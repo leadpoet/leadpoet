@@ -443,7 +443,21 @@ def test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs(
         assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
 
 
-def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
+def _assert_unknown_baseline_hold_and_deadline_cancel(harness):
+    row = harness.service.store.get_round(harness.round_id)
+    deadline = datetime.fromisoformat(row['configuration_doc']['schedule']['publication_deadline'].replace('Z', '+00:00'))
+    assert harness.clock() < deadline
+    assert harness.service.publish(harness.round_id) == {
+        'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete'}
+    held = harness.service.store.get_round(harness.round_id)
+    assert held['status'] == 'scored' and not held.get('publication_doc')
+    harness.clock.advance_to(row['configuration_doc']['schedule']['publication_deadline'])
+    assert harness.service.publish(harness.round_id)['status'] == 'cancelled'
+    cancelled = harness.service.store.get_round(harness.round_id)
+    assert cancelled['status'] == 'cancelled' and not cancelled.get('publication_doc')
+
+
+def test_exhausted_baseline_provider_error_stays_unknown_and_cancels_at_deadline(
     connect, tmp_path
 ):
     failed_position = 10
@@ -558,11 +572,13 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
         return runner
 
     harness.runner = runner_with_verified_pool
-    harness.advance_until("published", runners=1, max_steps=100)
+    harness.advance_until("scored", runners=1, max_steps=100)
 
     published = harness.service.store.get_round(harness.round_id)
-    assert published["status"] == "published"
-    assert published["stage2_scoring_plan_doc"]["zero_rows"] == [
+    assert published["status"] == "scored"
+    assert not published.get("publication_doc")
+    assert published["stage2_scoring_plan_doc"]["zero_rows"] == []
+    assert published["stage2_scoring_plan_doc"]["incomplete_rows"] == [
         {
             "submission_id": baseline_id,
             "icp_position": failed_position,
@@ -586,7 +602,7 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
         for run in failed_runs
     )
     assert failed_runs[0]["per_icp_score"] is None
-    assert failed_runs[1]["per_icp_score"] == 0
+    assert failed_runs[1]["per_icp_score"] is None
     costed_accepted = [
         run for run in accepted_runs if run["icp_position"] > failed_position
     ]
@@ -604,18 +620,22 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
     costs = harness.service.store.submission_costs(baseline_id)
     assert sum(row["inflight_calls"] for row in costs["providers"]) == 0
     assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
-    result = published["publication_doc"]["final_ranking"][0]
-    selected_scores = [
-        float(run["per_icp_score"])
-        for run in accepted_runs + [failed_runs[1]]
-    ]
-    assert result["final_score"] == pytest.approx(sum(selected_scores) / 20)
-    assert result["final_score"] > 0
+    _assert_unknown_baseline_hold_and_deadline_cancel(harness)
 
-    before_round = harness.service.store.get_round(harness.round_id)
-    before_runs = harness.service.store.list_runs(harness.round_id)
-    before_ledger = harness.service.store.list_ledger(submission_id=baseline_id)
-    connection = connect()
+
+
+def test_deadline_retry_migration_preserves_historical_data_and_privileges(historical_connect):
+    round_id = 'arena-2099-01-02-replay356'
+    submission_id = round_id + '-submission'
+    with historical_connect() as connection:
+        _seed_deadline_close_guard(connection, round_id, retry_status='leased',
+                                   prior_cause='provider_error',
+                                   ledger_kinds=('reservation', 'dispatch'))
+    store = ArenaStore(PsycopgTransport(historical_connect))
+    before_round = store.get_round(round_id)
+    before_runs = store.list_runs(round_id)
+    before_ledger = store.list_ledger(submission_id=submission_id)
+    connection = historical_connect()
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
@@ -640,12 +660,14 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
     assert "latest_status = 'failed'" in parallel
     assert "latest_cause = 'provider_error'" in parallel
     assert (service_execute, anon_execute) == (True, False)
-    assert harness.service.store.get_round(harness.round_id) == before_round
-    assert harness.service.store.list_runs(harness.round_id) == before_runs
-    assert harness.service.store.list_ledger(submission_id=baseline_id) == before_ledger
+    assert store.get_round(round_id) == before_round
+    assert store.list_runs(round_id) == before_runs
+    assert store.list_ledger(submission_id=submission_id) == before_ledger
+
+    store.close()
 
 
-def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
+def test_dispatched_baseline_retry_stays_unknown_and_cancels_at_deadline(
     connect, tmp_path
 ):
     """Use an accelerated test clock; production stage budgets stay unchanged."""
@@ -793,15 +815,17 @@ def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
         return runner
 
     harness.runner = runner_with_verified_pool
-    harness.advance_until("published", runners=2, max_steps=100)
+    harness.advance_until("scored", runners=2, max_steps=100)
 
     published = store.get_round(harness.round_id)
-    assert published["status"] == "published"
-    assert published["stage2_scoring_plan_doc"]["zero_rows"] == [
+    assert published["status"] == "scored"
+    assert not published.get("publication_doc")
+    assert published["stage2_scoring_plan_doc"]["zero_rows"] == []
+    assert published["stage2_scoring_plan_doc"]["incomplete_rows"] == [
         {
             "submission_id": baseline_id,
             "icp_position": failed_position,
-            "cause": "provider_error",
+            "cause": "stage_closed",
         }
     ]
     failed_runs = [
@@ -820,7 +844,7 @@ def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
         is True
     )
     assert failed_runs[0]["per_icp_score"] is None
-    assert failed_runs[1]["per_icp_score"] == 0
+    assert failed_runs[1]["per_icp_score"] is None
     assert [
         row["entry_kind"] for row in store.list_ledger(run_id=retry["run_id"])
     ] == ["reservation", "dispatch", "uncertain"]
@@ -833,13 +857,7 @@ def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
         if run["status"] == "accepted"
     ]
     assert len(accepted_runs) == 19
-    result = published["publication_doc"]["final_ranking"][0]
-    selected_scores = [
-        float(run["per_icp_score"])
-        for run in accepted_runs + [failed_runs[1]]
-    ]
-    assert result["final_score"] == pytest.approx(sum(selected_scores) / 20)
-    assert result["final_score"] > 0
+    _assert_unknown_baseline_hold_and_deadline_cancel(harness)
 
 
 def _seed_deadline_close_guard(

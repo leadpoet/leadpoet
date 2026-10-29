@@ -1540,7 +1540,9 @@ def review_evidence(
             _registrable_domain,
             _safe_https_url,
         )
-        from qualification.scoring.lead_scorer import _compact_company_name
+        from qualification.scoring.lead_scorer import (
+            _compact_company_name, _industry_supporting_pairs,
+        )
 
         if (
             not isinstance(company_source_contexts, Sequence)
@@ -1576,6 +1578,34 @@ def review_evidence(
                 dimension, str
             ) else None
             company_fact = company_facts.get(str(dimension))
+            support_identity = _mapping(
+                _mapping(dimensions.get("identity")).get("web_identity_receipt")
+            )
+            if (
+                dimension == "industry"
+                and company_fit_receipt.get("decision") == "match"
+                and isinstance(company_fact, Mapping)
+                and source_url != company_fact.get("url")
+                and support_identity.get("decision") == "match"
+                and all(isinstance(support_identity.get(key), str)
+                        and support_identity[key].strip() for key in (
+                            "observed_name", "observed_domain", "observed_linkedin_slug",
+                        ))
+            ):
+                # This is a host-verified citation from the final fit receipt,
+                # not a new source or a model-supplied ownership claim. Bind
+                # the selected body back to that exact URL and exact quote.
+                support = next((quote for url, quote in
+                    _industry_supporting_pairs(dimensions)
+                    if url == source_url and isinstance(source_text, str)
+                    and _quote_occurs(quote, source_text)), None)
+                if support:
+                    company_fact = {
+                        **company_fact,
+                        "evidence_url": source_url,
+                        "evidence_quote": support,
+                    }
+                    company_facts["industry"] = company_fact
             if dimension == "first_party_company":
                 identity = _mapping(
                     _mapping(

@@ -11767,9 +11767,9 @@ def _matched_investigator_source_contexts(
         source_url = _valid_web_evidence_url(web_evidence.get("url"))
         quote = str(web_evidence.get("quote") or "")
         evidence_pairs.append((dimension, source_url, quote))
-    # Retry storage retains every bound industry citation. Downstream company
-    # contexts keep one primary quote per dimension; extra first-party pages
-    # use the existing auxiliary-source binding and the same paragraph cap.
+    # Retry storage retains every bound industry citation. The paragraph
+    # handoff can select one cited source per dimension within its existing
+    # two-context cap; uncited first-party pages use the auxiliary binding.
     if include_industry_support:
         evidence_pairs.extend(("industry", url, quote)
                               for url, quote in _industry_supporting_pairs(dimensions))
@@ -11903,6 +11903,7 @@ def _matched_company_source_contexts(
     contexts.extend(_matched_investigator_source_contexts(
         company_fit,
         matched_company_source_cache,
+        include_industry_support=True,
     ))
     submitted_attribute = (
         getattr(company, "required_attribute", None)
@@ -11975,10 +11976,19 @@ def _matched_company_source_contexts(
             item[0],
         ),
     )
-    selected = [
-        context for _index, context in ranked
-        if context["url"] not in verified_signal_source_urls
-    ][:_MAX_PARAGRAPH_COMPANY_CONTEXTS]
+    # The paragraph contract accepts one context per dimension. Choose the
+    # most relevant cited industry source within the existing total allowance.
+    # Older policies expose no supporting industry sources.
+    selected: list[dict[str, str]] = []
+    for _index, context in ranked:
+        if context["url"] in verified_signal_source_urls or (
+            context["dimension"] == "industry"
+            and any(prior["dimension"] == "industry" for prior in selected)
+        ):
+            continue
+        selected.append(context)
+        if len(selected) == _MAX_PARAGRAPH_COMPANY_CONTEXTS:
+            break
     selected.sort(
         key=lambda item: _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS.index(
             item["dimension"]

@@ -6455,6 +6455,26 @@ class ArenaService:
                 "claim_request_hash": snapshot["claim_request_hash"],
                 "payload_sha256": snapshot["payload_sha256"]}
 
+    def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> str:
+        """Confirm only the exact final snapshot under this owned lease identity."""
+
+        run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
+        if not isinstance(payload_sha256, str) or not contracts.SHA256_RE.fullmatch(payload_sha256):
+            raise ServiceError("training_observations_invalid", 400)
+        objects = self._config.training_object_store
+        if objects is None:
+            raise ServiceError("training_observations_unavailable", 503)
+        try:
+            snapshot = training_observations.read_snapshot(
+                objects, run_id, str(run.get("kind") or "execute"),
+                run.get("lease_generation"), run.get("claim_request_hash"),
+            )
+        except training_observations.ObservationError:
+            raise ServiceError("training_observations_unavailable", 503) from None
+        if not hmac.compare_digest(snapshot["payload_sha256"], payload_sha256):
+            raise ServiceError("training_observations_digest_mismatch", 412)
+        return snapshot["payload_sha256"]
+
     def handle_training_observation_segment(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
         run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
         if not isinstance(document, Mapping):

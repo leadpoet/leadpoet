@@ -741,6 +741,8 @@ class ArenaApiClient(Protocol):
 
     def training_observations(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
+    def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> bool: ...
+
     def training_observation_segment(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
     def source(self, run_id: str, lease_token: str) -> bytes: ...
@@ -880,6 +882,21 @@ class HttpArenaApiClient:
             timeout_seconds=TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
             preserve_http_status=True,
         )
+
+    def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> bool:
+        training_input.object_ref(run_id, 1)
+        if not isinstance(payload_sha256, str) or not contracts.SHA256_RE.fullmatch(payload_sha256):
+            raise RunnerError("training observations digest is invalid")
+        etag = '"' + payload_sha256 + '"'
+        try:
+            response = self._client.head(
+                self._base_url + "/arena/v1/runs/%s/training-observations" % run_id,
+                headers={"x-lab-arena-lease": lease_token, "If-Match": etag},
+                timeout=httpx.Timeout(TRAINING_OBSERVATIONS_TIMEOUT_SECONDS),
+            )
+        except httpx.HTTPError as exc:
+            raise RunnerError("training observations verification transport failure") from exc
+        return response.status_code == 204 and response.headers.get("ETag") == etag
 
     def training_observation_segment(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
@@ -3922,15 +3939,22 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
         send = getattr(config.api, "training_observations", None)
         if not callable(send):
             return summary
+        expected_digest = contracts.document_hash(training_observations._validate_payload(
+            document, secrets=(lease_token,),
+        ))
         for attempt in range(2):
             try:
                 result = send(str(lease["run_id"]), lease_token, document)
                 if (not isinstance(result, Mapping) or result.get("status") != "stored"
-                        or not isinstance(result.get("payload_sha256"), str) or not contracts.SHA256_RE.fullmatch(result["payload_sha256"])):
+                        or getattr(result, "http_status", 200) != 200
+                        or result.get("payload_sha256") != expected_digest):
                     raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
                 return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
             except Exception:
                 if attempt:
+                    verify = getattr(config.api, "verify_training_observations", None)
+                    if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
+                        return {**summary, "status": "stored", "payload_sha256": expected_digest}
                     raise
     except Exception as exc:
         try:

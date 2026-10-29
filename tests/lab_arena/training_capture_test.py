@@ -1145,7 +1145,7 @@ def test_repeated_text_scans_once_but_still_checks_every_node(monkeypatch):
 
     monkeypatch.setattr(trajectory, "redact_text", counted)
     assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
-    assert calls == {public: 1, oversized: 2}
+    assert calls == {public: 1, oversized: 1}
 
 
 def test_long_text_working_set_does_not_evict_itself(monkeypatch):

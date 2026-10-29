@@ -175,11 +175,21 @@ def test_downstream_budget_retry_quota_and_eligibility_keep_policy(database):
     prior.test_absent_opt_in_preserves_old_published_cost_policy(database)
 
 
-def test_real_execution_judge_and_publication_use_indexed_helper(database, tmp_path):
+@pytest.fixture
+def current_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    for db in current_service_database():
+        with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
+            # Later service prerequisites retain the exact indexed482 helper.
+            assert hashlib.sha256(definition(cur).encode()).hexdigest() == POST
+        yield db
+
+
+def test_real_execution_judge_and_publication_use_indexed_helper(current_database, tmp_path):
     from tests.lab_arena.infrastructure_retry_cost478_lifecycle_test import (
         test_both_roles_keep_cost_credit_through_real_judge_and_publication,
     )
-    test_both_roles_keep_cost_credit_through_real_judge_and_publication(database, tmp_path)
+    test_both_roles_keep_cost_credit_through_real_judge_and_publication(current_database, tmp_path)
 
 
 # Every original/head binding stays enforced, including nullable columns.

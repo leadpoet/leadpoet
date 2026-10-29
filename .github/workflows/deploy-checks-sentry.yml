@@ -1,0 +1,67 @@
+name: Deploy Checks Sentry
+
+on:
+  workflow_run:
+    workflows: [Deploy Checks]
+    types: [in_progress, completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check-in:
+    # workflow_run loads this file from the default branch. Never check out or
+    # execute code or download artifacts from the triggering workflow.
+    if: >-
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+       github.event.workflow_run.event == 'schedule' ||
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report trusted main run to Sentry Cron
+        env:
+          LEADPOET_SENTRY_CRON_URL: ${{ secrets.LEADPOET_SENTRY_DEPLOY_CHECKS_CRON_URL }}
+        shell: python
+        run: |
+          import json
+          import os
+          import sys
+          import urllib.parse
+          import urllib.request
+          import uuid
+          from datetime import datetime
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          run = event['workflow_run']
+          url = os.environ.get('LEADPOET_SENTRY_CRON_URL', '')
+          if not url:
+              sys.exit('Sentry Deploy Checks Cron URL is not configured')
+          action = event['action']
+          if action not in ('in_progress', 'completed'):
+              sys.exit('Unsupported workflow event')
+          status = 'in_progress' if action == 'in_progress' else (
+              'ok' if run['conclusion'] == 'success' else 'error')
+          identity = '%s/%s/%s' % (
+              os.environ['GITHUB_REPOSITORY'], run['id'], run['run_attempt'])
+          check_in_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+          query = {'status': status, 'check_in_id': check_in_id, 'environment': 'ci'}
+          if action == 'completed':
+              start = datetime.fromisoformat(run['run_started_at'].replace('Z', '+00:00'))
+              end = datetime.fromisoformat(run['updated_at'].replace('Z', '+00:00'))
+              query['duration'] = str(max(0, (end - start).total_seconds()))
+          separator = '&' if '?' in url else '?'
+          request = urllib.request.Request(url + separator + urllib.parse.urlencode(query))
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  if response.status != 200:
+                      raise ValueError('unexpected check-in response')
+          except Exception:
+              # The Cron URL includes its authentication key. Never print an
+              # exception or response body that can contain that URL.
+              sys.exit('Sentry Cron check-in failed')
+          print('Deploy Checks Cron status: %s' % status)

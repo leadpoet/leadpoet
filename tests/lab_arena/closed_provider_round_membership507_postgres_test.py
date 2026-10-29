@@ -317,6 +317,11 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')
             results = []; plans = {}
             for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
+                # The obsolete control deliberately rescans spilled history 60
+                # times. Give only that reference a bounded allowance; every
+                # optimized507 execution retains the deployed 20s budget.
+                cur.execute('SET LOCAL statement_timeout=%s',
+                            ('60s' if name.startswith('test_before_') else '20s',))
                 cur.execute('SELECT public.'+name+"('live','plan507',71,'',0)")
                 results.append(cur.fetchone()[0])
                 cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+
@@ -335,6 +340,8 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                     values.extend(cte_loops(child))
                 return values
             for index,name in enumerate(('test_before_'+prior.NAMES[0],prior.NAMES[0])):
+                cur.execute('SET LOCAL statement_timeout=%s',
+                            ('60s' if index == 0 else '20s',))
                 cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',('public.'+name+prior.SUFFIX,))
                 body = cur.fetchone()[0].split('AS $function$',1)[1].split('$function$',1)[0].strip().removesuffix(';')
                 literal = body

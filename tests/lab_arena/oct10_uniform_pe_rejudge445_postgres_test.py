@@ -9,6 +9,9 @@ import pytest
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
+from tests.lab_arena.oct10_historical_service import (
+    pin_oct10_service, assert_current_publisher_holds,
+)
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena.icp_fixtures import daily_icps
@@ -236,6 +239,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
     service._store = store
+    pin_oct10_service(service, lambda: psycopg.connect(**dsn), round_id=ROUND)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 13, 59, 59, tzinfo=timezone.utc)
@@ -297,6 +301,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
         assert result['status'] not in ('cancelled', 'retry', 'stale'), (statuses, result)
     assert statuses[-1] == 'scored', statuses
     assert statuses == ['stage1_closed', 'stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored']
+    assert_current_publisher_holds(service, lambda: psycopg.connect(**dsn), _snapshot)
     row = store.get_round(ROUND)
     assert len(row['stage2_scoring_plan_doc']['incomplete_rows']) == 4
     assert len(row['stage2_scoring_plan_doc']['zero_rows']) == 3

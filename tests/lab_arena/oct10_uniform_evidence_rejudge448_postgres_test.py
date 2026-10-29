@@ -10,6 +10,9 @@ import pytest
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
+from tests.lab_arena.oct10_historical_service import (
+    pin_oct10_service, assert_current_publisher_holds,
+)
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena import oct10_uniform_pe_rejudge445_postgres_test as prior
@@ -284,6 +287,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
     service._store = store
+    pin_oct10_service(service, lambda: psycopg.connect(**dsn), round_id=ROUND)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 16, 0, 1, tzinfo=timezone.utc)
@@ -406,6 +410,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             cur.execute(sql)
             cur.execute("SELECT count(*),sum(amount_microusd) FROM public.lab_arena_ledger WHERE round_id=%s AND operation_id='new_judge448'", (ROUND,))
             assert cur.fetchone() == (682, 682 * 50)
+    assert_current_publisher_holds(service, lambda: psycopg.connect(**dsn), _snapshot)
     # The one-second terminal stage2 window cannot consume the final judging
     # window. The real driver already progressed at 16:00:01 with all execution
     # terminal; it now publishes through the unchanged service and SQL guards.

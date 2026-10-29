@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
-"""Store one hidden-input Sentry API token in both production env secrets.
+"""Store one hidden-input Sentry API token using local temporary operator authority.
 
-This is an operator tool. It sends the token to each host over SSH stdin and
-never places it in argv, output, shell history, or a local file. Secrets
-Manager retains the prior version for rollback. The gateway dotenv and
-validator JSON document formats are preserved.
+Secret documents and the token stay in memory. No secret or AWS credential is
+sent through SSH, argv, shell exports or a temporary file. Existing version,
+format and AWSCURRENT checks remain in place.
 """
 
 from __future__ import annotations
 
 import argparse
 import getpass
+import hmac
 import json
-import os
 import re
 import shlex
-import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional, Sequence
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 TOKEN_ENV_NAME = "LEADPOET_SENTRY_API_TOKEN"
-SSH_KEY_ENV = "LEADPOET_SENTRY_SSH_KEY"
-DEFAULT_SSH_KEY = Path.home() / "Downloads" / "leadpoet-2026-07-28.pem"
+NAME = TOKEN_ENV_NAME
 TOKEN_RE = re.compile(r"^sntryu_[A-Za-z0-9_-]{32,}$")
 MAX_TIMEOUT_SECONDS = 45.0
 TARGETS = {
-    "gateway": ("ec2-user@52.91.135.79", "leadpoet/prod/gateway/env"),
-    "validator": ("ec2-user@100.59.201.156", "leadpoet/prod/validator/env"),
+    "gateway": "leadpoet/prod/gateway/env",
+    "validator": "leadpoet/prod/validator/env",
 }
 
 
@@ -37,87 +38,6 @@ class ConfigurationError(RuntimeError):
         self.code = code
         self.detail = detail
         super().__init__(code)
-
-
-_REMOTE_UPDATER = r'''
-import hmac
-import json
-import os
-import re
-import shlex
-import subprocess
-import sys
-import tempfile
-import uuid
-
-NAME = "LEADPOET_SENTRY_API_TOKEN"
-TOKEN_RE = re.compile(r"^sntryu_[A-Za-z0-9_-]{32,}$")
-
-
-def aws_get(secret_id, version_id=""):
-    command = [
-        "aws", "secretsmanager", "get-secret-value",
-        "--secret-id", secret_id,
-        "--output", "json",
-    ]
-    if version_id:
-        command.extend(["--version-id", version_id])
-    result = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit(31)
-    try:
-        document = json.loads(result.stdout)
-        return str(document["VersionId"]), str(document["SecretString"])
-    except Exception:
-        raise SystemExit(32)
-
-
-def aws_error_status(stderr):
-    match = re.search(r"An error occurred \(([^)]+)\)", str(stderr or ""))
-    code = match.group(1) if match else ""
-    if code in {"AccessDenied", "AccessDeniedException", "UnauthorizedException"}:
-        return 35
-    if code in {"ResourceNotFoundException"}:
-        return 37
-    if code in {
-        "DecryptionFailure",
-        "EncryptionFailure",
-        "InvalidParameterException",
-        "InvalidRequestException",
-        "LimitExceededException",
-        "MalformedPolicyDocumentException",
-        "PreconditionNotMetException",
-    }:
-        return 38
-    return 39
-
-
-def aws_version_stages(secret_id):
-    result = subprocess.run(
-        [
-            "aws", "secretsmanager", "describe-secret",
-            "--secret-id", secret_id,
-            "--query", "VersionIdsToStages",
-            "--output", "json",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit(31)
-    try:
-        parsed = json.loads(result.stdout)
-    except Exception:
-        raise SystemExit(32)
-    if not isinstance(parsed, dict):
-        raise SystemExit(32)
-    return parsed
 
 
 def dotenv_key(line):
@@ -180,77 +100,71 @@ def parsed_value(raw):
     return ""
 
 
-secret_id = sys.argv[1]
-token = sys.stdin.read().strip()
-if not TOKEN_RE.fullmatch(token):
-    raise SystemExit(33)
+def _write_failure_code(error):
+    try:
+        code = error.response["Error"]["Code"]
+    except Exception:
+        code = ""
+    if code in {"AccessDenied", "AccessDeniedException", "UnauthorizedException"}:
+        return "secret_writer_access_denied"
+    if code == "ResourceNotFoundException":
+        return "secret_not_found"
+    if code in {
+        "DecryptionFailure", "EncryptionFailure", "InvalidParameterException",
+        "InvalidRequestException", "LimitExceededException",
+        "MalformedPolicyDocumentException", "PreconditionNotMetException",
+    }:
+        return "secret_write_rejected"
+    return "secret_write_failed"
 
-version_id, current = aws_get(secret_id)
-updated, document_format = update_document(current, token)
 
-# Re-read immediately before the write. Secrets Manager has no compare-and-swap
-# update API, so this closes the ordinary concurrent-operator window while the
-# previous version remains available as AWSPREVIOUS for rollback.
-latest_version_id, _ = aws_get(secret_id)
-if latest_version_id != version_id:
-    raise SystemExit(34)
+def _update_secret(client, secret_id, token, *, apply=True):
+    if secret_id not in TARGETS.values():
+        raise ConfigurationError("secret_scope_invalid")
+    if not TOKEN_RE.fullmatch(token):
+        raise ConfigurationError("token_format_invalid")
 
-path = ""
-candidate_version_id = str(uuid.uuid4())
-try:
-    handle = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", prefix="leadpoet-sentry-token-",
-        delete=False,
-    )
-    path = handle.name
-    os.chmod(path, 0o600)
-    with handle:
-        handle.write(updated)
-    result = subprocess.run(
-        [
-            "aws", "secretsmanager", "put-secret-value",
-            "--secret-id", secret_id,
-            "--client-request-token", candidate_version_id,
-            "--secret-string", "file://" + path,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit(aws_error_status(result.stderr))
-finally:
-    if path:
+    def get(version_id=""):
+        request = {"SecretId": secret_id}
+        if version_id:
+            request["VersionId"] = version_id
         try:
-            os.remove(path)
-        except OSError:
-            pass
+            document = client.get_secret_value(**request)
+        except Exception:
+            raise ConfigurationError("secret_read_unavailable") from None
+        try:
+            return str(document["VersionId"]), str(document["SecretString"])
+        except Exception:
+            raise ConfigurationError("secret_document_invalid") from None
 
-readback_version_id, readback = aws_get(secret_id, candidate_version_id)
-if (
-    readback_version_id != candidate_version_id
-    or not hmac.compare_digest(parsed_value(readback), token)
-):
-    raise SystemExit(36)
-stages = aws_version_stages(secret_id)
-if "AWSCURRENT" not in stages.get(candidate_version_id, []):
-    raise SystemExit(40)
-print(json.dumps({"updated": True, "format": document_format}, separators=(",", ":")))
-'''
-
-
-_REMOTE_FAILURE_CODES = {
-    31: "secret_read_unavailable",
-    32: "secret_document_invalid",
-    33: "token_format_invalid",
-    34: "secret_changed_concurrently",
-    35: "secret_writer_access_denied",
-    36: "secret_write_readback_mismatch",
-    37: "secret_not_found",
-    38: "secret_write_rejected",
-    39: "secret_write_failed",
-    40: "secret_write_superseded",
-}
+    version_id, current = get()
+    updated, document_format = update_document(current, token)
+    latest_version_id, _ = get()
+    if latest_version_id != version_id:
+        raise ConfigurationError("secret_changed_concurrently")
+    if not apply:
+        return document_format
+    candidate_version_id = str(uuid.uuid4())
+    try:
+        client.put_secret_value(
+            SecretId=secret_id, ClientRequestToken=candidate_version_id,
+            SecretString=updated,
+        )
+    except Exception as exc:
+        raise ConfigurationError(_write_failure_code(exc)) from None
+    readback_version_id, readback = get(candidate_version_id)
+    if (readback_version_id != candidate_version_id
+            or not hmac.compare_digest(parsed_value(readback), token)):
+        raise ConfigurationError("secret_write_readback_mismatch")
+    try:
+        stages = client.describe_secret(SecretId=secret_id)["VersionIdsToStages"]
+    except Exception:
+        raise ConfigurationError("secret_read_unavailable") from None
+    if not isinstance(stages, dict):
+        raise ConfigurationError("secret_document_invalid")
+    if "AWSCURRENT" not in stages.get(candidate_version_id, []):
+        raise ConfigurationError("secret_write_superseded")
+    return document_format
 
 
 def _bounded_timeout(value: float) -> float:
@@ -268,75 +182,25 @@ def _read_token() -> str:
     return token
 
 
-def _update_target(
-    name: str,
-    token: str,
-    *,
-    ssh_key: Path,
-    timeout: float,
-) -> str:
-    host, secret_id = TARGETS[name]
-    remote_command = "python3 -c %s %s" % (
-        shlex.quote(_REMOTE_UPDATER),
-        shlex.quote(secret_id),
-    )
-    command = [
-        "ssh",
-        "-i",
-        str(ssh_key),
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        host,
-        remote_command,
-    ]
+def _update_target(name, token, *, profile="leadpoet-lab", timeout=30, apply=True):
     try:
-        result = subprocess.run(
-            command,
-            input=token,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_bounded_timeout(timeout),
+        from scripts.production_secret_operator import secret_operator_client
+        client, _account = secret_operator_client(
+            profile=profile, timeout_seconds=_bounded_timeout(timeout)
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ConfigurationError(
-            "secret_update_unavailable",
-            "%s:%s" % (name, type(exc).__name__),
-        ) from None
-    if result.returncode != 0:
-        if result.returncode == 255:
-            raise ConfigurationError("secret_update_unavailable", name)
-        raise ConfigurationError(
-            _REMOTE_FAILURE_CODES.get(
-                result.returncode,
-                "secret_update_remote_failed",
-            ),
-            "%s:remote_status=%d" % (name, result.returncode),
-        )
-    try:
-        response = json.loads(result.stdout)
-    except (TypeError, ValueError):
-        raise ConfigurationError("secret_update_readback_invalid", name) from None
-    if not isinstance(response, dict) or response.get("updated") is not True:
-        raise ConfigurationError("secret_update_readback_invalid", name)
-    document_format = str(response.get("format") or "unknown")
-    if document_format not in {"dotenv", "json"}:
-        raise ConfigurationError("secret_update_readback_invalid", name)
-    return document_format
+        return _update_secret(client, TARGETS[name], token, apply=apply)
+    except ConfigurationError:
+        raise
+    except Exception:
+        raise ConfigurationError("secret_update_unavailable", name) from None
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--ssh-key",
-        type=Path,
-        default=Path(os.getenv(SSH_KEY_ENV) or DEFAULT_SSH_KEY),
-    )
+    parser.add_argument("--aws-profile", default="leadpoet-lab",
+                        help="named temporary operator profile")
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--check", action="store_true", help="validate both documents without a write")
     return parser
 
 
@@ -345,34 +209,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         token = _read_token()
         results = {}
+        # Both read-only checks must pass before the first possible write.
         for name in ("gateway", "validator"):
             results[name] = _update_target(
-                name,
-                token,
-                ssh_key=args.ssh_key,
-                timeout=args.timeout_seconds,
+                name, token, profile=args.aws_profile,
+                timeout=args.timeout_seconds, apply=False,
             )
+        if not args.check:
+            applied = 0
+            for name in ("gateway", "validator"):
+                try:
+                    results[name] = _update_target(
+                        name, token, profile=args.aws_profile,
+                        timeout=args.timeout_seconds, apply=True,
+                    )
+                    applied += 1
+                except ConfigurationError as exc:
+                    raise ConfigurationError(
+                        exc.code, f"{name}:applied_targets={applied}; inspect version stages before retry"
+                    ) from None
         print(
-            "sentry_api_token_configured "
-            + " ".join(
-                "%s_format=%s" % (name, results[name])
-                for name in ("gateway", "validator")
-            )
+            ("sentry_api_token_checked " if args.check else "sentry_api_token_configured ")
+            + " ".join("%s_format=%s" % (name, results[name]) for name in ("gateway", "validator"))
         )
         return 0
     except ConfigurationError as exc:
         detail = " detail=%s" % exc.detail if exc.detail else ""
-        print(
-            "sentry_api_token_configuration_failed code=%s%s" % (exc.code, detail),
-            file=sys.stderr,
-        )
+        print("sentry_api_token_configuration_failed code=%s%s" % (exc.code, detail), file=sys.stderr)
         return 1
-    except Exception as exc:  # never render token-bearing exception state
-        print(
-            "sentry_api_token_configuration_failed code=unexpected type=%s"
-            % type(exc).__name__,
-            file=sys.stderr,
-        )
+    except Exception as exc:
+        print("sentry_api_token_configuration_failed code=unexpected type=%s"
+              % type(exc).__name__, file=sys.stderr)
         return 1
 
 

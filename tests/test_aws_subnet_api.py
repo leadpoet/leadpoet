@@ -108,10 +108,10 @@ def test_existing_rpc_timeouts_and_body_limits_are_not_reduced():
     assert "access_log off;" in body and "error_log /dev/null crit;" in body
 
 
-def test_source_fallback_retains_target_bytes_and_uses_only_original_client_keys():
+def test_source_fallback_retains_target_contract_and_uses_only_original_client_keys():
     values = secrets()
     assert hashlib.sha256(api.render_nginx(values).encode()).hexdigest() == (
-        "759a1b25eca6b75bf8b2b47be1c616c144b7af1903dde168bc6d8b951ccece35"
+        "508bed53a5f391c61a2995330b2e0f4c520099c78f21a72aa550898c6e003bd4"
     )
     source = api.render_source_nginx(values)
     assert "proxy_pass https://qplwoislplkcegvdmbim.supabase.co;" in source
@@ -154,3 +154,17 @@ def test_source_selection_fails_closed_if_target_render_contract_changes(monkeyp
     monkeypatch.setattr(api, "render_nginx", lambda *_args, **_kwargs: changed)
     with pytest.raises(api.ConfigurationError, match="source renderer contract changed"):
         api.render_source_nginx(secrets())
+
+
+def test_header_buffer_change_is_only_three_directives_for_each_backend():
+    directives = {"large_client_header_buffers 4 64k;", "proxy_buffer_size 64k;", "proxy_buffers 3 64k;"}
+    for renderer, previous in (
+        (api.render_nginx, "759a1b25eca6b75bf8b2b47be1c616c144b7af1903dde168bc6d8b951ccece35"),
+        (api.render_source_nginx, "2e933330afbf57ce3d55507aee03ba5c2727ff22a44b378f0a61ea5554a40a0b"),
+    ):
+        body = renderer(secrets())
+        assert all(sum(line.strip() == directive for line in body.splitlines()) == 1
+                   for directive in directives)
+        previous_bytes = "".join(line for line in body.splitlines(keepends=True)
+                                 if line.strip() not in directives)
+        assert hashlib.sha256(previous_bytes.encode()).hexdigest() == previous

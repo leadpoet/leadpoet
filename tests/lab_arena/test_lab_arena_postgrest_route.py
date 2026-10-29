@@ -112,6 +112,13 @@ def stack(tmp_path_factory):
                     REVOKE ALL ON FUNCTION public.api_test_identity() FROM PUBLIC;
                     GRANT EXECUTE ON FUNCTION public.api_test_identity()
                       TO anon,service_role,lab_arena_service;
+                    CREATE FUNCTION public.api_test_row_limit() RETURNS SETOF integer
+                    LANGUAGE sql STABLE SECURITY INVOKER AS $$
+                      SELECT generate_series(1,1001)
+                    $$;
+                    REVOKE ALL ON FUNCTION public.api_test_row_limit() FROM PUBLIC;
+                    GRANT EXECUTE ON FUNCTION public.api_test_row_limit()
+                      TO anon,service_role,lab_arena_service;
                     CREATE FUNCTION public.api_test_payload(p_body text) RETURNS integer
                     LANGUAGE sql IMMUTABLE SECURITY INVOKER AS $$ SELECT octet_length(p_body) $$;
                     REVOKE ALL ON FUNCTION public.api_test_payload(text) FROM PUBLIC;
@@ -378,6 +385,20 @@ def test_request_role_timeouts_preserve_source_defaults(stack, key_name, role, t
     assert result["role"] == result["claims"]["role"] == role
     assert tuple(result[name] for name in
                  ("statement_timeout", "lock_timeout", "idle_timeout")) == timeouts
+
+
+@pytest.mark.parametrize("key_name", ["arena_key", "gateway_key", "public_key"])
+def test_source_row_cap_and_next_page_use_actual_ingress(stack, key_name):
+    url = stack["base_url"] + "/rest/v1/rpc/api_test_row_limit"
+    headers = {"apikey": stack["values"][key_name]}
+    first = httpx.get(url, headers=headers, params={"limit": 1001})
+    assert first.status_code == 200
+    assert first.json() == list(range(1, 1001))
+    assert first.headers["content-range"] == "0-999/*"
+    last = httpx.get(url, headers={**headers, "Range": "1000-1000"})
+    assert last.status_code in (200, 206)
+    assert last.json() == [1001]
+    assert last.headers["content-range"] == "1000-1000/*"
 
 
 def test_arena_direct_writes_and_private_icps_are_denied(stack):

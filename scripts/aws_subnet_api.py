@@ -192,6 +192,7 @@ def render_postgrest(values: Mapping[str, str], *, host: str = "127.0.0.1") -> s
         "# Private generated file; no anonymous backend fallback.",
         "db-uri = " + json.dumps(values["db_uri"]),
         'db-schemas = "public"', 'db-extra-search-path = "public, extensions"',
+        "db-max-rows = 1000",
         "db-pool = 10", "db-pool-acquisition-timeout = 8",
         "jwt-secret = " + json.dumps(values["jwt_secret"]),
         "jwt-aud = " + json.dumps(JWT_AUDIENCE),

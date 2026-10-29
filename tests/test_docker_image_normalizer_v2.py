@@ -300,3 +300,141 @@ def test_temporary_config_diagnostics_withhold_sensitive_material(monkeypatch, c
 def test_workflow_config_diagnostics_are_reproduction_only():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/attested-v2-release.yml").read_text()
     assert "GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}" in workflow
+
+
+def _entry(name, content=None, **metadata):
+    member = tarfile.TarInfo(name)
+    member.type = tarfile.DIRTYPE if content is None else tarfile.REGTYPE
+    member.mode = 0o755 if content is None else 0o644
+    member.size = 0 if content is None else len(content)
+    for key, value in metadata.items():
+        setattr(member, key, value)
+    return member, content
+
+
+def _saved_layers(path, layers, order=None):
+    order = list(range(len(layers))) if order is None else order
+    config = {"rootfs": {"type": "layers", "diff_ids": ["sha256:old"] * len(order)},
+              "config": {"Entrypoint": ["python3"]}}
+    manifest = [{"Config": "config.json", "RepoTags": ["raw:test"],
+                 "Layers": [f"layers/{index}.tar" for index in order]}]
+    with tarfile.open(path, "w:") as image:
+        for name, data in [("config.json", json.dumps(config).encode()),
+                           ("manifest.json", json.dumps(manifest).encode())]:
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            image.addfile(member, io.BytesIO(data))
+        for index, entries in enumerate(layers):
+            layer = io.BytesIO()
+            with tarfile.open(fileobj=layer, mode="w:") as archive:
+                for member, content in entries:
+                    archive.addfile(member, None if content is None else io.BytesIO(content))
+            member = tarfile.TarInfo(f"layers/{index}.tar")
+            member.size = len(layer.getvalue())
+            image.addfile(member, io.BytesIO(layer.getvalue()))
+
+
+def _normalize_layers(tmp_path, label, layers, order=None):
+    source = tmp_path / f"{label}.tar"
+    output = tmp_path / f"{label}-normalized.tar"
+    _saved_layers(source, layers, order)
+    identity = normalizer.normalize_saved_image(
+        archive_path=source, output_path=output, normalized_image="normalized:test"
+    )
+    with tarfile.open(output) as image:
+        manifest = json.load(image.extractfile("manifest.json"))[0]
+        members = []
+        for name in manifest["Layers"]:
+            with tarfile.open(fileobj=image.extractfile(name)) as layer:
+                members.append([member.name for member in layer.getmembers()])
+    return identity, manifest["Layers"], members
+
+
+def test_redundant_inherited_directory_matches_empty_layer(tmp_path):
+    base = [_entry("etc")]
+    empty = _normalize_layers(tmp_path, "empty", [base, []])
+    redundant = _normalize_layers(tmp_path, "redundant", [base, [_entry("etc")]])
+    assert empty[0] == redundant[0]
+    assert len(redundant[1]) == 2
+    assert redundant[2] == [["etc"], []]
+
+
+@pytest.mark.parametrize("change", [
+    {"mode": 0o700}, {"uid": 123}, {"gid": 456},
+    {"type": tarfile.SYMTYPE, "linkname": "elsewhere"},
+    {"pax_headers": {"SCHILY.xattr.user.attestation": "changed"}},
+])
+def test_real_directory_metadata_changes_remain_bound(tmp_path, change):
+    base = [_entry("etc")]
+    redundant = _normalize_layers(tmp_path, "redundant", [base, [_entry("etc")]])
+    changed = _normalize_layers(tmp_path, "changed", [base, [_entry("etc", **change)]])
+    assert changed[0] != redundant[0]
+    assert changed[2][1] == ["etc"]
+
+
+@pytest.mark.parametrize("removal,recreated", [
+    (".wh.etc", "etc"), (".wh.etc", "etc/sub"),
+    ("etc/.wh..wh..opq", "etc/sub"), (".wh..wh..opq", "etc"),
+])
+def test_directory_recreation_after_whiteout_remains_bound(tmp_path, removal, recreated):
+    base = [_entry("etc"), _entry("etc/sub")]
+    deleted = [_entry(removal, b"")]
+    rebuilt = _normalize_layers(tmp_path, "rebuilt", [base, deleted, [_entry(recreated)]])
+    absent = _normalize_layers(tmp_path, "absent", [base, deleted, []])
+    assert rebuilt[0] != absent[0]
+    assert rebuilt[2][-1] == [recreated]
+
+
+def test_directory_recreation_after_type_change_remains_bound(tmp_path):
+    result = _normalize_layers(tmp_path, "recreated", [
+        [_entry("etc"), _entry("etc/sub")],
+        [_entry("etc", type=tarfile.SYMTYPE, linkname="elsewhere")],
+        [_entry("etc"), _entry("etc/sub")],
+    ])
+    assert result[2][-1] == ["etc", "etc/sub"]
+
+
+def test_repeated_source_layer_is_normalized_again_after_whiteout(tmp_path):
+    result = _normalize_layers(tmp_path, "repeated", [
+        [_entry("etc")], [_entry("etc")], [_entry(".wh.etc", b"")],
+    ], order=[0, 1, 2, 1])
+    assert result[1][1] != result[1][3]
+    assert result[2] == [["etc"], [], [".wh.etc"], ["etc"]]
+
+
+def test_directory_canonicalization_preserves_file_content_and_layer_order(tmp_path):
+    base = [_entry("etc")]
+    first = _normalize_layers(tmp_path, "first", [base, [_entry("etc/file", b"a")]])
+    changed = _normalize_layers(tmp_path, "changed", [base, [_entry("etc/file", b"b")]])
+    reordered = _normalize_layers(tmp_path, "reordered", [base, [_entry("etc/file", b"a")]], order=[1, 0])
+    assert len({first[0], changed[0], reordered[0]}) == 3
+
+
+def test_same_layer_duplicate_directory_records_are_preserved(tmp_path):
+    result = _normalize_layers(tmp_path, "duplicates", [
+        [_entry("etc")], [_entry("etc"), _entry("etc")],
+    ])
+    assert result[2][-1] == ["etc", "etc"]
+
+
+@pytest.mark.parametrize("whiteout,recreated", [
+    (".wh.etc", "etc"), ("etc/.wh..wh..opq", "./etc/sub"),
+])
+def test_whiteout_precedes_same_layer_recreation_regardless_alias_order(tmp_path, whiteout, recreated):
+    result = _normalize_layers(tmp_path, "same-layer-recreated", [
+        [_entry("etc"), _entry("etc/sub")],
+        [_entry(recreated), _entry(whiteout, b"")],
+        [_entry(recreated)],
+    ])
+    assert recreated in result[2][1]
+    assert whiteout in result[2][1]
+    assert result[2][2] == []
+
+
+@pytest.mark.parametrize("unfamiliar", ["/absolute-directory", "../traversal-directory"])
+def test_unfamiliar_layer_paths_preserve_records_and_clear_comparison_state(tmp_path, unfamiliar):
+    result = _normalize_layers(tmp_path, "unfamiliar", [
+        [_entry("etc")], [_entry(unfamiliar), _entry("etc")],
+    ])
+    assert unfamiliar in result[2][1]
+    assert "etc" in result[2][1]

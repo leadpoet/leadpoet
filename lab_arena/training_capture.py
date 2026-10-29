@@ -393,17 +393,19 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     # Final examples repeat large request and catalog strings. Keep only bounded
     # long-text results within this walk; every node, path, and key is still checked.
     text_cache: OrderedDict[str, str] = OrderedDict()
-    # Aggregate exports also repeat complete responses beyond the old cache's
-    # length cap. Keep this lane separate so short/custom string behavior stays
-    # unchanged. Secret subclasses may carry behavior, so they disable this lane.
+    # Standalone captures repeat short schema strings and keys; aggregates
+    # repeat complete responses beyond the old cache's length cap. These modes
+    # share a bounded plain-string lane without evicting the medium/custom lane.
+    # Secret subclasses may carry behavior, so they disable this lane.
     large_text_cache: OrderedDict[str, tuple[str, int]] = OrderedDict()
-    large_text_cache_enabled = aggregate_parts and all(type(variant) is str for variant in variants)
+    large_text_cache_enabled = all(type(variant) is str for variant in variants)
     large_text_bytes = 0
     large_text_byte_limit = 8 * 1024 * 1024
 
     def clean_text(text: str) -> str:
         nonlocal large_text_bytes
-        if large_text_cache_enabled and type(text) is str and len(text) > 16_384:
+        if (large_text_cache_enabled and type(text) is str
+                and (len(text) > 16_384 if aggregate_parts else len(text) < 1_024)):
             cached = large_text_cache.get(text)
             if cached is not None:
                 large_text_cache.move_to_end(text)

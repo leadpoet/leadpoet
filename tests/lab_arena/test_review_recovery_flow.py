@@ -89,6 +89,8 @@ def _signed_reserve(harness: Harness, round_id: str, flavor: str, miner_label: s
     """Reserve an upload through the same signed API used by a real miner."""
 
     miner = keypair("svc-miner-" + miner_label)
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(flavor)
     facts = source_bundle.validate_source_archive(payload)
     request = contracts.build_signed_request(

@@ -238,10 +238,30 @@ def test_role_temporary_cleanup_keeps_its_original_success_timing():
     assert source[start:first_build].strip() == 'COLD_DOCKER_BUILD_STARTED=1'
 
 
-def test_both_workflow_final_cleanup_paths_always_use_preserving_optin():
+def test_release_builds_use_isolated_runners_and_release_the_lock_on_exit():
     import yaml
     workflow = yaml.safe_load(Path('.github/workflows/attested-v2-release.yml').read_text())
-    for name in ('gateway-parent', 'gateway-parent-b'):
-        step = next(step for step in workflow['jobs'][name]['steps'] if step.get('id') == 'final_cleanup')
-        assert step['if'] == 'always()'
-        assert 'VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1' in step['run']
+    builds = workflow['jobs']['builds']
+    assert builds['strategy']['matrix']['include'] == [
+        {'domain': 'gateway', 'runner': 'ubuntu-24.04'},
+        {'domain': 'validator', 'runner': 'runs-on'},
+    ]
+    assert '/runner=attested-v2-isolated/spot=false/retry=false' in builds['runs-on']
+    assert any(step.get('run') == 'bash .github/scripts/build_attested_release.sh'
+               for step in builds['steps'])
+    source = Path('.github/scripts/build_attested_release.sh').read_text()
+    isolation = source.index('python3 .github/scripts/verify_attested_builder_isolation.py')
+    assert source.index('test "${RUNNER_ENVIRONMENT:-}" = github-hosted') < isolation
+    assert source.index('get-caller-identity --query Account --output text)" = 899952150628') < isolation
+    assert isolation < source.index('docker ps -aq')
+    acquire = source.index('\nleadpoet_acquire_docker_operation_lock_v2')
+    cleanup = source.index("trap 'leadpoet_release_docker_operation_lock_v2' EXIT")
+    build = source.index('/usr/bin/time -v bash gateway/tee/build_release_evidence_v2.sh')
+    assert acquire < cleanup < build
+    # The release no longer runs on production parents or invokes their
+    # storage reclaimer. Maintenance-path preserving checks remain above.
+    assert 'gateway-parent' not in workflow['jobs']
+    assert 'gateway-parent-b' not in workflow['jobs']
+    for text in (source, Path('.github/workflows/attested-v2-release.yml').read_text()):
+        assert 'reclaim_docker_storage_v2.sh' not in text
+        assert 'docker system prune' not in text

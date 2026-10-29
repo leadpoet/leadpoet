@@ -2244,6 +2244,12 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
             if len(body) < 500:
                 return {"ok": False, "stage": "wayback_too_short",
                         "content": "", "error": f"len={len(body)}"}
+            # Archive scripts can make an empty challenge shell long enough
+            # to pass the raw-size bound. Reuse direct-fetch body validation
+            # so the caller can continue its exact-source Exa fallback.
+            if _has_empty_html_body(body):
+                return {"ok": False, "stage": "wayback_html_empty_body",
+                        "content": "", "error": "empty visible HTML body"}
             snapshot_url = str(r.url)
             ownership_meta = {}
             if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):

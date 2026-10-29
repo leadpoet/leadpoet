@@ -1,6 +1,7 @@
 """Exact recovery preserves old rows and resumes only frozen score work."""
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 
@@ -20,13 +21,22 @@ def digest(cur, expression):
     return cur.fetchone()[0]
 
 
-def prepare(conn):
+def prepare(conn, *, window_end=None):
+    # Renew only this command's four exact window literals together. Keep the
+    # original offsets, evaluation date, content and real clock safety check.
+    original_end = datetime(2026, 10, 21, 23, 59, 58, tzinfo=timezone.utc)
+    window_end = window_end or datetime.now(timezone.utc) + timedelta(hours=2)
+    offset = window_end.replace(microsecond=0) - original_end
+    literals = {'2026-10-21T20:30:02Z':1, '2026-10-21T20:30:03Z':1,
+                '2026-10-21T23:59:58Z':2, '2026-10-21T23:59:59Z':1}
+    windows = {stamp:(datetime.fromisoformat(stamp.replace('Z','+00:00')) + offset)
+               .strftime('%Y-%m-%dT%H:%M:%SZ') for stamp in literals}
     cfg = shape.score_seed(conn, positions=1)
     cfg['round_id'] = RID
     cfg['mode'] = 'live'
     cfg['schedule']['stage_2_close'] = '2026-10-21T14:00:02Z'
-    cfg['schedule']['final_scoring_close'] = '2026-10-21T20:30:02Z'
-    cfg['schedule']['publication_deadline'] = '2026-10-21T20:30:03Z'
+    cfg['schedule']['final_scoring_close'] = windows['2026-10-21T20:30:02Z']
+    cfg['schedule']['publication_deadline'] = windows['2026-10-21T20:30:03Z']
     runner = shape.fast.seed.RUNNER
     member = shape.fast.seed.hotkey(SUB)
     source = 'arena/' + RID + '/sources/' + SUB + '.tar.gz'
@@ -69,8 +79,9 @@ def prepare(conn):
     for key,value in replacements.items():
         text = re.sub(r"("+key+r" CONSTANT TEXT:=')[^']+(';)",lambda m:m[1]+value+m[2],text)
     text = re.sub(r"(expected_state CONSTANT JSONB:=')[^']+('::JSONB;)",lambda m:m[1]+json.dumps(state)+m[2],text)
-    # Only the test clock changes. The production migration keeps exact UTC bounds.
-    text = text.replace("clock_timestamp()>='2026-10-21T23:59:58Z'::TIMESTAMPTZ", "'2026-10-21T22:00:00Z'::TIMESTAMPTZ>='2026-10-21T23:59:58Z'::TIMESTAMPTZ")
+    for stamp, count in literals.items():
+        assert text.count(stamp) == count
+        text = text.replace(stamp, windows[stamp])
     return text
 
 
@@ -146,12 +157,26 @@ def test_changed_preimage_refuses_without_partial_recovery(database,mutation):
 
 def test_expired_recovery_window_refuses(database):
     with database[0].connect(**database[1]) as conn:
-        text = prepare(conn).replace("'2026-10-21T22:00:00Z'::TIMESTAMPTZ>=", "'2026-10-22T01:00:00Z'::TIMESTAMPTZ>=")
+        text = prepare(conn, window_end=datetime.now(timezone.utc)-timedelta(seconds=1))
         with conn.cursor() as cur:
             before = rows(cur)
             with pytest.raises(database[0].Error, match='exact state or window differs'):
                 cur.execute(text)
             conn.rollback()
+            assert rows(cur) == before
+
+
+def test_fresh_successor_keeps_real_retry_backoff(database):
+    with database[0].connect(**database[1]) as conn:
+        text = prepare(conn)
+        with conn.cursor() as cur:
+            cur.execute(text)
+            cur.execute('SELECT public.lab_arena_expire_leases(%s)', (RID,))
+            assert cur.fetchone()[0]['retried'] == 1
+            before = rows(cur)
+            assert previous.prior.queue.claim(cur, RID, runner=shape.fast.seed.RUNNER) == {
+                'status':'no_pending'}
+            cur.execute('RESET ROLE')
             assert rows(cur) == before
 
 

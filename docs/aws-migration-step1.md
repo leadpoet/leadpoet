@@ -49,8 +49,11 @@ can increase this amount. The API/restore runner will be scoped separately.
    change-set ID, stack ID and resource IDs.
 
 Use the existing authorized profiles. `leadpoet-lab` is the normal SSM/EC2 role;
-it does not grant general RDS/CloudFormation administration. The existing
-`leadpoet-recovery-console-20261026` session is available for this scoped setup.
+it does not grant general RDS/CloudFormation administration. For explicitly
+authorized administration, use the existing `leadpoet-admin` profile with the
+Identity Center `pranav-admin` authority and valid cached temporary credentials.
+Start a new session only when no valid cached credentials remain. Never use root
+recovery.
 No IAM policy or role needs to be changed for step 1.
 
 ## Acceptance checks

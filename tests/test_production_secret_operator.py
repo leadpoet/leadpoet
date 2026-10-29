@@ -63,10 +63,13 @@ def test_wrong_account_user_or_implicit_root_never_gets_secret_client(monkeypatc
     assert session.calls == ["sts"]
 
 
-def test_recovery_root_requires_explicit_existing_profile(monkeypatch):
-    session = Session(method="explicit", arn="arn:aws:iam::493765492819:root")
+@pytest.mark.parametrize("profile", ["leadpoet-lab", "leadpoet-admin", "leadpoet-recovery-console-20261026"])
+def test_root_never_gets_secret_client_with_named_profile(monkeypatch, profile):
+    session = Session(arn="arn:aws:iam::493765492819:root")
     monkeypatch.setattr(subject, "gateway_iam_session", lambda **kwargs: session)
-    assert subject.secret_operator_client(profile=subject.RECOVERY_PROFILE)[0] is session.secrets
+    with pytest.raises(subject.SecretOperatorError):
+        subject.secret_operator_client(profile=profile)
+    assert session.calls == ["sts"]
 
 
 def test_authority_failure_is_redacted(monkeypatch):

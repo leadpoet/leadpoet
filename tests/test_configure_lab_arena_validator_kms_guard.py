@@ -270,7 +270,7 @@ def test_cli_defaults_to_plan_and_apply_uses_existing_arena_authorization(
 
 @pytest.mark.parametrize("options,expected", [
     ([], "leadpoet-lab"),
-    (["--aws-profile", "leadpoet-recovery-console-20261026"], "leadpoet-recovery-console-20261026"),
+    (["--aws-profile", "leadpoet-admin"], "leadpoet-admin"),
     (["--aws-instance-role"], None),
 ])
 def test_cli_selects_guard_authority_explicitly(monkeypatch, capsys, options, expected):
@@ -295,16 +295,18 @@ def test_secret_configuration_selects_named_operator_profile(monkeypatch, capsys
     capsys.readouterr()
 
 
-def test_approved_temporary_recovery_root_passes_guard(monkeypatch):
+@pytest.mark.parametrize("profile", ["leadpoet-lab", "leadpoet-admin", "leadpoet-recovery-console-20261026"])
+def test_root_cannot_run_guard_with_any_named_profile(monkeypatch, profile):
     iam = FakeIam(MODULE._policy_with_credential_deny(BEFORE)[0])
     _install(monkeypatch, iam, FakeSts(arn="arn:aws:iam::493765492819:root"))
-    result = MODULE.configure_validator_credential_kms_guard(apply=True, profile="leadpoet-recovery-console-20261026")
-    assert result["changed"] is False and iam.puts == []
+    with pytest.raises(MODULE.ConfigurationError, match="identity"):
+        MODULE.configure_validator_credential_kms_guard(apply=True, profile=profile)
+    assert iam.reads == 0 and iam.puts == []
 
 
 def test_old_iam_user_cannot_run_guard(monkeypatch):
     iam = FakeIam()
     _install(monkeypatch, iam, FakeSts(arn="arn:aws:iam::493765492819:user/pranav-main"))
     with pytest.raises(MODULE.ConfigurationError, match="identity"):
-        MODULE.configure_validator_credential_kms_guard(apply=True, profile="leadpoet-recovery-console-20261026")
+        MODULE.configure_validator_credential_kms_guard(apply=True, profile="leadpoet-admin")
     assert iam.reads == 0 and iam.puts == []

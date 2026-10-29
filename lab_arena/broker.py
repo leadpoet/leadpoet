@@ -712,6 +712,21 @@ def _read_models_document(
         raise ArenaContractError("models endpoint returned invalid JSON") from exc
 
 
+def _account_model_ids(document: Any) -> set[str]:
+    """Validate the account list's ID structure; public data owns pricing."""
+
+    if (not isinstance(document, Mapping) or not isinstance(document.get("data"), list)
+            or not document["data"]):
+        raise ArenaContractError("models account catalog is malformed")
+    models = set()
+    for row in document["data"]:
+        model_id = row.get("id") if isinstance(row, Mapping) else None
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ArenaContractError("models account catalog is malformed")
+        models.add(model_id)
+    return models
+
+
 def fetch_openrouter_price_table(
     model_ids: Optional[Sequence[str]] = None,
     *,
@@ -734,9 +749,7 @@ def fetch_openrouter_price_table(
             timeout_seconds=timeout_seconds,
             api_key=api_key,
         )
-        account_models = set(price_table_from_models_response(
-            account_document, fetched_at=fetched_at
-        )["models"])
+        account_models = _account_model_ids(account_document)
     public_document = _read_models_document(
         OPENROUTER_MODELS_URL,
         urlopen=urlopen or _DIRECT_URLOPEN,

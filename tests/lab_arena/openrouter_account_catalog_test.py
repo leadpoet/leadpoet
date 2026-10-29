@@ -76,7 +76,9 @@ def test_account_ids_filter_public_catalog_without_changing_shared_prices():
     URLError("unreachable"),
     TimeoutError("timeout"),
     {"data": []},
-    {"data": [{"id": ALLOWED}]},
+    {"data": [{"id": ALLOWED}, {}]},
+    {"data": [{"id": ALLOWED}, {"id": 7}]},
+    {"data": [{"id": ALLOWED}, {"id": "  "}]},
     {"wrong": "shape"},
 ])
 def test_account_refusal_fails_closed_without_public_fallback(account_reply):
@@ -116,6 +118,23 @@ def test_explicit_model_list_cannot_restore_public_only_model():
         broker.fetch_openrouter_price_table(
             [ALLOWED, PUBLIC_ONLY], urlopen=opener, api_key="test-key"
         )
+
+
+def test_account_ids_do_not_depend_on_account_pricing_or_supported_syntax():
+    opener = _Opener({
+        broker.OPENROUTER_USER_MODELS_URL: {"data": [
+            {"id": ALLOWED}, {"id": ALLOWED}, {"id": "example/unsupported@model"},
+        ]},
+        broker.OPENROUTER_MODELS_URL: _document(
+            (ALLOWED, "0.00000015", "0.0000006"),
+            (PUBLIC_ONLY, "0.0000001", "0.0000002"),
+        ),
+    })
+
+    table = broker.fetch_openrouter_price_table(urlopen=opener, api_key="test-key")
+
+    assert list(table["models"]) == [ALLOWED]
+    assert table["models"][ALLOWED]["prompt"] == "0.00000015"
 
 
 def test_no_key_keeps_explicit_public_catalog_helper_behavior():

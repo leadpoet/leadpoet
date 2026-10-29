@@ -12,6 +12,7 @@ import subprocess
 import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -22,10 +23,10 @@ from lab_arena import source_bundle, submission_runtime, weight_state
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 from lab_arena.promotion import GitPromoter
 from leadpoet_canonical import arena_weights
-from leadpoet_canonical.lab_arena_rewards import champion_values
+from leadpoet_canonical.lab_arena_rewards import slot_allocations
+from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_OPENROUTER_KEY,
@@ -51,9 +52,7 @@ HOST_KEYS = {
 
 @pytest.fixture
 def champion_database():
-    yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS
-    )
+    yield from current_service_database()
 
 
 @pytest.fixture
@@ -244,6 +243,7 @@ class ChampionHarness(Harness):
                 defaults=svc.RoundDefaults(
                     benchmark_icp_count=contracts.BENCHMARK_ICP_COUNT,
                     checkpoint_deadline_enabled=False, runner_slot_ceiling=8,
+                    integrity_from="2000-01-01T00:00:00Z", normalize_intent_scale=False,
                     runner_hotkeys=tuple(self.runner_keys),
                     baseline_hotkey=self.baseline_hotkey,
                     baseline_source_url=svc.DEFAULT_BASELINE_SOURCE_URL,
@@ -349,13 +349,35 @@ def _assert_complete_miner_cycle(harness: ChampionHarness, row: dict) -> None:
         == {provider: "miner_key" for provider in contracts.PROVIDERS}
         for run in executions
     )
-    assert all(run["champion_funding_sources"] is None for run in scores)
+    # SQL576 freezes score payers too; a fully miner-funded cycle must keep
+    # the exact promoted-miner payer for every provider on both run kinds.
+    assert all(
+        run["champion_funding_sources"]
+        == {provider: "miner_key" for provider in contracts.PROVIDERS}
+        for run in scores
+    )
 
 
 @pytest.mark.parametrize("account_status", (401, 402), ids=("unauthorized", "credit"))
 def test_champion_funding_survives_rounds_restart_and_source_edits(
-    champion_connect, tmp_path, account_status
+    champion_connect, tmp_path, account_status, monkeypatch
 ):
+    original_scorer = fixtures.deterministic_scorer
+
+    def funding_scorer(companies, icp, reference):
+        # Prove funding recovery with a real winner at the current frozen
+        # margin and full reward tier. Hash-based grades differ by only 2.8
+        # points, below today's 8-point promotion threshold.
+        rows = original_scorer(companies, icp, reference)
+        for row in rows:
+            baseline = companies[row["company_index"]]["company_name"].startswith("PublicBaseline")
+            value = 5.0 if baseline else 25.0
+            row.update(final_score=value, intent_signal_raw=value, intent_signal_final=value)
+            for signal in row["intent_signals_detail"]:
+                signal.update(raw=value, after_decay=value)
+        return rows
+
+    monkeypatch.setattr(fixtures, "deterministic_scorer", funding_scorer)
     harness = ChampionHarness(
         champion_connect,
         tmp_path,
@@ -490,9 +512,12 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     harness.run_stage_with_runners(1)
     harness.advance_until("published", runners=1)
     half_basis = _activate(harness, 500_000)
-    assert champion_values(
+    assert half_basis["slot_policy"]["pool_percent"] == 50
+    assert len(half_basis["reward_slots"]) == 3
+    assert all(slot and slot["miner_hotkey"] == winner_hotkey for slot in half_basis["reward_slots"])
+    assert slot_allocations(
         half_basis, half_basis["effective_reward_epoch"], [winner_hotkey]
-    )["champion_share"] == 0.125
+    ) == {winner_hotkey: Fraction(1, 4)}
 
     repeated = _start_round(
         harness,
@@ -503,9 +528,9 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     harness.provider_transport.arm_account_failure(account_status)
     repeated = _publish_round(harness, len(repeated["participants"]))
     repeated_basis = _activate(harness, 500_000)
-    assert champion_values(
+    assert slot_allocations(
         repeated_basis, repeated_basis["effective_reward_epoch"], [winner_hotkey]
-    )["champion_share"] == 0.10
+    ) == {winner_hotkey: Fraction(1, 4)}
 
     restored = _start_round(
         harness,
@@ -517,9 +542,9 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     restored = _publish_round(harness, len(restored["participants"]))
     restored_basis = _activate(harness, 1_000_000)
     _assert_complete_miner_cycle(harness, restored)
-    assert champion_values(
+    assert slot_allocations(
         restored_basis, restored_basis["effective_reward_epoch"], [winner_hotkey]
-    )["champion_share"] == 0.20
+    ) == {winner_hotkey: Fraction(1, 2)}
 
     burn_hotkey = keypair("champion-funding-burn").ss58_address
     accepted = weight_state.build_accepted_weight_state(
@@ -542,8 +567,8 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     vector = arena_weights.derive_arena_weights(
         accepted, [winner_hotkey, burn_hotkey]
     )
-    assert vector["champion_share_ppb"] == 125_000_000
-    assert vector["burned_residual_ppb"] == 875_000_000
+    assert vector["champion_share_ppb"] == 250_000_000
+    assert vector["burned_residual_ppb"] == 750_000_000
     assert vector["sparse_uids"] == [0, 1]
 
     connection = champion_connect()
@@ -563,8 +588,9 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     assert all(row[1] > 0 and row[2] >= 0 for row in ledger)
 
     # Infrastructure failures use the same real broker and ledger, but never
-    # authorize an account fallback. Two validators hold separate real leases
-    # so both cases can be proved without completing an extra daily cycle.
+    # authorize an account fallback. One validator owns two independently
+    # leased ICPs; current claim authority keeps a submission on one validator
+    # while its first-attempt execution leases remain live.
     infrastructure = _start_round(
         harness,
         day=6 if account_status == 401 else 16,
@@ -576,33 +602,36 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     assert harness.service.advance_round(harness.round_id)["assignments"] == contracts.STAGE_1_ICP_COUNT
     scheduled_now = harness.clock.now
     harness.clock.now = datetime.now(timezone.utc)
+    runner = harness.runner(0, parallel=2)
+    from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verified_test_pool
+    runner._config.proxy_worker_pool = _verified_test_pool(2)
     try:
-        for runner_index, failure in enumerate(("status_500", "network")):
-            runner = harness.runner(runner_index, parallel=1)
-            try:
-                lease = runner.claim_one()
-                assert lease["status"] == "leased"
-                harness.provider_transport.arm_infrastructure_failure(failure)
-                response = harness.service.handle_provider(
-                    lease["run_id"],
-                    lease["lease_token"],
-                    {
-                        "operation_id": "deepline.execute",
-                        "parameters": {
-                            "tool": "exa_search",
-                            "payload": {"query": "synthetic infrastructure proof"},
-                        },
-                        "timeout_ms": 5000,
-                        "action_sequence": 0,
+        leases = [runner.claim_one() for _ in range(2)]
+        assert all(lease["status"] == "leased" for lease in leases)
+        assert len({lease["run_id"] for lease in leases}) == 2
+        distinct_tokens = len({lease["lease_token"] for lease in leases})
+        assert distinct_tokens == 2
+        for failure, lease in zip(("status_500", "network"), leases):
+            harness.provider_transport.arm_infrastructure_failure(failure)
+            response = harness.service.handle_provider(
+                lease["run_id"],
+                lease["lease_token"],
+                {
+                    "operation_id": "deepline.execute",
+                    "parameters": {
+                        "tool": "exa_search",
+                        "payload": {"query": "synthetic infrastructure proof"},
                     },
-                )
-                assert response["call"]["funding_source"] == "miner_key"
-                assert response["call"]["error_code"] == "provider_unavailable"
-                assert response["call"]["provider_attempt"] == 1
-                assert harness.service.store.get_round(harness.round_id)[
-                    "champion_fallback_providers"
-                ] == []
-            finally:
-                runner.close()
+                    "timeout_ms": 5000,
+                    "action_sequence": 0,
+                },
+            )
+            assert response["call"]["funding_source"] == "miner_key"
+            assert response["call"]["error_code"] == "provider_unavailable"
+            assert response["call"]["provider_attempt"] == 1
+            assert harness.service.store.get_round(harness.round_id)[
+                "champion_fallback_providers"
+            ] == []
     finally:
+        runner.close()
         harness.clock.now = scheduled_now

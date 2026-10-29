@@ -20,6 +20,7 @@ from tests.lab_arena.parallel_twenty_runtime_e2e_test import (
     _ExecutionEvidence, _http_runner, _postgres_lease_clock,
     bounded_socket_shutdown_poll,
 )
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.partial_execution_close422_postgres_test import (
     base_database, current_database, database, migrated,
 )
@@ -40,6 +41,22 @@ def integrated(migrated):
         cur.execute(transition.read_text())
         cur.execute(transition.read_text())
     return migrated
+
+
+def test_partial_baseline_migration_replays_on_its_historical_schema(integrated):
+    psycopg, dsn = integrated
+    with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT encode(extensions.digest(pg_get_functiondef("
+                    "'public.lab_arena_transition_round(text,text,text,jsonb)'::regprocedure),"
+                    "'sha256'),'hex')")
+        assert cur.fetchone()[0] == '6091b7159caaada4d14758f11304150d9e602a121aaf7a39e2820a07140b9521'
+
+
+@pytest.fixture()
+def service_integrated():
+    # Current service recovery needs the deployed RPCs. The422/423/424
+    # migration and security tests retain their separate pinned schemas.
+    yield from current_service_database()
 
 
 def _execute_exact(runner, harness, count):
@@ -82,8 +99,8 @@ def _project_closed_stage_to_real_clock(connect, round_id, field):
     return cutoff
 
 
-def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(integrated, tmp_path):
-    psycopg, dsn = integrated
+def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(service_integrated, tmp_path):
+    psycopg, dsn = service_integrated
     connect = lambda: psycopg.connect(**dsn)
     harness = QualityHarness(
         connect, tmp_path, challengers=["FullCandidate", "PartialCandidate"],

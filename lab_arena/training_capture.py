@@ -384,8 +384,35 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     # Final examples repeat large request and catalog strings. Keep only bounded
     # long-text results within this walk; every node, path, and key is still checked.
     text_cache: OrderedDict[str, str] = OrderedDict()
+    # Aggregate exports also repeat complete responses beyond the old cache's
+    # length cap. Keep this lane separate so short/custom string behavior stays
+    # unchanged. Secret subclasses may carry behavior, so they disable this lane.
+    large_text_cache: OrderedDict[str, tuple[str, int]] = OrderedDict()
+    large_text_cache_enabled = aggregate_parts and all(type(variant) is str for variant in variants)
+    large_text_bytes = 0
+    large_text_byte_limit = 8 * 1024 * 1024
 
     def clean_text(text: str) -> str:
+        nonlocal large_text_bytes
+        if large_text_cache_enabled and type(text) is str and len(text) > 16_384:
+            cached = large_text_cache.get(text)
+            if cached is not None:
+                large_text_cache.move_to_end(text)
+                return cached[0]
+            cleaned = scan_text(text)
+            if type(cleaned) is str:
+                # Count both retained strings, even if they are the same object.
+                # Built-in Unicode storage includes wide characters and avoids
+                # encoding allocations or custom __sizeof__/encode methods.
+                charge = str.__sizeof__(text) + str.__sizeof__(cleaned)
+                if charge <= large_text_byte_limit:
+                    while large_text_cache and (len(large_text_cache) >= 512
+                                                or large_text_bytes + charge > large_text_byte_limit):
+                        _, (_, removed_charge) = large_text_cache.popitem(last=False)
+                        large_text_bytes -= removed_charge
+                    large_text_cache[text] = (cleaned, charge)
+                    large_text_bytes += charge
+            return cleaned
         if 1_024 <= len(text) <= 16_384:
             cached = text_cache.get(text)
             if cached is not None:

@@ -49,6 +49,29 @@ or restart production in this step. The coordinating task owns AWS writes and
 verification; independent reviewers are read-only. This authority ends after the
 foundation is provisioned and verified, with the next step reported to the user.
 
+## Scoped authorization: October 28 aggregate exporter text reuse
+
+The user authorized bounded reuse of exact plain-string sanitizer results only
+within one aggregate export invocation. Preserve the existing short-string and
+custom-string cache behavior, every node/path/key/partition/privacy check, all
+redaction outputs, and standalone request behavior. Use a separate cache capped
+at 512 entries and 8 MiB of conservatively counted Python Unicode key/output
+storage; skip oversized entries. Do not add an input prewalk, global cache,
+provider calls, dependencies, or source, scoring, billing, or standards changes.
+Internal implementation agents may test and commit only. The coordinating task
+owns independent review, saved-artifact native validation, and any later release.
+Do not change production, processes, restart guards, or concurrent work under
+this implementation scope.
+
+## Scoped authorization: October 28 stale publisher exit
+
+The user authorized the narrow publication recovery fix: stop remaining training
+assessments when another publisher has already finalized the round. Preserve
+the final atomic transition, all accepted work, eligibility rules, scores and
+rewards. The coordinating task owns independent review, safe push and merge,
+canonical deployment and live verification. Do not interrupt another task's
+publisher or create a second publication path.
+
 ## Scoped authorization: October 28 Docker mount record ordering
 
 The user authorized the narrow confirmed live-restore snapshot guard fix:

@@ -164,6 +164,18 @@ def test_exact_unknown_marker_and_winner_guard_preserve_scored_costs(
         for row in full["final_ranking"]:
             if row["is_baseline"]:
                 row["training_data_eligibility"] = _training(True)
+        # Reopen only this disposable fixture, including the prior canonical
+        # publication authority. Production write-once guards stay enabled for
+        # both competing RPCs below.
+        cursor.execute("SET LOCAL session_replication_role=replica")
+        cursor.execute(
+            "UPDATE public.lab_arena_rounds SET status='scored', publication_doc=NULL, "
+            "published_at=NULL, king_outcome=NULL, king_hotkey=NULL, "
+            "reward_activated_at=NULL, reward_basis_doc=NULL, reward_basis_hash=NULL, "
+            "effective_reward_epoch=NULL, king_start_epoch=NULL WHERE round_id=%s",
+            (round_id,),
+        )
+        cursor.execute("SET LOCAL session_replication_role=origin")
 
     # Both transactions start against the same scored row. The validated
     # publication transition is atomic: one commits and one sees stale state.
@@ -173,12 +185,14 @@ def test_exact_unknown_marker_and_winner_guard_preserve_scored_costs(
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout='10s'")
             barrier.wait(timeout=10)
-            cursor.execute("UPDATE public.lab_arena_rounds SET status='published', "
-                           "publication_doc=%s::jsonb WHERE round_id=%s "
-                           "AND status='scored' RETURNING round_id",
-                           (json.dumps(full), round_id))
-            return cursor.fetchone() is not None
+            cursor.execute("SET LOCAL ROLE lab_arena_service")
+            cursor.execute(
+                "SELECT public.lab_arena_transition_round(%s,'scored','published',%s::jsonb)",
+                (round_id, json.dumps({"publication_doc": full,
+                                      "published_at": full["published_at"]})),
+            )
+            return cursor.fetchone()[0]["status"]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _index: publish_once(), range(2)))
-    assert sorted(results) == [False, True]
+    assert sorted(results) == ["ok", "stale"]

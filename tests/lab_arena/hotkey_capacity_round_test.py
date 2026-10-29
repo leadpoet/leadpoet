@@ -36,7 +36,9 @@ def test_default_admission_includes_all_miner_slots_with_one_planned_runner(conn
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
     configuration = harness.service.create_round(cutoff, round_id="arena-2098-01-01-capdefault")
     assert configuration["max_challengers"] == 256
-    assert capacity.daily_challenger_capacity(configuration) == 8
+    # Current scoring runs can take twenty minutes, so this throughput
+    # estimate is six. Admission still includes all256 configured slots.
+    assert capacity.daily_challenger_capacity(configuration) == 6
     assert configuration["runner_slot_ceiling"] == 8
     assert configuration["max_attempts_per_assignment"] == 2
     monkeypatch.setattr(capacity, "daily_challenger_capacity", lambda *_args, **_kwargs: 0)
@@ -69,7 +71,19 @@ def test_new_live_baseline_first_round_freezes_configured_cap(connect, tmp_path,
 def test_twenty_one_shared_owner_hotkeys_publish_with_intact_source_and_credentials(connect, tmp_path):
     """Signed intake, real PostgreSQL/broker/runner, nonempty contact results, publication."""
     flavors = [f"SharedOwner{index:02d}" for index in range(21)]
-    harness = ContactHarness(connect, tmp_path, challengers=flavors, runners=["alpha"])
+    from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+    class FrozenContactHarness(HistoricalStoreHarnessMixin, ContactHarness):
+        def build_service(self):
+            service = super().build_service()
+            commit = service.commit_benchmark
+            def commit_frozen(round_id):
+                freeze_historical_intake_dates(self, '2026-09-08')
+                return commit(round_id)
+            service.commit_benchmark = commit_frozen
+            return service
+        def objects_key(self):
+            return 'shared-owner-' + tmp_path.name
+    harness = FrozenContactHarness(connect, tmp_path, challengers=flavors, runners=["alpha"])
     _install_contact_sandbox(harness)
     harness.service.config.defaults = replace(
         harness.service.config.defaults,

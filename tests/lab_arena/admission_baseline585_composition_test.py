@@ -1,4 +1,4 @@
-"""The two distinct migration 585 files preserve each other's contracts."""
+"""The two exact historical 585 migrations preserve each other's contracts."""
 
 import pytest
 
@@ -9,7 +9,7 @@ from tests.postgres_migration_harness import SCRIPTS
 
 BASELINE = SCRIPTS / "585-lab-arena-champion-baseline-reasoning.sql"
 REVIEW = SCRIPTS / "585-lab-arena-review-deadline-recovery.sql"
-REVIEW_ROLLBACK = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql"
+REVIEW_ROLLBACK = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql.template"
 BASELINE_FUNCTIONS = (
     "public.lab_arena_rounds_write_once_v1()",
     "public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)",
@@ -19,7 +19,7 @@ BASELINE_FUNCTIONS = (
 @pytest.fixture()
 def database():
     # The predecessor fixture installs baseline 567 and review 492. Add only
-    # the existing review prerequisites, then test both exact 585 files below.
+    # the existing review prerequisites, then test both exact migration files below.
     generator = baseline.prior.database.__wrapped__()
     db = next(generator)
     try:
@@ -82,3 +82,41 @@ def test_baseline_snapshot_survives_review_upgrade_and_exact_rollback(database, 
         assert store.code_review_schema()["retry_policy"] == "deadline_transient_v2"
     finally:
         store.close()
+
+
+def test_current_service_fixture_reaches_atomic_review_capability():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+
+    from scripts.verify_arena_full_thinking_e2e import run_e2e
+
+    # Exercise the paid verifier's actual default, without invoking providers.
+    factory = run_e2e.__kwdefaults__["database_factory"]
+    assert factory is current_service_database
+    database = factory()
+    store = None
+    try:
+        psycopg2, dsn = next(database)
+        store = ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
+        schema = store.code_review_schema()
+        assert schema["retry_policy"] == "deadline_transient_v2"
+        assert schema["max_transient_attempts"] is None
+        assert schema["atomic_restart_guard"] is True
+        # The current service emits the exact unknown marker for full-thinking
+        # noncontenders. Its current fixture must install both588 validators;
+        # the separate588 migration test retains its pre588 rejection proof.
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            for signature, expected in (
+                ("public.lab_arena__per_icp_publication_valid(text,jsonb)",
+                 "0de3baf2d97622fd821c5959570a1b680f4c7ca0a565d3fe0b41f975c8c048e4"),
+                ("public.lab_arena_integrity_publication_guard_v1()",
+                 "da7b69efcc26abf82a9c4e187e0445554134b7dc744bf8fe33788763d8bfcbff"),
+            ):
+                cursor.execute(
+                    "SELECT encode(extensions.digest(pg_get_functiondef(%s::regprocedure),"
+                    "'sha256'),'hex')", (signature,),
+                )
+                assert cursor.fetchone()[0] == expected, signature
+    finally:
+        if store is not None:
+            store.close()
+        database.close()

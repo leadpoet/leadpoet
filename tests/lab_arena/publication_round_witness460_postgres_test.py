@@ -7,6 +7,7 @@ import copy
 import json
 
 import pytest
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_scored_first_postgres_test import (
@@ -27,6 +28,18 @@ OUTER = "public.lab_arena_integrity_publication_guard_v1()"
 BASELINE = "public.lab_arena_publication_baseline_guard_v1()"
 
 
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    """Only this module's pinned SQL uses the historical client and judge date."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-29")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
+
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
@@ -39,13 +52,13 @@ def database():
 
 @pytest.mark.parametrize("failed_execution", [False, True])
 def test_archived_accepted_judge_blocks_exact_current_incomplete_transition(
-    database, tmp_path, monkeypatch, failed_execution,
-):
+    database, tmp_path, monkeypatch, failed_execution, request):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=["PartialMiner"], runners=["alpha"]
     )
+    request.addfinalizer(harness.service.store.close)
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         execution_sequence_from="2000-01-01T00:00:00Z",

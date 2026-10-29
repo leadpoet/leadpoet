@@ -20,8 +20,7 @@ from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.parallel_twenty_runtime_e2e_test import (
     _http_runner,
@@ -32,7 +31,7 @@ from tests.test_arena_company_quality_policy import _positive_breakdown
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def _submit_without_review(harness, flavor):

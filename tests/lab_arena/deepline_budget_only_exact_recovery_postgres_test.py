@@ -18,6 +18,7 @@ from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
 from tests.lab_arena.per_icp_cost_admission_postgres_test import _settle
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, sha
 from tests.lab_arena.test_lab_arena_service_round import Harness
+from tests.lab_arena.round_timing_fixture import commit_dates
 
 MIGRATION = "415-lab-arena-deepline-budget-only-exact-recovery.sql"
 
@@ -368,7 +369,6 @@ def test_ledger_cursor_scans_more_than_400_rows_without_leakage(database, tmp_pa
 
 
 def test_catalog_freezes_atomically_and_cannot_change_later(database, tmp_path):
-    from datetime import datetime, timedelta, timezone
     from tests.lab_arena.test_lab_arena_migration_postgres import (
         round_config,
         frozen_participants,
@@ -379,19 +379,13 @@ def test_catalog_freezes_atomically_and_cannot_change_later(database, tmp_path):
     connect = lambda: database[0].connect(**database[1])
     store = ArenaStore(PsycopgTransport(connect))
     rid = "arena-2099-08-09"
-    day = datetime.now(timezone.utc).date()
-    bank = day - timedelta(days=1)
     cfg = round_config(rid, [hotkey("freeze-runner")], cost_per_company_microusd=800000)
     cfg.update(
         sourcing_cost_eligibility_policy="successful_calls_per_icp_v1",
         execution_icp_cap_microusd=4000000,
     )
-    cfg["schedule"] = {
-        "submission_open": bank.isoformat() + "T00:00:00Z",
-        "submission_cutoff": (datetime.now(timezone.utc) + timedelta(minutes=30))
-        .isoformat()
-        .replace("+00:00", "Z"),
-    }
+    day, bank = commit_dates(cfg)
+    cfg["schedule"]["submission_open"] = bank.isoformat() + "T00:00:00Z"
     assert store.create_round(rid, cfg)["status"] == "created"
     participants = frozen_participants(
         store, rid, 1, prefix="catalog-freeze", king_index=0

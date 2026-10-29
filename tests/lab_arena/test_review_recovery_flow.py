@@ -12,10 +12,6 @@ import pytest
 from lab_arena import broker, code_review, contracts, source_bundle
 from lab_arena.service import ServiceError
 from lab_arena.store import new_lease_token
-from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_PROVIDER_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
-)
-from tests.postgres_migration_harness import SCRIPTS
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_KEYS,
     CANARY_OPENROUTER_KEY,
@@ -28,61 +24,28 @@ from tests.lab_arena.test_lab_arena_service_round import (
 )
 
 
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
+
 @pytest.fixture(scope="module")
 def database():
-    generator = database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
-        "365-lab-arena-trajectories.sql",
-        "492-lab-arena-review-provider-observations.sql",
-        "562-lab-arena-review-context-integrity-reason.sql",
-        "563-lab-arena-review-source-digest-reason.sql",
-        "566-lab-arena-research-review-result.sql",
-        "585-lab-arena-review-deadline-recovery.sql",
-    ))
-    db = next(generator)
-    try:
-        # Current scoring reads this computed column. Reuse its exact existing
-        # production definition without installing unrelated host retry RPCs.
-        sql = (SCRIPTS / "474-lab-arena-host-interruption-execution-retries.sql").read_text()
-        helper = "CREATE OR REPLACE FUNCTION public.lab_arena_execution_attempt_count"
-        definition = helper + sql.split(helper, 1)[1].split(
-            "CREATE OR REPLACE FUNCTION public.lab_arena__execute_assignment_calls_v1", 1,
-        )[0]
-        with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
-            cursor.execute("GRANT CREATE ON SCHEMA public TO lab_arena_owner")
-            cursor.execute(definition)
-            # This historical harness has no model supersessions. Install only
-            # migration 517's additive zero-floor columns and public projection
-            # used by current result reads. Keep zero defaults for old inserts.
-            supersession = (SCRIPTS / "517-lab-arena-model-policy-supersession.sql").read_text()
-            for table in ("rounds", "runs"):
-                anchor = f"ALTER TABLE public.lab_arena_{table} ADD COLUMN IF NOT EXISTS scoring_generation_floor"
-                cursor.execute(anchor + supersession.split(anchor, 1)[1].split(";", 1)[0] + ";")
-            anchor = "DO $view517$"
-            cursor.execute(anchor + supersession.split(anchor, 1)[1].split("$view517$;", 1)[0] + "$view517$;")
-            anchor = "CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions"
-            cursor.execute(anchor + supersession.split(anchor, 1)[1].split(";", 1)[0] + ";")
-            cursor.execute("ALTER TABLE public.lab_arena_scoring_supersessions OWNER TO lab_arena_owner")
-            cursor.execute("ALTER TABLE public.lab_arena_scoring_supersessions ENABLE ROW LEVEL SECURITY")
-            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena_scoring_policy_history_v1"
-            cursor.execute(anchor + supersession.split(anchor, 1)[1].split(
-                "-- Trigger and exact existing-function amendments follow below.", 1,
-            )[0])
-            privacy = (SCRIPTS / "540-lab-arena-incomplete-participant-publication.sql").read_text()
-            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena__execution_privacy_route_unavailable_v1"
-            cursor.execute(anchor + privacy.split(anchor, 1)[1].split(
-                "DO $preflight_lab_arena__participant_incomplete_reason_v1$", 1,
-            )[0])
-            public_failure = (SCRIPTS / "541-lab-arena-public-execution-failure-reason.sql").read_text()
-            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena_public_execution_failure_reason_v1"
-            cursor.execute(anchor + public_failure.split(anchor, 1)[1].split("DO $restore541$", 1)[0])
-            cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
-        yield db
-    finally:
-        generator.close()
+    yield from current_service_database()
 
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("cutoff", [
+    "2026-10-29T00:00:00Z", "2026-11-01T00:00:00Z",
+    "2027-01-01T00:00:00Z", "2028-03-01T00:00:00Z",
+])
+def test_midnight_replacement_freeze_remains_2300_across_date_boundaries(cutoff):
+    row = {"configuration_doc": {"schedule": {"submission_cutoff": cutoff}}}
+    from lab_arena.service import ArenaService
+    freeze = ArenaService._submission_replacement_cutoff(row)
+    assert (freeze.hour, freeze.minute) == (23, 0)
+    assert freeze + timedelta(hours=1) == datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
 
 
 def _signed_reserve(harness: Harness, round_id: str, flavor: str, miner_label: str):
@@ -255,12 +218,11 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     harness.review_transport = transport
     assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
 
-    # A UTC-midnight round fixes the source replacement boundary at 23:00.
+    # Keep real PostgreSQL admission before the one-hour replacement freeze,
+    # including when CI runs during the last UTC hour.
     now = datetime.now(timezone.utc)
     harness.clock.now = now
-    cutoff = (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    cutoff = now + timedelta(hours=2)
     # The test later brings the cutoff into the current UTC day so PostgreSQL
     # can exercise retry timing without sleep. Keep the daily ID on that day.
     round_id = "arena-" + now.date().isoformat()
@@ -269,7 +231,9 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     replacement_freeze = harness.service._submission_replacement_cutoff(
         {"configuration_doc": configuration}
     )
-    assert (replacement_freeze.hour, replacement_freeze.minute) == (23, 0)
+    assert replacement_freeze == datetime.fromisoformat(
+        configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")
+    ) - timedelta(hours=1)
 
     original_reserved = _signed_reserve(
         harness, round_id, "SupersededOriginal", "review-recovery"
@@ -428,8 +392,17 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     # Freeze and publish the full round. Only the selected replacement enters
     # evaluation beside the baseline, and it receives all 20 ICP assignments.
     harness.clock.advance_to(_iso(review_cutoff))
+    # All admission checks above use real current database time. Freeze a
+    # coherent historical intake window for this fixture's legacy judge; the
+    # normal commit derives its bank/evaluation dates and retains live leases.
+    assert harness.service.store.list_runs(round_id) == []
+    freeze_historical_intake_dates(harness, "2026-10-12")
     committed = harness.service.advance_round(round_id)
     assert committed["status"] == "ok"
+    frozen = harness.service.store.get_round(round_id)
+    assert frozen["status"] == "committed"
+    assert str(frozen["evaluation_date"]) == "2026-10-12"
+    assert str(frozen["icp_set_date"]) == "2026-10-11"
     participants = harness.service.store.get_round(round_id)["participants"]
     challenger_ids = {
         row["submission_id"] for row in participants if not row["is_king"]

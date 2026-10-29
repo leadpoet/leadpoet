@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
-from lab_arena import broker as br, contracts, scoring, service as svc
+from lab_arena import broker as br, contracts, rewards, scoring, service as svc
 from lab_arena import source_bundle, submission_runtime, weight_state
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 from lab_arena.promotion import GitPromoter
@@ -27,6 +27,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_OPENROUTER_KEY,
     FakeCredentialManager,
@@ -356,7 +357,7 @@ def _assert_complete_miner_cycle(harness: ChampionHarness, row: dict) -> None:
 def test_champion_funding_survives_rounds_restart_and_source_edits(
     champion_connect, tmp_path, account_status
 ):
-    harness = ChampionHarness(
+    harness = _FrozenChampionHarness(
         champion_connect,
         tmp_path,
         challengers=["Alpha", "Bravo", "Charlie"],
@@ -379,7 +380,7 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     repository_root, _remote, promoted_source = _promote_first_winner(
         harness, tmp_path, first
     )
-    full_first_basis = _activate(harness, 1_000_000)
+    full_first_basis = _activate_historical_v1(harness, 1_000_000)
     harness.provider_transport.champion_key = "deepline-miner-" + winner_id
 
     full = _start_round(
@@ -391,7 +392,7 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     assert full["champion_submission_id"] == winner_id
     assert full["champion_hotkey"] == winner_hotkey
     full = _publish_round(harness, 1)
-    full_basis = _activate(harness, 1_000_000)
+    full_basis = _activate_historical_v1(harness, 1_000_000)
     _assert_complete_miner_cycle(harness, full)
     assert full_basis["king_hotkey"] == full_first_basis["king_hotkey"]
 
@@ -489,7 +490,7 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     assert harness.service.advance_round(harness.round_id)["assignments"] == contracts.STAGE_1_ICP_COUNT
     harness.run_stage_with_runners(1)
     harness.advance_until("published", runners=1)
-    half_basis = _activate(harness, 500_000)
+    half_basis = _activate_historical_v1(harness, 500_000)
     assert champion_values(
         half_basis, half_basis["effective_reward_epoch"], [winner_hotkey]
     )["champion_share"] == 0.125
@@ -502,7 +503,7 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     )
     harness.provider_transport.arm_account_failure(account_status)
     repeated = _publish_round(harness, len(repeated["participants"]))
-    repeated_basis = _activate(harness, 500_000)
+    repeated_basis = _activate_historical_v1(harness, 500_000)
     assert champion_values(
         repeated_basis, repeated_basis["effective_reward_epoch"], [winner_hotkey]
     )["champion_share"] == 0.10
@@ -515,7 +516,7 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     )
     harness.provider_transport.failure_status = 0
     restored = _publish_round(harness, len(restored["participants"]))
-    restored_basis = _activate(harness, 1_000_000)
+    restored_basis = _activate_historical_v1(harness, 1_000_000)
     _assert_complete_miner_cycle(harness, restored)
     assert champion_values(
         restored_basis, restored_basis["effective_reward_epoch"], [winner_hotkey]
@@ -606,3 +607,58 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
                 runner.close()
     finally:
         harness.clock.now = scheduled_now
+
+
+class _FrozenChampionHarness(HistoricalStoreHarnessMixin, ChampionHarness):
+    def build_service(self):
+        service = super().build_service()
+        # This frozen champion economics proof predates the current 8-point margin.
+        service.config.defaults = replace(service.config.defaults, promotion_margin=1.0)
+        commit = service.commit_benchmark
+
+        def commit_historical(round_id):
+            day = int(round_id.rsplit("-", 1)[-1])
+            freeze_historical_intake_dates(self, "2026-09-%02d" % day)
+            return commit(round_id)
+
+        service.commit_benchmark = commit_historical
+        return service
+
+
+def _activate_historical_v1(harness, expected_factor):
+    """Commit the fixture's pre-slot single-champion authority through real SQL."""
+    service = harness.service
+    row = service.store.get_round(harness.round_id)
+    assert row["status"] == "published" and service._baseline_final_ready(row)
+    prior = service.store.published_reward_bases(mode="live", network_name="finney", netuid=71)
+    previous = service._latest_miner_basis(service._usable_reward_bases(prior))
+    decision = row["publication_doc"]["king_decision"]
+    daily_hotkey = decision.get("king_hotkey") if decision["outcome"] == "crowned" else None
+    factor = rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
+    if daily_hotkey:
+        assert row["baseline_promoted_at"] is not None
+        hotkey = daily_hotkey
+        outcome = "defended" if previous and previous["king_hotkey"] == hotkey else "crowned"
+    elif previous:
+        hotkey, outcome = previous["king_hotkey"], "defended"
+        factor = previous.get("champion_reward_factor_ppm", factor)
+        if row["champion_funding_frozen"] and row["champion_hotkey"] == hotkey:
+            if row["champion_fallback_providers"]:
+                factor = rewards.FALLBACK_CHAMPION_REWARD_FACTOR_PPM
+            elif service._baseline_fully_succeeded(row):
+                factor = rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
+    else:
+        hotkey, outcome = "", "no_king"
+    assert factor == expected_factor
+    finalized = max(harness.chain.current_settlement_epoch(),
+                    max((int(item["effective_reward_epoch"]) for item in prior), default=-1))
+    basis = service._sign(rewards.reward_basis_document(
+        round_id=harness.round_id,
+        published_at=row["publication_doc"]["published_at"], finalized_epoch=finalized,
+        king_hotkey=hotkey, king_outcome=outcome,
+        previous_king_start_epoch=previous["king_start_epoch"] if previous and outcome == "defended" else None,
+        reward_constants=row["configuration_doc"]["reward_constants"],
+        champion_reward_factor_ppm=factor,
+    ), "reward_basis_hash")
+    assert service.store.activate_reward(harness.round_id, basis, service.signing_key_document())["status"] == "activated"
+    return service.store.get_round(harness.round_id)["reward_basis_doc"]

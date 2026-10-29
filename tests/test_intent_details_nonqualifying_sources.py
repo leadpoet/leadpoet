@@ -169,7 +169,7 @@ def test_nonqualifying_context_does_not_consume_positive_page_budget_or_expand_l
 
 @pytest.mark.parametrize("status,entity,retained", [
     ("contradicted","pass",True), ("partially_supported","pass",True),
-    ("wrong_entity","fail",False), ("contradicted","fail",False),
+    ("wrong_entity","fail",True), ("contradicted","fail",False),
     ("unable_to_verify","pass",False),
 ])
 def test_completed_same_entity_source_context_survives_real_scorer_trace(monkeypatch,status,entity,retained):
@@ -184,6 +184,9 @@ def test_completed_same_entity_source_context_survives_real_scorer_trace(monkeyp
     )
     contexts=receipts[-1]["verification_trace"].get("verified_source_context") or []
     assert bool(contexts) is retained
+    # Exact fetched wrong-entity contradiction text is retained for later
+    # context, while its original rejected verdict and zero score stay intact.
+    assert receipts[-1]["verification_trace"]["intent_verdict"]["signal_evaluations"][0]["signal_status"] == status
     assert result[0]==0
     if retained:
         assert all(len(c["text"])<=700 for c in contexts)

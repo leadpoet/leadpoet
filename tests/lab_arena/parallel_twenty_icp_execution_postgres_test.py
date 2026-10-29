@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -158,7 +160,7 @@ def test_parallel_execution_migration_is_idempotent_and_keeps_score_guard(
 
 
 def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness = _HistoricalServiceHarness(connect, tmp_path, challengers=[], runners=["alpha"])
     observed = []
     real_capability = harness.service.store.parallel_execution_schema
 
@@ -201,7 +203,7 @@ def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path)
 def test_ten_slot_round_has_a_strict_ten_plus_ten_barrier_and_retry_recovery(
     connect, tmp_path
 ):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
+    harness = _HistoricalServiceHarness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
     participants = _start_parallel_round(
         harness, "arena-2099-01-01-d10", slot_ceiling=10
     )
@@ -312,7 +314,7 @@ def test_ten_slot_round_has_a_strict_ten_plus_ten_barrier_and_retry_recovery(
 def test_twenty_slot_round_allows_two_validator_identities_independently(
     connect, tmp_path
 ):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
+    harness = _HistoricalServiceHarness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
     _start_parallel_round(harness, "arena-2099-01-01-d20", slot_ceiling=20)
     store = harness.service.store
     first_runner, second_runner = harness.runner_keys
@@ -368,7 +370,7 @@ def test_twenty_slot_round_allows_two_validator_identities_independently(
 def test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs(
     connect, tmp_path
 ):
-    harness = Harness(
+    harness = _HistoricalServiceHarness(
         connect, tmp_path, challengers=["ParallelMiner"], runners=["alpha", "beta"]
     )
     participants = _start_parallel_round(
@@ -410,11 +412,11 @@ def test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs(
         assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
 
 
-def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
+def test_exhausted_provider_error_in_stage_two_keeps_baseline_publication_blocked(
     connect, tmp_path
 ):
     failed_position = 10
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness = _HistoricalServiceHarness(connect, tmp_path, challengers=[], runners=["alpha"])
     participants = _start_parallel_round(
         harness, "arena-2099-01-01-e21", slot_ceiling=20
     )
@@ -525,11 +527,18 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
         return runner
 
     harness.runner = runner_with_verified_pool
-    harness.advance_until("published", runners=1, max_steps=100)
+    harness.advance_until("scored", runners=1, max_steps=100)
 
     published = harness.service.store.get_round(harness.round_id)
-    assert published["status"] == "published"
-    assert published["stage2_scoring_plan_doc"]["zero_rows"] == [
+    assert published["status"] == "scored"
+    assert published["publication_doc"] is None
+    assert published["reward_activated_at"] is None
+    assert published["reward_basis_doc"] is None
+    assert harness.service.publish(harness.round_id) == {
+        "status": "retry", "round_status": "scored", "reason": "baseline_incomplete",
+    }
+    assert published["stage2_scoring_plan_doc"]["zero_rows"] == []
+    assert published["stage2_scoring_plan_doc"]["incomplete_rows"] == [
         {
             "submission_id": baseline_id,
             "icp_position": failed_position,
@@ -553,7 +562,7 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
         for run in failed_runs
     )
     assert failed_runs[0]["per_icp_score"] is None
-    assert failed_runs[1]["per_icp_score"] == 0
+    assert failed_runs[1]["per_icp_score"] is None
     costed_accepted = [
         run for run in accepted_runs if run["icp_position"] > failed_position
     ]
@@ -571,13 +580,14 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
     costs = harness.service.store.submission_costs(baseline_id)
     assert sum(row["inflight_calls"] for row in costs["providers"]) == 0
     assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
-    result = published["publication_doc"]["final_ranking"][0]
     selected_scores = [
         float(run["per_icp_score"])
-        for run in accepted_runs + [failed_runs[1]]
+        for run in accepted_runs
     ]
-    assert result["final_score"] == pytest.approx(sum(selected_scores) / 20)
-    assert result["final_score"] > 0
+    assert len(selected_scores) == 19
+    assert sum(selected_scores) > 0
+    with pytest.raises(ServiceError, match="results_not_public"):
+        harness.service.public_results(harness.round_id, baseline_id)
 
     before_round = harness.service.store.get_round(harness.round_id)
     before_runs = harness.service.store.list_runs(harness.round_id)
@@ -612,13 +622,13 @@ def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
     assert harness.service.store.list_ledger(submission_id=baseline_id) == before_ledger
 
 
-def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
+def test_dispatched_provider_retry_closed_by_deadline_keeps_baseline_publication_blocked(
     connect, tmp_path
 ):
     """Use an accelerated test clock; production stage budgets stay unchanged."""
 
     failed_position = 10
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
+    harness = _HistoricalServiceHarness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
     participants = _start_parallel_round(
         harness,
         "arena-2099-01-01-e22",
@@ -760,15 +770,22 @@ def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
         return runner
 
     harness.runner = runner_with_verified_pool
-    harness.advance_until("published", runners=2, max_steps=100)
+    harness.advance_until("scored", runners=2, max_steps=100)
 
     published = store.get_round(harness.round_id)
-    assert published["status"] == "published"
-    assert published["stage2_scoring_plan_doc"]["zero_rows"] == [
+    assert published["status"] == "scored"
+    assert published["publication_doc"] is None
+    assert published["reward_activated_at"] is None
+    assert published["reward_basis_doc"] is None
+    assert harness.service.publish(harness.round_id) == {
+        "status": "retry", "round_status": "scored", "reason": "baseline_incomplete",
+    }
+    assert published["stage2_scoring_plan_doc"]["zero_rows"] == []
+    assert published["stage2_scoring_plan_doc"]["incomplete_rows"] == [
         {
             "submission_id": baseline_id,
             "icp_position": failed_position,
-            "cause": "provider_error",
+            "cause": "stage_closed",
         }
     ]
     failed_runs = [
@@ -787,7 +804,7 @@ def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
         is True
     )
     assert failed_runs[0]["per_icp_score"] is None
-    assert failed_runs[1]["per_icp_score"] == 0
+    assert failed_runs[1]["per_icp_score"] is None
     assert [
         row["entry_kind"] for row in store.list_ledger(run_id=retry["run_id"])
     ] == ["reservation", "dispatch", "uncertain"]
@@ -800,13 +817,14 @@ def test_dispatched_provider_retry_closed_by_deadline_scores_zero_and_publishes(
         if run["status"] == "accepted"
     ]
     assert len(accepted_runs) == 19
-    result = published["publication_doc"]["final_ranking"][0]
     selected_scores = [
         float(run["per_icp_score"])
-        for run in accepted_runs + [failed_runs[1]]
+        for run in accepted_runs
     ]
-    assert result["final_score"] == pytest.approx(sum(selected_scores) / 20)
-    assert result["final_score"] > 0
+    assert len(selected_scores) == 19
+    assert sum(selected_scores) > 0
+    with pytest.raises(ServiceError, match="results_not_public"):
+        harness.service.public_results(harness.round_id, baseline_id)
 
 
 def _seed_deadline_close_guard(
@@ -1031,3 +1049,8 @@ def test_parallel_close_keeps_incomplete_assignment_cardinality_fail_closed(conn
         connection.rollback()
     finally:
         connection.close()
+
+
+# These local tests pin pre-474 SQL. Shared harness classes keep current clients.
+class _HistoricalServiceHarness(HistoricalStoreHarnessMixin, Harness):
+    pass

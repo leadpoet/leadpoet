@@ -36,6 +36,40 @@ def _setup(base: Path, *, mode: str = "live", backend: str = "closed", leak: str
     preflight.mkdir(parents=True)
     (preflight / "__init__.py").touch()
     shutil.copyfile(ROOT / "scripts/gateway_git_deploy.py", preflight / "gateway_git_deploy.py")
+    # Use the actual retirement checks on this fixture's files. Host process,
+    # mount and ingress inputs are isolated from the operator's machine.
+    (base / "mountinfo").touch()
+    (base / "proc").mkdir()
+    (preflight / "arena_runtime_cache_retirement.py").write_text(
+        "import argparse,json,sys\nfrom pathlib import Path\n"
+        f"sys.path=[p for p in sys.path if p not in ({str(preflight)!r}, {str(preflight.parent)!r})]\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "from scripts import arena_runtime_cache_retirement as retirement\n"
+        f"base=Path({str(base)!r})\n"
+        "def ingress(*args):\n"
+        "    mode,slot,sha,backend=(base/'ingress').read_text().split()\n"
+        "    return dict(mode=mode,slot=int(slot),sha=sha,backend=backend)\n"
+        "retirement.inspect_ingress=ingress\n"
+        "retirement.os.geteuid=lambda: 0\n"
+        # Emulate root's directory-write permission only on already validated,
+        # fixture-owned descriptors; keep the real cache and identity checks.
+        "def fixture_remove(operation):\n"
+        "    def remove(name, *, dir_fd):\n"
+        "        mode=retirement.os.fstat(dir_fd).st_mode & 0o7777\n"
+        "        retirement.os.fchmod(dir_fd,mode | 0o200)\n"
+        "        try: return operation(name,dir_fd=dir_fd)\n"
+        "        finally: retirement.os.fchmod(dir_fd,mode)\n"
+        "    return remove\n"
+        "retirement.os.unlink=fixture_remove(retirement.os.unlink)\n"
+        "retirement.os.rmdir=fixture_remove(retirement.os.rmdir)\n"
+        "p=argparse.ArgumentParser()\n"
+        "p.add_argument('--repo-root',type=Path);p.add_argument('--slot',type=int)\n"
+        "p.add_argument('--sha');p.add_argument('--owner-uid',type=int)\n"
+        "p.add_argument('--defer-if-busy',action='store_true');a=p.parse_args()\n"
+        "print(json.dumps(retirement.retire_runtime_caches(repo_root=a.repo_root,\n"
+        " runtime_root=base/'runtime',slot=a.slot,sha=a.sha,owner_uid=a.owner_uid,\n"
+        " apply=True,defer_if_busy=a.defer_if_busy,mountinfo=base/'mountinfo',proc_root=base/'proc')))\n"
+    )
     (preflight / "run_lab_arena_service.py").write_text(
         "import os,json\ndef load_scoped_environment(path):\n"
         "    os.environ['LAB_ARENA_MODE']=json.loads(path.read_text())['mode']\n")
@@ -81,7 +115,7 @@ def _setup(base: Path, *, mode: str = "live", backend: str = "closed", leak: str
 
 def _run(base: Path, sha: str, *, failure: str = "") -> subprocess.CompletedProcess[str]:
     functions = "\n".join(_function(name) for name in (
-        "arena_runtime_tree", "prepare_arena_runtime_tree", "recover_arena_restart_owner",
+        "arena_runtime_tree", "prepare_arena_runtime_tree", "retire_arena_runtime_tree", "recover_arena_restart_owner",
         "rollback_arena_candidate_before_destructive", "run_lab_arena_restart_guard",
         "require_arena_lock_recovery_idle", "recover_arena_inherited_docker_locks"))
     script = f'''set -euo pipefail
@@ -95,12 +129,15 @@ ARENA_RUNTIME_ROOT="$PWD/runtime"
 ENV_CLONE="$PWD/clone.sh"
 GATEWAY_ENV_FILE="$PWD/env.json"
 GATEWAY_ACTIVE_RELEASE_COMPONENT=gateway
+GATEWAY_RESTART_GUARD_SCOPE=gateway
+GATEWAY_PAIRED_RESTART=0
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=fresh
 PREPARED_GATEWAY_SHA={'b' * 40}
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=0
 FAIL={shlex.quote(failure)}
 {functions}
 restore_gateway_restart_path_authority() {{ GATEWAY_ENV_FILE="$FIXTURE_BASE/env.json"; }}
+sudo() {{ "$@"; }}
 verify_controller_process_helper() {{ return 0; }}
 arena_component_command() {{
   ARENA_COMPONENT_STATE_FILE="$ARENA_RUNTIME_ROOT/$1-slot$2-process.json"

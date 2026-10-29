@@ -183,6 +183,36 @@ def migrations_before(anchor: str) -> tuple[str, ...]:
     return CURRENT_SERVICE_MIGRATIONS[:CURRENT_SERVICE_MIGRATIONS.index(anchor)]
 
 
+def current_service_database():
+    """Current service schema; historical migration fixtures keep their bases."""
+    from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+
+    database = full_thinking_database(production_order=True)
+    try:
+        psycopg2, dsn = next(database)
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            for migration in (
+                "443-lab-arena-competition-publication-projection.sql",
+                "575-lab-arena-score-host-continuation.sql",
+                "576-lab-arena-champion-score-funding.sql",
+                "577-lab-arena-judge-continuation-runner-handoff.sql",
+                "578-lab-arena-closed-provider-ordered-candidate.sql",
+                "579-lab-arena-close-covered-credit-candidates.sql",
+                "581-lab-arena-judge-generation-drain.sql",
+                "583-lab-arena-promotion-rpc-privileges.sql",
+                "584-lab-arena-stage-quota-run-lookup.sql",
+                "585-lab-arena-champion-baseline-reasoning.sql",
+                "585-lab-arena-review-deadline-recovery.sql",
+                "586-lab-arena-publication-restart-drain.sql",
+                "587-lab-arena-atomic-review-restart-guard.sql",
+                "588-lab-arena-qualifier-training-publication.sql",
+            ):
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+        yield psycopg2, dsn
+    finally:
+        database.close()
+
+
 def prepare_historical_confirmation_bank(store, round_id: str, ref: str, digest: str):
     """Call the retired RPC only in tests pinned to a pre-251 schema."""
     transport = store._transport

@@ -9,9 +9,10 @@ from pathlib import Path
 import pytest
 
 from lab_arena import contracts
-from lab_arena.store import hash_lease_token
+from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 from tests.lab_arena import untransitioned_host_fault_guard399_postgres_test as prior399
 from tests.lab_arena.execute_host_cooldown396_postgres_test import _hash, _security
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
 from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
     migrations_before,
@@ -25,6 +26,10 @@ migrated399 = prior399.migrated
 # Descendants replay SQL420's exact historical completion preimage. SQL465
 # changes that function, so it belongs after those historical upgrade chains.
 HISTORICAL_SERVICE_MIGRATIONS = migrations_before("465-lab-arena-partial-company-judgments.sql")
+
+
+class HistoricalStartupHarness(HistoricalStoreHarnessMixin, Harness):
+    """Check SQL401 startup against its original bounded-review capability."""
 
 
 @pytest.fixture(scope="module")
@@ -253,17 +258,19 @@ def test_frozen_old_round_cap_limits_new_validator_slots(connect, tmp_path):
 
 
 def test_new_service_startup_accepts_expanded_schema(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness = HistoricalStartupHarness(connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
         parallel_twenty_icp_execution=True,
     )
+    with pytest.raises(ArenaStoreError, match="code review schema mismatch"):
+        ArenaStore(harness.service.store._transport).code_review_schema()
     harness.service.startup_checks()
 
 
 def test_legacy_gateway_capability_still_starts_after_migration(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness = HistoricalStartupHarness(connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=20,

@@ -1840,7 +1840,8 @@ except BlockingIOError:
     assert "Stopping existing gateway" not in result.stdout
 
 
-def test_restart_recovers_lock_inherited_by_detached_relay(tmp_path: Path) -> None:
+@pytest.mark.parametrize("holder_module, recover", [("gateway.main", True), ("gateway.utils.tee_inter_enclave_relay", False)])
+def test_restart_recovers_only_the_allowed_gateway_lock_holder(tmp_path: Path, holder_module: str, recover: bool) -> None:
     if not Path("/proc/self/fd").exists() or shutil.which("flock") is None:
         return
 
@@ -1850,19 +1851,25 @@ import fcntl
 import sys
 import time
 
-with open(sys.argv[2], "w", encoding="utf-8") as handle:
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     print("ready", flush=True)
     time.sleep(30)
 """
+    # Start a real -m process so the controller sees the allowed entrypoint,
+    # not a marker hidden in the arguments of an arbitrary inline program.
+    holder_root = tmp_path / "holder"
+    module = holder_root.joinpath(*holder_module.split(".")).with_suffix(".py")
+    module.parent.mkdir(parents=True)
+    package = module.parent
+    while package != holder_root:
+        (package / "__init__.py").write_text("")
+        package = package.parent
+    module.write_text(holder_code)
     holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            holder_code,
-            "gateway.utils.tee_inter_enclave_relay",
-            str(lock_file),
-        ],
+        [sys.executable, "-m", holder_module, str(lock_file)],
+        cwd=holder_root,
+        env={**os.environ, "PYTHONPATH": str(holder_root)},
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -1894,8 +1901,8 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
     assert (
         "Recovering gateway restart lock inherited by a detached runtime process"
         in result.stdout
-    )
-    assert "another gateway restart is already running" not in result.stderr
+    ) is recover
+    assert ("another gateway restart is already running" in result.stderr) is not recover
 
 
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:

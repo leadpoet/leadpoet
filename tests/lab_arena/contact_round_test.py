@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
 import asyncio
 import json
 from copy import deepcopy
@@ -118,7 +120,7 @@ def test_contact_generation_does_not_activate_an_existing_company_round(
     database, tmp_path
 ) -> None:
     psycopg2, dsn = database
-    harness = fixtures.Harness(
+    harness = _HistoricalServiceHarness(
         lambda: psycopg2.connect(**dsn), tmp_path,
         challengers=["CompanyOnly"], runners=["alpha"],
     )
@@ -386,7 +388,7 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
     )
 
     psycopg2, dsn = database
-    harness = IntentDetailsContactHarness(
+    harness = _HistoricalIntentDetailsContactHarness(
         lambda: psycopg2.connect(**dsn),
         tmp_path,
         challengers=["IntentWinner"],
@@ -457,7 +459,7 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
 ) -> None:
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = ContactHarness(
+    harness = _HistoricalContactHarness(
         connect, tmp_path, challengers=["ContactWinner"], runners=["alpha"]
     )
     _install_contact_sandbox(harness)
@@ -572,3 +574,16 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
     after = harness.service.store.get_round(round_id)
     assert {key: after[key] for key in preserved} == preserved
     fixtures.assert_canary_absent(harness, connect)
+
+
+# These local tests pin pre-474 SQL. Shared harness classes keep current clients.
+class _HistoricalServiceHarness(HistoricalStoreHarnessMixin, fixtures.Harness):
+    pass
+
+
+class _HistoricalContactHarness(HistoricalStoreHarnessMixin, ContactHarness):
+    pass
+
+
+class _HistoricalIntentDetailsContactHarness(HistoricalStoreHarnessMixin, IntentDetailsContactHarness):
+    pass

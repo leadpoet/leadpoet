@@ -16,6 +16,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_arena import contracts, runner as rn, source_bundle, submission_similarity
@@ -26,8 +27,21 @@ from tests.lab_arena.parallel_twenty_runtime_e2e_test import bounded_socket_shut
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_DEEPLINE_KEY, CANARY_OPENROUTER_KEY,
     CANARY_OPENROUTER_MANAGEMENT_KEY, Harness, assert_canary_absent,
-    connect, database, flavor_source_archive, keypair,
+    flavor_source_archive, keypair,
 )
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
+
+
+@pytest.fixture(scope="module")
+def database():
+    yield from current_service_database()
+
+
+@pytest.fixture(scope="module")
+def connect(database):
+    psycopg2, dsn = database
+    return lambda: psycopg2.connect(**dsn)
 
 
 def _harness(connect, tmp_path, *, count, suffix, cutoff_hours=0.5, baseline_first=False):
@@ -186,9 +200,18 @@ def _admit_at_cap(harness, http):
 
 
 def _freeze_and_open(harness):
-    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    # Admission uses current SQL and real time. This load proof retains its
+    # original legacy judge, with coherent pre-continuation intake authority.
+    assert harness.service.store.list_runs(harness.round_id) == []
+    cutoff = freeze_historical_intake_dates(harness, "2026-09-02")
+    harness.clock.advance_to(cutoff)
     assert harness.service.advance_round(harness.round_id)["participants"] == 257
-    for p in harness.service.store.get_round(harness.round_id)["participants"]:
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["evaluation_date"] == "2026-09-02"
+    assert row["icp_set_date"] == "2026-09-01"
+    assert row["configuration_doc"]["schedule"]["submission_cutoff"] == "2026-09-02T00:00:00Z"
+    assert harness.service.store.list_runs(harness.round_id) == []
+    for p in row["participants"]:
         harness.flavors.setdefault(p["submission_id"], "PublicBaseline")
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     return harness.service.advance_round(harness.round_id)

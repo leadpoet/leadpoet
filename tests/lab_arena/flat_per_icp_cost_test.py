@@ -13,6 +13,7 @@ from tests.lab_arena.deepline_round_runtime_test import _service
 from tests.lab_arena.test_deepline_catalog import frozen
 from tests.lab_arena.test_lab_arena_verify import _breakdown, _icp, _junk
 from tests.lab_arena.training_export_test import per_icp_cost_fixture, per_icp_cost_reader
+from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
 
 
 FLAT = contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY

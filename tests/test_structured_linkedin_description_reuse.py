@@ -219,7 +219,7 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
         "text": DESCRIPTION,
     }]
     assert user_document["investigation_limits"]["prefetched_pages"] == 1
-    assert user_document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert user_document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS
     assert claims["stage"]["status"] == "VERIFIED"
     assert validated_stage["evidence_quote"] == STAGE_EVIDENCE_QUOTE
     assert projected["observed_company_stage"] == "series c+"
@@ -336,7 +336,7 @@ def test_description_prefetch_preserves_existing_full_page_for_same_url():
     [
         "https://www.linkedin.com/company/joinmultiverse/posts/",
         "https://www.linkedin.com/company/joinmultiverse?trk=company",
-        "https://uk.linkedin.com/company/joinmultiverse/",
+        "https://uk.linkedin.com.evil.example/company/joinmultiverse/",
         "https://www.linkedin.com/company/multiversecomputing/",
     ],
 )
@@ -350,6 +350,16 @@ def test_description_prefetch_rejects_noncanonical_profile_variants(
         verified_identity=_identity(),
         include_structured_description=True,
     ) == {}
+
+
+@pytest.mark.parametrize("host", ["uk.linkedin.com", "de.linkedin.com"])
+def test_description_prefetch_accepts_exact_regional_profile_alias(host):
+    submitted_url = f"https://{host}/company/joinmultiverse/"
+    assert lead_scorer._investigator_prefetched_pages(
+        {}, [submitted_url],
+        structured_profile_description_evidence=_description_evidence(),
+        verified_identity=_identity(), include_structured_description=True,
+    ) == {submitted_url: {"final_url": CANONICAL_PROFILE_URL, "text": DESCRIPTION}}
 
 
 def test_description_prefetch_consumes_existing_three_page_budget():

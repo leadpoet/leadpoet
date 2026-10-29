@@ -9,7 +9,7 @@ import pytest
 
 from lab_arena import code_review, contracts, training_reader
 from lab_arena.output import MAX_OUTPUT_BYTES
-from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
@@ -23,7 +23,7 @@ from tests.lab_arena.training_steps_test import seal
 
 @pytest.fixture()
 def database():
-    yield from full_thinking_database()
+    yield from current_service_database()
 
 
 def test_later_missing_output_keeps_measured_publication(database, tmp_path, monkeypatch):

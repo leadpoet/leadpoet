@@ -1,11 +1,11 @@
 """The paid E2E runner starts from current, guarded PostgreSQL authority."""
 
-from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+from tests.lab_arena.test_lab_arena_migration_sql import _assert_migration_numbering
 from tests.lab_arena.complete_baseline_final_authority_postgres_test import (
     test_normal_complete_baseline_publishes_and_activates_with_all_guards as _prove_round,
 )
@@ -17,16 +17,10 @@ def database(request):
 
 
 def test_new_migrations_have_unique_sequence_numbers():
-    # Concurrent main changes must not share a numeric release position with
-    # the PR tail. Older historical filenames are outside this new tail.
+    # Reuse the exact filename/hash gate, including the already-applied 585
+    # pair. New collisions and any mutation of that pair still fail closed.
     scripts = Path(__file__).resolve().parents[2] / "scripts"
-    numbers = [
-        int(path.name.split("-", 1)[0])
-        for path in scripts.glob("[0-9][0-9][0-9]-*.sql")
-        if int(path.name.split("-", 1)[0]) >= 564
-    ]
-    duplicates = {number: count for number, count in Counter(numbers).items() if count > 1}
-    assert not duplicates, duplicates
+    _assert_migration_numbering(scripts)
 
 
 def test_complete_mainline_schema_starts_and_publishes(database, tmp_path, monkeypatch):

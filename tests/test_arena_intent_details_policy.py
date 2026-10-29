@@ -49,6 +49,9 @@ def test_intent_details_activation_requires_announced_integrity_and_timezone(
 
 def test_intent_details_activation_is_frozen_at_submission_open() -> None:
     class Store:
+        def get_round(self, _round_id):
+            return None
+
         def create_round(self, _round_id, _configuration):
             return {"status": "created"}
 

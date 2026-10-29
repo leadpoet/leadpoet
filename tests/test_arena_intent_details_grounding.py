@@ -1057,7 +1057,7 @@ def test_duplocloud_narrative_recategorization_reaches_review_contract(
         ) == paragraph
         assert "strategic partnership" in document["icp"]["prompt"]
         assert "Startup Perks program" in json.dumps(document)
-        assert "participation alone do not\nprove that criterion" in kwargs["system_prompt"]
+        assert "do not support that recategorization" in kwargs["system_prompt"]
         checks = {name: True for name in intent_details._CHECKS}
         return json.dumps(_review_response(
             checks,
@@ -1079,18 +1079,18 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
     monkeypatch,
 ):
     company, icp, results, fit = inputs()
-    assert "A verified signal establishes\nonly the facts its evidence proves" in intent_details._SYSTEM
-    assert "API inputs/outputs" in intent_details._SYSTEM
-    assert "Equivalent source wording is sufficient" in intent_details._SYSTEM
-    assert "review every supplied intent_details_units unit exactly\nonce by unit_id" in intent_details._SYSTEM
-    assert "a failed ICP match is\nnot itself a contradiction" in intent_details._SYSTEM
-    assert "program enrollment, perks, accelerator or\nvendor status" in intent_details._SYSTEM
-    assert "participation alone do not\nprove that criterion" in intent_details._SYSTEM
+    assert "A valid primary signal supports only the facts" in intent_details._SYSTEM
+    assert "API inputs or outputs" in intent_details._SYSTEM
+    assert "Equivalent supporting\nwording is sufficient" in intent_details._SYSTEM
+    assert "Review\nevery unit exactly once" in intent_details._SYSTEM
+    assert "failed ICP event\nmatch is not a factual contradiction" in intent_details._SYSTEM
+    assert "standalone enrollment in a partner, perks, accelerator" in intent_details._SYSTEM
+    assert "do not support that recategorization" in intent_details._SYSTEM
     assert (
-        "bilateral strategic collaboration or\nconcrete joint commitments"
+        "bilateral strategic collaboration or concrete joint commitments"
         in intent_details._SYSTEM
     )
-    assert "only when the actual ICP\ncriterion requires a strategic partnership" in intent_details._SYSTEM
+    assert "Apply this distinction only when the actual\nICP criterion requires" in intent_details._SYSTEM
 
     calls = []
     expected_document = intent_details.review_evidence(
@@ -1284,7 +1284,7 @@ def test_true_but_nonqualifying_fact_is_not_automatically_false(monkeypatch):
         assert "verifier_status" not in finding
         assert "prior_verifier_unsupported_parts" not in finding
         assert finding["same_entity_check"] == "pass"
-        assert "Evidence must concern the same company and activity" in kwargs[
+        assert "same company and the activity\nasserted in the paragraph" in kwargs[
             "system_prompt"
         ]
         assert "same company and verified activity" not in kwargs["system_prompt"]
@@ -1324,7 +1324,7 @@ def test_validated_signal_coverage_is_authoritative_over_false_aggregate(
         ] == [0]
         assert document["icp"]["required_primary_intent"]["matched_icp_signal"] == 0
         assert len(document["icp"]["optional_bonus_intents"]) == 1
-        assert "matched_icp_signal in verified_signals, return that index exactly once" in kwargs[
+        assert "Return ONLY indexes present in verified_signals" in kwargs[
             "system_prompt"
         ]
         checks = {name: True for name in intent_details._CHECKS}
@@ -1355,7 +1355,7 @@ def test_review_assesses_original_paragraph_without_requiring_a_copy(monkeypatch
         coverage_schema = schema["properties"]["signal_coverage"]["items"]
         assert coverage_schema["properties"]["covered"] == {"type": "boolean"}
         assert "paragraph_quote" not in coverage_schema["properties"]
-        assert "Read what the original paragraph actually states" in kwargs["system_prompt"]
+        assert "Read the original paragraph directly" in kwargs["system_prompt"]
         prompts.append(prompt)
         return json.dumps(_review_response(
             {name: True for name in intent_details._CHECKS},
@@ -1442,9 +1442,9 @@ def test_conditional_funding_connection_preserves_independent_gates(
 
     async def judge(prompt, **kwargs):
         system = kwargs["system_prompt"]
-        assert "between the verified activity and the company's supported offering" in system
-        assert "with supported factual premises" in system
-        assert "generic growth alone\ndoes not express a specific business relationship" in system
+        assert "connects that activity to an ICP seeking funded workflow" in system
+        assert "The offering must still be supported" in system
+        assert "alone supplies no such specific connection" in system
         return json.dumps(_review_response(
             {name: name != failed_check for name in intent_details._CHECKS},
             [{"matched_icp_signal": 0, "covered": True}],
@@ -1470,7 +1470,7 @@ def test_current_product_description_does_not_override_missing_launch_coverage(
     )
 
     async def judge(prompt, **kwargs):
-        assert "describing an offering alone does not state its launch" in kwargs["system_prompt"]
+        assert "does not alone describe the launch" in kwargs["system_prompt"]
         checks = {name: True for name in intent_details._CHECKS}
         checks["verified_signals_covered"] = False
         return json.dumps(_review_response(checks, [

@@ -583,6 +583,7 @@ ARENA_DENIAL_CODES = frozenset(
         "training_observation_segment_invalid",
         "training_observation_segment_unavailable",
         "training_observations_conflict",
+        "training_observations_digest_mismatch",
         "training_observations_invalid",
         "training_observations_unavailable",
         "unsupported_integrity_policy",

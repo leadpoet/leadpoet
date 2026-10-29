@@ -183,7 +183,7 @@ def test_completion_helper_rejects_non_failure_status_types(status):
 
 def test_live_shaped_broker_worker_transition_returns_before_sixty_seconds(clock, tmp_path):
     transport = CompleteErrorTransport(clock=clock)
-    initial, broker, store, context, arguments = execute(transport)
+    initial, _, store, _, arguments = execute(transport)
     # Measured broker time was33.393s; retain the measured local/admission
     # remainder while the real broker above executes its unchanged30s polling.
     clock.now = 0.0
@@ -199,7 +199,9 @@ def test_live_shaped_broker_worker_transition_returns_before_sixty_seconds(clock
                 return initial.to_document()
             # A mistaken recovery consumes the measured second API window.
             clock.now += 32.458
-            return broker.execute(context, **arguments).to_document()
+            recovered = initial.to_document()
+            recovered["call"]["transport_recovery"] = "deepline_execution_lookup"
+            return recovered
 
     api = BrokerApi()
     host = worker(tmp_path, api, monotonic=clock.monotonic)

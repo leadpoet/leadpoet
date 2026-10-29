@@ -570,7 +570,13 @@ def test_accepted_run_preservation_rejects_unbound_or_nonpublic_score(change):
         _assert_accepted_run_preserved(old, current, **arguments)
 
 
-def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path):
+@pytest.fixture()
+def service_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_real_signed_late_execution_preserves_costs_and_publishes(service_database,tmp_path):
     """Actual service, signed runner, cost RPCs and scoring/publication.
 
     Only local fixture schedule boundaries are projected before claiming.
@@ -578,7 +584,7 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     """
     import time
     from tests.lab_arena.confirmed_cost_admission_postgres_test import _reserve,_dispatch,_settle
-    psycopg,dsn=database
+    psycopg,dsn=service_database
     connect=lambda:psycopg.connect(**dsn)
     with connect() as conn,conn.cursor() as cur:
         cur.execute("SET LOCAL session_replication_role=replica")

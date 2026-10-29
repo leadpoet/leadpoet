@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,21 @@ database = hold.database
 
 def _prepare(cursor):
     hold._seed_active(cursor)
+    # Keep the frozen Oct1 source, bank and evaluation date. The actual release
+    # RPC must run inside its renewed fixture window, without a fake SQL clock.
+    cursor.execute('SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s',
+                   (hold.recovery.ROUND,))
+    configuration = cursor.fetchone()[0]
+    schedule = configuration['schedule']
+    offset = (datetime.now(timezone.utc) + timedelta(hours=1)
+              - datetime.fromisoformat(schedule['stage_1_scoring_close'].replace('Z','+00:00')))
+    for key in ('benchmark_deadline','stage_1_start','stage_1_close','stage_1_scoring_close',
+                'stage_2_start','stage_2_close','final_scoring_close','publication_deadline'):
+        schedule[key] = (datetime.fromisoformat(schedule[key].replace('Z','+00:00')) + offset).isoformat()
+    cursor.execute('SET session_replication_role=replica')
+    cursor.execute('UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s',
+                   (json.dumps(configuration), hold.recovery.ROUND))
+    cursor.execute('SET session_replication_role=origin')
     cursor.execute(hold._render_hold(cursor))
     cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',"
                    "terminal_cause='accepted',output_ref='arena/test/score2.json' "

@@ -525,7 +525,8 @@ class _Clusters:
                 self.parent[max(first, second)] = min(first, second)
 
 
-def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
+def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
+          curation_metadata: Optional[dict] = None) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
     """Return ({train, eval, analysis}: records) and the dataset manifest."""
 
     sources, records, privacy_filtered = [], [], 0
@@ -535,6 +536,9 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
                         "run_id": example.get("run_id"), "round_id": example.get("round_id"),
                         "used": reason is None, "exclusion": reason})
         if reason is None:
+            judgments = ({row.get("company_index"): row.get("judgment")
+                          for row in example.get("companies") or () if isinstance(row, Mapping)}
+                         if curation_metadata is not None else {})
             for record in records_from_example(example):
                 # Redaction elsewhere in the run, mostly URL tokens in fetched
                 # pages, never reaches these fields. One inside the record's
@@ -542,6 +546,10 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
                 if _REDACTION_RE.search(contracts.canonical_json(record["input"])):
                     privacy_filtered += 1
                     continue
+                if curation_metadata is not None:
+                    from lab_arena.training_curation import project_judgment
+                    curation_metadata[record["record_id"]] = project_judgment(
+                        judgments.get(record["meta"]["company_index"]))
                 records.append(record)
     # Identical ICP requirements, evaluation date and claim: replays, retries
     # and cached judgments count once. The date is part of the input because

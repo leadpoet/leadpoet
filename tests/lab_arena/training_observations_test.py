@@ -234,6 +234,46 @@ def test_worker_observation_keeps_plaintext_response_alias_but_redacts_request_a
     assert saved["privacy"] == {"redacted": True, "redactions": ["hidden_reasoning"]}
 
 
+def test_worker_observation_keeps_public_article_url_in_request_and_response():
+    url = ("https://www.prnewswire.com/news-releases/biohaven-and-sk-"
+           "biopharmaceuticals-enter-into-strategic-global-licensing-agreement-"
+           "for-novel-kv7-ion-channel-platform-and-opakalim-lead-candidate-for-"
+           "epilepsy-302860299.html")
+    row = observation()
+    row["request"]["admitted_parameters"]["messages"][0]["content"] = url
+    body = {"url": url}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    buffer = obs.Buffer()
+    buffer.append(row)
+    saved = buffer.observations[0]
+    assert saved["privacy"] == {"redacted": False, "redactions": []}
+    assert saved["request"]["admitted_parameters"]["messages"][0]["content"] == url
+    assert json.loads(base64.b64decode(saved["outcome"]["response"]["body_b64"])) == body
+
+
+def test_worker_web_observation_keeps_public_article_url():
+    url = ("https://www.prnewswire.com/news-releases/biohaven-and-sk-"
+           "biopharmaceuticals-enter-into-strategic-global-licensing-agreement-"
+           "for-novel-kv7-ion-channel-platform-and-opakalim-lead-candidate-for-"
+           "epilepsy-302860299.html")
+    body = "Public source: " + url
+    data = {
+        "url": url, "final_url": url, "retrieved_at": "2026-10-28T00:00:00Z",
+        "status": 200, "content_type": "text/html", "body": body, "body_ref": None,
+        "body_sha256": contracts.hash_bytes(body.encode()), "body_bytes": len(body.encode()),
+        "stored_body_sha256": None, "stored_body_bytes": None,
+    }
+    row = {"id": 0, "kind": "web_fetch", "observed_at": "2026-10-28T00:00:00Z",
+           "after_action_sequence": None, "depends_on": [], "data": data,
+           "privacy": {"redacted": False, "redactions": []}}
+    buffer = obs.Buffer()
+    assert buffer.append_agent_observation(row) == 0
+    saved = buffer.agent_observations[0]
+    assert saved["privacy"] == {"redacted": False, "redactions": []}
+    assert saved["data"]["url"] == saved["data"]["final_url"] == url
+    assert saved["data"]["body"] == body
+
+
 def test_buffer_overflow_is_explicit_incomplete_and_never_clipped():
     buffer = obs.Buffer()
     buffer.append(observation())

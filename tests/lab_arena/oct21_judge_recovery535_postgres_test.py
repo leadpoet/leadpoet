@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from tests.lab_arena import cancel_latest_call_heads533_postgres_test as previous
@@ -71,6 +72,12 @@ def prepare(conn):
     text = re.sub(r"(expected_state CONSTANT JSONB:=')[^']+('::JSONB;)",lambda m:m[1]+json.dumps(state)+m[2],text)
     # Only the test clock changes. The production migration keeps exact UTC bounds.
     text = text.replace("clock_timestamp()>='2026-10-21T23:59:58Z'::TIMESTAMPTZ", "'2026-10-21T22:00:00Z'::TIMESTAMPTZ>='2026-10-21T23:59:58Z'::TIMESTAMPTZ")
+    # The real claim RPC uses its own clock. Project only the recovered fixture
+    # admission deadline into that clock; keep the sealed initial state intact.
+    target = "'\"2026-10-21T23:59:59Z\"'"
+    assert text.count(target) == 1
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    text = text.replace(target, "'" + json.dumps(deadline) + "'")
     return text
 
 
@@ -106,6 +113,17 @@ def test_preserves_all_rows_and_normal_continuation_only_adds_score(database):
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",(TARGET+':14',))
             cur.execute('SET LOCAL session_replication_role=origin')
+            cur.execute('SAVEPOINT expired_fixture_admission')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,publication_deadline}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE round_id=%s", (RID,))
+            cur.execute('SET LOCAL session_replication_role=origin')
+            denied_before = rows(cur)
+            assert previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER) == {'status': 'no_pending'}
+            cur.execute('RESET ROLE')
+            assert rows(cur) == denied_before
+            cur.execute('ROLLBACK TO SAVEPOINT expired_fixture_admission')
+            cur.execute("SELECT (configuration_doc#>>'{schedule,publication_deadline}')::timestamptz>clock_timestamp() FROM public.lab_arena_rounds WHERE round_id=%s", (RID,))
+            assert cur.fetchone()[0] is True
             lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
             assert lease['status'] == 'leased' and lease['run_id'] == TARGET+':14', lease
             cur.execute('RESET ROLE')

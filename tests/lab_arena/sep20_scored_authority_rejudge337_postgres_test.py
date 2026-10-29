@@ -178,11 +178,7 @@ def test_rerun337_archives_335_judges_and_preserves_execution_authority(
         rerun332._drive_rejudge_cycle(
             harness.service, harness.objects, harness.runner_keys[0]
         )
-        with pytest.raises(
-            ArenaStoreError,
-            match="Sep20 rejudge332 publication requires sealed review release",
-        ):
-            harness.service.publish(ROUND)
+        rerun332.assert_sealed_publication_stop(harness.service, connection, psycopg2.Error)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*),bool_and(status='accepted'),"

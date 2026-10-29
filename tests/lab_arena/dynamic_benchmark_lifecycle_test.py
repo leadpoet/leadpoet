@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import broker, contracts, runtime, scoring, shim, verify
+from lab_arena import broker, contracts, runtime, scoring, service as service_module, shim, verify
 from lab_arena.contact_evidence import source_key
 from lab_arena.service import ServiceError
 from qualification.scoring.competition import apply_company_judgment_context, _merge_contact_breakdown
@@ -214,6 +214,7 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
 
     harness.runner = verified_runner
     original_run_icp = harness.sandbox.run_icp
+    failed_judge_sources = set()
 
     class ChargedJudgeTransport(type(harness.provider)):
         def send(self, **kwargs):
@@ -243,12 +244,14 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 finally:
                     os.environ.pop(shim.WORKER_SOCKET_ENV, None)
 
-            if count == 17 and document["icp"]["icp_id"].endswith("_017"):
+            if (count == 17 and document["icp"]["icp_id"].endswith("_017")
+                and document["scored_run_id"] not in failed_judge_sources):
+                failed_judge_sources.add(document["scored_run_id"])
                 return runtime.fake_result(
                     exit_code=0,
                     output_bytes=json.dumps(scoring.build_scoring_failure(
                         document["scored_run_id"], "judge_error",
-                        detail="deterministic terminal judge failure",
+                        detail="deterministic first-attempt judge failure",
                     )).encode(),
                 )
 
@@ -281,6 +284,32 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
         return runtime.fake_result(exit_code=0, output_bytes=json.dumps({"companies": companies}).encode())
 
     harness.sandbox.run_icp = run_icp
+    if count == 17:
+        original_run_stage = harness.run_stage_with_runners
+
+        def recover_after_real_backoff(runners=2):
+            original_run_stage(runners)
+            with connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' AND status='pending' AND attempt=2", (harness.round_id,))
+                pending = [row[0] for row in cursor.fetchall()]
+                if not pending:
+                    return
+                failures = [run for run in harness.service.store.list_runs(harness.round_id, kind="score") if run["status"] == "failed"]
+                held = harness.service.store.get_round(harness.round_id)
+                assert harness.service._unfinished_judgments(held)
+                failed_sources = {run["scored_run_id"] for run in failures}
+                assert all(run["per_icp_score"] is None for run in harness.service.store.list_runs(harness.round_id, kind="execute")
+                    if run["run_id"] in failed_sources)
+                cursor.execute("SELECT bool_and(clock_timestamp()<created_at+interval '30 seconds'),bool_and(public.lab_arena__judge_calls_clear_v1(assignment_id)) FROM public.lab_arena_runs WHERE run_id=ANY(%s)", (pending,))
+                assert cursor.fetchone() == (True, True)
+                # The real first claim pass respected the retry backoff. Move
+                # only pending fixture timestamps, never accepted evidence.
+                cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=ANY(%s)", (pending,))
+            original_run_stage(runners)
+            retained = {run["run_id"]: run for run in harness.service.store.list_runs(harness.round_id, kind="score")}
+            assert all(retained[run["run_id"]] == run for run in failures)
+
+        harness.run_stage_with_runners = recover_after_real_backoff
     configuration, participants = _start(harness, label=f"cost{count}", epoch=36100 + count)
     assert configuration["sourcing_cost_eligibility_policy"] == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
     assert configuration["execution_sequence_policy"] == contracts.BASELINE_SCORED_FIRST_POLICY
@@ -294,6 +323,15 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
         original_evaluation_icps = service.evaluation_icps
         original_scoring_outputs = service._scoring_outputs
         original_qualified_counts = service._qualified_company_counts
+        original_publication_reads = service_module._PublicationReads
+        authority_reads = Counter()
+
+        def publication_reads(*args, **kwargs):
+            authority_reads.update(reads)
+            # The aggregate's single snapshot is evaluated as a constructor
+            # argument. Every earlier read belongs to continuation/finality.
+            authority_reads["execution_runs"] -= 1
+            return original_publication_reads(*args, **kwargs)
 
         def list_runs(*args, **kwargs):
             if kwargs.get("kind") == "execute":
@@ -316,11 +354,14 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
         monkeypatch.setattr(service, "evaluation_icps", evaluation_icps)
         monkeypatch.setattr(service, "_scoring_outputs", scoring_outputs)
         monkeypatch.setattr(service, "_qualified_company_counts", qualified_counts)
+        monkeypatch.setattr(service_module, "_PublicationReads", publication_reads)
         assert service.publish(harness.round_id)["status"] == "ok"
-        assert reads["execution_runs"] == 1
-        assert reads["icp_bank"] == 1
-        assert reads["score_runs"] <= 2
-        assert reads["qualification"] == len(participants)
+        assert authority_reads == Counter(execution_runs=5, icp_bank=1)
+        aggregation_reads = reads - authority_reads
+        assert aggregation_reads["execution_runs"] == 1
+        assert aggregation_reads["icp_bank"] == 1
+        assert aggregation_reads["score_runs"] <= 2
+        assert aggregation_reads["qualification"] == len(participants)
     else:
         harness.advance_until("published", runners=2)
     published = harness.service.store.get_round(harness.round_id)
@@ -411,8 +452,11 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 kind="execute",
             )
             last = next(run for run in runs if run["icp_position"] == 16)
-            assert last["per_icp_score"] == 0
-            assert last["qualification_doc"] == {"companies": []}
+            assert last["per_icp_score"] == (30 if participant["is_king"] else 60)
+            qualification = last["qualification_doc"]["companies"]
+            assert len(qualification) == configuration["companies_per_icp"] == 5
+            assert {item["company_index"] for item in qualification} == set(range(5))
+            assert all(item["company_qualified"] is True and item["contact_qualified"] is True for item in qualification)
             score_attempts = [
                 run
                 for run in harness.service.store.list_runs(
@@ -423,11 +467,10 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 if run["scored_run_id"] == last["run_id"]
             ]
             assert len(score_attempts) == 2
-            assert all(
-                run["status"] == "failed"
-                and run["terminal_cause"] == "judge_error"
-                for run in score_attempts
-            )
+            by_attempt = {run["attempt"]: run for run in score_attempts}
+            assert by_attempt[1]["status"] == "failed" and by_attempt[1]["terminal_cause"] == "judge_error"
+            assert by_attempt[2]["status"] == "accepted" and by_attempt[2]["terminal_cause"] == "accepted"
+        assert len(failed_judge_sources) == 2
 
 
 @pytest.mark.parametrize("count", [15, 30])

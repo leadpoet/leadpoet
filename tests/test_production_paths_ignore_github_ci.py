@@ -70,17 +70,34 @@ def test_gateway_current_release_path_does_not_consult_github_ci() -> None:
 
 
 def test_attested_release_workflow_is_manual_only_with_integrity_guards() -> None:
+    import yaml
     workflow = (ROOT / ".github/workflows/attested-v2-release.yml").read_text(
         encoding="utf-8"
     )
-    trigger = workflow[: workflow.index("\nconcurrency:")]
-    assert trigger == "name: Gateway Attested Release\n\non:\n  workflow_dispatch:\n"
-
-    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
-    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
-    assert "leadpoet_acquire_docker_operation_lock_v2" in workflow
-    assert "leadpoet-gateway-v2-builder" in workflow
-    assert "leadpoet-validator-v2-builder" in workflow
+    document = yaml.load(workflow, Loader=yaml.BaseLoader)
+    assert set(document['on']) == {'workflow_dispatch'}
+    inputs = document['on']['workflow_dispatch']['inputs']
+    assert set(inputs) == {'reproduce_commit', 'expected_pcr0'}
+    for declaration in inputs.values():
+        assert (declaration['required'], declaration['default'], declaration['type']) == ('false', '', 'string')
+    assert document['concurrency']['cancel-in-progress'] == 'false'
+    assert document['permissions'] == {'contents': 'read'}
+    jobs = document['jobs']
+    assert set(jobs) == {'source', 'builds', 'verify', 'publish'}
+    for job in jobs.values():
+        assert any('require_attested_release_source.sh' in step.get('run', '')
+                   for step in job['steps'])
+    source_gate = (ROOT / '.github/scripts/require_attested_release_source.sh').read_text()
+    assert '"${GITHUB_EVENT_NAME:-}" = workflow_dispatch' in source_gate
+    assert '"${GITHUB_REF:-}" = refs/heads/main' in source_gate
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in source_gate
+    assert 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in source_gate
+    assert jobs['publish']['environment'] == 'attested-release'
+    assert jobs['publish']['permissions'] == {'contents': 'read', 'id-token': 'write'}
+    assert "needs.source.outputs.mode == 'publish'" in jobs['publish']['if']
+    assert "inputs.reproduce_commit == ''" in jobs['publish']['if']
+    for name in ('source', 'builds', 'verify'):
+        assert 'permissions' not in jobs[name]
 
 
 def test_normal_validator_restart_does_not_consult_github_ci() -> None:

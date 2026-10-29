@@ -11,6 +11,7 @@ from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+from tests.lab_arena.historical_service import pin_pre470_baseline_service
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena import oct10_uniform_pe_rejudge445_postgres_test as prior
@@ -275,6 +276,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
     service._store = store
+    pin_pre470_baseline_service(service, lambda: psycopg.connect(**dsn), round_id=ROUND)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 18, 0, 1, tzinfo=timezone.utc)
@@ -342,8 +344,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     assert statuses[-1] == 'scored', statuses
     assert statuses == ['stage1_closed', 'stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored']
     row = store.get_round(ROUND)
-    assert len(row['stage2_scoring_plan_doc']['incomplete_rows']) == 4
-    assert len(row['stage2_scoring_plan_doc']['zero_rows']) == 14
+    prior.assert_current_oct10_plan(row['stage2_scoring_plan_doc'], before['lab_arena_runs'], extra_failures=True)
     scores = store.list_runs(ROUND, kind='score')
     assert len(scores) == 10 + 672
     assert all(r['assignment_id'].endswith(':score:rerun452') for r in scores)
@@ -363,10 +364,8 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             for run in actual_exec:
                 if run['stage'] == 2 and (run['assignment_id'] not in latest or run['attempt'] > latest[run['assignment_id']]['attempt']):
                     latest[run['assignment_id']] = run
-            assert {r['submission_id'] for r in latest.values() if r['per_icp_score'] is None} == {'miner440-1', 'miner440-2'}
-            assert all(r['per_icp_score'] == 0 for r in latest.values() if r['submission_id'] == 'miner440-3' and r['icp_position'] < 3)
             aggregates = service._score_entries_from_runs(row, range(10), 'final_score')
-            assert {r['submission_id'] for r in aggregates if r['final_score'] is None} == {'miner440-1', 'miner440-2'}
+            prior.assert_current_oct10_scores(latest, aggregates, row['stage2_scoring_plan_doc'], before['lab_arena_runs'])
             canonical = lambda r: {**r, 'round_id': ROUND, 'submission_id': BASE if r['submission_id'] == BASE+'-r452archive' else r['submission_id']}
             for table, key in (('lab_arena_ledger', 'entry_id'), ('lab_arena_trajectory_events', 'trajectory_id')):
                 old_rows = [r for r in before[table] if r['round_id'] == ROUND]
@@ -407,33 +406,11 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     assert row['configuration_doc']['schedule']['stage_2_close'] == '2026-10-10T18:00:02Z'
     assert row['configuration_doc']['schedule']['final_scoring_close'] == '2026-10-10T20:30:02Z'
     assert row['configuration_doc']['schedule']['publication_deadline'] == '2026-10-10T20:30:03Z'
-    with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
-        cur.execute('SELECT clock_timestamp()')
-        database_now = cur.fetchone()[0]
-    if database_now < datetime(2026,10,10,18,0,2,tzinfo=timezone.utc):
-        # Publication's real PostgreSQL clock also proves a host-incomplete
-        # assignment's execution window is closed. A mocked service clock
-        # cannot bypass this existing guard.
-        with pytest.raises(ArenaStoreError,match='lab_arena_publication_ranking_invalid'):
-            service._advance_round_locked(ROUND)
-        assert store.get_round(ROUND)['status'] == 'scored'
-        # Only this disposable fixture's three ordered timestamps move into
-        # the past to model elapsed time. No function, ACL, row proof, final
-        # judging deadline, or publication deadline changes.
-        elapsed = database_now - timedelta(minutes=1)
-        with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
-            cur.execute('SET LOCAL session_replication_role=replica')
-            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule}',(configuration_doc->'schedule')||%s::jsonb) WHERE round_id=%s",(json.dumps({
-                'stage_1_scoring_close': (elapsed-timedelta(seconds=2)).isoformat(),
-                'stage_2_start': (elapsed-timedelta(seconds=1)).isoformat(),
-                'stage_2_close': elapsed.isoformat(),
-            }),ROUND))
-    service.now = lambda: database_now
-    assert service._advance_round_locked(ROUND)['status'] == 'ok'
-    published = store.get_round(ROUND)
-    assert published['status'] == 'published'
-    assert len(published['publication_doc']['final_ranking']) == 70
-    assert {entry['submission_id'] for entry in published['publication_doc']['final_ranking'] if entry['final_score'] is None} == {'miner440-1','miner440-2'}
+    # ffb48c012 keeps incomplete infrastructure work unmeasured. A current
+    # driver holds before the deadline and cancels afterwards; it must not
+    # publish a fabricated ranking through this exact historical schema.
+    prior.assert_current_incomplete_round_holds_then_cancels(
+        service, store, lambda: psycopg.connect(**dsn), _snapshot)
     assert len(store.list_runs(ROUND,kind='execute')) == 764
     assert len({run['assignment_id'] for run in store.list_runs(ROUND,stage=2,kind='execute')}) == 690
 

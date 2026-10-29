@@ -96,11 +96,31 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     assert any(call[1] == "miner" and call[4] == {"rejection_rule": "code_review_incomplete"} for call in updates)
 
 
-@pytest.mark.parametrize('attempts,retryable,pending', [
-    (3, True, False), (5, True, False), (6, True, False),
-    (1, False, False), (2, None, True), (3, None, False),
+@pytest.mark.parametrize('attempts,retryable,error_code,pending', [
+    (3, True, None, False), (5, True, None, False), (6, True, None, False),
+    (1, False, None, False), (2, None, None, True), (3, None, None, False),
+    (2, True, None, True),
+    (2, True, "unknown_provider_failure", True),
+    (3, True, "unknown_provider_failure", False),
+    (1, False, "source_contains_credentials", False),
+    (1, False, "code_review_provider_credit", False),
+    (3, True, "code_review_provider_timeout", True),
+    (50, None, "code_review_provider_rate_limited", True),
+    # Persisted retryable=False can predate classification. Explicit transient
+    # codes recover until the deadline; anonymous errors still stop at three.
+    *[(50, False, code, True) for code in (
+        "code_review_preparation_unavailable",
+        "code_review_provider_rate_limited",
+        "code_review_provider_timeout",
+        "code_review_provider_unavailable",
+        "code_review_transport_error",
+        "review_response_invalid",
+        "code_review_research_unverified",
+    )],
 ])
-def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pending):
+def test_freeze_waits_only_for_available_review_attempts(
+    attempts, retryable, error_code, pending
+):
     now = datetime(2026, 9, 11, tzinfo=timezone.utc)
     baseline = {'submission_id': 'baseline-test', 'miner_hotkey': 'host', 'is_king': True,
                 'source_ref': 'baseline', 'source_size_bytes': 10, 'status': 'accepted'}
@@ -108,6 +128,8 @@ def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pe
              'code_review_status': 'error', 'code_review_attempts': attempts,
              'code_review_doc': {} if retryable is None else {'retryable': retryable},
              'source_ref': 'miner', 'source_size_bytes': 10, 'status': 'accepted'}
+    if error_code is not None:
+        miner['code_review_doc']['error_code'] = error_code
     round_row = {'round_id': 'arena-test', 'champion_funding_frozen': True,
                  'configuration_doc': {'baseline_hotkey': 'host',
                  'schedule': {'benchmark_deadline': '2026-09-11T00:30:00Z'}}}
@@ -125,7 +147,15 @@ def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pe
         with pytest.raises(ServiceError, match='code_review_pending'):
             service.freeze_participants('arena-test')
         assert not updates
-    else:
-        assert len(service.freeze_participants('arena-test')) == 1
-        assert any(call[1] == 'miner' and call[4] == {'rejection_rule': 'code_review_incomplete'}
-                   for call in updates)
+        # The deadline remains an absolute bound, even for a classified
+        # transient after many attempts and despite a stale retry flag.
+        now += timedelta(minutes=30)
+    assert service.freeze_participants('arena-test') == [{
+        key: baseline[key] for key in (
+            'submission_id', 'miner_hotkey', 'source_ref', 'source_size_bytes', 'is_king'
+        )
+    }]
+    assert [call for call in updates if call[1] == 'miner'] == [
+        ('arena-test', 'miner', 'accepted', 'rejected',
+         {'rejection_rule': 'code_review_incomplete'})
+    ]

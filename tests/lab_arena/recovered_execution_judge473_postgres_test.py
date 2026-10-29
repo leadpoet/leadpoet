@@ -268,7 +268,24 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
         return store_claim(self, *args, **kwargs)
 
     def assemble_at_scored(self, target, **kwargs):
-        result = advance(self, target, **kwargs)
+        run_stage = self.run_stage_with_runners
+
+        def finish_window_with_pending_reviews(count):
+            run_stage(count)
+            pending = [run for run in self.service.store.list_runs(self.round_id, kind='score')
+                       if run['status'] == 'pending' and run['attempt'] == 4]
+            if len(pending) == 2:
+                # Current continuation waits while retry work remains. Reach
+                # the real scheduled phase boundary before the late accepts.
+                assert self.status() == 'stage2_scoring'
+                self.clock.advance_to(self.schedule()['final_scoring_close'])
+
+        if late_completion and target == 'scored':
+            self.run_stage_with_runners = finish_window_with_pending_reviews
+        try:
+            result = advance(self, target, **kwargs)
+        finally:
+            self.run_stage_with_runners = run_stage
         if target == 'scored':
             row = self.service.store.get_round(self.round_id)
             source = next(r for r in self.service.store.list_runs(self.round_id, kind='execute')

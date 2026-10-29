@@ -381,6 +381,7 @@ def test_authenticated_abandoned_host_after_cutoff_keeps_failure_without_retry(d
 
 def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(database):
     from lab_arena.store import ArenaStore,PsycopgTransport
+    from tests.lab_arena.historical_service import pin_pre470_baseline_service
     psycopg,dsn=database
     connect=lambda:psycopg.connect(**dsn)
     store=ArenaStore(PsycopgTransport(connect),lease_ttl_seconds=4500)
@@ -395,13 +396,15 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         assert store.mark_uncertain(**arguments,call_doc={"reason":"missing_provider_cost","call_succeeded":True,"provider_status":200})["status"]=="uncertain"
         with connect() as conn,conn.cursor() as cur:
             cur.execute("UPDATE public.lab_arena_runs SET lease_expires_at=clock_timestamp()+interval '1 day' WHERE run_id=%s",(lease["run_id"],))
-        service=object.__new__(svc.ArenaService)
-        service._store=store
-        service._lock=threading.RLock()
-        service._clock=lambda:datetime.now(timezone.utc)
+        service=svc.ArenaService(SimpleNamespace(
+            store=store,object_store=None,signer=None,
+            clock=lambda:datetime.now(timezone.utc)))
+        pin_pre470_baseline_service(service, connect, round_id=ROUND)
         service._invalidate_hot_round=lambda:None
         service._round=lambda _:store.get_round(ROUND)
-        service._reconcile_deepline_cost=lambda _:{"status":"none"}
+        # This pinned migration420 fixture predates the Deepline selection
+        # RPCs. The test exercises real OpenRouter ledger/drain authority.
+        service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
         service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(datetime.now(timezone.utc)+timedelta(days=1))}
         with connect() as conn: before=_state(conn)
         assert service.advance_round(ROUND)["status"]=="draining"
@@ -419,7 +422,13 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         store.close()
 
 
-def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path):
+@pytest.fixture()
+def current_application_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_real_signed_late_execution_preserves_costs_and_publishes(current_application_database,tmp_path):
     """Actual service, signed runner, cost RPCs and scoring/publication.
 
     Only local fixture schedule boundaries are projected before claiming.
@@ -427,6 +436,7 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     """
     import time
     from tests.lab_arena.confirmed_cost_admission_postgres_test import _reserve,_dispatch,_settle
+    database=current_application_database
     psycopg,dsn=database
     connect=lambda:psycopg.connect(**dsn)
     with connect() as conn,conn.cursor() as cur:
@@ -520,7 +530,20 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
         old_accepted=[r for r in before["lab_arena_runs"] if r["status"]=="accepted"]
         for old in old_accepted:
             current=next(r for r in after["lab_arena_runs"] if r["run_id"]==old["run_id"])
-            assert current==old
+            if old['kind']=='execute' and old['per_icp_score'] is None:
+                # Current baseline judging can continue during stage 2. The
+                # accepted execution remains immutable while its first actual
+                # judgment adds only these derived projection fields.
+                projected_fields={'qualification_doc','per_icp_score','updated_at'}
+                assert {k:v for k,v in current.items() if k not in projected_fields}=={
+                    k:v for k,v in old.items() if k not in projected_fields}
+                baseline_ids={p['submission_id'] for p in participants if p['is_king']}
+                assert current['per_icp_score']==(30 if old['submission_id'] in baseline_ids else 60)
+                assert len(current['qualification_doc']['companies'])==5
+                assert all(c['company_qualified'] for c in current['qualification_doc']['companies'])
+                assert current['updated_at']>=old['updated_at']
+            else:
+                assert current==old
         assert all(r["status"]=="accepted" for r in after["lab_arena_runs"])
         assert _close(conn)["status"]=="existing"
         assert _state(conn)==after

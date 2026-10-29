@@ -1,6 +1,7 @@
 """Disposable PostgreSQL proof of the October 1 saved-output rejudge."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from lab_arena.store import ArenaStore, PsycopgTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from tests.lab_arena import oct01_held_deadline_recovery372_postgres_test as prior
 from tests.lab_arena.icp_fixtures import daily_icps
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
 
 
 MIGRATION = Path(__file__).parents[2] / "scripts/376-arena-2026-10-01-new-scorer-rejudge.sql"
@@ -203,6 +205,7 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     assert keys.credential_for(context, 'deepline') == 'test-miner-key'
     assert public_dashboard._is_administrative_archive(archive)
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
     service._store = store
     service._config = SimpleNamespace(mode='live', pinned_round_id=None)
     service._chain_scope = lambda: ('finney', 71)
@@ -214,10 +217,7 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     assert service.open_round()['round_id'] != archive['round_id']
     # Historical recovery assertions above use the original schema. Current
     # dashboard reads require their publication projection migration first.
-    with psycopg.connect(**dsn) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cursor:
-            cursor.execute((MIGRATION.parent / "443-lab-arena-competition-publication-projection.sql").read_text())
+    prepare_current_service_reads(lambda: psycopg.connect(**dsn))
     assert archive['round_id'] not in {
         r['round_id'] for r in public_dashboard._recent_competition_rounds(
             service, network_name='finney', netuid=71, limit=20)
@@ -288,6 +288,7 @@ def test_canonical_open_scoring_uses_fresh_namespace_and_image_scope(database, m
             cursor.execute("SET session_replication_role=origin")
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
     service._store = store
     service._round = lambda rid: store.get_round(rid)
     service._load_scoring_plan = lambda row, stage: plan

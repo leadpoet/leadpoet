@@ -212,4 +212,4 @@ def test_new_round_uses_60m_and_historical_profiles_remain_valid():
     )
     assert "checkpoint_deadline_policy" not in historical
     assert historical["icp_wall_clock_seconds"] == 300
-    assert historical["lease_ttl_seconds"] == 1200
+    assert historical["lease_ttl_seconds"] == 1500

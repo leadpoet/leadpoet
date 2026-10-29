@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
+import pytest
 
 from lab_arena import contracts
 from lab_arena.api import create_app
@@ -29,7 +30,12 @@ from leadpoet_canonical import arena_weights
 from qualification.scoring import competition
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
-from tests.lab_arena.attribute_evidence_cache_postgres_test import database, migrated
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
+
+
+@pytest.fixture()
+def database():
+    yield from current_service_database()
 
 
 def _install_hints(harness):
@@ -48,7 +54,7 @@ def _install_hints(harness):
                     status, _, _ = shim.dispatch(
                         "openrouter.chat",
                         {
-                            "model": "google/gemini-2.5-flash",
+                            "model": scoring.DEFAULT_JUDGE_MODELS["intent_signal_judge"],
                             "messages": [
                                 {
                                     "role": "user",
@@ -97,7 +103,7 @@ def _install_hints(harness):
 
 
 def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
-    database, migrated, tmp_path, monkeypatch
+    database, tmp_path, monkeypatch
 ):
     original_send = fixtures.FakeProviderTransport.send
 
@@ -206,10 +212,10 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
                     break
                 if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
                     _drain_both(harness, (small, large))
-                if status == "stage1_scored":
-                    assert harness.service._baseline_fully_succeeded(
-                        harness.service.store.get_round(harness.round_id)
-                    )
+                if status == "stage1_scoring":
+                    # Drain baseline judges before opening miner execution.
+                    # Current continuation stores their score projections at
+                    # publication; their accepted cache evidence is already fixed.
                     old_baseline = {
                         r["run_id"]: (
                             r["judgment_cache_key"],
@@ -292,6 +298,8 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
     burn = fixtures.keypair("attribute-evidence-cache-burn").ss58_address
     state = _accepted_state(harness, int(activated["effective_reward_epoch"]), burn)
     weights = arena_weights.derive_arena_weights(state, [burn, winner_hotkey])
-    assert weights["champion_share_ppb"] == 300_000_000
-    assert weights["burned_residual_ppb"] == 700_000_000
+    assert activated["reward_basis_doc"]["slot_policy"]["pool_percent"] == 50
+    assert all(slot["miner_hotkey"] == winner_hotkey for slot in activated["reward_basis_doc"]["reward_slots"])
+    assert weights["champion_share_ppb"] == 500_000_000
+    assert weights["burned_residual_ppb"] == 500_000_000
     fixtures.assert_canary_absent(harness, lambda: database[0].connect(**database[1]))

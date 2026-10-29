@@ -24,6 +24,7 @@ from tests.lab_arena.partial_execution_close422_postgres_test import (
     base_database, current_database, database, migrated,
 )
 from tests.lab_arena.test_lab_arena_service_round import _start_round, keypair
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -82,8 +83,20 @@ def _project_closed_stage_to_real_clock(connect, round_id, field):
     return cutoff
 
 
-def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(integrated, tmp_path):
+def test_partial_transition_migrations_replay_at_historical_boundary(integrated):
     psycopg, dsn = integrated
+    with psycopg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure('public.lab_arena_transition_round(text,text,text,jsonb)') IS NOT NULL")
+        assert cursor.fetchone() == (True,)
+
+
+@pytest.fixture()
+def current_round_database():
+    yield from current_service_database()
+
+
+def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(current_round_database, tmp_path):
+    psycopg, dsn = current_round_database
     connect = lambda: psycopg.connect(**dsn)
     harness = QualityHarness(
         connect, tmp_path, challengers=["FullCandidate", "PartialCandidate"],

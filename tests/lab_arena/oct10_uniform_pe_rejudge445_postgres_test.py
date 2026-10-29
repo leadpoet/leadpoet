@@ -1,5 +1,5 @@
 """Local PostgreSQL proof for the unrendered Oct10 uniform rejudge template."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import threading
@@ -10,6 +10,7 @@ from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+from tests.lab_arena.historical_service import pin_pre470_baseline_service
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena.icp_fixtures import daily_icps
@@ -219,6 +220,85 @@ def _snapshot(cur):
     return result
 
 
+def assert_current_oct10_plan(plan, original_runs, *, extra_failures=False):
+    # ffb48c012 stopped turning infrastructure failures into invented zeros.
+    # Keep this fixture's exact selected executions and every terminal cause.
+    actual = lambda rows: {(r['submission_id'], r['icp_position'], r['cause']) for r in rows}
+    incomplete = {
+        ('miner440-1', 0, 'lease_expired'), ('miner440-1', 1, 'lease_expired'),
+        ('miner440-2', 2, 'lease_expired'), ('miner440-2', 3, 'lease_expired'),
+        *{('miner440-3', i, 'provider_error') for i in range(3)},
+    }
+    zeros = set()
+    if extra_failures:
+        incomplete.add(('miner440-6', 0, 'provider_error'))
+        zeros = {(sid, i, 'model_error') for sid in ('miner440-5', 'miner440-7') for i in range(5)}
+    assert actual(plan.get('incomplete_rows', [])) == incomplete
+    assert actual(plan['zero_rows']) == zeros
+    assert len(plan.get('incomplete_rows', [])) == len(incomplete)
+    assert len(plan['zero_rows']) == len(zeros)
+    assert {r['scored_run_id'] for r in plan['work_items']} == {
+        r['run_id'] for r in original_runs
+        if r['round_id'] == plan['round_id'] and r['kind'] == 'execute'
+        and r['stage'] == 2 and r['status'] == 'accepted'
+    }
+
+
+def assert_current_oct10_scores(latest, aggregates, plan, original_runs):
+    incomplete = {(r['submission_id'], r['icp_position']) for r in plan['incomplete_rows']}
+    retained = ('miner440-6', 0)
+    if retained in incomplete:
+        # This failed execution already held a stored legacy zero before the
+        # rejudge. Current planning cannot invent another zero or erase that
+        # historical authority while the exact migration preserves executions.
+        prior = [r for r in original_runs if r['round_id'] == plan['round_id']
+                 and r['kind'] == 'execute' and r['stage'] == 2
+                 and (r['submission_id'], r['icp_position']) == retained]
+        assert prior and all(r['per_icp_score'] == 0 and r['qualification_doc'] == {'companies': []} for r in prior)
+        current = next(r for r in latest.values() if (r['submission_id'], r['icp_position']) == retained)
+        assert current['per_icp_score'] == 0
+        assert current['qualification_doc'] == {'companies': []}
+        incomplete.remove(retained)
+    assert {(r['submission_id'], r['icp_position']) for r in latest.values()
+            if r['per_icp_score'] is None} == incomplete
+    zeros = {(r['submission_id'], r['icp_position']) for r in plan['zero_rows']}
+    assert all(r['per_icp_score'] == 0 for r in latest.values()
+               if (r['submission_id'], r['icp_position']) in zeros)
+    assert {r['submission_id'] for r in aggregates if r['final_score'] is None} == {
+        sid for sid, _ in incomplete
+    }
+
+
+def assert_current_incomplete_round_holds_then_cancels(service, store, connect, snapshot):
+    """Current incomplete policy preserves every historical migration record."""
+    row = store.get_round(ROUND)
+    deadline = datetime.fromisoformat(row['configuration_doc']['schedule']['publication_deadline'].replace('Z', '+00:00'))
+    with connect() as conn, conn.cursor() as cur:
+        before = snapshot(cur)
+    service.now = lambda: deadline - timedelta(seconds=1)
+    assert service._advance_round_locked(ROUND) == {
+        'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete',
+    }
+    with connect() as conn, conn.cursor() as cur:
+        assert snapshot(cur) == before
+    service.now = lambda: deadline + timedelta(seconds=1)
+    assert service._advance_round_locked(ROUND)['status'] == 'cancelled'
+    with connect() as conn, conn.cursor() as cur:
+        after = snapshot(cur)
+    assert {k:v for k,v in after.items() if k != 'lab_arena_rounds'} == {
+        k:v for k,v in before.items() if k != 'lab_arena_rounds'}
+    assert [r for r in after['lab_arena_rounds'] if r['round_id'] != ROUND] == [
+        r for r in before['lab_arena_rounds'] if r['round_id'] != ROUND]
+    old = next(r for r in before['lab_arena_rounds'] if r['round_id'] == ROUND)
+    current = next(r for r in after['lab_arena_rounds'] if r['round_id'] == ROUND)
+    assert current['status'] == 'cancelled' and current['cancel_reason'] == 'scoring_incomplete'
+    assert current['status_generation'] == old['status_generation'] + 1
+    assert current['stage_generation'] == old['stage_generation'] + 1
+    changed = {'status', 'cancel_reason', 'status_generation', 'stage_generation', 'updated_at'}
+    assert {k:v for k,v in current.items() if k not in changed} == {
+        k:v for k,v in old.items() if k not in changed}
+
+
 def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch):
     psycopg, dsn = seeded
     prepare_current_service_reads(lambda: psycopg.connect(**dsn), include_round_reads=False)
@@ -238,6 +318,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
     service._store = store
+    pin_pre470_baseline_service(service, lambda: psycopg.connect(**dsn), round_id=ROUND)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 13, 59, 59, tzinfo=timezone.utc)
@@ -300,8 +381,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     assert statuses[-1] == 'scored', statuses
     assert statuses == ['stage1_closed', 'stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored']
     row = store.get_round(ROUND)
-    assert len(row['stage2_scoring_plan_doc']['incomplete_rows']) == 4
-    assert len(row['stage2_scoring_plan_doc']['zero_rows']) == 3
+    assert_current_oct10_plan(row['stage2_scoring_plan_doc'], before['lab_arena_runs'])
     scores = store.list_runs(ROUND, kind='score')
     assert len(scores) == 10 + 683
     assert all(r['assignment_id'].endswith(':score:rerun445') for r in scores)
@@ -321,10 +401,8 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             for run in actual_exec:
                 if run['stage'] == 2 and (run['assignment_id'] not in latest or run['attempt'] > latest[run['assignment_id']]['attempt']):
                     latest[run['assignment_id']] = run
-            assert {r['submission_id'] for r in latest.values() if r['per_icp_score'] is None} == {'miner440-1', 'miner440-2'}
-            assert all(r['per_icp_score'] == 0 for r in latest.values() if r['submission_id'] == 'miner440-3' and r['icp_position'] < 3)
             aggregates = service._score_entries_from_runs(row, range(10), 'final_score')
-            assert {r['submission_id'] for r in aggregates if r['final_score'] is None} == {'miner440-1', 'miner440-2'}
+            assert_current_oct10_scores(latest, aggregates, row['stage2_scoring_plan_doc'], before['lab_arena_runs'])
             canonical = lambda r: {**r, 'round_id': ROUND, 'submission_id': BASE if r['submission_id'] == BASE+'-r445archive' else r['submission_id']}
             for table, key in (('lab_arena_ledger', 'entry_id'), ('lab_arena_trajectory_events', 'trajectory_id')):
                 old_rows = [r for r in before[table] if r['round_id'] == ROUND]

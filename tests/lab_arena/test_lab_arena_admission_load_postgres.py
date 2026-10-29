@@ -63,6 +63,9 @@ def _signed(harness, miner, scope, body):
 
 def _upload(harness, http, flavor, *, miner_label=None):
     miner = keypair("svc-miner-" + (miner_label or flavor))
+    # Positive admission fixtures are registered miners; request validation stays real.
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(flavor)
     facts = source_bundle.validate_source_archive(payload, require_license=True)
     response = http.post("/arena/v1/submissions/presign", json=_signed(
@@ -200,10 +203,16 @@ def test_256_admission_ten_icp_queue_and_concurrent_claims(connect, tmp_path):
         _admit_at_cap(harness, http)
         assert _freeze_and_open(harness)["assignments"] == 10
         harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=http)
-        harness.advance_until("stage1_scored", runners=2)
+        # Current continuation opens miner execution from stage1_scoring once
+        # the baseline executions are accepted. Its accepted judgments are
+        # materialized by the guarded publication writer at the final phase.
+        opened = harness.advance_until("stage2", runners=2)
         baseline = harness.service.store.list_runs(harness.round_id, stage=1, kind="execute")
-        assert len(baseline) == 10 and all(r["per_icp_score"] > 0 for r in baseline)
-        assert harness.service.advance_round(harness.round_id)["assignments"] == 10 * 256
+        assert len(baseline) == 10 and all(r["status"] == "accepted" for r in baseline)
+        baseline_judges = harness.service.store.list_runs(harness.round_id, stage=1, kind="score")
+        assert len(baseline_judges) == 10 and all(r["status"] == "accepted" for r in baseline_judges)
+        assert all(r["per_icp_score"] is None for r in baseline)
+        assert opened["assignments"] == 10 * 256
         runs = harness.service.store.list_runs(harness.round_id, stage=2, kind="execute")
         expected = {(p["submission_id"], position) for p in harness.service.store.get_round(harness.round_id)["participants"] for position in range(10) if not p["is_king"]}
         assert len(runs) == len({r["assignment_id"] for r in runs}) == len(expected)

@@ -14,6 +14,7 @@ from tests.lab_arena import untransitioned_host_fault_guard399_postgres_test as 
 from tests.lab_arena.execute_host_cooldown396_postgres_test import _hash, _security
 from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
+    current_service_database,
     migrations_before,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete
@@ -252,8 +253,18 @@ def test_frozen_old_round_cap_limits_new_validator_slots(connect, tmp_path):
     assert full == {"status": "no_free_slot", "active_leases": 20, "slot_limit": 20}
 
 
-def test_new_service_startup_accepts_expanded_schema(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+@pytest.fixture()
+def current_connect():
+    database = current_service_database()
+    try:
+        psycopg2, dsn = next(database)
+        yield lambda: psycopg2.connect(**dsn)
+    finally:
+        database.close()
+
+
+def test_new_service_startup_accepts_expanded_schema(current_connect, tmp_path):
+    harness = Harness(current_connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
@@ -262,8 +273,8 @@ def test_new_service_startup_accepts_expanded_schema(connect, tmp_path):
     harness.service.startup_checks()
 
 
-def test_legacy_gateway_capability_still_starts_after_migration(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+def test_legacy_gateway_capability_still_starts_after_migration(current_connect, tmp_path):
+    harness = Harness(current_connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=20,

@@ -18,13 +18,13 @@ import pytest
 
 from lab_arena import broker as br, runtime, scoring, shim, submission_runtime, verify
 from lab_arena.promotion import GitPromoter
+from lab_arena.store import ArenaStoreError
 from leadpoet_canonical import arena_weights
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena import test_integrity_round as integrity_fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_REWARD_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 
 
@@ -170,7 +170,7 @@ class BaselineCostHarness(integrity_fixtures.IntegrityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture
@@ -351,20 +351,23 @@ def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_do
         ).decode()
         == "EfficientWinner"
     )
-    assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
-    activated = harness.service.store.get_round(harness.round_id)
-    assert activated["reward_basis_doc"]["king_hotkey"] == winner["miner_hotkey"]
+    # Migration 428 requires an eligible baseline to establish a reward
+    # achievement. Promotion may use the official zero, but cannot invent that
+    # proof or change the accepted eligibility result.
+    before_activation = harness.service.store.get_round(harness.round_id)
+    with pytest.raises(ArenaStoreError, match='lab_arena_reward_current_achievement_invalid'):
+        harness.service.activate_reward(harness.round_id)
+    assert harness.service.store.get_round(harness.round_id) == before_activation
+    assert before_activation['reward_basis_doc'] is None
 
     burn = fixtures.keypair("baseline-cost-zero-burn-one").ss58_address
-    reward_epoch = int(activated["effective_reward_epoch"])
-    state = _accepted_state(harness, reward_epoch, burn)
-    assert state["reward_basis"]["king_hotkey"] == winner["miner_hotkey"]
-    derived = arena_weights.derive_arena_weights(
-        state, [burn, winner["miner_hotkey"]]
-    )
-    assert derived["champion_share_ppb"] == 300_000_000
-    assert derived["burned_residual_ppb"] == 700_000_000
-    assert derived["sparse_uids"] == [0, 1]
+    reward_epoch = int(harness.chain.epoch) + 1
+    harness.service.config.accepted_burn_hotkey = burn
+    assert harness.service.public_weight_state(reward_epoch) == {'state': None, 'lookup_ok': True}
+    restarted.config.accepted_burn_hotkey = burn
+    assert restarted.public_weight_state(reward_epoch) == {'state': None, 'lookup_ok': True}
+    network, netuid = harness.service._chain_scope()
+    assert harness.service.store.get_weight_state(network, netuid, reward_epoch) is None
     fixtures.assert_canary_absent(harness, connect)
 
 
@@ -416,6 +419,10 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
     assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
     first_activated = harness.service.store.get_round(harness.round_id)
     first_basis = first_activated["reward_basis_doc"]
+    # Epoch 42001 is after the explicit Oct23 threshold cutover. The official
+    # five-point improvement does not earn any of the 20/15/8-point slots.
+    assert [tier['minimum_improvement'] for tier in first_basis['slot_policy']['tiers']] == [20, 15, 8]
+    assert all(slot is None for slot in first_basis['reward_slots'])
 
     harness.challengers = ["LowEligible", "ExpensiveHigh"]
     harness.expensive_baseline = True
@@ -479,8 +486,8 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
     derived = arena_weights.derive_arena_weights(
         state, [burn, prior_winner["miner_hotkey"]]
     )
-    assert derived["champion_share_ppb"] == 300_000_000
-    assert derived["burned_residual_ppb"] == 700_000_000
+    assert derived["champion_share_ppb"] == 0
+    assert derived["burned_residual_ppb"] == 1_000_000_000
 
     # The next daily round freezes the still-current promoted source again.
     harness.challengers = []

@@ -19,11 +19,12 @@ import pytest
 from lab_arena import broker as br, contracts, runtime, scoring, shim, submission_runtime
 from lab_arena.contact_evidence import source_key
 from lab_arena.promotion import GitPromoter
+from lab_arena.store import ArenaStoreError
 from qualification.scoring.competition import apply_company_judgment_context, _merge_contact_breakdown
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.contact_round_test import _claim, _contact_icps, _contact_result
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.test_arena_company_quality_policy import _positive_breakdown
 
 
@@ -67,18 +68,7 @@ class PerIcpHarness(QualityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + (
-            "409-lab-arena-publication-cost-document-reuse.sql",
-            # The round lifecycle test calls the current signed reward API.
-            # Keep its existing slot, cumulative-pot and decay RPCs available.
-            "342-lab-arena-reward-predecessor-barrier.sql",
-            "377-lab-arena-monotonic-day-authority.sql",
-            "428-lab-arena-reward-slots.sql",
-            "429-lab-arena-cumulative-reward-pot.sql",
-            "431-lab-arena-slot-decay.sql",
-        )
-    )
+    yield from current_service_database()
 
 
 def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(database, tmp_path):
@@ -232,7 +222,7 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
         ("provider_error", 32, 31804),
     ],
 )
-def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
+def test_incomplete_baseline_retains_provider_costs_without_publication(
     database, tmp_path, stop_reason, day, epoch
 ):
     psycopg2, dsn = database
@@ -368,10 +358,22 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     scoring_opened = harness.service.advance_round(harness.round_id)
     assert scoring_opened["assignments"] == 9
     assert harness.status() == "stage1_scoring"
-    harness.advance_until("published", runners=1)
+    if stop_reason == "provider_error":
+        # Infrastructure failure has no measured zero. The stage-one SQL
+        # barrier rejects advancing a baseline with an unmeasured position.
+        harness.run_stage_with_runners(1)
+        harness.service.advance_round(harness.round_id)
+        assert harness.status() == "stage1_judged"
+        with pytest.raises(ArenaStoreError, match="lab_arena_stage1_baseline_scores_incomplete"):
+            harness.service.score_stage(harness.round_id, 1)
+    else:
+        harness.advance_until("scored", runners=1)
+        assert harness.service.publish(harness.round_id) == {
+            "status": "retry", "round_status": "scored", "reason": "baseline_incomplete"}
 
     saved = harness.service.store.get_round(harness.round_id)
-    assert saved["status"] == "published"
+    assert saved["publication_doc"] is None
+    assert saved["baseline_promoted_at"] is saved["reward_activated_at"] is None
     baseline_id = next(iter(harness.flavors))
     runs = harness.service.store.list_runs(
         harness.round_id, submission_id=baseline_id, kind="execute"
@@ -383,7 +385,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     terminal_stops = [
         run for run in runs if run["terminal_cause"] == expected_cause
     ]
-    assert len(accepted) == 19
+    assert len(accepted) == (9 if stop_reason == "provider_error" else 19)
     assert len(terminal_stops) == (2 if stop_reason == "provider_error" else 1)
     assert all(run["icp_position"] == 0 for run in terminal_stops)
     if stop_reason == "money_cap":
@@ -393,7 +395,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
         assert observed == [("failed", 502), ("failed", 502)]
         assert [run["attempt"] for run in terminal_stops] == [1, 2]
         assert terminal_stops[0]["per_icp_score"] is None
-        assert terminal_stops[1]["per_icp_score"] == 0
+        assert terminal_stops[1]["per_icp_score"] is None
         assert all(
             harness.service.store.list_ledger(run_id=run["run_id"])
             for run in terminal_stops
@@ -408,28 +410,28 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
             "per_icp_quota"
         ]
 
-    result = saved["publication_doc"]["final_ranking"][0]
-    assert result["submission_id"] == baseline_id
-    assert result["eligible"] is True
-    assert result["final_score"] > 0
-    if stop_reason == "provider_error":
-        scored = [
-            float(run["per_icp_score"])
-            for run in runs
-            if run["per_icp_score"] is not None
-        ]
-        assert len(scored) == 20
-        assert result["final_score"] == pytest.approx(sum(scored) / 20)
-        public = harness.service.public_results(harness.round_id, baseline_id)
-        assert len(public["scores"]["stage_1"] + public["scores"]["stage_2"]) == 20
-    per_icp = {item["icp_position"]: item for item in result["cost_summary"]["per_icp"]}
-    assert per_icp[0]["eligible"] is (
-        stop_reason in ("per_icp_quota", "provider_error")
-    )
+    assert not harness.service._baseline_final_ready(saved)
+    measured = [run for run in runs if run["status"] == "accepted"]
+    assert all(run["per_icp_score"] == 30 for run in measured)
+    cost = harness.service._submission_cost_eligibility(saved, baseline_id, runs)
+    per_icp = {item["icp_position"]: item for item in cost["cost_summary"]["per_icp"]}
     if stop_reason == "provider_error":
         assert per_icp[0]["execution"]["settled_microusd"] == 2_000_000
         assert per_icp[0]["execution"]["successful_microusd"] == 0
-    assert all(per_icp[position]["eligible"] for position in range(1, 20))
+    elif stop_reason == "money_cap":
+        assert per_icp[0]["execution"]["settled_microusd"] == 4_100_000
+        assert per_icp[0]["execution"]["successful_microusd"] == 3_100_000
+        assert per_icp[0]["eligible"] is False
+    assert all(per_icp[run["icp_position"]]["eligible"] for run in measured)
+    if stop_reason != "provider_error":
+        before = deepcopy(harness.service.store.list_runs(harness.round_id))
+        ledger_before = {run["run_id"]: deepcopy(harness.service.store.list_ledger(run_id=run["run_id"]))
+                         for run in before}
+        harness.clock.advance_to(harness.schedule()["publication_deadline"])
+        assert harness.service.publish(harness.round_id)["status"] == "cancelled"
+        assert harness.service.store.list_runs(harness.round_id) == before
+        assert {run["run_id"]: harness.service.store.list_ledger(run_id=run["run_id"])
+                for run in before} == ledger_before
     fixtures.assert_canary_absent(harness, connect)
 
 

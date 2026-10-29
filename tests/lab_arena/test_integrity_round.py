@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 
 import pytest
 
@@ -116,7 +117,7 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
 ):
     psycopg2, dsn = database
     harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
-        challengers=["Outage", "Healthy"], runners=["alpha"])
+        challengers=["Outage", "Healthy"], runners=["alpha", "beta"])
     def judge(companies, icp, reference):
         indexes, _ = verify.bucket_skip(icp, companies)
         return [{"final_score": 40.0, "company_index": index,
@@ -127,7 +128,8 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
     round_id = "arena-2026-11-01-outage"
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    # Enter the real review window; paid review waits for replacement cutoff.
+    harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=round_id)
     harness.round_id = round_id
     submission = harness.submit("Outage", round_id)
     healthy_submission = harness.submit("Healthy", round_id)
@@ -149,20 +151,24 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
         return original_send(self, **kwargs)
 
     monkeypatch.setattr(fixtures.FakeProviderTransport, "send", unavailable)
-    harness.run_stage_with_runners(1)
+    # Retries must move to a different validator under the real claim guard.
+    harness.run_stage_with_runners(2)
     runs = [
         run
         for run in harness.service.store.list_runs(round_id, stage=1, kind="score")
         if run["submission_id"] == submission
     ]
     failed = [run for run in runs if run["terminal_cause"] == "judge_error"]
-    assert len(failed) == contracts.STAGE_1_ICP_COUNT * 2
+    # Continuation policy472 retains an unresolved provider-cost head and
+    # blocks another paid attempt until reconciliation proves it clear.
+    assert len(failed) == contracts.STAGE_1_ICP_COUNT
     assert all(run["status"] == "failed" for run in failed)
-    assert {run["attempt"] for run in failed} == {1, 2}
+    assert {run["attempt"] for run in failed} == {1}
     assert {run["icp_position"] for run in failed} == set(
         contracts.stage_positions(1)
     )
-    assert not any(run["status"] == "pending" for run in runs)
+    assert all(run["status"] == "pending" and run["attempt"] == 2 for run in runs if run not in failed)
+    assert len(runs) == contracts.STAGE_1_ICP_COUNT * 2
     assert not any(run["terminal_cause"] == "credential_error" for run in runs)
     healthy_runs = [
         run
@@ -170,6 +176,9 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
         if run["submission_id"] == healthy_submission
     ]
     assert healthy_runs and all(run["status"] == "accepted" for run in healthy_runs)
+    before_retry = deepcopy(harness.service.store.list_runs(round_id))
+    harness.run_stage_with_runners(2)
+    assert harness.service.store.list_runs(round_id) == before_retry
 
     candidates = harness.service.store.list_deepline_cost_reconciliations(
         round_id, run_id=failed[0]["run_id"]
@@ -239,7 +248,7 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
     )
     round_id = "arena-2026-11-01-twentyicp"
     config = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id
+        datetime.now(timezone.utc) + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
@@ -359,10 +368,61 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
     assert vector["champion_share_ppb"] > 0
 
 
-def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
-    database_before_251, tmp_path, monkeypatch,
+def test_exact_251_cutover_replay_preserves_terminal_archive_and_evidence(database_before_251):
+    pg, dsn = database_before_251
+    migration = Path(__file__).resolve().parents[2] / "scripts/251-lab-arena-twenty-icp-promotion.sql"
+    configuration = {"mode": "live", "rewards_enabled": False,
+        "integrity_policy": "arena_integrity_v1", "cost_per_company_microusd": 100000,
+        "scorer_policy": {"scoring_adapter_version": "qualification_integrity_v2"},
+        "schedule": {"submission_cutoff": "2026-09-01T01:00:00Z", "stage_3_start": "2026-09-01T02:00:00Z",
+            "stage_3_close": "2026-09-01T03:00:00Z", "stage_3_scoring_close": "2026-09-01T04:00:00Z"}}
+    hotkey = "5" + "A" * 47
+    with pg.connect(**dsn) as conn, conn.cursor() as cur:
+        for suffix, status in (("active", "open"), ("archive", "published")):
+            rid = "arena-2026-09-01-" + suffix
+            cur.execute("INSERT INTO public.lab_arena_rounds(round_id,status,configuration_doc,confirmation_bank_ref,confirmation_bank_hash,confirmation_cohort) VALUES(%s,%s,%s::jsonb,%s,%s,%s::jsonb)",
+                (rid, status, json.dumps(configuration), "arena/" + rid + "/confirmation.json", "sha256:" + "c" * 64,
+                 json.dumps({"saved": True}) if status == "published" else None))
+        rid = "arena-2026-09-01-archive"
+        cur.execute("INSERT INTO public.lab_arena_submissions(submission_id,round_id,miner_hotkey,status,owner_coldkey,owner_block_number,owner_block_hash) VALUES('archive-submission',%s,%s,'frozen',%s,123,%s)", (rid, hotkey, hotkey, '0x' + 'a' * 64))
+        cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,status,terminal_cause,output_ref,result_doc,per_icp_score,qualification_doc) VALUES('archive-run','archive-assignment',%s,'archive-submission',%s,1,0,1,'accepted','accepted','saved-output.json',%s::jsonb,80,%s::jsonb)", (rid, hotkey, json.dumps({"terminal_status": "accepted"}), json.dumps({"companies": []})))
+        cur.execute("INSERT INTO public.lab_arena_ledger(entry_kind,round_id,run_id,miner_hotkey,stage,provider,amount_microusd,entry_doc) VALUES('settlement',%s,'archive-run',%s,1,'deepline',123,%s::jsonb)", (rid, hotkey, json.dumps({"saved": True})))
+
+        def evidence():
+            values = []
+            for table in ("lab_arena_rounds", "lab_arena_runs", "lab_arena_ledger"):
+                cur.execute(f"SELECT jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text) FROM public.{table} t WHERE round_id=%s", (rid,))
+                values.append(cur.fetchone()[0])
+            return values
+
+        archive = evidence()
+        cur.execute(migration.read_text())
+        assert evidence() == archive
+        cur.execute("SELECT configuration_doc,confirmation_bank_ref,confirmation_bank_hash FROM public.lab_arena_rounds WHERE round_id='arena-2026-09-01-active'")
+        config, bank_ref, bank_hash = cur.fetchone()
+        assert config == {**configuration, "schedule": {"submission_cutoff": "2026-09-01T01:00:00Z"}}
+        assert bank_ref.endswith("/confirmation.json") and bank_hash == "sha256:" + "c" * 64
+        cur.execute("SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id='arena-2026-09-01-active'")
+        active = cur.fetchone()[0]
+        for _ in range(2):
+            cur.execute(migration.read_text())
+            assert evidence() == archive
+            cur.execute("SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id='arena-2026-09-01-active'")
+            assert cur.fetchone()[0] == active
+        cur.execute("SELECT public.lab_arena_twenty_icp_promotion_schema_v1()")
+        assert cur.fetchone()[0]["version"] == 251
+        for signature in ("public.lab_arena_prepare_confirmation_bank(text,text,text)",
+            "public.lab_arena_open_confirmation(text,jsonb)", "public.lab_arena__confirmation_account_failure(text,text)"):
+            cur.execute("SELECT to_regprocedure(%s)", (signature,))
+            assert cur.fetchone()[0] is None
+        cur.execute("SELECT has_function_privilege('lab_arena_service','public.lab_arena_twenty_icp_promotion_schema_v1()','EXECUTE'),has_function_privilege('anon','public.lab_arena_twenty_icp_promotion_schema_v1()','EXECUTE'),has_function_privilege('authenticated','public.lab_arena_twenty_icp_promotion_schema_v1()','EXECUTE')")
+        assert cur.fetchone() == (True, False, False)
+
+
+def test_migrated_inert_bank_finishes_current_round_on_twenty_icps(
+    database, tmp_path, monkeypatch,
 ):
-    psycopg2, dsn = database_before_251
+    psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     harness = IntegrityHarness(
         connect, tmp_path, challengers=["CutoverWinner"], runners=["alpha"]
@@ -384,50 +444,23 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
 
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service._require_integrity_schema = lambda: None
     round_id = "arena-2026-11-02-cutover"
     config = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     winner = harness.submit("CutoverWinner", round_id)
     confirmation_ref = f"arena/{round_id}/confirmation/{'c' * 64}.json"
     confirmation_hash = "sha256:" + "c" * 64
+    # Seed only the inert state retained by251, never retired schedule keys.
+    # This separate full lifecycle uses current admission and scoring RPCs.
     with connect() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            "ALTER TABLE public.lab_arena_rounds "
-            "DISABLE TRIGGER lab_arena_rounds_write_once"
-        )
-        cursor.execute(
-            """UPDATE public.lab_arena_rounds
-               SET configuration_doc = jsonb_set(
-                     configuration_doc, '{schedule}',
-                     configuration_doc -> 'schedule' || jsonb_build_object(
-                       'stage_3_start', %s,
-                       'stage_3_close', %s,
-                       'stage_3_scoring_close', %s
-                     )
-                   ),
-                   confirmation_bank_ref = %s,
-                   confirmation_bank_hash = %s
-               WHERE round_id = %s""",
-            (
-                config["schedule"]["final_scoring_close"],
-                config["schedule"]["publication_deadline"],
-                config["schedule"]["publication_deadline"],
-                confirmation_ref,
-                confirmation_hash,
-                round_id,
-            ),
-        )
-        cursor.execute(
-            "ALTER TABLE public.lab_arena_rounds "
-            "ENABLE TRIGGER lab_arena_rounds_write_once"
-        )
-        migration = Path(__file__).resolve().parents[2] / (
-            "scripts/251-lab-arena-twenty-icp-promotion.sql"
-        )
-        cursor.execute(migration.read_text(encoding="utf-8"))
+        cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_rounds_write_once")
+        cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_integrity_round_guard")
+        cursor.execute("UPDATE public.lab_arena_rounds SET confirmation_bank_ref=%s,confirmation_bank_hash=%s WHERE round_id=%s",
+            (confirmation_ref, confirmation_hash, round_id))
+        cursor.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_integrity_round_guard")
+        cursor.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_rounds_write_once")
 
     harness.service = harness.build_service()
     cutover = harness.service.store.get_round(round_id)
@@ -452,41 +485,3 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
     assert runs
     assert all(run["stage"] in (1, 2) for run in runs)
     assert max(run["icp_position"] for run in runs) == 19
-
-    # Replaying the exact cutover after publication must retain all evidence.
-    with connect() as connection, connection.cursor() as cursor:
-        def evidence():
-            result = []
-            for table, key in (
-                ("lab_arena_rounds", "round_id"),
-                ("lab_arena_runs", "run_id"),
-                ("lab_arena_ledger", "entry_id"),
-            ):
-                cursor.execute(
-                    f"SELECT md5(COALESCE(string_agg(row_to_json(r)::text, '' "
-                    f"ORDER BY {key}), '')) FROM public.{table} r "
-                    "WHERE round_id = %s", (round_id,),
-                )
-                result.append(cursor.fetchone()[0])
-            return result
-
-        before = evidence()
-        cursor.execute(migration.read_text(encoding="utf-8"))
-        cursor.execute(migration.read_text(encoding="utf-8"))
-        assert evidence() == before
-        cursor.execute("SELECT public.lab_arena_twenty_icp_promotion_schema_v1()")
-        assert cursor.fetchone()[0]["version"] == 251
-        for signature in (
-            "public.lab_arena_prepare_confirmation_bank(text,text,text)",
-            "public.lab_arena_open_confirmation(text,jsonb)",
-            "public.lab_arena__confirmation_account_failure(text,text)",
-        ):
-            cursor.execute("SELECT to_regprocedure(%s)", (signature,))
-            assert cursor.fetchone()[0] is None
-        cursor.execute(
-            "SELECT has_function_privilege('lab_arena_service', "
-            "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE'), "
-            "has_function_privilege('anon', "
-            "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE')"
-        )
-        assert cursor.fetchone() == (True, False)

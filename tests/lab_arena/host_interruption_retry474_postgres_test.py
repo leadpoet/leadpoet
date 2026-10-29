@@ -125,7 +125,10 @@ def test_host_then_two_provider_failures_exhaust_two_normal_attempts(database):
         third=claim(conn,'c'); assert 'confirmation_attempt' not in finish(conn,third,token='c')
         assert expire(conn)['retried']==0
         assert close(conn)['status']=='closed'
-        assert plan(conn,cfg)['zero_rows']==[{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
+        built=plan(conn,cfg)
+        assert built['zero_rows']==[] and built['work_items']==[]
+        assert built['incomplete_rows']==[{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
+        assert [r['execution_attempt'] for r in projected(conn)]==[0,1,2]
 
 def test_two_genuine_provider_failures_still_exhaust(database):
     with database[0].connect(**database[1]) as conn:
@@ -134,7 +137,10 @@ def test_two_genuine_provider_failures_still_exhaust(database):
         second=claim(conn,'b'); assert 'confirmation_attempt' not in finish(conn,second)
         assert expire(conn)['retried']==0
         assert close(conn)['status']=='closed'
-        assert len(plan(conn,cfg)['zero_rows'])==1
+        built=plan(conn,cfg)
+        assert built['zero_rows']==[] and built['work_items']==[]
+        assert built['incomplete_rows']==[{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
+        assert [r['execution_attempt'] for r in projected(conn)]==[1,2]
 
 @pytest.mark.parametrize('cause',['model_error','invalid_output','credential_error','budget_exhausted'])
 def test_genuine_terminal_failure_is_not_replayed_because_of_host_credit(database,cause):
@@ -389,6 +395,8 @@ def test_current_schema_model_zero_preserves_baseline_scores_and_publication(dat
     from dataclasses import replace
     from lab_arena import runtime
     connect=lambda:database[0].connect(**database[1])
+    from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+    prepare_current_service_reads(connect)
     with connect() as conn, conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')
         cur.execute('TRUNCATE public.lab_arena_rounds,public.lab_arena_ledger,public.lab_arena_trajectory_events RESTART IDENTITY CASCADE')
@@ -448,6 +456,8 @@ def test_current_schema_model_zero_preserves_baseline_scores_and_publication(dat
 
 
 def test_current_schema_accepted_scores_publish_and_activate_reward(database,tmp_path):
+    from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+    prepare_current_service_reads(lambda:database[0].connect(**database[1]))
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
         cur.execute('TRUNCATE public.lab_arena_ledger,public.lab_arena_trajectory_events RESTART IDENTITY CASCADE')
     cutoff.test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path)

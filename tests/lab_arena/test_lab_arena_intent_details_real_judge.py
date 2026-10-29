@@ -18,6 +18,16 @@ LAUNCH_SENTENCE = (
     "for logistics operating teams."
 )
 FUNDING_DESCRIPTION = "Acme Robotics announced a $40 million Series B funding round."
+# A complete source article is required by the current fetch admission contract;
+# a one-sentence search highlight is not a fetched page.
+LAUNCH_PAGE_TEXT = (
+    LAUNCH_SENTENCE
+    + " Fleet Control is a robotics fleet-management software platform sold by "
+    "Acme Robotics to logistics operators. The announcement describes the new "
+    "platform's availability to logistics operating teams. Acme Robotics is "
+    "headquartered in San Francisco, California, and has 120 employees. "
+    "The company was founded in 2019."
+)
 LAUNCH_DESCRIPTION = "Acme Robotics launched its Fleet Control platform."
 PARAGRAPH = (
     "Acme Robotics announced a $40 million Series B funding round on July 15, "
@@ -111,7 +121,7 @@ def _source_results() -> Dict[str, Any]:
                 "title": "Acme Robotics launches Fleet Control",
                 "publishedDate": "2026-08-20T00:00:00.000Z",
                 "author": "Acme Robotics",
-                "text": LAUNCH_SENTENCE,
+                "text": LAUNCH_PAGE_TEXT,
                 "highlights": [LAUNCH_SENTENCE],
                 "highlightScores": [0.98],
                 "score": 0.98,
@@ -167,7 +177,7 @@ def _company_fit_reply() -> Dict[str, Any]:
         "observed_company_linkedin": (
             "https://www.linkedin.com/company/acme-robotics"
         ),
-        "observed_employee_count": "51-200",
+        "observed_employee_count": 120,
         "employee_size_matches": True,
         "employee_size_evidence_url": about_url,
         "employee_size_evidence_quote": "Acme Robotics has 120 employees.",
@@ -199,17 +209,34 @@ def _company_fit_reply() -> Dict[str, Any]:
     }
 
 
+def _unit_evidence(
+    review_document: Mapping[str, Any], unit_id: int
+) -> list[Dict[str, Any]]:
+    # Bind each event to its own complete article, including its observed date.
+    signals = (0, 1) if unit_id == 2 else (unit_id,)
+    return [
+        {"source_index": source["source_index"], "quote": source["admitted_text"][0]}
+        for source in review_document["admitted_evidence"]
+        if source["evidence_kind"] == "verified_source_context"
+        and source["matched_icp_signal"] in signals
+    ]
+
+
 def _local_responder(
     review_checks: Mapping[str, bool] | None,
     review_documents: list[Dict[str, Any]],
+    repair_documents: list[Dict[str, Any]] | None = None,
 ):
-    """Return a fake provider that honors the two strict judge contracts."""
+    """Return a fake provider that honors the strict judge and repair contracts."""
 
     def respond(
         operation_id: str, normalized: Mapping[str, Any]
     ) -> Tuple[int, Dict[str, str], bytes]:
         headers = {"content-type": "application/json"}
         if operation_id == "openrouter.chat":
+            if normalized.get("tools"):
+                body = real_judge.investigator_completion(normalized)
+                return 200, headers, json.dumps(body).encode()
             messages = normalized.get("messages") or []
             prompt = " ".join(str(item.get("content") or "") for item in messages)
             response_format = normalized.get("response_format") or {}
@@ -226,10 +253,6 @@ def _local_responder(
                 }
                 review_document = json.loads(str(messages[-1]["content"]))
                 review_documents.append(review_document)
-                source_index, values = next(iter(
-                    intent_details._bound_evidence_sources(review_document).items()
-                ))
-                quote = values[0][:500]
                 unit_grounding = [
                     {
                         "unit_id": unit["unit_id"],
@@ -246,7 +269,7 @@ def _local_responder(
                             if review_checks is not None
                             and not review_checks["facts_supported"]
                             and unit["unit_id"] == 0
-                            else [{"source_index": source_index, "quote": quote}]
+                            else _unit_evidence(review_document, unit["unit_id"])
                         ),
                     }
                     for unit in review_document["intent_details_units"]
@@ -261,6 +284,21 @@ def _local_responder(
                         **dict(review_checks),
                     } if review_checks is not None else {}
                 )
+            elif schema_name == "arena_intent_details_semantic_repair":
+                assert schema.get("strict") is True
+                repair_document = json.loads(str(messages[-1]["content"]))
+                if repair_documents is not None:
+                    repair_documents.append(repair_document)
+                units = repair_document["bounded_unit_repair_control"]["units"]
+                # Only the synthesis sentence's relative word "recent" needs
+                # this bounded review. A failed funding claim stays UNPROVEN.
+                assert [unit["unit_id"] for unit in units] == [2]
+                assert units[0]["semantic_recheck_reason"] == "relative_time_grounding_review"
+                content = json.dumps({"repairs": [{
+                    "unit_id": 2,
+                    "status": "VERIFIED",
+                    "evidence": _unit_evidence(repair_document["review_document"], 2),
+                }]})
             elif schema_name == "verification":
                 content = json.dumps(_stage3_reply(prompt))
             else:
@@ -305,8 +343,9 @@ def test_real_judge_reviews_one_paragraph_against_two_verified_signals(
         name: name != failed_check for name in intent_details._CHECKS
     }
     review_documents: list[Dict[str, Any]] = []
+    repair_documents: list[Dict[str, Any]] = []
     monkeypatch.setattr(
-        real_judge, "respond", _local_responder(checks, review_documents)
+        real_judge, "respond", _local_responder(checks, review_documents, repair_documents)
     )
 
     document = _scoring_input()
@@ -330,6 +369,7 @@ def test_real_judge_reviews_one_paragraph_against_two_verified_signals(
     ] == 0
 
     assert len(review_documents) == 1, summary
+    assert len(repair_documents) == 1, summary
     review = review_documents[0]
     assert " ".join(
         unit["text"] for unit in review["intent_details_units"]
@@ -371,3 +411,25 @@ def test_real_judge_retries_malformed_intent_details_review(
     assert result["output"]["reason"] == "malformed_response", summary
     assert len(review_documents) == scoring.MAX_JUDGE_RETRIES, summary
     assert all(len(item["verified_signals"]) == 2 for item in review_documents)
+
+
+def test_thin_launch_highlight_cannot_become_a_verified_signal(
+    tmp_path, monkeypatch
+) -> None:
+    review_documents: list[Dict[str, Any]] = []
+    monkeypatch.setattr(f"{__name__}.LAUNCH_PAGE_TEXT", LAUNCH_SENTENCE)
+    monkeypatch.setattr(real_judge, "respond", _local_responder(
+        dict.fromkeys(intent_details._CHECKS, True), review_documents
+    ))
+
+    result = real_judge.run_real_judge(tmp_path, _scoring_input())
+    summary = real_judge.describe(result)
+
+    assert result["exit_code"] == 0 and not result["rejected"], summary
+    assert result["output"]["failure"] == "judge_error", summary
+    assert result["output"]["reason"] == "malformed_response", summary
+    assert len(review_documents) == scoring.MAX_JUDGE_RETRIES, summary
+    assert all(
+        [signal["matched_icp_signal"] for signal in review["verified_signals"]] == [0]
+        for review in review_documents
+    )

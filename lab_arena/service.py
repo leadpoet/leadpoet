@@ -4170,7 +4170,10 @@ class ArenaService:
                 "ineligible_submissions": [],
                 "finalists": finalists,
             }
-        self._score_recovered_baseline(round_row)
+        # Continuation judgments are materialized by publish in the scored
+        # phase. Its guarded writer selects only missing projections.
+        if not _judge_continuation_enabled(round_row):
+            self._score_recovered_baseline(round_row)
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
         return {
             "status": transition.get("status"),

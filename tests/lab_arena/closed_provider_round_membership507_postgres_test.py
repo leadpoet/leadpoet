@@ -257,7 +257,24 @@ def plan_database():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(arena_pg, '_database_with_migrations',
                       partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
-        yield from database.__wrapped__()
+        generator = database.__wrapped__()
+        try:
+            db = next(generator)
+            with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
+                # Historical507 equivalence/replay tests keep their own DB.
+                # The production throughput bound uses the full deployed plan.
+                for migration in (
+                    '557-lab-arena-closed-provider-scoped-candidates.sql',
+                    '559-lab-arena-deepline-uncertain-round-entry-index.sql',
+                    '560-lab-arena-closed-provider-score-run-scope.sql',
+                    '573-lab-arena-closed-provider-eligible-run-materialization.sql',
+                ):
+                    cursor.execute((ROOT / 'scripts' / migration).read_text())
+                cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURE,))
+                assert hashlib.sha256(cursor.fetchone()[0].encode()).hexdigest() == 'ce8691e166d24a87ff6bbf475dca8cc0eb526b6688f3af22fad6ad8b0a8b6c89'
+            yield db
+        finally:
+            generator.close()
 
 
 def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
@@ -327,6 +344,8 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                 # larger allowance. Optimized507 retains its 20-second bound.
                 cur.execute('SET LOCAL statement_timeout=%s',
                             ('60s' if name.startswith('test_before_') else '20s',))
+                print('PLAN507_FUNCTION name=%s statement_timeout=%s' %
+                      (name, '60s' if name.startswith('test_before_') else '20s'), flush=True)
                 cur.execute('SELECT public.'+name+"('live','plan507',71,'',0)")
                 results.append(cur.fetchone()[0])
                 cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+

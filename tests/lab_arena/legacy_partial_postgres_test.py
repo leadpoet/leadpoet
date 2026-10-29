@@ -209,14 +209,10 @@ def test_owner_credit_retry_requires_bound_checkpoint_and_original_credit_gates(
 
 @pytest.fixture()
 def round_database():
-    # Separate complete rounds preserve their own baseline packages and reward
-    # state. Reuse the exact deployed schema fixture, including migration468.
-    generator = database.__wrapped__()
-    value = next(generator)
-    try:
-        yield value
-    finally:
-        generator.close()
+    # The app lifecycle uses the full runtime schema. Raw migration468 proofs
+    # above continue to use their exact historical database fixture.
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
 
 
 @pytest.mark.parametrize('failure', ['judge_error', 'judge_timeout'])
@@ -281,6 +277,36 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
             return runtime.fake_result(exit_code=0, timed_out=timed_out, output_bytes=json.dumps(output).encode())
 
     harness.sandbox.run_icp = run_icp
+    run_stage = harness.run_stage_with_runners
+    advanced_retry_clock = []
+
+    def run_stage_after_retry_backoff(count=2):
+        run_stage(count)
+        # The signed runners have exhausted available jobs. A pending retry is
+        # still fenced by the current 30-second queue backoff. Advance only
+        # that disposable clock, then let the normal signed claim resume it.
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT run_id,created_at+interval '30 seconds'>clock_timestamp() "
+                        "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' "
+                        "AND scored_run_id=%s AND status='pending' AND attempt=2",
+                        (harness.round_id, state['target']))
+            pending = cur.fetchall()
+            if pending:
+                assert state['failed'] and not advanced_retry_clock
+                assert len(pending) == 1 and pending[0][1] is True
+                assert len([r for r in leases if r['scored_run_id'] == state['target']]) == 1
+                scheduled_now = harness.clock.now
+                harness.clock.now = datetime.now(timezone.utc)
+                probe = harness.runner(0)
+                try:
+                    assert probe.run_once() == 0
+                finally:
+                    probe.close()
+                    harness.clock.now = scheduled_now
+                fixtures._make_pending_judge_retries_ready(harness)
+                advanced_retry_clock.append(pending[0][0])
+
+    harness.run_stage_with_runners = run_stage_after_retry_backoff
     round_id = 'arena-2026-12-02-legacy' + ('err' if failure == 'judge_error' else 'time')
     configuration = harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=round_id)
     harness.round_id = round_id
@@ -290,6 +316,7 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
     challenger = harness.submit('Recovered', round_id)
     harness.clock.advance_to(harness.schedule()['submission_cutoff'])
     harness.advance_until('scored', runners=2, max_steps=120)
+    assert len(advanced_retry_clock) == 1
     failed = next(run for run in harness.service.store.list_runs(round_id, kind='score') if run['status'] == 'failed')
     assert failed['scored_run_id'] == state['target']
     assert failed['terminal_cause'] == failure and failed['per_icp_score'] is None

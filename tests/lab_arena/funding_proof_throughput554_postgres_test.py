@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from functools import partial
 
 import pytest
 
@@ -12,10 +13,15 @@ from tests.lab_arena import funding_proof_scalars526_postgres_test as scalar
 from tests.lab_arena import proven_funding_recovery524_postgres_test as prior
 from tests.lab_arena.quiescence_recovery_gate522_postgres_test import reset
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
+from tests.lab_arena.closed_provider_round_membership507_postgres_test import POSTGRES_IMAGE
 
 ROOT = Path(__file__).parents[2]
 INDEX = ROOT / 'scripts/553-lab-arena-paid-native-request-index.sql'
 SQL = ROOT / 'scripts/554-lab-arena-funding-proof-throughput.sql'
+KEYED_SQL = ROOT / 'scripts/558-lab-arena-funding-proof-keyed-lookups.sql'
+KEYED_POST = '23fbb6e5d40450916b75110d16d9b3c9c369264014dea51e17db7f3f978786c6'
 PRE = '46acfd38b92eb7a03613a4d55c72cc9af57339cf6602ed4611955af22b511cf6'
 POST = 'a962ddae017d3e1efbbe05d296bd1b9c895523d4a5081b0a3fd2c78b9c7f3d73'
 NAME = 'public.lab_arena_ledger_paid_native_request_idx'
@@ -61,6 +67,16 @@ def database():
         yield db
     finally:
         gen.close()
+
+
+@pytest.fixture
+def throughput_database():
+    # Historical semantic/replay controls above stay exactly at554. The
+    # independent throughput case upgrades to the deployed keyed558 authority.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, '_database_with_migrations',
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        yield from database.__wrapped__()
 
 
 # Existing successful, adversarial, inherited-root and malformed JSON proofs
@@ -200,9 +216,9 @@ def _queue70(c, run, denial):
     return ids
 
 
-def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history(database):
-    pg, dsn = database
-    run, denial = prior.seed(database)
+def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history(throughput_database):
+    pg, dsn = throughput_database
+    run, denial = prior.seed(throughput_database)
     with pg.connect(**dsn) as c, c.cursor() as q:
         ids = _queue70(c, run, denial)
         funded = prior.clone(c, run, 'historical-wide')
@@ -231,7 +247,13 @@ def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history
         c.commit()
         build_seconds = time.monotonic()-started
         q.execute(SQL.read_text())
+        #558 keeps exact keys in index conditions;554's intermediate planner
+        # shape is preserved in the separate historical semantic controls.
+        q.execute(KEYED_SQL.read_text())
+        assert hashlib.sha256(definition(q).encode()).hexdigest() == KEYED_POST
         c.commit()
+        q.execute("SELECT current_setting('server_version'),current_setting('server_version_num')")
+        print('FUNDING554_RUNTIME deployed_funding=558 server_version=%s server_version_num=%s' % q.fetchone(), flush=True)
         q.execute("SET LOCAL statement_timeout='8s'")
         started = time.monotonic()
         q.execute('SELECT bool_or(public.lab_arena_miner_credit_failure_v1(run_id)) FROM public.lab_arena_runs WHERE run_id=ANY(%s)', (ids,))

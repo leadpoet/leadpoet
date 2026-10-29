@@ -12,6 +12,7 @@ domain refusal.
 from __future__ import annotations
 
 import collections
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -82,12 +83,13 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # The operator's first command (--check-only) parses PostgREST error bodies for the function probes.
     checks = service.startup_checks()
     assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     configuration = service.create_round(cutoff, round_id="arena-2026-09-03-rest")
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
     # With a current round, startup also compares the pinned identities of this build.
     assert harness.build_service().startup_checks()["current_round"] == round_id
+    harness.clock.now = cutoff - timedelta(minutes=15)
     submissions = {flavor: harness.submit(flavor, round_id) for flavor in harness.challengers}
     participant_count = len(harness.challengers) + 1  # challengers plus the daily public baseline
     assert service.advance_round(round_id)["status"] == "waiting"
@@ -132,9 +134,42 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert "lab_arena_register_submission" in reached or "lab_arena_register_submission_v2" in reached
     assert "lab_arena_open_scoring" in reached or "lab_arena_open_scoring_v2" in reached
     assert "lab_arena_complete_attempt" in reached or "lab_arena_complete_attempt_v2" in reached
-    # Every function the round did not reach is routed and coerced by PostgREST; only its own domain check refuses.
+    # Every unvisited RPC must reach its domain check or exact empty-result
+    # contract. Read-only lookups and capability probes legitimately succeed.
+    empty_results = {
+        "lab_arena__miner_credit_judgment_terminal_v1": False,
+        "lab_arena_latest_promoted_champion_v1": None,
+        "lab_arena_signal_authority_exclusions_v1": None,
+        "lab_arena_scoring_policy_history_v1": {"revisions": [], "round_id": "missing-round-id"},
+        "lab_arena_next_closed_provider_reconciliation_v1": {"status": "none"},
+        "lab_arena_retry_credit_failures_v1": {"status": "no_eligible", "reason": "invalid_request_hash", "requeued_count": 0},
+        "lab_arena_review_guard_state_v1": {"schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False},
+        "lab_arena_deepline_catalog_schema_v1": {"schema_version": "leadpoet.lab_arena.deepline_catalog_schema.v1", "version": 415},
+        "lab_arena_deepline_response_schema_v1": {"schema_version": "leadpoet.lab_arena.deepline_response_schema.v1", "version": 426, "status": "ok"},
+        "lab_arena_infrastructure_retry_cost_schema_v1": {"schema_version": "leadpoet.lab_arena.infrastructure_retry_cost_schema.v1", "version": 478, "policy": "trusted_infrastructure_v1"},
+        "lab_arena_parallel_execution_schema_v2": {"schema_version": "leadpoet.lab_arena.parallel_execution_schema.v2", "version": 401, "max_parallel_icps": 251},
+        "lab_arena_per_icp_cost_schema_v1": {"schema_version": "leadpoet.lab_arena.per_icp_cost_schema.v1", "version": 289, "policy": "successful_calls_per_icp_v1"},
+    }
+    unexpected_results = {}
     for function in sorted(set(FUNCTION_SIGNATURES) - reached):
         params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
+        if function in empty_results:
+            assert harness.transport.rpc(function, params) == empty_results[function], function
+            continue
+        if function == "lab_arena_restart_guard_state_v1":
+            state = harness.transport.rpc(function, params)
+            assert state["schema_version"] == "leadpoet.lab_arena.restart_guard_state.v1"
+            assert all(state[field] is False for field in ("guard_active", "guard_present", "operator_paused", "paused"))
+            assert all(state[field] == "" for field in ("candidate_commit", "guard_commitment", "owner_commitment", "restart_phase", "restart_scope"))
+            assert state["guard_expires_at"] is None
+            assert type(state["guard_generation"]) is int and state["guard_generation"] >= 0
+            drain = state["drain"]
+            assert drain["schema_version"] == "leadpoet.lab_arena.restart_drain_state.v1"
+            assert drain["preserved"] is True
+            assert all(value == 0 for name, value in drain.items() if name.endswith("_count"))
+            assert drain["snapshot_commitment"] == contracts.document_hash([])
+            assert drain["outcome_commitment"].startswith("sha256:") and len(drain["outcome_commitment"]) == 71
+            continue
         if function == "lab_arena_current_daily_icp_set":
             response = harness.transport.rpc(function, params)
             assert response["status"] == "unavailable"
@@ -181,11 +216,16 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
         if function == "lab_arena_next_closed_deepline_reconciliation_v1":
             assert harness.transport.rpc(function, params)["status"] == "none"
             continue
-        with pytest.raises(ArenaStoreError) as excinfo:
-            harness.transport.rpc(function, params)
-        message = str(excinfo.value)
+        try:
+            response = harness.transport.rpc(function, params)
+        except ArenaStoreError as error:
+            message = str(error)
+        else:
+            unexpected_results[function] = response
+            continue
         assert not any(marker in message for marker in ROUTING_OR_COERCION_MARKERS), (function, message)
         assert "lab_arena_" in message or "code=P0" in message, (function, message)
+    assert not unexpected_results, json.dumps(unexpected_results, sort_keys=True, indent=2)
     # The cancel path is real, not a probe: a fresh round is cancelled through PostgREST.
     second = service.create_round(cutoff, round_id="arena-2026-09-03-restcancel")
     assert service.store.cancel_round(second["round_id"], "operator_abort")["status"] in ("ok", "cancelled")

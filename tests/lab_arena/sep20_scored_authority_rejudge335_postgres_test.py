@@ -206,11 +206,7 @@ def test_sep20_rerun335_preserves_scored_research_history_and_authority(
         rerun332._drive_rejudge_cycle(
             harness.service, harness.objects, harness.runner_keys[0]
         )
-        with pytest.raises(
-            ArenaStoreError,
-            match="Sep20 rejudge332 publication requires sealed review release",
-        ):
-            harness.service.publish(ROUND)
+        rerun332.assert_sealed_publication_stop(harness.service, connection, psycopg2.Error)
         with connection.cursor() as cursor:
             assert rerun332._scalar(
                 cursor,

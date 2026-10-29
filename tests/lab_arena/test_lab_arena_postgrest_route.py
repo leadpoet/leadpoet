@@ -18,22 +18,20 @@ import json
 import shutil
 import socket
 import subprocess
+import sys
 import time
-from pathlib import Path
 from uuid import uuid4
 
 import httpx
 import pytest
 
-from lab_arena import contracts
-from lab_arena.store import ArenaRoleError, ArenaStore, ArenaStoreError, PostgrestTransport
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS
+from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena import lab_arena_pg_harness
+from tests.lab_arena.test_lab_arena_migration_postgres import round_config
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ROOT / "scripts"
 DOCKER = shutil.which("docker")
 POSTGREST_IMAGE = "postgrest/postgrest:v12.2.3"
-POSTGRES_IMAGE = "postgres:15"
 JWT_SECRET = "lab-arena-local-jwt-secret-" + "x" * 40
 
 pytestmark = pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
@@ -62,100 +60,67 @@ def _docker(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
 
 @pytest.fixture(scope="module")
 def stack():
-    psycopg2 = pytest.importorskip("psycopg2")
-    suffix = uuid4().hex[:10]
-    network = "lab-arena-net-%s" % suffix
-    pg_name = "lab-arena-pg-%s" % suffix
-    rest_name = "lab-arena-rest-%s" % suffix
-    pg_port = _free_port()
+    # Use the same exact current schema as the service tests. Keep real
+    # PostgREST role switching, HTTP coercion, RLS and RPC execution.
+    database = current_service_database()
+    connection = None
+    rest_name = "lab-arena-rest-" + uuid4().hex[:10]
     rest_port = _free_port()
-    started = []
+    started = False
     try:
-        if _docker("network", "create", network).returncode != 0:
-            pytest.skip("docker network could not be created")
-        started.append(("network", network))
-        run = _docker("run", "--rm", "--detach", "--name", pg_name, "--network", network, "--env", "POSTGRES_PASSWORD=postgres", "--publish", "127.0.0.1:%d:5432" % pg_port, POSTGRES_IMAGE)
-        if run.returncode != 0:
-            pytest.skip("PostgreSQL container could not start: %s" % run.stderr[-200:])
-        started.append(("container", pg_name))
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline:
-            if _docker("exec", pg_name, "pg_isready", "-U", "postgres", timeout=10).returncode == 0:
-                break
-            time.sleep(0.5)
-        else:
-            pytest.fail("PostgreSQL container did not become ready")
-        dsn = {"host": "127.0.0.1", "port": pg_port, "user": "postgres", "password": "postgres", "dbname": "postgres"}
-        connect_deadline = time.monotonic() + 20
-        while True:
-            try:
-                connection = psycopg2.connect(**dsn)
-                break
-            except psycopg2.OperationalError:
-                if time.monotonic() >= connect_deadline:
-                    raise
-                time.sleep(0.5)
+        # A Docker database exposes its password-authenticated host port to
+        # PostgREST on both Linux CI and Docker Desktop.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("LAB_ARENA_PG_LOCAL", "0")
+            seed_database = lab_arena_pg_harness._database_with_migrations
+
+            def with_authenticator(migrations, *, setup_sql="", **kwargs):
+                # The real Arena migration must grant its scoped role to an
+                # existing authenticator, as hosted Supabase does.
+                setup_sql += "\nCREATE ROLE authenticator LOGIN PASSWORD 'authenticator-pw' NOINHERIT; GRANT anon,authenticated,service_role TO authenticator;"
+                return seed_database(migrations, setup_sql=setup_sql, **kwargs)
+
+            patch.setattr(lab_arena_pg_harness, "_database_with_migrations", with_authenticator)
+            psycopg2, dsn = next(database)
+        connection = psycopg2.connect(**dsn)
         connection.autocommit = True
         with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE SCHEMA IF NOT EXISTS extensions;
-                CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
-                CREATE ROLE anon NOLOGIN;
-                CREATE ROLE authenticated NOLOGIN;
-                CREATE ROLE service_role NOLOGIN;
-                CREATE ROLE authenticator LOGIN PASSWORD 'authenticator-pw' NOINHERIT;
-                GRANT anon, authenticated, service_role TO authenticator;
-                CREATE TABLE public.lab_arena_test_other_table (id INT);
-                CREATE TABLE public.qualification_private_icp_sets (
-                  set_id BIGINT PRIMARY KEY,
-                  icps JSONB NOT NULL,
-                  active_from TIMESTAMPTZ,
-                  active_until TIMESTAMPTZ,
-                  is_active BOOLEAN NOT NULL DEFAULT FALSE
-                );
-                ALTER TABLE public.qualification_private_icp_sets ENABLE ROW LEVEL SECURITY;
-                REVOKE ALL ON TABLE public.qualification_private_icp_sets
-                  FROM PUBLIC, anon, authenticated;
-                """
-            )
-            for migration in CURRENT_SERVICE_MIGRATIONS:
-                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
-            cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'authenticator' ORDER BY 1")
-            memberships = [row[0] for row in cursor.fetchall()]
-        assert "lab_arena_service" in memberships, memberships
+            cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='authenticator' ORDER BY 1")
+            assert "lab_arena_service" in [row[0] for row in cursor.fetchall()]
+            cursor.execute("CREATE TABLE public.lab_arena_test_other_table (id INT)")
+        linux = sys.platform.startswith("linux")
+        host = "127.0.0.1" if linux else "host.docker.internal"
+        networking = ("--network", "host") if linux else (
+            "--publish", "127.0.0.1:%d:%d" % (rest_port, rest_port))
         rest = _docker(
-            "run", "--rm", "--detach", "--name", rest_name, "--network", network, "--publish", "127.0.0.1:%d:3000" % rest_port,
-            "--env", "PGRST_DB_URI=postgres://authenticator:authenticator-pw@%s:5432/postgres" % pg_name,
+            "run", "--rm", "--detach", "--name", rest_name, *networking,
+            "--env", "PGRST_DB_URI=postgres://authenticator:authenticator-pw@%s:%d/postgres" % (host, dsn["port"]),
+            "--env", "PGRST_SERVER_PORT=%d" % rest_port,
             "--env", "PGRST_DB_SCHEMAS=public", "--env", "PGRST_DB_ANON_ROLE=anon", "--env", "PGRST_JWT_SECRET=%s" % JWT_SECRET,
             "--env", "PGRST_DB_POOL=4", POSTGREST_IMAGE,
         )
-        if rest.returncode != 0:
-            pytest.skip("PostgREST container could not start: %s" % rest.stderr[-200:])
-        started.append(("container", rest_name))
+        assert rest.returncode == 0, "PostgREST container could not start: %s" % rest.stderr[-200:]
+        started = True
         base_url = "http://127.0.0.1:%d" % rest_port
-        client = httpx.Client(http1=True, http2=False, timeout=httpx.Timeout(10.0))
-        deadline = time.monotonic() + 60
-        ready = False
-        while time.monotonic() < deadline:
-            try:
-                if client.get(base_url + "/", headers={"Accept": "application/json"}).status_code < 500:
-                    ready = True
-                    break
-            except httpx.HTTPError:
-                pass
-            time.sleep(0.5)
-        if not ready:
-            logs = _docker("logs", rest_name)
-            pytest.fail("PostgREST did not become ready: %s" % (logs.stdout + logs.stderr)[-500:])
-        yield {"base_url": base_url, "connection": connection}
-        connection.close()
-    finally:
-        for kind, name in reversed(started):
-            if kind == "container":
-                _docker("rm", "--force", name, timeout=60)
+        with httpx.Client(http1=True, http2=False, timeout=httpx.Timeout(10.0)) as client:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                try:
+                    if client.get(base_url + "/", headers={"Accept": "application/json"}).status_code < 500:
+                        break
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.5)
             else:
-                _docker("network", "rm", name, timeout=60)
+                logs = _docker("logs", rest_name)
+                pytest.fail("PostgREST did not become ready: %s" % (logs.stdout + logs.stderr)[-500:])
+        yield {"base_url": base_url, "connection": connection}
+    finally:
+        if started:
+            _docker("rm", "--force", rest_name, timeout=60)
+        if connection is not None:
+            connection.close()
+        database.close()
 
 
 def make_transport(
@@ -190,7 +155,7 @@ def test_service_role_authorization_reaches_whoami_and_functions_through_postgre
     identity = store.require_service_role()
     assert identity["current_user"] == "lab_arena_service" and identity["jwt_role"] == "lab_arena_service"
     assert identity["rolsuper"] is False and identity["rolbypassrls"] is False and identity["session_user"] == "authenticator"
-    config = {"round_id": "arena-2026-09-02", "mode": "live", "rewards_enabled": False, "runner_hotkeys": [], "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP)}
+    config = round_config("arena-2026-09-02", [], mode="live", rewards_enabled=False)
     assert store.create_round("arena-2026-09-02", config)["status"] == "created"
     assert store.get_round("arena-2026-09-02")["status"] == "open"
     assert store.list_rounds()[0]["round_id"] == "arena-2026-09-02"
@@ -220,7 +185,7 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
         ):
             assert store.create_round(
                 round_id,
-                {"round_id": round_id, "mode": mode, "rewards_enabled": rewards},
+                round_config(round_id, [], mode=mode, rewards_enabled=rewards),
             )["status"] == "created"
         # Seed enough rows to make an unfiltered limit-20 query fail to find
         # the live row. These rows are local PostgREST fixture data only.

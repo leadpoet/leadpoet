@@ -13,9 +13,8 @@ from lab_arena import broker, code_review, contracts, source_bundle
 from lab_arena.service import ServiceError
 from lab_arena.store import new_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_PROVIDER_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    current_service_database,
 )
-from tests.postgres_migration_harness import SCRIPTS
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_KEYS,
     CANARY_OPENROUTER_KEY,
@@ -30,55 +29,7 @@ from tests.lab_arena.test_lab_arena_service_round import (
 
 @pytest.fixture(scope="module")
 def database():
-    generator = database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
-        "365-lab-arena-trajectories.sql",
-        "492-lab-arena-review-provider-observations.sql",
-        "562-lab-arena-review-context-integrity-reason.sql",
-        "563-lab-arena-review-source-digest-reason.sql",
-        "566-lab-arena-research-review-result.sql",
-        "585-lab-arena-review-deadline-recovery.sql",
-    ))
-    db = next(generator)
-    try:
-        # Current scoring reads this computed column. Reuse its exact existing
-        # production definition without installing unrelated host retry RPCs.
-        sql = (SCRIPTS / "474-lab-arena-host-interruption-execution-retries.sql").read_text()
-        helper = "CREATE OR REPLACE FUNCTION public.lab_arena_execution_attempt_count"
-        definition = helper + sql.split(helper, 1)[1].split(
-            "CREATE OR REPLACE FUNCTION public.lab_arena__execute_assignment_calls_v1", 1,
-        )[0]
-        with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
-            cursor.execute("GRANT CREATE ON SCHEMA public TO lab_arena_owner")
-            cursor.execute(definition)
-            # This historical harness has no model supersessions. Install only
-            # migration 517's additive zero-floor columns and public projection
-            # used by current result reads. Keep zero defaults for old inserts.
-            supersession = (SCRIPTS / "517-lab-arena-model-policy-supersession.sql").read_text()
-            for table in ("rounds", "runs"):
-                anchor = f"ALTER TABLE public.lab_arena_{table} ADD COLUMN IF NOT EXISTS scoring_generation_floor"
-                cursor.execute(anchor + supersession.split(anchor, 1)[1].split(";", 1)[0] + ";")
-            anchor = "DO $view517$"
-            cursor.execute(anchor + supersession.split(anchor, 1)[1].split("$view517$;", 1)[0] + "$view517$;")
-            anchor = "CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions"
-            cursor.execute(anchor + supersession.split(anchor, 1)[1].split(";", 1)[0] + ";")
-            cursor.execute("ALTER TABLE public.lab_arena_scoring_supersessions OWNER TO lab_arena_owner")
-            cursor.execute("ALTER TABLE public.lab_arena_scoring_supersessions ENABLE ROW LEVEL SECURITY")
-            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena_scoring_policy_history_v1"
-            cursor.execute(anchor + supersession.split(anchor, 1)[1].split(
-                "-- Trigger and exact existing-function amendments follow below.", 1,
-            )[0])
-            privacy = (SCRIPTS / "540-lab-arena-incomplete-participant-publication.sql").read_text()
-            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena__execution_privacy_route_unavailable_v1"
-            cursor.execute(anchor + privacy.split(anchor, 1)[1].split(
-                "DO $preflight_lab_arena__participant_incomplete_reason_v1$", 1,
-            )[0])
-            public_failure = (SCRIPTS / "541-lab-arena-public-execution-failure-reason.sql").read_text()
-            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena_public_execution_failure_reason_v1"
-            cursor.execute(anchor + public_failure.split(anchor, 1)[1].split("DO $restore541$", 1)[0])
-            cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
-        yield db
-    finally:
-        generator.close()
+    yield from current_service_database()
 
 
 def _iso(moment: datetime) -> str:
@@ -89,6 +40,9 @@ def _signed_reserve(harness: Harness, round_id: str, flavor: str, miner_label: s
     """Reserve an upload through the same signed API used by a real miner."""
 
     miner = keypair("svc-miner-" + miner_label)
+    # Positive admission fixtures are registered miners; request validation stays real.
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(flavor)
     facts = source_bundle.validate_source_archive(payload)
     request = contracts.build_signed_request(

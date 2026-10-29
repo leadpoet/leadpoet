@@ -9,6 +9,7 @@ import json
 import pytest
 
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+from tests.lab_arena.historical_service import start_pre470_round
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge,
     _enable_verified_proxy_runtime,
@@ -92,7 +93,7 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
     )
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-    assert fixtures._start_round(harness, day=27, epoch=62_427) == 2
+    assert start_pre470_round(harness, round_id="arena-2026-09-27", epoch=62_427) == 2
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     harness.advance_until("stage1_scored", runners=1)
     harness.service.advance_round(harness.round_id)

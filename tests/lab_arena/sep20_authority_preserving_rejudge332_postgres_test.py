@@ -15,6 +15,7 @@ import pytest
 from lab_arena import rewards, source_disclosure
 from lab_arena.promotion import GitPromoter
 from lab_arena.store import ArenaStoreError
+from tests.lab_arena.historical_service import seed_pre428_initial_reward
 from tests.lab_arena import sep18_published_rerun295_postgres_test as lifecycle
 from tests.lab_arena import sep19_terminal309_newjudge_rerun310_postgres_test as rerun310
 from tests.lab_arena import sep20_90m_verifier_baseline_rerun328_postgres_test as rerun328
@@ -27,6 +28,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION,
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    prepare_current_service_reads,
 )
 
 
@@ -118,6 +120,9 @@ def database():
             assert "lab_arena_confirmed_cost_admission" in reserve_definition
             assert "lab_arena_confirmed_score_admission" in reserve_definition
             assert "lab_arena_confirmed_cost_eligibility" in eligibility_definition
+        # Modern read projections are installed before any historical seed or
+        # archive snapshot; exact write RPC preimages above stay unchanged.
+        prepare_current_service_reads(lambda: psycopg2.connect(**dsn))
         yield psycopg2, dsn
 
 
@@ -568,7 +573,7 @@ def _publish_rerun328(
     assert subprocess.check_output(
         ["git", "--git-dir", str(remote), "rev-parse", "lab"]
     ).strip()
-    assert harness.service.activate_reward(ROUND)["status"] == "activated"
+    assert seed_pre428_initial_reward(harness.service, harness.connect, round_id=ROUND)["status"] == "activated"
     assert harness.service.activate_reward(ROUND)["status"] == "existing"
 
 
@@ -784,6 +789,16 @@ def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
             assert service.close_stage(ROUND, 2)["status"] == "ok"
 
 
+def assert_sealed_publication_stop(service, connection, error_type):
+    assert service.publish(ROUND) == {
+        'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete',
+    }
+    with pytest.raises(error_type, match='Sep20 rejudge332 publication requires sealed review release'):
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE public.lab_arena_rounds SET status='published' WHERE round_id=%s", (ROUND,))
+    connection.rollback()
+
+
 def test_sep20_rerun332_preserves_history_and_isolates_new_scorer_cache(
     database, tmp_path, monkeypatch
 ):
@@ -984,11 +999,9 @@ def test_sep20_rerun332_preserves_history_and_isolates_new_scorer_cache(
         _drive_rejudge_cycle(
             harness.service, harness.objects, harness.runner_keys[0]
         )
-        with pytest.raises(
-            ArenaStoreError,
-            match="Sep20 rejudge332 publication requires sealed review release",
-        ):
-            harness.service.publish(ROUND)
+        # Current baseline completeness is stricter than this frozen schema.
+        # Its early hold must preserve the original SQL publication-stop proof.
+        assert_sealed_publication_stop(harness.service, connection, psycopg2.Error)
         with connection.cursor() as cursor:
             assert _scalar(
                 cursor,

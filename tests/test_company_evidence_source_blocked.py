@@ -15,9 +15,16 @@ from tests.test_current_linkedin_company_size import _install_exa_bodies
 PROFILE = "https://www.linkedin.com/company/acme"
 PAGES = ("https://acme.example/about", "https://acme.example/product")
 TARGETS = ("headcount", "industry", "required_attribute")
+pytestmark = pytest.mark.parametrize("rendered", [False, True], ids=["direct", "rendered"])
 
 
-def _run(monkeypatch, case):
+def _run(monkeypatch, case, *, rendered):
+    # Exercise both production transports independently of the caller's keys.
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+    if rendered:
+        monkeypatch.setenv("SCRAPINGDOG_API_KEY", "offline-scrapingdog-key")
+    else:
+        monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
     code, tag, profile = {
         "blocked409": (409, "CRAWL_NON_CANONICAL", PROFILE),
         "blocked504": (504, "CRAWL_LIVECRAWL_TIMEOUT", PROFILE),
@@ -53,9 +60,23 @@ def _run(monkeypatch, case):
     search_calls = []
     reasoning_calls = []
     search_requested = False
+    page_calls = []
 
     async def fetch(_session, url, **_kwargs):
-        assert url in PAGES
+        if rendered:
+            assert url == "https://api.scrapingdog.com/scrape"
+            assert _kwargs["params"] == {
+                "api_key": "offline-scrapingdog-key",
+                "url": PAGES[len(page_calls)], "dynamic": "true", "wait": "5000",
+            }
+            target = _kwargs["params"]["url"]
+        else:
+            assert not _kwargs
+            target = url
+        assert target == PAGES[len(page_calls)]
+        page_calls.append(target)
+        # Rendered transport may report its endpoint; production must retain
+        # the validated target's evidence identity in that case.
         return 200, url, "Acme maintains a company information page."
 
     async def search(_session, query, **_kwargs):
@@ -101,14 +122,15 @@ def _run(monkeypatch, case):
         verified_homepage_identity={"normalized_name": "acme", "registrable_dns_domain": "acme.example"},
     ))
     assert not pending_urls and not pending_bodies
+    assert page_calls == list(PAGES)
     assert len(profile_calls) == 1
     assert search_calls
     return result
 
 
 @pytest.mark.parametrize("case", ["blocked409", "blocked504", "wall"])
-def test_typed_linkedin_block_plus_successful_sources_can_complete_unproven(monkeypatch, case):
-    result = _run(monkeypatch, case)
+def test_typed_linkedin_block_plus_successful_sources_can_complete_unproven(monkeypatch, case, rendered):
+    result = _run(monkeypatch, case, rendered=rendered)
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""
     assert set(result["claims"]) == set(TARGETS)
@@ -133,8 +155,8 @@ def test_typed_linkedin_block_plus_successful_sources_can_complete_unproven(monk
     "crawl502", "crawl504", "unbound504", "outer504", "outer_timeout",
     "malformed", "invalid_evidence", "required_search_failure",
 ])
-def test_genuine_provider_and_incomplete_evidence_failures_remain_retryable(monkeypatch, case):
-    result = _run(monkeypatch, case)
+def test_genuine_provider_and_incomplete_evidence_failures_remain_retryable(monkeypatch, case, rendered):
+    result = _run(monkeypatch, case, rendered=rendered)
     assert result.get("_completed_submit") is not True
     assert result["failure_reason"] in {"provider_error", "malformed_response"}
     assert all(finding["status"] != "VERIFIED" for finding in result["claims"].values())

@@ -26,6 +26,17 @@ def _ordered_offsets(text: str, markers: tuple[str, ...]) -> list[int]:
     return offsets
 
 
+def _current_restart_environment():
+    """Model the controller's instance-role environment, not CI credentials."""
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AWS_") and key not in {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        }
+    }
+
+
 def _shell_function_source(script: str, name: str) -> str:
     lines = script.splitlines()
     start = lines.index(f"{name}() {{")
@@ -1851,7 +1862,7 @@ import fcntl
 import sys
 import time
 
-with open(sys.argv[2], "w", encoding="utf-8") as handle:
+with open(sys.argv[-1], "w", encoding="utf-8") as handle:
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     print("ready", flush=True)
     time.sleep(30)
@@ -1880,7 +1891,7 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
             text=True,
             timeout=5,
             env={
-                **os.environ,
+                **_current_restart_environment(),
                 "GATEWAY_ROOT": str(tmp_path / "missing-gateway"),
                 "GATEWAY_RESTART_LOCK_FILE": str(lock_file),
                 "GATEWAY_RESTART_RECOVERY_LOCK_FILE": str(
@@ -1987,13 +1998,7 @@ def test_gateway_restart_does_not_require_closed_model_identity() -> None:
 def _run_current_restart_helpers(names, command, *, environment=None):
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     source = "\n\n".join(_shell_function_source(script, name) for name in names)
-    env = {
-        key: value for key, value in os.environ.items()
-        if not key.startswith("AWS_") and key not in {
-            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
-            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
-        }
-    }
+    env = _current_restart_environment()
     env.update(environment or {})
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + source + "\n" + command],

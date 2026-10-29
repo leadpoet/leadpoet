@@ -88,7 +88,7 @@ def _enable_verified_proxy_runtime(harness):
     harness.runner = runner
 
 
-def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
+def test_baseline_execution_precedes_five_miners_and_all_judgments_publish(
     database, tmp_path, monkeypatch
 ):
     psycopg2, dsn = database
@@ -138,15 +138,18 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
         harness.round_id, stage=2, kind="execute"
     ) == []
 
-    harness.advance_until("stage1_scored", runners=2)
+    # Migration 572 permits baseline judging to continue while miners run.
+    # All baseline executions must still finish before any miner is admitted.
+    harness.advance_until("stage1_scoring", runners=2)
     scored_baseline = harness.service.store.list_runs(
         harness.round_id, stage=1, kind="execute"
     )
     assert len(scored_baseline) == 20
-    assert all(run["per_icp_score"] is not None for run in scored_baseline)
-    assert harness.service._baseline_fully_succeeded(
-        harness.service.store.get_round(harness.round_id)
-    )
+    assert all(run["status"] == "accepted" and run["per_icp_score"] is None
+               for run in scored_baseline)
+    baseline_judges = harness.service.store.list_runs(harness.round_id, stage=1, kind="score")
+    assert len(baseline_judges) == 20
+    assert all(run["status"] == "pending" for run in baseline_judges)
     assert harness.service.store.list_runs(
         harness.round_id, stage=2, kind="execute"
     ) == []
@@ -165,6 +168,9 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
 
     harness.advance_until("published", runners=2, max_steps=120)
     published = harness.service.store.get_round(harness.round_id)
+    assert harness.service._baseline_fully_succeeded(published)
+    assert all(run["per_icp_score"] == 80 for run in
+               harness.service.store.list_runs(harness.round_id, stage=1, kind="execute"))
     assert published["benchmark_ref"] == bank_ref
     assert harness.objects.get(bank_ref) == bank_bytes
     publication = published["publication_doc"]

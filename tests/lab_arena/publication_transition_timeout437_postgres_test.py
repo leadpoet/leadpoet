@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+from tests.lab_arena.historical_service import start_pre470_round
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge,
     _enable_verified_proxy_runtime,
@@ -100,7 +101,9 @@ def proven_round(database, tmp_path_factory):
     # are produced and validated by the real completion and publication paths.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-        assert fixtures._start_round(h, day=28, epoch=62_428) == 2
+        # Rehearse the exact pre-470 publication protocol. The migration's
+        # functions, security shape and large-population checks stay unchanged.
+        assert start_pre470_round(h, round_id="arena-2026-09-28", epoch=62_428) == 2
         h.clock.advance_to(h.schedule()["stage_1_start"])
         h.advance_until("stage1_scored", runners=1)
         h.service.advance_round(h.round_id)

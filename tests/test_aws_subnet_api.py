@@ -62,14 +62,15 @@ def test_client_identities_cannot_share_key():
         api.render_nginx(values)
 
 
-def test_configuration_permissions_and_no_secret_stdout(tmp_path):
+@pytest.mark.parametrize("backend_args", [[], ["--rest-backend", "target"]])
+def test_configuration_permissions_and_no_secret_stdout(tmp_path, backend_args):
     source = tmp_path / "private-input.json"
     values = secrets()
     values["db_uri"] += "?sslmode=verify-full&sslrootcert=/run/subnet-api/rds-ca.pem"
     source.write_text(json.dumps(values))
     source.chmod(0o600)
     output = tmp_path / "private-output"
-    command = [sys.executable, str(Path(api.__file__)), "--secrets-file", str(source), "--output-dir", str(output)]
+    command = [sys.executable, str(Path(api.__file__)), "--secrets-file", str(source), "--output-dir", str(output), *backend_args]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0
     assert result.stdout == "subnet_api_configuration_ready\n"
@@ -77,6 +78,13 @@ def test_configuration_permissions_and_no_secret_stdout(tmp_path):
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
     for name in ("nginx.conf", "postgrest.conf"):
         assert stat.S_IMODE((output / name).stat().st_mode) == 0o600
+    # Exact target output from main 71d35786f229ca34848dc7e6d2dfef18a1b2b40a.
+    assert hashlib.sha256((output / "nginx.conf").read_bytes()).hexdigest() == (
+        "508bed53a5f391c61a2995330b2e0f4c520099c78f21a72aa550898c6e003bd4"
+    )
+    assert hashlib.sha256((output / "postgrest.conf").read_bytes()).hexdigest() == (
+        "af4961a9909f4b3d0d524cdb9f7d38f3cd7b8867c72007adbc60294f17b4a96d"
+    )
     source.chmod(0o644)
     failure = subprocess.run(command, capture_output=True, text=True, timeout=10)
     assert failure.returncode == 1
@@ -108,63 +116,33 @@ def test_existing_rpc_timeouts_and_body_limits_are_not_reduced():
     assert "access_log off;" in body and "error_log /dev/null crit;" in body
 
 
-def test_source_fallback_retains_target_contract_and_uses_only_original_client_keys():
-    values = secrets()
-    assert hashlib.sha256(api.render_nginx(values).encode()).hexdigest() == (
-        "508bed53a5f391c61a2995330b2e0f4c520099c78f21a72aa550898c6e003bd4"
-    )
-    source = api.render_source_nginx(values)
-    assert "proxy_pass https://qplwoislplkcegvdmbim.supabase.co;" in source
-    assert 'proxy_set_header Authorization "";' in source
-    assert 'proxy_set_header apikey $http_apikey;' in source
-    assert "proxy_ssl_server_name on;" in source and "proxy_ssl_verify on;" in source
-    assert values["db_uri"] not in source and values["jwt_secret"] not in source
-    assert "$backend_jwt" not in source
-    for role in api.KEY_ROLES.values():
-        assert api.role_jwt(role, values["jwt_secret"]) not in source
-    for directive in ("client_max_body_size 0;", "proxy_connect_timeout 8s;",
-                      "proxy_read_timeout 610s;", "proxy_send_timeout 610s;",
-                      "proxy_next_upstream off;", "proxy_buffering off;",
-                      "proxy_request_buffering off;", "proxy_max_temp_file_size 0;"):
-        assert directive in source
-
-
-def test_source_cli_keeps_private_pair_and_retained_target_database(tmp_path):
-    values = secrets()
-    values["db_uri"] += "?sslmode=verify-full&sslrootcert=/run/subnet-api/rds-ca.pem"
-    source = tmp_path / "input.json"
-    source.write_text(json.dumps(values))
-    source.chmod(0o600)
+def test_retired_source_cli_is_rejected_before_reading_input_or_writing(tmp_path):
+    source = tmp_path / "absent-input.json"
     output = tmp_path / "configuration"
     result = subprocess.run([sys.executable, str(Path(api.__file__)), "--secrets-file", str(source),
                              "--output-dir", str(output), "--rest-backend", "source"],
                             capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0 and result.stdout == "subnet_api_configuration_ready\n"
-    assert not result.stderr
-    assert (output / "nginx.conf").read_text() == api.render_source_nginx(values)
-    assert (output / "postgrest.conf").read_text() == api.render_postgrest(values)
-    assert stat.S_IMODE(output.stat().st_mode) == 0o700
-    for path in output.iterdir():
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert result.returncode == 2
+    assert "invalid choice: 'source'" in result.stderr
+    assert not result.stdout and not output.exists()
 
 
-def test_source_selection_fails_closed_if_target_render_contract_changes(monkeypatch):
-    changed = api.render_nginx(secrets()).replace("proxy_pass http://127.0.0.1:3000/;",
-                                                "proxy_pass http://different-target/;")
-    monkeypatch.setattr(api, "render_nginx", lambda *_args, **_kwargs: changed)
-    with pytest.raises(api.ConfigurationError, match="source renderer contract changed"):
-        api.render_source_nginx(secrets())
+def test_retired_source_writer_cannot_replace_existing_target_configuration(tmp_path):
+    output = tmp_path / "configuration"
+    api.write_configuration(secrets(), output)
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+    with pytest.raises(api.ConfigurationError, match="invalid REST backend"):
+        api.write_configuration(secrets(), output, rest_backend="source")
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
 
 
-def test_header_buffer_change_is_only_three_directives_for_each_backend():
+def test_target_header_buffer_change_is_only_three_directives():
     directives = {"large_client_header_buffers 4 64k;", "proxy_buffer_size 64k;", "proxy_buffers 3 64k;"}
-    for renderer, previous in (
-        (api.render_nginx, "759a1b25eca6b75bf8b2b47be1c616c144b7af1903dde168bc6d8b951ccece35"),
-        (api.render_source_nginx, "2e933330afbf57ce3d55507aee03ba5c2727ff22a44b378f0a61ea5554a40a0b"),
-    ):
-        body = renderer(secrets())
-        assert all(sum(line.strip() == directive for line in body.splitlines()) == 1
-                   for directive in directives)
-        previous_bytes = "".join(line for line in body.splitlines(keepends=True)
-                                 if line.strip() not in directives)
-        assert hashlib.sha256(previous_bytes.encode()).hexdigest() == previous
+    body = api.render_nginx(secrets())
+    assert all(sum(line.strip() == directive for line in body.splitlines()) == 1
+               for directive in directives)
+    previous_bytes = "".join(line for line in body.splitlines(keepends=True)
+                             if line.strip() not in directives)
+    assert hashlib.sha256(previous_bytes.encode()).hexdigest() == (
+        "759a1b25eca6b75bf8b2b47be1c616c144b7af1903dde168bc6d8b951ccece35"
+    )

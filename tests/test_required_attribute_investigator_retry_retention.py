@@ -9,6 +9,8 @@ import pytest
 from lab_arena import scoring as arena_scoring
 from qualification.scoring import lead_scorer
 from qualification.scoring.company_fit_decision import company_fit_match
+from qualification.scoring.competition import CompetitionCompanyScorer
+from qualification.scoring.evaluation_clock import use_evaluation_date
 from tests.test_company_evidence_investigator import _competition_company
 from tests.test_matched_company_retry_source_continuity import (
     _company as _platform_company, _icp as _platform_icp,
@@ -107,6 +109,98 @@ def test_missing_source_stays_unavailable_and_unretained():
     assert rejected["attribute_satisfied"] is None
     assert retained == {}
     assert no_network.await_count == 1
+
+
+def test_newly_fetched_body_overrides_conflicting_retained_quote():
+    """A source changed during retry cannot ground an old quote from the sink."""
+
+    retained = {}
+    lead_scorer._retain_successful_required_attribute_source(
+        retained, SOURCE_URL,
+        {"status": "fetched", "final_url": SOURCE_URL, "text": SOURCE_TEXT},
+    )
+    current_text = "Origis Energy updated the page without the cited agreement."
+    current = {
+        SOURCE_URL: {
+            "status": "fetched", "final_url": SOURCE_URL, "text": current_text,
+        },
+    }
+    no_network = AsyncMock(side_effect=AssertionError("current body must not refetch"))
+    with patch.object(lead_scorer, "_fetch_bounded_html", no_network):
+        projected, _ = asyncio.run(lead_scorer._ground_required_attribute_evidence(
+            _verdict(), active_attribute=True, source_cache=current,
+            successful_source_sink=retained,
+        ))
+
+    assert projected[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == "quote_absent"
+    assert projected["attribute_satisfied"] is None
+    assert projected["required_attribute_evidence_url"] == ""
+    assert projected["required_attribute_evidence_quote"] == ""
+    assert current[SOURCE_URL]["text"] == current_text
+    assert retained[SOURCE_URL]["text"] == SOURCE_TEXT
+    assert no_network.await_count == 0
+
+
+def test_required_attribute_retry_cache_scope_isolates_company_icp_and_date(
+    monkeypatch,
+):
+    """The attribute sink cannot cross a changed scoring input or date."""
+
+    observed = []
+
+    async def score_company(**kwargs):
+        observed.append(kwargs["required_attribute_retry_source_cache"])
+        return {"final_score": 0.0, "failure_reason": "test-only"}
+
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", score_company)
+    scorer = CompetitionCompanyScorer(
+        integrity_policy=True, company_quality=True, evidence_investigator=True,
+        scorer_policy={"scoring_adapter_version": "qualification_integrity_v2"},
+    )
+    company = {
+        "company_name": "Unibuddy",
+        "company_website": "https://unibuddy.com/",
+        "company_linkedin": "https://www.linkedin.com/company/unibuddy",
+        "industry": "Education",
+        "employee_count": "201-500",
+        "company_stage": "",
+        "country": "United Kingdom",
+        "state": "",
+        "fit_summary": "Unibuddy supplies higher-education software.",
+        "fit_evidence_urls": ["https://unibuddy.com/"],
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "Unibuddy announced a new enrollment workflow.",
+            "date": "2026-09-01",
+            "why_now": "The workflow is a current product signal.",
+            "url": "https://unibuddy.com/news/enrollment-workflow",
+            "snippet": "The workflow supports university enrollment teams.",
+        }],
+    }
+    icp = _platform_icp().model_dump(mode="json")
+    changed_company = {**company, "company_name": "Different Company"}
+    changed_icp = {**icp, "required_attribute": "Different criterion"}
+    scope = {}
+
+    with use_evaluation_date("2026-10-28"):
+        for submitted_company, submitted_icp in (
+            (company, icp), (company, icp), (changed_company, icp),
+            (company, changed_icp),
+        ):
+            asyncio.run(scorer.score_with_breakdowns(
+                [submitted_company], submitted_icp, False,
+                retry_evidence_scope=scope,
+            ))
+    with use_evaluation_date("2026-10-29"):
+        asyncio.run(scorer.score_with_breakdowns(
+            [company], icp, False, retry_evidence_scope=scope,
+        ))
+
+    assert len(observed) == 5
+    assert all(isinstance(cache, dict) for cache in observed)
+    assert observed[0] is observed[1]
+    assert all(cache is not observed[0] for cache in observed[2:])
+    assert len({id(cache) for cache in observed}) == 4
 
 
 def test_captured_origis_page_enters_next_investigator_after_intent_retry(monkeypatch):

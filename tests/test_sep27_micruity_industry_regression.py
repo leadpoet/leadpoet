@@ -28,7 +28,7 @@ def test_micruity_industry_review_controls_schema_repair(
     initial_attribute,
     expected_decision,
 ):
-    """Reproduce the frozen Sep. 27 Micruity industry-only receipt."""
+    """Retain the saved activity case under the separate current proof targets."""
 
     company = CompanyOutput(
         company_name="Micruity",
@@ -123,7 +123,7 @@ def test_micruity_industry_review_controls_schema_repair(
 
     async def bounded_investigation(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("industry",)
+        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
         assert kwargs["positive_semantic_review"] is True
         if investigator_status == "UNPROVEN":
             finding = _finding(
@@ -157,8 +157,16 @@ def test_micruity_industry_review_controls_schema_repair(
                 ),
                 reason="Exact requested industry and activity are supported.",
             )
+        stage = _finding(
+            "stage", observed_value="Series A",
+            evidence_url=initial["stage_evidence_url"],
+            evidence_quote=initial["stage_evidence_quote"],
+        )
         return {
-            "claims": {"industry": finding},
+            "claims": {"industry": finding, "stage": stage,
+                       "required_attribute": {**finding, "target": "required_attribute"}},
+            "_completed_submit": True,
+            "_validated_stage_finding": stage,
             "failure_reason": "",
             "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 1},
         }
@@ -212,7 +220,7 @@ def test_micruity_industry_review_controls_schema_repair(
     )
 
     assert calls == {
-        "provider": 2 if investigator_status == "VERIFIED" else 1,
+        "provider": 1,
         "investigator": 1,
     }
     assert result.decision == expected_decision

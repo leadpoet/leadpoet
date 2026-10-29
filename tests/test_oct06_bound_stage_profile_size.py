@@ -64,8 +64,12 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
             domain, url, payload
         )
 
-    async def unexpected_profile_fetch(*_args, **_kwargs):
-        pytest.fail("The mismatched model profile must not trigger a size fetch")
+    current_fetches = []
+
+    async def bound_current_profile(url, **_kwargs):
+        current_fetches.append(url)
+        assert url == "https://www.linkedin.com/company/marqeta"
+        return {"outcome": "insufficient_evidence", "url": url}
 
     async def ground_attribute(verdict, **_kwargs):
         # Attribute grounding is a separate gate, outside this size regression.
@@ -83,7 +87,7 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
         lead_scorer, "fetch_structured_linkedin_company_size", structured_fetch
     )
     monkeypatch.setattr(
-        lead_scorer, "fetch_current_linkedin_company_size", unexpected_profile_fetch
+        lead_scorer, "fetch_current_linkedin_company_size", bound_current_profile
     )
     monkeypatch.setattr(
         lead_scorer, "_run_targeted_company_evidence_investigation", investigate
@@ -112,10 +116,11 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
             ),
         )
     )
+    assert current_fetches == ["https://www.linkedin.com/company/marqeta"] * 2
     assert fetches == [("marqeta.com", "https://www.linkedin.com/company/marqeta")]
     assert result.details["dimension_decisions"]["employee_size"] == expected
     assert investigated
-    assert ("headcount" in investigated[0]) == (expected != "match")
+    assert ("headcount" in investigated[0]) == (expected == "unavailable")
     # A stored Public Company label remains insufficient for current stage.
     assert result.details["dimension_decisions"]["stage"] == "unavailable"
     if expected != "unavailable":

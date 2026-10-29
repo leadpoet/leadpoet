@@ -42,7 +42,10 @@ class CostHarness(fixtures.Harness):
 
     def build_service(self):
         service = super().build_service()
-        service.config.defaults = replace(service.config.defaults, cost_per_company_microusd=25, rewards_enabled=True)
+        # The current fixture returns five qualified companies per ICP. Keep
+        # the original 500-microdollar competition cap across twenty ICPs so
+        # failed-call charges still exceed it while successful charges do not.
+        service.config.defaults = replace(service.config.defaults, cost_per_company_microusd=5, rewards_enabled=True)
         payer = submission_runtime.SubmissionProviderKeys(
             store=service.store, credentials=fixtures.FakeCredentialManager(), organizer_keys=fixtures.CANARY_KEYS,
         )
@@ -114,6 +117,8 @@ def test_successful_call_cost_survives_publication_restart_and_promotion(databas
         assert costs["execution"]["settled_microusd"] == attempts * 30
         assert costs["competition_sourcing_microusd"] == attempts * 10
         assert costs["execution"]["successful_microusd"] == attempts * 10
+        assert costs["cost_per_company_cap_microusd"] == 5
+        assert costs["qualified_company_count"] == 100
         assert costs["eligibility_cap_microusd"] == 500
         assert costs["judge"]["uncertain_calls"] == 20
         assert costs["execution"]["settled_microusd"] > costs["eligibility_cap_microusd"]

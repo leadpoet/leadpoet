@@ -36,7 +36,10 @@ def test_default_admission_includes_all_miner_slots_with_one_planned_runner(conn
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
     configuration = harness.service.create_round(cutoff, round_id="arena-2098-01-01-capdefault")
     assert configuration["max_challengers"] == 256
-    assert capacity.daily_challenger_capacity(configuration) == 8
+    # The current twenty-minute scoring limit lowers the throughput estimate;
+    # admission still includes every configured miner slot.
+    assert configuration["scoring_wall_clock_seconds"] == 1200
+    assert capacity.daily_challenger_capacity(configuration) == 6
     assert configuration["runner_slot_ceiling"] == 8
     assert configuration["max_attempts_per_assignment"] == 2
     monkeypatch.setattr(capacity, "daily_challenger_capacity", lambda *_args, **_kwargs: 0)

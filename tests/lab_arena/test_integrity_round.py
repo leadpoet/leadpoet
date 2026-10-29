@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     DEFAULT_MIGRATIONS,
+    current_service_database,
     database_with_lab_arena_migration,
 )
 
@@ -25,7 +27,7 @@ MIGRATIONS = DEFAULT_MIGRATIONS + (
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture()
@@ -81,7 +83,8 @@ def test_legacy_rounds_still_publish_and_promote_after_integrity_migrations(data
 
 class IntegrityHarness(fixtures.Harness):
     def objects_key(self):
-        return "integrity-round"
+        return getattr(self.connect, 'object_store_namespace',
+                       'integrity-round:' + str(self.tmp.resolve()))
 
     def build_service(self):
         service = super().build_service()
@@ -126,7 +129,7 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
     round_id = "arena-2026-11-01-outage"
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=round_id)
     harness.round_id = round_id
     submission = harness.submit("Outage", round_id)
     healthy_submission = harness.submit("Healthy", round_id)
@@ -161,7 +164,10 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
     assert {run["icp_position"] for run in failed} == set(
         contracts.stage_positions(1)
     )
-    assert not any(run["status"] == "pending" for run in runs)
+    pending = [run for run in runs if run['status'] == 'pending']
+    assert len(pending) == contracts.STAGE_1_ICP_COUNT
+    assert {run['attempt'] for run in pending} == {3}
+    assert {run['scored_run_id'] for run in pending} == {run['scored_run_id'] for run in failed}
     assert not any(run["terminal_cause"] == "credential_error" for run in runs)
     healthy_runs = [
         run
@@ -238,7 +244,7 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
     )
     round_id = "arena-2026-11-01-twentyicp"
     config = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id
+        datetime.now(timezone.utc) + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
@@ -358,10 +364,10 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
     assert vector["champion_share_ppb"] > 0
 
 
-def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
-    database_before_251, tmp_path, monkeypatch,
+def test_current_round_keeps_inert_bank_and_finishes_on_twenty_icps(
+    database, tmp_path, monkeypatch,
 ):
-    psycopg2, dsn = database_before_251
+    psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     harness = IntegrityHarness(
         connect, tmp_path, challengers=["CutoverWinner"], runners=["alpha"]
@@ -383,50 +389,24 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
 
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service._require_integrity_schema = lambda: None
     round_id = "arena-2026-11-02-cutover"
     config = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     winner = harness.submit("CutoverWinner", round_id)
     confirmation_ref = f"arena/{round_id}/confirmation/{'c' * 64}.json"
     confirmation_hash = "sha256:" + "c" * 64
+    # The retired references are inert saved state. Current lifecycle tests
+    # must use the current schema, rather than replay 251 over later functions.
     with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL session_replication_role = replica")
         cursor.execute(
-            "ALTER TABLE public.lab_arena_rounds "
-            "DISABLE TRIGGER lab_arena_rounds_write_once"
+            "UPDATE public.lab_arena_rounds SET confirmation_bank_ref=%s, "
+            "confirmation_bank_hash=%s WHERE round_id=%s",
+            (confirmation_ref, confirmation_hash, round_id),
         )
-        cursor.execute(
-            """UPDATE public.lab_arena_rounds
-               SET configuration_doc = jsonb_set(
-                     configuration_doc, '{schedule}',
-                     configuration_doc -> 'schedule' || jsonb_build_object(
-                       'stage_3_start', %s,
-                       'stage_3_close', %s,
-                       'stage_3_scoring_close', %s
-                     )
-                   ),
-                   confirmation_bank_ref = %s,
-                   confirmation_bank_hash = %s
-               WHERE round_id = %s""",
-            (
-                config["schedule"]["final_scoring_close"],
-                config["schedule"]["publication_deadline"],
-                config["schedule"]["publication_deadline"],
-                confirmation_ref,
-                confirmation_hash,
-                round_id,
-            ),
-        )
-        cursor.execute(
-            "ALTER TABLE public.lab_arena_rounds "
-            "ENABLE TRIGGER lab_arena_rounds_write_once"
-        )
-        migration = Path(__file__).resolve().parents[2] / (
-            "scripts/251-lab-arena-twenty-icp-promotion.sql"
-        )
-        cursor.execute(migration.read_text(encoding="utf-8"))
+        cursor.execute("SET LOCAL session_replication_role = origin")
 
     harness.service = harness.build_service()
     cutover = harness.service.store.get_round(round_id)
@@ -452,19 +432,113 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
     assert all(run["stage"] in (1, 2) for run in runs)
     assert max(run["icp_position"] for run in runs) == 19
 
-    # Replaying the exact cutover after publication must retain all evidence.
+
+def test_historical_251_cutover_preserves_rows_and_replays_exact_sql(
+    database_before_251, tmp_path,
+):
+    """Test the historical SQL on its own preimage, separate from current RPCs."""
+    psycopg2, dsn = database_before_251
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = IntegrityHarness(connect, tmp_path, challengers=[], runners=["alpha"])
+    # Only create the old-schema fixture; current source intake has a newer RPC
+    # signature and is covered by the complete current-service test above.
+    harness.service._require_integrity_schema = lambda: None
+    harness.clock.now = datetime.now(timezone.utc)
+    round_id = "arena-2026-11-02-sql251"
+    config = harness.service.create_round(
+        harness.clock.now + timedelta(minutes=30), round_id=round_id,
+    )
+    confirmation_ref = f"arena/{round_id}/confirmation/{'c' * 64}.json"
+    confirmation_hash = "sha256:" + "c" * 64
+    migration = Path(__file__).resolve().parents[2] / (
+        "scripts/251-lab-arena-twenty-icp-promotion.sql"
+    )
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL session_replication_role = replica")
+        schedule = dict(config['schedule'],
+            stage_3_start=config['schedule']['final_scoring_close'],
+            stage_3_close=config['schedule']['publication_deadline'],
+            stage_3_scoring_close=config['schedule']['publication_deadline'])
+        cursor.execute(
+            "UPDATE public.lab_arena_rounds SET configuration_doc="
+            "jsonb_set(configuration_doc,'{schedule}',%s::jsonb), "
+            "confirmation_bank_ref=%s,confirmation_bank_hash=%s WHERE round_id=%s",
+            (json.dumps(schedule), confirmation_ref, confirmation_hash, round_id),
+        )
+        # Historical evidence rows have no stage-three work. Their bytes must
+        # survive the SQL cutover, including accepted output and settled cost.
+        submission_id = 'historical-251-submission'
+        run_id = submission_id + ':1:0:1'
+        miner = fixtures.keypair('Historical251').ss58_address
+        cursor.execute(
+            "INSERT INTO public.lab_arena_submissions"
+            "(submission_id,round_id,miner_hotkey,status) VALUES(%s,%s,%s,'frozen')",
+            (submission_id, round_id, miner),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,"
+            "submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,"
+            "terminal_cause,output_ref,per_icp_score) "
+            "VALUES(%s,%s,%s,%s,%s,1,0,1,'execute','accepted','accepted',"
+            "'historical-251-output',40)",
+            (run_id, run_id[:-2], round_id, submission_id, miner),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_ledger(entry_kind,miner_hotkey,round_id,"
+            "submission_id,run_id,stage,amount_microusd,entry_doc) "
+            "VALUES('settlement',%s,%s,%s,%s,1,1234,'{\"historical\":251}')",
+            (miner, round_id, submission_id, run_id),
+        )
+        # Terminal documents retain the retired schedule and all inert state.
+        for status in ('published', 'cancelled'):
+            cursor.execute(
+                "INSERT INTO public.lab_arena_rounds(round_id,status,"
+                "configuration_doc,benchmark_ref,evaluation_date,"
+                "confirmation_bank_ref,confirmation_bank_hash) "
+                "SELECT %s,%s,configuration_doc,benchmark_ref,evaluation_date,"
+                "confirmation_bank_ref,confirmation_bank_hash "
+                "FROM public.lab_arena_rounds r WHERE round_id=%s",
+                (round_id + status, status, round_id),
+            )
+        cursor.execute("SET LOCAL session_replication_role = origin")
+        cursor.execute("SHOW session_replication_role")
+        assert cursor.fetchone()[0] == 'origin'
+        cursor.execute("SELECT to_jsonb(r) FROM public.lab_arena_rounds r ORDER BY round_id")
+        before_rounds = {r['round_id']: r for (r,) in cursor.fetchall()}
+        cursor.execute("SELECT to_jsonb(r) FROM public.lab_arena_runs r")
+        before_runs = cursor.fetchall()
+        cursor.execute("SELECT to_jsonb(r) FROM public.lab_arena_ledger r")
+        before_ledger = cursor.fetchall()
+        cursor.execute(migration.read_text(encoding='utf-8'))
+        cursor.execute("SELECT to_jsonb(r) FROM public.lab_arena_rounds r ORDER BY round_id")
+        after_rounds = {r['round_id']: r for (r,) in cursor.fetchall()}
+        for terminal in ('published', 'cancelled'):
+            key = round_id + terminal
+            assert after_rounds[key] == before_rounds[key]
+        expected = deepcopy(before_rounds[round_id])
+        expected['configuration_doc']['schedule'] = config['schedule']
+        expected['updated_at'] = after_rounds[round_id]['updated_at']
+        assert after_rounds[round_id] == expected
+        cursor.execute("SELECT to_jsonb(r) FROM public.lab_arena_runs r")
+        assert cursor.fetchall() == before_runs
+        cursor.execute("SELECT to_jsonb(r) FROM public.lab_arena_ledger r")
+        assert cursor.fetchall() == before_ledger
+
+    # Replaying the exact historical SQL must retain all evidence.
     with connect() as connection, connection.cursor() as cursor:
         def evidence():
             result = []
             for table, key in (
                 ("lab_arena_rounds", "round_id"),
+                ("lab_arena_submissions", "submission_id"),
                 ("lab_arena_runs", "run_id"),
                 ("lab_arena_ledger", "entry_id"),
             ):
                 cursor.execute(
                     f"SELECT md5(COALESCE(string_agg(row_to_json(r)::text, '' "
                     f"ORDER BY {key}), '')) FROM public.{table} r "
-                    "WHERE round_id = %s", (round_id,),
+                    "WHERE round_id IN (%s,%s,%s)",
+                    (round_id, round_id + 'published', round_id + 'cancelled'),
                 )
                 result.append(cursor.fetchone()[0])
             return result

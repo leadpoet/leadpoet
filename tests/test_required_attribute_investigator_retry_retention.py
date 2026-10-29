@@ -459,3 +459,68 @@ def test_multitarget_prefetch_keeps_homepage_and_stage_priority():
     assert len(prefetch) == lead_scorer.MAX_PREFETCHED_PAGES
 
 
+def _prefetch_for_non_attribute_review(targets, *, preserve_matched_industry):
+    retained = {}
+    lead_scorer._retain_successful_required_attribute_source(
+        retained, SOURCE_URL,
+        {"status": "fetched", "final_url": SOURCE_URL, "text": SOURCE_TEXT},
+    )
+    company = _platform_company().model_copy(update={
+        "company_name": "Origis Energy",
+        "company_website": "https://origisenergy.com/",
+        "company_linkedin": "https://www.linkedin.com/company/origis-energy",
+        "fit_evidence_urls": [SOURCE_URL],
+    })
+    icp = _platform_icp()
+    observed = []
+
+    async def investigate(**kwargs):
+        observed.append(kwargs)
+        return {"claims": {}, "failure_reason": "offline probe"}
+
+    with patch.object(lead_scorer, "investigate_company_evidence", investigate):
+        asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+            company=company, icp=icp,
+            verdict={
+                "observed_company_name": "Origis Energy",
+                "observed_company_website": "https://origisenergy.com/",
+                "observed_company_linkedin": (
+                    "https://www.linkedin.com/company/origis-energy"
+                ),
+            },
+            investigation_targets=targets,
+            icp_attribute=icp.required_attribute, icp_stage="",
+            verified_identity={
+                "normalized_name": "Origis Energy",
+                "registrable_dns_domain": "origisenergy.com",
+                "linkedin_company_slug": "origis-energy",
+            },
+            verified_transport_domain="origisenergy.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            required_attribute_source_cache={
+                SOURCE_URL: {"status": "source_unavailable"},
+            },
+            successful_required_attribute_source_sink=retained,
+            preserve_matched_industry=preserve_matched_industry,
+        ))
+    assert len(observed) == 1
+    assert SOURCE_URL in observed[0]["prior_observations"]["submitted_source_urls"]
+    return observed[0]["prefetched_pages"]
+
+
+@pytest.mark.parametrize("targets", [("stage",), ("industry",)])
+def test_unrelated_review_does_not_prefetch_retained_attribute_body(targets):
+    pages = _prefetch_for_non_attribute_review(
+        targets, preserve_matched_industry=False,
+    )
+    assert SOURCE_URL not in pages
+
+
+def test_attribute_source_recovery_keeps_retained_body_for_industry_target():
+    pages = _prefetch_for_non_attribute_review(
+        ("industry",), preserve_matched_industry=True,
+    )
+    assert pages[SOURCE_URL] == {"final_url": SOURCE_URL, "text": SOURCE_TEXT}

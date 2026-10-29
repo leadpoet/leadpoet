@@ -8622,8 +8622,10 @@ async def _run_targeted_company_evidence_investigation(
         matched_company_retry_source_cache,
         investigation_verified_identity,
     )
-    retained_attribute_retry_pages = _validated_retry_retained_sources(
-        successful_required_attribute_source_sink
+    retained_attribute_retry_pages = (
+        _validated_retry_retained_sources(successful_required_attribute_source_sink)
+        if "required_attribute" in investigation_targets or preserve_matched_industry
+        else {}
     )
     current_attribute_pages = required_attribute_source_cache or {}
     prefetch_attribute_pages = {

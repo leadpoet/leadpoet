@@ -2597,6 +2597,14 @@ class WorkerSocketServer:
             return None
         if body != {"error": {"code": call["error_code"]}}:
             return None
+        if (call.get("deepline_terminal_failure") is True
+            and type(call.get("provider_status")) is int
+            and 400 <= call["provider_status"] <= 599
+            and call.get("transport_error_class") is None
+            and call.get("deepline_response_missing") is not True):
+            # A broker-proved completed failure cannot yield a missing success.
+            # Its unknown charge still follows the ordinary delayed audit.
+            return None
         return call["call_identity"]
 
     def _recover_deepline_response(

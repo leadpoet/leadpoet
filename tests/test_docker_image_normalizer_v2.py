@@ -300,3 +300,21 @@ def test_temporary_config_diagnostics_withhold_sensitive_material(monkeypatch, c
 def test_workflow_config_diagnostics_are_reproduction_only():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/attested-v2-release.yml").read_text()
     assert "GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}" in workflow
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_temporary_layer_diagnostic_is_gated_and_excludes_contents(monkeypatch, capsys, tmp_path, enabled):
+    monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1" if enabled else "")
+    source = tmp_path / "original.tar"
+    _layer(source, mtime=100, reverse=False, compressed=False)
+    normalizer.normalize_layer_archive(source, tmp_path / "normalized-layer-11.tar")
+    output = capsys.readouterr()
+    assert not output.out
+    if enabled:
+        record = json.loads(output.err.split("diagnostic: ", 1)[1])
+        assert record["member_count"] == 2
+        assert record["members"][0]["content_sha256"] == hashlib.sha256(b"a").hexdigest()
+        assert len(record["first_header_hex"]) == 1024
+        assert "content" not in record["members"][0]
+    else:
+        assert not output.err

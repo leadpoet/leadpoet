@@ -138,6 +138,38 @@ def normalize_layer_archive(source: Path, destination: Path) -> str:
             normalized = _normalized_member(member)
             content = original.extractfile(member) if member.isfile() else None
             output.addfile(normalized, content)
+    if (
+        os.environ.get("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS") == "1"
+        and destination.name == "normalized-layer-11.tar"
+    ):
+        # The exact historical reproduction's first read-only RUN layer.
+        # Only headers and content hashes are emitted, never file contents.
+        records = []
+        with tarfile.open(destination) as archive:
+            members = archive.getmembers()
+            for member in members[:64]:
+                record = {name: getattr(member, name) for name in (
+                    "name", "mode", "uid", "gid", "size", "mtime", "linkname",
+                    "uname", "gname", "devmajor", "devminor", "pax_headers",
+                )}
+                record["type"] = member.type.decode("ascii")
+                if member.isfile():
+                    digest = hashlib.sha256()
+                    with archive.extractfile(member) as content:
+                        for chunk in iter(lambda: content.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    record["content_sha256"] = digest.hexdigest()
+                records.append(record)
+        with destination.open("rb") as layer:
+            prefix = layer.read(512).hex()
+        payload = json.dumps({
+            "size": destination.stat().st_size, "member_count": len(members),
+            "first_header_hex": prefix, "members": records,
+        }, sort_keys=True, separators=(",", ":"))
+        if len(members) <= 64 and len(payload.encode()) <= 65536:
+            print("Canonical Docker layer 11 diagnostic: " + payload, file=sys.stderr)
+        else:
+            print("Canonical Docker layer 11 diagnostic withheld by bounds", file=sys.stderr)
     return _sha256_file(destination)
 
 

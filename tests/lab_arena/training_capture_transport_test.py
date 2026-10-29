@@ -1,11 +1,12 @@
 """Training evidence has its own bounded transport budget and safe failures."""
 
+import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from lab_arena import runner
+from lab_arena import contracts, runner
 
 
 TOKEN = "private-lease-value-do-not-log"
@@ -27,7 +28,9 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
         required_seconds = 15.0 if request.url.path.endswith("/training-observations") else 3.0
         if min(timeout.values()) < required_seconds:
             raise httpx.ReadTimeout("private response text", request=request)
-        return httpx.Response(200, json={"status": "stored", "payload_sha256": "sha256:" + "a" * 64})
+        # A stored acknowledgment binds the actual uploaded document.
+        digest = contracts.document_hash(json.loads(request.content))
+        return httpx.Response(200, json={"status": "stored", "payload_sha256": digest})
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         api = runner.HttpArenaApiClient("https://arena.invalid", client=client)
@@ -52,7 +55,7 @@ def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, 
     secret = "private-body-token-do-not-log"
 
     def respond(request):
-        attempts.append(request.url.path)
+        attempts.append((request.method, request.url.path))
         if failure == "timeout":
             raise httpx.ReadTimeout(secret, request=request)
         return httpx.Response(403, json={"status": "rejected", "detail": secret})
@@ -70,6 +73,12 @@ def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, 
     assert "exception_class=RunnerError" in logs
     if failure == "timeout":
         assert "transport_cause=ReadTimeout" in logs
-        assert len(attempts) == 4
+        assert attempts == [
+            ("POST", f"/arena/v1/runs/{RUN}/training-input"),
+            ("POST", f"/arena/v1/runs/{RUN}/training-input"),
+            ("POST", f"/arena/v1/runs/{RUN}/training-observations"),
+            ("POST", f"/arena/v1/runs/{RUN}/training-observations"),
+            ("HEAD", f"/arena/v1/runs/{RUN}/training-observations"),
+        ]
     else:
         assert "http_status=403" in logs and "transport_cause=-" in logs

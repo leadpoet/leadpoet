@@ -12,6 +12,7 @@ from lab_arena import contracts
 from lab_arena.store import ArenaStoreError, hash_lease_token, new_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
+    current_service_database,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import sha
@@ -58,6 +59,16 @@ def database():
             )
             assert cursor.fetchall() == privileges_before
         yield psycopg2, dsn
+
+
+def test_migration_preserves_function_privileges(database):
+    # Apply twice to the exact historical preimage, independent of service reads.
+    assert database
+
+
+@pytest.fixture()
+def service_database():
+    yield from current_service_database()
 
 
 def _service_claim(harness: Harness) -> dict:
@@ -177,9 +188,9 @@ def _exercise_uncertain_recovery(store, lease: dict, ttl: int) -> str:
 
 
 def test_exact_6300_lease_reaches_publication_and_old_profile_still_works(
-    database, tmp_path, monkeypatch
+    service_database, tmp_path, monkeypatch
 ):
-    psycopg2, dsn = database
+    psycopg2, dsn = service_database
     connect = lambda: psycopg2.connect(**dsn)
 
     (tmp_path / "old").mkdir()

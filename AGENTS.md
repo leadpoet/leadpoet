@@ -1,3 +1,28 @@
+## Scoped authorization: October 29 post-migration production audit
+
+The user explicitly authorized a full post-migration production audit with fresh
+OnePatch, Sentry, host logs, AWS state and runtime traffic, plus minimal permanent
+fixes for confirmed dependencies or regressions. The coordinator may make narrow
+reviewed changes, merge, deploy through canonical controls and verify the full
+Arena lifecycle. This includes removal of the proved obsolete temporary migration
+bridge egress rule `sgr-07174f23df388ec6e` from `sg-0081d026fe5311783` in
+account `493765492819`, region `us-east-1`; preserve the existing RDS port 5432
+ingress, all other network rules, history, accepted runs, scores, cost accounting,
+privacy, promotion, rewards and weights. Add no services, dependencies, data
+migration or compatibility architecture. The only database cleanup in this audit
+is one exact committed, hash- and identity-guarded transaction that drops the five
+proved obsolete callbacks with RESTRICT: process_consensus_async(uuid),
+process_rep_score_async(uuid), cron_process_rep_scores(),
+process_pending_rep_scores(), and process_pending_rep_scores_continuous(), all in
+public. Require the private before-image, independent dependency review, local
+exact-definition removal and rollback tests, and fresh production readback.
+Preserve every table and publication. Observe today's existing single publisher
+without duplicating or interrupting work owned by another active task. Internal
+agents are read-only unless given isolated implementation scope; the coordinator
+owns production changes. OnePatch access is read-only, with no messages or new
+monitors. This scope ends after AWS-only operation and today's publication and
+settlement are proved healthy.
+
 ## Scoped authorization: October 29 complete subnet Supabase retirement
 
 The user explicitly authorized completing the subnet's Supabase exit using the

@@ -1589,17 +1589,40 @@ def _deepline_execution_response_readback(
         recovery_deadline = deadline if recovery_deadline is None else min(deadline, recovery_deadline)
         if time.monotonic() >= recovery_deadline:
             return None
-    try:
-        lookup = transport.send(
-            method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
-            headers={"accept": "application/json", "authorization": "Bearer " + secret,
-                     "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
-            timeout_seconds=(min(DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
-                max(0.001, recovery_deadline - time.monotonic()))
-                if recovery_deadline is not None else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
-            max_response_bytes=max_response_bytes + 16_384,
-        )
-    except ProviderTransportError:
+    # Registration can lag the first POST: a 404 is not proof of no dispatch.
+    # Wait with GETs only, and only when the caller retained the original
+    # request/deadline. Other errors and unbound/malformed proofs fail closed.
+    attempts = _DEEPLINE_BILLING_MAX_ATTEMPTS if resume_request is not None else 1
+    for attempt in range(attempts):
+        if recovery_deadline is not None:
+            remaining = recovery_deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if attempt:
+                time.sleep(min(_DEEPLINE_BILLING_POLL_SECONDS, remaining))
+                if time.monotonic() >= recovery_deadline:
+                    return None
+        try:
+            lookup = transport.send(
+                method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
+                headers={"accept": "application/json", "authorization": "Bearer " + secret,
+                         "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
+                timeout_seconds=(min(DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+                    max(0.001, recovery_deadline - time.monotonic()))
+                    if recovery_deadline is not None else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
+                max_response_bytes=max_response_bytes + 16_384,
+            )
+        except ProviderTransportError:
+            return None
+        if lookup.status != 404:
+            break
+        if (lookup.internal_provenance is not None
+            or len(lookup.body) > max_response_bytes + 16_384
+            or _response_contains_credential(lookup, secret)):
+            return None
+    else:
+        return None
+    if recovery_deadline is not None and time.monotonic() >= recovery_deadline:
         return None
     if (lookup.status != 200 or lookup.internal_provenance is not None
         or len(lookup.body) > max_response_bytes + 16_384
@@ -1614,6 +1637,7 @@ def _deepline_execution_response_readback(
         saved = document.get("response") if isinstance(document, Mapping) else None
         status = document.get("responseStatus") if isinstance(document, Mapping) else None
         if (resume_request is not None and isinstance(recovery, Mapping)
+            and (observed_status is None or 200 <= observed_status < 300)
             and recovery.get("idempotencyKey") == execution_key
             and recovery.get("state") == "running"
             and document.get("toolId") in (operation, *operation_aliases)
@@ -1632,7 +1656,8 @@ def _deepline_execution_response_readback(
                     timeout_seconds=max(0.001, recovery_deadline - time.monotonic())))
             except ProviderTransportError:
                 return None
-            if (resumed.internal_provenance is not None
+            if (time.monotonic() >= recovery_deadline
+                or resumed.internal_provenance is not None
                 or len(resumed.body) > max_response_bytes
                 or _response_contains_credential(resumed, secret)):
                 return None
@@ -6063,7 +6088,14 @@ class Broker:
                                 if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                                 else effective_operation.max_response_bytes),
                             observed_status=transport_error.observed_status,
-                            deadline=source_content_deadline,
+                            deadline=request_deadline,
+                            resume_request=(dict(method=outbound.target.method, url=url,
+                                headers=dict(headers), body=outbound.body,
+                                timeout_seconds=max(0.0, request_deadline - time.monotonic()),
+                                max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                    if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
+                                    else effective_operation.max_response_bytes))
+                                if deepline_catalog_entry is not None or route is not None else None),
                         )
                         if effective_operation.provider == "deepline" else None
                     )

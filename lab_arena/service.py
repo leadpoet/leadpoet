@@ -4170,8 +4170,22 @@ class ArenaService:
                 "ineligible_submissions": [],
                 "finalists": finalists,
             }
-        self._score_recovered_baseline(round_row)
+        current_baseline_first = (
+            _judge_continuation_enabled(round_row)
+            and round_row['configuration_doc'].get('execution_sequence_policy')
+                == contracts.BASELINE_SCORED_FIRST_POLICY
+        )
+        if not current_baseline_first:
+            self._score_recovered_baseline(round_row)
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
+        if current_baseline_first and transition.get('status') == 'ok':
+            # Current continuation can start challengers before stage1 scoring.
+            # Its ordinary accepted judgments use the scored-phase SQL authority,
+            # not the older bounded baseline-recovery exception. Publication
+            # repeats this operation if a crash interrupts this score write.
+            scored_round = self._round(round_id)
+            if scored_round['status'] == 'scored':
+                self._record_recovered_judgment_scores(scored_round)
         return {
             "status": transition.get("status"),
             "judge_executions": judge_executions,

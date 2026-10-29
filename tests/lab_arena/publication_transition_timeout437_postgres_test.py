@@ -18,6 +18,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 MIGRATION = SCRIPTS / "437-lab-arena-publication-transition-timeout.sql"
@@ -91,7 +92,7 @@ def proven_round(database, tmp_path_factory):
     """Use the established signed service/broker fixture, not mocked guards."""
     psycopg, dsn = database
     connect = lambda: psycopg.connect(**dsn)
-    h = IntegrityHarness(connect, tmp_path_factory.mktemp("publication437"),
+    h = _FrozenIntegrityHarness(connect, tmp_path_factory.mktemp("publication437"),
                          challengers=["DeadlineMiner"], runners=["alpha"])
     h.service.config.defaults = replace(h.service.config.defaults,
         execution_sequence_from="2000-01-01T00:00:00Z", per_icp_cost_policy=True)
@@ -231,3 +232,16 @@ def test_large_real_publication_and_forgery_rejection(database, proven_round, pa
         cur.execute("SELECT status,publication_doc FROM public.lab_arena_rounds WHERE round_id=%s", (round_id,))
         status, actual = cur.fetchone()
         assert status == "published" and actual == publication
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+
+        def commit_historical(round_id):
+            freeze_historical_intake_dates(self, "2026-10-10")
+            return commit(round_id)
+
+        service.commit_benchmark = commit_historical
+        return service

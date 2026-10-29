@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 from lab_arena import contracts, integrity, verify
 from lab_arena.store import ArenaStoreError
@@ -18,6 +19,18 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
 
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    """Only this module's pinned SQL uses the historical client and judge date."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-20")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
 
 @pytest.fixture(scope="module")
 def database():
@@ -57,14 +70,14 @@ def _ranking(publication, submission_id):
 
 
 def test_guard_requires_receipt_backed_zero_and_migration_replays_without_history_changes(
-    database, tmp_path, monkeypatch
-):
+    database, tmp_path, monkeypatch, request):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     monkeypatch.setattr(fixtures, "deterministic_scorer", _score)
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=["Threshold"], runners=["alpha"]
     )
+    request.addfinalizer(harness.service.store.close)
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         cost_per_company_microusd=1,

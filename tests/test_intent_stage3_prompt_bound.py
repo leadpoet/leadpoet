@@ -258,7 +258,9 @@ def _exact_ats_contents(
             "url": SOURCE_URL,
             "title": title,
             "text": text,
-            "meta": {"kind": "ashby_job"},
+            "meta": {"kind": "ashby_job", "observed_ownership_links": [{
+                "url": "https://example.com/careers", "label": "Example careers",
+            }]},
         }],
         "statuses": [],
     }
@@ -291,6 +293,7 @@ def _exact_ats_result(
             miner_signal_date=SIGNAL_DATE,
             evidence_type="HIRING",
             stage1_soft_reject=True,
+            verified_company_identity=_verified_identity(),
         ))
 
 
@@ -414,7 +417,9 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_sources(
                 "url": url,
                 "title": "Enterprise Account Executive",
                 "text": body,
-                "meta": {"kind": "ashby_job"} if exact_ats else {},
+                "meta": {"kind": "ashby_job", "observed_ownership_links": [{
+                    "url": "https://example.com/careers", "label": "Example careers",
+                }]} if exact_ats else {},
             }
             for url in urls
         ],

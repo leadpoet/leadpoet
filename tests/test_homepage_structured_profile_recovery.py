@@ -232,7 +232,7 @@ def _rapid7_public_stage_case():
         "observed_hq_state": "Massachusetts",
         "geography_matches": True,
         "geography_evidence_url": "https://rapid7.com/company/about",
-        "geography_evidence_quote": "Rapid7 is based in Boston.",
+        "geography_evidence_quote": "Rapid7 is headquartered in Boston, Massachusetts, United States.",
         "observed_company_stage": "Public",
         "stage_matches": True,
         "stage_evidence_url": "https://rapid7.com/investors",
@@ -498,7 +498,7 @@ def test_numeric_linkedin_alias_unlocks_full_company_fit_gate(monkeypatch):
             "observed_hq_state": "Massachusetts",
             "geography_matches": True,
             "geography_evidence_url": "https://rapid7.com/company/about",
-            "geography_evidence_quote": "Rapid7 is based in Boston.",
+            "geography_evidence_quote": "Rapid7 is headquartered in Boston, Massachusetts, United States.",
             "reason": "All requested dimensions match.",
         }, ""
 
@@ -589,7 +589,7 @@ def test_numeric_homepage_identity_runs_full_structured_alias_gate(monkeypatch):
             "observed_hq_state": "Massachusetts",
             "geography_matches": True,
             "geography_evidence_url": "https://rapid7.com/company/about",
-            "geography_evidence_quote": "Rapid7 is based in Boston.",
+            "geography_evidence_quote": "Rapid7 is headquartered in Boston, Massachusetts, United States.",
             "reason": "All requested dimensions match.",
         }, ""
 

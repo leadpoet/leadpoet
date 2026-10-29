@@ -49,6 +49,69 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped authorization: October 29 frozen catalog request performance
+
+The user authorized the measured Deepline catalog performance fix: reuse exact,
+validated immutable catalog bytes within one broker request and its retries.
+Preserve full hash, schema and policy checks, mutable-input rejection, frozen
+round JSON, request and response bytes, credentials, billing, async ownership,
+scoring and rewards. Add no provider calls, dependencies or shared identity cache.
+Internal agents may test and commit only. The coordinating task owns independent
+review, safe push and merge, canonical deployment and live verification. Preserve
+active jobs, migration ownership and release gates. This scope ends after live
+verification; local benchmarks alone do not prove recovery from API stalls.
+
+## Scoped authorization: October 28 AWS production database migration
+
+The user explicitly authorized completing the subnet Supabase-to-AWS migration,
+including narrow CI fixes, API/client compatibility tests, final synchronization,
+tested rollback, safe merges, deployment and controlled production cutover.
+Use account 493765492819, us-east-1, and the dedicated subnet destination.
+This replaces the completed foundation/rehearsal stage limits for this task.
+Preserve all source data and SOURCE_ADD history, accepted work, provider billing,
+scoring, promotion, rewards, weight recovery and concurrent work. Use the smallest
+existing-code changes; do not add an accounting system or compatibility framework.
+The coordinator owns source/AWS writes, writer drain/fencing, exact migrations,
+canonical gateway/normal-validator restarts and live verification. Internal
+agents may implement in isolated worktrees or review read-only; they must not
+write to production. Independently review data transfer, authorization and
+rollback before activation. Do not bypass tests or canonical release gates.
+Keep current production authoritative until data integrity, client compatibility
+and rollback pass. A failed critical check leaves the current system serving.
+Do not delete Supabase source data, the verified backup or rollback evidence.
+This scope ends after the AWS production flow and durable outcomes are verified.
+
+## Scoped authorization: October 28 AWS restore rehearsal
+
+The user asked the coordinating agent to take ownership and continue the staged
+subnet Supabase-to-AWS migration. This stage may merge the reviewed foundation,
+provision a temporary isolated restore runner and scoped AWS access, create a
+complete read-only source export identity, copy a consistent source snapshot,
+and restore and verify it in the dedicated leadpoet-subnet-arena RDS target.
+Use account 493765492819, us-east-1. Preserve all source data, SOURCE_ADD history,
+current production endpoints, running jobs, accounting, scoring and chain state.
+Do not cut over production or restart the gateway/validator in this stage.
+Do not broaden the existing parity-reader identity. Keep secrets out of source,
+logs and tool output. Remove temporary export access after verified transfer;
+retain encrypted migration evidence and backups. Internal agents may prepare
+scoped files or perform read-only review; only the coordinator owns cloud and
+source permission writes. Use independent review before source grants and target
+restore. This stage ends after restored-state verification and a handoff of the
+remaining client/API and cutover steps.
+
+## Scoped authorization: October 28 AWS migration foundation
+
+The user authorized starting the subnet Supabase-to-AWS migration step by step.
+The current step creates and verifies only an isolated AWS PostgreSQL destination
+and its dedicated private network resources in account 493765492819, us-east-1.
+Use the saved reviewed CloudFormation template and existing authorized access.
+Preserve production databases, clients, source records, gateway/validator releases,
+provider work, scoring, rewards, weights, and concurrent tasks. Do not change
+source roles or copy data, expose the destination, change production endpoints,
+or restart production in this step. The coordinating task owns AWS writes and
+verification; independent reviewers are read-only. This authority ends after the
+foundation is provisioned and verified, with the next step reported to the user.
+
 ## Scoped authorization: October 29 short capture text reuse
 
 The user authorized bounded reuse of exact short builtin-string sanitizer
@@ -170,10 +233,10 @@ independent review, push, merge and release after the current canonical pair.
 The user authorized the narrow recovery of unfinished reviewer and provider
 failures until the existing admission deadline, focused tests, independent
 review, safe push and merge, exact committed
-`585-lab-arena-review-deadline-recovery.sql` and
-`585-lab-arena-review-deadline-recovery-rollback.sql`, canonical gateway and
-normal-validator deployment, and live
-verification. Preserve completed pass/reject decisions, source and credential
+`585-lab-arena-review-deadline-recovery.sql` and its exact-byte rollback template
+`585-lab-arena-review-deadline-recovery-rollback.sql.template`, canonical gateway
+and normal-validator deployment, and live verification. Before use, commit the
+rollback template as a separately reviewed SQL migration with a unique number. Preserve completed pass/reject decisions, source and credential
 checks, miner funding, backoff, leases, accounting limits, scoring and rewards.
 Preserve the October 28 frozen entrant set and its excluded submission; do not
 admit it late, replace participants, reset scores, replay paid calls or rewrite
@@ -181,6 +244,14 @@ historical records. Internal implementation agents may test and commit only.
 The coordinating task owns production SQL, migration and rollback application,
 canonical deployment and live verification. This authority ends after the
 scoped fix and affected future-flow verification are complete.
+
+The applied deadline SQL retains its original 585 filename and SHA-256
+`e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a`.
+The separately applied champion 585 keeps its own exact filename and bytes;
+the numbering gate permits only this hash-bound historical pair. Publication
+586 and atomic review guard 587 retain their distinct names and exact SQL.
+Install the deadline dependency before atomic 587; never identify these
+migrations by numeric prefix alone or discover the rollback as forward SQL.
 
 ## Scoped authorization: October 28 capture policy composition
 

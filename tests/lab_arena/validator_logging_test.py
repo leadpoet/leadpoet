@@ -257,7 +257,8 @@ def test_claim_observations_track_effective_capacity_and_bounded_result(tmp_path
     log = logger()
     pool = SimpleNamespace(capacity=5, quarantined=0)
     api = FakeApi([{'status': 'no_free_slot'}, {'status': 'no_pending'},
-                   {'status': 'paused'}, {'status': 'leased'},
+                   {'status': 'paused'}, {'status': 'leased', 'run_id': 'fixture-run',
+                                          'lease_token': 'fixture-lease', 'icp': {}},
                    {'status': 'secret=DO-NOT-LOG'}])
     config = replace(make_config(tmp_path, api, None, parallel=5),
                      proxy_worker_pool=pool, operational_logger=log)

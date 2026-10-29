@@ -207,7 +207,9 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         record() { printf '%s\\n' "$*" >> "$EVENTS"; }
         arena_ingress_tool() {
           local root="$1"; shift
-          if [ "$1" = --inspect ]; then cat "$INGRESS_FILE"; return; fi
+          # Bash 5 inherits the pre-trap failure for a bare return in EXIT.
+          # This mock inspection succeeded, as the real Python command does.
+          if [ "$1" = --inspect ]; then cat "$INGRESS_FILE" || return 1; return 0; fi
           [ "$1" = --activate ] || return 1
           shift
           local old_mode= old_slot= old_sha= old_backend=
@@ -344,6 +346,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=gateway-1792000000-123
         GATEWAY_RESTART_INVOCATION_ID=gateway-1792000000-456
         GATEWAY_LOG_FILE="$TASK_TMP/log"
+        GATEWAY_DEPLOY_PLAN_FILE="$TASK_TMP/deploy-plan.json"
         GATEWAY_V2_HEALTH_MAX_ATTEMPTS=2
         GATEWAY_V2_HEALTH_RETRY_SECONDS=0
         GATEWAY_V2_HEALTH_DEADLINE_SECONDS=10

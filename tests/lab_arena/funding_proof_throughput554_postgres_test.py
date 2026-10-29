@@ -1,5 +1,6 @@
 """Keep exact funding proof semantics with bounded historical receipt lookups."""
 from pathlib import Path
+from functools import partial
 from datetime import timedelta
 import hashlib
 import json
@@ -8,6 +9,8 @@ import time
 
 import pytest
 
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
 from tests.lab_arena import funding_proof_scalars526_postgres_test as scalar
 from tests.lab_arena import proven_funding_recovery524_postgres_test as prior
 from tests.lab_arena.quiescence_recovery_gate522_postgres_test import reset
@@ -19,6 +22,7 @@ SQL = ROOT / 'scripts/554-lab-arena-funding-proof-throughput.sql'
 PRE = '46acfd38b92eb7a03613a4d55c72cc9af57339cf6602ed4611955af22b511cf6'
 POST = 'a962ddae017d3e1efbbe05d296bd1b9c895523d4a5081b0a3fd2c78b9c7f3d73'
 NAME = 'public.lab_arena_ledger_paid_native_request_idx'
+POSTGRES_IMAGE = 'postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545'
 
 
 def definition(q):
@@ -39,28 +43,33 @@ def old_source(post):
 
 @pytest.fixture(scope='module')
 def database():
-    gen = scalar.database.__wrapped__()
-    db = next(gen)
-    try:
-        c = db[0].connect(**db[1])
-        c.autocommit = True
-        with c.cursor() as q:
-            # Exercise the committed concurrent migration as one autocommit SQL
-            # statement, never inside the ordinary transaction migration helper.
-            q.execute(INDEX.read_text())
-            q.execute(INDEX.read_text())
-            for number in (527, 551, 552):
-                paths = list((ROOT/'scripts').glob(str(number)+'-*.sql'))
-                assert len(paths) == 1
-                q.execute(paths[0].read_text())
-            assert hashlib.sha256(definition(q).encode()).hexdigest() == PRE
-            q.execute(SQL.read_text())
-            q.execute(SQL.read_text())
-            assert hashlib.sha256(definition(q).encode()).hexdigest() == POST
-        c.close()
-        yield db
-    finally:
-        gen.close()
+    # Throughput uses the deployed PG17 planner. The wide-history benchmark
+    # below also matches source and target configuration-file jit=off.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, '_database_with_migrations',
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        gen = scalar.database.__wrapped__()
+        db = next(gen)
+        try:
+            c = db[0].connect(**db[1])
+            c.autocommit = True
+            with c.cursor() as q:
+                # Exercise the committed concurrent migration as one autocommit SQL
+                # statement, never inside the ordinary transaction migration helper.
+                q.execute(INDEX.read_text())
+                q.execute(INDEX.read_text())
+                for number in (527, 551, 552):
+                    paths = list((ROOT/'scripts').glob(str(number)+'-*.sql'))
+                    assert len(paths) == 1
+                    q.execute(paths[0].read_text())
+                assert hashlib.sha256(definition(q).encode()).hexdigest() == PRE
+                q.execute(SQL.read_text())
+                q.execute(SQL.read_text())
+                assert hashlib.sha256(definition(q).encode()).hexdigest() == POST
+            c.close()
+            yield db
+        finally:
+            gen.close()
 
 
 # Existing successful, adversarial, inherited-root and malformed JSON proofs
@@ -201,9 +210,17 @@ def _queue70(c, run, denial):
 
 
 def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history(database):
+    """Keep the frozen 554 proof and current keyed expiry as distinct phases."""
     pg, dsn = database
     run, denial = prior.seed(database)
     with pg.connect(**dsn) as c, c.cursor() as q:
+        # Captured source PG17.6 and target RDS17.9 both have jit=off, with
+        # no database or role overrides. Keep that production setting across
+        # the rollback between the old and new proof; retain both 8s limits.
+        q.execute('SET jit=off')
+        q.execute("SELECT current_setting('jit'), current_setting('server_version_num')")
+        planner = q.fetchone()
+        assert planner == ('off', '170009')
         ids = _queue70(c, run, denial)
         funded = prior.clone(c, run, 'historical-wide')
         for index in range(2500):
@@ -232,19 +249,42 @@ def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history
         build_seconds = time.monotonic()-started
         q.execute(SQL.read_text())
         c.commit()
-        q.execute("SET LOCAL statement_timeout='8s'")
+        # 554 is a semantic reference: 558 supersedes its unkeyed join plan.
+        # Keep it bounded by the historical migration's 30s allowance, not a
+        # deployed performance claim. The identical 70-run current proof and
+        # ordinary expiry below each retain their original 8s deadline.
+        q.execute("SET LOCAL statement_timeout='30s'")
         started = time.monotonic()
         q.execute('SELECT bool_or(public.lab_arena_miner_credit_failure_v1(run_id)) FROM public.lab_arena_runs WHERE run_id=ANY(%s)', (ids,))
         assert q.fetchone()[0] is False
-        proof_seconds = time.monotonic()-started
+        reference_seconds = time.monotonic()-started
         c.commit()
-        q.execute("SET LOCAL statement_timeout='8s'")
-        started = time.monotonic()
-        q.execute('SELECT public.lab_arena_expire_leases(%s)', (run['round_id'],))
-        result = q.fetchone()[0]
-        sweep_seconds = time.monotonic()-started
-        assert result == {'status': 'ok', 'expired': 0, 'retried': 70}
-        q.execute("SELECT count(*) FROM public.lab_arena_runs WHERE run_id=ANY(%s) AND status='failed' AND terminal_cause='credential_error'", (ids,))
-        assert q.fetchone() == (70,)
-        print('FUNDING554_QUEUE70 old_seconds=%.3f proof_seconds=%.3f sweep_seconds=%.3f local_regular_index_build_seconds=%.3f' % (old_seconds, proof_seconds, sweep_seconds, build_seconds), flush=True)
-        assert proof_seconds < 8 and sweep_seconds < 8
+        # 558 keeps native request and call identities in index conditions.
+        try:
+            q.execute((ROOT/'scripts/558-lab-arena-funding-proof-keyed-lookups.sql').read_text())
+            assert hashlib.sha256(definition(q).encode()).hexdigest() == (
+                '23fbb6e5d40450916b75110d16d9b3c9c369264014dea51e17db7f3f978786c6')
+            c.commit()
+            q.execute("SET LOCAL statement_timeout='8s'")
+            started = time.monotonic()
+            q.execute('SELECT bool_or(public.lab_arena_miner_credit_failure_v1(run_id)) FROM public.lab_arena_runs WHERE run_id=ANY(%s)', (ids,))
+            assert q.fetchone()[0] is False
+            proof_seconds = time.monotonic()-started
+            c.commit()
+            q.execute("SET LOCAL statement_timeout='8s'")
+            started = time.monotonic()
+            q.execute('SELECT public.lab_arena_expire_leases(%s)', (run['round_id'],))
+            result = q.fetchone()[0]
+            sweep_seconds = time.monotonic()-started
+            assert result == {'status': 'ok', 'expired': 0, 'retried': 70}
+            q.execute("SELECT count(*) FROM public.lab_arena_runs WHERE run_id=ANY(%s) AND status='failed' AND terminal_cause='credential_error'", (ids,))
+            assert q.fetchone() == (70,)
+        finally:
+            # Do not upgrade this module's shared historical migration fixture.
+            c.rollback()
+            q.execute(post)
+            c.commit()
+            assert hashlib.sha256(definition(q).encode()).hexdigest() == POST
+        print('FUNDING554_PLANNER jit=%s server_version_num=%s' % planner, flush=True)
+        print('FUNDING554_QUEUE70 reference_helper=554 deployed_helper=558 old_seconds=%.3f reference_seconds=%.3f proof_seconds=%.3f sweep_seconds=%.3f local_regular_index_build_seconds=%.3f' % (old_seconds, reference_seconds, proof_seconds, sweep_seconds, build_seconds), flush=True)
+        assert reference_seconds < 30 and proof_seconds < 8 and sweep_seconds < 8

@@ -18,12 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sources():
-    current = (ROOT / composer.FINALITY_FILE).read_bytes()
-    original = current
-    for _, old, new in DELTAS:
-        assert original.count(new.encode()) == 1
-        original = original.replace(new.encode(), old.encode(), 1)
-    return original, current
+    # Keep frozen847 grading functions tied to revision77db393b. Current
+    # source contains later grading changes that must not redefine this fixture.
+    original = (ROOT / composer.FINALITY_FILE).read_text()
+    frozen = (ROOT / "tests/fixtures/frozen847_attribute_source_functions.py.txt").read_text()
+    for name, _, _ in DELTAS:
+        current_node = next(n for n in ast.parse(original).body
+                            if isinstance(n, ast.FunctionDef) and n.name == name)
+        frozen_node = next(n for n in ast.parse(frozen).body
+                           if isinstance(n, ast.FunctionDef) and n.name == name)
+        original = original.replace(ast.get_source_segment(original, current_node),
+                                    ast.get_source_segment(frozen, frozen_node), 1)
+    original = original.encode()
+    return original, convert_attribute_source_seam(original)
 
 
 def test_exact_frozen847_function_hashes_and_only_approved_bytes_change():

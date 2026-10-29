@@ -7,11 +7,11 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
+import pytest
 
 from lab_arena import contracts
 from lab_arena.api import create_app
 from lab_arena.promotion import GitPromoter
-from tests.lab_arena import proxy_model_capacity401_postgres_test as capacity401
 from tests.lab_arena.company_only_capacity_e2e_test import (
     _drain_both,
     _http_runner,
@@ -22,11 +22,25 @@ from tests.lab_arena.company_only_capacity_e2e_test import (
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.test_lab_arena_service_round import promotion_repository
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 
-database = capacity401.database
-migrated399 = capacity401.migrated399
-migrated = capacity401.migrated
+@pytest.fixture(scope="module")
+def database():
+    yield from current_service_database()
+
+
+@pytest.fixture(scope="module")
+def migrated(database):
+    # The current fixture contains 401 and its successors. Exact 401 upgrade
+    # preimages, permissions and concurrency guards retain their own SQL tests.
+    pg, dsn = database
+    with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena_parallel_execution_schema_v2()")
+        capability = cursor.fetchone()[0]
+        assert capability["version"] == 401
+        assert capability["max_parallel_icps"] == 251
+    return True
 
 
 def test_company_only_baseline_miners_costs_promotion_and_publication(

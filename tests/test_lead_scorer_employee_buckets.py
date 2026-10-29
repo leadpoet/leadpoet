@@ -149,7 +149,7 @@ class EmployeeSizeBucketTests(unittest.TestCase):
                 },
                 icp,
             ),
-            COMPANY_FIT_UNAVAILABLE,
+            COMPANY_FIT_MISMATCH,
         )
         self.assertEqual(
             _decision_from_observed_employee_size(

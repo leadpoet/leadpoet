@@ -11,13 +11,13 @@ from tests.lab_arena.baseline_scored_first_postgres_test import (
     _verified_test_pool,
 )
 from tests.lab_arena.completed_model_scores_test import _wait_for_scores
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, current_service_database, database_with_lab_arena_migration
 from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def test_completed_scores_and_diagnostics_precede_round_publication(database, tmp_path, monkeypatch):

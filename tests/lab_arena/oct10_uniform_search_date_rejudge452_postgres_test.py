@@ -9,7 +9,9 @@ import pytest
 
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
-from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
+from lab_arena.store import ArenaStoreError, PsycopgTransport
+from tests.lab_arena.historical_service_harness import HistoricalArenaStore
+from tests.lab_arena.sep20_frozen_publication_fixture import commit_oct10_frozen_scoring_plan, frozen_publication_document, publish_frozen_document
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena import oct10_uniform_pe_rejudge445_postgres_test as prior
@@ -37,6 +39,14 @@ def migrated(database):
             assert len(paths) == 1
             cur.execute(paths[0].read_text())
             cur.execute(paths[0].read_text())
+        # This disposable module repeatedly DELETEs/reseeds and tests NOWAIT
+        # fences. Automatic VACUUM/ANALYZE can otherwise preempt the intended
+        # semantic guard (55P03) on these exact tables. Explicit concurrency
+        # tests below retain real locks and must still prove their denials.
+        for table in ('lab_arena_rounds', 'lab_arena_restart_claim_control',
+                      'lab_arena_submissions', 'lab_arena_runs', 'lab_arena_ledger',
+                      'lab_arena_trajectory_events', 'qualification_private_icp_sets'):
+            cur.execute('ALTER TABLE public.' + table + ' SET (autovacuum_enabled=false)')
     return True
 
 
@@ -253,9 +263,10 @@ def _snapshot(cur):
     return result
 
 
-def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch):
+def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch, request):
     psycopg, dsn = seeded
-    cost_store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    cost_store = HistoricalArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    request.addfinalizer(cost_store.close)
     prior_cost = cost_store.submission_costs('miner440-4')
     with psycopg.connect(**dsn) as conn:
         conn.autocommit = True
@@ -270,9 +281,11 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             assert [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in immediate_exec] == [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in original_exec]
             cur.execute(sql)
             assert _snapshot(cur) == after
-    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    store = HistoricalArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    request.addfinalizer(store.close)
     service = object.__new__(ArenaService)
     service._store = store
+    service.commit_scoring_plan = lambda rid, stage: commit_oct10_frozen_scoring_plan(service, rid, stage)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 18, 0, 1, tzinfo=timezone.utc)
@@ -405,6 +418,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     assert row['configuration_doc']['schedule']['stage_2_close'] == '2026-10-10T18:00:02Z'
     assert row['configuration_doc']['schedule']['final_scoring_close'] == '2026-10-10T20:30:02Z'
     assert row['configuration_doc']['schedule']['publication_deadline'] == '2026-10-10T20:30:03Z'
+    frozen_publication = frozen_publication_document(service, ROUND)
     with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute('SELECT clock_timestamp()')
         database_now = cur.fetchone()[0]
@@ -413,7 +427,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
         # assignment's execution window is closed. A mocked service clock
         # cannot bypass this existing guard.
         with pytest.raises(ArenaStoreError,match='lab_arena_publication_ranking_invalid'):
-            service._advance_round_locked(ROUND)
+            publish_frozen_document(service, ROUND, frozen_publication)
         assert store.get_round(ROUND)['status'] == 'scored'
         # Only this disposable fixture's three ordered timestamps move into
         # the past to model elapsed time. No function, ACL, row proof, final
@@ -426,8 +440,8 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
                 'stage_2_start': (elapsed-timedelta(seconds=1)).isoformat(),
                 'stage_2_close': elapsed.isoformat(),
             }),ROUND))
-    service.now = lambda: database_now
-    assert service._advance_round_locked(ROUND)['status'] == 'ok'
+    frozen_publication['published_at'] = database_now.isoformat().replace('+00:00', 'Z')
+    assert publish_frozen_document(service, ROUND, frozen_publication)['status'] == 'ok'
     published = store.get_round(ROUND)
     assert published['status'] == 'published'
     assert len(published['publication_doc']['final_ranking']) == 70

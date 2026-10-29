@@ -3,16 +3,18 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import threading
+import time
 
 
 from lab_arena import runtime, scoring
 from lab_arena.runtime_host import RuntimeHostError
 from tests.lab_arena import proxy_model_capacity401_e2e_test as fullflow
-from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
 
 
-database=recovery.database
-migrated=recovery.migrated
+# Exact migration 412 upgrades retain their historical SQL fixture. This file
+# drives the current HTTP service, which also needs all later read/recovery RPCs.
+database=fullflow.database
+migrated=fullflow.migrated
 
 
 def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(database,migrated,tmp_path,monkeypatch):
@@ -48,8 +50,11 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
                     assert (expiry-datetime.now(timezone.utc)).total_seconds()>4400
                     cur.execute('SELECT count(*) FROM public.lab_arena_ledger WHERE run_id=%s',(run,));assert cur.fetchone()[0]==0
             # Gateway's normal scheduling path calls the exact expiry RPC.
-            transition=harness.service.advance_round(harness.round_id)
-            assert transition['status'] not in ('cancelled','retry','stale')
+            # Current concurrent baseline scheduling can open stage two on
+            # the first tick, before its normal expiry/recovery tick follows.
+            for _ in range(2):
+                transition=harness.service.advance_round(harness.round_id)
+                assert transition['status'] not in ('cancelled','retry','stale')
             with psycopg.connect(**dsn) as conn:
                 with conn.cursor() as cur:
                     cur.execute('SELECT status,terminal_cause,terminal_doc,claim_response FROM public.lab_arena_runs WHERE run_id=%s',(run,))
@@ -63,12 +68,23 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
             healthy_config=healthy._config
             healthy.close()
             replacement=type(healthy)(healthy_config)
+            # The current score retry has a real 30-second backoff. Preserve
+            # its queue timestamp and wait only for that existing admission
+            # boundary, rather than requiring an immediate retry lease.
+            retry=run.rsplit(':',1)[0]+':2'
+            with psycopg.connect(**dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT extract(epoch FROM created_at+interval '30 seconds'-clock_timestamp()) FROM public.lab_arena_runs WHERE run_id=%s",(retry,))
+                    delay=float(cur.fetchone()[0])
+            assert delay<=30
+            time.sleep(max(0,delay)+0.01)
             drain(harness,(replacement,))
             with psycopg.connect(**dsn) as conn:
                 with conn.cursor() as cur:
-                    cur.execute('SELECT status,runner_hotkey FROM public.lab_arena_runs WHERE run_id=%s',(run.rsplit(':',1)[0]+':2',))
+                    cur.execute('SELECT status,runner_hotkey FROM public.lab_arena_runs WHERE run_id=%s',(retry,))
                     state,runner=cur.fetchone()
                     assert state=='accepted' and runner!=failed_hotkey
+                    assert expiry>datetime.now(timezone.utc)
             observed['recovered']=True
             replacements[id(failed)]=replacement
             replacements[id(healthy)]=replacement

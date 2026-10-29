@@ -1,6 +1,7 @@
 """Brand composition owns three proof spans and two private prompt copies."""
 
 from copy import deepcopy
+from functools import lru_cache
 import ast
 import hashlib
 import json
@@ -15,8 +16,33 @@ from scripts import build_arena_reviewer_runtime as builder
 from tests.lab_arena.reviewer_runtime_composition_test import layer
 
 
+# This exact-byte composer owns the reviewed October 28 source. Later
+# production verifier changes must not silently become its frozen input.
+FROZEN_COMMIT = "00725d7839a5b68b56c92774f415c173c3fd8d60"
+_GIT_RUN = subprocess.run  # Builder tests replace subprocess.run for Docker only.
+FROZEN_SHA256 = {
+    seam.SCORER: "1daa87943bbd8aaa857cf177884899a4cad26d5c6220e7c2af1764bd23a2ea2d",
+    seam.FIT: "5f8f990f7719b98f7fc84ecf7236992db46c97a099c64f2d01a13d200d6e17d0",
+    seam.INVESTIGATOR: "22519946a9355e9374261d39fdc5099452d531c13e4d821f57eb349e513535c5",
+    "lab_arena/scorer_entrypoint.py": "7f9f11d6cd86cdce932f06f9b32db4c64cfe95ab3fca161ea8d11c67349188f4",
+}
+
+
+@lru_cache(maxsize=1)
+def _frozen_sources():
+    corrected = {}
+    for name, expected in FROZEN_SHA256.items():
+        data = _GIT_RUN(
+            ["git", "show", f"{FROZEN_COMMIT}:{name}"], cwd=builder.ROOT,
+            check=True, stdout=subprocess.PIPE, timeout=10,
+        ).stdout
+        assert hashlib.sha256(data).hexdigest() == expected
+        corrected[name] = data
+    return corrected
+
+
 def sources():
-    corrected = {name: (builder.ROOT / name).read_bytes()
+    corrected = {name: _frozen_sources()[name]
                  for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
     # This overlay owns exact historical functions. Industry integration can
     # change today's investigator without changing the reviewed frozen image.
@@ -50,8 +76,8 @@ def reverse(files):
 
 def originals(include_brand=True):
     names = (builder.GRADER_FILE, *builder.ENTRYPOINT_FILES)
-    files = {name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
-                                   if name == "scorer_entrypoint.py" else name)).read_bytes()
+    files = {name: _frozen_sources()["lab_arena/scorer_entrypoint.py"
+                                   if name == "scorer_entrypoint.py" else name]
              for name in names}
     files[builder.GRADER_FILE] = sources()[1][seam.INVESTIGATOR]
     if include_brand:

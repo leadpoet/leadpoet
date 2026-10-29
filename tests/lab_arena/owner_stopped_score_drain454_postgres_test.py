@@ -1,5 +1,6 @@
 """Owner-authorized canonical drain reuses stopped-host proof without new claims."""
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -116,7 +117,9 @@ def test_held_owner_drain_preserves_costs_frozen_claim_and_authorizes(database,m
         assert after['lab_arena_trajectory_events']==before['lab_arena_trajectory_events']
         assert prior._cache(conn,lease)==cache
         assert after['run'][0:2]==('failed','lease_expired') and after['run'][3]==lease
-        assert after['run'][2]['original_lease_expires_at']==before['run'][4].isoformat()
+        # PostgreSQL JSON drops trailing fractional zeroes; compare the exact
+        # instant so all six persisted microsecond digits remain protected.
+        assert datetime.fromisoformat(after['run'][2]['original_lease_expires_at'])==before['run'][4]
         assert drained['pending_retry_count']==1
         assert prior.prior.recovery._claim(conn,prior.prior.recovery.prior.RUNNER_B,'b')['status']=='paused'
         authorized=guard._rpc(conn,'lab_arena_authorize_restart_phase_v1',guard.GUARD,guard.OWNER,generation,'gateway_destructive')

@@ -4,6 +4,8 @@ Only model/provider/judge and chain boundaries are controlled. No paid calls.
 """
 from __future__ import annotations
 
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
 import asyncio
 import json
 import os
@@ -84,7 +86,7 @@ def database():
 def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(database, tmp_path):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = PerIcpHarness(connect, tmp_path, challengers=["Healthy"], runners=["alpha"])
+    harness = _HistoricalPerIcpHarness(connect, tmp_path, challengers=["Healthy"], runners=["alpha"])
     original = harness.sandbox.run_icp
     observed = []
 
@@ -237,7 +239,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = PerIcpHarness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness = _HistoricalPerIcpHarness(connect, tmp_path, challengers=["FaultedMiner"], runners=["alpha"])
     original = harness.sandbox.run_icp
     observed = []
     deepline_quota = None
@@ -287,7 +289,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
 
         submission_id = spec.source_dir.parent.name.removeprefix("submission-")
         position = int(document["icp"]["icp_id"].rsplit("_", 1)[-1]) - 1
-        if harness.flavors[submission_id] == "PublicBaseline" and position == 0:
+        if harness.flavors[submission_id] == "FaultedMiner" and position == 0:
             with harness.sandbox.lock:
                 os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
                 try:
@@ -357,24 +359,40 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
 
     harness.sandbox.run_icp = run_icp
     participants = fixtures._start_round(harness, day=day, epoch=epoch)
-    assert participants == 1
+    assert participants == 2
     deepline_quota = harness.service.store.get_round(harness.round_id)[
         "configuration_doc"
     ]["call_quotas"]["deepline"]
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
-    assert harness.service.advance_round(harness.round_id)["assignments"] == 10
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 20
     harness.run_stage_with_runners(1)
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"
     scoring_opened = harness.service.advance_round(harness.round_id)
-    assert scoring_opened["assignments"] == 9
+    assert scoring_opened["assignments"] == 19
     assert harness.status() == "stage1_scoring"
-    harness.advance_until("published", runners=1)
+    harness.advance_until("scored", runners=1)
+    if stop_reason == "provider_error":
+        assert harness.service.publish(harness.round_id) == {
+            "status": "retry", "round_status": "scored",
+            "reason": "execution_infrastructure_incomplete",
+        }
+    else:
+        harness.advance_until("published", runners=1)
 
     saved = harness.service.store.get_round(harness.round_id)
-    assert saved["status"] == "published"
-    baseline_id = next(iter(harness.flavors))
+    assert saved["status"] == ("scored" if stop_reason == "provider_error" else "published")
+    faulted_id = next(
+        submission_id for submission_id, flavor in harness.flavors.items()
+        if flavor == "FaultedMiner"
+    )
+    # Baseline failures hold publication. This failure belongs to the challenger;
+    # all of the baseline's accepted work must remain complete.
+    baseline = next(p["submission_id"] for p in saved["participants"] if p["is_king"])
+    assert len([r for r in harness.service.store.list_runs(
+        harness.round_id, submission_id=baseline, kind="execute",
+    ) if r["status"] == "accepted"]) == 20
     runs = harness.service.store.list_runs(
-        harness.round_id, submission_id=baseline_id, kind="execute"
+        harness.round_id, submission_id=faulted_id, kind="execute"
     )
     accepted = [run for run in runs if run["status"] == "accepted"]
     expected_cause = (
@@ -393,7 +411,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
         assert observed == [("failed", 502), ("failed", 502)]
         assert [run["attempt"] for run in terminal_stops] == [1, 2]
         assert terminal_stops[0]["per_icp_score"] is None
-        assert terminal_stops[1]["per_icp_score"] == 0
+        assert terminal_stops[1]["per_icp_score"] is None
         assert all(
             harness.service.store.list_ledger(run_id=run["run_id"])
             for run in terminal_stops
@@ -408,8 +426,24 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
             "per_icp_quota"
         ]
 
-    result = saved["publication_doc"]["final_ranking"][0]
-    assert result["submission_id"] == baseline_id
+    if stop_reason == "provider_error":
+        # An infrastructure failure cannot produce a measured final score.
+        # Preserve the 19 accepted ICPs and exact failed-call charges for recovery.
+        assert saved["publication_doc"] is None
+        assert saved["reward_activated_at"] is None
+        assert saved["reward_basis_doc"] is None
+        assert all(run["per_icp_score"] > 0 for run in accepted)
+        costs = harness.service.store.submission_costs(faulted_id)
+        assert sum(item["inflight_calls"] for item in costs["providers"]) == 0
+        assert sum(item["uncertain_calls"] for item in costs["providers"]) == 0
+        fixtures.assert_canary_absent(harness, connect)
+        return
+
+    result = next(
+        row for row in saved["publication_doc"]["final_ranking"]
+        if row["submission_id"] == faulted_id
+    )
+    assert result["submission_id"] == faulted_id
     assert result["eligible"] is True
     assert result["final_score"] > 0
     if stop_reason == "provider_error":
@@ -420,7 +454,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
         ]
         assert len(scored) == 20
         assert result["final_score"] == pytest.approx(sum(scored) / 20)
-        public = harness.service.public_results(harness.round_id, baseline_id)
+        public = harness.service.public_results(harness.round_id, faulted_id)
         assert len(public["scores"]["stage_1"] + public["scores"]["stage_2"]) == 20
     per_icp = {item["icp_position"]: item for item in result["cost_summary"]["per_icp"]}
     assert per_icp[0]["eligible"] is (
@@ -436,7 +470,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
 def test_all_budget_exhausted_challenger_publishes_null_score(database, tmp_path):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = PerIcpHarness(
+    harness = _HistoricalPerIcpHarness(
         connect, tmp_path, challengers=["Empty", "Healthy"], runners=["alpha"]
     )
     original = harness.sandbox.run_icp
@@ -658,3 +692,8 @@ def test_publication_eligibility_reuse_migration_replays_and_rolls_back(database
             assert cursor.fetchone() == identity
     finally:
         connection.close()
+
+
+# These local tests pin pre-474 SQL. Shared harness classes keep current clients.
+class _HistoricalPerIcpHarness(HistoricalStoreHarnessMixin, PerIcpHarness):
+    pass

@@ -9,7 +9,7 @@ import pytest
 
 from lab_arena import contracts, public_dashboard, source_disclosure
 from lab_arena.service import ArenaService, ServiceError
-from lab_arena.store import ArenaStore
+from lab_arena.store import ArenaStore, PUBLIC_CONFIGURATION_FIELDS
 
 
 BASELINE_HOTKEY = "5" + "A" * 47
@@ -406,14 +406,17 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
             }
             rows = pages.get(kwargs.get("offset", 0), [])
             if archive_reason == "authorized_baseline_recovery440":
-                # Production fetches compact JSON projections, not full config.
-                assert "cfg_recovery_source_round_id:" in kwargs["columns"]
+                # Production fetches the public configuration projection, not
+                # the full private configuration document.
+                assert "configuration_doc:lab_arena_public_configuration_v1" in kwargs["columns"]
                 return [
                     {
                         **{key: value for key, value in row.items()
                            if key != "configuration_doc"},
-                        **{"cfg_" + key: json.dumps(value)
-                           for key, value in row["configuration_doc"].items()},
+                        "configuration_doc": {
+                            key: value for key, value in row["configuration_doc"].items()
+                            if key in PUBLIC_CONFIGURATION_FIELDS
+                        },
                     }
                     for row in rows
                 ]
@@ -571,6 +574,7 @@ def test_open_submissions_disclose_only_accepted_intake_as_queued():
 
     service = SimpleNamespace(
         _round=lambda _round_id: round_row,
+        _public_submissions_round=lambda _round_id: round_row,
         _store=Store(),
         now=_now,
     )
@@ -656,6 +660,7 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
 
     service = SimpleNamespace(
         _round=lambda _round_id: round_row,
+        _public_submissions_round=lambda _round_id: round_row,
         _store=Store(),
         now=_now,
     )
@@ -815,6 +820,7 @@ def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
 
     service = SimpleNamespace(
         _round=lambda _round_id: row,
+        _public_submissions_round=lambda _round_id: row,
         _store=Store(),
         now=_now,
     )
@@ -920,6 +926,7 @@ def test_cancelled_round_never_fabricates_aggregate_scores():
     ]
     service = SimpleNamespace(
         _round=lambda _round_id: row,
+        _public_submissions_round=lambda _round_id: row,
         _store=SimpleNamespace(list_submissions=lambda *_args, **_kwargs: records,
                                list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []),
         now=_now,
@@ -944,6 +951,7 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
     }
     checked = []
     service = SimpleNamespace(
+        _require_identifier=ArenaService._require_identifier,
         _store=SimpleNamespace(get_submission=lambda _submission_id: submission),
         _round=lambda round_id: checked.append(round_id),
         _objects=object(),
@@ -973,6 +981,7 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
 def test_submission_status_uses_full_round_scope_check():
     checked = []
     service = SimpleNamespace(
+        _require_identifier=ArenaService._require_identifier,
         _store=SimpleNamespace(
             get_submission=lambda _submission_id: {
                 "submission_id": "sub-miner",
@@ -1014,7 +1023,8 @@ def test_previously_admitted_review_exclusion_remains_visible_without_scores(rou
             "provider_response": "private-provider-do-not-publish",
         },
     }
-    service = SimpleNamespace(_round=lambda _: row, now=_now,
+    service = SimpleNamespace(_round=lambda _: row,
+        _public_submissions_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
                              list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     result = public_dashboard.submissions_snapshot(service, row["round_id"])
@@ -1041,7 +1051,8 @@ def test_review_visibility_does_not_disclose_unadmitted_or_superseded_sources(ch
     submission = {"submission_id": "private-id", "miner_hotkey": MINER_HOTKEY,
         "status": "rejected", "rejection_rule": "code_review_incomplete",
         "accepted_at": "2026-09-08T17:50:08Z", **change}
-    service = SimpleNamespace(_round=lambda _: row, now=_now,
+    service = SimpleNamespace(_round=lambda _: row,
+        _public_submissions_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
                              list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     assert public_dashboard.submissions_snapshot(service, row["round_id"])["submissions"] == []

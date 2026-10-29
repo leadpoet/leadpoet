@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import host_interruption_retry474_postgres_test as prior
+from tests.lab_arena.round_timing_fixture import commit_dates
 
 ROOT = Path(__file__).parents[2]
 SQL = ROOT / 'scripts/478-lab-arena-infrastructure-retry-cost.sql'
@@ -368,18 +369,15 @@ def test_retry_cost_per_qualified_company_boundary_is_unchanged(database, amount
 
 @pytest.mark.parametrize('catalog_enabled', [False, True])
 def test_existing_unstarted_round_enrolls_only_when_commit_rpc_freezes_it(database, catalog_enabled):
-    from datetime import datetime, timedelta, timezone
     from lab_arena.store import ArenaStore, PsycopgTransport
     from tests.lab_arena.test_lab_arena_migration_postgres import round_config, frozen_participants, hotkey
     connect = lambda: database[0].connect(**database[1])
     store = ArenaStore(PsycopgTransport(connect))
     rid = 'arena-2099-08-09-infra' + str(catalog_enabled).lower()
-    day = datetime.now(timezone.utc).date()
-    bank = day - timedelta(days=1)
     cfg = round_config(rid, [hotkey('freeze-runner')], cost_per_company_microusd=800000)
     cfg.update(sourcing_cost_eligibility_policy='successful_calls_per_icp_v1', execution_icp_cap_microusd=4000000)
-    cfg['schedule'] = {'submission_open': bank.isoformat() + 'T00:00:00Z',
-                       'submission_cutoff': (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()}
+    day, bank = commit_dates(cfg)
+    cfg['schedule']['submission_open'] = bank.isoformat() + 'T00:00:00Z'
     assert store.create_round(rid, cfg)['status'] == 'created'
     participants = frozen_participants(store, rid, 1, prefix='infra-freeze-' + str(catalog_enabled), king_index=0)
     catalog = {'schema_version': 'leadpoet.lab_arena.deepline_catalog.v1',

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Mapping, Tuple
 
 import pytest
@@ -18,6 +19,9 @@ LAUNCH_SENTENCE = (
     "for logistics operating teams."
 )
 FUNDING_DESCRIPTION = "Acme Robotics announced a $40 million Series B funding round."
+FUNDING_SENTENCE = (
+    "Acme Robotics announced a $40 million Series B funding round on July 15, 2026."
+)
 LAUNCH_DESCRIPTION = "Acme Robotics launched its Fleet Control platform."
 PARAGRAPH = (
     "Acme Robotics announced a $40 million Series B funding round on July 15, "
@@ -36,8 +40,10 @@ def _icp() -> Dict[str, Any]:
         ),
         product_service="Fleet-management software for logistics operating teams",
         intent_signals=[
-            "Announced a Series A or later funding round in the last 12 months",
-            "Launched a software product in the last 12 months",
+            {"signal": "Announced a Series A or later funding round in the last 12 months",
+             "intent_category": "FUNDING"},
+            {"signal": "Launched a software product in the last 12 months",
+             "intent_category": "PRODUCT_LAUNCH"},
         ],
     )
     return icp
@@ -100,7 +106,7 @@ def _source_results() -> Dict[str, Any]:
                 "title": "Acme Robotics raises Series B",
                 "publishedDate": "2026-07-15T00:00:00.000Z",
                 "author": "Acme Robotics",
-                "text": real_judge.PAGE_TEXT,
+                "text": real_judge.PAGE_TEXT + " " + FUNDING_SENTENCE,
                 "highlights": [real_judge.SENTENCE],
                 "highlightScores": [0.99],
                 "score": 0.99,
@@ -111,7 +117,7 @@ def _source_results() -> Dict[str, Any]:
                 "title": "Acme Robotics launches Fleet Control",
                 "publishedDate": "2026-08-20T00:00:00.000Z",
                 "author": "Acme Robotics",
-                "text": LAUNCH_SENTENCE,
+                "text": LAUNCH_SENTENCE + " " + real_judge.PAGE_TEXT,
                 "highlights": [LAUNCH_SENTENCE],
                 "highlightScores": [0.98],
                 "score": 0.98,
@@ -122,10 +128,15 @@ def _source_results() -> Dict[str, Any]:
 
 
 def _stage3_reply(prompt: str) -> Dict[str, Any]:
-    is_launch = LAUNCH_DESCRIPTION in prompt
+    claim_match = re.search(r'"miner_claim"\s*:\s*"([^"\n]+)"', prompt)
+    assert claim_match is not None
+    is_launch = claim_match.group(1) == LAUNCH_DESCRIPTION
+    source_match = re.search(r'"claimed_source_urls"\s*:\s*(\[[^\]]*\])', prompt)
+    assert source_match is not None
+    supplied_urls = json.loads(source_match.group(1))
     claim = LAUNCH_DESCRIPTION if is_launch else FUNDING_DESCRIPTION
     url = LAUNCH_URL if is_launch else real_judge.NEWS_URL
-    quote = LAUNCH_SENTENCE if is_launch else real_judge.SENTENCE
+    quote = LAUNCH_SENTENCE if is_launch else FUNDING_SENTENCE
     event_date = "2026-08-20" if is_launch else "2026-07-15"
     return {
         "overall_verdict": "qualified",
@@ -137,7 +148,7 @@ def _stage3_reply(prompt: str) -> Dict[str, Any]:
                 "claim": claim,
                 "verification_mode": "source_grounded",
                 "signal_status": "supported",
-                "source_urls_supplied": [url],
+                "source_urls_supplied": supplied_urls,
                 "evidence_urls_used": [url],
                 "source_accessibility": "accessible",
                 "same_entity_check": "pass",
@@ -167,7 +178,7 @@ def _company_fit_reply() -> Dict[str, Any]:
         "observed_company_linkedin": (
             "https://www.linkedin.com/company/acme-robotics"
         ),
-        "observed_employee_count": "51-200",
+        "observed_employee_count": 120,
         "employee_size_matches": True,
         "employee_size_evidence_url": about_url,
         "employee_size_evidence_quote": "Acme Robotics has 120 employees.",
@@ -215,6 +226,34 @@ def _local_responder(
             response_format = normalized.get("response_format") or {}
             schema = response_format.get("json_schema") or {}
             schema_name = schema.get("name")
+            submit_tool = next((tool["function"] for tool in normalized.get("tools") or []
+                                if tool.get("function", {}).get("name") == "submit_findings"), None)
+            if submit_tool is not None:
+                from tests.test_company_evidence_investigator import _finding
+                targets = submit_tool["parameters"]["properties"]["findings"]["items"]["properties"]["target"]["enum"]
+                facts = _company_fit_reply()
+                dimensions = {"headcount": "employee_size", "required_attribute": "required_attribute"}
+                findings = []
+                for target in targets:
+                    dimension = dimensions.get(target, target)
+                    findings.append(_finding(
+                        target, observed_value=("Series B" if target == "stage" else 120 if target == "headcount" else None),
+                        observed_industry="Software" if target == "industry" else "",
+                        observed_subindustry="Robotics fleet-management software" if target == "industry" else "",
+                        observed_country="United States" if target == "geography" else "",
+                        observed_state="California" if target == "geography" else "",
+                        activity_role="supplier_operator" if target in {"industry", "required_attribute"} else "unresolved",
+                        evidence_url=(real_judge.SITE + "/about" if target == "stage"
+                                      else facts[f"{dimension}_evidence_url"]),
+                        evidence_quote=facts[f"{dimension}_evidence_quote"],
+                    ))
+                body = real_judge.chat_completion(str(normalized.get("model")), "")
+                body["choices"][0]["message"]["tool_calls"] = [{
+                    "id": "controlled-company-findings", "type": "function", "function": {
+                        "name": "submit_findings", "arguments": json.dumps({"findings": findings}),
+                    },
+                }]
+                return 200, headers, json.dumps(body).encode()
             if schema_name == "arena_intent_details_review":
                 assert schema.get("strict") is True
                 declared = schema.get("schema") or {}
@@ -226,10 +265,17 @@ def _local_responder(
                 }
                 review_document = json.loads(str(messages[-1]["content"]))
                 review_documents.append(review_document)
-                source_index, values = next(iter(
-                    intent_details._bound_evidence_sources(review_document).items()
-                ))
-                quote = values[0][:500]
+                bound_sources = intent_details._bound_evidence_sources(review_document)
+
+                def unit_evidence(unit):
+                    quotes = ([LAUNCH_SENTENCE] if "Fleet Control" in unit["text"]
+                              else [FUNDING_SENTENCE] if "July 15" in unit["text"]
+                              else [FUNDING_SENTENCE, LAUNCH_SENTENCE])
+                    return [{"source_index": next(
+                                index for index, values in bound_sources.items()
+                                if any(quote in value for value in values)),
+                             "quote": quote} for quote in quotes]
+
                 unit_grounding = [
                     {
                         "unit_id": unit["unit_id"],
@@ -246,7 +292,7 @@ def _local_responder(
                             if review_checks is not None
                             and not review_checks["facts_supported"]
                             and unit["unit_id"] == 0
-                            else [{"source_index": source_index, "quote": quote}]
+                            else unit_evidence(unit)
                         ),
                     }
                     for unit in review_document["intent_details_units"]
@@ -261,6 +307,22 @@ def _local_responder(
                         **dict(review_checks),
                     } if review_checks is not None else {}
                 )
+            elif schema_name == "arena_intent_details_semantic_repair":
+                repair_document = json.loads(str(messages[-1]["content"]))
+                document = repair_document["review_document"]
+                sources = intent_details._bound_evidence_sources(document)
+                evidence = [{"source_index": next(
+                                index for index, values in sources.items()
+                                if any(quote in value for value in values)),
+                             "quote": quote}
+                            for quote in (FUNDING_SENTENCE, LAUNCH_SENTENCE)]
+                controls = repair_document["bounded_unit_repair_control"]["units"]
+                assert {item["unit_id"] for item in controls} == {2}
+                assert all(item["semantic_recheck_allowed"] for item in controls)
+                content = json.dumps({"repairs": [
+                    {"unit_id": item["unit_id"], "status": "VERIFIED", "evidence": evidence}
+                    for item in controls
+                ]})
             elif schema_name == "verification":
                 content = json.dumps(_stage3_reply(prompt))
             else:
@@ -282,11 +344,13 @@ def _local_responder(
         if operation_id.startswith("scrapingdog.scrape"):
             html = (
                 "<html><head><title>Acme Robotics</title></head><body><p>"
-                + real_judge.PAGE_TEXT
+                + real_judge.PAGE_TEXT + " " + FUNDING_SENTENCE
                 + "</p><p>"
                 + LAUNCH_SENTENCE
                 + "</p><p>Acme Robotics sells a robotics fleet-management platform."
-                + "</p></body></html>"
+                + "</p><p>Acme Robotics has 120 employees.</p>"
+                + "<p>Acme Robotics is headquartered in San Francisco, California.</p>"
+                + "</body></html>"
             )
             return 200, {"content-type": "text/html; charset=utf-8"}, html.encode()
         return real_judge.respond(operation_id, normalized)

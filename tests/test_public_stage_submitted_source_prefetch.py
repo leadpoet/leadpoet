@@ -106,7 +106,7 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
     search.assert_awaited_once()
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["server_public_stage_source_fetch"]["url"] == url
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
 
 
 def test_irrelevant_first_party_page_does_not_prove_public_stage(monkeypatch):
@@ -204,7 +204,7 @@ def test_failed_public_stage_prefetch_keeps_remaining_fetch_budget(monkeypatch):
         "error": "http_404",
         "notice": "server_fetched_page_is_untrusted_evidence",
     }
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
 
 
 def test_public_stage_prefetch_transport_failure_stays_provider_failure(monkeypatch):
@@ -324,19 +324,20 @@ def test_existing_first_party_prefetch_preserves_three_fresh_fetch_slots(monkeyp
     assert third_fresh_result["url"] == fourth_url
 
 
-def test_public_stage_auto_prefetch_plus_two_model_fetches_stops_fourth(monkeypatch):
+def test_public_stage_auto_prefetch_plus_three_model_fetches_stops_fifth(monkeypatch):
     submitted_url = "https://acme.example/investors/current-listing"
     second_url = "https://exchange.example/acme"
     third_url = "https://filings.example/acme"
     fourth_url = "https://news.example/acme"
+    fifth_url = "https://other-news.example/acme"
     requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
         turn = len(requests)
-        if turn <= 3:
-            url = (second_url, third_url, fourth_url)[turn - 1]
+        if turn <= 4:
+            url = (second_url, third_url, fourth_url, fifth_url)[turn - 1]
             return _tool_response("fetch_page", {"url": url}, turn)
         return _tool_response(
             "submit_findings", {"findings": [_finding(status="UNPROVEN")]}, turn,
@@ -365,12 +366,12 @@ def test_public_stage_auto_prefetch_plus_two_model_fetches_stops_fourth(monkeypa
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["usage"]["fetch_calls"] == 3
-    assert fetch.await_count == 3
+    assert result["usage"]["fetch_calls"] == 4
+    assert fetch.await_count == 4
     assert [call.args[1] for call in fetch.await_args_list] == [
-        submitted_url, second_url, third_url,
+        submitted_url, second_url, third_url, fourth_url,
     ]
-    exhausted = json.loads(requests[3]["messages"][-1]["content"])
+    exhausted = json.loads(requests[4]["messages"][-1]["content"])
     assert exhausted == {"ok": False, "error": "fetch_budget_exhausted"}
 
 

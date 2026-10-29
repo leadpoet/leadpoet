@@ -29,13 +29,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _current_source():
-    # This suite isolates PR483. Reverse the separate source-access correction
-    # so its original frozen847 hash remains a real immutable-source control.
-    from scripts.arena_reviewer_source_access_seam import FINALITY_DELTAS
-    source = (ROOT / FINALITY_FILE).read_bytes()
-    for _, old, new in FINALITY_DELTAS:
-        source = source.replace(new.encode(), old.encode(), 1)
-    return source
+    # Pin the exact grading predicate from frozen847 revision77db393b. The
+    # current scorer has later source/quality changes that cannot define this
+    # immutable historical fixture. Keep the surrounding module for composition.
+    source = (ROOT / FINALITY_FILE).read_text()
+    current_predicate = _predicate_source(source.encode())
+    original_predicate = (ROOT / "tests/fixtures/frozen847_finality_predicate.py.txt").read_text()
+    assert original_predicate.count(_ORIGINAL_GUARD) == 1
+    return source.replace(
+        current_predicate,
+        original_predicate.replace(_ORIGINAL_GUARD, _CORRECTED_GUARD, 1),
+        1,
+    ).encode()
 
 
 def _original_source():
@@ -231,5 +236,5 @@ def test_composed_finality_through_fit_zero_and_existing_arena_completion(
     monkeypatch.setattr(lead_scorer, PREDICATE,
                         _predicate(convert_finality_seam(_original_source())))
     controls.test_negative_completion_through_fit_and_arena(
-        monkeypatch, semantic, homepage_fault, investigation_fault='', preserve_marker=True,
+        monkeypatch, semantic, homepage_fault, investigation_fault="", preserve_marker=True,
     )

@@ -110,7 +110,7 @@ class _Clock:
 
 
 @pytest.mark.parametrize("search_limit", [1, 2])
-def test_time_forced_unproven_with_unused_research_is_incomplete(
+def test_time_forced_valid_negative_completes_with_unused_research(
     monkeypatch, search_limit,
 ):
     clock = _Clock()
@@ -161,10 +161,8 @@ def test_time_forced_unproven_with_unused_research_is_incomplete(
     assert result["usage"]["search_calls"] == 1
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result.get("_completed_submit") is not True
-    assert result["failure_reason"] == (
-        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-    )
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
 
 
@@ -303,7 +301,7 @@ def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
 
     result = _run(monkeypatch, fake_post_json)
 
-    assert len(requests) == 1
+    assert len(requests) == (2 if response_exhausted else 1)
     payload, normalized, outbound = requests[0]
     assert payload["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     assert payload["tool_choice"] == {
@@ -651,7 +649,9 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
         )
 
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == 2
+    assert len(requests) == 3
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
     assert result["claims"]["industry"]["status"] != "VERIFIED"
 
 
@@ -687,7 +687,7 @@ def test_late_grace_does_not_admit_other_work(monkeypatch, case):
         )
 
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == 1
+    assert len(requests) == (2 if case == "other_tool" else 1)
     assert result["claims"].get("industry", {}).get("status") != "VERIFIED"
 
 

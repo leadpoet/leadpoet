@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from typing import Any, Optional, Sequence
@@ -234,6 +235,33 @@ def normalize_saved_image(
         return "sha256:" + config_hash
 
 
+def _saved_image_config_hash(archive_path: Path) -> str:
+    """Read the exact config bytes exported by Docker after loading an image."""
+
+    try:
+        with tarfile.open(archive_path, "r:*") as archive:
+            manifest = json.load(archive.extractfile("manifest.json"))
+            if (
+                not isinstance(manifest, list)
+                or len(manifest) != 1
+                or not isinstance(manifest[0], dict)
+            ):
+                raise DockerImageNormalizationError("loaded Docker manifest is invalid")
+            config_name = manifest[0].get("Config")
+            if not isinstance(config_name, str) or not config_name:
+                raise DockerImageNormalizationError("loaded Docker config path is invalid")
+            config = archive.extractfile(config_name)
+            if config is None:
+                raise DockerImageNormalizationError("loaded Docker config is unavailable")
+            digest = hashlib.sha256()
+            with config:
+                for chunk in iter(lambda: config.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return "sha256:" + digest.hexdigest()
+    except (OSError, KeyError, ValueError, TypeError, tarfile.TarError) as exc:
+        raise DockerImageNormalizationError("loaded Docker config is invalid") from exc
+
+
 def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
     """Save, canonicalize, and reload a Docker image under a stable tag."""
 
@@ -245,6 +273,7 @@ def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
         root = Path(temporary)
         original = root / "original.tar"
         normalized = root / "normalized.tar"
+        reloaded = root / "reloaded.tar"
         _run(["docker", "save", "-o", str(original), source_image])
         canonical_config_id = normalize_saved_image(
             archive_path=original,
@@ -258,13 +287,22 @@ def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
         ).stdout.strip()
         if not observed_id.startswith("sha256:"):
             raise DockerImageNormalizationError("normalized Docker image ID is invalid")
-        # With Docker's classic store, .Id is the canonical config digest.
-        # With the containerd store, .Id can be a generated manifest digest.
-        # Both are acceptable build identities and are compared across all
-        # repeated builds; the canonical config remains bound into the image.
+        # .Id can be a config digest in the classic store or a generated
+        # manifest digest in the containerd store. Compare the exact loaded
+        # config instead: it binds all config fields and ordered layer hashes.
         if not canonical_config_id.startswith("sha256:"):
             raise DockerImageNormalizationError("canonical Docker config ID is invalid")
-        return observed_id
+        original.unlink()
+        normalized.unlink()
+        _run(["docker", "save", "-o", str(reloaded), normalized_image])
+        if _saved_image_config_hash(reloaded) != canonical_config_id:
+            raise DockerImageNormalizationError("loaded Docker config differs from canonical config")
+        print(
+            "Verified canonical Docker config %s (store image %s)"
+            % (canonical_config_id, observed_id),
+            file=sys.stderr,
+        )
+        return canonical_config_id
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

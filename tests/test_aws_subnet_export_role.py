@@ -243,6 +243,7 @@ class ExportRoleTests(unittest.TestCase):
             with self.assertRaisesRegex(tool.Failure, "repo-tool-bytes"):
                 tool.verified_head(Path.cwd(), HEAD)
 
+    @patch.dict(os.environ, {name: "" for name in tool.AWS_AUTHORITY_OVERRIDES})
     def test_aws_cli_payload_file_is_private_removed_and_not_in_arguments(self):
         paths = []
         def inspect(args, data=None):
@@ -264,6 +265,7 @@ class ExportRoleTests(unittest.TestCase):
         self.assertFalse(paths[0].exists())
         self.assertFalse(paths[0].parent.exists())
 
+    @patch.dict(os.environ, {name: "" for name in tool.AWS_AUTHORITY_OVERRIDES})
     def test_aws_cli_payload_cleanup_and_sanitized_failure(self):
         paths = []
         def failed(args, data=None):

@@ -4145,7 +4145,9 @@ class Broker:
             snapshot = self._store.run_quota_snapshot(context.run_id, context.lease_token_hash)
             if not isinstance(snapshot, Mapping) or snapshot.get("status") == "stale":
                 return _error_result("lease_stale", summary)
-            catalog = deepline_catalog.validate_catalog(context.deepline_catalog)
+            catalog = (deepline_catalog.prepare_catalog(context.deepline_catalog)
+                       if operation.operation_id == "deepline.tools.get"
+                       else deepline_catalog.validate_catalog(context.deepline_catalog))
             if operation.operation_id == "deepline.tools.get":
                 document = deepline_catalog.public_tool_definition(
                     deepline_catalog.tool_entry(catalog, parameters["tool"])
@@ -4311,6 +4313,17 @@ class Broker:
                 "broker_unavailable", {"operation_id": str(operation_id)},
                 setup_diagnostics=diagnostics,
             )
+        operation = (operations.OPERATIONS.get(operation_id)
+                     or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
+        if (operation is not None and operation.provider == "deepline"
+                and (bool(operation.deepline_tool)
+                     or operation_id in {"deepline.execute", "deepline.tools.get"})
+                and context.deepline_catalog is not None):
+            try:
+                context = replace(context, deepline_catalog=deepline_catalog.prepare_catalog(
+                    context.deepline_catalog))
+            except deepline_catalog.CatalogError:
+                return _error_result("invalid_request", {"operation_id": operation_id})
         last_result: Optional[BrokerResult] = None
         attempt_trace: list[Dict[str, Any]] = []
 

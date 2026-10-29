@@ -24,6 +24,18 @@ and tests only; the coordinator owns release and production validation through
 the existing paired controller and shared deployment lock. This authority ends
 when the scoped CI and deployed behavior are verified.
 
+## Scoped authorization: October 29 frozen catalog request performance
+
+The user authorized the measured Deepline catalog performance fix: reuse exact,
+validated immutable catalog bytes within one broker request and its retries.
+Preserve full hash, schema and policy checks, mutable-input rejection, frozen
+round JSON, request and response bytes, credentials, billing, async ownership,
+scoring and rewards. Add no provider calls, dependencies or shared identity cache.
+Internal agents may test and commit only. The coordinating task owns independent
+review, safe push and merge, canonical deployment and live verification. Preserve
+active jobs, migration ownership and release gates. This scope ends after live
+verification; local benchmarks alone do not prove recovery from API stalls.
+
 ## Scoped authorization: October 28 AWS production database migration
 
 The user explicitly authorized completing the subnet Supabase-to-AWS migration,

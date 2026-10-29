@@ -282,10 +282,17 @@ def test_cli_selects_guard_authority_explicitly(monkeypatch, capsys, options, ex
     capsys.readouterr()
 
 
-@pytest.mark.parametrize("options", [["--aws-profile", "leadpoet-lab"], ["--aws-instance-role"]])
-def test_other_configuration_scopes_reject_aws_authority_options(capsys, options):
-    assert MODULE.main(["--openrouter-max-concurrency", "4", "--allowed-account", MODULE.IAM_ACCOUNT, *options]) == 2
-    assert "require --validator-credential-kms-guard" in capsys.readouterr().err
+def test_secret_configuration_rejects_instance_role_authority(capsys):
+    assert MODULE.main(["--openrouter-max-concurrency", "4", "--allowed-account", MODULE.IAM_ACCOUNT, "--aws-instance-role"]) == 2
+    assert "requires --validator-credential-kms-guard" in capsys.readouterr().err
+
+
+def test_secret_configuration_selects_named_operator_profile(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **kwargs: calls.append(kwargs) or {"ok": True})
+    assert MODULE.main(["--openrouter-max-concurrency", "4", "--allowed-account", MODULE.IAM_ACCOUNT, "--aws-profile", "leadpoet-lab"]) == 0
+    assert calls == [{"profile": "leadpoet-lab"}]
+    capsys.readouterr()
 
 
 def test_approved_temporary_recovery_root_passes_guard(monkeypatch):

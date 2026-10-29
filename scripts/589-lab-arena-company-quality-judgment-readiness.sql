@@ -54,6 +54,14 @@ BEGIN
  ELSIF encode(extensions.digest(pg_get_functiondef('public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)'::regprocedure),'sha256'),'hex')='c1dd9446626ef01989a5ae53ce4f4e28d4d1692ab2d9fb96747f388281e5649f' THEN
    RAISE EXCEPTION 'Quality continuation helper missing' USING ERRCODE='55000';
  END IF;
+ SELECT * INTO STRICT p FROM pg_proc WHERE oid='public.lab_arena__participant_incomplete_reason_v1(text,text)'::regprocedure;
+ IF encode(extensions.digest(pg_get_functiondef(p.oid),'sha256'),'hex') NOT IN (
+      'f0947c0d204d0883d926781cfe03ba22ad2b940ea16cf7618de90a9533cd44c4','4a2ada51252a041add7be1aa4595d8aedd18b68ae85c64e2ca3163dae28f870f')
+   OR pg_get_userbyid(p.proowner)<>'lab_arena_owner'
+   OR p.proacl::text IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner}'
+   OR NOT p.prosecdef OR p.provolatile<>'s'
+   OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::text[] THEN
+   RAISE EXCEPTION 'Quality incomplete preimage/security differs' USING ERRCODE='55000'; END IF;
  PERFORM set_config('lab_arena.quality_readiness_owner_create',
    has_schema_privilege('lab_arena_owner','public','CREATE')::text,true);
  IF NOT has_schema_privilege('lab_arena_owner','public','CREATE') THEN
@@ -304,6 +312,22 @@ BEGIN
  EXECUTE replace(d,old,new);
 END $continuation589$;
 
+-- An incomplete challenger still needs strict accepted authority for every
+-- measured ICP. Change only its quality representation, not omission reasons,
+-- deadline, score, baseline, source or native-drain admission.
+DO $incomplete589$
+DECLARE d text; old text:=$old589$      ELSE judge.judgment_scope_doc->>'scorer_image_digest'=r.configuration_doc->>'scorer_image_digest'$old589$;
+ new text:=$new589$      WHEN r.configuration_doc->>'company_quality_policy'='company_quality_v1' THEN
+       public.lab_arena__quality_judgment_refs_v1(r,judge,source)
+      ELSE judge.judgment_scope_doc->>'scorer_image_digest'=r.configuration_doc->>'scorer_image_digest'$new589$;
+BEGIN
+ SELECT pg_get_functiondef('public.lab_arena__participant_incomplete_reason_v1(text,text)'::regprocedure) INTO d;
+ IF strpos(d,new)>0 THEN RETURN; END IF;
+ IF (length(d)-length(replace(d,old,'')))<>length(old) THEN
+   RAISE EXCEPTION 'Quality incomplete anchor differs' USING ERRCODE='55000'; END IF;
+ EXECUTE replace(d,old,new);
+END $incomplete589$;
+
 DO $verify589$
 DECLARE item record; p pg_proc;
 BEGIN
@@ -314,7 +338,8 @@ BEGIN
     '812d8b76d2d3579e733a2708e20fc7918e565e5c9c84062586f24d19d121cc62','plpgsql'),
    ('public.lab_arena_record_run_scores(text,smallint,jsonb)','68e0fe2b383b0295e8f121902a8d429e7a0b43b233d4357f0f242779da9fa9f8','plpgsql'),
    ('public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs)','b94ec8c6ebbd7a94a2b2e3e34d31226f9fe3931e256985b9375f6504e27fa946','plpgsql'),
-   ('public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)','c1dd9446626ef01989a5ae53ce4f4e28d4d1692ab2d9fb96747f388281e5649f','plpgsql')) AS expected(signature,hash,language)
+   ('public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)','c1dd9446626ef01989a5ae53ce4f4e28d4d1692ab2d9fb96747f388281e5649f','plpgsql'),
+   ('public.lab_arena__participant_incomplete_reason_v1(text,text)','4a2ada51252a041add7be1aa4595d8aedd18b68ae85c64e2ca3163dae28f870f','plpgsql')) AS expected(signature,hash,language)
  LOOP
    SELECT * INTO STRICT p FROM pg_proc WHERE oid=item.signature::regprocedure;
    IF encode(extensions.digest(pg_get_functiondef(p.oid),'sha256'),'hex')<>item.hash

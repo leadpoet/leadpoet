@@ -347,8 +347,12 @@ def test_current_per_icp_cost_policy_preserves_measured_scores_and_excludes_judg
         monkeypatch.setattr(service, "_scoring_outputs", scoring_outputs)
         monkeypatch.setattr(service, "_qualified_company_counts", qualified_counts)
         assert service.publish(harness.round_id)["status"] == "ok"
-        assert reads["execution_runs"] == 1
-        assert reads["icp_bank"] == 1
+        # Continuation recovery reads both stages, then unfinished-judgment
+        # and baseline authority each read executions. Publication itself
+        # still shares one execution read and one ICP bank across rankings,
+        # qualification and cost checks.
+        assert reads["execution_runs"] == 5
+        assert reads["icp_bank"] == 2
         assert reads["score_runs"] <= 2
         assert reads["qualification"] == len(participants)
     else:

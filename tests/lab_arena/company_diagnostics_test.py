@@ -98,10 +98,10 @@ def _service(monkeypatch, *, disclosed=True):
     _install_completed_scores_cache(service)
     service._round = lambda _: row
     service._public_icp_disclosure = lambda _: {"public_positions": [0]} if disclosed else None
-    judges = [{"run_id": "judge-0", "scored_run_id": "run-0", "stage": 1, "status": "accepted"}]
-    service._store = SimpleNamespace(
-        list_runs=lambda *a, **k: copy.deepcopy(judges if k.get("kind") == "score" else runs),
-    )
+    judgments = [{**run, "run_id": run["run_id"] + ":score", "kind": "score",
+                  "scored_run_id": run["run_id"]} for run in runs]
+    service._store = SimpleNamespace(list_runs=lambda *a, **k: copy.deepcopy(
+        judgments if k.get("kind") == "score" else runs))
     reads = []
     def get_output(ref, _limit):
         reads.append(ref)

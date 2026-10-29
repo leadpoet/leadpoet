@@ -213,16 +213,24 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     service._store = store
     service._config = SimpleNamespace(mode='live', pinned_round_id=None)
     # Read the archived recovery beside the original October 2 intake window.
-    cutoff = store.get_round('arena-2026-10-02')['configuration_doc']['schedule']['submission_cutoff']
-    service._clock = lambda: datetime.fromisoformat(cutoff.replace('Z', '+00:00')) - timedelta(seconds=1)
+    intake = store.get_round('arena-2026-10-02')
+    cutoff = datetime.fromisoformat(
+        intake['configuration_doc']['schedule']['submission_cutoff'].replace('Z', '+00:00'))
+    service._clock = lambda: cutoff - timedelta(seconds=1)
     service._chain_scope = lambda: ('finney', 71)
     service._pinned_round_id = lambda: None
     service._round = lambda rid: store.get_round(rid)
     service._public_round_output_policy = lambda config: {}
     assert service.current_round()['round_id'] != archive['round_id']
     assert archive['round_id'] not in {r['round_id'] for r in service.active_rounds()}
-    # This sealed fixture has active scoring work and no open admission round.
-    assert service.open_round() is None
+    # The unrelated October2 intake is still open. Neither the recovery target
+    # nor its administrative archive may replace that valid admission row.
+    assert store.get_round(prior.ROUND)['status'] == 'stage1_closed'
+    assert service.open_round()['round_id'] == intake['round_id']
+    # At and after its actual cutoff, even that intake must refuse admission.
+    for seconds in (0, 1):
+        service._clock = lambda seconds=seconds: cutoff + timedelta(seconds=seconds)
+        assert service.open_round() is None
     # Historical recovery assertions above use the original schema. Current
     # dashboard reads require their publication projection migration first.
     with psycopg.connect(**dsn) as conn:

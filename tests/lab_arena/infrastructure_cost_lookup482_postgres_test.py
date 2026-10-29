@@ -278,6 +278,15 @@ def test_production_cardinality_lookup_is_indexed_and_bounded(database):
                 '{"reason":"worker_reported","call":{"reason":"transport_failure","call_succeeded":false}}'::jsonb
               FROM public.lab_arena_runs r CROSS JOIN generate_series(1,60000) g
               WHERE r.run_id=%s""", (lease['run_id'],))
+            cur.execute("""INSERT INTO public.lab_arena_ledger
+              (entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,call_identity,
+               provider,operation_id,funding_source,amount_microusd,entry_doc)
+              SELECT 'uncertain',miner_hotkey,round_id,submission_id,run_id,stage,
+                'sha256:'||lpad(to_hex(g+100000),64,'0'),'deepline','deepline.execute','miner_key',0,
+                '{"reason":"worker_reported","call":{"reason":"transport_failure","call_succeeded":false}}'::jsonb
+              FROM public.lab_arena_runs r CROSS JOIN generate_series(1,333) g
+              WHERE r.run_id=%s""", (lease['run_id'],))
+            assert cur.rowcount == 333
             cur.execute('SET LOCAL session_replication_role=origin')
             cur.execute('ANALYZE public.lab_arena_ledger')
             cur.execute("""CREATE TEMP TABLE cost_proof_heads_482 AS
@@ -304,6 +313,8 @@ def test_production_cardinality_lookup_is_indexed_and_bounded(database):
         with conn.cursor() as cur:
             before = rows(cur)
             cur.execute('SET jit=off')
+            cur.execute('SHOW statement_timeout')
+            previous_timeout = cur.fetchone()[0]
             cur.execute('EXPLAIN (FORMAT JSON) ' + query)
             old_plan = cur.fetchone()[0][0]['Plan']
             cur.execute('EXPLAIN (FORMAT JSON) ' + indexed)
@@ -326,6 +337,7 @@ def test_production_cardinality_lookup_is_indexed_and_bounded(database):
             assert cur.fetchone()[0] == 0
             new_seconds = time.monotonic() - started
             assert new_seconds < 1 and new_seconds * 5 < old_seconds
+            cur.execute("SELECT set_config('statement_timeout',%s,FALSE)", (previous_timeout,))
             assert proof(conn, lease['run_id']) == (True, True)
             assert rows(cur) == before
             print(f'lookup482 old_cost={old_plan["Total Cost"]} new_cost={new_plan["Total Cost"]} '

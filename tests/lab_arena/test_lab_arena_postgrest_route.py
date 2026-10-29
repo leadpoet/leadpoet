@@ -459,3 +459,17 @@ def test_private_backend_has_no_anonymous_fallback(stack):
     response = _docker("exec", stack["proxy_name"], "wget", "-q", "-O", "-",
                        "http://" + stack["rest_name"] + ":3000/rpc/api_test_identity")
     assert response.returncode != 0 and "401" in response.stderr
+
+
+def test_long_run_filter_and_postgrest_content_location_survive_target(stack):
+    run_ids = ["run-" + "x" * 36 + "-%03d" % number for number in range(215)]
+    params = [("select", "run_id"), ("run_id", "in.(" + ",".join(run_ids) + ")"), ("limit", "1")]
+    with httpx.Client(timeout=10, trust_env=False) as client:
+        request = client.build_request("GET", stack["base_url"] + "/rest/v1/lab_arena_runs",
+                                       params=params, headers={"apikey": stack["values"]["arena_key"]})
+        assert 8192 < len(request.url.raw_path) < 16384
+        response = client.send(request)
+    assert response.status_code == 200
+    assert response.json() == []
+    assert len(response.headers["Content-Location"]) > 8192
+    assert "run_id=in." in response.headers["Content-Location"]

@@ -17,6 +17,7 @@ PREIMAGE = 'bc1e769a81daacdcb6fac4c6d1e094b0ad288a075ca5a1e1a65433fd38c3e550'
 POSTIMAGE = 'aa8250cbfe7b62e0ba7802eb1b8c2a38c5b4a012a3e0044a04cb09692318bae7'
 SIGNATURE = 'public.lab_arena__judge_calls_clear_v1(text)'
 database = prior.database
+service_database = prior.service_database
 
 
 @pytest.fixture(scope='module')
@@ -220,5 +221,5 @@ def test_prior_day_remains_outside_continuation(database, migrated):
             assert cur.fetchone()[0] == 0
 
 
-def test_existing_publication_and_reward_controls(database, migrated, tmp_path):
-    prior.test_existing_acceptance_publication_and_rewards_still_work(database, True, tmp_path)
+def test_existing_publication_and_reward_controls(service_database, tmp_path):
+    prior.test_existing_acceptance_publication_and_rewards_still_work(service_database, tmp_path)

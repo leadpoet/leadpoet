@@ -237,10 +237,14 @@ def test_unproved_or_open_call_remains_held(database, upgraded, variant):
         assert stopped.paid._audit(conn, lease) == before
 
 
-def test_existing_acceptance_publication_and_rewards_still_work(database, upgraded, tmp_path):
-    with database[0].connect(**database[1]) as conn:
-        stopped._reset(conn)
-    prior.test_current_schema_accepted_scores_publish_and_activate_reward(database, tmp_path)
+@pytest.fixture()
+def service_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_existing_acceptance_publication_and_rewards_still_work(service_database, tmp_path):
+    prior.test_current_schema_accepted_scores_publish_and_activate_reward(service_database, tmp_path)
 
 
 def test_old_baseline_publication_is_unchanged(database, upgraded, tmp_path):

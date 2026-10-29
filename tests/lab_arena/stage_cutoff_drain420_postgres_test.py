@@ -418,6 +418,98 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         store.close()
 
 
+def _assert_accepted_run_preserved(old, current, *, service, round_row, judgments,
+                                   public, expected_output):
+    if current == old:
+        return
+    assert old['kind'] == 'execute' and old['status'] == 'accepted'
+    assert old['per_icp_score'] is None and old['qualification_doc'] is None
+    scored_fields = {'per_icp_score', 'qualification_doc', 'updated_at'}
+    assert {k: v for k, v in current.items() if k not in scored_fields} == {
+        k: v for k, v in old.items() if k not in scored_fields}
+    assert current['per_icp_score'] is not None
+    assert isinstance(current['qualification_doc'], dict)
+    assert any(service._judgment_matches_execution(round_row, judge, current)
+               for judge in judgments)
+    public_scores = public['scores']['stage_1'] + public['scores']['stage_2']
+    assert any(score['run_id'] == current['run_id']
+               and score['per_icp_score'] == current['per_icp_score']
+               and score['icp_position'] == current['icp_position']
+               for score in public_scores)
+    assert public['outputs'][current['run_id']] == expected_output
+
+
+def _accepted_run_preservation_case():
+    old = dict(run_id='execution', assignment_id='assignment', round_id='round',
+               submission_id='submission', miner_hotkey='miner', stage=1,
+               icp_position=0, kind='execute', status='accepted',
+               terminal_cause='accepted', attempt=1, output_ref='execution-output',
+               result_doc={'terminal_status': 'accepted'}, lease_token_hash='token',
+               per_icp_score=None, qualification_doc=None, updated_at='before')
+    current = {**old, 'per_icp_score': 30.0,
+               'qualification_doc': {'companies': []}, 'updated_at': 'after'}
+    judge = {**current, 'kind': 'score', 'run_id': 'judge',
+             'scored_run_id': 'execution', 'output_ref': 'judge-output'}
+    output = {'companies': []}
+    arguments = dict(service=svc.ArenaService.__new__(svc.ArenaService),
+                     round_row={'round_id': 'round', 'configuration_doc': {}},
+                     judgments=[judge], expected_output=output,
+                     public={'scores': {'stage_1': [{'run_id': 'execution',
+                             'icp_position': 0, 'per_icp_score': 30.0}],
+                             'stage_2': []}, 'outputs': {'execution': output}})
+    return old, current, arguments
+
+
+def test_accepted_run_preservation_allows_only_bound_public_scoring():
+    old, current, arguments = _accepted_run_preservation_case()
+    _assert_accepted_run_preserved(old, current, **arguments)
+    # Already judged accepted work remains byte-exact.
+    _assert_accepted_run_preserved(current, current.copy(), **arguments)
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(current, {**current, 'updated_at': 'later'}, **arguments)
+
+
+@pytest.mark.parametrize('field', [
+    'run_id', 'assignment_id', 'round_id', 'submission_id', 'miner_hotkey',
+    'stage', 'icp_position', 'kind', 'status', 'terminal_cause', 'attempt',
+    'output_ref', 'result_doc', 'lease_token_hash', 'new_field',
+])
+def test_accepted_run_preservation_rejects_immutable_mutation(field):
+    old, current, arguments = _accepted_run_preservation_case()
+    current[field] = 'mutated'
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(old, current, **arguments)
+
+
+@pytest.mark.parametrize('change', [
+    'missing_judge', 'wrong_execution', 'wrong_miner', 'wrong_round',
+    'wrong_submission', 'wrong_stage', 'wrong_position', 'unaccepted',
+    'missing_output', 'wrong_generation', 'public_score', 'public_output',
+])
+def test_accepted_run_preservation_rejects_unbound_or_nonpublic_score(change):
+    old, current, arguments = _accepted_run_preservation_case()
+    judge = arguments['judgments'][0]
+    if change == 'missing_judge':
+        arguments['judgments'] = []
+    elif change == 'public_score':
+        arguments['public']['scores']['stage_1'][0]['per_icp_score'] = 99
+    elif change == 'public_output':
+        arguments['public']['outputs']['execution'] = {'companies': ['foreign']}
+    else:
+        field, value = {
+            'wrong_execution': ('scored_run_id', 'foreign'),
+            'wrong_miner': ('miner_hotkey', 'foreign'),
+            'wrong_round': ('round_id', 'foreign'),
+            'wrong_submission': ('submission_id', 'foreign'),
+            'wrong_stage': ('stage', 2), 'wrong_position': ('icp_position', 1),
+            'unaccepted': ('status', 'failed'), 'missing_output': ('output_ref', None),
+            'wrong_generation': ('scoring_generation_floor', 1),
+        }[change]
+        judge[field] = value
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(old, current, **arguments)
+
+
 def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path):
     """Actual service, signed runner, cost RPCs and scoring/publication.
 
@@ -510,8 +602,10 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     assert runtime_budgets==[3600]*20
     assert h.service.activate_reward(ROUND)["status"]=="activated"
     h.clock.now=datetime.now(timezone.utc)+timedelta(days=2)
+    public_results={}
     for participant in participants:
         public=h.service.public_results(ROUND,participant["submission_id"])
+        public_results[participant["submission_id"]]=public
         assert public["score_status"]=="published"
         assert len(public["scores"]["stage_1"]+public["scores"]["stage_2"])==10
     with connect() as conn:
@@ -519,7 +613,12 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
         old_accepted=[r for r in before["lab_arena_runs"] if r["status"]=="accepted"]
         for old in old_accepted:
             current=next(r for r in after["lab_arena_runs"] if r["run_id"]==old["run_id"])
-            assert current==old
+            _assert_accepted_run_preserved(
+                old, current, service=h.service, round_row=final,
+                judgments=after['lab_arena_runs'],
+                public=public_results[old['submission_id']],
+                expected_output=json.loads(h.service._objects.get(old['output_ref'])),
+            )
         assert all(r["status"]=="accepted" for r in after["lab_arena_runs"])
         assert _close(conn)["status"]=="existing"
         assert _state(conn)==after

@@ -3,6 +3,8 @@ from pathlib import Path
 from functools import partial
 import hashlib
 import json
+import os
+import time
 import re
 
 import pytest
@@ -265,6 +267,21 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
     database = plan_database
     pg, dsn = database
     store, rid, run, cid, _ = router._call(database, '507plan')
+    plans = {}
+    started = time.monotonic()
+
+    def checkpoint(phase):
+        plans['phase'] = phase
+        plans['elapsed_seconds'] = round(time.monotonic() - started, 3)
+        print('PLAN507_PHASE %s elapsed_seconds=%s' %
+              (phase, plans['elapsed_seconds']), flush=True)
+        destinations = [tmp_path / 'plans.json']
+        if os.environ.get('GITHUB_ACTIONS') == 'true':
+            destinations.append(Path('ci-results') / 'postgres-plan507.json')
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(plans, indent=2))
+
     try:
         with pg.connect(**dsn) as conn, conn.cursor() as cur:
             cur.execute('SET LOCAL session_replication_role=replica')
@@ -318,8 +335,8 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')
             cur.execute("SELECT current_setting('server_version'), current_setting('server_version_num')")
             server_version, server_version_num = cur.fetchone()
-            results = []; plans = {'server_version': server_version,
-                                   'server_version_num': server_version_num}
+            results = []; plans.update(server_version=server_version,
+                                       server_version_num=server_version_num)
             print('PLAN507_RUNTIME server_version=%s server_version_num=%s' %
                   (server_version, server_version_num), flush=True)
             for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
@@ -327,8 +344,10 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                 # larger allowance. Optimized507 retains its 20-second bound.
                 cur.execute('SET LOCAL statement_timeout=%s',
                             ('60s' if name.startswith('test_before_') else '20s',))
+                checkpoint(name + ':function_select')
                 cur.execute('SELECT public.'+name+"('live','plan507',71,'',0)")
                 results.append(cur.fetchone()[0])
+                checkpoint(name + ':function_explain_analyze')
                 cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+
                             name+"('live','plan507',71,'',0)")
                 full_plan = cur.fetchone()[0][0]
@@ -353,19 +372,21 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                 for key,value in {'p_mode':"'live'",'p_network_name':"'plan507'",'p_netuid':'71',
                                   'p_round_id':"''",'p_after_entry_id':'0'}.items():
                     literal = literal.replace(key,value)
+                checkpoint(name + ':literal_explain')
                 cur.execute('EXPLAIN (FORMAT JSON, COSTS TRUE) '+literal)
                 plans['literal_'+name]=cur.fetchone()[0][0]
                 for number,key in enumerate(('p_mode','p_network_name','p_netuid','p_round_id','p_after_entry_id'),1):
                     body = body.replace(key,'$'+str(number))
                 prepared = 'plan507_'+str(index)
                 cur.execute('PREPARE '+prepared+'(text,text,integer,text,bigint) AS '+body)
+                checkpoint(name + ':generic_explain_analyze')
                 cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) EXECUTE '+
                             prepared+"('live','plan507',71,'',0)")
                 full_plan=cur.fetchone()[0][0]
                 plans['generic_'+name]=full_plan
                 generic_reads[index]=full_plan['Plan']['Temp Read Blocks']
                 generic_loops[index]=max(cte_loops(full_plan['Plan']))
-            (tmp_path/'plans.json').write_text(json.dumps(plans,indent=2))
+            checkpoint('assertions')
             assert generic_loops=={0:60,1:1}
             assert generic_reads[0]>0 and generic_reads[1]<generic_reads[0]/10
             assert results == [{'status':'none'}]*2
@@ -373,4 +394,6 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             # Keep the history isolated from later callers of this module fixture.
             conn.rollback()
     finally:
+        if plans:
+            checkpoint(plans.get('phase', 'setup') + ':finished')
         store.close()

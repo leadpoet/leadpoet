@@ -17,7 +17,11 @@ phase, remove the unused scoring read, and apply exact independently reviewed
 `589-lab-arena-company-quality-judgment-readiness.sql` for accepted-quality
 score and publication checks. Preserve frozen inputs, accepted artifacts,
 provider costs, score values, reward rules, function ownership and grants.
-Do not extend retry authority under this scope. The coordinator owns canonical
+Restore only the established company-quality partial-judgment retry contract
+that migration 472 blocked by requiring a full-group scope. Validate the frozen
+ordered company references and preserve all existing source, participant,
+generation, parent, cost-clear, deadline and backoff checks. Do not add retry
+causes, increase limits or change accepted results. The coordinator owns canonical
 deployment and fresh production verification after required checks pass.
 For authorized `pranav-admin` access, reuse valid cached credentials across checks and subagents; request new credentials only when none remain valid.
 This authority ends when these fixes and live verification are complete.

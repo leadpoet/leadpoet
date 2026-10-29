@@ -16,6 +16,7 @@ import json
 import subprocess
 import tarfile
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -648,7 +649,10 @@ class Harness:
 
     def make_store(self) -> ArenaStore:
         prepare_current_service_reads(self.connect, include_round_reads=False)
-        return ArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+        store = ArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+        if _SERVICE_TRANSPORTS is not None:
+            _SERVICE_TRANSPORTS.append(store._transport)
+        return store
 
     def build_service(self) -> svc.ArenaService:
         store = self.make_store()
@@ -3414,15 +3418,108 @@ def historical_main_connect(historical_main_database):
 from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 
-_FROZEN_SERVICE_TRANSPORTS = []
+# Only this module's active test owns these pools. Other fixtures and offline
+# tools import Harness and must not have their stores retained here.
+_SERVICE_TRANSPORTS: List[Any] | None = None
 
 
 @pytest.fixture(autouse=True)
-def close_frozen_service_transports():
+def close_service_transports():
     """Each test owns its service pools although this module shares one DB."""
-    yield
-    while _FROZEN_SERVICE_TRANSPORTS:
-        _FROZEN_SERVICE_TRANSPORTS.pop().close()
+    global _SERVICE_TRANSPORTS
+    previous = _SERVICE_TRANSPORTS
+    transports = []
+    _SERVICE_TRANSPORTS = transports
+    try:
+        yield
+    finally:
+        try:
+            while transports:
+                transports.pop().close()
+        finally:
+            _SERVICE_TRANSPORTS = previous
+
+
+def test_round_fixture_restores_owner_when_transport_close_fails():
+    class BrokenTransport:
+        def close(self):
+            raise RuntimeError("test transport close failed")
+
+    previous = _SERVICE_TRANSPORTS
+    cleanup = close_service_transports.__wrapped__()
+    next(cleanup)
+    _SERVICE_TRANSPORTS.append(BrokenTransport())
+    with pytest.raises(RuntimeError, match="test transport close failed"):
+        cleanup.close()
+    assert _SERVICE_TRANSPORTS is previous
+
+
+@pytest.mark.parametrize("historical", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_round_fixture_closes_current_and_rebuilt_service_pools(
+    connect, tmp_path, monkeypatch, historical, interrupted,
+):
+    # Keep service cycles alive: cleanup must not depend on the garbage
+    # collector running before the shared database reaches max_connections.
+    previous = _SERVICE_TRANSPORTS
+    cleanup = close_service_transports.__wrapped__()
+    next(cleanup)
+    connections = []
+    observer = connect()
+    observer.autocommit = True
+    try:
+        harness_type = _FrozenServiceHarness if historical else Harness
+        harness = harness_type(connect, tmp_path, challengers=[], runners=["alpha"])
+        original = harness.service
+        harness.service = harness.build_service()
+        reopened = harness.make_store()
+        stores = [original.store, harness.service.store, reopened]
+        backend_pids = []
+        for store in stores:
+            transport = store._transport
+            borrowed = [transport._acquire() for _ in range(transport._pool_size)]
+            connections.extend(borrowed)
+            for connection in borrowed:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_backend_pid()")
+                    backend_pids.append(cursor.fetchone()[0])
+                transport._release(connection)
+        with observer.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(%s)", (backend_pids,))
+            assert cursor.fetchone()[0] == len(connections)
+        if interrupted:
+            cleanup.close()
+        else:
+            assert next(cleanup, None) is None
+        assert _SERVICE_TRANSPORTS is previous
+        assert all(connection.closed for connection in connections)
+        # Backend exit follows client close asynchronously. Wait only for
+        # session shutdown, without retrying any service operation.
+        deadline = time.monotonic() + 3
+        while True:
+            with observer.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(%s)", (backend_pids,))
+                remaining = cursor.fetchone()[0]
+            if remaining == 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        assert remaining == 0
+        # Imported Harness users outside this module's test fixture retain
+        # responsibility for their own store lifetime; no global owner grows.
+        with monkeypatch.context() as patch:
+            patch.setitem(globals(), "_SERVICE_TRANSPORTS", None)
+            standalone = harness.make_store()
+            try:
+                assert _SERVICE_TRANSPORTS is None
+                assert standalone._transport not in previous
+            finally:
+                standalone.close()
+    finally:
+        assert next(cleanup, None) is None
+        # Also release sessions on the pre-fix regression failure.
+        for connection in connections:
+            connection.close()
+        observer.close()
 
 
 class _FrozenServiceHarness(HistoricalStoreHarnessMixin, Harness):
@@ -3430,7 +3527,8 @@ class _FrozenServiceHarness(HistoricalStoreHarnessMixin, Harness):
 
     def make_store(self):
         store = super().make_store()
-        _FROZEN_SERVICE_TRANSPORTS.append(store._transport)
+        if _SERVICE_TRANSPORTS is not None:
+            _SERVICE_TRANSPORTS.append(store._transport)
         return store
 
     def __init__(self, *args, **kwargs):

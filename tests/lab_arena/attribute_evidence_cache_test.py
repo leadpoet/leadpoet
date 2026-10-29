@@ -123,6 +123,15 @@ def test_no_hint_inputs_keep_historical_keys_and_malformed_hints_still_fail():
     from tests.lab_arena.judgment_cache_test import _input, _scope
 
     old = _input()
+    # Freeze the original ad72859fc model map as well as its cache hash.
+    # Current defaults intentionally select newer judges and a different key.
+    old["scorer_policy"]["judge_models"] = {
+        "company_fit_reverification": "perplexity/sonar",
+        "intent_signal_judge": "anthropic/claude-sonnet-4.5",
+        "intent_three_stage_stage3": "perplexity/sonar-pro",
+        "intent_fetched_evidence": "openai/gpt-6-luna",
+        "role_batch_check": "google/gemini-2.5-flash",
+    }
     expected = _scope(old)
     blank = copy.deepcopy(old)
     blank["companies"][0]["required_attribute"] = None

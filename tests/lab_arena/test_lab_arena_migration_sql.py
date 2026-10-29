@@ -87,6 +87,8 @@ TABLES = (
 def test_arena_migrations_are_uniquely_numbered():
     numbered = {}
     for path in SCRIPTS.glob("*.sql"):
+        if path.name.endswith("-rollback.sql"):
+            continue
         match = re.match(r"^(\d+)-", path.name)
         if match and int(match.group(1)) >= 100:
             numbered.setdefault(int(match.group(1)), []).append(path.name)
@@ -110,7 +112,14 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
-    assert all(len(paths) == 1 for paths in numbered.values()), numbered
+    # Preserve exact already-released collisions; an extra file still fails.
+    released = {
+        478: {"478-lab-arena-baseline-closed-settlement-recovery.sql", "478-lab-arena-infrastructure-retry-cost.sql"},
+        489: {"489-lab-arena-weight-write-rpc-privileges.sql", "489-lab-arena-chain-outcome-resigning.sql"},
+        585: {"585-lab-arena-review-deadline-recovery.sql", "585-lab-arena-champion-baseline-reasoning.sql"},
+    }
+    assert all(len(paths) == 1 or set(paths) == released.get(number)
+               for number, paths in numbered.items()), numbered
 
 
 def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():

@@ -4,18 +4,22 @@ from datetime import datetime, timezone
 import json
 import threading
 
+import pytest
 
 from lab_arena import runtime, scoring
 from lab_arena.runtime_host import RuntimeHostError
 from tests.lab_arena import proxy_model_capacity401_e2e_test as fullflow
-from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 
-database=recovery.database
-migrated=recovery.migrated
+@pytest.fixture()
+def database():
+    # The HTTP driver runs current service code. Exact412 upgrade/preimage and
+    # recovery authority tests retain their separate historical SQL fixture.
+    yield from current_service_database()
 
 
-def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(database,migrated,tmp_path,monkeypatch):
+def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(database,tmp_path,monkeypatch):
     install=fullflow._install_company_only_sandbox
     drain=fullflow._drain_both
     observed={}
@@ -48,8 +52,14 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
                     assert (expiry-datetime.now(timezone.utc)).total_seconds()>4400
                     cur.execute('SELECT count(*) FROM public.lab_arena_ledger WHERE run_id=%s',(run,));assert cur.fetchone()[0]==0
             # Gateway's normal scheduling path calls the exact expiry RPC.
-            transition=harness.service.advance_round(harness.round_id)
-            assert transition['status'] not in ('cancelled','retry','stale')
+            # Current baseline-first rounds can first open stage two while
+            # stage-one judgments continue. The next ordinary tick expires
+            # the authenticated host fault under that continuation authority.
+            for _ in range(2):
+                transition=harness.service.advance_round(harness.round_id)
+                assert transition['status'] not in ('cancelled','retry','stale')
+                if harness.service.store.get_run(run)['status']=='failed':
+                    break
             with psycopg.connect(**dsn) as conn:
                 with conn.cursor() as cur:
                     cur.execute('SELECT status,terminal_cause,terminal_doc,claim_response FROM public.lab_arena_runs WHERE run_id=%s',(run,))
@@ -63,6 +73,7 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
             healthy_config=healthy._config
             healthy.close()
             replacement=type(healthy)(healthy_config)
+            harness.wait_for_score_retry_backoff()
             drain(harness,(replacement,))
             with psycopg.connect(**dsn) as conn:
                 with conn.cursor() as cur:
@@ -76,7 +87,7 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
     monkeypatch.setattr(fullflow,'_install_company_only_sandbox',failing_install)
     monkeypatch.setattr(fullflow,'_drain_both',recovering_drain)
     try:
-        fullflow.test_company_only_baseline_miners_costs_promotion_and_publication(database,migrated,tmp_path)
+        fullflow.test_company_only_baseline_miners_costs_promotion_and_publication(database,True,tmp_path)
     finally:
         for runner in set(replacements.values()):
             runner.close()

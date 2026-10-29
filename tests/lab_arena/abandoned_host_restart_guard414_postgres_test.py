@@ -175,10 +175,20 @@ def test_capture_and_early_recovery_share_claim_control_lock(database,migrated,w
     finally: owner.close()
 
 
-def test_http_host_recovery_publishes_and_promotes_with414_active(database,migrated,tmp_path,monkeypatch):
+@pytest.fixture()
+def current_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_http_host_recovery_publishes_and_promotes_with414_active(current_database,tmp_path,monkeypatch):
     from tests.lab_arena import abandoned_host_recovery412_e2e_test as full_http
+    psycopg,dsn=current_database
+    with psycopg.connect(**dsn) as conn,conn.cursor() as cur:
+        cur.execute("SELECT pg_get_functiondef('public.lab_arena_expire_leases(text)'::regprocedure)")
+        assert 'lab_arena_abandoned_host_restart_guard_v1' in cur.fetchone()[0]
     full_http.test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(
-        database,migrated,tmp_path,monkeypatch,
+        current_database,tmp_path,monkeypatch,
     )
 
 

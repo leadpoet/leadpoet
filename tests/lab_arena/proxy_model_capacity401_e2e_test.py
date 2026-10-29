@@ -6,12 +6,12 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_arena import contracts
 from lab_arena.api import create_app
 from lab_arena.promotion import GitPromoter
-from tests.lab_arena import proxy_model_capacity401_postgres_test as capacity401
 from tests.lab_arena.company_only_capacity_e2e_test import (
     _drain_both,
     _http_runner,
@@ -21,12 +21,21 @@ from tests.lab_arena.company_only_capacity_e2e_test import (
 )
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.icp_fixtures import daily_icps
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_service_round import promotion_repository
 
 
-database = capacity401.database
-migrated399 = capacity401.migrated399
-migrated = capacity401.migrated
+@pytest.fixture()
+def database():
+    # Current HTTP service code needs the deployed recovery and score helpers.
+    # SQL401's exact upgrade/preimage tests retain their historical fixture.
+    yield from current_service_database()
+
+
+@pytest.fixture()
+def migrated():
+    # Descendant drivers already pass this marker after schema installation.
+    return True
 
 
 def test_company_only_baseline_miners_costs_promotion_and_publication(

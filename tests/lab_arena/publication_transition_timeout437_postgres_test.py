@@ -18,6 +18,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
+from tests.lab_arena.historical_service import start_pre470_round
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 MIGRATION = SCRIPTS / "437-lab-arena-publication-transition-timeout.sql"
@@ -100,7 +101,9 @@ def proven_round(database, tmp_path_factory):
     # are produced and validated by the real completion and publication paths.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-        assert fixtures._start_round(h, day=28, epoch=62_428) == 2
+        # This exact437 schema predates the470 recovery RPC. Use its explicit
+        # historical protocol boundary; judging and publication SQL stay real.
+        assert start_pre470_round(h, round_id='arena-2026-10-12-publication437', epoch=62_428) == 2
         h.clock.advance_to(h.schedule()["stage_1_start"])
         h.advance_until("stage1_scored", runners=1)
         h.service.advance_round(h.round_id)

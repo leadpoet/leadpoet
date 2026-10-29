@@ -24,7 +24,10 @@ def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None
     harness.service.config.mode = "shadow"
     config = harness.service.create_round(cutoff, round_id=round_id)
     # Use a separate live ID so no immutable row needs rewriting in setup.
-    config.update(round_id=round_id + "live", mode="live", max_challengers=cap)
+    # Migration201 repairs the frozen 15-minute judge profile. Current daily
+    # capacity separately includes the later 20-minute judge allowance.
+    config.update(round_id=round_id + "live", mode="live", max_challengers=cap,
+                  scoring_wall_clock_seconds=900)
     if changed_schedule:
         field = changed_schedule
         value = datetime.fromisoformat(config["schedule"][field].replace("Z", "+00:00"))
@@ -32,7 +35,8 @@ def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None
     harness.service.config.mode = "live"
     harness.service.store.create_round(config["round_id"], config)
     for index in range(count):
-        harness.submit("capacity-%s-%d" % (suffix, index), config["round_id"])
+        harness.submit("capacity-%s-%d" % (suffix, index), config["round_id"],
+                       expected_review="pending")
     return harness, config
 
 
@@ -108,7 +112,8 @@ def test_parallel_finalizations_cannot_overbook_or_store_rejected_credentials(co
 
     def submit(index):
         try:
-            harness.submit("parallel-capacity-%d" % index, config["round_id"])
+            harness.submit("parallel-capacity-%d" % index, config["round_id"],
+                           expected_review="pending")
             return "accepted"
         except ServiceError as exc:
             return exc.code
@@ -146,6 +151,7 @@ def test_upgrade_leaves_operator_limited_round_unchanged(connect, tmp_path):
     from tests.lab_arena.test_lab_arena_service_round import keypair
     for index in range(7):
         miner = keypair("uploading-lower-%d" % index)
+        harness.chain.registered.append(miner.ss58_address)
         request = contracts.build_signed_request(
             scope=contracts.SCOPE_SUBMISSION_PRESIGN,
             round_id=before["round_id"],

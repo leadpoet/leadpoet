@@ -351,7 +351,7 @@ def route_for(
     return None
 
 
-def _envelope_data(body: bytes) -> Any:
+def _envelope_data(body: bytes, *, source_json: bool = False) -> Any:
     try:
         document = json.loads(bytes(body).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -362,6 +362,22 @@ def _envelope_data(body: bytes) -> Any:
     data = result.get("data") if isinstance(result, Mapping) else None
     if not isinstance(data, (Mapping, list)):
         raise CompatibilityResponseError("missing_deepline_result")
+    if (
+        source_json and isinstance(data, Mapping)
+        and isinstance(data.get("rawHtml"), (Mapping, list))
+    ):
+        # Only the new structured-source lane needs this additional native
+        # failure proof. Keys inside rawHtml belong to the source JSON itself.
+        for node in (document, result, data):
+            node_status = node.get("status")
+            if (
+                node.get("error") is not None or node.get("tool_error") is not None
+                or ("isError" in node and node["isError"] is not False)
+                or ("success" in node and node["success"] is not True)
+                or (node_status is not None and not isinstance(node_status, str))
+                or node_status in {"failed", "cancelled", "canceled", "error"}
+            ):
+                raise CompatibilityResponseError("invalid_deepline_envelope")
     return data
 
 
@@ -433,7 +449,15 @@ def _firecrawl_response(
 ) -> tuple[int, dict[str, str], bytes, str]:
     raw_html = data.get("rawHtml")
     metadata = data.get("metadata")
-    if not isinstance(raw_html, str) or not isinstance(metadata, Mapping):
+    if not isinstance(metadata, Mapping):
+        raise CompatibilityResponseError("missing_firecrawl_raw_html")
+    content_type = metadata.get("contentType")
+    structured_json = (
+        isinstance(raw_html, (Mapping, list))
+        and isinstance(content_type, str)
+        and content_type.split(";", 1)[0].strip().casefold() == "application/json"
+    )
+    if not isinstance(raw_html, str) and not structured_json:
         raise CompatibilityResponseError("missing_firecrawl_raw_html")
     requested_url = str(route.requested_parameters.get("url") or "")
     if str(metadata.get("sourceURL") or "") != requested_url:
@@ -454,7 +478,24 @@ def _firecrawl_response(
     status = metadata.get("statusCode")
     if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
         raise CompatibilityResponseError("missing_firecrawl_target_status")
-    content_type = metadata.get("contentType")
+    if structured_json:
+        # Firecrawl can preserve a JSON source as parsed data even in rawHtml.
+        # Match the generic transport's JSON contract after the same source,
+        # final-URL and target-status proof. Never expose a failed target body
+        # or let the legacy text sanitizer truncate a JSON document.
+        if not 200 <= status < 300:
+            raise CompatibilityResponseError("missing_firecrawl_raw_html")
+        if not _safe_public_source_https_url(requested_url):
+            raise CompatibilityResponseError("invalid_firecrawl_source_url")
+        if not _safe_public_source_https_url(final_url):
+            raise CompatibilityResponseError("invalid_firecrawl_final_url")
+        encoded = _json_bytes(raw_html)
+        if len(encoded) > operations.OPERATIONS[route.requested_operation_id].max_response_bytes:
+            raise CompatibilityResponseError("firecrawl_json_body_too_large")
+        return (
+            status, {"content-type": "application/json; charset=utf-8"},
+            encoded, final_url,
+        )
     if (
         isinstance(content_type, str)
         and content_type.split(";", 1)[0].strip().casefold() == "application/pdf"
@@ -860,7 +901,7 @@ def adapt_response_with_trusted_url(
         raise CompatibilityResponseError("deepline_http_error")
     if route.adapter == "generic_http_raw_html":
         return _generic_http_raw_html_response(route, body)
-    data = _envelope_data(body)
+    data = _envelope_data(body, source_json=route.adapter == "firecrawl_raw_html")
     if route.adapter.startswith("generic_ats_json:"):
         response_status, response_headers, response_body = _generic_ats_response(
             route, data

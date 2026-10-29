@@ -44,3 +44,24 @@ def _never_reexec_the_test_session(request, monkeypatch):
         )
 
     monkeypatch.setattr(validator_startup.os, "execve", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_scorer_process_environment(monkeypatch):
+    # score_input is a process entrypoint. Its frozen-policy and placeholder
+    # credential bindings must not leak into another in-process test. CI also
+    # supplies import-only fake keys that must not become a scorer credential.
+    # Individual tests still set conflicting values to exercise fail-closed
+    # policy enforcement; no production validation is changed.
+    from lab_arena import contracts, scoring, shim
+
+    names = (*scoring.CREDENTIAL_ENV_NAMES, 'OPENROUTER_KEY',
+             'ARENA_INTENT_EVIDENCE_MODEL', 'ARENA_INTENT_DETAILS_REVIEW_MODEL',
+             'ARENA_ROLE_BATCH_MODEL', contracts.SCORE_NORMALIZATION_BINDING,
+             contracts.PROVIDER_OBSERVATION_HANDOFF_BINDING,
+             contracts.FIT_FP_CLASSIFICATION_BINDING, shim.TRUSTED_SCORER_ENV)
+    for name in names:
+        # Register every name, including absent ones, so direct environment
+        # writes from the entrypoint are removed when this test ends.
+        monkeypatch.setenv(name, '')
+        monkeypatch.delenv(name)

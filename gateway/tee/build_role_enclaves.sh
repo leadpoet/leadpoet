@@ -154,8 +154,7 @@ if [ "$RESTORED_EXACT_RELEASE" != "1" ]; then
     sudo python3 \
       "${GATEWAY_ROOT%/gateway}/validator_tee/host/docker_image_normalizer_v2.py" \
       --source-image "$raw_image" \
-      --normalized-image "$image"
-    sudo docker image inspect -f '{{.Id}}' "$image" \
+      --normalized-image "$image" \
       > "$BUILD_EIF_ROOT/enclave-image-${role}.txt"
     sudo nitro-cli build-enclave \
       --docker-uri "$image" \

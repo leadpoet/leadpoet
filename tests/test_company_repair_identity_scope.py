@@ -151,8 +151,9 @@ def test_repair_identity_scope_allows_only_fully_bound_same_entity_proof():
     )
 
 
-def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair(
-    monkeypatch,
+@pytest.mark.parametrize("explicit_attribute_review", [False, True])
+def test_attribute_review_and_unrelated_repair_preserve_grounded_dbs_identity(
+    monkeypatch, explicit_attribute_review,
 ):
     initial = {
         "observed_company_name": "DBS",
@@ -208,7 +209,10 @@ def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair
 
     async def investigator(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
+        assert kwargs["targets"] == (
+            ("stage", "industry", "required_attribute")
+            if explicit_attribute_review else ("stage", "industry")
+        )
         finding = {
             "target": "stage",
             "status": "VERIFIED",
@@ -233,10 +237,10 @@ def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair
         return {
             "claims": {
                 "stage": finding,
-                "required_attribute": {
+                **({"required_attribute": {
                     **finding, "target": "required_attribute", "status": "UNPROVEN",
                     "evidence_url": "", "evidence_quote": "",
-                },
+                }} if explicit_attribute_review else {}),
                 "industry": {
                     **finding,
                     "target": "industry",
@@ -264,11 +268,12 @@ def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair
         # shared attribute-review selector has its own regression suite.
         return ("stage", "industry")
 
-    monkeypatch.setattr(
-        lead_scorer, "_targeted_company_investigation_dimensions", stage_industry_only,
-    )
-    monkeypatch.setattr(lead_scorer, "_industry_attribute_semantic_repair_needed", lambda *_: False)
-    monkeypatch.setattr(lead_scorer, "_positive_semantic_review_needed", lambda *_: False)
+    if not explicit_attribute_review:
+        monkeypatch.setattr(
+            lead_scorer, "_targeted_company_investigation_dimensions", stage_industry_only,
+        )
+        monkeypatch.setattr(lead_scorer, "_industry_attribute_semantic_repair_needed", lambda *_: False)
+        monkeypatch.setattr(lead_scorer, "_positive_semantic_review_needed", lambda *_: False)
     original_ground = lead_scorer._ground_required_attribute_evidence
 
     async def counted_ground(*args, **kwargs):
@@ -311,9 +316,13 @@ def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair
         )
     )
 
-    # The separate attribute review exhausted its proof. It must not reopen a
-    # broad repair that can introduce a new identity beside retained stage proof.
-    assert calls == {"broad": 1, "investigator": 1, "ground": 2}
+    # Explicit attribute review must not reopen a broad identity repair. The
+    # separate schema-repair control must reject a changed identity while
+    # preserving the original, independently grounded stage proof.
+    assert calls == (
+        {"broad": 1, "investigator": 1, "ground": 2}
+        if explicit_attribute_review else {"broad": 2, "investigator": 1, "ground": 1}
+    )
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["identity_decision"] == COMPANY_FIT_MATCH
     assert result.details["identity_receipt"]["observed_name"] == "dbs"

@@ -1,4 +1,3 @@
-from tests.lab_arena.historical_service_harness import HistoricalArenaStore
 """Local PostgreSQL proof for the unrendered Oct10 uniform rejudge template."""
 from datetime import datetime, timedelta, timezone
 import json
@@ -285,15 +284,13 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             assert [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in immediate_exec] == [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in original_exec]
             cur.execute(sql)
             assert _snapshot(cur) == after
-    store = HistoricalArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
     service._store = store
     pin_oct10_service(service, lambda: psycopg.connect(**dsn), round_id=ROUND)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 16, 0, 1, tzinfo=timezone.utc)
-    from tests.lab_arena.sep20_frozen_publication_fixture import commit_oct10_frozen_scoring_plan
-    service.commit_scoring_plan = lambda rid, stage: commit_oct10_frozen_scoring_plan(service, rid, stage)
     service._require_code_review = lambda *args: None
     service.benchmark_icps = service.evaluation_icps = lambda rid: daily_icps()[:10]
     class Objects:
@@ -416,22 +413,19 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     assert_current_publisher_holds(service, lambda: psycopg.connect(**dsn), _snapshot)
     # The one-second terminal stage2 window cannot consume the final judging
     # window. The real driver already progressed at 16:00:01 with all execution
-    # terminal. Today's service must hold; the frozen Oct10 producer then
-    # exercises the original SQL publication guards.
+    # terminal; it now publishes through the unchanged service and SQL guards.
     assert row['configuration_doc']['schedule']['stage_2_close'] == '2026-10-10T16:00:02Z'
     assert row['configuration_doc']['schedule']['final_scoring_close'] == '2026-10-10T20:30:02Z'
     assert row['configuration_doc']['schedule']['publication_deadline'] == '2026-10-10T20:30:03Z'
     with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute('SELECT clock_timestamp()')
         database_now = cur.fetchone()[0]
-    from tests.lab_arena.sep20_frozen_publication_fixture import frozen_publication_document, publish_frozen_document
-    document = frozen_publication_document(service, ROUND)
     if database_now < datetime(2026,10,10,16,0,2,tzinfo=timezone.utc):
         # Publication's real PostgreSQL clock also proves a host-incomplete
         # assignment's execution window is closed. A mocked service clock
         # cannot bypass this existing guard.
         with pytest.raises(ArenaStoreError,match='lab_arena_publication_ranking_invalid'):
-            publish_frozen_document(service, ROUND, document)
+            service._advance_round_locked(ROUND)
         assert store.get_round(ROUND)['status'] == 'scored'
         # Only this disposable fixture's three ordered timestamps move into
         # the past to model elapsed time. No function, ACL, row proof, final
@@ -445,8 +439,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
                 'stage_2_close': elapsed.isoformat(),
             }),ROUND))
     service.now = lambda: database_now
-    document['published_at'] = database_now.isoformat().replace('+00:00', 'Z')
-    assert publish_frozen_document(service, ROUND, document)['status'] == 'ok'
+    assert service._advance_round_locked(ROUND)['status'] == 'ok'
     published = store.get_round(ROUND)
     assert published['status'] == 'published'
     assert len(published['publication_doc']['final_ranking']) == 70

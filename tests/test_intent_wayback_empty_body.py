@@ -21,6 +21,9 @@ SNAPSHOT = "https://web.archive.org/web/" + TIMESTAMP + "/" + SOURCE
 # Public HTML supplied to saved judge call 77164. Only the opaque public
 # Incapsula resource query value is redacted; the empty body is unchanged.
 SHELL = (Path(__file__).parent / "fixtures/amdocs_empty_wayback_shell.html").read_text()
+# Saved call 77458 contains the expanded archive error iframe and toolbar.
+# Only opaque public Incapsula resource query values are redacted.
+ERROR_FRAME = (Path(__file__).parent / "fixtures/amdocs_wayback_error_iframe.html").read_text()
 QUOTE = "VEON and Amdocs announced a 10-year strategic agreement on October 7, 2026."
 ARTICLE_TEXT = QUOTE + " " + (
     "The agreement combines operational modernization and technology "
@@ -182,3 +185,86 @@ def test_pdf_still_bypasses_wayback_and_uses_existing_exact_url_exa_path(monkeyp
     fallback.assert_awaited_once_with(SOURCE)
     assert result["results"][0]["text"] == ARTICLE_TEXT
     assert [url for url, _ in calls] == ["https://api.scrapingdog.com/scrape"]
+
+
+def test_captured_nonempty_wayback_error_frame_is_not_source_content(monkeypatch):
+    assert len(ERROR_FRAME)>500 and not intent._has_empty_html_body(ERROR_FRAME)
+    install_source_responses(monkeypatch,archive=ERROR_FRAME)
+    result=asyncio.run(intent._try_wayback(SOURCE))
+    assert result['ok'] is False and result['content']==''
+    assert result['stage']=='wayback_error_body'
+
+
+def test_archive_error_frame_continues_existing_exact_url_fallback_once(monkeypatch):
+    calls=install_source_responses(monkeypatch,archive=ERROR_FRAME)
+    fallback=AsyncMock(return_value={'ok':True,'stage':'exa_scraped','content':ARTICLE_TEXT,'error':None})
+    monkeypatch.setattr(intent,'_scrape_exa',fallback)
+    result=asyncio.run(intent._fetch_sd_then_exa([SOURCE]))
+    fallback.assert_awaited_once_with(SOURCE)
+    assert result['results'][0]['text']==ARTICLE_TEXT and result['results'][0]['url']==SOURCE
+    assert len(calls)==3
+
+
+@pytest.mark.parametrize('content',[
+    ARTICLE_HTML.replace('</body>',ERROR_FRAME+'</body>'),
+    ARTICLE_HTML.replace('</article>','<p>The Wayback Machine has not archived that URL.</p></article>'),
+    ARTICLE_HTML.replace('<h1>','<div id="wm-ipp-base">Wayback Machine toolbar</div><h1>'),
+    ARTICLE_HTML.replace('</article>','<div id="error"><div class="error-text">The Wayback Machine has not archived that URL.</div></div></article>'),
+    ARTICLE_HTML.replace('</article>','<script>var example="error-text";</script><!-- errorBorder --></article>'),
+    ARTICLE_TEXT,
+    '%PDF-1.7\n'+ARTICLE_TEXT,
+],ids=['article_with_broken_optional_embed','article_about_archive_errors','article_with_toolbar',
+       'article_with_error_prose_markup','script_and_comment_example','plain_text','pdf_unchanged'])
+def test_genuine_source_survives_archive_error_words_toolbar_or_broken_embed(monkeypatch,content):
+    install_source_responses(monkeypatch,archive=content)
+    result=asyncio.run(intent._try_wayback(SOURCE))
+    assert result['ok'] is True and result['content']==content
+    assert result['meta']['ownership_archive_url']==SNAPSHOT
+
+
+def _standalone_archive_error():
+    start=ERROR_FRAME.index('<html lang="en">')
+    end=ERROR_FRAME.index('</html>',start)+len('</html>')
+    return ERROR_FRAME[start:end]
+
+
+def test_standalone_structural_archive_error_is_unusable(monkeypatch):
+    install_source_responses(monkeypatch,archive=_standalone_archive_error())
+    result=asyncio.run(intent._try_wayback(SOURCE))
+    assert result['ok'] is False and result['stage']=='wayback_error_body'
+    assert result['content']=='' and not result.get('meta')
+
+
+@pytest.mark.parametrize('body',[
+    _standalone_archive_error().replace('<title>Wayback Machine</title>','<title>Source report</title>'),
+    _standalone_archive_error().replace('class="navia wb_embedded"','class="source-report"'),
+    _standalone_archive_error().replace('action="https://web.archive.org/web/submit"','action="https://web.archive.org.evil.example/web/submit"'),
+    _standalone_archive_error().replace('id="errorBorder"','id="sourceBorder"'),
+    _standalone_archive_error().replace('class="error-text"','class="quoted-error-text"'),
+],ids=['ordinary_title','ordinary_body','foreign_service_form','no_error_container','no_error_text_node'])
+def test_partial_lookalike_archive_layout_is_not_enough_to_remove_source(body):
+    assert intent._has_wayback_error_body(body) is False
+
+
+@pytest.mark.parametrize('tag',['article','main','p','div','span',''])
+def test_archive_service_style_error_discussion_with_independent_body_is_preserved(monkeypatch,tag):
+    # Even all service markers do not erase source text outside the error UI.
+    source=('<'+tag+'>'+ARTICLE_TEXT+'</'+tag+'>') if tag else ARTICLE_TEXT
+    body=_standalone_archive_error().replace('<div id="errorBorder">',source+'<div id="errorBorder">')
+    install_source_responses(monkeypatch,archive=body)
+    result=asyncio.run(intent._try_wayback(SOURCE))
+    assert result['ok'] is True and result['content']==body
+
+
+def test_archive_error_plus_failed_exact_fallback_remains_unavailable(monkeypatch):
+    install_source_responses(monkeypatch,archive=ERROR_FRAME)
+    fallback=AsyncMock(return_value={'ok':False,'stage':'exa_no_results','content':'','error':'unavailable'})
+    monkeypatch.setattr(intent,'_scrape_exa',fallback)
+    judge=AsyncMock(side_effect=AssertionError('archive error is not judge evidence'))
+    monkeypatch.setattr(intent,'_call_openrouter',judge)
+    result=asyncio.run(intent.verify_three_stage(object(),company_name='Amdocs',company_website='https://amdocs.com/',
+        company_linkedin='',source_url=SOURCE,miner_claim=QUOTE,target_signal_text='Announced a strategic technology partnership',
+        integrity_policy=True,stage1_soft_reject=True))
+    fallback.assert_awaited_once_with(SOURCE)
+    judge.assert_not_awaited()
+    assert result['decision']=='unavailable' and result['scrape']['result_count']==0

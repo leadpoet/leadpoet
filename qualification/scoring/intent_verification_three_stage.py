@@ -2192,6 +2192,105 @@ def _wayback_original_url(url: str) -> str:
         return ""
 
 
+class _WaybackErrorParser(HTMLParser):
+    """Locate complete archive-service error documents, including iframe HTML."""
+
+    _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track", "wbr"})
+
+    def __init__(self, body: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.body = body
+        self.lines = [0, *(match.end() for match in re.finditer("\n", body))]
+        self.nodes: list[tuple[str, dict, int, dict]] = []
+        self.frames: list[dict] = []
+        self.errors: list[tuple[int, int]] = []
+        self.toolbars: list[tuple[int, int]] = []
+
+    def _offset(self) -> int:
+        line, column = self.getpos()
+        return self.lines[line - 1] + column
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "html":
+            self.frames.append({"start": self._offset(), "title": [],
+                                "service_body": False, "form": False,
+                                "error": False, "source_body": False})
+        if not self.frames:
+            return
+        frame, attributes = self.frames[-1], dict(attrs)
+        if tag == "body" and "navia" in str(attributes.get("class") or "").split():
+            frame["service_body"] = True
+        if tag == "form":
+            action = urlsplit(str(attributes.get("action") or ""))
+            if action.hostname == "web.archive.org" and action.path == "/web/submit":
+                frame["form"] = True
+        if tag not in self._VOID:
+            self.nodes.append((tag, attributes, self._offset(), frame))
+
+    def handle_data(self, data: str) -> None:
+        if not self.frames or not data.strip():
+            return
+        frame = self.frames[-1]
+        nodes = [node for node in self.nodes if node[3] is frame]
+        if any(node[0] in _HTMLShellParser._HIDDEN for node in self.nodes):
+            return
+        ids = {node[1].get("id") for node in nodes}
+        if any(node[0] == "title" for node in nodes):
+            frame["title"].append(data)
+        if {"errorBorder", "error"} <= ids and any(
+            "error-text" in str(node[1].get("class") or "").split() for node in nodes
+        ):
+            frame["error"] = True
+        # Preserve all visible source text, including div/span/direct body
+        # text; only the archive's error, donation and navigation UI is chrome.
+        if (not ids & {"errorBorder", "wm-ipp-base", "wm-ipp-print", "donation-link"}
+            and not any(node[0] in {"footer", "nav", "head"} for node in nodes)
+            and any(node[0] == "body" for node in nodes)):
+            frame["source_body"] = True
+
+    def handle_endtag(self, tag: str) -> None:
+        index = next((i for i in range(len(self.nodes) - 1, -1, -1)
+                      if self.nodes[i][0] == tag), None)
+        if index is None:
+            return
+        end = self.body.find(">", self._offset()) + 1
+        for node_tag, attributes, start, frame in reversed(self.nodes[index:]):
+            if attributes.get("id") in {"wm-ipp-base", "wm-ipp-print"}:
+                self.toolbars.append((start, end))
+            if node_tag == "html":
+                if (" ".join(" ".join(frame["title"]).split()).casefold() == "wayback machine"
+                    and frame["service_body"] and frame["form"] and frame["error"]
+                    and not frame["source_body"]):
+                    self.errors.append((start, end))
+                if self.frames and self.frames[-1] is frame:
+                    self.frames.pop()
+        del self.nodes[index:]
+
+
+def _has_wayback_error_body(body: str) -> bool:
+    """Reject archive error/chrome only when no independent source body remains."""
+    if not _HTML_DOCUMENT_RE.search(body):
+        return False
+    document = _WaybackErrorParser(body)
+    try:
+        document.feed(body)
+        document.close()
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not document.errors:
+        return False
+    remaining, offset = [], 0
+    for start, end in sorted([*document.errors, *document.toolbars]):
+        if start > offset:
+            remaining.append(body[offset:start])
+        offset = max(offset, end)
+    cleaned = "".join([*remaining, body[offset:]])
+    if not _HTML_DOCUMENT_RE.search(cleaned):
+        cleaned = "<html><body>" + cleaned + "</body></html>"
+    return _has_empty_html_body(cleaned)
+
+
 
 async def _try_wayback(url: str) -> Dict[str, Any]:
     """Final-fallback: Wayback Machine snapshot of the URL.
@@ -2250,6 +2349,9 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
             if _has_empty_html_body(body):
                 return {"ok": False, "stage": "wayback_html_empty_body",
                         "content": "", "error": "empty visible HTML body"}
+            if _has_wayback_error_body(body):
+                return {"ok": False, "stage": "wayback_error_body",
+                        "content": "", "error": "archive error without source body"}
             snapshot_url = str(r.url)
             ownership_meta = {}
             if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):

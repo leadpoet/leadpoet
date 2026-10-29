@@ -10,11 +10,11 @@ exact-owner recovery completed through SSM. Dashboard HTTPS and Arena published
 and open-round state remained intact. Recheck live inventory before later changes.
 
 Use `leadpoet-lab` for routine operations in account `493765492819`, region
-`us-east-1`. Its SSO role is `LabOperator`, which cannot change IAM. The existing
-administrator profile is `leadpoet-recovery-console-20261026`; refresh it with
-`aws login --profile leadpoet-recovery-console-20261026 --region us-east-1`
-using `hello@leadpoet.com` (Leadpoet-main root). The `pranav@leadpoet.com` root
-account is separate (`187445349696`). Check STS identity before each write.
+`us-east-1`. Its SSO role is `LabOperator`, which cannot change IAM. For an
+explicitly authorized administrative change, use the existing `leadpoet-admin`
+profile with the Identity Center `pranav-admin` authority. Reuse valid cached
+temporary credentials. Start a new session only when no valid cached credentials
+remain. Never use root recovery. Check STS identity before each write.
 
 The validator credential KMS guard no longer reads AWS credentials from
 `gateway.env`. Run it from the checkout with temporary SSO authority:
@@ -24,32 +24,26 @@ python3 -m scripts.configure_lab_arena_production --validator-credential-kms-gua
 ```
 
 The default profile is explicitly `leadpoet-lab`. It can inspect this guard but
-cannot change IAM. For an authorized policy change, select the existing temporary
-recovery session with `--aws-profile leadpoet-recovery-console-20261026`,
-`--apply`, and `LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. The helper reads the
-approved recovery profile through `aws configure export-credentials` in memory;
-it does not print or save the export. This supports AWS CLI `login_session` with
-the deployed boto3 version. An already-correct policy causes no IAM write.
-
-Recovery requires an AWS CLI that supports `aws login` and its `login_session`
-credentials. Use the existing current CLI installation. Before the guard, run
-`aws --version` and `aws --profile leadpoet-recovery-console-20261026 --region us-east-1 sts get-caller-identity`
-with the same `PATH` that will run the guard. An older CLI earlier in `PATH` can
-report missing credentials even when the current CLI has a valid login session.
+cannot change IAM. For an explicitly authorized policy change, select the
+existing administrative authority with `--aws-profile leadpoet-admin`, `--apply`,
+and `LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. Reuse its valid cached credentials.
+An already-correct policy causes no IAM write. Root authentication and AWS CLI
+credential export are not supported by this helper.
 
 For a host with an appropriately permitted EC2 instance role, select
 `--aws-instance-role`. It accepts only the instance metadata credential provider.
 Instance-role mode applies only to this guard. The helper rejects inherited AWS authority
 overrides, long-lived credentials, IAM user callers and other accounts. STS and
-IAM clients ignore configured endpoint URLs. The recovery root caller is allowed
-only through the explicit existing recovery profile. No role permissions change.
+IAM clients ignore configured endpoint URLs. Root callers and the retired root
+profile are rejected. No role permissions change.
 Gateway, Arena and canonical restart authentication continue to use their
 existing instance roles. Keep obsolete static keys out of both the cache and its
 authoritative Secrets Manager document.
 
 Arena environment configuration now runs locally with the named temporary
 `leadpoet-lab` operator profile. `--aws-profile` can select another approved
-temporary operator profile, including the explicit existing recovery profile.
+temporary operator profile. Select `leadpoet-admin` only for an explicitly
+authorized administrative change.
 The two fixed environment documents and scoped service key stay in process
 memory. They do not pass through SSH, command arguments or temporary files.
 EC2 and container credential providers are rejected for secret configuration.

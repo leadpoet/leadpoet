@@ -474,6 +474,49 @@ def _execution_snapshot(cursor):
     )
 
 
+def _activate_pre428_reward(harness):
+    """Seed this pre333 fixture through its real pre428 v1 reward RPC.
+
+    The pre428 service (parent of 1b5d196af) signed the v1 builder result
+    directly. Reward slots and their snapshot RPC do not exist in this schema.
+    This helper owns only the fixture's already-promoted crowned winner.
+    """
+    service = harness.service
+    with harness.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure('public.lab_arena_reward_slot_snapshot(text,jsonb)')")
+        assert cursor.fetchone()[0] is None, 'pre428 reward fixture only'
+    row = service.store.get_round(ROUND)
+    if row.get('reward_activated_at'):
+        assert row['reward_basis_doc']['schema_version'] == rewards.REWARD_BASIS_SCHEMA_VERSION
+        return {'status': 'existing', 'effective_reward_epoch': row['effective_reward_epoch']}
+    configuration = row['configuration_doc']
+    publication = row['publication_doc']
+    decision = publication['king_decision']
+    assert row['status'] == 'published'
+    assert configuration['mode'] == 'live' and configuration['rewards_enabled'] is True
+    assert decision['outcome'] == 'crowned' and row['baseline_promoted_at']
+    winner = decision['king_hotkey']
+    assert winner and winner != configuration['baseline_hotkey']
+    network, netuid = service._chain_scope()
+    prior = service.store.published_reward_bases(mode='live', network_name=network, netuid=netuid, limit=200)
+    effective_epoch = max(int(harness.chain.current_settlement_epoch()) + 1,
+        max((int(item['effective_reward_epoch']) for item in prior if item.get('effective_reward_epoch') is not None), default=-1) + 1)
+    previous = service._latest_miner_basis(service._usable_reward_bases(prior))
+    if previous is not None and previous['king_hotkey'] == configuration['baseline_hotkey']:
+        previous = None
+    outcome = 'defended' if previous is not None and previous['king_hotkey'] == winner else 'crowned'
+    basis = rewards.reward_basis_document(
+        round_id=ROUND, published_at=str(publication['published_at']),
+        finalized_epoch=effective_epoch - 1, king_hotkey=winner, king_outcome=outcome,
+        previous_king_start_epoch=int(previous['king_start_epoch']) if outcome == 'defended' else None,
+        reward_constants=configuration['reward_constants'],
+        champion_reward_factor_ppm=rewards.FULL_CHAMPION_REWARD_FACTOR_PPM)
+    assert basis['schema_version'] == rewards.REWARD_BASIS_SCHEMA_VERSION
+    assert 'slot_policy' not in basis and 'reward_slots' not in basis
+    return service.store.activate_reward(ROUND, service._sign(basis, 'reward_basis_hash'),
+                                         service.signing_key_document())
+
+
 def _publish_rerun328(
     connection, harness, monkeypatch, *, zero_baseline: bool = False
 ) -> None:
@@ -568,8 +611,8 @@ def _publish_rerun328(
     assert subprocess.check_output(
         ["git", "--git-dir", str(remote), "rev-parse", "lab"]
     ).strip()
-    assert harness.service.activate_reward(ROUND)["status"] == "activated"
-    assert harness.service.activate_reward(ROUND)["status"] == "existing"
+    assert _activate_pre428_reward(harness)["status"] == "activated"
+    assert _activate_pre428_reward(harness)["status"] == "existing"
 
 
 def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:

@@ -295,14 +295,23 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                     'entry_kind':"CASE WHEN s%%3=1 THEN 'reservation' WHEN s%%3=2 THEN 'dispatch' "
                                  "WHEN ((s-1)/3)%%2=0 THEN 'uncertain' ELSE 'settlement' END",
                     'provider':"CASE WHEN ((s-1)/3)%%3=0 THEN 'openrouter' ELSE 'deepline' END"}
-            cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
-                        " FROM lab_arena_ledger l CROSS JOIN generate_series(1,500000) s "
-                        "WHERE call_identity=%s AND entry_kind='uncertain'", (maximum, cid))
+            # Seed identical cardinality in bounded statements. Preserve the
+            # measured query budget and every history/plan assertion below.
+            for first in range(1, 500001, 100000):
+                cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
+                            " FROM lab_arena_ledger l CROSS JOIN generate_series(%s,%s) s "
+                            "WHERE call_identity=%s AND entry_kind='uncertain'",
+                            (maximum, first, first + 99999, cid))
+                assert cur.rowcount == 100000
             for table in ('lab_arena_ledger','lab_arena_runs','lab_arena_rounds'):
                 cur.execute('ANALYZE '+table)
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')
             results = []; plans = {}
             for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
+                # Only the deliberately obsolete 60-scan reference needs a
+                # larger allowance. Optimized507 retains its 20-second bound.
+                cur.execute('SET LOCAL statement_timeout=%s',
+                            ('60s' if name.startswith('test_before_') else '20s',))
                 cur.execute('SELECT public.'+name+"('live','plan507',71,'',0)")
                 results.append(cur.fetchone()[0])
                 cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+
@@ -321,6 +330,8 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                     values.extend(cte_loops(child))
                 return values
             for index,name in enumerate(('test_before_'+prior.NAMES[0],prior.NAMES[0])):
+                cur.execute('SET LOCAL statement_timeout=%s',
+                            ('60s' if index == 0 else '20s',))
                 cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',('public.'+name+prior.SUFFIX,))
                 body = cur.fetchone()[0].split('AS $function$',1)[1].split('$function$',1)[0].strip().removesuffix(';')
                 literal = body

@@ -5066,6 +5066,11 @@ class ArenaService:
             king_entry["final_score"] = 0.0
         if self._full_thinking_required(round_row):
             for entry in effective_final_entries:
+                # Another publisher may finish while an assessment is running.
+                # Stop obsolete work before holding up the next driver round.
+                current = self._round(round_id)
+                if current["status"] != "scored":
+                    return {"status": "stale", "round_status": current["status"]}
                 submission_id = str(entry["submission_id"])
                 training = self._submission_training_eligibility(
                     round_row, submission_id, publication_reads.runs,

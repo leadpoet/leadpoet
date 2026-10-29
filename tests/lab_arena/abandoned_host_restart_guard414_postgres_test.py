@@ -9,6 +9,7 @@ import pytest
 from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
 from tests.lab_arena import restart_expired_zero_call394_postgres_test as guard
 from tests.lab_arena import score_host_retry398_postgres_test as identity
+from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 ROOT = Path(__file__).parents[2]
 SQL = ROOT/'scripts/414-lab-arena-abandoned-host-restart-guard.sql'
@@ -175,23 +176,14 @@ def test_capture_and_early_recovery_share_claim_control_lock(database,migrated,w
     finally: owner.close()
 
 
-@pytest.fixture
-def current_http_database():
-    from tests.lab_arena.lab_arena_pg_harness import current_service_database
-    yield from current_service_database()
-
-
-def test_http_host_recovery_publishes_and_promotes_with414_active(current_http_database,tmp_path,monkeypatch):
+def test_http_host_recovery_publishes_and_promotes_with414_active(complete_application_database,tmp_path,monkeypatch):
     from tests.lab_arena import abandoned_host_recovery412_e2e_test as full_http
-    from tests.lab_arena import proxy_model_capacity401_e2e_test as current
-    # Exact 414 upgrade/security cases above retain their historical schema.
-    # The current HTTP path needs its complete schema and still-active guard.
-    with current_http_database[0].connect(**current_http_database[1]) as conn,conn.cursor() as cur:
+    # Historical414 guards above stay pinned; current HTTP needs its complete schema.
+    with complete_application_database[0].connect(**complete_application_database[1]) as conn,conn.cursor() as cur:
         cur.execute("SELECT pg_get_functiondef('public.lab_arena_expire_leases(text)'::regprocedure)")
         assert 'v_early_recovery_allowed' in cur.fetchone()[0]
-    ready=current.migrated.__wrapped__(current_http_database)
-    full_http.test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(
-        current_http_database,ready,tmp_path,monkeypatch,
+    full_http._exercise_host_fault(
+        complete_application_database,True,tmp_path,monkeypatch,
     )
 
 

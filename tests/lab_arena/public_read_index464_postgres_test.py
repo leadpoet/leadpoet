@@ -18,14 +18,15 @@ from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, cur
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/464-lab-arena-public-read-index.sql"
 INDEX = "lab_arena_rounds_chain_mode_created_idx"
-# The exact 464 migration predates later public reasoning/score fields.
-HISTORICAL_PUBLIC_FIELDS = frozenset({
+# Migration 501 adds company_judgment_policy to this projection. These exact
+# migration-464 checks must keep the original public field contract.
+PUBLIC_CONFIGURATION_FIELDS_464 = (
     'mode', 'network_name', 'netuid', 'schedule', 'benchmark_disclosure_policy',
     'stage_1_icp_count', 'stage_2_icp_count', 'promotion_margin',
     'execution_sequence_policy', 'sourcing_cost_eligibility_policy',
     'recovery_source_round_id', 'integrity_policy', 'contact_policy',
     'company_quality_policy', 'intent_details_policy', 'baseline_hotkey',
-})
+)
 
 
 @pytest.fixture(scope="module")
@@ -61,6 +62,7 @@ def test_index_bounds_large_round_reads_preserves_responses_and_security(current
     connection.autocommit = True
     transport = PsycopgTransport(lambda: pg.connect(**dsn))
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 10, 14, tzinfo=timezone.utc)
     service._store = ArenaStore(transport)
     service._clock = lambda: datetime(2026, 10, 13, tzinfo=timezone.utc)
     service._config = SimpleNamespace(mode="live", pinned_round_id=None,
@@ -150,6 +152,6 @@ def test_compact_configuration_preserves_types_missing_null_and_permissions(data
                 cursor.execute("SELECT public.lab_arena_public_configuration_v1(jsonb_populate_record(NULL::public.lab_arena_rounds,%s::jsonb))", (json.dumps({"configuration_doc": configuration}),))
                 actual = cursor.fetchone()[0]
                 assert actual == ({key: value for key, value in configuration.items()
-                    if key in HISTORICAL_PUBLIC_FIELDS} if isinstance(configuration, dict) else {})
+                    if key in PUBLIC_CONFIGURATION_FIELDS_464} if isinstance(configuration, dict) else {})
     finally:
         connection.close()

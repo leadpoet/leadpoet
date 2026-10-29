@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -21,20 +21,26 @@ RELEASE = ROOT / "scripts/370-arena-2026-10-01-provider-score-release.sql"
 database = hold.database
 
 
-def _prepare(cursor):
+def _prepare(cursor, *, deadline_expired=False):
     hold._seed_active(cursor)
     # Keep October1 intake/evaluation authority while making the release's
     # execution deadline runnable on the disposable database's real clock.
     cursor.execute("SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s", (hold.recovery.ROUND,))
     config = cursor.fetchone()[0]
-    shift = datetime.now(timezone.utc) + timedelta(minutes=30) - datetime.fromisoformat(
-        config["schedule"]["benchmark_deadline"].replace("Z", "+00:00"))
+    # The recovery extends scoring well beyond the benchmark deadline. Bind
+    # the negative control to the actual deadline checked by migration370.
+    anchor = "stage_1_scoring_close" if deadline_expired else "benchmark_deadline"
+    shift = datetime.now(timezone.utc) + timedelta(hours=-1 if deadline_expired else 0.5) - datetime.fromisoformat(
+        config["schedule"][anchor].replace("Z", "+00:00"))
     for key, value in config["schedule"].items():
         if key not in ("submission_open", "submission_cutoff"):
             config["schedule"][key] = (datetime.fromisoformat(value.replace("Z", "+00:00")) + shift).isoformat().replace("+00:00", "Z")
     cursor.execute("SET session_replication_role=replica")
     cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s", (json.dumps(config), hold.recovery.ROUND))
     cursor.execute("SET session_replication_role=origin")
+    cursor.execute("SELECT (configuration_doc#>>'{schedule,stage_1_scoring_close}')::timestamptz "
+                   ">clock_timestamp() FROM public.lab_arena_rounds WHERE round_id=%s", (hold.recovery.ROUND,))
+    assert cursor.fetchone()[0] is (not deadline_expired)
     cursor.execute(hold._render_hold(cursor))
     cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',"
                    "terminal_cause='accepted',output_ref='arena/test/score2.json' "
@@ -268,3 +274,22 @@ def test_release_fails_closed_without_touching_hold(database, tamper):
             cursor.execute("SELECT count(*) FROM public.lab_arena_runs "
                            "WHERE run_id='score369:0:2'")
             assert cursor.fetchone()[0] == 0
+
+
+def test_expired_scoring_deadline_keeps_provider_hold_and_all_rows(database):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            sql = _prepare(cursor, deadline_expired=True)
+            cursor.execute("SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM public.lab_arena_runs r")
+            before = cursor.fetchone()[0]
+            cursor.execute("SELECT to_jsonb(c) FROM public.lab_arena_restart_claim_control c")
+            control = cursor.fetchone()[0]
+            with pytest.raises(psycopg.Error, match='frozen source or drained scoring preimage changed'):
+                cursor.execute(sql)
+            cursor.execute('ROLLBACK')
+            cursor.execute("SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM public.lab_arena_runs r")
+            assert cursor.fetchone()[0] == before
+            cursor.execute("SELECT to_jsonb(c) FROM public.lab_arena_restart_claim_control c")
+            assert cursor.fetchone()[0] == control

@@ -60,10 +60,12 @@ def test_redirect_target_is_resolved_and_private_components_removed(location, ta
     assert automatic_capture._redirect_url("https://example.com/start/page", location) == target
 
 
-def test_metadata_stays_incomplete_through_snapshot_and_journal(tmp_path):
+@pytest.mark.parametrize("optional_capability", [False, True])
+def test_metadata_stays_incomplete_through_snapshot_and_journal(tmp_path, monkeypatch, optional_capability):
     service, objects = service_for(tmp_path)
     client = TestClient(create_app(service))
     state, journal = _journal(client)
+    monkeypatch.setitem(journal.lease, obs.OPTIONAL_FAILURE_TAG_CAPABILITY, optional_capability)
     buffer = state.worker_observations
     assert buffer.append_agent_observation(row()) == 0
     document = buffer.document()
@@ -74,9 +76,11 @@ def test_metadata_stays_incomplete_through_snapshot_and_journal(tmp_path):
     assert journal._prepare() and journal._send_pending()
     segments, prefix, failure = obs.read_journal_prefix(objects, "r1", "execute", 1, CLAIM_HASH)
     assert len(segments) == 1 and failure is None
-    # This older lease does not negotiate optional failure tags. Its journal
-    # must conservatively retain the hard gap while the buffer stays optional.
-    assert segments[0]["payload"]["failures"] == ["capture_incomplete"]
+    # Older gateways receive the safe hard-gap tag; the untouched worker
+    # buffer retains the optional attribution on both wire versions.
+    assert segments[0]["payload"]["failures"] == [
+        obs.OPTIONAL_CAPTURE_INCOMPLETE if optional_capability else "capture_incomplete"]
+    assert buffer.document() == document
     # A journal prefix still lacks the final snapshot and keeps a hard gap.
     assert prefix == {**document, "failures": ["capture_incomplete"]}
     assert not obs.optional_capture_only(prefix)

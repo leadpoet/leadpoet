@@ -8,8 +8,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.lab_arena.historical_service_harness import HistoricalArenaStore, HistoricalStoreHarnessMixin, freeze_historical_intake_dates
-from lab_arena.store import PsycopgTransport
 
 from lab_arena import broker as br, contracts, scoring, submission_runtime
 from lab_arena.api import create_app
@@ -26,41 +24,10 @@ from tests.lab_arena.partial_execution_close422_postgres_test import (
     base_database, current_database, database, migrated,
 )
 from tests.lab_arena.test_lab_arena_service_round import _start_round, keypair
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 ROOT = Path(__file__).resolve().parents[2]
 
-
-
-class _PartialBaselineStore(HistoricalArenaStore):
-    def recover_baseline(self, round_id, work_items=()):
-        #424 predates the recovery RPC. This exact negative fixture deliberately
-        # leaves one baseline position failed; it must stay unscored until cancel.
-        assert not work_items
-        row = self.get_round(round_id)
-        baseline = next(p['submission_id'] for p in row['participants'] if p['is_king'])
-        runs = self.list_runs(round_id, stage=1, kind='execute', submission_id=baseline)
-        assert len(runs) == 10
-        accepted = [r for r in runs if r['status'] == 'accepted']
-        missing = [r for r in runs if r['status'] != 'accepted']
-        assert len(accepted) == 9 and all(r['per_icp_score'] is not None for r in accepted)
-        assert len(missing) == 1 and missing[0]['status'] == 'failed'
-        assert missing[0]['terminal_cause'] == 'stage_closed'
-        assert missing[0]['per_icp_score'] is None and missing[0]['output_ref'] is None
-        return {'status': 'not_applicable'}
-
-
-class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
-    """Only this module's pinned SQL uses the historical client and judge date."""
-    def make_store(self):
-        return _PartialBaselineStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
-    def build_service(self):
-        service = super().build_service()
-        commit = service.commit_benchmark
-        def commit_frozen(round_id):
-            freeze_historical_intake_dates(self, "2026-10-10")
-            return commit(round_id)
-        service.commit_benchmark = commit_frozen
-        return service
 
 @pytest.fixture(scope="module")
 def integrated(migrated):
@@ -116,14 +83,25 @@ def _project_closed_stage_to_real_clock(connect, round_id, field):
     return cutoff
 
 
-def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(integrated, tmp_path, request):
+def test_partial_transition_migrations_replay_at_historical_boundary(integrated):
     psycopg, dsn = integrated
+    with psycopg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure('public.lab_arena_transition_round(text,text,text,jsonb)') IS NOT NULL")
+        assert cursor.fetchone() == (True,)
+
+
+@pytest.fixture()
+def current_round_database():
+    yield from current_service_database()
+
+
+def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(current_round_database, tmp_path):
+    psycopg, dsn = current_round_database
     connect = lambda: psycopg.connect(**dsn)
-    harness = _FrozenQualityHarness(
+    harness = QualityHarness(
         connect, tmp_path, challengers=["FullCandidate", "PartialCandidate"],
         runners=["alpha"],
     )
-    request.addfinalizer(harness.service.store.close)
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         benchmark_icp_count=10,

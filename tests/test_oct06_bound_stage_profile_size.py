@@ -48,6 +48,7 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
     elif mutation == "bad_status":
         payload["result"]["data"]["status"] = 404
     fetches = []
+    current_fetches = []
     investigated = []
 
     async def provider(**_kwargs):
@@ -64,13 +65,12 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
             domain, url, payload
         )
 
-    raw_fetches = []
-
-    async def unavailable_profile_fetch(url, **_kwargs):
-        # The homepage-bound canonical profile is now tried before structured
-        # fallback. The model's conflicting marqeta-inc locator has no authority.
+    async def current_profile_fetch(url, **kwargs):
+        # The independent homepage anchor permits its exact profile fetch.
+        # The model's marqeta-inc citation must never select the request.
         assert url == "https://www.linkedin.com/company/marqeta"
-        raw_fetches.append(url)
+        assert kwargs["expected_company_identity"]["linkedin_company_slug"] == "marqeta"
+        current_fetches.append(url)
         return {"outcome": "insufficient_evidence", "url": url}
 
     async def ground_attribute(verdict, **_kwargs):
@@ -89,7 +89,7 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
         lead_scorer, "fetch_structured_linkedin_company_size", structured_fetch
     )
     monkeypatch.setattr(
-        lead_scorer, "fetch_current_linkedin_company_size", unavailable_profile_fetch
+        lead_scorer, "fetch_current_linkedin_company_size", current_profile_fetch
     )
     monkeypatch.setattr(
         lead_scorer, "_run_targeted_company_evidence_investigation", investigate
@@ -118,11 +118,12 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
             ),
         )
     )
-    assert raw_fetches == ["https://www.linkedin.com/company/marqeta"] * 2
     assert fetches == [("marqeta.com", "https://www.linkedin.com/company/marqeta")]
+    assert current_fetches == ["https://www.linkedin.com/company/marqeta"] * 2
     assert result.details["dimension_decisions"]["employee_size"] == expected
     assert investigated
-    # A bound numerical mismatch is complete proof; only missing size needs repair.
+    # A bound structured mismatch is a measured decision, not missing proof
+    # to reopen. Only an unavailable size needs the evidence investigator.
     assert ("headcount" in investigated[0]) == (expected == "unavailable")
     # A stored Public Company label remains insufficient for current stage.
     assert result.details["dimension_decisions"]["stage"] == "unavailable"

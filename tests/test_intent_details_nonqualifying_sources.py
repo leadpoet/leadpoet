@@ -172,7 +172,7 @@ def test_nonqualifying_context_does_not_consume_positive_page_budget_or_expand_l
     ("wrong_entity","fail",True), ("contradicted","fail",False),
     ("unable_to_verify","pass",False),
 ])
-def test_completed_same_entity_source_context_survives_real_scorer_trace(monkeypatch,status,entity,retained):
+def test_completed_grounded_source_context_survives_real_scorer_trace(monkeypatch,status,entity,retained):
     from tests import test_funding_stage_source_reuse as funding
     answer = funding._answer(None,urls=[funding.SECONDARY,funding.PRIMARY])
     evaluation=answer["answer"]["signal_evaluations"][0]
@@ -188,6 +188,13 @@ def test_completed_same_entity_source_context_survives_real_scorer_trace(monkeyp
     # context, while its original rejected verdict and zero score stay intact.
     assert receipts[-1]["verification_trace"]["intent_verdict"]["signal_evaluations"][0]["signal_status"] == status
     assert result[0]==0
+    if status == "wrong_entity":
+        # Negative source proof remains available for exact judgment reuse.
+        # It grants neither intent credit nor paragraph company facts.
+        traced = receipts[-1]["verification_trace"]["intent_verdict"]["signal_evaluations"][0]
+        assert traced["signal_status"] == "wrong_entity"
+        assert traced["same_entity_check"] == "fail"
+        assert receipts[-1]["client_ready"] is False
     if retained:
         assert all(len(c["text"])<=700 for c in contexts)
         assert any(c["url"]==funding.SECONDARY and c["source_publication_date"]=="2026-02-14" for c in contexts)

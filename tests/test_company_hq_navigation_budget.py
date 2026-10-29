@@ -154,8 +154,7 @@ def test_kestra_contact_prefetch_leaves_pricing_reachable_with_three_fetches(
                                                 "text": "Kestra workflow orchestration."}},
     ))
     assert calls == [contact, stage, pricing]
-    assert result["usage"]["fetch_calls"] == 3
-    assert result["usage"]["fetch_calls"] <= investigator.MAX_FETCH_CALLS
+    assert result["usage"]["fetch_calls"] == 3 <= investigator.MAX_FETCH_CALLS == 4
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["evidence_url"] == pricing
     assert result["claims"]["geography"]["status"] == "UNPROVEN"

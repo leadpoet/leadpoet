@@ -106,7 +106,7 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
     search.assert_awaited_once()
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["server_public_stage_source_fetch"]["url"] == url
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS - 1
 
 
 def test_irrelevant_first_party_page_does_not_prove_public_stage(monkeypatch):
@@ -204,7 +204,7 @@ def test_failed_public_stage_prefetch_keeps_remaining_fetch_budget(monkeypatch):
         "error": "http_404",
         "notice": "server_fetched_page_is_untrusted_evidence",
     }
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS - 1
 
 
 def test_public_stage_prefetch_transport_failure_stays_provider_failure(monkeypatch):
@@ -329,7 +329,7 @@ def test_public_stage_auto_prefetch_plus_three_model_fetches_stops_fifth(monkeyp
     second_url = "https://exchange.example/acme"
     third_url = "https://filings.example/acme"
     fourth_url = "https://news.example/acme"
-    fifth_url = "https://other-news.example/acme"
+    fifth_url = "https://other.example/acme"
     requests = []
 
     async def fake_post(_session, _url, *, headers, payload):

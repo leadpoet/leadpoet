@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import site
 import socketserver
@@ -131,127 +130,122 @@ def company_for_prompt(prompt: str) -> Dict[str, Any]:
     return COMPANIES[0] if COMPANIES else {"company_name": COMPANY, "company_website": SITE, "company_linkedin": ""}
 
 
-def _company_facts(company):
-    name = company["company_name"]
-    return {
-        "employee_size": f"{name} has {company.get('employee_count') or '51-200'} employees.",
-        "industry": f"{name} sells robotics fleet-management software to logistics operating teams.",
-        "geography": f"{name} is headquartered in San Francisco, California, United States.",
-        "stage": f"{name} completed a $40 million Series B funding round on July 15, 2026.",
-        "required_attribute": f"{name} sells a business software platform used by logistics operating teams.",
-    }
-
-
-def _company_page(company):
-    return " ".join(_company_facts(company).values())
-
-
 def judge_reply(normalized: Mapping[str, Any]) -> str:
-    """Bind every simulated finding to its actual requested company and source."""
+    """A JSON verdict shaped for whichever judge prompt asked, bound to the company it asks about."""
+
     prompt = " ".join(str(m.get("content") or "") for m in normalized.get("messages") or [])
     company = company_for_prompt(prompt)
-    facts = _company_facts(company)
-    source = company["company_website"].rstrip("/") + "/about"
-    schema = ((normalized.get("response_format") or {}).get("json_schema") or {}).get("name")
-    if schema == "verification":
-        claim = re.search(r'"miner_claim"\s*:\s*"([^"\n]+)"', prompt)
-        supplied = re.search(r'"claimed_source_urls"\s*:\s*(\[[^\]]*\])', prompt)
-        assert claim is not None and supplied is not None
-        urls = json.loads(supplied.group(1))
-        return json.dumps({
-            "overall_verdict": "qualified", "overall_confidence": "high",
-            "summary": "The exact source proves the requested company event.",
-            "signal_evaluations": [{
-                "signal_id": "signal-1", "claim": claim.group(1),
-                "verification_mode": "source_grounded", "signal_status": "supported",
-                "source_urls_supplied": urls, "evidence_urls_used": [urls[0]],
-                "source_accessibility": "accessible", "same_entity_check": "pass",
-                "entity_match_reason": "The fetched source names the exact company.",
-                "supporting_quotes": [facts["stage"]], "contradicting_quotes": [],
-                "unsupported_parts": [], "source_quality": "first_party",
-                "risk_notes": ["source_event_date:2026-07-15"], "confidence": "high",
-                "claim_matches_miner_date": "consistent", "author_type": "n/a",
-                "author_employer_matches_lead": "n/a", "author_role_matches_spec": "n/a",
-                "author_satisfies_role_spec": "n/a",
-            }], "missing_or_risks": [],
-        })
+    page_url = company["intent_signals"][0]["url"]
+    page_text = PAGE_TEXT.replace(COMPANY, company["company_name"])
+    sentence = SENTENCE.replace(COMPANY, company["company_name"])
+    evidence = {"url": page_url, "quote": page_text}
     verdict = {
-        "verdict": "supported", "company_named_in_page": True,
-        "quote_supporting_claim": facts["stage"], "signal_date": "2026-07-15",
+        # intent-signal judge
+        "verdict": "supported",
+        "company_named_in_page": True,
+        "quote_supporting_claim": sentence,
+        "signal_date": "2026-07-15",
         "reason": "The page names the company and quotes the announcement.",
-        "verified": True, "confidence": 92,
+        # verification helpers
+        "verified": True,
+        "confidence": 92,
+        # company-fit web reverification
         "observed_company_name": company["company_name"],
         "observed_company_website": company["company_website"],
         "observed_company_linkedin": company.get("company_linkedin") or "",
-        "observed_employee_count": str(company.get("employee_count") or "51-200"),
-        "employee_size_matches": True, "observed_industry": "Software",
-        "observed_subindustry": "Robotics software", "industry_matches": True,
-        "industry_activity_role": "supplier_operator", "observed_hq_country": "United States",
-        "observed_hq_state": "California", "geography_matches": True,
-        "observed_company_stage": "Series B", "stage_matches": True,
-        "attribute_satisfied": True, "attribute_evidence": facts["required_attribute"],
-        "dimension_evidence": {key: {"url": source, "quote": quote} for key, quote in facts.items()},
-        "required_attribute_evidence_url": source,
-        "required_attribute_evidence_quote": facts["required_attribute"],
-        "decision": "match", "evidence_type": "press_release",
+        "observed_employee_count": 120,
+        "employee_size_matches": True,
+        "observed_industry": "Software",
+        "observed_subindustry": "Robotics software",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "California",
+        "geography_matches": True,
+        "observed_company_stage": "Series B",
+        "stage_matches": True,
+        "attribute_satisfied": True,
+        "attribute_evidence": page_text,
+        "dimension_evidence": {name: dict(evidence) for name in ("identity", "employee_size", "industry", "geography", "stage", "required_attribute")},
+        "decision": "match",
+        "evidence_type": "press_release",
     }
     if int(normalized.get("max_tokens") or 0) <= 64 and "json" not in prompt.lower():
         return "press_release"
     return json.dumps(verdict)
 
 
-def _requested_source_results(parameters):
-    urls = parameters.get("urls") or []
-    if not urls:
-        company = company_for_prompt(str(parameters.get("query") or ""))
-        urls = [company["company_website"].rstrip("/") + "/news/series-b"]
-    return {"requestId": "req-1", "results": [{
-        "id": url, "url": url,
-        "title": company_for_prompt(url)["company_name"] + " raises Series B",
-        "publishedDate": "2026-07-15T00:00:00.000Z", "author": "",
-        "text": _company_page(company_for_prompt(url)),
-        "highlights": [_company_facts(company_for_prompt(url))["stage"]],
-        "highlightScores": [0.9], "score": 0.9,
-    } for url in urls], "searchTime": 12.0}
+def investigator_completion(normalized: Mapping[str, Any]) -> Dict[str, Any]:
+    """Honor the current investigator's required tools and quoted-source schema."""
+    prompt = json.dumps(normalized.get("messages") or [])
+    company = company_for_prompt(prompt)
+    page_url = company["intent_signals"][0]["url"]
+    choice = normalized.get("tool_choice")
+    required = (choice.get("function") or {}).get("name") if isinstance(choice, Mapping) else None
+    fetched = any(message.get("name") == "fetch_page" for message in normalized.get("messages") or [])
+    name = required or ("submit_findings" if fetched else "fetch_page")
+    if name == "search_web":
+        arguments = {"query": company["company_name"] + " latest funding round"}
+    elif name == "fetch_page":
+        arguments = {"url": page_url}
+    else:
+        tool = next(tool["function"] for tool in normalized["tools"]
+                    if tool["function"]["name"] == "submit_findings")
+        schema = tool["parameters"]["properties"]["findings"]["items"]
+        findings = []
+        for target in schema["properties"]["target"]["enum"]:
+            finding = dict.fromkeys(schema["required"], "")
+            finding.update(target=target, status="VERIFIED", observed_value={
+                "stage": "Series B", "headcount": 120, "industry": "Software",
+                "required_attribute": "Sells a robotics fleet-management platform to logistics operators",
+                "geography": "United States",
+            }.get(target), observed_country="United States", observed_state="California",
+                observed_industry="Software", observed_subindustry="Robotics software",
+                activity_role="supplier_operator", evidence_url=page_url,
+                evidence_quote=PAGE_TEXT.replace(COMPANY, company["company_name"]),
+                reason="The fetched company announcement directly states this company fact.")
+            if "ownership" in finding:
+                finding["ownership"] = None
+            findings.append(finding)
+        arguments = {"findings": findings}
+    reply = chat_completion(str(normalized["model"]), "")
+    reply["choices"][0].update(finish_reason="tool_calls", message={
+        "role": "assistant", "content": None, "tool_calls": [{
+            "id": "fixture-call", "type": "function", "function": {
+                "name": name, "arguments": json.dumps(arguments),
+            },
+        }],
+    })
+    return reply
 
 
 def respond(operation_id: str, normalized: Mapping[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
     json_headers = {"content-type": "application/json"}
     if operation_id == "openrouter.chat":
-        completion = chat_completion(str(normalized.get("model")), judge_reply(normalized))
-        submit = next((tool["function"] for tool in normalized.get("tools") or []
-                       if tool.get("function", {}).get("name") == "submit_findings"), None)
-        if submit is not None:
-            from tests.test_company_evidence_investigator import _finding
-            prompt = " ".join(str(m.get("content") or "") for m in normalized.get("messages") or [])
-            company = company_for_prompt(prompt)
-            targets = submit["parameters"]["properties"]["findings"]["items"]["properties"]["target"]["enum"]
-            document = json.loads(normalized["messages"][1]["content"].split("\n", 1)[1])
-            pages = document.get("prefetched_sources") or []
-            assert pages, "The company investigator must receive its grounded first-party source"
-            source = pages[0]["url"]
-            facts = _company_facts(company)
-            findings = [_finding(
-                target, observed_value="Series B" if target == "stage" else None,
-                observed_industry="Software" if target == "industry" else "",
-                observed_subindustry="Robotics software" if target == "industry" else "",
-                activity_role="supplier_operator" if target in {"industry", "required_attribute"} else "unresolved",
-                evidence_url=source, evidence_quote=facts[target],
-            ) for target in targets]
-            completion["choices"][0]["message"].update(content=None, tool_calls=[{
-                "id": "company-findings", "type": "function", "function": {
-                    "name": "submit_findings", "arguments": json.dumps({"findings": findings}),
-                },
-            }])
-        return 200, json_headers, json.dumps(completion).encode()
+        reply = (investigator_completion(normalized) if normalized.get("tools") else
+                 chat_completion(str(normalized.get("model")), judge_reply(normalized)))
+        return 200, json_headers, json.dumps(reply).encode()
+    company = company_for_prompt(json.dumps(normalized))
+    page_text = PAGE_TEXT.replace(COMPANY, company["company_name"])
+    page_url = company["intent_signals"][0]["url"]
     if operation_id in ("exa.search", "exa.contents"):
-        return 200, json_headers, json.dumps(_requested_source_results(normalized)).encode()
+        response = exa_results()
+        response["results"][0].update(url=page_url, id=page_url, text=page_text,
+                                      title=company["company_name"] + " raises Series B")
+        return 200, json_headers, json.dumps(response).encode()
     if operation_id == "deepline.execute":
-        envelope = {"job_id": "job-1", "status": "completed", "result": {"data": _requested_source_results(normalized.get("payload") or {})}, "billing": {"credits_charged": 1, "cost_usd": 0.01}}
+        if normalized.get("tool") == "harvestapi_get_company":
+            data = {"name": company["company_name"], "linkedinUrl": company["company_linkedin"],
+                    "website": company["company_website"], "employeeCountRange": {"start": 51, "end": 200},
+                    "description": page_text}
+        else:
+            data = exa_results()
+        envelope = {"job_id": "job-1", "status": "completed", "result": {"data": data}, "billing": {"credits_charged": 1, "cost_usd": 0.01}}
         return 200, json_headers, json.dumps(envelope).encode()
     if operation_id.startswith("scrapingdog.scrape"):
-        page = _company_page(company_for_prompt(str(normalized.get("url") or "")))
-        return 200, {"content-type": "text/html; charset=utf-8"}, ("<html><body>" + page + "</body></html>").encode()
+        html = "<html><body><h1>%s</h1><p>%s</p><a href='%s'>LinkedIn</a></body></html>" % (
+            company["company_name"], page_text, company["company_linkedin"])
+        return 200, {"content-type": "text/html; charset=utf-8"}, html.encode()
     if operation_id.startswith("scrapingdog."):
         return 200, json_headers, json.dumps({"name": COMPANY, "website": SITE, "description": PAGE_TEXT, "employees": "120", "posts": [], "jobs": []}).encode()
     return 200, json_headers, b"{}"

@@ -897,6 +897,16 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
         _drive_rejudge_cycle(
             harness.service, harness.objects, harness.runner_keys[0], historical_zeros=True
         )
+        with connection.cursor() as cursor:
+            held_before = _json(cursor, "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s", (ROUND,))
+            accepted_before = _execution_snapshot(cursor)
+        connection.commit()
+        assert harness.service.publish(ROUND) == {
+            'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete',
+        }
+        with connection.cursor() as cursor:
+            assert _json(cursor, "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s", (ROUND,)) == held_before
+            assert _execution_snapshot(cursor) == accepted_before
         publication = frozen_publication_document(harness.service, ROUND)
         assert publish_frozen_document(harness.service, ROUND, publication)["status"] == "ok"
         with connection.cursor() as cursor:

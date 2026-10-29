@@ -632,8 +632,8 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_url"] == good_url
-    # Current-stage discovery advances to its known listing locator rather
-    # than repeating a sibling diagnostic source. Cached failures still count.
+    # Current-stage discovery prioritizes the useful issuer source after
+    # the first diagnostic; it need not fetch a second diagnostic page.
     assert fetched == [bad_urls[0], good_url]
     assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3, "search_calls": 1, "fetch_calls": 3,
@@ -642,6 +642,11 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
     assert [item["error_class"] for item in result["usage"]["fetch_outcomes"]] == [
         "provider_diagnostic_body", "fetch_failed", "",
     ]
+    # A model retry of the rejected server-prefetch URL spends a logical
+    # fetch slot without exposing or loading the cached diagnostic body.
+    outcomes = result["usage"]["fetch_outcomes"]
+    assert outcomes[0]["url_sha256"] == outcomes[1]["url_sha256"]
+    assert outcomes[0]["loaded_text_length"] == outcomes[1]["loaded_text_length"] == 0
     assert "Provider account capacity details redacted." not in json.dumps(requests)
     assert TENB_QUOTE in json.dumps(requests[-1])
 

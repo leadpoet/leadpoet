@@ -141,6 +141,7 @@ def test_flat_training_export_rejects_legacy_or_multiplied_cost_authority(wrong_
     assert result['competition_cost_eligibility']['status'] == 'unavailable'
 
 
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_frozen_judge_input_and_contract_do_not_receive_sourcing_policy(monkeypatch):
     service = _service()
     cutoff = datetime(2026, 10, 19, tzinfo=timezone.utc)

@@ -337,13 +337,14 @@ def test_proven_foreign_linkedin_hq_mismatch_does_not_need_a_us_state():
     assert projected["observed_hq_country"] == "Germany"
     assert projected["observed_hq_state"] == ""
     assert projected["geography_evidence_url"] == URL
-    finding = {"target": "geography", "status": "VERIFIED",
-        "evidence_url": hq["url"], "evidence_quote": hq["text"],
+    # Literal structured HQ JSON is authority through its validated private
+    # finding, not through a model-authored headquarters sentence.
+    bound_finding = {"target": "geography", "status": "VERIFIED",
+        "evidence_url": URL, "evidence_quote": hq["text"],
         "observed_country": hq["country"], "observed_state": hq["state"]}
-    # Literal provider records reach the decision with their private bound finding.
     assert scorer._decision_from_observed_geography(projected, request,
         company=candidate, company_quality=True,
-        validated_geography_finding=finding) == "mismatch"
+        validated_geography_finding=bound_finding) == "mismatch"
 
 
 @pytest.mark.parametrize("company_quality", [False, True])
@@ -355,7 +356,7 @@ def test_partial_us_hq_fallback_for_state_region_is_country_compatible(company_q
             location.pop("geographicArea", None)
             location.get("parsed", {}).pop("state", None)
     hq = profile.project_structured_linkedin_company_headquarters("quaise.com", URL, "Quaise Energy", body)
-    assert hq["state"] == ""
+    assert hq["country"] == "United States" and hq["state"] == ""
     request = icp().model_copy(update={"geography": "United States, West Coast"})
     candidate = company().model_copy(update={"state": "California"})
     observation = verdict()
@@ -380,6 +381,19 @@ def test_unknown_country_does_not_become_a_proven_foreign_hq():
     assert scorer._canonical_observed_geography_match(
         {"observed_hq_country": "Mars", "observed_hq_state": ""}, request,
         company_quality=False) is None
+
+
+def test_structured_hq_cannot_use_a_hand_authored_replacement_sentence():
+    hq = profile.project_structured_linkedin_company_headquarters(
+        "quaise.com", URL, "Quaise Energy", CAPTURE)
+    forged = {**hq, "state": "", "text": "Quaise Energy headquarters: Houston, United States."}
+    cache = {"structured_profile_headquarters_evidence": forged}
+    observation = verdict()
+    projected = scorer._project_verified_linkedin_headquarters(
+        observation, verified_identity=ANCHOR, invocation_cache=cache,
+        linkedin_profile_source={}, icp=icp(), company=company(), company_quality=True)
+    assert projected == observation
+    assert not cache.get("linkedin_headquarters_verified")
 
 
 REAL_COMPANIES = json.loads((Path(__file__).parent / "fixtures/linkedin_first_submitted_profiles.json").read_text())["companies"]

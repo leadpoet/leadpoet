@@ -82,19 +82,18 @@ def _run_scoped_correction(
     monkeypatch, responses, *, max_turns=2, reserve_after_first=True,
 ):
     requests = []
-    clock = {"now": 0.0}
-    monkeypatch.setattr(
-        investigator, "time", SimpleNamespace(monotonic=lambda: clock["now"]),
-    )
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(investigator, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         arena_operations.validate_operation_request("openrouter.chat", payload)
         requests.append(payload)
         if len(requests) == 1 and reserve_after_first:
-            # The admission policy captures limits when the run starts.
-            clock["now"] = (investigator.ADMISSION_DEADLINE_SECONDS
-                            - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1)
+            # Admission freezes its reserve at construction. Advance the
+            # clock instead of changing a constant after that construction.
+            clock.now = (investigator.ADMISSION_DEADLINE_SECONDS
+                         - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS)
         findings = responses[len(requests) - 1]
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"call-{len(requests)}",
@@ -225,7 +224,7 @@ def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypat
     )["industry"]
 
 
-def test_final_unproven_clears_unused_citations_and_preserves_valid_industry(
+def test_scoped_explicit_negative_clears_unused_citations_and_retains_industry(
     monkeypatch,
 ):
     malformed_unproven = _finding(
@@ -248,11 +247,13 @@ def test_final_unproven_clears_unused_citations_and_preserves_valid_industry(
         ["items"]["properties"]["target"]["enum"] == ["stage"]
         for request in requests[1:]
     )
-    # A final explicit negative may clear unused citations. Rejected positive
-    # proof remains incomplete in the separate fabricated-quote controls.
+    # The terminal explicit-negative repair (088ee092b) clears unused
+    # citations. This is distinct from rejected positive evidence packets.
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["claims"]["stage"]["evidence_url"] == ""
     assert result["claims"]["stage"]["evidence_quote"] == ""
-    assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
 
@@ -262,10 +263,8 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
     monkeypatch, retry_completes,
 ):
     requests = []
-    clock = {"now": 0.0}
-    monkeypatch.setattr(
-        investigator, "time", SimpleNamespace(monotonic=lambda: clock["now"]),
-    )
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(investigator, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
@@ -273,9 +272,8 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
         requests.append(payload)
         turn = len(requests)
         if turn == 1:
-            # The admission policy captures limits when the run starts.
-            clock["now"] = (investigator.ADMISSION_DEADLINE_SECONDS
-                            - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1)
+            clock.now = (investigator.ADMISSION_DEADLINE_SECONDS
+                         - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS)
             arguments = json.dumps({"findings": _initial_findings()})
             finish_reason = "tool_calls"
         elif turn == 2 or not retry_completes:

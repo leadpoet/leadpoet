@@ -216,6 +216,10 @@ def test_64_miner_company_only_round_preserves_all_work_and_publishes(
     }
     observed = _install_company_only_sandbox(harness)
     harness.chain.epoch = 64_000
+    # Finalize the whole intake identity snapshot before concurrent API writes.
+    # These custom burst submissions do not pass through Harness.submit.
+    harness.chain.registered.extend(
+        fixtures.keypair("svc-miner-" + flavor).ss58_address for flavor in flavors)
     harness.clock.now = datetime.now(timezone.utc) + timedelta(seconds=1)
     harness.round_id = "arena-2098-10-06-capacity"
     configuration = harness.service.create_round(

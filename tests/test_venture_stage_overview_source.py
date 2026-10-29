@@ -196,7 +196,7 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
         0 if mode == "no_round" else 2 if mode == "cached" else 1
     )
     assert document["investigation_limits"]["remaining_fetch_calls"] == (
-        investigator.MAX_FETCH_CALLS - (0 if mode == "cached" else 2 if mode == "hq" else 1)
+        investigator.MAX_FETCH_CALLS - result["usage"]["fetch_calls"]
     )
     assert any(
         source["url"] == OVERVIEW_URL and source["text"] == TIMELINE

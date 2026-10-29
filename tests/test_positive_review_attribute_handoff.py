@@ -28,6 +28,8 @@ from tests.test_positive_semantic_fit_review import (
         "wrong_domain",
         "absent_quote",
         "unproven_stage",
+        "industry_only",
+        "third_party_attribute",
     ],
 )
 def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
@@ -39,7 +41,7 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
         "PeerConnect supplies a student enrollment platform to universities."
     )
     source_url = (
-        "https://other.example/platform" if control == "wrong_domain"
+        "https://other.example/platform" if control in {"wrong_domain", "third_party_attribute"}
         else "https://peer.example/platform"
     )
     calls = {"provider": 0, "investigator": 0, "fetch": 0}
@@ -53,10 +55,7 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
 
     async def fetch(_session, url):
         calls["fetch"] += 1
-        if url == source_url:
-            assert control in {"missing_page", "absent_quote"}
-            return (404 if control == "missing_page" else 200), url, "Contact our team."
-        assert url == initial["required_attribute_evidence_url"]
+        assert url in {initial["required_attribute_evidence_url"], source_url}
         text = (
             initial["required_attribute_evidence_quote"]
             if control == "already_grounded" else "Contact our team."
@@ -104,15 +103,26 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
                 ),
             },
         }
-        attribute = dict(industry, target="required_attribute")
-        if control == "wrong_domain":
-            # The investigator validates company attribution before it returns
-            # a finding. A different company's source cannot prove this one.
+        # Industry and required-attribute judgments are independent. Reuse
+        # the same fetched source only with an explicit attribute finding.
+        attribute = _finding(
+            "required_attribute", observed_value=icp.required_attribute,
+            evidence_url=source_url, evidence_quote=quote,
+        )
+        if control == "already_grounded":
+            attribute.update(
+                evidence_url=initial["required_attribute_evidence_url"],
+                evidence_quote=initial["required_attribute_evidence_quote"],
+            )
+        if control in {"unproven", "customer"}:
             attribute.update(status="UNPROVEN", evidence_url="", evidence_quote="")
+        claims = {"stage": stage, "industry": industry}
+        industry_only = control in {"industry_only", "wrong_domain"}
+        if not industry_only:
+            claims["required_attribute"] = attribute
         return {
-            "_completed_submit": True,
-            "claims": {"stage": stage, "industry": industry,
-                       "required_attribute": attribute},
+            "claims": claims,
+            "_completed_submit": not industry_only,
             "_validated_stage_finding": (
                 stage if control != "unproven_stage" else None
             ),
@@ -150,16 +160,19 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
 
     assert calls["investigator"] == 1
     assert calls["fetch"] == (2 if control in {"missing_page", "absent_quote"} else 1)
-    if control in {"verified", "already_grounded"}:
+    if control in {"verified", "already_grounded", "third_party_attribute"}:
         assert result.decision == COMPANY_FIT_MATCH
         assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
         assert result.details["required_attribute_grounding"]["status"] == "grounded"
         assert calls["provider"] == 1
         evidence = result.details["dimension_evidence"]["required_attribute"]
-        # The explicit current review supersedes even a grounded first verdict.
-        assert evidence["quote"] == quote
-        if control == "verified":
+        assert evidence["quote"] == (
+            initial["required_attribute_evidence_quote"]
+            if control == "already_grounded" else quote
+        )
+        if control in {"verified", "third_party_attribute"}:
             assert result.details["required_attribute_grounding"]["cache_hit"] is True
+            assert evidence["url"] == source_url
     else:
         assert result.decision != COMPANY_FIT_MATCH
         if control != "unproven_stage":

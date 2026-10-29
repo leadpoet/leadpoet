@@ -63,7 +63,7 @@ def service_database():
     yield from current_service_database()
 
 
-def test_latest_schema_retains_complete_normal_round_aggregate_and_publication(database,service_database,tmp_path,monkeypatch):
+def test_latest_schema_retains_complete_normal_round_aggregate_and_publication(service_database,tmp_path,monkeypatch):
     # Keep the historical 509/510 application fixture intact. This separate
     # normal-flow control uses today's complete publication read schema.
     database=service_database

@@ -1,7 +1,9 @@
+import copy
 import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 
@@ -133,6 +135,9 @@ def test_normalizer_uses_root_backed_build_workspace(
         "normalize_saved_image",
         fake_normalize_saved_image,
     )
+    monkeypatch.setattr(
+        normalizer, "_saved_image_config_hash", lambda path: "sha256:" + "b" * 64
+    )
 
     observed = normalizer.normalize_docker_image(
         source_image="source:test",
@@ -140,7 +145,7 @@ def test_normalizer_uses_root_backed_build_workspace(
     )
 
     expected_parent = build_root / ".docker-image-normalizer-v2"
-    assert observed == "sha256:" + "a" * 64
+    assert observed == "sha256:" + "b" * 64
     assert saved_archive[0].parent.parent == expected_parent
     assert nested_parents == [saved_archive[0].parent]
     assert not runner_temp.exists()
@@ -170,3 +175,102 @@ def test_normalizer_rejects_relative_build_workspace(
         match="GATEWAY_V2_BUILD_WORK_ROOT must be an absolute path",
     ):
         normalizer._normalization_temp_parent()
+
+
+@pytest.mark.parametrize("store", ["classic", "containerd"])
+def test_normalizer_returns_verified_config_digest_for_each_image_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    store: str,
+) -> None:
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.delenv("GATEWAY_V2_BUILD_WORK_ROOT", raising=False)
+    loaded = tmp_path / "loaded.tar"
+    config_ids = []
+    saves = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["docker", "save", "-o"]:
+            saves.append(command[-1])
+            if command[-1] == "source:test":
+                _docker_archive(
+                    Path(command[3]), mtime=100, reverse=False, compressed=False
+                )
+            else:
+                shutil.copyfile(loaded, command[3])
+        elif command[:3] == ["docker", "load", "-i"]:
+            shutil.copyfile(command[3], loaded)
+            with tarfile.open(loaded) as archive:
+                entry = json.load(archive.extractfile("manifest.json"))[0]
+                config_ids.append(
+                    "sha256:" + hashlib.sha256(
+                        archive.extractfile(entry["Config"]).read()
+                    ).hexdigest()
+                )
+        elif command[:4] == ["docker", "image", "inspect", "-f"]:
+            store_id = config_ids[0] if store == "classic" else "sha256:" + "a" * 64
+            return _completed(store_id + "\n")
+        return _completed()
+
+    monkeypatch.setattr(normalizer, "_run", fake_run)
+    observed = normalizer.normalize_docker_image(
+        source_image="source:test", normalized_image="normalized:test"
+    )
+
+    assert observed == config_ids[0]
+    assert saves == ["source:test", "normalized:test"]
+
+
+def test_normalizer_rejects_loaded_config_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.delenv("GATEWAY_V2_BUILD_WORK_ROOT", raising=False)
+    loaded = tmp_path / "loaded.tar"
+
+    def export_changed_entrypoint(destination: Path) -> None:
+        with tarfile.open(loaded) as source, tarfile.open(destination, "w:") as output:
+            manifest = json.load(source.extractfile("manifest.json"))
+            old_config_name = manifest[0]["Config"]
+            config = json.load(source.extractfile(old_config_name))
+            assert config["config"]["Entrypoint"] == ["python3"]
+            config["config"]["Entrypoint"] = ["sh"]
+            config_bytes = json.dumps(
+                config, sort_keys=True, separators=(",", ":")
+            ).encode()
+            new_config_name = "blobs/sha256/" + hashlib.sha256(config_bytes).hexdigest()
+            manifest[0]["Config"] = new_config_name
+            for original in source.getmembers():
+                member = copy.copy(original)
+                data = source.extractfile(original).read() if original.isfile() else None
+                if original.name == old_config_name:
+                    member.name = new_config_name
+                    data = config_bytes
+                elif original.name == "manifest.json":
+                    data = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+                if data is not None:
+                    member.size = len(data)
+                output.addfile(member, None if data is None else io.BytesIO(data))
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["docker", "save", "-o"]:
+            if command[-1] == "source:test":
+                _docker_archive(
+                    Path(command[3]), mtime=100, reverse=False, compressed=False
+                )
+            else:
+                export_changed_entrypoint(Path(command[3]))
+        elif command[:3] == ["docker", "load", "-i"]:
+            shutil.copyfile(command[3], loaded)
+        elif command[:4] == ["docker", "image", "inspect", "-f"]:
+            return _completed("sha256:" + "a" * 64 + "\n")
+        return _completed()
+
+    monkeypatch.setattr(normalizer, "_run", fake_run)
+    with pytest.raises(
+        normalizer.DockerImageNormalizationError, match="loaded Docker config differs"
+    ):
+        normalizer.normalize_docker_image(
+            source_image="source:test", normalized_image="normalized:test"
+        )

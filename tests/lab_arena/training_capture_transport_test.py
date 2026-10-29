@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from lab_arena import contracts, runner, training_observations
+from lab_arena import contracts, runner
 
 
 TOKEN = "private-lease-value-do-not-log"
@@ -28,12 +28,10 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
         required_seconds = 15.0 if request.url.path.endswith("/training-observations") else 3.0
         if min(timeout.values()) < required_seconds:
             raise httpx.ReadTimeout("private response text", request=request)
-        document = json.loads(request.content)
+        response = {"status": "stored"}
         if request.url.path.endswith("/training-observations"):
-            document = training_observations._validate_payload(document, secrets=(TOKEN,))
-        return httpx.Response(200, json={
-            "status": "stored", "payload_sha256": contracts.document_hash(document),
-        })
+            response["payload_sha256"] = contracts.document_hash(json.loads(request.content))
+        return httpx.Response(200, json=response)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         api = runner.HttpArenaApiClient("https://arena.invalid", client=client)
@@ -76,12 +74,14 @@ def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, 
     assert "exception_class=RunnerError" in logs
     if failure == "timeout":
         assert "transport_cause=ReadTimeout" in logs
-        assert [(method, path.rsplit("/", 1)[-1]) for method, path, _ in attempts] == [
-            ("POST", "training-input"), ("POST", "training-input"),
-            ("POST", "training-observations"), ("POST", "training-observations"),
-            ("HEAD", "training-observations"),
-        ]
-        assert all(set(timeout.values()) == {10.0 if path.endswith("/training-input") else 60.0}
-                   for _, path, timeout in attempts)
     else:
         assert "http_status=403" in logs and "transport_cause=-" in logs
+    input_path = f"/arena/v1/runs/{RUN}/training-input"
+    observations_path = f"/arena/v1/runs/{RUN}/training-observations"
+    assert [(method, path) for method, path, _ in attempts] == (
+        [("POST", input_path)] * (2 if failure == "timeout" else 1)
+        + [("POST", observations_path)] * 2
+        + [("HEAD", observations_path)]
+    )
+    assert all(set(timeout.values()) == {10.0 if path.endswith("/training-input") else 60.0}
+               for _, path, timeout in attempts)

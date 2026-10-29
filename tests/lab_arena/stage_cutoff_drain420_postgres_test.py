@@ -450,6 +450,122 @@ def current_application_database():
     yield from current_service_database()
 
 
+def _replay_accepted_stage_scores(service, round_row, runs):
+    from lab_arena import scoring
+
+    configuration = round_row['configuration_doc']
+    icps = service.evaluation_icps(round_row['round_id'])
+    by_id = {run['run_id']: run for run in runs}
+    judgments = service._select_scoring_outputs(
+        [run for run in runs if run['kind'] == 'score'], round_row=round_row)
+    replayed = {}
+    for stage in (1, 2):
+        plan = round_row['stage%d_scoring_plan_doc' % stage]
+        outputs, breakdowns = {}, {}
+        for item in plan['work_items']:
+            run_id = item['scored_run_id']
+            source, judge = by_id[run_id], judgments[run_id]
+            assert service._judgment_matches_execution(round_row, judge, source)
+            output = json.loads(service._objects.get(source['output_ref']))
+            outputs[run_id] = output['companies']
+            breakdowns[run_id] = service._verified_breakdowns(
+                judge, icp=icps[int(item['icp_position'])],
+                companies=output['companies'], policy=configuration['scorer_policy'],
+                round_context=round_row)
+        scores = scoring.build_stage_scores(
+            plan=plan, policy=configuration['scorer_policy'],
+            icps_by_position=dict(enumerate(icps)), outputs_by_run=outputs,
+            breakdowns_by_item=breakdowns, configuration=configuration)
+        records = scoring.run_scores_for_store(
+            scores, [run for run in runs if run['kind'] == 'execute' and run['stage'] == stage])
+        replayed.update({record['run_id']: record for record in records})
+    return replayed
+
+
+def _assert_accepted_run_preserved(old, current, *, service, round_row, judgments,
+                                   public, expected_output, replayed):
+    if current == old:
+        return
+    assert old['kind'] == 'execute' and old['status'] == 'accepted'
+    assert old['per_icp_score'] is None and old['qualification_doc'] is None
+    scored_fields = {'per_icp_score', 'qualification_doc', 'updated_at'}
+    assert {k: v for k, v in current.items() if k not in scored_fields} == {
+        k: v for k, v in old.items() if k not in scored_fields}
+    assert current['per_icp_score'] is not None
+    assert isinstance(current['qualification_doc'], dict)
+    assert replayed['run_id'] == current['run_id']
+    assert current['per_icp_score'] == replayed['per_icp_score']
+    assert current['qualification_doc'] == replayed.get('qualification_doc')
+    assert any(service._judgment_matches_execution(round_row, judge, current)
+               for judge in judgments)
+    public_scores = public['scores']['stage_1'] + public['scores']['stage_2']
+    assert any(score['run_id'] == current['run_id']
+               and score['per_icp_score'] == current['per_icp_score']
+               and score['icp_position'] == current['icp_position']
+               for score in public_scores)
+    assert public['outputs'][current['run_id']] == expected_output
+
+
+def _accepted_run_preservation_case():
+    old = dict(run_id='execution', assignment_id='assignment', round_id='round',
+               submission_id='submission', miner_hotkey='miner', stage=1,
+               icp_position=0, kind='execute', status='accepted',
+               terminal_cause='accepted', attempt=1, output_ref='execution-output',
+               result_doc={'terminal_status': 'accepted'}, lease_token_hash='token',
+               per_icp_score=None, qualification_doc=None, updated_at='before')
+    current = {**old, 'per_icp_score': 30.0,
+               'qualification_doc': {'companies': [{'company_qualified': True} for _ in range(5)]}, 'updated_at': 'after'}
+    judge = {**current, 'kind': 'score', 'run_id': 'judge',
+             'scored_run_id': 'execution', 'output_ref': 'judge-output'}
+    output = {'companies': []}
+    arguments = dict(service=svc.ArenaService.__new__(svc.ArenaService),
+                     round_row={'round_id': 'round', 'configuration_doc': {}},
+                     judgments=[judge], expected_output=output,
+                     replayed={key: copy.deepcopy(current[key]) for key in
+                               ('run_id', 'per_icp_score', 'qualification_doc')},
+                     public={'scores': {'stage_1': [{'run_id': 'execution',
+                             'icp_position': 0, 'per_icp_score': 30.0}],
+                             'stage_2': []}, 'outputs': {'execution': output}})
+    return old, current, arguments
+
+
+def test_accepted_run_preservation_allows_only_bound_public_scoring():
+    old, current, arguments = _accepted_run_preservation_case()
+    _assert_accepted_run_preserved(old, current, **arguments)
+    # Already judged accepted work remains byte-exact.
+    _assert_accepted_run_preserved(current, current.copy(), **arguments)
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(current, {**current, 'updated_at': 'later'}, **arguments)
+
+
+@pytest.mark.parametrize('change', ['qualification_doc', 'score_and_public'])
+def test_accepted_run_preservation_rejects_tampered_replayed_score(change):
+    old, current, arguments = _accepted_run_preservation_case()
+    if change == 'qualification_doc':
+        current['qualification_doc']['companies'][0]['unbound_evidence'] = 'tampered'
+    else:
+        current['per_icp_score'] = 99
+        arguments['public']['scores']['stage_1'][0]['per_icp_score'] = 99
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(old, current, **arguments)
+
+
+@pytest.mark.parametrize('change', [
+    'missing_judge', 'wrong_generation', 'public_output',
+])
+def test_accepted_run_preservation_rejects_unbound_or_nonpublic_score(change):
+    old, current, arguments = _accepted_run_preservation_case()
+    judge = arguments['judgments'][0]
+    if change == 'missing_judge':
+        arguments['judgments'] = []
+    elif change == 'public_output':
+        arguments['public']['outputs']['execution'] = {'companies': ['foreign']}
+    else:
+        judge['scoring_generation_floor'] = 1
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(old, current, **arguments)
+
+
 def test_real_signed_late_execution_preserves_costs_and_publishes(current_application_database,tmp_path):
     """Actual service, signed runner, cost RPCs and scoring/publication.
 
@@ -544,12 +660,15 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
     from tests.lab_arena.baseline_cost_zero_round_test import _activate_single_champion_reward
     assert _activate_single_champion_reward(h)["status"]=="activated"
     h.clock.now=datetime.now(timezone.utc)+timedelta(days=2)
+    public_results={}
     for participant in participants:
         public=h.service.public_results(ROUND,participant["submission_id"])
+        public_results[participant['submission_id']]=public
         assert public["score_status"]=="published"
         assert len(public["scores"]["stage_1"]+public["scores"]["stage_2"])==10
     with connect() as conn:
         after=_state(conn)
+        replayed = _replay_accepted_stage_scores(h.service, final, after['lab_arena_runs'])
         old_accepted=[r for r in before["lab_arena_runs"] if r["status"]=="accepted"]
         for old in old_accepted:
             current=next(r for r in after["lab_arena_runs"] if r["run_id"]==old["run_id"])
@@ -567,6 +686,13 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
                 assert current['updated_at']>=old['updated_at']
             else:
                 assert current==old
+            _assert_accepted_run_preserved(
+                old, current, service=h.service, round_row=final,
+                judgments=after['lab_arena_runs'],
+                public=public_results[old['submission_id']],
+                expected_output=json.loads(h.service._objects.get(old['output_ref'])),
+                replayed=replayed.get(old['run_id']),
+            )
         assert all(r["status"]=="accepted" for r in after["lab_arena_runs"])
         assert _close(conn)["status"]=="existing"
         assert _state(conn)==after

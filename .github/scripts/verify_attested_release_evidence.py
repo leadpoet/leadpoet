@@ -76,6 +76,7 @@ def main(argv=None) -> int:
     parser.add_argument("--validator-builder-id", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--acceptance-signer-pubkey-hash", required=True)
+    parser.add_argument("--expected-pcr0")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", args.commit):
         raise ReleaseManifestV2Error("expected commit is invalid")
@@ -98,6 +99,11 @@ def main(argv=None) -> int:
     )
     if release["commit_sha"] != args.commit:
         raise ReleaseManifestV2Error("assembled release source differs")
+    if args.expected_pcr0 is not None:
+        if not re.fullmatch(r"[0-9a-f]{96}", args.expected_pcr0):
+            raise ReleaseManifestV2Error("expected PCR0 is invalid")
+        if any(row["pcr0"] != args.expected_pcr0 for row in rows):
+            raise ReleaseManifestV2Error("reproduced PCR0 differs from expected measurement")
     print("Independent exact-source build artifacts verified")
     return 0
 

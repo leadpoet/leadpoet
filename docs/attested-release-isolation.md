@@ -5,10 +5,19 @@ The production gateway and validator are not release builders. The legacy
 They do not identify hosts or grant access. Each domain still needs three clean
 builds of each physical role, and all six measurements must agree.
 
-The workflow currently has only a protected-environment admission job. It
-always fails with the setup blockers. It has no builder, artifact-download,
-publisher, AWS credential, or production-host job. This is a temporary suspension,
-not evidence that the replacement runners or IAM controls are configured.
+The workflow keeps source admission, independent builds, verification and
+publication in separate jobs. Only the fresh GitHub-hosted publisher can request
+OIDC, and only after protected-environment approval. Builders receive no stored
+secrets or OIDC permission. Source configuration alone does not prove that the
+external runner, environment and IAM controls are configured.
+
+To reproduce an existing serving commit, dispatch this workflow on `main` with
+`reproduce_commit` set to its full lowercase 40-character hash. It must be an
+ancestor of `main`. An optional `expected_pcr0` checks the coordinator measurement
+across both domains and all repetitions. Every reproduction skips publication,
+including a reproduction of the current main commit. Inputs enter shell scripts
+through environment values and are validated before use. Workflow code and
+toolchain selection always come from the exact current main commit.
 
 ## Release admission
 
@@ -20,10 +29,15 @@ Release publication must remain unavailable until all of these checks pass:
 2. Builder A runs on a fresh GitHub-hosted Linux x64 runner. Prove its actual
    memory and free disk are sufficient with the complete build below. Standard
    runner specifications are not a completed build or a peak-usage measurement.
-3. Builder B runs on a fresh RunsOn Linux x64 runner in a dedicated AWS account.
-   Record the actual account, installation, workflow restriction, runner labels,
-   and network/IAM boundaries. The existing leadpoet-site installation does not
-   prove access for this repository. Do not substitute either production host.
+3. Builder B runs on a fresh RunsOn Linux x64 runner in the existing dedicated
+   `leadpoet-ci` account `899952150628`, separate from production `493765492819`.
+   Its actual stock runner label is
+   `runs-on=<run-id>-attested-v2-b-<attempt>/runner=4cpu-linux-x64/spot=false/retry=false`.
+   Check the installation, main-workflow restriction, repository access and
+   network/IAM boundaries. The existing leadpoet-site installation does not
+   prove access for this repository. The build helper checks its AWS account
+   before historical source runs, then clears inherited AWS credential settings.
+   Do not substitute either production host or a GitHub runner for Builder B.
 4. Both builders use Nitro CLI 1.4.2 and identical approved x64 bootstrap blobs.
    Verify the source/package identity and file hashes before execution. The
    version string alone does not identify the kernel, init, or command line.
@@ -54,6 +68,13 @@ under the selected `NITRO_CLI_BLOBS` directory. Nitro CLI 1.4.2's upstream tag
 currently resolves to `6e8512e4d9e1ba82e0e5c4c9d9d0b3987724f217`.
 The selected approved bootstrap blob hashes must match production evidence.
 Do not assume that rebuilding the CLI produces the same executable hash.
+The October 28 checks found identical CLI/blob hashes on both production hosts.
+They are pinned in `.github/scripts/attested-nitro-toolchain.lock.json`.
+The installed `init`, `linuxkit` and `nsm.ko` differ from the upstream 1.4.2 Git
+tag. Do not replace them with the upstream tag's files during reproduction.
+Run `.github/scripts/verify_attested_nitro_toolchain.py --nitro-cli PATH --blobs DIR`
+before any build; it checks the binary and bootstrap hashes before executing
+the pinned CLI version check.
 The acceptance signer public-key hash remains
 `sha256:cdc20e17d9ecee5da04b30604ac72bc015326640ab98501646551f075d60ef36`.
 
@@ -64,6 +85,14 @@ The four enclave wheels are hash pinned in
 `gateway/tee/requirements-enclave-py312.lock`; the preparation script downloads
 and verifies them. A publisher additionally needs boto3. No production secret
 or full production Python environment is needed to reproduce the image.
+
+`.github/scripts/install_attested_nitro_toolchain.py` downloads the two official
+Amazon Linux RPMs at the pinned immutable CDN URLs. It verifies both package
+hashes, extracts only the fixed CLI/bootstrap members through `bsdtar`, verifies
+their hashes, and checks the CLI version. It does not install the RPM, execute
+package hooks, load a driver, start an allocator or change host CPU/RAM settings.
+The workflow installs only `libarchive-tools` and `rsync` as CI prerequisites.
+Nitro build artifacts, logs and sockets use writable runner-temporary paths.
 
 On each approved isolated builder, in an exact clean checkout:
 

@@ -1,10 +1,18 @@
 name: Gateway Attested Release
 
-# Publication is intentionally suspended while release builders are isolated.
-# Restore build/publish jobs only through a reviewed change after every exit
-# condition in docs/attested-release-isolation.md has external proof.
 on:
   workflow_dispatch:
+    inputs:
+      reproduce_commit:
+        description: Optional full main-history commit to reproduce without publication
+        required: false
+        default: ''
+        type: string
+      expected_pcr0:
+        description: Optional expected coordinator PCR0 for reproduction only
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: gateway-attested-release-main
@@ -13,26 +21,170 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RELEASE_BUCKET: leadpoet-attested-v2-artifacts-493765492819
+  RELEASE_PREFIX: attested-v2/releases
+  ACCEPTANCE_SIGNER_PUBKEY_HASH: sha256:cdc20e17d9ecee5da04b30604ac72bc015326640ab98501646551f075d60ef36
+
 jobs:
-  release-isolation-admission:
-    name: Release isolation prerequisites are not complete
+  source:
+    name: Admit exact main workflow and build source
     if: github.repository == 'leadpoet/leadpoet' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    environment: attested-release
-    timeout-minutes: 5
+    timeout-minutes: 10
+    outputs:
+      build_commit: ${{ steps.source.outputs.build_commit }}
+      mode: ${{ steps.source.outputs.mode }}
     steps:
       - name: Check out exact release source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
-
       - name: Require exact main source
         run: bash .github/scripts/require_attested_release_source.sh
+      - name: Select exact source without granting historical publication
+        id: source
+        env:
+          REPRODUCE_COMMIT: ${{ inputs.reproduce_commit }}
+          EXPECTED_PCR0: ${{ inputs.expected_pcr0 }}
+        run: bash .github/scripts/select_attested_release_source.sh
 
-      - name: Fail closed until independent release setup is proved
+  builds:
+    name: Independent ${{ matrix.domain }} evidence
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - domain: gateway
+            runner: ubuntu-24.04
+          - domain: validator
+            runner: runs-on
+    runs-on: ${{ matrix.runner == 'runs-on' && format('runs-on={0}-attested-v2-b-{1}/runner=4cpu-linux-x64/spot=false/retry=false', github.run_id, github.run_attempt) || matrix.runner }}
+    timeout-minutes: 180
+    env:
+      BUILD_COMMIT: ${{ needs.source.outputs.build_commit }}
+      GATEWAY_V2_BUILDER_DOMAIN: ${{ matrix.domain }}
+    steps:
+      - name: Check out trusted exact workflow source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact main source
+        run: bash .github/scripts/require_attested_release_source.sh
+      - name: Install userspace build prerequisites
         run: |
-          echo '::error::Attested publication is suspended. The dedicated isolated RunsOn builder, protected main-only environment, narrow OIDC trust/role and Nitro 1.4.2 reproduction must be verified before a reviewed workflow change can enable release.'
-          echo 'See docs/attested-release-isolation.md for the exact exit conditions.'
-          exit 1
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libarchive-tools rsync
+      - name: Extract and verify pinned official Nitro CLI 1.4.2
+        run: python3 .github/scripts/install_attested_nitro_toolchain.py --output "$RUNNER_TEMP/nitro-toolchain"
+      - name: Build three clean independent measurements
+        run: bash .github/scripts/build_attested_release.sh
+      - name: Upload only this domain's evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v2-evidence-${{ matrix.domain }}-${{ needs.source.outputs.build_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/gateway-evidence/gateway-${{ matrix.domain }}-evidence.json
+
+  verify:
+    name: Verify independent exact-commit measurements
+    needs: [source, builds]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BUILD_COMMIT: ${{ needs.source.outputs.build_commit }}
+      EXPECTED_PCR0: ${{ inputs.expected_pcr0 }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - name: Check out trusted exact verification source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require exact main source
+        run: bash .github/scripts/require_attested_release_source.sh
+      - name: Download exact GitHub builder evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v2-evidence-gateway-${{ needs.source.outputs.build_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/gateway
+      - name: Download exact isolated AWS builder evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v2-evidence-validator-${{ needs.source.outputs.build_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/validator
+      - name: Verify data identities, six-build consensus and expected measurement
+        run: bash .github/scripts/assemble_attested_release.sh
+      - name: Upload verified release evidence for inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v2-release-verified-${{ needs.source.outputs.build_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/release/*.json
+
+  publish:
+    name: Publish approved exact-main channel with OIDC
+    needs: [source, builds, verify]
+    if: needs.source.outputs.mode == 'publish' && inputs.reproduce_commit == '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: attested-release
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BUILD_COMMIT: ${{ needs.source.outputs.build_commit }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_REGION: us-east-1
+    steps:
+      - name: Check out trusted exact publication source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require exact current main publication source
+        run: |
+          bash .github/scripts/require_attested_release_source.sh
+          test "$BUILD_COMMIT" = "$GITHUB_SHA"
+      - name: Download exact GitHub builder evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v2-evidence-gateway-${{ needs.source.outputs.build_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/gateway
+      - name: Download exact isolated AWS builder evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: v2-evidence-validator-${{ needs.source.outputs.build_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/validator
+      - name: Independently revalidate original build artifacts before credentials
+        run: bash .github/scripts/assemble_attested_release.sh
+      - name: Prepare publisher dependency
+        run: python3 -m pip install --user boto3==1.40.0
+      - name: Recheck current main before requesting AWS authority
+        run: bash .github/scripts/require_attested_release_source.sh
+      - name: Obtain narrow short-lived release publication role
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: arn:aws:iam::493765492819:role/leadpoet-attested-release-publisher
+          aws-region: us-east-1
+          role-duration-seconds: 900
+          role-session-name: attested-${{ github.run_id }}-${{ github.run_attempt }}
+          allowed-account-ids: '493765492819'
+          unset-current-credentials: true
+      - name: Publish exact-commit channel with COMPLIANCE Object Lock
+        run: |
+          bash .github/scripts/require_attested_release_source.sh
+          python3 -m gateway.tee.release_channel_v2 \
+            --publish "$RUNNER_TEMP/release/release-channel-v2.json" \
+            --bucket "$RELEASE_BUCKET" \
+            --prefix "$RELEASE_PREFIX" \
+            --retention-days 365

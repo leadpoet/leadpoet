@@ -109,45 +109,60 @@ fi
 
 
 
+
 def _workflow():
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
 
-def test_suspended_release_has_no_production_or_publication_authority():
+def test_release_authority_is_limited_to_separate_protected_publisher():
     workflow = _workflow()
-    assert workflow.get("on", workflow.get(True)) == {"workflow_dispatch": None}
     assert workflow["permissions"] == {"contents": "read"}
-    jobs = workflow["jobs"]
-    assert set(jobs) == {"release-isolation-admission"}
-    job = jobs["release-isolation-admission"]
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["environment"] == "attested-release"
-    assert "github.repository == 'leadpoet/leadpoet'" in job["if"]
-    assert "github.ref == 'refs/heads/main'" in job["if"]
-    assert "permissions" not in job
-    for step in job["steps"]:
-        if "uses" in step:
-            assert step["uses"].split("@", 1)[0] == "actions/checkout"
-            assert len(step["uses"].split("@", 1)[1]) == 40
-            assert step["with"]["persist-credentials"] is False
-        if "run" in step:
-            subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+    assert set(workflow["jobs"]) == {"source", "builds", "verify", "publish"}
+    for name, job in workflow["jobs"].items():
+        if name == "publish":
+            assert job["environment"] == "attested-release"
+            assert job["permissions"] == {"contents": "read", "id-token": "write"}
+            assert job["runs-on"] == "ubuntu-24.04"
+            assert "inputs.reproduce_commit == ''" in job["if"]
+            assert "needs.source.outputs.mode == 'publish'" in job["if"]
+        else:
+            assert "environment" not in job
+            assert "permissions" not in job
+        for step in job.get("steps", []):
+            if "uses" in step:
+                action, pin = step["uses"].split("@", 1)
+                assert len(pin) == 40 and all(c in "0123456789abcdef" for c in pin)
+                if action == "actions/checkout":
+                    assert step["with"]["persist-credentials"] is False
+                    assert step["with"]["ref"] == "${{ github.sha }}"
+            if "run" in step:
+                subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
     source = WORKFLOW.read_text(encoding="utf-8")
-    for forbidden in (
-        "self-hosted", "leadpoet-gateway-v2-builder", "leadpoet-validator-v2-builder",
-        "id-token", "secrets.", "release_channel_v2", "docker", "configure-aws-credentials",
-    ):
+    for forbidden in ("self-hosted", "leadpoet-gateway-v2-builder", "leadpoet-validator-v2-builder", "secrets."):
         assert forbidden not in source
+    assert workflow["jobs"]["builds"]["strategy"]["matrix"]["include"] == [
+        {"domain": "gateway", "runner": "ubuntu-24.04"},
+        {"domain": "validator", "runner": "runs-on"},
+    ]
+    runner = workflow["jobs"]["builds"]["runs-on"]
+    assert "/runner=4cpu-linux-x64/spot=false/retry=false" in runner
+    assert "|| 'ubuntu" not in runner
 
 
-def test_release_block_is_unconditional_and_cannot_be_enabled_by_a_variable():
-    steps = _workflow()["jobs"]["release-isolation-admission"]["steps"]
-    block = steps[-1]
-    assert "if" not in block
-    assert "continue-on-error" not in block
-    assert "vars." not in block["run"]
-    result = subprocess.run(
-        ["bash", "-e", "-c", block["run"]], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 1
-    assert "Attested publication is suspended" in result.stdout
+def test_artifact_validation_precedes_oidc_and_uses_exact_separate_artifacts():
+    for name in ("verify", "publish"):
+        steps = _workflow()["jobs"][name]["steps"]
+        downloads = [s for s in steps if s.get("uses", "").startswith("actions/download-artifact@")]
+        assert len(downloads) == 2
+        assert len({s["with"]["path"] for s in downloads}) == 2
+        for download in downloads:
+            assert "pattern" not in download["with"]
+            assert "merge-multiple" not in download["with"]
+            artifact = download["with"]["name"]
+            assert "${{ needs.source.outputs.build_commit }}" in artifact
+            assert "${{ github.run_id }}-${{ github.run_attempt }}" in artifact
+        if name == "publish":
+            verify = next(i for i, s in enumerate(steps) if s.get("run") == "bash .github/scripts/assemble_attested_release.sh")
+            oidc = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("aws-actions/configure-aws-credentials@"))
+            assert verify < oidc
+            assert steps[oidc]["with"]["role-to-assume"] == "arn:aws:iam::493765492819:role/leadpoet-attested-release-publisher"

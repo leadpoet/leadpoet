@@ -59,7 +59,8 @@ def artifacts(tmp_path):
     return tmp_path
 
 
-def _verify(root):
+def _verify(root, *, expected_pcr0=None):
+    extra = ["--expected-pcr0", expected_pcr0] if expected_pcr0 is not None else []
     return EVIDENCE.main(
         [
             "--gateway-artifact", str(root / "gateway"),
@@ -68,12 +69,18 @@ def _verify(root):
             "--validator-builder-id", "validator-parent-123-1",
             "--commit", COMMIT,
             "--acceptance-signer-pubkey-hash", "sha256:" + "f" * 64,
-        ]
+        ] + extra
     )
 
 
 def test_exact_artifacts_pass_full_manifest_consensus(artifacts):
     assert _verify(artifacts) == 0
+
+
+def test_reproduction_compares_actual_measurement(artifacts):
+    assert _verify(artifacts, expected_pcr0="a" * 96) == 0
+    with pytest.raises(ReleaseManifestV2Error, match="differs from expected"):
+        _verify(artifacts, expected_pcr0="b" * 96)
 
 
 @pytest.mark.parametrize(

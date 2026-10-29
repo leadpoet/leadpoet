@@ -113,8 +113,7 @@ def test_full_thinking_multi_episode_global_split_and_manifest_golden():
     second["round_id"] = "arena-20261028-000002"
     seal(second)
     splits, manifest = training_thinking.build(iter([first, second, first]))
-    # Captured from the original eager implementation before this fix. It
-    # includes global shared-ICP clustering, cross-source dedup, and coverage.
-    assert manifest["dataset_version"] == "sha256:00153ce6883cdf2b6e0848c0c94a2b5339f039a70c9deed6980d9a2c06515dd4"
+    # Bind the shared source graph, cross-source dedup, and coverage.
+    assert manifest["dataset_version"] == "sha256:3777f6fa08a674fc18071c9e8ba67d3f47994a70f93ab65f92dde6cc61907d01"
     assert manifest["coverage"]["distinct_verified_exports"] == 2
     assert not (splits["train"] and splits["eval"])

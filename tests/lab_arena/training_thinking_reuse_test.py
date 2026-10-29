@@ -41,52 +41,50 @@ def example_for(case):
     return seal(example)
 
 
-# Digests bind the complete (all splits, full manifest) result produced before
-# the generic host-observation path was added. These values include the earlier
-# reasoning-default annotation and valid Responses-fixture corrections. Counts
-# below also make the relevant policy outcomes readable.
-BASELINES = {'diagnostic_gaps': ('sha256:0163c0c82f00d9928ff843f15a42edae7d45bdbaff446c8acd96ade11b9986d3',
-                                    2, {'requested_empty': 1}, 1),'legacy': ('sha256:490e3ec9b82cb73edfd7dd7ee7464a57becf6783c4bc3554408823aa7675aa02',
+# Digests bind the complete result after shared source grouping. Counts make
+# the policy outcomes readable.
+BASELINES = {'diagnostic_gaps': ('sha256:1f652461e4945d14b33b1574e74d29e08103c91564cd1c24dd65bf03d7122e1e',
+                                    2, {'requested_empty': 1}, 1),'legacy': ('sha256:03e6d0528b576472b25d028e607b7b82c7aec1ebcb8b68f0e936adf032fb30df',
             2,
             {'requested_empty': 1},
             1),
- 'new_policy': ('sha256:2ccae9fa8506087650221b58eab4a7cd240fe229e7b255b514874bca86a579b2',
+ 'new_policy': ('sha256:3f6070eca4b5885546253ae8735ed090411be60305ce1dcaee9917c7d3d0cd6c',
                 2,
                 {'requested_empty': 1},
                 1),
- 'missing_at_limit': ('sha256:91cceea8981cf526e07023c1ee336707cb79141702b04d1308884f9ebb4771a4',
+ 'missing_at_limit': ('sha256:1e0ac8dca4fba16ea238b75c4b4cf3da293107a1046a3e69b18f440bf841907a',
                       2,
                       {'missing_thinking': 1},
                       1),
- 'missing_over_limit': ('sha256:ddb38fdf58c70e8e4d1d3457d54bd83f29e32742f5e4f48654f1b4cf6bd5c324',
+ 'missing_over_limit': ('sha256:b8312102f6bff139355adda832db71897de9ffe670beed2ab55c46cf9fcff94a',
                         0,
                         {'missing_reasoning_share_exceeded': 3},
                         1),
- 'combined_failure': ('sha256:3536d2c51d438cc1811a19446622f5abda1e3e11f7238acdec48d88c263e0b4a',
+ 'combined_failure': ('sha256:403d69678e8bd0ec369ae07a484eddeb844bcb864de41b51e77037f29f64be3d',
                       0,
                       {'missing_reasoning_share_exceeded': 2},
                       1),
- 'tampered_route': ('sha256:6c4dbfc5a74e3203b67fc3f8d7264720c9b5b706d86d675439382eb0fffda2d9',
+ 'tampered_route': ('sha256:f28d15d7c34efd3ce5a49729d6706fc2a43346eaa62f4a2c3d43e30b4d77155b',
                     0,
                     {'trajectory_reasoning_ineligible': 3},
                     1),
- 'missing_usage': ('sha256:b24ca105f0e6af19f425a85cafd4d0357b4e68ed5bcc8d029076daba4fb52f2b',
+ 'missing_usage': ('sha256:2125b81ed65743254bbf88fa0832007f856e2fc83001635a4ca1215814a85c25',
                    0,
                    {'trajectory_reasoning_ineligible': 3},
                    1),
- 'privacy': ('sha256:8aa73bbc308295dab624d2e028921aaea1c767d419987627e1b82816607f2261',
+ 'privacy': ('sha256:3190e152711788bf7888956f399be70e83e5364628eb7203bc890318cde1cd24',
              0,
              {'trajectory_evidence_incomplete': 2},
              0),
- 'invalid_policy': ('sha256:6637f07f755f7a92f14b8dc34d6120f3ca6e4aaa18e4f33c44a43c8f090bcd31',
+ 'invalid_policy': ('sha256:fba0c7383440db855937480f5bd6905b79cd219267f83773d92a233507e85200',
                     0,
                     {'frozen_reasoning_policy_invalid': 3},
                     1),
- 'failed_retry': ('sha256:c7e077ffb63c1251821f470c9f4e0f78c56d4f46c87c570d0747fabaeb327d89',
+ 'failed_retry': ('sha256:00e1cdeef48081f62b7025c0b3eba3c64925e27ef05fcc2dabcb48a9aa9fe8db',
                   3,
                   {},
                   1),
- 'cap_retry': ('sha256:6639aa9c30140f4a09625398dbf388f1c1718760781f273fae92504f386b7435', 2, {}, 1)}
+ 'cap_retry': ('sha256:d3a48e8320c61955512adf1d8c41fd6baafaf955bdce92bffc33f799225e0708', 2, {}, 1)}
 
 
 @pytest.mark.parametrize('case', BASELINES)

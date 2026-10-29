@@ -70,6 +70,24 @@ def test_mixed_scorer_cohorts_are_separate_instead_of_combined():
     assert report["qualification"]["cohorts_must_not_be_combined_for_training"]
 
 
+def test_missing_image_cohort_stays_exact_while_using_full_source_split_graph():
+    first = document("image-missing")
+    first["configuration"]["scorer_image_digest"] = None
+    first["submission_id"] = "missing-image-source"
+    first["companies"][0]["company"] = claim("Missing Image", "missing-image.example", "missing-image")
+    first["output"]["companies"][0] = first["companies"][0]["company"]
+    second = document("image-present")
+    second["submission_id"] = "present-image-source"
+    second["companies"][0]["company"] = claim("Present Image", "present-image.example", "present-image")
+    second["output"]["companies"][0] = second["companies"][0]["company"]
+    report = readiness.build([seal(first), seal(second)])
+    cohorts = report["qualification"]["cohorts"]
+    assert len(cohorts) == 2
+    assert [sum(cohort["records"][name] for name in ("train", "eval"))
+            for cohort in cohorts] == [1, 1]
+    assert report["qualification"]["candidate_records"] == 2
+
+
 def test_truthy_completeness_metadata_cannot_claim_complete():
     value = document()
     value["completeness"] = {"complete": True, "dimensions": {

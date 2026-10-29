@@ -2100,6 +2100,7 @@ def build(examples, rules: training_steps.Rules | None = None):
     manifest = {"schema_version": SCHEMA_VERSION, "rules": historical["rules"],
                 "training_permission": copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 "source_dataset_version": historical["dataset_version"],
+                "split_source_hashes": historical["split_source_hashes"],
                 "counts": {"records_by_split": {key: len(rows) for key, rows in output.items()},
                            "exclusion_reasons": dict(sorted(reasons.items()))},
                 "coverage": _combined_coverage(coverage_reports)}

@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
-from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage, reasoning_capture, training_worker_proof
+from lab_arena import contracts, operations, training_capture, training_export, training_dataset, training_coverage, reasoning_capture, training_worker_proof
 
 SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_dataset.v1'
 RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
@@ -24,14 +24,20 @@ RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
 @dataclass(frozen=True)
 class Rules:
     eval_percent: int = 20
-    seed: str = 'arena-agent-steps-v1'
+    seed: str = training_dataset.DEFAULT_SPLIT_SEED
     production_rounds_only: bool = True
+    eval_after: str | None = None
+    eval_mode: str = 'company_and_icp'
 
     def __post_init__(self):
         if type(self.eval_percent) is not int or not 0 < self.eval_percent < 100:
             raise ValueError('invalid_eval_percent')
         if not isinstance(self.seed, str) or not self.seed:
             raise ValueError('invalid_seed')
+        if self.eval_after is not None and training_dataset._date(self.eval_after) is None:
+            raise ValueError('invalid_eval_after')
+        if self.eval_mode not in {'company', 'company_and_icp'}:
+            raise ValueError('invalid_eval_mode')
 
 
 def _require(condition, reason):
@@ -683,10 +689,12 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
     """Keep strict policy evidence separate from generic host observations."""
     rules = rules or Rules()
     candidates, analysis, sources = {}, [], set()
-    clusters = training_dataset._Clusters()
+    source_groups = training_dataset._SourceSplitGroups()
     record_groups = {}
     counts = Counter()
     for example in examples:
+        episode = source_groups.add(example, production_rounds_only=rules.production_rounds_only,
+                                    eval_mode=rules.eval_mode)
         source = example.get('example_hash')
         sources.add(source if isinstance(source, str) and contracts.SHA256_RE.fullmatch(source) else 'invalid_example_hash')
         reason = None
@@ -696,20 +704,13 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
             reason = 'example_hash_mismatch'
         elif rules.production_rounds_only and (not training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', ''))) or example.get('round_status') != 'published'):
             reason = 'not_a_published_production_round'
+        elif episode is None:
+            reason = 'episode_identity_unverified'
         if reason:
             counts[reason] += 1
             analysis.append({'source_example_hash': str(source) if isinstance(source, str) and contracts.SHA256_RE.fullmatch(source) else None, 'reason': reason})
             del example
             continue
-        group_keys = ['episode:' + contracts.document_hash({k: example.get(k) for k in ('round_id', 'submission_id', 'stage', 'icp_position', 'assignment_id')})]
-        if example.get('icp'):
-            group_keys.append('icp:' + integrity.requirement_fingerprint(example['icp'], contacts_required=training_dataset._contacts(example.get('configuration') or {})))
-        for company in example.get('companies') or []:
-            if isinstance(company, dict):
-                group_keys.extend('company:' + key for key in training_dataset._company_keys(company.get('company') or company, {}))
-        for key in group_keys:
-            clusters.find(key)
-            clusters.union([group_keys[0], key])
         for call in example.get('provider_calls') or []:
             if not isinstance(call, dict):
                 counts['malformed_call'] += 1
@@ -721,11 +722,11 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])
-                    clusters.union([record_groups[digest], group_keys[0]])
+                    record_groups[digest].add(episode)
                 else:
                     record['candidate_id'] = digest
                     candidates[digest] = record
-                    record_groups[digest] = group_keys[0]
+                    record_groups[digest] = {episode}
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 reason = str(exc) if isinstance(exc, ValueError) and re.fullmatch('[a-z_]+', str(exc)) else 'malformed_call'
                 counts[reason] += 1
@@ -737,13 +738,30 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
         call = None
         del example
     splits = {'train': [], 'eval': [], 'analysis': []}
+    future_groups = source_groups.future_groups(rules.eval_after)
     for digest, record in sorted(candidates.items()):
         record['source_refs'] = sorted({contracts.canonical_json(ref): ref for ref in record['source_refs']}.values(), key=contracts.canonical_json)
-        group = clusters.find(record_groups[digest])
-        split = 'eval' if int(contracts.document_hash({'seed': rules.seed, 'group': group}).split(':')[-1][:8], 16) % 100 < rules.eval_percent else 'train'
+        assignments = {source_groups.assignment(episode, seed=rules.seed,
+                                                 eval_percent=rules.eval_percent,
+                                                 eval_after=rules.eval_after,
+                                                 future_groups=future_groups)
+                       for episode in record_groups[digest]}
+        if len(assignments) != 1:
+            counts['source_split_conflict'] += 1
+            analysis.append({'source_example_hash': None, 'call_ref_hash': digest,
+                             'reason': 'source_split_conflict'})
+            continue
+        split, split_reason = next(iter(assignments))
+        if split_reason:
+            counts[split_reason] += 1
+            analysis.append({'source_example_hash': None, 'call_ref_hash': digest,
+                             'reason': split_reason})
+            continue
         splits[split].append(record)
     splits['analysis'] = sorted({contracts.canonical_json(row): row for row in analysis}.values(), key=contracts.canonical_json)
-    manifest = {'schema_version': SCHEMA_VERSION, 'rules': asdict(rules),
+    manifest_rules = asdict(rules)
+    manifest_rules['split_grouping'] = training_dataset.SPLIT_GROUPING
+    manifest = {'schema_version': SCHEMA_VERSION, 'rules': manifest_rules,
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
                                        'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',
@@ -753,7 +771,9 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                                        'no_encrypted_reasoning'],
                 'counts': {'examples': len(sources), 'candidate_executions': len({ref['run_id'] for r in candidates.values() for ref in r['source_refs']}),
                            'records_by_split': {k: len(v) for k, v in splits.items()}, 'exclusion_reasons': dict(sorted(counts.items()))},
-                'sources': sorted(sources), 'split_hashes': {k: contracts.document_hash(v) for k, v in splits.items()}}
+                'sources': sorted(sources),
+                'split_source_hashes': sorted(source_groups.source_hashes),
+                'split_hashes': {k: contracts.document_hash(v) for k, v in splits.items()}}
     manifest['dataset_version'] = contracts.document_hash(manifest)
     return splits, manifest
 

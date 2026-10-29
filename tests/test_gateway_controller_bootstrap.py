@@ -81,7 +81,7 @@ def host(tmp_path, monkeypatch):
           [ -z "${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID+x}" ]
         fi
         [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" == */gateway-restart-controller-bootstrap.*/authority ]]
-        [ "$(stat -f '%Lp' "$GATEWAY_RESTART_AUTHORITY_ROOT" 2>/dev/null || stat -c '%a' "$GATEWAY_RESTART_AUTHORITY_ROOT")" = 700 ]
+        [ "$(python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$GATEWAY_RESTART_AUTHORITY_ROOT")" = 0o700 ]
         python3 -B - <<'PY'
         import fcntl, os
         # Bootstrap must release its locks before the full controller enters.

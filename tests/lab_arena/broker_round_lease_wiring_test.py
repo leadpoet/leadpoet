@@ -87,6 +87,7 @@ def _wired_factory(monkeypatch, *, prices=None):
         funding_source_for = staticmethod(lambda _context: "host")
         provider_funding_source_for = staticmethod(lambda _context, _provider: "host")
         retry_miner_credential_for = staticmethod(lambda _context: False)
+        champion_score_for = staticmethod(lambda _context: False)
         mark_provider_fallback = staticmethod(lambda *_args: {"status": "none"})
         provider_restart_required_for = staticmethod(lambda *_args: False)
         code_review_key = staticmethod(lambda *_args: "test")

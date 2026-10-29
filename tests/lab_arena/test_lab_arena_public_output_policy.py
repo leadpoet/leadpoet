@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,10 @@ def _round(round_id: str, status: str, **policies: str) -> dict:
         "status": status,
         "configuration_doc": {
             "mode": "shadow",
-            "schedule": {"submission_cutoff": "2026-09-15T12:00:00Z"},
+            "schedule": {
+                "submission_open": "2026-09-14T00:00:00Z",
+                "submission_cutoff": "2026-09-15T12:00:00Z",
+            },
             "private_icps": ["PRIVATE ICP MUST NOT LEAK"],
             "runner_hotkeys": ["PRIVATE RUNNER MUST NOT LEAK"],
             **policies,
@@ -39,10 +43,17 @@ def _round(round_id: str, status: str, **policies: str) -> dict:
 
 def _service(rows: list[dict]) -> ArenaService:
     service = ArenaService.__new__(ArenaService)
+    # These scenarios describe an announced intake before its frozen cutoff.
+    service._clock = lambda: datetime(2026, 9, 14, tzinfo=timezone.utc)
     by_id = {row["round_id"]: row for row in rows}
 
     class Store:
+        def get_round(self, round_id):
+            return by_id.get(round_id)
+
         def list_rounds(self, **query):
+            if query.get("status"):
+                return [row for row in rows if row["status"] == query["status"]]
             if query.get("statuses"):
                 return [row for row in rows if row["status"] != "published"]
             return []

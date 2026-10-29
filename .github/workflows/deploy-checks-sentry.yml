@@ -24,7 +24,7 @@ jobs:
     steps:
       - name: Report trusted main run to Sentry Cron
         env:
-          SENTRY_CRON_URL: ${{ secrets.SENTRY_DEPLOY_CHECKS_CRON_URL }}
+          LEADPOET_SENTRY_CRON_URL: ${{ secrets.LEADPOET_SENTRY_DEPLOY_CHECKS_CRON_URL }}
         shell: python
         run: |
           import json
@@ -38,7 +38,7 @@ jobs:
 
           event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
           run = event['workflow_run']
-          url = os.environ.get('SENTRY_CRON_URL', '')
+          url = os.environ.get('LEADPOET_SENTRY_CRON_URL', '')
           if not url:
               sys.exit('Sentry Deploy Checks Cron URL is not configured')
           action = event['action']

@@ -102,7 +102,7 @@ def test_sentry_check_in_correlates_start_and_completion_without_logging_key(
     }}))
     monkeypatch.setenv('GITHUB_EVENT_PATH', str(path))
     monkeypatch.setenv('GITHUB_REPOSITORY', 'leadpoet/leadpoet')
-    monkeypatch.setenv('SENTRY_CRON_URL', 'https://sentry.io/api/123/cron/deploy-checks/test-only-key/')
+    monkeypatch.setenv('LEADPOET_SENTRY_CRON_URL', 'https://sentry.io/api/123/cron/deploy-checks/test-only-key/')
     observed = []
     class Response:
         status = 200
@@ -135,7 +135,7 @@ def test_sentry_check_in_transport_failure_does_not_print_the_authenticated_url(
     }}))
     monkeypatch.setenv('GITHUB_EVENT_PATH', str(path))
     monkeypatch.setenv('GITHUB_REPOSITORY', 'leadpoet/leadpoet')
-    monkeypatch.setenv('SENTRY_CRON_URL', 'https://sentry.io/api/123/cron/deploy-checks/test-only-key/')
+    monkeypatch.setenv('LEADPOET_SENTRY_CRON_URL', 'https://sentry.io/api/123/cron/deploy-checks/test-only-key/')
     def fail(request, timeout):
         raise ValueError(request.full_url)
     monkeypatch.setattr(urllib.request, 'urlopen', fail)

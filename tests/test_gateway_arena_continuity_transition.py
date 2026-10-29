@@ -334,6 +334,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         ARENA_RUNTIME_ROOT="$TASK_TMP/runtime"
         GATEWAY_PYTHON_BIN="$TASK_TMP/mock-python"
         GATEWAY_ENV_FILE="$TASK_TMP/env-clone"
+        GATEWAY_DEPLOY_PLAN_FILE="$TASK_TMP/deploy-plan.json"
         GATEWAY_LOG_ROOT="$TASK_TMP/logs"
         ENV_CLONE="$TASK_TMP/env-clone"
         GATEWAY_CONTROLLER_PROCESS_HELPER="$TASK_TMP/helper"

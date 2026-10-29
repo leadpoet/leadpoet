@@ -144,7 +144,10 @@ def test_direct_openrouter_402_with_unpriced_generation_has_no_proof(monkeypatch
         action_sequence=3, timeout_ms=5000,
     )
     assert "credit_failure_proof" not in result.call
-    assert "credit_failure_proof" not in store.calls[result.call["call_identity"]]["terminal"]
+    retained = store.calls[result.call["call_identity"]]
+    assert retained["kind"] == "uncertain"
+    assert "terminal" not in retained
+    assert "credit_failure_proof" not in retained["uncertain_doc"]["openrouter_terminal_response"]
 
 
 def test_direct_openrouter_402_with_malformed_charge_has_no_proof():

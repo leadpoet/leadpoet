@@ -117,13 +117,20 @@ def test_preserves_all_rows_and_normal_continuation_only_adds_score(database):
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",(TARGET+':14',))
             cur.execute('SET LOCAL session_replication_role=origin')
-            # The original frozen Oct21 window has elapsed on today's DB
-            # clock; its normal claim guard must reject the retained successor.
+            # Exercise an expired window explicitly. prepare() renews the
+            # migration's exact four window literals against the real clock.
+            cur.execute('SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s', (RID,))
+            reopened_configuration = cur.fetchone()[0]
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((clock_timestamp()-interval '2 seconds')::text)),'{schedule,publication_deadline}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE round_id=%s", (RID,))
+            cur.execute('SET LOCAL session_replication_role=origin')
+            before_expired_claim = rows(cur)
             lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
             assert lease['status'] == 'no_pending', lease
             cur.execute('RESET ROLE')
+            assert rows(cur) == before_expired_claim
             cur.execute('SET LOCAL session_replication_role=replica')
-            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((clock_timestamp()+interval '1 hour')::text)),'{schedule,publication_deadline}',to_jsonb((clock_timestamp()+interval '1 hour 1 second')::text)) WHERE round_id=%s",(RID,))
+            cur.execute('UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s', (json.dumps(reopened_configuration), RID))
             cur.execute('SET LOCAL session_replication_role=origin')
             lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
             assert lease['status'] == 'leased' and lease['run_id'] == TARGET+':14', lease

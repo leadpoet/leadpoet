@@ -35,8 +35,7 @@ def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None
     harness.service.config.mode = "live"
     harness.service.store.create_round(config["round_id"], config)
     for index in range(count):
-        harness.submit("capacity-%s-%d" % (suffix, index), config["round_id"],
-                       expected_review="pending")
+        harness.submit("capacity-%s-%d" % (suffix, index), config["round_id"])
     return harness, config
 
 
@@ -112,8 +111,7 @@ def test_parallel_finalizations_cannot_overbook_or_store_rejected_credentials(co
 
     def submit(index):
         try:
-            harness.submit("parallel-capacity-%d" % index, config["round_id"],
-                           expected_review="pending")
+            harness.submit("parallel-capacity-%d" % index, config["round_id"])
             return "accepted"
         except ServiceError as exc:
             return exc.code

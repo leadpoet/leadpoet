@@ -622,6 +622,12 @@ def test_orphan_or_mislabeled_score_event_is_not_archived(seeded):
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute('BEGIN')
+            # This case tests forged-event rejection after the relation fence.
+            # Wait briefly for incidental readers before changing the fixture;
+            # keep the migration's real NOWAIT and contention tests unchanged.
+            cur.execute("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='5s'")
+            cur.execute("LOCK TABLE public.lab_arena_rounds, public.lab_arena_restart_claim_control, public.lab_arena_submissions, public.lab_arena_runs, public.lab_arena_ledger, public.lab_arena_trajectory_events IN ACCESS EXCLUSIVE MODE")
+            cur.execute('LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE')
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("UPDATE public.lab_arena_trajectory_events SET run_kind='score' WHERE trajectory_id=(SELECT min(trajectory_id) FROM public.lab_arena_trajectory_events WHERE round_id=%s AND run_kind='execute')", (ROUND,))
             cur.execute('SET LOCAL session_replication_role=origin')

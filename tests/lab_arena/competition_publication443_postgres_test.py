@@ -294,9 +294,8 @@ def test_actual_postgrest_computed_selection_and_response(stack, monkeypatch):
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
     _insert_rows(stack["connection"], rows)
     transport = make_transport(stack, "lab_arena_service")
-    transport.select = pre517_round_select(transport.select)
-    original_get = transport._client.get
-    transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
+    # The current stack exposes the production opaque-key /rest/v1 route.
+    # Keep its actual computed projections and nginx admission unchanged.
     try:
         store = ArenaStore(transport)
         # NOTIFY reload is asynchronous; poll only this bounded schema read.

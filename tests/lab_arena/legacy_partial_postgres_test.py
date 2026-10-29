@@ -227,21 +227,14 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
     from lab_arena.promotion import GitPromoter
     from leadpoet_canonical import arena_weights
     from tests.lab_arena.test_integrity_round import IntegrityHarness
-    from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
-    class FrozenHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
-        def build_service(self):
-            service = super().build_service()
-            commit = service.commit_benchmark
-            def commit_frozen(round_id):
-                freeze_historical_intake_dates(self, "2026-10-12")
-                return commit(round_id)
-            service.commit_benchmark = commit_frozen
-            return service
     from tests.lab_arena import test_lab_arena_service_round as fixtures
 
     psycopg, dsn = round_database
     connect = lambda: psycopg.connect(**dsn)
-    harness = FrozenHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
+    # This full-round test uses the current schema and continuation protocol.
+    # An Oct12 intake would disable SQL472's retries. The exact468 migration
+    # and checkpoint-security tests above retain their historical database.
+    harness = IntegrityHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
     harness.chain.epoch = 25080
     original_run_stage = harness.run_stage_with_runners
 

@@ -17,6 +17,11 @@ def database():
         yield db
     finally: gen.close()
 
+@pytest.fixture()
+def service_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
 def test_exact_upgrade_is_idempotent(database):
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
         cur.execute("SELECT has_function_privilege('lab_arena_service','public.lab_arena_execution_attempt_count(public.lab_arena_runs)','EXECUTE'),has_function_privilege('anon','public.lab_arena_execution_attempt_count(public.lab_arena_runs)','EXECUTE')")
@@ -125,7 +130,12 @@ def test_host_then_two_provider_failures_exhaust_two_normal_attempts(database):
         third=claim(conn,'c'); assert 'confirmation_attempt' not in finish(conn,third,token='c')
         assert expire(conn)['retried']==0
         assert close(conn)['status']=='closed'
-        assert plan(conn,cfg)['zero_rows']==[{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
+        # The SQL retry budget is historical; plan() uses today's Python
+        # classifier. Provider infrastructure failure has no measured zero.
+        built = plan(conn,cfg)
+        assert built['zero_rows'] == []
+        assert built['incomplete_rows'] == [
+            {'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
 
 def test_two_genuine_provider_failures_still_exhaust(database):
     with database[0].connect(**database[1]) as conn:
@@ -134,7 +144,12 @@ def test_two_genuine_provider_failures_still_exhaust(database):
         second=claim(conn,'b'); assert 'confirmation_attempt' not in finish(conn,second)
         assert expire(conn)['retried']==0
         assert close(conn)['status']=='closed'
-        assert len(plan(conn,cfg)['zero_rows'])==1
+        # Preserve exact SQL exhaustion while checking the current Python
+        # classifier's explicit infrastructure-incomplete result.
+        built = plan(conn,cfg)
+        assert built['zero_rows'] == []
+        assert built['incomplete_rows'] == [
+            {'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
 
 @pytest.mark.parametrize('cause',['model_error','invalid_output','credential_error','budget_exhausted'])
 def test_genuine_terminal_failure_is_not_replayed_because_of_host_credit(database,cause):
@@ -384,7 +399,8 @@ def test_migration_refuses_unreviewed_rpc_changes_transactionally(database,mutat
         assert cur.fetchone()[0]==before
 
 
-def test_current_schema_model_zero_preserves_baseline_scores_and_publication(database,tmp_path):
+def test_current_schema_model_zero_preserves_baseline_scores_and_publication(service_database,tmp_path):
+    database = service_database
     import copy
     from dataclasses import replace
     from lab_arena import runtime
@@ -447,7 +463,8 @@ def test_current_schema_model_zero_preserves_baseline_scores_and_publication(dat
     (tmp_path/'host-retry474-model-zero-publication-proof.json').write_text(json.dumps(proof,indent=2)+'\n')
 
 
-def test_current_schema_accepted_scores_publish_and_activate_reward(database,tmp_path):
+def test_current_schema_accepted_scores_publish_and_activate_reward(service_database,tmp_path):
+    database = service_database
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
         cur.execute('TRUNCATE public.lab_arena_ledger,public.lab_arena_trajectory_events RESTART IDENTITY CASCADE')
     cutoff.test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path)

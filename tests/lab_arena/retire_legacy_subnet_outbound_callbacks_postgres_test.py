@@ -155,6 +155,10 @@ def test_real_production_hashes_reject_noop_replacements(connection):
      "public.process_pending_rep_scores_continuous() IS NULL AS completed", "has a dependent"),
     ("CREATE FUNCTION public.callback_text_caller() RETURNS void LANGUAGE plpgsql "
      "AS 'BEGIN PERFORM public.process_pending_rep_scores_continuous(); END'", "stored routine caller"),
+    ("CREATE FUNCTION public.callback_text_caller() RETURNS void LANGUAGE plpgsql "
+     "AS 'BEGIN PERFORM public.\"process_pending_rep_scores_continuous\"(); END'", "stored routine caller"),
+    ("CREATE FUNCTION public.callback_text_caller() RETURNS void LANGUAGE plpgsql "
+     "AS 'BEGIN PERFORM public.Process_Pending_Rep_Scores_Continuous(); END'", "stored routine caller"),
 ])
 def test_unexpected_state_aborts_all_without_changing_history(connection, change, reason):
     conn, pg = connection

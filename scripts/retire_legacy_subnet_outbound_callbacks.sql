@@ -77,14 +77,18 @@ BEGIN
   END LOOP;
 
   -- PL/pgSQL calls need not have pg_depend entries. Fail closed on a new
-  -- stored-routine text caller outside the exact retired set as well.
+  -- stored-routine text reference outside the exact retired set as well.
+  -- Conservative name matching also covers quoted and mixed-case calls.
   IF EXISTS (
     SELECT 1 FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
     WHERE pg_catalog.left(n.nspname, 3) <> 'pg_'
       AND n.nspname <> 'information_schema'
       AND NOT (n.nspname = 'public' AND p.proname = ANY(names))
-      AND p.prosrc ~ ('\m(' || pg_catalog.array_to_string(names, '|') || ')\s*\(')
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.unnest(names) AS retired(name)
+        WHERE pg_catalog.strpos(pg_catalog.lower(p.prosrc), retired.name) > 0
+      )
   ) THEN
     RAISE EXCEPTION 'legacy outbound callback has a stored routine caller'
       USING ERRCODE = '55000';

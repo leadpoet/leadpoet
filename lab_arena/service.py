@@ -3134,7 +3134,6 @@ class ArenaService:
         admitted = {p["submission_id"] for p in round_row.get("participants") or []}
         runs = [run for run in self._store.list_runs(
             round_id, stage=stage, kind="execute",
-            columns="*,execution_attempt:lab_arena_execution_attempt_count",
         ) if run["submission_id"] in admitted]
         plan = scoring.build_scoring_plan(
             round_id=round_id,

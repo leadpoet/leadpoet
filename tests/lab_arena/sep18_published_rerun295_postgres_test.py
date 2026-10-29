@@ -32,7 +32,14 @@ from tests.lab_arena.per_icp_cost_admission_postgres_test import (
     _settle as _settle_cost_call,
 )
 from tests.lab_arena.sep18_open_quota287_postgres_test import _configuration
-from tests.lab_arena.test_lab_arena_service_round import Harness
+from tests.lab_arena.test_lab_arena_service_round import Harness as ServiceHarness
+
+
+class Harness(ServiceHarness):
+    def objects_key(self):
+        # Each historical proof owns a database and sealed artifact namespace.
+        # Rerun templates intentionally reuse round/run IDs across proofs.
+        return "published-rerun:" + str(self.tmp.resolve())
 
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/295-arena-2026-09-18-published-baseline-rerun.sql.template"

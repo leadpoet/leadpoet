@@ -311,6 +311,16 @@ async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
     return await _proxy_request(arena_path, request, testnet=True)
 
 
+@router.head("/v1/runs/{run_id}/training-observations")
+async def proxy_observation_head(run_id: str, request: Request) -> Response:
+    return await proxy_arena_request("v1/runs/%s/training-observations" % run_id, request)
+
+
+@testnet_router.head("/v1/runs/{run_id}/training-observations")
+async def proxy_testnet_observation_head(run_id: str, request: Request) -> Response:
+    return await proxy_testnet_request("v1/runs/%s/training-observations" % run_id, request)
+
+
 async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = False) -> Response:
     if (
         not arena_path
@@ -320,6 +330,11 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         raise HTTPException(status_code=404, detail="arena path invalid")
 
     parts = arena_path.split("/")
+    observation_verification = (
+        request.method == "HEAD" and len(parts) == 4
+        and parts[:2] == ["v1", "runs"] and parts[3] == "training-observations"
+        and "if-match" in request.headers
+    )
     observation_upload = (
         request.method == "POST" and len(parts) == 4
         and parts[:2] == ["v1", "runs"] and parts[3] == "training-observations"
@@ -380,6 +395,8 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         for name in _FORWARDED_REQUEST_HEADERS
         if name in request.headers
     }
+    if observation_verification:
+        request_headers["if-match"] = request.headers["if-match"]
     try:
         upstream = await _request_sidecar(
             request.method,
@@ -395,15 +412,17 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         raise HTTPException(status_code=503, detail="agent competition is unavailable") from exc
     if not testnet:
         _log_handoff(request, arena_path, body, upstream)
-    return _upstream_response(upstream)
+    return _upstream_response(upstream, observation_verification=observation_verification)
 
 
-def _upstream_response(upstream: httpx.Response) -> Response:
+def _upstream_response(upstream: httpx.Response, *, observation_verification: bool = False) -> Response:
     response_headers = {
         name: upstream.headers[name]
         for name in _FORWARDED_RESPONSE_HEADERS
         if name in upstream.headers
     }
+    if observation_verification and "etag" in upstream.headers:
+        response_headers["etag"] = upstream.headers["etag"]
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,

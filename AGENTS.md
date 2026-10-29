@@ -24,6 +24,18 @@ and tests only; the coordinator owns release and production validation through
 the existing paired controller and shared deployment lock. This authority ends
 when the scoped CI and deployed behavior are verified.
 
+## Scoped authorization: October 29 retained capture export
+
+The user authorized the narrow capture fix to retain validated stored worker
+snapshots in raw and readable exports when the completion summary cannot verify
+them. Keep these records explicitly unverified. Preserve delivery proof, privacy,
+hashes, training eligibility, scoring, billing, miner behavior and frozen rules.
+Add no receipts, dependencies, provider calls or recovery machinery. Internal
+agents may implement and test in this worktree only. The coordinator owns
+independent review, safe merge, canonical deployment and fresh production
+readback. Preserve active runs and other tasks' migration and restart ownership.
+This authority ends after the scoped fix is deployed and verified.
+
 ## Scoped authorization: October 29 frozen catalog request performance
 
 The user authorized the measured Deepline catalog performance fix: reuse exact,

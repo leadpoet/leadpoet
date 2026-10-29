@@ -1334,11 +1334,19 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "evidence_gaps": copy.deepcopy(call.get("evidence_gaps") or []),
                       "events": events})
     observations = []
-    for field in ("worker_observation_artifacts", "partial_worker_observation_artifacts"):
+    for field in ("worker_observation_artifacts", "partial_worker_observation_artifacts",
+                  "unverified_worker_observation_artifacts"):
         for run_id, artifact in sorted((example.get(field) or {}).items()):
             payload = artifact.get("payload") if isinstance(artifact, Mapping) else None
             if not isinstance(payload, Mapping):
                 continue
+            if field == "unverified_worker_observation_artifacts" and artifact.get("unverified_reasons"):
+                reasons = artifact["unverified_reasons"]
+                observations.append({"run_id": run_id, "kind": "unverified_snapshot",
+                                     "source_path": [field, run_id, "unverified_reasons"],
+                                     "value": copy.deepcopy(reasons),
+                                     "value_sha256": contracts.document_hash(reasons),
+                                     "payload_sha256": artifact.get("payload_sha256")})
             for collection in ("observations", "agent_observations", "response_receipts"):
                 for index, row in enumerate(payload.get(collection) or []):
                     observations.append({"run_id": run_id, "kind": row.get("kind", collection)
@@ -1350,7 +1358,7 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
     core_context = ("icp", "configuration", "input_snapshots", "output", "judgment",
                     "runtime", "costs", "competition_cost_eligibility", "completeness")
     separate = {"provider_calls", "worker_observation_artifacts",
-                "partial_worker_observation_artifacts", "example_hash"}
+                "partial_worker_observation_artifacts", "unverified_worker_observation_artifacts", "example_hash"}
     context_keys = list(core_context) + sorted(set(example) - set(core_context) - separate)
     document_context = [
         {"field": key, "status": "present", "source_path": [key],
@@ -1371,7 +1379,11 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
             "calls": calls, "observations": observations, "worker_observation_paths": [
                 ["worker_observation_artifacts", key] for key in sorted(example.get("worker_observation_artifacts") or {})],
             "partial_worker_observation_paths": [
-                ["partial_worker_observation_artifacts", key] for key in sorted(example.get("partial_worker_observation_artifacts") or {})]}
+                ["partial_worker_observation_artifacts", key] for key in sorted(example.get("partial_worker_observation_artifacts") or {})],
+            **({"unverified_worker_observation_paths": [
+                ["unverified_worker_observation_artifacts", key]
+                for key in sorted(example["unverified_worker_observation_artifacts"])]}
+               if example.get("unverified_worker_observation_artifacts") else {})}
 
 
 def readable_trace_markdown(report: Mapping[str, Any], *, raw_export_name: str | None = None) -> str:

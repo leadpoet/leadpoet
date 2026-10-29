@@ -236,7 +236,8 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
                   "leadpoet.lab_arena.training_observations.v2")):
             observation = at(request_path[:-1])
         elif (len(request_path) == 6 and request_path[0] in {
-                "worker_observation_artifacts", "partial_worker_observation_artifacts"}
+                "worker_observation_artifacts", "partial_worker_observation_artifacts",
+                "unverified_worker_observation_artifacts"}
               and request_path[2:4] == ("payload", "observations")
               and request_path[4].isdigit() and request_path[5] == "request"):
             observation = at(request_path[:-1])

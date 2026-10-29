@@ -19,7 +19,7 @@ from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verifie
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def database():
     yield from current_service_database()
 

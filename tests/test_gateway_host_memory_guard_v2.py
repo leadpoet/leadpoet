@@ -145,16 +145,35 @@ def test_gateway_restart_uses_bounded_memory_gates_without_async_termination() -
         '"$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"'
         in restart
     )
-    # Release builders now use disposable isolated hosts. The production
-    # restart memory gates above still protect both local maintenance paths.
-    import yaml
-    jobs = yaml.safe_load(workflow)["jobs"]
-    assert "gateway-parent" not in jobs and "gateway-parent-b" not in jobs
-    assert "/runner=attested-v2-isolated/spot=false/retry=false" in jobs["builds"]["runs-on"]
-    assert jobs["builds"]["strategy"]["matrix"]["include"][0]["runner"] == "ubuntu-24.04"
-    assert "host_memory_guard_v2.py" not in workflow
     assert "--watch-parent" not in restart
     assert "--watch-parent" not in (
         root / "gateway" / "tee" / "host_memory_guard_v2.py"
     ).read_text(encoding="utf-8")
     assert "--watch-parent" not in workflow
+
+    # Attested releases now build on isolated runners. The production restart
+    # still needs the bounded memory gates above; its host-memory cleanup must
+    # not be transplanted into the isolated release workflow.
+    import yaml
+
+    builds = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["builds"]
+    assert builds["strategy"]["matrix"]["include"] == [
+        {"domain": "gateway", "runner": "ubuntu-24.04"},
+        {"domain": "validator", "runner": "runs-on"},
+    ]
+    assert "attested-v2-isolated" in builds["runs-on"]
+    assert "/runner=attested-v2-isolated/spot=false/retry=false" in builds["runs-on"]
+    jobs = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]
+    assert "gateway-parent" not in jobs and "gateway-parent-b" not in jobs
+    assert any(
+        step.get("run") == "bash .github/scripts/build_attested_release.sh"
+        for step in builds["steps"]
+    )
+    builder = (root / ".github/scripts/build_attested_release.sh").read_text(
+        encoding="utf-8"
+    )
+    assert builder.index(
+        "python3 .github/scripts/verify_attested_builder_isolation.py"
+    ) < builder.index("bash gateway/tee/build_release_evidence_v2.sh")
+    assert "host_memory_guard_v2.py" not in workflow + builder
+    assert "--watch-parent" not in builder

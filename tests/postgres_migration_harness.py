@@ -17,7 +17,7 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _database_with_migrations(migrations, *, setup_sql="", image="postgres:15"):
+def _database_with_migrations(migrations, *, setup_sql="", image="postgres:15", network=None):
     psycopg2 = pytest.importorskip("psycopg2")
     port = _free_port()
     container = "migration-contract-%s" % uuid4().hex[:12]
@@ -31,6 +31,7 @@ def _database_with_migrations(migrations, *, setup_sql="", image="postgres:15"):
                 "--detach",
                 "--name",
                 container,
+                *(["--network", network, "--network-alias", "database"] if network else []),
                 "--env",
                 "POSTGRES_PASSWORD=postgres",
                 "--publish",

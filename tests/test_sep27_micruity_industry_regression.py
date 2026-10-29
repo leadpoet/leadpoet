@@ -226,6 +226,10 @@ def test_micruity_industry_review_controls_schema_repair(
     assert result.decision == expected_decision
     assert result.details["dimension_decisions"]["industry"] == expected_decision
     receipt = result.details["investigation_receipt"]
+    assert receipt["targets"] == ["stage", "industry", "required_attribute"]
+    assert receipt["completed_submitted_findings"] is True
+    assert receipt["claims"]["industry"]["status"] == investigator_status
+    assert receipt["claims"]["required_attribute"]["status"] == investigator_status
     assert receipt["positive_semantic_review"] is True
     assert receipt["positive_semantic_review_resolved"] is (
         investigator_status == "VERIFIED"

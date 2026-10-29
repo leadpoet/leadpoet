@@ -11,6 +11,7 @@ import pytest
 
 from tests.lab_arena import baseline_infrastructure_continuation485_postgres_test as prior
 from tests.lab_arena import publication_transition_timeout437_postgres_test as publication
+from tests.lab_arena.publication_round_witness460_postgres_test import _historical_cost_bucket
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
 
 ROOT = Path(__file__).parents[2]
@@ -243,10 +244,10 @@ def test_every_target_waits_before_taking_round_lock(database, migrated, call, t
 
 @pytest.fixture(scope='module')
 def proven_round(database, tmp_path_factory):
-    # Build signed source evidence on the established complete service fixture.
-    # Its historical helpers are intentionally absent from the isolated485
-    # catalog; the tested transition/projection then runs on exact490 bodies.
-    generator = prior.database.__wrapped__()
+    # Build signed source evidence on its exact437 service preimage. Its
+    # pre470 protocol must refuse the newer485 recovery authority. Only the
+    # resulting evidence is reused; lock tests still run on exact490 bodies.
+    generator = publication.database.__wrapped__()
     source = next(generator)
     try:
         return publication.proven_round.__wrapped__(source, tmp_path_factory)
@@ -256,7 +257,24 @@ def proven_round(database, tmp_path_factory):
 
 def _publication_row(pg, dsn, proven, count=25):
     with pg.connect(**dsn) as conn, conn.cursor() as cur:
-        return publication._expand(cur, proven, count)
+        rid, document = publication._expand(cur, proven, count)
+        for ranking in document['final_ranking']:
+            costs = ranking['cost_summary']
+            sid = ranking['submission_id']
+            # The signed437 source predates four zero-valued per-ICP fields.
+            # Derive them through the real485 SQL on its preserved ledger;
+            # every original amount/call/provenance field must remain equal.
+            for kind, key in (('execute', 'execution'), ('score', 'judge')):
+                cur.execute('SELECT public.lab_arena__cost_kind_summary_v1(%s,%s)', (sid, kind))
+                assert costs[key] == cur.fetchone()[0]
+            for item in costs['per_icp']:
+                cur.execute('SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,%s)',
+                            (rid, sid, item['icp_position'], item['qualified_company_count']))
+                execution = cur.fetchone()[0]['execution']
+                assert _historical_cost_bucket(execution, item['execution']) == item['execution']
+                # Keep company counts, eligibility and all outer cost fields.
+                item['execution'] = execution
+        return rid, document
 
 
 def test_real_publication_old_deadlock_then_fixed_claim_progress(database, proven_round, record_property):

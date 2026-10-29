@@ -18,8 +18,7 @@ from tests.lab_arena.hotkey_admission_postgres_test import (
     _config as _integrity_config,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_source_migration_postgres import _hotkey, _round_config
 from tests.lab_arena.test_lab_arena_migration_postgres import round_config
@@ -27,7 +26,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import round_config
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture

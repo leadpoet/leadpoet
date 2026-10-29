@@ -16,7 +16,7 @@ from tests.postgres_migration_harness import SCRIPTS
 
 
 MIGRATION = SCRIPTS / "585-lab-arena-review-deadline-recovery.sql"
-ROLLBACK = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql"
+ROLLBACK = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql.template"
 
 
 @pytest.fixture(scope="module")

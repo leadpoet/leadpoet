@@ -21,8 +21,6 @@ from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
     current_service_database,
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
 )
 from tests.lab_arena.parallel_twenty_runtime_e2e_test import (
     _http_runner,

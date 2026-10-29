@@ -37,6 +37,9 @@ def _unexpected_migration_collisions(paths):
 def test_new_migrations_have_unique_sequence_numbers():
     scripts = Path(__file__).resolve().parents[2] / "scripts"
     assert not _unexpected_migration_collisions(scripts.glob("[0-9][0-9][0-9]-*.sql"))
+    # Also retain main's exact filename/hash validation of the released pair.
+    from tests.lab_arena.test_lab_arena_migration_sql import _assert_migration_numbering
+    _assert_migration_numbering(scripts)
 
 
 def test_sequence_guard_keeps_new_collisions_and_extra_585_files_blocked():

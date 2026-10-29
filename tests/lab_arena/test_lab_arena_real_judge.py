@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import site
 import socketserver
@@ -139,6 +140,29 @@ def judge_reply(normalized: Mapping[str, Any]) -> str:
     page_text = PAGE_TEXT.replace(COMPANY, company["company_name"])
     sentence = SENTENCE.replace(COMPANY, company["company_name"])
     evidence = {"url": page_url, "quote": page_text}
+    schema = ((normalized.get("response_format") or {}).get("json_schema") or {}).get("name")
+    if schema == "verification":
+        claim = re.search(r'"miner_claim"\s*:\s*"([^"\n]+)"', prompt)
+        supplied = re.search(r'"claimed_source_urls"\s*:\s*(\[[^\]]*\])', prompt)
+        assert claim is not None and supplied is not None
+        urls = json.loads(supplied.group(1))
+        return json.dumps({
+            "overall_verdict": "qualified", "overall_confidence": "high",
+            "summary": "The exact source proves the requested company event.",
+            "signal_evaluations": [{
+                "signal_id": "signal-1", "claim": claim.group(1),
+                "verification_mode": "source_grounded", "signal_status": "supported",
+                "source_urls_supplied": urls, "evidence_urls_used": [urls[0]],
+                "source_accessibility": "accessible", "same_entity_check": "pass",
+                "entity_match_reason": "The fetched source names the exact company.",
+                "supporting_quotes": [sentence], "contradicting_quotes": [],
+                "unsupported_parts": [], "source_quality": "first_party",
+                "risk_notes": ["source_event_date:2026-07-15"], "confidence": "high",
+                "claim_matches_miner_date": "consistent", "author_type": "n/a",
+                "author_employer_matches_lead": "n/a", "author_role_matches_spec": "n/a",
+                "author_satisfies_role_spec": "n/a",
+            }], "missing_or_risks": [],
+        })
     verdict = {
         # intent-signal judge
         "verdict": "supported",

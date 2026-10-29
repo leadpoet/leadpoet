@@ -16,7 +16,19 @@ from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import sha
-from tests.lab_arena.test_lab_arena_service_round import Harness, _start_round, keypair
+from tests.lab_arena.test_lab_arena_service_round import Harness as ServiceHarness, _start_round, keypair
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+
+
+class Harness(HistoricalStoreHarnessMixin, ServiceHarness):
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-20")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
 
 
 ROOT = Path(__file__).resolve().parents[2]

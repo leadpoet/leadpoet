@@ -270,6 +270,7 @@ def test_service_billing_return_only_yields_at_execution_cutoff(case):
     status="stage2_scoring" if case=="scoring" else "stage2"
     config={"schedule":{"stage_2_close":_stamp(now+timedelta(seconds=1 if case=="before" else -1))}}
     if case!="legacy": config["execution_sequence_policy"]=contracts.BASELINE_SCORED_FIRST_POLICY
+    service._lock=threading.RLock()
     service._clock=lambda:now
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)

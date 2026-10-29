@@ -634,7 +634,7 @@ def test_web_dimension_tri_state_requires_evidence():
         ),
     ],
 )
-def test_web_dimension_boolean_must_agree_with_canonical_observation(
+def test_web_dimensions_preserve_deterministic_size_and_semantic_boolean_contracts(
     dimension,
     observed_field,
     matching,
@@ -2582,6 +2582,10 @@ def test_null_fit_with_nested_claimed_evidence_remains_retryable(
         scorer,
         "_refresh_linkedin_employee_size_observation",
         keep_employee_observation,
+    )
+    # Isolate the schema guard from the separate numeric-source sanitizer.
+    monkeypatch.setattr(
+        scorer, "_ground_employee_size_observation", keep_employee_observation,
     )
     result = asyncio.run(
         _llm_reverify_company(

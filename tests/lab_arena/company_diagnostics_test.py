@@ -90,7 +90,8 @@ def _service(monkeypatch, *, disclosed=True):
            "publication_doc": {"participants": [{"submission_id": "miner"}]}}
     runs = [
         {"run_id": f"run-{i}", "icp_position": i, "stage": 1,
-         "submission_id": "miner", "output_ref": f"output-{i}", "status": "accepted"}
+         "round_id": "round", "kind": "execute", "submission_id": "miner",
+         "output_ref": f"output-{i}", "status": "accepted"}
         for i in (0, 1)
     ]
     service = object.__new__(ArenaService)

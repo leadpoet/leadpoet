@@ -2,6 +2,7 @@
 
 import ast
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -161,28 +162,45 @@ def _seam_preimages():
             for name in SELF_NAME_CHANGES}
 
 
-def test_exact_function_seam_preserves_every_other_current_source_byte():
+def _assert_source_bytes_match(actual, expected, path):
+    # Compare fixed-size values so a changed large file cannot stall pytest's
+    # assertion renderer while constructing a full difflib source comparison.
+    actual_digest = hashlib.sha256(actual).hexdigest()
+    expected_digest = hashlib.sha256(expected).hexdigest()
+    assert actual_digest == expected_digest, path
+
+
+def test_source_byte_mismatch_has_bounded_failure_diagnostics():
+    source = b"unchanged surrounding source\n" * 40_000
+    path = "qualification/scoring/lead_scorer.py"
+    with pytest.raises(AssertionError) as failure:
+        _assert_source_bytes_match(source, source + b"# unexpected byte change\n", path)
+    assert path in str(failure.value)
+    assert len(str(failure.value)) < 1024
+
+
+def test_exact_function_seam_preserves_every_other_frozen_source_byte():
     from scripts.arena_reviewer_structured_homepage_alias_seam import (
         SELF_NAME_CHANGES, convert_numeric_profile_self_name_files,
     )
     original = _seam_preimages()
     repaired = convert_numeric_profile_self_name_files(original)
     root = Path(__file__).parents[1]
-    # Compare the historical repair with its committed historical output.
-    # Later independent grading changes do not belong to this composition.
-    assert repaired == {
-        name: subprocess.check_output(
-            ["git", "show", "46a7bc76c311e6e84ac1fef64564d979a3168f0d:" + name],
-            cwd=root,
-        ) for name in SELF_NAME_CHANGES
-    }
-    assert convert_numeric_profile_self_name_files(repaired) == repaired
+    # This correction converts a frozen image, not today's evolving scorer.
+    # PR745's merged postimage is the exact reviewed result of these preimages.
+    approved = {name: subprocess.check_output([
+        "git", "show", "46a7bc76c311e6e84ac1fef64564d979a3168f0d:" + name,
+    ], cwd=root, timeout=5) for name in SELF_NAME_CHANGES}
+    repeated = convert_numeric_profile_self_name_files(repaired)
+    for name in SELF_NAME_CHANGES:
+        _assert_source_bytes_match(repaired[name], approved[name], name)
+        _assert_source_bytes_match(repeated[name], repaired[name], name)
     for name, (_, _, _, changes) in SELF_NAME_CHANGES.items():
         reversed_source = repaired[name].decode()
         for before, after in reversed(changes):
             assert reversed_source.count(after) == 1
             reversed_source = reversed_source.replace(after, before, 1)
-        assert reversed_source.encode() == original[name]
+        _assert_source_bytes_match(reversed_source.encode(), original[name], name)
 
 
 @pytest.mark.parametrize("fault", ["unknown", "unguarded", "shadowed", "missing", "crlf", "decoy"])

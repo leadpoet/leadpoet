@@ -33,8 +33,14 @@ def database():
 
 
 @pytest.fixture()
-def migrated():
+def migrated(database):
     # Descendant drivers already pass this marker after schema installation.
+    pg, dsn = database
+    with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena_parallel_execution_schema_v2()")
+        capability = cursor.fetchone()[0]
+        assert capability["version"] == 401
+        assert capability["max_parallel_icps"] == 251
     return True
 
 

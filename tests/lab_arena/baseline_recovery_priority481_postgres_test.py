@@ -308,7 +308,7 @@ def test_priority_release_signed_runner_completes_or_blocks_publication(
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
         assert _hash(cur) == POST
     recovery.exercise_signed_baseline_recovery(
-        database, tmp_path, monkeypatch, recover_successfully,
+        database, tmp_path, monkeypatch, recover_successfully, current_publication=False,
     )
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
         assert _hash(cur) == POST

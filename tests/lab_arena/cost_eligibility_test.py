@@ -488,7 +488,7 @@ def _publish_cost_case(
         run.update(kind="execute", miner_hotkey=hotkeys[run["submission_id"]],
                    result_doc={"terminal_status": "accepted"})
     judgments = [{**run, "kind": "score", "run_id": "judge-" + run["run_id"],
-                  "scored_run_id": run["run_id"]} for run in runs]
+                  "scored_run_id": run["run_id"], "output_ref": run["run_id"] + ":score.json"} for run in runs]
     objects = {
         run["output_ref"]: _output(
             [_company("%s-%d.example.com" % (run["submission_id"], run["icp_position"]), "Company")]

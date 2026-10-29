@@ -67,6 +67,46 @@ def _icp(**updates) -> ICPPrompt:
     return ICPPrompt(**values)
 
 
+def _hq_verdict(
+    observed_country: str,
+    observed_state: str,
+    *,
+    geography_matches: bool,
+) -> dict:
+    """Build company-quality geography output with literal bound HQ evidence."""
+
+    state = {
+        "ca": "California",
+        "CA": "California",
+        "dc": "District of Columbia",
+        "DC": "District of Columbia",
+    }.get(observed_state, observed_state)
+    city = {
+        "California": "Los Angeles",
+        "District of Columbia": "Washington",
+        "Nevada": "Reno",
+        "Ontario": "Toronto",
+    }.get(state)
+    if state:
+        if city:
+            location = f"{city}, {state}, {observed_country}"
+        else:
+            location = f"{state}, {observed_country}"
+    elif observed_country == "United States":
+        location = "the United States"
+    elif observed_country == "Canada":
+        location = "Toronto, Canada"
+    else:
+        location = observed_country
+    return {
+        "observed_hq_country": observed_country,
+        "observed_hq_state": observed_state,
+        "geography_matches": geography_matches,
+        "geography_evidence_url": "https://acme.com/about",
+        "geography_evidence_quote": f"Acme is headquartered in {location}.",
+    }
+
+
 def _quality_receipt(**updates) -> dict:
     value = {
         "decision": COMPANY_FIT_MATCH,
@@ -847,12 +887,7 @@ def test_ats_tenant_slug_does_not_override_observed_employer_conflict(monkeypatc
     [("ca", "California"), ("California", "CA"), ("dc", "District of Columbia")],
 )
 def test_us_hq_state_variants_match(submitted_state, observed_state):
-    verdict = {
-        "observed_hq_country": "USA",
-        "observed_hq_state": observed_state,
-        "geography_matches": True,
-        "geography_evidence_quote": f"Acme headquarters: {observed_state}, United States.",
-    }
+    verdict = _hq_verdict("USA", observed_state, geography_matches=True)
 
     assert _decision_from_observed_geography(
         verdict,
@@ -867,18 +902,12 @@ def test_us_hq_state_variants_match(submitted_state, observed_state):
 )
 def test_dc_icp_geography_requires_dc_headquarters(requested):
     icp = _icp(country=requested, geography=requested)
-    dc_verdict = {
-        "observed_hq_country": "United States",
-        "observed_hq_state": "District of Columbia",
-        "geography_matches": True,
-        "geography_evidence_quote": "Acme headquarters: District of Columbia, United States.",
-    }
-    california_verdict = {
-        "observed_hq_country": "United States",
-        "observed_hq_state": "California",
-        "geography_matches": False,
-        "geography_evidence_quote": "Acme headquarters: California, United States.",
-    }
+    dc_verdict = _hq_verdict(
+        "United States", "District of Columbia", geography_matches=True
+    )
+    california_verdict = _hq_verdict(
+        "United States", "California", geography_matches=False
+    )
 
     assert _decision_from_observed_geography(
         dc_verdict,
@@ -907,12 +936,9 @@ def test_wrong_or_missing_observed_us_hq_state_fails(
     observed_country, observed_state, expected
 ):
     assert _decision_from_observed_geography(
-        {
-            "observed_hq_country": observed_country,
-            "observed_hq_state": observed_state,
-            "geography_matches": True,
-            "geography_evidence_quote": f"Acme headquarters: {observed_state}, {observed_country}.",
-        },
+        _hq_verdict(
+            observed_country, observed_state, geography_matches=True
+        ),
         _icp(),
         company=_company(state="California"),
         company_quality=True,
@@ -927,12 +953,9 @@ def test_observed_us_country_cannot_be_bypassed_by_false_submitted_country(
     submitted_country,
 ):
     result = _decision_from_observed_geography(
-        {
-            "observed_hq_country": "United States",
-            "observed_hq_state": "California",
-            "geography_matches": True,
-            "geography_evidence_quote": "Acme headquarters: United States.",
-        },
+        _hq_verdict(
+            "United States", "California", geography_matches=True
+        ),
         _icp(),
         company=_company(country=submitted_country, state="California"),
         company_quality=True,
@@ -943,12 +966,7 @@ def test_observed_us_country_cannot_be_bypassed_by_false_submitted_country(
 
 def test_non_us_state_remains_optional_and_historical_state_path_is_unchanged():
     canada = _decision_from_observed_geography(
-        {
-            "observed_hq_country": "Canada",
-            "observed_hq_state": "",
-            "geography_matches": True,
-            "geography_evidence_quote": "Acme headquarters: Canada.",
-        },
+        _hq_verdict("Canada", "", geography_matches=True),
         _icp(country="Canada", geography="Canada"),
         company=_company(country="Canada", state=""),
         company_quality=True,

@@ -136,7 +136,7 @@ def test_openrouter_http_error_log_does_not_disclose_provider_body(monkeypatch, 
     system_prompt = requests[0]["messages"][0]["content"]
     assert "Generate exactly 20 ICPs" in system_prompt
     assert ", ".join(icp_generator.INDUSTRY_DISTRIBUTION) in system_prompt
-    assert "FUNDING/OWNERSHIP STAGE — LIMITED SET QUOTA" in system_prompt
+    assert f"EXACTLY {icp_generator.generated_stage_target(20)} of the 20 ICPs MUST set `company_stage`" in system_prompt
 
 
 def test_integrity_retry_preserves_terminal_scores_and_original_sparse_positions():

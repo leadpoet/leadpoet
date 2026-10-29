@@ -403,9 +403,8 @@ def test_attempt_connection_limit_cannot_be_reset_by_reopening(socket_root, prox
         second = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         second.settimeout(2)
         second.connect(str(server.path))
-        second.sendall(
-            b"GET http://public.example/ HTTP/1.1\r\nHost: public.example\r\n\r\n"
-        )
+        # The total budget rejects at accept, before reading another request.
+        # Writing here races that immediate close and can raise BrokenPipeError.
         assert _read_headers(second).startswith(b"HTTP/1.1 503 Service Unavailable")
         second.close()
     finally:

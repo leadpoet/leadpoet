@@ -16,6 +16,7 @@ from qualification.scoring import lead_scorer
 from tests.lab_arena import zero_call_setup_recovery467_postgres_test as deployed
 from tests.lab_arena.company_judgments_postgres_test import _frozen_participants
 from tests.lab_arena.partial_company_judgments_postgres_test import _sign
+from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
 from tests.lab_arena.test_lab_arena_migration_postgres import _commit_plan, _execute_everything, claim, commit_round, round_config
 from tests.lab_arena.test_lab_arena_object_store import _ConditionalS3
 from tests.lab_arena.test_lab_arena_service_round import keypair, wallet_verify, FakeChain
@@ -84,6 +85,9 @@ def _completion(round_id, key, lease, token, output, terminal='judge_error'):
 
 
 def test_signed_failure_persists_then_retry_scores_only_unresolved_and_final_cache_accepts(store, monkeypatch):
+    # The hermetic scorer uses sandbox placeholders, independent of host keys.
+    for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
     service, round_id, key, lease, token, rows, companies = _setup(store, 'life')
     output = scoring.build_scoring_failure(lease['scored_run_id'], 'judge_error', terminal_breakdowns=rows[:1])
     request = _completion(round_id, key, lease, token, output)
@@ -223,11 +227,21 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
     from lab_arena.promotion import GitPromoter
     from leadpoet_canonical import arena_weights
     from tests.lab_arena.test_integrity_round import IntegrityHarness
+    from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+    class FrozenHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+        def build_service(self):
+            service = super().build_service()
+            commit = service.commit_benchmark
+            def commit_frozen(round_id):
+                freeze_historical_intake_dates(self, "2026-10-12")
+                return commit(round_id)
+            service.commit_benchmark = commit_frozen
+            return service
     from tests.lab_arena import test_lab_arena_service_round as fixtures
 
     psycopg, dsn = round_database
     connect = lambda: psycopg.connect(**dsn)
-    harness = IntegrityHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
+    harness = FrozenHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
     harness.chain.epoch = 25080
     original_run_stage = harness.run_stage_with_runners
 

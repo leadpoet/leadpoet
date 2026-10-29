@@ -8,7 +8,7 @@ from lab_arena import source_disclosure
 from lab_arena.store import ArenaStore, PsycopgTransport, PUBLIC_CONFIGURATION_FIELDS
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.public_submissions_projection_test import _row, _service
 from tests.lab_arena.historical_round_reads import pre517_round_select
@@ -16,7 +16,7 @@ from tests.lab_arena.historical_round_reads import pre517_round_select
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def test_real_projection_keeps_rankings_validation_disclosure_and_fresh_generation(database):

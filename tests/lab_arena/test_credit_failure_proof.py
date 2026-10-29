@@ -144,6 +144,8 @@ def test_direct_openrouter_402_with_unpriced_generation_has_no_proof(monkeypatch
         action_sequence=3, timeout_ms=5000,
     )
     assert "credit_failure_proof" not in result.call
+    assert result.call["outcome"] == "uncertain"
+    assert result.call.get("actual_microusd") is None
     retained = store.calls[result.call["call_identity"]]
     assert retained["kind"] == "uncertain"
     assert "terminal" not in retained

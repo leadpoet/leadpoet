@@ -16,7 +16,7 @@ class _Service(SimpleNamespace):
     _public_submissions_round = ArenaService._public_submissions_round
     _require_identifier = staticmethod(ArenaService._require_identifier)
 
-from lab_arena.store import ArenaStore
+from lab_arena.store import ArenaStore, PUBLIC_CONFIGURATION_FIELDS
 
 
 BASELINE_HOTKEY = "5" + "A" * 47
@@ -419,8 +419,10 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
                     {
                         **{key: value for key, value in row.items()
                            if key != "configuration_doc"},
-                        **{"cfg_" + key: json.dumps(value)
-                           for key, value in row["configuration_doc"].items()},
+                        "configuration_doc": {
+                            key: value for key, value in row["configuration_doc"].items()
+                            if key in PUBLIC_CONFIGURATION_FIELDS
+                        },
                     }
                     for row in rows
                 ]

@@ -334,7 +334,6 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         ARENA_RUNTIME_ROOT="$TASK_TMP/runtime"
         GATEWAY_PYTHON_BIN="$TASK_TMP/mock-python"
         GATEWAY_ENV_FILE="$TASK_TMP/env-clone"
-        GATEWAY_DEPLOY_PLAN_FILE="$TASK_TMP/deploy-plan.json"
         GATEWAY_LOG_ROOT="$TASK_TMP/logs"
         ENV_CLONE="$TASK_TMP/env-clone"
         GATEWAY_CONTROLLER_PROCESS_HELPER="$TASK_TMP/helper"
@@ -345,6 +344,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=gateway-1792000000-123
         GATEWAY_RESTART_INVOCATION_ID=gateway-1792000000-456
         GATEWAY_LOG_FILE="$TASK_TMP/log"
+        GATEWAY_DEPLOY_PLAN_FILE="$TASK_TMP/deploy-plan.json"
         GATEWAY_V2_HEALTH_MAX_ATTEMPTS=2
         GATEWAY_V2_HEALTH_RETRY_SECONDS=0
         GATEWAY_V2_HEALTH_DEADLINE_SECONDS=10

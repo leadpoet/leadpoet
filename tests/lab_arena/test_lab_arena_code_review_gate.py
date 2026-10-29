@@ -96,18 +96,34 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     assert any(call[1] == "miner" and call[4] == {"rejection_rule": "code_review_incomplete"} for call in updates)
 
 
-@pytest.mark.parametrize('attempts,retryable,pending', [
-    (3, True, False), (5, True, False), (6, True, False),
-    (1, False, False), (2, None, True), (3, None, False),
+@pytest.mark.parametrize('attempts,error_code,retryable,pending', [
+    # A saved retryable flag alone does not classify a provider failure.
+    (3, None, True, False), (5, None, True, False), (6, None, True, False),
+    (1, None, False, False), (2, None, None, True), (3, None, None, False),
+    # Known transient failures wait for the deadline, even past the old cap
+    # and when old diagnostics saved a false or absent retryable flag.
+    (3, 'review_response_invalid', True, True),
+    (5, 'code_review_provider_timeout', True, True),
+    (6, 'review_response_invalid', True, True),
+    (10, 'review_response_invalid', False, True),
+    (10, 'code_review_provider_unavailable', None, True),
+    (1, 'source_unreadable', False, False),
 ])
-def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pending):
+@pytest.mark.parametrize('at_deadline', [False, True])
+def test_freeze_waits_for_classified_retry_until_deadline(
+    attempts, error_code, retryable, pending, at_deadline,
+):
     now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    if at_deadline:
+        now += timedelta(minutes=30)
     baseline = {'submission_id': 'baseline-test', 'miner_hotkey': 'host', 'is_king': True,
                 'source_ref': 'baseline', 'source_size_bytes': 10, 'status': 'accepted'}
     miner = {'submission_id': 'miner', 'miner_hotkey': 'miner-owner', 'is_king': False,
              'code_review_status': 'error', 'code_review_attempts': attempts,
              'code_review_doc': {} if retryable is None else {'retryable': retryable},
              'source_ref': 'miner', 'source_size_bytes': 10, 'status': 'accepted'}
+    if error_code is not None:
+        miner['code_review_doc']['error_code'] = error_code
     round_row = {'round_id': 'arena-test', 'champion_funding_frozen': True,
                  'configuration_doc': {'baseline_hotkey': 'host',
                  'schedule': {'benchmark_deadline': '2026-09-11T00:30:00Z'}}}
@@ -121,7 +137,7 @@ def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pe
         list_submissions=lambda _, status: [baseline, miner] if status == 'accepted' else [],
         update_submission=lambda *args: updates.append(args) or {'status': 'ok'},
     )
-    if pending:
+    if pending and not at_deadline:
         with pytest.raises(ServiceError, match='code_review_pending'):
             service.freeze_participants('arena-test')
         assert not updates

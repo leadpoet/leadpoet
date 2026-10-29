@@ -59,6 +59,7 @@ def _service(rows: list[dict]) -> ArenaService:
             return []
 
     service._store = Store()
+    service.public_reward_basis = lambda *_args, **_kwargs: None
     service._config = SimpleNamespace(
         mode="shadow",
         network_name="finney",

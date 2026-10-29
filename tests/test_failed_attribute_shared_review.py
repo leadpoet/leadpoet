@@ -218,15 +218,26 @@ def test_mandg_broad_repair_then_one_typed_review_through_fit_and_arena(monkeypa
         }[attribute]
 
 
-@pytest.mark.parametrize("fault", ["incomplete", "provider", "budget", "typed_fetch", "profile"])
-def test_independent_failures_remain_retryable(monkeypatch, fault):
+@pytest.mark.parametrize("fault", ["incomplete", "provider", "budget", "typed_fetch", "homepage", "profile"])
+def test_unfinished_failures_retry_and_complete_negative_supersedes_homepage(monkeypatch, fault):
     _install_replay(monkeypatch, fault=fault)
     fit = asyncio.run(scorer._verify_company_fit(
         _company(), _icp(), 0.0, 1.0, set(), require_https_transport=True,
         company_quality=True, evidence_investigator=True,
     ))
     row = {"final_score": 0.0, "verifier_gate_receipts": [fit.receipt("company_fit")]}
-    assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row)
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row) is (fault != "homepage")
+    if fault == "homepage":
+        # A separate complete strict negative may supersede the earlier
+        # homepage fault. It remains unavailable and keeps the fault receipt.
+        receipt = row["verifier_gate_receipts"][0]
+        assert receipt["decision"] == "unavailable"
+        assert receipt["dimension_evidence"]["identity"]["failure_reason_code"] == "provider_error"
+        investigation = next(item for item in receipt["supporting_receipts"]
+                             if item["gate"] == "company_evidence_investigation")
+        assert investigation["completed_submitted_findings"] is True
+        assert investigation["failure_reason"] == ""
+        assert all(claim["status"] == "UNPROVEN" for claim in investigation["claims"].values())
 
 
 def test_completed_review_settles_homepage_transport_failure(monkeypatch):

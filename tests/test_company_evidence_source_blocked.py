@@ -17,6 +17,16 @@ PAGES = ("https://acme.example/about", "https://acme.example/product")
 TARGETS = ("headcount", "industry", "required_attribute")
 
 
+@pytest.fixture(params=[False, True], autouse=True)
+def source_transport(monkeypatch, request):
+    """Cover both approved transports, independent of operator/CI credentials."""
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+    if request.param:
+        monkeypatch.setenv("SCRAPINGDOG_API_KEY", "offline-scrapingdog-key")
+    else:
+        monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+
+
 def _run(monkeypatch, case):
     code, tag, profile = {
         "blocked409": (409, "CRAWL_NON_CANONICAL", PROFILE),
@@ -54,8 +64,13 @@ def _run(monkeypatch, case):
     reasoning_calls = []
     search_requested = False
 
-    async def fetch(_session, url, **_kwargs):
-        assert url in PAGES
+    async def fetch(_session, url, **kwargs):
+        if url == "https://api.scrapingdog.com/scrape":
+            assert kwargs["params"]["dynamic"] == "true"
+            target = kwargs["params"]["url"]
+        else:
+            target = url
+        assert target in PAGES
         return 200, url, "Acme maintains a company information page."
 
     async def search(_session, query, **_kwargs):

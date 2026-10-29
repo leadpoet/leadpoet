@@ -376,3 +376,41 @@ def test_earlier_same_day_reward_disabled_promotion_blocks_later_no_winner_rewar
     assert store.prepare_promotion(older, plan)["status"] == "prepared"
     assert store.complete_promotion(older, plan)["status"] == "promoted"
     assert service.activate_reward(later)["status"] == "activated"
+
+
+def test_missing_baseline_score_blocks_promotion_before_git(
+    connections, tmp_path, monkeypatch,
+):
+    store, control = connections
+    remote, main, lab = repository(tmp_path)
+    objects = svc.LocalObjectStore(tmp_path / "objects")
+    round_id = "arena-2026-09-07-missingscore"
+    _winner(store, control, objects, round_id, source())
+    service = _service(
+        store, objects, remote, tmp_path / "git-cache",
+        signing.LocalSigner.generate(),
+    )
+    with control, control.cursor() as cursor:
+        cursor.execute("BEGIN")
+        cursor.execute("SET LOCAL session_replication_role=replica")
+        cursor.execute(
+            "UPDATE public.lab_arena_runs SET per_icp_score=NULL "
+            "WHERE run_id=%s", (round_id + "-baseline-execute-1-0",),
+        )
+    with control.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)", (round_id,))
+        assert cursor.fetchone() == (False,)
+
+    def unexpected_git():
+        pytest.fail("an incomplete baseline must not create a Git promoter")
+
+    monkeypatch.setattr(service.config, "baseline_promoter_factory", unexpected_git)
+    assert service.promote_baseline(round_id) == {"status": "waiting_for_baseline"}
+    assert service.activate_reward(round_id) == {"status": "waiting_for_baseline"}
+    assert git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", "lab") == lab
+    row = store.get_round(round_id)
+    assert row["promotion_doc"] is None
+    assert row["baseline_promoted_at"] is None
+    assert row["reward_basis_doc"] is None
+    assert row["reward_activated_at"] is None

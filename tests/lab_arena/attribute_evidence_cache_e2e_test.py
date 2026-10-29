@@ -252,6 +252,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
 
     published = harness.service.store.get_round(harness.round_id)
     assert published["status"] == "published"
+    assert harness.service._baseline_fully_succeeded(published)
     assert observed == {"execute": 30, "score": 26}
     score_runs = harness.service.store.list_runs(harness.round_id, kind="score")
     cached = [r for r in score_runs if r["judgment_cache_source_run_id"] != r["run_id"]]
@@ -303,6 +304,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
     state = _accepted_state(harness, int(activated["effective_reward_epoch"]), burn)
     weights = arena_weights.derive_arena_weights(state, [burn, winner_hotkey])
     # Current reward slots allocate the frozen 50% achievement pot.
+    assert activated["reward_basis_doc"]["slot_policy"]["pool_percent"] == 50
     assert weights["champion_share_ppb"] == 500_000_000
     assert weights["burned_residual_ppb"] == 500_000_000
     fixtures.assert_canary_absent(harness, lambda: psycopg.connect(**dsn))

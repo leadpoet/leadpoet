@@ -301,7 +301,7 @@ def test_bound_profile_compaction_settles_in_one_submit_without_research(monkeyp
     fetch.assert_not_called()
 
 
-def test_repeated_oversized_quotes_finish_unproven_within_existing_turn_limit(monkeypatch):
+def test_repeated_oversized_quotes_remain_incomplete_within_existing_turn_limit(monkeypatch):
     post = AsyncMock(return_value=(200, {"choices": [{"message": {"tool_calls": [{
         "id": "unchanged-oversized-quote", "type": "function", "function": {
             "name": "submit_findings", "arguments": json.dumps(

@@ -117,6 +117,14 @@ def test_preserves_all_rows_and_normal_continuation_only_adds_score(database):
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",(TARGET+':14',))
             cur.execute('SET LOCAL session_replication_role=origin')
+            # The original frozen Oct21 window has elapsed on today's DB
+            # clock; its normal claim guard must reject the retained successor.
+            lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
+            assert lease['status'] == 'no_pending', lease
+            cur.execute('RESET ROLE')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((clock_timestamp()+interval '1 hour')::text)),'{schedule,publication_deadline}',to_jsonb((clock_timestamp()+interval '1 hour 1 second')::text)) WHERE round_id=%s",(RID,))
+            cur.execute('SET LOCAL session_replication_role=origin')
             lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
             assert lease['status'] == 'leased' and lease['run_id'] == TARGET+':14', lease
             cur.execute('RESET ROLE')

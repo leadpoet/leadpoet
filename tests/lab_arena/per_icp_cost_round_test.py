@@ -656,3 +656,236 @@ def test_publication_eligibility_reuse_migration_replays_and_rolls_back(database
             assert cursor.fetchone() == identity
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "day", "epoch"),
+    [
+        ("money_cap", 29, 31801),
+        ("per_icp_quota", 30, 31802),
+        ("provider_error", 32, 31804),
+    ],
+)
+def test_challenger_budget_stop_preserves_measured_baseline_and_costs(
+    database, tmp_path, stop_reason, day, epoch
+):
+    psycopg2, dsn = database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = PerIcpHarness(connect, tmp_path, challengers=["FaultedMiner"], runners=["alpha"])
+    original = harness.sandbox.run_icp
+    observed = []
+    deepline_quota = None
+
+    def run_icp(spec, **kwargs):
+        document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        if document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION:
+            def judge(companies, buyer, _reference):
+                company = companies[0]
+                name = company["company_name"]
+                raw = _positive_breakdown(
+                    name,
+                    urlsplit(company["company_website"]).hostname,
+                    name.lower().replace(" ", "-"),
+                )
+                raw.update(
+                    final_score=30,
+                    intent_signal_raw=30,
+                    intent_signal_final=30,
+                )
+                raw["intent_signals_detail"][0].update(raw=30, after_decay=30)
+                evidence = document["contact_source_evidence"][source_key(company)]
+                _merge_contact_breakdown(
+                    raw,
+                    asyncio.run(_contact_result(company, buyer, evidence)),
+                )
+                return apply_company_judgment_context(
+                    companies, [raw], contacts_required=True
+                )
+
+            judge.company_quality = judge.integrity_policy = judge.contacts_required = True
+            full, new = scoring.score_quality_work_item(
+                {"scored_run_id": document["scored_run_id"]},
+                icp=document["icp"],
+                companies=document["companies"],
+                scorer=judge,
+                cache_context=document["company_judgment_cache"],
+            )
+            return runtime.fake_result(
+                exit_code=0,
+                output_bytes=json.dumps(
+                    scoring.build_scoring_output(
+                        document["scored_run_id"], full, company_judgments=new
+                    )
+                ).encode(),
+            )
+
+        submission_id = spec.source_dir.parent.name.removeprefix("submission-")
+        position = int(document["icp"]["icp_id"].rsplit("_", 1)[-1]) - 1
+        if harness.flavors[submission_id] == "FaultedMiner" and position == 0:
+            with harness.sandbox.lock:
+                os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+                try:
+                    if stop_reason == "money_cap":
+                        calls = (("1.00", "failed"), ("3.10", "ok"), ("0.01", "refused"))
+                    else:
+                        calls = (("1.00", "failed"),)
+                    for cost, outcome in calls:
+                        status, _, _ = shim.dispatch(
+                            "openrouter.chat",
+                            {
+                                "model": "openai/gpt-4o-mini",
+                                "messages": [{
+                                    "role": "user",
+                                    "content": cost + "|" + (
+                                        "failed" if outcome == "failed" else "ok"
+                                    ),
+                                }],
+                                "max_tokens": 100,
+                            },
+                            5000,
+                        )
+                        assert status == {
+                            "ok": 200,
+                            "failed": 502,
+                            "refused": 402,
+                        }[outcome]
+                        observed.append((outcome, status))
+                    if stop_reason == "per_icp_quota":
+                        assert deepline_quota is not None
+                        for index in range(deepline_quota + 1):
+                            status, _, _ = shim.dispatch(
+                                "deepline.execute",
+                                {"tool": "exa_search", "payload": {"query": "fintech"}},
+                                5000,
+                            )
+                            expected = 200 if index < deepline_quota else 402
+                            assert status == expected
+                            observed.append((
+                                "quota_ok" if index < deepline_quota else "quota_refused",
+                                status,
+                            ))
+                finally:
+                    os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            return runtime.fake_result(
+                exit_code=1,
+                output_bytes=None,
+                stderr=b"controlled no output after budget stop",
+            )
+
+        base = original(spec, **kwargs)
+        assert base.output_bytes
+        rows = json.loads(base.output_bytes)["companies"]
+        for company in rows:
+            company.update(
+                company_linkedin=(
+                    "https://linkedin.com/company/"
+                    + company["company_name"].lower().replace(" ", "-")
+                ),
+                state="CA",
+            )
+            company["contact"] = _claim(company, valid_role=True)
+        return runtime.fake_result(
+            exit_code=0,
+            output_bytes=json.dumps({"companies": rows}).encode(),
+        )
+
+    harness.sandbox.run_icp = run_icp
+    participants = fixtures._start_round(harness, day=day, epoch=epoch)
+    assert participants == 2
+    deepline_quota = harness.service.store.get_round(harness.round_id)[
+        "configuration_doc"
+    ]["call_quotas"]["deepline"]
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 20
+    harness.run_stage_with_runners(1)
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    scoring_opened = harness.service.advance_round(harness.round_id)
+    assert scoring_opened["assignments"] == 19
+    assert harness.status() == "stage1_scoring"
+    harness.advance_until("scored", runners=1)
+    if stop_reason == "provider_error":
+        assert harness.service.publish(harness.round_id) == {
+            "status": "retry", "round_status": "scored",
+            "reason": "execution_infrastructure_incomplete",
+        }
+    else:
+        harness.advance_until("published", runners=1)
+
+    saved = harness.service.store.get_round(harness.round_id)
+    assert saved["status"] == ("scored" if stop_reason == "provider_error" else "published")
+    faulted_id = next(
+        submission_id for submission_id, flavor in harness.flavors.items()
+        if flavor == "FaultedMiner"
+    )
+    # Baseline failures hold publication. This failure belongs to the challenger;
+    # all of the baseline's accepted work must remain complete.
+    baseline = next(p["submission_id"] for p in saved["participants"] if p["is_king"])
+    assert len([r for r in harness.service.store.list_runs(
+        harness.round_id, submission_id=baseline, kind="execute",
+    ) if r["status"] == "accepted"]) == 20
+    runs = harness.service.store.list_runs(
+        harness.round_id, submission_id=faulted_id, kind="execute"
+    )
+    accepted = [run for run in runs if run["status"] == "accepted"]
+    expected_cause = (
+        "provider_error" if stop_reason == "provider_error" else "budget_exhausted"
+    )
+    terminal_stops = [
+        run for run in runs if run["terminal_cause"] == expected_cause
+    ]
+    assert len(accepted) == 19
+    assert len(terminal_stops) == (2 if stop_reason == "provider_error" else 1)
+    assert all(run["icp_position"] == 0 for run in terminal_stops)
+    if stop_reason == "money_cap":
+        assert observed == [("failed", 502), ("ok", 200), ("refused", 402)]
+        assert "0.01|ok" not in harness.provider.dispatched
+    elif stop_reason == "provider_error":
+        assert observed == [("failed", 502), ("failed", 502)]
+        assert [run["attempt"] for run in terminal_stops] == [1, 2]
+        assert terminal_stops[0]["per_icp_score"] is None
+        assert terminal_stops[1]["per_icp_score"] is None
+        assert all(
+            harness.service.store.list_ledger(run_id=run["run_id"])
+            for run in terminal_stops
+        )
+    else:
+        assert observed.count(("quota_ok", 200)) == deepline_quota
+        assert observed.count(("quota_refused", 402)) == 1
+        refusal_entries = harness.service.store.list_ledger(
+            run_id=terminal_stops[0]["run_id"], entry_kind="refusal"
+        )
+        assert [entry["entry_doc"]["reason"] for entry in refusal_entries] == [
+            "per_icp_quota"
+        ]
+
+    if stop_reason == "provider_error":
+        # An infrastructure failure cannot produce a measured final score.
+        # Preserve the 19 accepted ICPs and exact failed-call charges for recovery.
+        assert saved["publication_doc"] is None
+        assert saved["reward_activated_at"] is None
+        assert saved["reward_basis_doc"] is None
+        assert all(run["per_icp_score"] > 0 for run in accepted)
+        costs = harness.service.store.submission_costs(faulted_id)
+        assert sum(item["inflight_calls"] for item in costs["providers"]) == 0
+        assert sum(item["uncertain_calls"] for item in costs["providers"]) == 0
+        eligibility = harness.service._submission_cost_eligibility(
+            saved, faulted_id, runs, positions=range(20))
+        per_icp = {item["icp_position"]: item
+                   for item in eligibility["cost_summary"]["per_icp"]}
+        assert per_icp[0]["execution"]["settled_microusd"] == 2_000_000
+        assert per_icp[0]["execution"]["successful_microusd"] == 0
+        assert all(per_icp[position]["eligible"] for position in range(1, 20))
+        fixtures.assert_canary_absent(harness, connect)
+        return
+
+    result = next(
+        row for row in saved["publication_doc"]["final_ranking"]
+        if row["submission_id"] == faulted_id
+    )
+    assert result["submission_id"] == faulted_id
+    assert result["eligible"] is True
+    assert result["final_score"] > 0
+    per_icp = {item["icp_position"]: item for item in result["cost_summary"]["per_icp"]}
+    assert per_icp[0]["eligible"] is (stop_reason == "per_icp_quota")
+    assert all(per_icp[position]["eligible"] for position in range(1, 20))
+    fixtures.assert_canary_absent(harness, connect)

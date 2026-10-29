@@ -905,6 +905,7 @@ def test_gate_outcomes_outside_the_vocabulary_are_dropped_whole():
 
 
 @pytest.mark.parametrize("denial_code", [
+    "reasoning_capture_activation_not_ready",
     "run_result_invalid",
     "baseline_recovery_scores_not_recorded",
     "infrastructure_retry_cost_schema_unavailable",

@@ -30,6 +30,9 @@ def database():
         with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
             cur.execute(SQL.read_text())
             cur.execute(SQL.read_text())
+            # Current public dashboard reads require this additive computed
+            # projection. Keep the 540 transition/preimage checks unchanged.
+            cur.execute((SQL.parent / '541-lab-arena-public-execution-failure-reason.sql').read_text())
         yield db
     finally:
         gen.close()

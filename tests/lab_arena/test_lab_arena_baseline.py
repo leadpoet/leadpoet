@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import source_bundle
+from lab_arena import contracts, source_bundle
 from lab_arena.service import ArenaService, DEFAULT_BASELINE_SOURCE_URL, ServiceError
 
 
@@ -46,6 +46,34 @@ class _Store:
         self.submissions = {row["submission_id"]: row for row in submissions}
         for row in published or []:
             self.rounds[row["round_id"]] = row
+        self.runs = []
+        for row in self.rounds.values():
+            row.setdefault("evaluation_date", row["round_id"][-10:])
+            if row["status"] != "published":
+                continue
+            baseline_id = row["round_id"] + "-baseline"
+            row.setdefault("participants", [{"submission_id": baseline_id,
+                "miner_hotkey": "baseline", "is_king": True}])
+            for stage in (1, 2):
+                for position in contracts.execution_positions(stage, None, row["configuration_doc"]):
+                    execution = dict(round_id=row["round_id"], submission_id=baseline_id,
+                        miner_hotkey="baseline", stage=stage, icp_position=position,
+                        status="accepted", terminal_cause="accepted", per_icp_score=1.0,
+                        result_doc={}, output_ref=f"fixture/{baseline_id}/{position}",
+                        run_id=f"{baseline_id}:{stage}:{position}", kind="execute")
+                    self.runs.extend([execution, dict(execution, kind="score",
+                        run_id=execution["run_id"] + ":score", scored_run_id=execution["run_id"])])
+
+    def list_runs(self, round_id, *, kind=None, **_kwargs):
+        return [row for row in self.runs if row["round_id"] == round_id
+                and (kind is None or row["kind"] == kind)]
+
+    def latest_published_day(self, *, network_name, netuid):
+        rows = [row for row in self.rounds.values() if row["status"] == "published"
+                and row["configuration_doc"].get("mode") == "live"
+                and row["configuration_doc"].get("network_name", "finney") == network_name
+                and row["configuration_doc"].get("netuid", 71) == netuid]
+        return max(rows, key=lambda row: row["evaluation_date"], default=None)
 
     def latest_published_day(self, **_kwargs):
         return None

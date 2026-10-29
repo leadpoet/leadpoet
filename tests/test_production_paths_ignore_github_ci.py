@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -73,24 +75,35 @@ def test_attested_release_workflow_is_manual_only_with_integrity_guards() -> Non
     workflow = (ROOT / ".github/workflows/attested-v2-release.yml").read_text(
         encoding="utf-8"
     )
-    import yaml
     document = yaml.load(workflow, Loader=yaml.BaseLoader)
     assert set(document["on"]) == {"workflow_dispatch"}
-    assert set(document["on"]["workflow_dispatch"]["inputs"]) == {
-        "reproduce_commit", "expected_pcr0",
-    }
-    guard = (ROOT / ".github/scripts/require_attested_release_source.sh").read_text()
+    inputs = document["on"]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {"reproduce_commit", "expected_pcr0"}
+    assert all(value["required"] == "false" and value["default"] == ""
+               and value["type"] == "string" for value in inputs.values())
+
+    source_guard = ".github/scripts/require_attested_release_source.sh"
+    jobs = document["jobs"]
+    assert set(jobs) == {"source", "builds", "verify", "publish"}
+    for job in jobs.values():
+        assert any("bash " + source_guard in step.get("run", "")
+                   for step in job["steps"])
+    guard = (ROOT / source_guard).read_text(encoding="utf-8")
+    assert 'test "${GITHUB_EVENT_NAME:-}" = workflow_dispatch' in guard
     assert 'test "${GITHUB_REF:-}" = refs/heads/main' in guard
     assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in guard
     assert 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in guard
-    for job in document["jobs"].values():
-        assert any("require_attested_release_source.sh" in step.get("run", "")
-                   for step in job["steps"])
-    builder = (ROOT / ".github/scripts/build_attested_release.sh").read_text()
-    assert "leadpoet_acquire_docker_operation_lock_v2" in builder
+
+    build_script = ".github/scripts/build_attested_release.sh"
+    assert any(step.get("run") == "bash " + build_script
+               for step in jobs["builds"]["steps"])
+    assert "leadpoet_acquire_docker_operation_lock_v2" in (
+        ROOT / build_script
+    ).read_text(encoding="utf-8")
+    assert "needs.source.outputs.mode == 'publish'" in jobs["publish"]["if"]
+    assert "inputs.reproduce_commit == ''" in jobs["publish"]["if"]
     assert "leadpoet-gateway-v2-builder" not in workflow
     assert "leadpoet-validator-v2-builder" not in workflow
-
 
 
 def test_normal_validator_restart_does_not_consult_github_ci() -> None:

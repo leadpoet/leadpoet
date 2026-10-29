@@ -75,7 +75,7 @@ def _fixed_public_cutover_authority_enabled(
 ) -> bool:
     """Return whether this process is the production SN71 runtime.
 
-    The repository's fixed public Supabase project is production authority for
+    The repository's fixed public database HTTP API is production authority for
     Finney subnet 71 only.
     """
 
@@ -143,7 +143,7 @@ def _read_cutover_state_from_db_sync(
             # Validators and public auditors must not receive the service-role
             # secret. The cutover singleton contains no secrets and migration
             # 101 grants anon read-only access under RLS specifically for this
-            # cross-runtime safety gate. Pin the public project authority rather
+            # cross-runtime safety gate. Pin the public API authority rather
             # than trusting caller-provided endpoint/key overrides.
             public_value = call_public_rpc(
                 _CUTOVER_PUBLIC_STATE_RPC,

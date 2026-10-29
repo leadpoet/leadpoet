@@ -156,14 +156,14 @@ def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatc
             self.waits = 0
 
         def is_set(self):
-            return False
+            return self.waits >= 2
 
         def wait(self, timeout):
             self.waits += 1
             return self.waits >= 2
 
         def set(self):
-            pass
+            self.waits = 2
 
     monkeypatch.setattr(script.threading, "Event", FiniteEvent)
     workers = []

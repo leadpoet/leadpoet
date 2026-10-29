@@ -259,6 +259,16 @@ def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair
             },
         }
 
+    def stage_industry_only(*_args, **_kwargs):
+        # Isolate the unrelated schema-repair identity boundary. The current
+        # shared attribute-review selector has its own regression suite.
+        return ("stage", "industry")
+
+    monkeypatch.setattr(
+        lead_scorer, "_targeted_company_investigation_dimensions", stage_industry_only,
+    )
+    monkeypatch.setattr(lead_scorer, "_industry_attribute_semantic_repair_needed", lambda *_: False)
+    monkeypatch.setattr(lead_scorer, "_positive_semantic_review_needed", lambda *_: False)
     original_ground = lead_scorer._ground_required_attribute_evidence
 
     async def counted_ground(*args, **kwargs):

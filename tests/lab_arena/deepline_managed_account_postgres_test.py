@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 from urllib.parse import parse_qs, urlsplit
 import pytest
 
@@ -77,7 +78,7 @@ def test_managed_error_does_not_block_research_scoring_or_publication(database, 
     with connect() as connection, connection.cursor() as cursor:
         for name in ("365-lab-arena-trajectories.sql", "366-lab-arena-trajectory-capacity.sql"):
             cursor.execute((Path(__file__).parents[2] / "scripts" / name).read_text())
-    h = QualityHarness(connect, tmp_path, challengers=["ManagedResearch"], runners=["alpha"])
+    h = _FrozenQualityHarness(connect, tmp_path, challengers=["ManagedResearch"], runners=["alpha"])
     miner = keypair("svc-miner-ManagedResearch").ss58_address
     h.chain.owned[miner] = [miner]
     h.service.config.defaults = replace(h.service.config.defaults,
@@ -140,3 +141,15 @@ def test_managed_error_does_not_block_research_scoring_or_publication(database, 
     assert all(r[0] == 3000 for r in successful)
     assert h.service.store.get_round(h.round_id)["publication_doc"]
     assert_canary_absent(h, connect)
+
+
+class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
+    """The lifecycle belongs to this file's pinned SQL and original judge."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-10-07")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service

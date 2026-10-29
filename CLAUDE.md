@@ -49,6 +49,21 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped production authorization: October 29 legacy baseline reward comparison
+
+The user authorized the smallest permanent fix for the confirmed legacy baseline
+reward-slot defect during October 29 monitoring. Apply only exact committed
+`591-lab-arena-legacy-baseline-reward-comparison.sql`, after independent review
+and regression checks. It changes only the reward-slot comparison predicate to
+recognize the canonical, frozen legacy baseline's exact assessed training
+exemption. Keep its training eligibility false. Preserve the existing eligible
+baseline path, publication cost and score authority, winner eligibility, promotion,
+reward shares, penalties, privacy, stored records, and function security metadata.
+Do not replay paid calls, change frozen rules, rewrite data, or add dependencies.
+Internal agents own code, tests, and commits only. The coordinator owns safe
+push and merge, the exact migration, canonical deployment, and fresh production
+verification. This authority ends after the scoped deployed behavior is verified.
+
 ## Scoped production authorization: October 29 full CI recovery
 
 The user authorized investigation and repair of confirmed full-repository CI

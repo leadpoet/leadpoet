@@ -9,9 +9,11 @@ on:
       - main
   deployment:
   workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"
 
 concurrency:
-  group: deploy-checks-${{ github.event.deployment.ref || github.ref }}
+  group: deploy-checks-${{ github.event_name == 'schedule' && 'nightly' || github.event.deployment.ref || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -50,7 +52,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.deployment.ref || github.ref }}
+          ref: ${{ github.event.deployment.sha || github.sha }}
           fetch-depth: 0
 
       - name: Verify repository instruction parity
@@ -127,6 +129,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
@@ -134,7 +137,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.deployment.ref || github.ref }}
+          ref: ${{ github.event.deployment.sha || github.sha }}
           fetch-depth: 0
 
       - name: Verify repository instruction parity
@@ -176,17 +179,17 @@ jobs:
         env:
           COVERAGE_FILE: ci-results/.coverage.shard-${{ matrix.shard }}
         run: |
+          coverage_args=()
+          if [ "${{ github.event_name }}" = schedule ]; then
+            coverage_args=(--cov=Leadpoet --cov=gateway --cov=leadpoet_canonical
+                           --cov=leadpoet_verifier --cov=qualification --cov-report=term-missing)
+          fi
           python -m pytest -v -rf --tb=short -p scripts.pytest_shard \
             --ci-shard-index=${{ matrix.shard }} --ci-shard-count=8 \
             --ci-shard-manifest=ci-results/shard-${{ matrix.shard }}.json \
-            --cov=Leadpoet \
-            --cov=gateway \
-            --cov=leadpoet_canonical \
-            --cov=leadpoet_verifier \
-            --cov=qualification \
-            --cov-report=term-missing
+            "${coverage_args[@]}"
 
-      - name: Upload shard execution and coverage
+      - name: Upload shard execution reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -219,7 +222,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.deployment.ref || github.ref }}
+          ref: ${{ github.event.deployment.sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -228,7 +231,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install existing test report dependencies
-        run: python -m pip install 'pytest>=8.0.0' 'coverage>=7.3.0'
+        run: python -m pip install 'pytest>=8.0.0'
 
       - name: Download all shard reports
         uses: actions/download-artifact@v4
@@ -237,9 +240,13 @@ jobs:
           path: ci-results
           merge-multiple: true
 
-      - name: Verify complete test execution and combine coverage
+      - name: Verify complete test execution
+        run: python -m scripts.pytest_shard ci-results --count=8
+
+      - name: Combine nightly coverage
+        if: github.event_name == 'schedule'
         run: |
-          python -m scripts.pytest_shard ci-results --count=8
+          python -m pip install 'coverage>=7.3.0'
           for shard in 0 1 2 3 4 5 6 7; do
             test -s "ci-results/.coverage.shard-$shard"
           done
@@ -248,7 +255,7 @@ jobs:
           python -m coverage xml
 
       - name: Upload coverage report
-        if: always()
+        if: always() && github.event_name == 'schedule'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report-py${{ matrix.python-version }}
@@ -266,7 +273,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.deployment.ref || github.ref }}
+          ref: ${{ github.event.deployment.sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up Docker Buildx

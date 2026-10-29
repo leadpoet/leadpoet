@@ -274,3 +274,29 @@ def test_normalizer_rejects_loaded_config_change(
         normalizer.normalize_docker_image(
             source_image="source:test", normalized_image="normalized:test"
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_temporary_config_diagnostics_require_explicit_gate(monkeypatch, capsys, enabled):
+    monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1" if enabled else "")
+    config = {"config": {"Env": ["PYTHON_VERSION=3.12.15"]}, "rootfs": {"diff_ids": ["sha256:example"]}}
+    payload = json.dumps(config).encode()
+    normalizer._emit_canonical_config_diagnostic(config, payload)
+    output = capsys.readouterr()
+    assert not output.out
+    assert (payload.decode() in output.err) is enabled
+
+
+@pytest.mark.parametrize("value", ["UNKNOWN_ENV=private-value", "PATH=https://user:private-value@example.com"])
+def test_temporary_config_diagnostics_withhold_sensitive_material(monkeypatch, capsys, value):
+    monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1")
+    config = {"config": {"Env": [value]}}
+    normalizer._emit_canonical_config_diagnostic(config, json.dumps(config).encode())
+    output = capsys.readouterr()
+    assert "private-value" not in output.err
+    assert "withheld" in output.err
+
+
+def test_workflow_config_diagnostics_are_reproduction_only():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/attested-v2-release.yml").read_text()
+    assert "GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}" in workflow

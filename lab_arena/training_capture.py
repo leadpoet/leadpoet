@@ -58,6 +58,15 @@ _EXTRA_SECRET_KEYS = frozenset({
     "credential", "credentials", "private_key", "secret_key", "session_token",
     "x_amz_credential", "x_amz_signature", "x_amz_security_token",
 })
+# The 2026-10-28 privacy audit recovered this exact public source by restoring
+# two URL fields and matching the original execution document hash. No other
+# URL is exempt from the bare-key matcher without equivalent evidence.
+_VERIFIED_PUBLIC_SOURCE_URL = (
+    "https://www.prnewswire.com/news-releases/"
+    "biohaven-and-sk-biopharmaceuticals-enter-into-strategic-global-licensing-"
+    "agreement-for-novel-kv7-ion-channel-platform-and-opakalim-lead-candidate-"
+    "for-epilepsy-302860299.html"
+)
 
 
 class CaptureError(ValueError):
@@ -430,6 +439,37 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         for secret in sorted(variants, key=len, reverse=True):
             text = text.replace(secret, "[REDACTED]")
 
+        # Protect the audited URL's false-positive "sk-" path span from the
+        # generic bare-key matcher only. Exact secrets above and every other
+        # credential context still use ordinary checks.
+        slug_spans = []
+        for url_match in _URL_RE.finditer(text) if "sk-" in text else ():
+            try:
+                parts = urlsplit(url_match[0])
+            except ValueError:
+                continue
+            if urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")) != _VERIFIED_PUBLIC_SOURCE_URL:
+                continue
+            path_offset = url_match[0].find(parts.path, url_match[0].find("://") + 3)
+            if path_offset < 0:
+                continue
+            for candidate in trajectory._BARE_API_KEY_RE.finditer(parts.path):
+                start = url_match.start() + path_offset + candidate.start()
+                slug_spans.append((start, start + len(candidate[0])))
+        slug_prefix = "arena-public-slug-" + uuid.uuid4().hex + "-" if slug_spans else ""
+        while slug_prefix and slug_prefix in text:
+            slug_prefix = "arena-public-slug-" + uuid.uuid4().hex + "-"
+        slugs = []
+        for start, end in reversed(slug_spans):
+            slugs.append(text[start:end])
+            text = text[:start] + slug_prefix + str(len(slugs) - 1) + "-end" + text[end:]
+
+        def restore_slugs(value: str) -> str:
+            if not slugs:
+                return value
+            return re.sub(re.escape(slug_prefix) + r"([0-9]+)-end",
+                          lambda match: slugs[int(match[1])], value)
+
         def redact(value):
             return trajectory.redact_text(value, tuple(variants), escape_nul=False)
 
@@ -468,7 +508,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         text = trajectory.redact_auth_schemes(text)
         text = trajectory._BARE_API_KEY_RE.sub("[REDACTED]", text)
         if not _URL_RE.search(text):
-            return redact(text)
+            return restore_slugs(redact(text))
         # Keep URL delimiters out of the generic credential scan, while a URL
         # used as a credential value still gets removed with its full context.
         # '[' cannot turn Basic/Bearer plus a public URL into a credential.
@@ -488,8 +528,8 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         # Exact secrets were removed before masking; never match them against
         # temporary tokens. Restore all surviving URLs in one scan.
         cleaned = trajectory.redact_text(masked, escape_nul=False)
-        return re.sub(re.escape(prefix) + r"([0-9]+)\]",
-                      lambda match: urls[int(match[1])], cleaned)
+        return restore_slugs(re.sub(re.escape(prefix) + r"([0-9]+)\]",
+                                    lambda match: urls[int(match[1])], cleaned))
 
     def request_config_path(path: tuple[str, ...]) -> bool:
         # The same request is sanitized first as a standalone blob and later

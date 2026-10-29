@@ -12,6 +12,7 @@ import pytest
 
 from tests.lab_arena import claim_eligibility_fast_paths509_postgres_test as fast
 from tests.lab_arena import claim_admission_transition509_510_postgres_test as transition
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 ROOT = Path(__file__).parents[2]
 SQL = ROOT / 'scripts/511-lab-arena-score-expiry-start-proof.sql'
@@ -33,6 +34,11 @@ def database():
         with socket.socket() as probe:
             probe.settimeout(1)
             assert probe.connect_ex((db[1]['host'], int(db[1]['port']))) != 0
+
+
+@pytest.fixture()
+def current_application_database():
+    yield from current_service_database()
 
 
 @pytest.fixture(scope='module')
@@ -344,7 +350,9 @@ def test_after511_cached_failure_retry_keeps_completed_company_authorities(datab
     transition.test_company_failure_retry_preserves_completed_authorities_and_finishes(database)
 
 
-def test_after511_full_current_schema_completes_and_publishes_normal_round(database, tmp_path, monkeypatch):
+def test_after511_full_current_schema_completes_and_publishes_normal_round(database, current_application_database, tmp_path, monkeypatch):
     with database[0].connect(**database[1]) as conn:
         apply(conn)
-    transition.test_latest_schema_retains_complete_normal_round_aggregate_and_publication(database, tmp_path, monkeypatch)
+    # Keep 511's real preimage/replay proof on its historical schema. The
+    # complete current-service control needs the current public projections.
+    transition.test_latest_schema_retains_complete_normal_round_aggregate_and_publication(current_application_database, tmp_path, monkeypatch)

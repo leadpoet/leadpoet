@@ -14,6 +14,7 @@ from tests.lab_arena import test_lab_arena_service_round as flows
 from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge, _enable_verified_proxy_runtime
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.test_integrity_round import IntegrityHarness
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 _BASE_PRICE_TABLE = flows.price_table
 
@@ -64,6 +65,19 @@ def completed(database, tmp_path_factory):
     finally:
         monkey.undo()
         harness.service.store.close()
+
+
+@pytest.fixture(scope='module')
+def current_application_database():
+    yield from current_service_database()
+
+
+@pytest.fixture(scope='module')
+def current_application_completed(current_application_database, tmp_path_factory):
+    # The dashboard/history checks use the reader introduced after 540.
+    # Reuse the same genuine completion setup on current SQL, without adding
+    # future functions to the independent historical migration controls.
+    yield from completed.__wrapped__(current_application_database, tmp_path_factory)
 
 
 def reset(database, completed, *, deadline=-1):
@@ -240,7 +254,8 @@ def test_stage_scoring_retains_complete_work_and_publishes_infrastructure_gaps(d
 
 
 @pytest.mark.parametrize('kind', ['accepted_empty_unjudged', 'missing_execution', 'malformed_failed_native', 'generic_exhausted_provider'])
-def test_unmeasured_edge_cases_reach_real_publication(database, completed, kind):
+def test_unmeasured_edge_cases_reach_real_publication(current_application_database, current_application_completed, kind):
+    database, completed = current_application_database, current_application_completed
     h = reset(database, completed)
     run = selected(completed, 'FailedRoute')
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:

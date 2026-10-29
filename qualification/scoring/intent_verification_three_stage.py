@@ -2614,15 +2614,16 @@ async def _scrape_sd_hardened(
                     "content": wb["content"], "error": None,
                     "meta": wb.get("meta") or {}, "stage_history": history}
 
-    # A target 404 alone cannot prove semantic absence. The caller compares it
+    # A target 404/410 alone cannot prove semantic absence. The caller compares it
     # with the independent Exa result before separating a missing source from
     # verifier infrastructure failure. Neither case proves miner fabrication.
-    every_attempt_not_found = bool(history) and all(
-        verdict == "http_404" for _tier, verdict in history
+    direct_history = [(tier, verdict) for tier, verdict in history if tier != "wayback"]
+    every_attempt_absent = bool(direct_history) and all(
+        verdict == f"http_{last_status}" for _tier, verdict in direct_history
     )
     fail_label = (
-        "genuine_404"
-        if every_attempt_not_found and last_status == 404
+        f"genuine_{last_status}"
+        if every_attempt_absent and last_status in (404, 410)
         else f"all_tiers_exhausted:{last_verdict}"
     )
     return {"ok": False, "stage": fail_label,
@@ -3453,8 +3454,9 @@ def _confirmed_source_absence(
         isinstance(status, Mapping)
         and status.get("url") == requested_url
         and status.get("source") == "none"
-        and status.get("sd_stage") == "genuine_404"
-        and status.get("sd_error") == "http_404"
+        and (status.get("sd_stage"), status.get("sd_error")) in {
+            ("genuine_404", "http_404"), ("genuine_410", "http_410"),
+        }
         and status.get("exa_stage") == "exa_target_not_found"
         and status.get("exa_error") == "target_not_found"
         and _canonical_target_absence_receipt(
@@ -3509,7 +3511,9 @@ def _unusable_source_allows_same_event_search(
             ) is not None
         )
     if not (
-        (sd_stage == "genuine_404" and sd_error == "http_404")
+        ((sd_stage, sd_error) in {
+            ("genuine_404", "http_404"), ("genuine_410", "http_410"),
+        })
         or (sd_error in local_sd_errors
             and sd_stage == "all_tiers_exhausted:" + sd_error)
     ):

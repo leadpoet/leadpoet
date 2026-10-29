@@ -6,9 +6,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+import pytest
 
 from lab_arena import broker, contracts, deepline_catalog, runtime, scoring, shim
-from tests.lab_arena.bound_account_refusal421_postgres_test import database, base_database
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.deepline_managed_account_test import managed_error
@@ -20,6 +21,11 @@ from tests.lab_arena.test_deepline_catalog import row
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_DEEPLINE_KEY, assert_canary_absent, keypair, price_table,
 )
+
+
+@pytest.fixture()
+def database():
+    yield from current_service_database()
 
 class ManagedTransport(ExactResearchTransport):
     def __init__(self):

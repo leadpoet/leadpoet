@@ -194,6 +194,7 @@ def current_service_database():
                 "588-lab-arena-qualifier-training-publication.sql",
                 "589-lab-arena-company-quality-judgment-authority.sql",
                 "590-lab-arena-closed-miner-binding-gate.sql",
+                "591-lab-arena-legacy-baseline-reward-comparison.sql",
             ):
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             # Only the disposable authority fixture's unrelated seed is removed.

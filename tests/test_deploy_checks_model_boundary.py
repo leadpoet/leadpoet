@@ -47,6 +47,21 @@ def test_all_test_partitions_gate_the_stable_required_check_without_push_coverag
 
 
 
+def test_every_checkout_uses_the_same_immutable_event_commit():
+    import yaml
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    checkouts = {
+        name: [step for step in job['steps']
+               if step.get('uses', '').startswith('actions/checkout@')]
+        for name, job in workflow['jobs'].items()
+    }
+    assert set(checkouts) == {'preflight', 'test-shards', 'test', 'docker-build'}
+    for name, steps in checkouts.items():
+        assert len(steps) == 1, name
+        assert steps[0]['with']['ref'] == '${{ github.event.deployment.sha || github.sha }}', name
+
+
+
 def test_sentry_receives_only_trusted_main_workflow_events_without_checkout():
     import yaml
     workflow = yaml.load((WORKFLOW.parent / 'deploy-checks-sentry.yml').read_text(),

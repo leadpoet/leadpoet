@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.lab_arena.historical_round_reads import pre517_round_select
+
 import pytest
 
 from lab_arena import public_dashboard, service as service_module, store as store_module
@@ -18,6 +20,15 @@ from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, dat
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/464-lab-arena-public-read-index.sql"
 INDEX = "lab_arena_rounds_chain_mode_created_idx"
+# Freeze the API that migration464 actually installed. New public fields are
+# verified by current-schema service tests rather than retrofitted into SQL464.
+PUBLIC_CONFIGURATION_FIELDS_464 = {
+    'mode', 'network_name', 'netuid', 'schedule', 'benchmark_disclosure_policy',
+    'stage_1_icp_count', 'stage_2_icp_count', 'promotion_margin',
+    'execution_sequence_policy', 'sourcing_cost_eligibility_policy',
+    'recovery_source_round_id', 'integrity_policy', 'contact_policy',
+    'company_quality_policy', 'intent_details_policy', 'baseline_hotkey',
+}
 
 
 @pytest.fixture(scope="module")
@@ -44,8 +55,10 @@ def test_index_bounds_large_round_reads_preserves_responses_and_security(databas
     connection = pg.connect(**dsn)
     connection.autocommit = True
     transport = PsycopgTransport(lambda: pg.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
     service = object.__new__(ArenaService)
     service._store = ArenaStore(transport)
+    service._clock = lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
     service._config = SimpleNamespace(mode="live", pinned_round_id=None,
         chain=SimpleNamespace(current_settlement_epoch=lambda: 100))
     # Deliberately difficult to compress: public reads must not walk shadow
@@ -126,6 +139,8 @@ def test_compact_configuration_preserves_types_missing_null_and_permissions(data
             cursor.execute("SELECT prosecdef, provolatile FROM pg_proc WHERE oid='public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'::regprocedure")
             assert cursor.fetchone() == (False, "i")
             cursor.execute("SET ROLE lab_arena_service")
+            # SQL464 predates company-cache policy; its original projection
+            # intentionally excludes the later company_judgment_policy key.
             for configuration in ({}, {"mode": None, "schedule": {}, "stage_1_icp_count": 0},
                     {key: {"value": [None, False, 0, ""]} for key in store_module.PUBLIC_CONFIGURATION_FIELDS},
                     {"mode": "live", "deepline_catalog": {"private": True}, "scorer_policy": {"private": True}},
@@ -133,6 +148,6 @@ def test_compact_configuration_preserves_types_missing_null_and_permissions(data
                 cursor.execute("SELECT public.lab_arena_public_configuration_v1(jsonb_populate_record(NULL::public.lab_arena_rounds,%s::jsonb))", (json.dumps({"configuration_doc": configuration}),))
                 actual = cursor.fetchone()[0]
                 assert actual == ({key: value for key, value in configuration.items()
-                    if key in store_module.PUBLIC_CONFIGURATION_FIELDS} if isinstance(configuration, dict) else {})
+                    if key in PUBLIC_CONFIGURATION_FIELDS_464} if isinstance(configuration, dict) else {})
     finally:
         connection.close()

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.lab_arena.historical_round_reads import pre517_round_select
+
 import pytest
 
 from lab_arena import contact_policy, integrity, intent_details_policy, quality_policy
@@ -128,6 +130,7 @@ def test_view_only_drops_nested_cost_and_preserves_order_and_malformed_values(pr
         for index, publication in enumerate(variants):
             _insert(connection, "arena-2026-10-10-v449%02d" % index, publication)
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
     try:
         store = ArenaStore(transport)
         for index, publication in enumerate(variants):
@@ -168,6 +171,7 @@ def test_long_published_ranking_matches_live_shape_without_stored_change(project
         connection.autocommit = True
         _insert(connection, round_id, publication)
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
     try:
         store = ArenaStore(transport)
         source = store.get_round(round_id)["publication_doc"]
@@ -203,6 +207,7 @@ def test_actual_view_keeps_public_result_body(projected_database, mode, policies
         connection.autocommit = True
         _insert(connection, round_id, _publication(), configuration=configuration)
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
     try:
         store = ArenaStore(transport)
         full_row = store.get_round(round_id)
@@ -236,6 +241,7 @@ def test_missing_and_malformed_rankings_keep_result_behavior(projected_database,
         connection.autocommit = True
         _insert(connection, round_id, publication)
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
     try:
         store = ArenaStore(transport)
         full_row = store.get_round(round_id)

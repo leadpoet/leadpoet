@@ -1,6 +1,5 @@
 """The paid E2E runner starts from current, guarded PostgreSQL authority."""
 
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -16,17 +15,37 @@ def database(request):
     yield from full_thinking_database(production_order=request.param == "production")
 
 
+# These two independently released migrations already share 585. Their exact
+# filenames remain ordered explicitly by the current service fixture. Preserve
+# applied history, reject any extra collision, and do not count rollback plans.
+_RELEASED_SEQUENCE_COLLISIONS = {
+    585: {'585-lab-arena-champion-baseline-reasoning.sql',
+          '585-lab-arena-review-deadline-recovery.sql'},
+}
+
+
+def _unexpected_migration_collisions(paths):
+    groups = {}
+    for path in paths:
+        number = int(path.name.split('-', 1)[0])
+        if number >= 564 and not path.name.endswith('-rollback.sql'):
+            groups.setdefault(number, set()).add(path.name)
+    return {number: sorted(names) for number, names in groups.items()
+            if len(names) > 1 and names != _RELEASED_SEQUENCE_COLLISIONS.get(number)}
+
+
 def test_new_migrations_have_unique_sequence_numbers():
-    # Concurrent main changes must not share a numeric release position with
-    # the PR tail. Older historical filenames are outside this new tail.
     scripts = Path(__file__).resolve().parents[2] / "scripts"
-    numbers = [
-        int(path.name.split("-", 1)[0])
-        for path in scripts.glob("[0-9][0-9][0-9]-*.sql")
-        if int(path.name.split("-", 1)[0]) >= 564
-    ]
-    duplicates = {number: count for number, count in Counter(numbers).items() if count > 1}
-    assert not duplicates, duplicates
+    assert not _unexpected_migration_collisions(scripts.glob("[0-9][0-9][0-9]-*.sql"))
+
+
+def test_sequence_guard_keeps_new_collisions_and_extra_585_files_blocked():
+    released = [Path(name) for name in _RELEASED_SEQUENCE_COLLISIONS[585]]
+    assert not _unexpected_migration_collisions(released + [
+        Path('585-lab-arena-review-deadline-recovery-rollback.sql')])
+    assert 585 in _unexpected_migration_collisions(released + [Path('585-unreviewed.sql')])
+    assert 589 in _unexpected_migration_collisions([
+        Path('589-first.sql'), Path('589-second.sql')])
 
 
 def test_complete_mainline_schema_starts_and_publishes(database, tmp_path, monkeypatch):

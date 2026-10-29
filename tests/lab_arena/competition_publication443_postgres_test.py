@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import time
 
+from tests.lab_arena.historical_round_reads import pre517_round_select
+
 import pytest
 
 from lab_arena import contracts, public_dashboard as dashboard
@@ -274,6 +276,7 @@ def test_actual_psycopg_query_and_full_competition_response(projected_database, 
     _insert_rows(connection, rows)
     connection.close()
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
     try:
         store = ArenaStore(transport)
         projected = store.list_rounds(limit=30, columns=dashboard._COMPETITION_ROUND_COLUMNS)
@@ -291,6 +294,7 @@ def test_actual_postgrest_computed_selection_and_response(stack, monkeypatch):
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
     _insert_rows(stack["connection"], rows)
     transport = make_transport(stack, "lab_arena_service")
+    transport.select = pre517_round_select(transport.select)
     original_get = transport._client.get
     transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
     try:

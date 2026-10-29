@@ -466,7 +466,7 @@ security review and production deployment. Do not change PR 825 scorer behavior
 or unrelated runtime work. This authority ends after deployment and native
 validation complete.
 
-AWS access: use `leadpoet-lab` (SSO `LabOperator`) for routine SN71 SSM/EC2 operations in `us-east-1`, account `493765492819`; it cannot change IAM. For IAM changes, use the existing `leadpoet-recovery-console-20261026` session, or refresh it with `aws login --profile leadpoet-recovery-console-20261026 --region us-east-1` using `hello@leadpoet.com` (Leadpoet-main root); `pranav@leadpoet.com` root is the separate `187445349696` account. Check `sts get-caller-identity` with the selected profile before any write; do not retry unrelated accounts or the unassigned SSO `Admin` role.
+AWS access: use the existing `leadpoet-lab` (SSO `LabOperator`) profile for routine work in account `493765492819`, region `us-east-1`. Use the `leadpoet-admin` profile with Identity Center `pranav-admin` only for explicitly authorized administrative changes. Never use a root session. Verify the caller identity before any write. Reuse valid cached temporary credentials across checks and subagents; start a new session only when no valid cached credentials remain.
 
 ## Scoped authorization: October 27 SSM access hardening
 

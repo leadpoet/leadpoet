@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,7 +33,7 @@ class FakeSession:
         return SimpleNamespace(get_caller_identity=lambda: self.identity)
 
 
-@pytest.mark.parametrize("profile,method", [("leadpoet-lab", "sso"), (None, "iam-role"), ("operator-role", "assume-role")])
+@pytest.mark.parametrize("profile,method", [("leadpoet-lab", "sso"), (None, "iam-role"), ("operator-role", "assume-role"), ("leadpoet-admin", "sso")])
 def test_temporary_roles_work_without_gateway_cache(monkeypatch, profile, method):
     session = FakeSession(method=method)
     captured = {}
@@ -81,37 +81,21 @@ def test_rejects_ambient_authority_before_resolving(monkeypatch, name):
         subject.gateway_iam_session()
 
 
-def export_document(**updates):
-    document = {"Version": 1, "AccessKeyId": "ASIA" + "A" * 16, "SecretAccessKey": "s" * 40,
-                "SessionToken": "temporary-token", "Expiration": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
-    document.update(updates)
-    return json.dumps(document)
-
-
-def test_recovery_uses_only_approved_cli_profile_and_in_memory_temporary_credentials(monkeypatch):
-    calls = []
-    session = FakeSession(arn="arn:aws:iam::493765492819:root")
-    monkeypatch.setattr(subject.subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs)) or SimpleNamespace(
-        returncode=0, stdout=export_document(), stderr=""))
-    captured = {}
-    monkeypatch.setattr(subject.boto3.session, "Session", lambda **kwargs: captured.update(kwargs) or session)
-    assert subject.gateway_iam_session(profile="leadpoet-recovery-console-20261026") is session
-    assert calls[0][0] == ["aws", "configure", "export-credentials", "--profile", "leadpoet-recovery-console-20261026", "--format", "process"]
-    assert calls[0][1]["capture_output"] is True
-    assert captured["aws_session_token"] == "temporary-token"
-    assert "profile_name" not in captured
-
-
-@pytest.mark.parametrize("updates", [
-    {"AccessKeyId": "AKIA" + "A" * 16}, {"SessionToken": ""},
-    {"Expiration": "2020-01-01T00:00:00+00:00"}, {"Expiration": "invalid"},
-    {"Expiration": (datetime.now() + timedelta(hours=1)).isoformat()},
-])
-def test_recovery_rejects_invalid_export_before_session(monkeypatch, updates):
-    monkeypatch.setattr(subject.subprocess, "run", lambda *_a, **_k: SimpleNamespace(returncode=0, stdout=export_document(**updates), stderr=""))
-    monkeypatch.setattr(subject.boto3.session, "Session", lambda **_k: pytest.fail("invalid export"))
-    with pytest.raises(subject.GatewayIamSessionError):
+def test_retired_root_profile_is_rejected_before_session_or_export(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("must not export root credentials"))
+    monkeypatch.setattr(subject.boto3.session, "Session", lambda **_k: pytest.fail("must not resolve retired profile"))
+    with pytest.raises(subject.GatewayIamSessionError, match="authority"):
         subject.gateway_iam_session(profile="leadpoet-recovery-console-20261026")
+
+
+@pytest.mark.parametrize("profile", ["leadpoet-lab", "leadpoet-admin"])
+def test_root_is_rejected_without_export_for_each_operator_profile(monkeypatch, profile):
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("must not export root credentials"))
+    session = FakeSession(arn="arn:aws:iam::493765492819:root")
+    monkeypatch.setattr(subject.boto3.session, "Session", lambda **_k: session)
+    with pytest.raises(subject.GatewayIamSessionError, match="identity"):
+        subject.gateway_iam_session(profile=profile)
+    assert session.clients == ["sts"]
 
 
 def test_authority_errors_do_not_expose_provider_output(monkeypatch):
@@ -129,14 +113,6 @@ def test_instance_role_mode_rejects_default_sso_profile(monkeypatch):
     with pytest.raises(subject.GatewayIamSessionError, match="temporary"):
         subject.gateway_iam_session(profile=None)
     assert session.clients == []
-
-
-def test_recovery_cli_failure_is_redacted(monkeypatch):
-    monkeypatch.setattr(subject.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
-        returncode=1, stdout="synthetic-sensitive-provider-detail", stderr="synthetic-sensitive-provider-detail"))
-    with pytest.raises(subject.GatewayIamSessionError) as failure:
-        subject.gateway_iam_session(profile="leadpoet-recovery-console-20261026")
-    assert "synthetic-sensitive" not in str(failure.value)
 
 
 @pytest.mark.parametrize("service", ["sts", "iam"])

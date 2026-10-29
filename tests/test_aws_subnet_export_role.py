@@ -160,6 +160,56 @@ class ExportRoleTests(unittest.TestCase):
         self.assertEqual(observed["current_user"], "postgres")
         self.assertEqual(observed["role"]["memberships"], tool.CREATOR_MEMBERSHIP)
 
+    def test_aws_rejects_all_ambient_authority_overrides_before_process_or_payload(self):
+        names = {
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_SECURITY_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+            "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+            "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT", "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+            "BOTO_CONFIG",
+        }
+        for name in sorted(names):
+            for payload in (None, {"SecretString": "synthetic-private-payload"}):
+                with self.subTest(name=name, payload=payload is not None), \
+                     patch.dict(os.environ, {name: "synthetic-override"}, clear=True), \
+                     patch.object(tool, "run") as process, \
+                     patch.object(tool.tempfile, "TemporaryDirectory") as temporary:
+                    with self.assertRaisesRegex(tool.Failure, "^aws-authority$"):
+                        tool.aws("sts", "get-caller-identity", payload=payload)
+                    process.assert_not_called()
+                    temporary.assert_not_called()
+        self.assertEqual(tool.AWS_AUTHORITY_OVERRIDES, frozenset(names))
+
+    def test_aws_forces_endpoint_safety_with_hostile_environment_without_network(self):
+        env = {"AWS_ENDPOINT_URL": "http://127.0.0.1:9",
+               "AWS_ENDPOINT_URL_STS": "http://127.0.0.1:9",
+               "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "false", "AWS_PROFILE": ""}
+        result = subprocess.CompletedProcess([], 0, b"{}", b"")
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(tool.subprocess, "run", return_value=result) as process:
+            self.assertIs(tool.aws("sts", "get-caller-identity"), result)
+        process.assert_called_once()
+        argv = process.call_args.args[0]
+        self.assertEqual(argv[argv.index("--profile") + 1], "leadpoet-admin")
+        self.assertEqual(argv[argv.index("--region") + 1], "us-east-1")
+        self.assertEqual(process.call_args.kwargs["env"]["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"], "true")
+
+    def test_aws_authority_requires_named_admin_and_same_account_assumed_role(self):
+        self.assertEqual(tool.PROFILE, "leadpoet-admin")
+        good = {"Account": tool.ACCOUNT,
+                "Arn": f"arn:aws:sts::{tool.ACCOUNT}:assumed-role/AWSReservedSSO_Admin/test"}
+        with patch.object(tool, "aws_json", return_value=good) as identity:
+            tool.check_aws()
+        identity.assert_called_once_with("sts", "get-caller-identity")
+        for arn in (f"arn:aws:iam::{tool.ACCOUNT}:root",
+                    f"arn:aws:iam::{tool.ACCOUNT}:user/pranav-main",
+                    "arn:aws:sts::187445349696:assumed-role/Admin/test", "", None):
+            with self.subTest(arn=arn), patch.object(tool, "aws_json", return_value={**good, "Arn": arn}):
+                with self.assertRaisesRegex(tool.Failure, "aws-identity"):
+                    tool.check_aws()
+
     def test_preflight_rejects_wrong_identity_existing_role_and_secret(self):
         with patch.object(tool, "aws_json", return_value={"Account": "wrong"}):
             with self.assertRaisesRegex(tool.Failure, "aws-account"):
@@ -193,6 +243,7 @@ class ExportRoleTests(unittest.TestCase):
             with self.assertRaisesRegex(tool.Failure, "repo-tool-bytes"):
                 tool.verified_head(Path.cwd(), HEAD)
 
+    @patch.dict(os.environ, {name: "" for name in tool.AWS_AUTHORITY_OVERRIDES})
     def test_aws_cli_payload_file_is_private_removed_and_not_in_arguments(self):
         paths = []
         def inspect(args, data=None):
@@ -214,6 +265,7 @@ class ExportRoleTests(unittest.TestCase):
         self.assertFalse(paths[0].exists())
         self.assertFalse(paths[0].parent.exists())
 
+    @patch.dict(os.environ, {name: "" for name in tool.AWS_AUTHORITY_OVERRIDES})
     def test_aws_cli_payload_cleanup_and_sanitized_failure(self):
         paths = []
         def failed(args, data=None):

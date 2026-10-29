@@ -76,12 +76,30 @@ def _setup(base: Path, *, mode: str = "live", backend: str = "closed", leak: str
     # No live gateway environment; only the hydrated clone exists. Path
     # authority is restored after loading, and mode comes from scoped config.
     (base / "clone.sh").write_text("export LAB_ARENA_MODE=off\nexport GATEWAY_ENV_FILE=/untrusted\n")
+    # The privileged deletion boundary has separate coverage. Run the real
+    # cache planner here against the fixture's inactive archive and empty
+    # process/mount inventory, then model its successful privileged report.
+    (base / "proc").mkdir()
+    (base / "mountinfo").touch()
+    (base / "cache-plan.py").write_text(
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "from scripts import arena_runtime_cache_retirement as retirement\n"
+        "base=Path(sys.argv[1]); slot=int(sys.argv[2]); sha=sys.argv[3]\n"
+        "def ingress(*_):\n"
+        "    mode, slot, sha, backend=(base/'ingress').read_text().split()\n"
+        "    return dict(mode=mode,slot=int(slot),sha=sha,backend=backend)\n"
+        "retirement.inspect_ingress=ingress\n"
+        "report=retirement.retire_runtime_caches(repo_root=base/'repo',runtime_root=base/'runtime',\n"
+        "    slot=slot,sha=sha,owner_uid=os.getuid(),proc_root=base/'proc',mountinfo=base/'mountinfo')\n"
+        "report.update(applied=True,status='cache_cleanup_complete')\n"
+        "print(json.dumps(report))\n")
     return sha
 
 
 def _run(base: Path, sha: str, *, failure: str = "") -> subprocess.CompletedProcess[str]:
     functions = "\n".join(_function(name) for name in (
-        "arena_runtime_tree", "prepare_arena_runtime_tree", "recover_arena_restart_owner",
+        "arena_runtime_tree", "prepare_arena_runtime_tree", "retire_arena_runtime_tree", "recover_arena_restart_owner",
         "rollback_arena_candidate_before_destructive", "run_lab_arena_restart_guard",
         "require_arena_lock_recovery_idle", "recover_arena_inherited_docker_locks"))
     script = f'''set -euo pipefail
@@ -95,6 +113,7 @@ ARENA_RUNTIME_ROOT="$PWD/runtime"
 ENV_CLONE="$PWD/clone.sh"
 GATEWAY_ENV_FILE="$PWD/env.json"
 GATEWAY_ACTIVE_RELEASE_COMPONENT=gateway
+GATEWAY_RESTART_GUARD_SCOPE=gateway
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=fresh
 PREPARED_GATEWAY_SHA={'b' * 40}
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=0
@@ -139,6 +158,14 @@ stop_arena_component() {{
   fi
 }}
 timeout() {{ shift; "$@"; }}
+sudo() {{
+  local slot= sha=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --slot) slot="$2"; shift;; --sha) sha="$2"; shift;; esac
+    shift
+  done
+  "$GATEWAY_PYTHON_BIN" "$FIXTURE_BASE/cache-plan.py" "$FIXTURE_BASE" "$slot" "$sha"
+}}
 curl() {{
   [ "$FAIL" != health ] || return 1
   if [ "$FAIL" = guard-before-cas ]; then
@@ -154,8 +181,11 @@ recover_arena_inherited_docker_locks
 [ "$GATEWAY_ENV_FILE" = "$PWD/env.json" ]
 echo normal-docker-gates >> "$FIXTURE_BASE/events"
 '''
-    return subprocess.run(["bash", "-c", script], text=True, capture_output=True,
-                          timeout=10, env=os.environ.copy())
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                            timeout=10, env=os.environ.copy())
+    assert 'unbound variable' not in result.stderr, result.stderr
+    assert ': command not found' not in result.stderr, result.stderr
+    return result
 
 
 def _events(base: Path) -> list[str]:

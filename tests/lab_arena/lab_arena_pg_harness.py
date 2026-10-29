@@ -169,6 +169,132 @@ CURRENT_REWARD_SERVICE_MIGRATIONS = CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
 )
 
 
+def current_service_database():
+    """Current service schema; historical migration fixtures keep their bases."""
+    from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+
+    database = full_thinking_database(production_order=True)
+    try:
+        psycopg2, dsn = next(database)
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            for migration in (
+                "443-lab-arena-competition-publication-projection.sql",
+                "575-lab-arena-score-host-continuation.sql",
+                "576-lab-arena-champion-score-funding.sql",
+                "577-lab-arena-judge-continuation-runner-handoff.sql",
+                "578-lab-arena-closed-provider-ordered-candidate.sql",
+                "579-lab-arena-close-covered-credit-candidates.sql",
+                "581-lab-arena-judge-generation-drain.sql",
+                "583-lab-arena-promotion-rpc-privileges.sql",
+                "584-lab-arena-stage-quota-run-lookup.sql",
+                "585-lab-arena-champion-baseline-reasoning.sql",
+                "585-lab-arena-review-deadline-recovery.sql",
+                "586-lab-arena-publication-restart-drain.sql",
+                "587-lab-arena-atomic-review-restart-guard.sql",
+                "588-lab-arena-qualifier-training-publication.sql",
+            ):
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            # Only the disposable authority fixture's unrelated seed is removed.
+            cursor.execute("TRUNCATE public.lab_arena_rounds CASCADE")
+        yield psycopg2, dsn
+    finally:
+        database.close()
+
+
+def prepare_current_service_reads(connect, *, include_run_reads=True, include_round_reads=True):
+    """Install additive read dependencies for current code on old test schemas.
+
+    Historical migration fixtures keep their exact write RPCs, retry rules and
+    indexes. The modern service nevertheless reads projections introduced by
+    443, 449, 464, 474, 517 and 541. Install only committed reader definitions and the
+    revision-zero round column/view; do not apply their write migrations. This
+    is an explicit integration-fixture boundary, never a production fallback.
+    Existing readers, including later upgraded definitions, stay unchanged.
+    Round-only projection tests can omit run readers on pre-227 schemas.
+    """
+    connection = connect()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regprocedure('public.lab_arena_execution_attempt_count(public.lab_arena_runs)'),"
+                "to_regprocedure('public.lab_arena_public_execution_failure_reason_v1(public.lab_arena_runs)'),"
+                "EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.lab_arena_rounds'::regclass "
+                "AND attname='scoring_generation_floor' AND NOT attisdropped),"
+                "to_regclass('public.lab_arena_published_results_v1'),"
+                "to_regprocedure('public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'),"
+                "to_regprocedure('public.lab_arena_competition_publication_v1(public.lab_arena_rounds)')"
+            )
+            attempt_reader, failure_reader, has_floor, results_view, configuration_reader, competition_reader = cursor.fetchone()
+            if not include_run_reads:
+                attempt_reader = failure_reader = True
+            if results_view:
+                cursor.execute(
+                    "SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=%s::regclass "
+                    "AND attname='scoring_generation_floor' AND NOT attisdropped)",
+                    (results_view,),
+                )
+                view_has_floor = cursor.fetchone()[0]
+            else:
+                view_has_floor = True
+            if (attempt_reader and failure_reader and (not include_round_reads or (
+                    has_floor and results_view and view_has_floor and configuration_reader and competition_reader))):
+                return
+
+            cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') "
+                           "FROM pg_namespace WHERE nspname='public'")
+            schema_acl, had_create = cursor.fetchone()
+            if include_round_reads and not configuration_reader:
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                migration = (SCRIPTS / '464-lab-arena-public-read-index.sql').read_text()
+                cursor.execute(migration[
+                    migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_public_configuration_v1'):
+                    migration.index('DO $restore_create$')
+                ])
+            if include_round_reads and not competition_reader:
+                cursor.execute((SCRIPTS / '443-lab-arena-competition-publication-projection.sql').read_text())
+            if include_round_reads and not results_view:
+                cursor.execute((SCRIPTS / '449-lab-arena-published-results-rank-view.sql').read_text())
+                view_has_floor = False
+            if not attempt_reader:
+                cursor.execute("SELECT to_regclass('public.lab_arena_trajectory_events')")
+                if cursor.fetchone()[0] is None:
+                    cursor.execute((SCRIPTS / '365-lab-arena-trajectories.sql').read_text())
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                migration = (SCRIPTS / '474-lab-arena-host-interruption-execution-retries.sql').read_text()
+                cursor.execute(migration[
+                    migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_execution_attempt_count'):
+                    migration.index('CREATE OR REPLACE FUNCTION public.lab_arena__execute_assignment_calls_v1')
+                ])
+            if not failure_reader:
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                cursor.execute("SELECT to_regprocedure('public.lab_arena__execution_privacy_route_unavailable_v1(text)')")
+                if cursor.fetchone()[0] is None:
+                    migration = (SCRIPTS / '540-lab-arena-incomplete-participant-publication.sql').read_text()
+                    cursor.execute(migration[
+                        migration.index('CREATE OR REPLACE FUNCTION public.lab_arena__execution_privacy_route_unavailable_v1'):
+                        migration.index('DO $preflight_lab_arena__participant_incomplete_reason_v1$')
+                    ])
+                cursor.execute((SCRIPTS / '541-lab-arena-public-execution-failure-reason.sql').read_text())
+            migration = (SCRIPTS / '517-lab-arena-model-policy-supersession.sql').read_text()
+            if include_round_reads and not has_floor:
+                cursor.execute(migration[
+                    migration.index('ALTER TABLE public.lab_arena_rounds ADD COLUMN'):
+                    migration.index('-- Existing rows retain revision zero.')
+                ])
+            if include_round_reads and not view_has_floor:
+                start = migration.index('DO $view517$')
+                cursor.execute(migration[start:migration.index('DO $security517$', start)])
+            if had_create:
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+            else:
+                cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
+            cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+            assert cursor.fetchone()[0] == schema_acl, 'current-service read dependencies changed schema ACL'
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def migrations_before(anchor: str) -> tuple[str, ...]:
     """Canonical migrations installed ahead of ``anchor``.
 

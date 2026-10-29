@@ -23,19 +23,19 @@ from scripts import build_arena_reviewer_runtime as composer
 from scripts.arena_reviewer_finality_seam import CORRECTION_ID
 from tests.lab_arena.reviewer_runtime_composition_test import layer
 from tests import test_completed_cross_domain_negative as controls
+from tests.reviewer_frozen_sources import frozen_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_FROZEN_ORIGINAL = frozen_source("negative_finality", FINALITY_FILE)
+_FROZEN_POSTIMAGE = _FROZEN_ORIGINAL.replace(
+    _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1)
 
 
 def _current_source():
-    # This suite isolates PR483. Reverse the separate source-access correction
-    # so its original frozen847 hash remains a real immutable-source control.
-    from scripts.arena_reviewer_source_access_seam import FINALITY_DELTAS
-    source = (ROOT / FINALITY_FILE).read_bytes()
-    for _, old, new in FINALITY_DELTAS:
-        source = source.replace(new.encode(), old.encode(), 1)
-    return source
+    # The seam targets frozen847, not the evolving current implementation.
+    # Keep its original predicate golden bound to the reviewed postimage.
+    return _FROZEN_POSTIMAGE
 
 
 def _original_source():
@@ -222,11 +222,13 @@ def test_composed_predicate_preserves_all_unfinished_evidence_controls(monkeypat
 
 @pytest.mark.parametrize("semantic", [False, True])
 @pytest.mark.parametrize("homepage_fault", [None, "provider_error", "malformed_response"])
+@pytest.mark.parametrize("investigation_fault", ["", "provider_error", "malformed_response", "unbound_fault", "incomplete"])
+@pytest.mark.parametrize("preserve_marker", [True, False])
 def test_composed_finality_through_fit_zero_and_existing_arena_completion(
-    monkeypatch, semantic, homepage_fault,
+    monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
 ):
     monkeypatch.setattr(lead_scorer, PREDICATE,
                         _predicate(convert_finality_seam(_original_source())))
     controls.test_negative_completion_through_fit_and_arena(
-        monkeypatch, semantic, homepage_fault,
+        monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
     )

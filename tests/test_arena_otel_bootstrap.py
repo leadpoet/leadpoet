@@ -1057,6 +1057,7 @@ def test_existing_judgment_denial_codes_export_only_their_literal_prefix():
                 "accepted_judgment_binding_invalid",
                 "signal_judgment_result_invalid",
                 "training_observation_segment_conflict",
+                "reasoning_capture_activation_not_ready",
                 "private_token",
             ):
                 assert client.get("/arena/v1/refuse/" + code).status_code == 409
@@ -1067,11 +1068,12 @@ def test_existing_judgment_denial_codes_export_only_their_literal_prefix():
     spans = exp.get_finished_spans()
     assert [span.attributes["arena.denial"] for span in spans] == [
         "accepted_judgment_binding_invalid", "signal_judgment_result_invalid",
-        "training_observation_segment_conflict", "-", "-",
+        "training_observation_segment_conflict", "reasoning_capture_activation_not_ready", "-", "-",
     ]
     assert [span.attributes["http.route"] for span in spans] == [
         "/arena/v1/refuse/{code}", "/arena/v1/refuse/{code}",
         "/arena/v1/refuse/{code}", "/arena/v1/refuse/{code}",
+        "/arena/v1/refuse/{code}",
         "/_unmatched",
     ]
     assert "private request details" not in repr(spans)

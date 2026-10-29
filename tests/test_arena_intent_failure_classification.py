@@ -390,7 +390,7 @@ def test_unproven_structured_fit_scores_zero_without_arena_retry(
         return verdict, ""
 
     async def fetch_current_profile(
-        url, *, diagnostic=None, source_text_sink=None,
+        url, *, diagnostic=None, source_text_sink=None, expected_company_identity=None,
     ):
         assert unproven_dimension == "employee_size"
         assert url == "https://www.linkedin.com/company/strandtx"
@@ -543,11 +543,24 @@ def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
     )
     provider_calls = []
 
+    async def current_profile(url, *, expected_company_identity, **_kwargs):
+        # Retain the rounded public quote above. It is not exact size proof;
+        # this controlled independent profile supplies the canonical range.
+        assert url == "https://www.linkedin.com/company/day-ai"
+        assert expected_company_identity["linkedin_company_slug"] == "day-ai"
+        return {"url": url, "employee_count": "11-50",
+                "quote": "Company size 11-50 employees"}
+
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("prechecks passed")
 
     async def homepage(*_args, **_kwargs):
-        return company_fit_match("homepage identity verified")
+        return company_fit_match("homepage identity verified", details={
+            "identity": {"decision": "match", "evidence_source": "company_homepage",
+                         "observed_name": "dayai", "observed_domain": "day.ai",
+                         "observed_linkedin_slug": "day-ai"},
+            "verified_homepage_transport_domain": "day.ai",
+        })
 
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
@@ -563,6 +576,7 @@ def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
         ]
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", current_profile)
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
     monkeypatch.setattr(
@@ -619,7 +633,7 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
         provider_calls.append(kwargs["telemetry_purpose"])
         return dict(verdict), ""
 
-    async def no_current_size(url, *, diagnostic=None, source_text_sink=None):
+    async def no_current_size(url, *, diagnostic=None, source_text_sink=None, expected_company_identity=None):
         profile_fetches.append(url)
         return {
             "outcome": "insufficient_evidence",
@@ -860,7 +874,7 @@ def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
     async def provider(**_kwargs):
         return verdict, ""
 
-    async def timeout(url, *, diagnostic=None, source_text_sink=None):
+    async def timeout(url, *, diagnostic=None, source_text_sink=None, expected_company_identity=None):
         fetches.append(url)
         return None
 
@@ -942,7 +956,7 @@ def test_exact_profile_without_size_accepts_zero_after_invalid_repair_guess(
         provider_calls.append(kwargs["telemetry_purpose"])
         return verdicts.pop(0), ""
 
-    async def no_current_size(url, *, diagnostic=None, source_text_sink=None):
+    async def no_current_size(url, *, diagnostic=None, source_text_sink=None, expected_company_identity=None):
         fetches.append(url)
         return {
             "outcome": "insufficient_evidence",

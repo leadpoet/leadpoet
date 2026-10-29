@@ -324,7 +324,8 @@ def test_repeated_oversized_quotes_finish_unproven_within_existing_turn_limit(mo
         prior_observations={"submitted_source_urls": [URL]},
         prefetched_pages={URL: {"final_url": URL, "text": PAGE}},
     ))
-    assert result["_completed_submit"] is True and result["failure_reason"] == ""
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == "malformed_response"
     assert result["claims"]["headcount"]["status"] == "UNPROVEN"
     assert result["claims"]["headcount"]["reason"] == investigator.OVERSIZED_QUOTE_REASON
     assert 1 < post.call_count <= investigator.MAX_REASONING_TURNS + 1

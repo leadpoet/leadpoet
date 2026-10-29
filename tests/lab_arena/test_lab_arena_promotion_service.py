@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 import subprocess
 
@@ -19,8 +20,10 @@ from tests.lab_arena.test_lab_arena_promotion_git import git, repository, source
 from tests.lab_arena.test_lab_arena_promotion_migration_postgres import (
     _plan,
     connections,
-    database,
+    database as historical_database,
 )
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+from tests.postgres_migration_harness import SCRIPTS
 from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     BASELINE,
     MINER_A,
@@ -32,6 +35,65 @@ from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
 class _Chain:
     def current_settlement_epoch(self):
         return 900
+
+
+def _current_rewards(control):
+    # Historical DB barrier cases run before this explicit app integration
+    # boundary. Install the full committed v2 reward RPCs and exact predecessors.
+    with control.cursor() as cursor:
+        for migration in (
+            "342-lab-arena-reward-predecessor-barrier.sql",
+            "377-lab-arena-monotonic-day-authority.sql",
+            "428-lab-arena-reward-slots.sql",
+            "429-lab-arena-cumulative-reward-pot.sql",
+            "431-lab-arena-slot-decay.sql",
+        ):
+            cursor.execute((SCRIPTS / migration).read_text())
+
+
+@pytest.fixture()
+def database():
+    generator = historical_database.__wrapped__()
+    pg, dsn = next(generator)
+    try:
+        # Keep historical promotion/reward writes. Current run projections need
+        # the exact champion-run columns before their additive read helpers.
+        with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+            cursor.execute((SCRIPTS / "214-lab-arena-prior-credential-refusal.sql").read_text())
+            cursor.execute((SCRIPTS / "227-lab-arena-champion-funding.sql").read_text())
+        prepare_current_service_reads(lambda: pg.connect(**dsn))
+        yield pg, dsn
+    finally:
+        generator.close()
+
+
+def _accepted_scoring(store, control, round_id, *, missing_judgment=False):
+    """Persist the accepted participant work represented by the publication."""
+    row = store.get_round(round_id)
+    scores = {entry["submission_id"]: entry["final_score"]
+              for entry in row["publication_doc"]["final_ranking"]}
+    with control.cursor() as cursor:
+        for participant in row["participants"]:
+            sid = participant["submission_id"]
+            cursor.execute(
+                "INSERT INTO public.lab_arena_submissions (submission_id,round_id,miner_hotkey,status,is_king) "
+                "VALUES (%s,%s,%s,'frozen',%s) ON CONFLICT (submission_id) DO NOTHING",
+                (sid, round_id, participant["miner_hotkey"], participant["is_king"]))
+            for stage in (1, 2):
+                for position in contracts.execution_positions(stage, None, row["configuration_doc"]):
+                    execution_id = f"{sid}-execute-{position}"
+                    for kind in ("execute", "score"):
+                        if missing_judgment and participant["is_king"] and kind == "score" and position == 0:
+                            continue
+                        run_id = execution_id if kind == "execute" else f"{sid}-score-{position}"
+                        cursor.execute(
+                            "INSERT INTO public.lab_arena_runs "
+                            "(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,"
+                            "kind,scored_run_id,status,terminal_cause,per_icp_score,output_ref,result_doc) "
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,1,%s,%s,'accepted','accepted',%s,%s,%s::jsonb)",
+                            (run_id, run_id, round_id, sid, participant["miner_hotkey"],
+                             stage, position, kind, execution_id if kind == "score" else None,
+                             scores[sid], run_id + ".json", json.dumps({"terminal_status": "accepted"})))
 
 
 def _git_archive(remote: Path) -> bytes:
@@ -83,7 +145,7 @@ def _service(
     )
 
 
-def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
+def _winner(store, control, objects, round_id: str, payload: bytes, *, missing_judgment=False) -> str:
     _publish(
         store,
         control,
@@ -94,6 +156,7 @@ def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
         crowned=True,
         evaluation_date="2026-09-07",
         published_at="2026-09-08T00:00:00Z",
+        eligible=True,
     )
     submission_id = round_id + "-miner"
     source_ref = f"arena/{round_id}/sources/{submission_id}.tar.gz"
@@ -106,6 +169,7 @@ def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
             "'{\"public_rerun\":true}'::jsonb)",
             (submission_id, round_id, MINER_A, source_ref, len(payload)),
         )
+    _accepted_scoring(store, control, round_id, missing_judgment=missing_judgment)
     return submission_id
 
 
@@ -134,7 +198,7 @@ def _reward_disabled_winner(store, control, round_id: str) -> str:
     with control.cursor() as cursor:
         cursor.execute(
             "UPDATE public.lab_arena_rounds SET status = 'scored', participants = %s::jsonb, "
-            "finalists = '[]'::jsonb WHERE round_id = %s",
+            "finalists = '[]'::jsonb, evaluation_date='2026-09-05' WHERE round_id = %s",
             (json.dumps(participants), round_id),
         )
         cursor.execute(
@@ -203,6 +267,7 @@ def test_lost_db_completion_reconciles_git_then_activates_miner_once(
     connections, database, tmp_path, monkeypatch
 ):
     store, control = connections
+    _current_rewards(control)
     remote, _, _ = repository(tmp_path)
     objects = svc.LocalObjectStore(tmp_path / "objects")
     signer = signing.LocalSigner.generate()
@@ -237,24 +302,41 @@ def test_lost_db_completion_reconciles_git_then_activates_miner_once(
     assert first_row["reward_basis_doc"]["king_hotkey"] != BASELINE
     # This links activation to the production reward calculation, not to a
     # chain write. On-chain settlement still needs its separate live proof.
-    from leadpoet_canonical.lab_arena_rewards import champion_values
+    from leadpoet_canonical.lab_arena_rewards import slot_allocations
 
-    values = champion_values(
+    allocations = slot_allocations(
         first_row["reward_basis_doc"],
         first_row["effective_reward_epoch"],
         [BASELINE, MINER_A],
     )
-    assert values["champion_uid"] == 1
-    assert values["champion_share"] == values["effective_champion_share"] == 0.30
+    assert allocations == {MINER_A: Fraction(3, 10)}
     assert fresh.activate_reward(round_id)["status"] == "existing"
     assert fresh_store.get_round(round_id)["reward_activated_at"] == first_row["reward_activated_at"]
     _assert_promoted_baseline(fresh, fresh_store, objects, tmp_path)
+
+
+def test_incomplete_baseline_cannot_promote_or_activate_rewards(connections, tmp_path):
+    store, control = connections
+    _current_rewards(control)
+    remote, main, lab = repository(tmp_path)
+    objects = svc.LocalObjectStore(tmp_path / "objects")
+    round_id = "arena-2026-09-07-incomplete"
+    _winner(store, control, objects, round_id, source(), missing_judgment=True)
+    service = _service(store, objects, remote, tmp_path / "git-cache", signing.LocalSigner.generate())
+    assert not service._baseline_final_ready(store.get_round(round_id))
+    assert service.promote_baseline(round_id) == {"status": "waiting_for_baseline"}
+    assert service.activate_reward(round_id) == {"status": "waiting_for_baseline"}
+    assert git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", "lab") == lab
+    row = store.get_round(round_id)
+    assert row["baseline_promoted_at"] is None and row["reward_activated_at"] is None
 
 
 def test_rejected_atomic_push_blocks_reward_and_next_baseline_until_retry(
     connections, tmp_path
 ):
     store, control = connections
+    _current_rewards(control)
     remote, main, lab = repository(tmp_path)
     hook = remote / "hooks" / "pre-receive"
     hook.write_text("#!/bin/sh\nexit 1\n")
@@ -284,7 +366,7 @@ def test_rejected_atomic_push_blocks_reward_and_next_baseline_until_retry(
     assert service.activate_reward(round_id)["status"] == "activated"
 
 
-def test_older_reward_disabled_promotion_blocks_later_no_winner_reward(
+def test_historical_db_barrier_is_explicit_while_service_supersedes_older_promotion(
     connections, tmp_path
 ):
     store, control = connections
@@ -299,12 +381,15 @@ def test_older_reward_disabled_promotion_blocks_later_no_winner_reward(
         baseline_score=60,
         miner_score=50,
         crowned=False,
+        evaluation_date="2026-09-06",
     )
+    _accepted_scoring(store, control, later)
     signer = signing.LocalSigner.generate()
     basis = _basis(signer, later, later_at, 901, "no_king", "")
     key = signing.signing_key_document(signer.public_key_der)
     with pytest.raises(ArenaStoreError, match="reward_waiting_for_promotion"):
         store.activate_reward(later, basis, key)
+    _current_rewards(control)
 
     remote, _, _ = repository(tmp_path)
     service = _service(
@@ -314,9 +399,10 @@ def test_older_reward_disabled_promotion_blocks_later_no_winner_reward(
         tmp_path / "git-cache-global",
         signer,
     )
-    assert service.activate_reward(later) == {"status": "waiting_for_promotion"}
+    assert service.promote_baseline(older) == {"status": "superseded"}
+    assert service._pending_promotion_blocks() is False
 
     plan = _plan("e")
-    assert store.prepare_promotion(older, plan)["status"] == "prepared"
-    assert store.complete_promotion(older, plan)["status"] == "promoted"
+    assert store.prepare_promotion(older, plan) == {"status": "superseded", "newer_round_id": later}
+    assert store.get_round(older)["baseline_promoted_at"] is None
     assert service.activate_reward(later)["status"] == "activated"

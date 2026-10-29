@@ -1840,7 +1840,8 @@ except BlockingIOError:
     assert "Stopping existing gateway" not in result.stdout
 
 
-def test_restart_recovers_lock_inherited_by_detached_relay(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runtime,recovers", [("gateway", True), ("relay", False)])
+def test_restart_recovers_only_lock_inherited_by_gateway_runtime(tmp_path: Path, runtime, recovers) -> None:
     if not Path("/proc/self/fd").exists() or shutil.which("flock") is None:
         return
 
@@ -1860,7 +1861,10 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
             sys.executable,
             "-c",
             holder_code,
-            "gateway.utils.tee_inter_enclave_relay",
+            # The production lock classifier permits only the gateway main
+            # runtime. A relay-shaped command remains an unknown lock owner.
+            *( ["-m", "gateway.main"] if runtime == "gateway" else
+               ["gateway.utils.tee_inter_enclave_relay"] ),
             str(lock_file),
         ],
         stdout=subprocess.PIPE,
@@ -1894,8 +1898,8 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
     assert (
         "Recovering gateway restart lock inherited by a detached runtime process"
         in result.stdout
-    )
-    assert "another gateway restart is already running" not in result.stderr
+    ) is recovers
+    assert ("another gateway restart is already running" in result.stderr) is (not recovers)
 
 
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:

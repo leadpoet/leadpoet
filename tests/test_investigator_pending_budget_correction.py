@@ -163,7 +163,8 @@ def test_final_correction_cannot_research_or_accept_fabricated_proof(monkeypatch
     if correction == "research":
         assert result["failure_reason"] == "malformed_response"
     else:
-        assert result["_completed_submit"] is True
+        assert result["_completed_submit"] is False
+        assert result["failure_reason"] == "malformed_response"
         assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
         assert result["claims"]["required_attribute"]["evidence_quote"] == ""
 

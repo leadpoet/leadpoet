@@ -20,8 +20,7 @@ from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.parallel_twenty_runtime_e2e_test import (
     _http_runner,
@@ -32,7 +31,7 @@ from tests.test_arena_company_quality_policy import _positive_breakdown
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def _submit_without_review(harness, flavor):
@@ -217,6 +216,10 @@ def test_64_miner_company_only_round_preserves_all_work_and_publishes(
     }
     observed = _install_company_only_sandbox(harness)
     harness.chain.epoch = 64_000
+    # Finalize the whole intake identity snapshot before concurrent API writes.
+    # These custom burst submissions do not pass through Harness.submit.
+    harness.chain.registered.extend(
+        fixtures.keypair("svc-miner-" + flavor).ss58_address for flavor in flavors)
     harness.clock.now = datetime.now(timezone.utc) + timedelta(seconds=1)
     harness.round_id = "arena-2098-10-06-capacity"
     configuration = harness.service.create_round(

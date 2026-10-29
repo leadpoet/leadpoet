@@ -10,6 +10,7 @@ import pytest
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena import oct10_uniform_pe_rejudge445_postgres_test as prior
@@ -266,6 +267,7 @@ def _snapshot(cur):
 
 def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch):
     psycopg, dsn = seeded
+    prepare_current_service_reads(lambda: psycopg.connect(**dsn), include_round_reads=False)
     cost_store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     prior_cost = cost_store.submission_costs('miner440-4')
     with psycopg.connect(**dsn) as conn:

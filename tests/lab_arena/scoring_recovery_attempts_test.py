@@ -14,6 +14,7 @@ def _service(runs):
     service._load_scoring_plan = lambda _round, _stage: {
         "work_items": [{"scored_run_id": "accepted-execution"}]}
     service._store = SimpleNamespace(list_runs=lambda *_args, **_kwargs: runs)
+    service._round = lambda _round_id: {"scoring_generation_floor": 0}
     return service
 
 

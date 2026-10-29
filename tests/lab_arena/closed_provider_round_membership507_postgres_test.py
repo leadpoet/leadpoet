@@ -1,11 +1,14 @@
 """Generic closed-cost plans scan uncertainty history once, with identical bills."""
 from pathlib import Path
+from functools import partial
 import hashlib
 import json
 import re
 
 import pytest
 
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
 from tests.lab_arena import closed_provider_candidate_query_postgres_test as prior
 from tests.lab_arena import closed_openrouter_billing_postgres_test as router
 from tests.lab_arena.flat_per_icp_cost500_postgres_test import (
@@ -16,6 +19,9 @@ ROOT = Path(__file__).parents[2]
 MIGRATION = ROOT / 'scripts/507-lab-arena-closed-provider-round-membership.sql'
 SIGNATURE = 'public.lab_arena_next_closed_deepline_reconciliation_v1(text,text,integer,text,bigint)'
 PREIMAGE = 'a65adc61115dbb1fa7258bffcadc96218cf889534f3de189b82134e2c5effaf0'
+# Source Supabase server_version17.6 /170006 verified read-only on2026-10-29.
+# Pin the public multi-platform manifest; other migration fixtures stayPG15.
+POSTGRES_IMAGE = 'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929'
 
 
 @pytest.fixture(scope='module')
@@ -246,8 +252,12 @@ def test_migration_guard_rejects_drift(database, mutation):
 
 @pytest.fixture
 def plan_database():
-    # Keep representative cardinalities independent of earlier scope controls.
-    yield from database.__wrapped__()
+    # Match the source production planner, and keep representative
+    # cardinalities independent of earlier historical migration controls.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, '_database_with_migrations',
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        yield from database.__wrapped__()
 
 
 def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
@@ -295,14 +305,28 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                     'entry_kind':"CASE WHEN s%%3=1 THEN 'reservation' WHEN s%%3=2 THEN 'dispatch' "
                                  "WHEN ((s-1)/3)%%2=0 THEN 'uncertain' ELSE 'settlement' END",
                     'provider':"CASE WHEN ((s-1)/3)%%3=0 THEN 'openrouter' ELSE 'deepline' END"}
-            cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
-                        " FROM lab_arena_ledger l CROSS JOIN generate_series(1,500000) s "
-                        "WHERE call_identity=%s AND entry_kind='uncertain'", (maximum, cid))
+            # Seed identical cardinality in bounded statements. Preserve the
+            # measured query budget and every history/plan assertion below.
+            for first in range(1, 500001, 100000):
+                cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
+                            " FROM lab_arena_ledger l CROSS JOIN generate_series(%s,%s) s "
+                            "WHERE call_identity=%s AND entry_kind='uncertain'",
+                            (maximum, first, first + 99999, cid))
+                assert cur.rowcount == 100000
             for table in ('lab_arena_ledger','lab_arena_runs','lab_arena_rounds'):
                 cur.execute('ANALYZE '+table)
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')
-            results = []; plans = {}
+            cur.execute("SELECT current_setting('server_version'), current_setting('server_version_num')")
+            server_version, server_version_num = cur.fetchone()
+            results = []; plans = {'server_version': server_version,
+                                   'server_version_num': server_version_num}
+            print('PLAN507_RUNTIME server_version=%s server_version_num=%s' %
+                  (server_version, server_version_num), flush=True)
             for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
+                # Only the deliberately obsolete 60-scan reference needs a
+                # larger allowance. Optimized507 retains its 20-second bound.
+                cur.execute('SET LOCAL statement_timeout=%s',
+                            ('60s' if name.startswith('test_before_') else '20s',))
                 cur.execute('SELECT public.'+name+"('live','plan507',71,'',0)")
                 results.append(cur.fetchone()[0])
                 cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+
@@ -321,6 +345,8 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                     values.extend(cte_loops(child))
                 return values
             for index,name in enumerate(('test_before_'+prior.NAMES[0],prior.NAMES[0])):
+                cur.execute('SET LOCAL statement_timeout=%s',
+                            ('60s' if index == 0 else '20s',))
                 cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',('public.'+name+prior.SUFFIX,))
                 body = cur.fetchone()[0].split('AS $function$',1)[1].split('$function$',1)[0].strip().removesuffix(';')
                 literal = body

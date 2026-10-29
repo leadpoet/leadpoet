@@ -4,6 +4,7 @@ import ast
 import copy
 import hashlib
 import json
+import gzip
 from pathlib import Path
 
 import pytest
@@ -12,18 +13,38 @@ from scripts import build_arena_reviewer_runtime as composer
 from scripts.arena_reviewer_attribute_source_seam import (
     AttributeSourceSeamError, CORRECTION_ID, DELTAS, convert_attribute_source_seam,
 )
+from tests.reviewer_frozen_sources import frozen_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_FROZEN_POSTIMAGE = frozen_source("attribute_source", composer.FINALITY_FILE)
 
 
 def _sources():
-    current = (ROOT / composer.FINALITY_FILE).read_bytes()
+    # Preserve the exact reviewed frozen function hashes as current grading
+    # evolves. The converter must still change only its two owned blocks.
+    current = _FROZEN_POSTIMAGE
     original = current
     for _, old, new in DELTAS:
         assert original.count(new.encode()) == 1
         original = original.replace(new.encode(), old.encode(), 1)
     return original, current
+
+
+def test_historical_fixture_rejects_changed_source_bytes(monkeypatch, tmp_path):
+    from tests import reviewer_frozen_sources
+    source = _FROZEN_POSTIMAGE
+    fixture = tmp_path / "source.gz"
+    fixture.write_bytes(gzip.compress(source, mtime=0))
+    (tmp_path / "sources.json").write_text(json.dumps({"probe": {"files": {
+        composer.FINALITY_FILE: {"fixture": fixture.name,
+                                "sha256": hashlib.sha256(source).hexdigest()},
+    }}}))
+    monkeypatch.setattr(reviewer_frozen_sources, "ROOT", tmp_path)
+    assert frozen_source("probe", composer.FINALITY_FILE) == source
+    fixture.write_bytes(gzip.compress(source + b"\n# unreviewed grading bytes\n", mtime=0))
+    with pytest.raises(AssertionError, match=composer.FINALITY_FILE):
+        frozen_source("probe", composer.FINALITY_FILE)
 
 
 def test_exact_frozen847_function_hashes_and_only_approved_bytes_change():

@@ -24,7 +24,10 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    # Current baseline recovery invokes guarded RPCs introduced after 470.
+    # Keep the independent historical 347 fixture below at its exact schema.
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
 
 
 @pytest.fixture()

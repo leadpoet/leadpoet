@@ -21,7 +21,9 @@ SHA = "a" * 40
 
 def _between(start: str, end: str) -> str:
     assert SOURCE.count(start) == 1, start
-    return SOURCE.split(start, 1)[1].split(end, 1)[0]
+    remainder = SOURCE.split(start, 1)[1]
+    assert end in remainder, end
+    return remainder.split(end, 1)[0]
 
 
 def _function(name: str) -> str:
@@ -47,8 +49,14 @@ BACKEND_CHECK = 'GATEWAY_DEPLOY_STAGE="gateway_health_check"' + _between(
 )
 PUBLISH = 'GATEWAY_DEPLOY_STAGE="host_restart_script_install"' + _between(
     'GATEWAY_DEPLOY_STAGE="host_restart_script_install"',
-    '\nLAB_ARENA_RESTART_GUARD_GENERATION=""',
+    '\nGATEWAY_DEPLOY_STAGE="completed"',
 )
+
+
+def test_publication_fixture_excludes_deployment_finalization():
+    assert 'GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"' in PUBLISH
+    assert 'GATEWAY_DEPLOY_PLAN_FILE' not in PUBLISH
+    assert 'finalize_deployment_record' not in PUBLISH
 
 
 def _runtime_clone(tmp_path: Path, origin: str) -> str:
@@ -383,8 +391,13 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
            "TEST_PAIRED_RESTART": str(int(paired)),
            "FAIL_IDLE": "1" if fail == "idle" else "0",
            "IDLE_REVIEW_FILE": str(tmp_path / "review-rows.json") if review_rows is not None else ""}
-    return subprocess.run(["bash", str(harness)], cwd=tmp_path, env=env,
-                          capture_output=True, text=True, timeout=20)
+    result = subprocess.run(["bash", str(harness)], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=20)
+    # Bash 3 can report a successful outer command after nounset terminates a
+    # command-substitution subshell. Never accept an incomplete fixture path.
+    assert 'unbound variable' not in result.stderr, result.stderr
+    assert ': command not found' not in result.stderr, result.stderr
+    return result
 
 
 def _events(tmp_path: Path) -> list[str]:

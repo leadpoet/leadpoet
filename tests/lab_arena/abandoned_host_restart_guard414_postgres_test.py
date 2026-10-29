@@ -9,6 +9,7 @@ import pytest
 from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
 from tests.lab_arena import restart_expired_zero_call394_postgres_test as guard
 from tests.lab_arena import score_host_retry398_postgres_test as identity
+from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 ROOT = Path(__file__).parents[2]
 SQL = ROOT/'scripts/414-lab-arena-abandoned-host-restart-guard.sql'
@@ -175,10 +176,10 @@ def test_capture_and_early_recovery_share_claim_control_lock(database,migrated,w
     finally: owner.close()
 
 
-def test_http_host_recovery_publishes_and_promotes_with414_active(database,migrated,tmp_path,monkeypatch):
+def test_http_host_recovery_publishes_and_promotes_with414_active(complete_application_database,tmp_path,monkeypatch):
     from tests.lab_arena import abandoned_host_recovery412_e2e_test as full_http
-    full_http.test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(
-        database,migrated,tmp_path,monkeypatch,
+    full_http._exercise_host_fault(
+        complete_application_database,True,tmp_path,monkeypatch,
     )
 
 

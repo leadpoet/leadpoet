@@ -281,8 +281,14 @@ def test_provider_exception_keeps_frame_correlation():
 
 def test_exception_trace_instrumentation_failure_preserves_original_exception():
     class LockedFailure(ArenaStoreUnavailable):
+        def __init__(self, *args):
+            super().__init__(*args)
+            object.__setattr__(self, "_metadata_locked", True)
+
         def __setattr__(self, _name, _value):
-            raise RuntimeError("metadata disabled")
+            if getattr(self, "_metadata_locked", False):
+                raise RuntimeError("metadata disabled")
+            super().__setattr__(_name, _value)
 
     failure = LockedFailure("provider ledger unavailable")
     provider = broker_module.Broker.__new__(broker_module.Broker)

@@ -13,11 +13,20 @@ from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows, _security_state
 from tests.lab_arena.competition_summary_projection_test import _row
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration, prepare_current_service_reads
 
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/464-lab-arena-public-read-index.sql"
 INDEX = "lab_arena_rounds_chain_mode_created_idx"
+# Migration 501 adds company_judgment_policy to this projection. These exact
+# migration-464 checks must keep the original public field contract.
+PUBLIC_CONFIGURATION_FIELDS_464 = (
+    'mode', 'network_name', 'netuid', 'schedule', 'benchmark_disclosure_policy',
+    'stage_1_icp_count', 'stage_2_icp_count', 'promotion_margin',
+    'execution_sequence_policy', 'sourcing_cost_eligibility_policy',
+    'recovery_source_round_id', 'integrity_policy', 'contact_policy',
+    'company_quality_policy', 'intent_details_policy', 'baseline_hotkey',
+)
 
 
 @pytest.fixture(scope="module")
@@ -41,10 +50,12 @@ def _nodes(plan):
 
 def test_index_bounds_large_round_reads_preserves_responses_and_security(database, monkeypatch):
     pg, dsn = database
+    prepare_current_service_reads(lambda: pg.connect(**dsn), include_run_reads=False)
     connection = pg.connect(**dsn)
     connection.autocommit = True
     transport = PsycopgTransport(lambda: pg.connect(**dsn))
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 10, 14, tzinfo=timezone.utc)
     service._store = ArenaStore(transport)
     service._config = SimpleNamespace(mode="live", pinned_round_id=None,
         chain=SimpleNamespace(current_settlement_epoch=lambda: 100))
@@ -133,6 +144,6 @@ def test_compact_configuration_preserves_types_missing_null_and_permissions(data
                 cursor.execute("SELECT public.lab_arena_public_configuration_v1(jsonb_populate_record(NULL::public.lab_arena_rounds,%s::jsonb))", (json.dumps({"configuration_doc": configuration}),))
                 actual = cursor.fetchone()[0]
                 assert actual == ({key: value for key, value in configuration.items()
-                    if key in store_module.PUBLIC_CONFIGURATION_FIELDS} if isinstance(configuration, dict) else {})
+                    if key in PUBLIC_CONFIGURATION_FIELDS_464} if isinstance(configuration, dict) else {})
     finally:
         connection.close()

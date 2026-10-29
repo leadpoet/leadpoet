@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_arena import contracts
@@ -29,7 +30,21 @@ migrated399 = capacity401.migrated399
 migrated = capacity401.migrated
 
 
+@pytest.fixture()
+def complete_application_database():
+    # Application integration follows the current service. Exact historical
+    # claim-migration proofs remain in proxy_model_capacity401_postgres_test.
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
 def test_company_only_baseline_miners_costs_promotion_and_publication(
+    complete_application_database, tmp_path,
+):
+    _exercise_company_only_round(complete_application_database, True, tmp_path)
+
+
+def _exercise_company_only_round(
     database, migrated, tmp_path
 ):
     psycopg, dsn = database

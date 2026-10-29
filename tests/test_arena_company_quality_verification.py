@@ -851,6 +851,8 @@ def test_us_hq_state_variants_match(submitted_state, observed_state):
         "observed_hq_country": "USA",
         "observed_hq_state": observed_state,
         "geography_matches": True,
+        "geography_evidence_url": "https://acme.com/about",
+        "geography_evidence_quote": f"Acme is headquartered in {observed_state}, USA.",
     }
 
     assert _decision_from_observed_geography(
@@ -859,6 +861,19 @@ def test_us_hq_state_variants_match(submitted_state, observed_state):
         company=_company(state=submitted_state),
         company_quality=True,
     ) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("quote", [
+    "", "Acme has an office in California, United States.",
+    "Acme location: California, United States.",
+])
+def test_quality_state_normalization_requires_headquarters_proof(quote):
+    assert _decision_from_observed_geography(
+        {"observed_hq_country": "United States", "observed_hq_state": "California",
+         "geography_matches": True, "geography_evidence_url": "https://acme.com/about",
+         "geography_evidence_quote": quote},
+        _icp(), company=_company(state="California"), company_quality=True,
+    ) == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize(
@@ -870,11 +885,15 @@ def test_dc_icp_geography_requires_dc_headquarters(requested):
         "observed_hq_country": "United States",
         "observed_hq_state": "District of Columbia",
         "geography_matches": True,
+        "geography_evidence_url": "https://acme.com/about",
+        "geography_evidence_quote": "Acme is headquartered in District of Columbia, United States.",
     }
     california_verdict = {
         "observed_hq_country": "United States",
         "observed_hq_state": "California",
         "geography_matches": False,
+        "geography_evidence_url": "https://acme.com/about",
+        "geography_evidence_quote": "Acme is headquartered in California, United States.",
     }
 
     assert _decision_from_observed_geography(
@@ -908,6 +927,8 @@ def test_wrong_or_missing_observed_us_hq_state_fails(
             "observed_hq_country": observed_country,
             "observed_hq_state": observed_state,
             "geography_matches": True,
+            "geography_evidence_url": "https://acme.com/about",
+            "geography_evidence_quote": f"Acme is headquartered in {observed_state}, {observed_country}.",
         },
         _icp(),
         company=_company(state="California"),
@@ -927,6 +948,8 @@ def test_observed_us_country_cannot_be_bypassed_by_false_submitted_country(
             "observed_hq_country": "United States",
             "observed_hq_state": "California",
             "geography_matches": True,
+            "geography_evidence_url": "https://acme.com/about",
+            "geography_evidence_quote": "Acme is headquartered in California, United States.",
         },
         _icp(),
         company=_company(country=submitted_country, state="California"),
@@ -942,6 +965,8 @@ def test_non_us_state_remains_optional_and_historical_state_path_is_unchanged():
             "observed_hq_country": "Canada",
             "observed_hq_state": "",
             "geography_matches": True,
+            "geography_evidence_url": "https://acme.com/about",
+            "geography_evidence_quote": "Acme is headquartered in Canada.",
         },
         _icp(country="Canada", geography="Canada"),
         company=_company(country="Canada", state=""),

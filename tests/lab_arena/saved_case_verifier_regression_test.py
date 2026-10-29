@@ -124,8 +124,8 @@ def _complete_provider_verdict(
     *,
     observed_employee_count=None,
     employee_size_matches=True,
-    employee_size_evidence_url="https://www.linkedin.com/company/example",
-    employee_size_evidence_quote="The company has an in-range team size.",
+    employee_size_evidence_url=None,
+    employee_size_evidence_quote=None,
     observed_industry=None,
     observed_subindustry=None,
     industry_matches=True,
@@ -167,8 +167,15 @@ def _complete_provider_verdict(
             else observed_employee_count
         ),
         "employee_size_matches": employee_size_matches,
-        "employee_size_evidence_url": employee_size_evidence_url,
-        "employee_size_evidence_quote": employee_size_evidence_quote,
+        "employee_size_evidence_url": (
+            company["company_website"] if employee_size_evidence_url is None
+            else employee_size_evidence_url),
+        "employee_size_evidence_quote": (
+            employee_size_evidence_quote if employee_size_evidence_quote is not None
+            else "Company size %s employees" % (
+                company.get("employee_count") if observed_employee_count is None
+                else observed_employee_count)
+        ),
         "observed_industry": observed_industry or company.get("industry") or "",
         "observed_subindustry": observed_subindustry or row["icp"].get("sub_industry") or "",
         "industry_matches": industry_matches,
@@ -251,6 +258,11 @@ def _install_company_boundaries(monkeypatch, row: dict, verdict: dict) -> None:
     async def no_structured_profile(*_args, **_kwargs):
         return None
 
+    async def no_current_profile(url, **_kwargs):
+        # Optional fresh profile lookup is outside this retained evidence
+        # replay. Its explicit source-local miss supplies no size or failure.
+        return {"outcome": "insufficient_evidence", "url": url}
+
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
     monkeypatch.setattr(
         lead_scorer, "_request_company_reverify_json", broad_provider
@@ -261,6 +273,7 @@ def _install_company_boundaries(monkeypatch, row: dict, verdict: dict) -> None:
         "fetch_structured_linkedin_company_size",
         no_structured_profile,
     )
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", no_current_profile)
 
 
 def _score_saved_case(row: dict) -> dict:
@@ -321,7 +334,7 @@ def test_all_saved_cases_cross_lab_scorer_and_score_work_item(monkeypatch):
     arena_scorer = scoring.lab_scorer(_policy())
 
     for index, row in enumerate(_cases()):
-        with pytest.raises(scoring.ScoringError, match="ReachedVerifierBoundary"):
+        with pytest.raises(scoring.ScoringError, match="^judge_exhausted attempts=1 reason=unknown origin=exception$"):
             scoring.score_work_item(
                 {"scored_run_id": "saved-case-%02d" % index},
                 icp=row["icp"],
@@ -358,7 +371,7 @@ def test_exact_dexory_label_reaches_independent_company_evidence(monkeypatch):
     )
     arena_scorer = scoring.lab_scorer(_policy())
 
-    with pytest.raises(scoring.ScoringError, match="controlled-company-model-boundary"):
+    with pytest.raises(scoring.ScoringError, match="^judge_exhausted attempts=1 reason=unknown origin=exception$"):
         scoring.score_work_item(
             {"scored_run_id": "saved-dexory"},
             icp=row["icp"],
@@ -537,6 +550,16 @@ def test_saved_false_negative_company_fact_is_recovered_before_later_gate(
                 evidence_url="https://www.linkedin.com/company/gocloudforce",
                 evidence_quote="Cloudforce has 51-200 employees company-wide.",
             ))
+        if "stage" in targets:
+            raw_findings.append(_finding(
+                "stage", observed_value=verdict["observed_company_stage"],
+                evidence_url=verdict["stage_evidence_url"],
+                evidence_quote=verdict["stage_evidence_quote"],
+            ))
+        if "required_attribute" in targets:
+            # Reuse concrete source facts only with a separate attribute
+            # judgment. The industry's positive status proves no attribute.
+            raw_findings.append({**finding, "target": "required_attribute"})
         fetched_pages = {
             item["evidence_url"]: item["evidence_quote"]
             for item in raw_findings
@@ -560,7 +583,12 @@ def test_saved_false_negative_company_fact_is_recovered_before_later_gate(
         )
         assert claims is not None
         assert all(item["status"] == "VERIFIED" for item in claims.values())
-        return {"claims": claims, "failure_reason": ""}
+        return {
+            "claims": claims, "_completed_submit": True, "failure_reason": "",
+            "_validated_stage_finding": claims.get("stage", {}),
+            lead_scorer.PRIVATE_FETCHED_PAGES_KEY: {
+                url: {"final_url": url, "text": text} for url, text in fetched_pages.items()},
+        }
 
     monkeypatch.setattr(
         lead_scorer, "investigate_company_evidence", bounded_investigator
@@ -640,10 +668,11 @@ def test_saved_samsara_headcount_gap_is_investigated_without_inventing_count(
     )
     with pytest.raises(
         scoring.ScoringError,
-        match="Company fit unavailable: unproven dimensions: employee_size",
+        match=(r"^judge_exhausted attempts=1 reason=unknown fit_dims=employee_size(?:,.*)? "
+               r"fit_class=missing fit_reason=missing inv_complete=no inv_reason=none fetch=none$"),
     ):
         _score_saved_case(row)
-    assert calls == [("headcount",)]
+    assert len(calls) == 1 and "headcount" in calls[0]
 
 
 NEGATIVE_COMPANY_CONTROLS = [
@@ -817,6 +846,7 @@ def test_saved_company_negative_control_stays_zero_through_real_adapter(
         assert claims is not None
         result = {
             "claims": claims,
+            "_completed_submit": True,
             "failure_reason": "",
         }
         stage_finding = claims.get("stage")

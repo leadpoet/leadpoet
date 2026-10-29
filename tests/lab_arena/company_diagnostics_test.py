@@ -97,7 +97,10 @@ def _service(monkeypatch, *, disclosed=True):
     _install_completed_scores_cache(service)
     service._round = lambda _: row
     service._public_icp_disclosure = lambda _: {"public_positions": [0]} if disclosed else None
-    service._store = SimpleNamespace(list_runs=lambda *a, **k: copy.deepcopy(runs))
+    judgments = [{"run_id": "judge-0", "scored_run_id": "run-0",
+                  "status": "accepted", "stage": 1, "icp_position": 0}]
+    service._store = SimpleNamespace(list_runs=lambda *a, **k: copy.deepcopy(
+        judgments if k.get("kind") == "score" else runs))
     reads = []
     def get_output(ref, _limit):
         reads.append(ref)
@@ -105,9 +108,9 @@ def _service(monkeypatch, *, disclosed=True):
         return b'{"companies":[{"company_name":"Disclosed company","contact":null}]}'
     service._objects = SimpleNamespace(get_bounded=get_output)
     monkeypatch.setattr(module, "validate_output_document", lambda value: value)
-    service._public_scoring_attribution = lambda *a: {}
+    service._public_scoring_attribution = lambda *a, **k: {}
     service._scoring_outputs = lambda *a: {"run-0": {"status": "accepted"}}
-    service.evaluation_icps = lambda _: [{}]
+    service._benchmark_icps_from_row = lambda _round_id, _row: [{}]
     service._verified_breakdowns = lambda *a, **k: [_breakdown()]
     return service, reads, row
 
@@ -123,7 +126,7 @@ def test_public_api_projects_only_disclosed_accepted_company_checks(monkeypatch)
 
 def test_pending_disclosure_never_fetches_company_or_verifier_evidence(monkeypatch):
     service, reads, _ = _service(monkeypatch, disclosed=False)
-    service.evaluation_icps = lambda _: pytest.fail("private ICPs accessed")
+    service._benchmark_icps_from_row = lambda *_args: pytest.fail("private ICPs accessed")
     service._scoring_outputs = lambda *a: pytest.fail("private judgments accessed")
     assert service.public_results("round", "miner")["company_diagnostics"] == []
     assert reads == []

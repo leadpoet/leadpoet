@@ -20,7 +20,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "lab_arena"
-MEASURED_PACKAGES = (
+SOURCE_PACKAGES = (
     "gateway",
     "leadpoet_canonical",
     "leadpoet_verifier",
@@ -118,44 +118,60 @@ def test_lab_arena_is_in_the_distribution_without_a_runtime_lock():
     assert "runtime.lock.json" not in setup
 
 
-def _imports_lab_arena(path: Path) -> bool:
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except SyntaxError:
-        return False
+# These host adapters are outside the thirteen-module identity-enclave closure.
+# Keep the exact existing module/symbol contracts closed to new runtime imports.
+HOST_ARENA_IMPORTS = {
+    "gateway/api/arena_proxy.py": {("lab_arena", name) for name in ("operations", "training_input", "training_observations")},
+    "gateway/middleware/body_size.py": {("lab_arena", "training_observations")},
+    "gateway/observability/otel_bootstrap.py": {("lab_arena.store", "safe_store_error_metadata")},
+    "gateway/tasks/icp_generator.py": {("lab_arena", "contracts"), ("lab_arena.integrity", "company_only_icp"),
+                                        ("lab_arena.store", "ArenaStore"), ("lab_arena.store", "PostgrestTransport")},
+    "leadpoet_canonical/arena_weights.py": {("lab_arena", "contracts")},
+    "qualification/scoring/company_evidence_investigator.py": {("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS")},
+    "qualification/scoring/competition.py": {("lab_arena.provider_observations", "company_observation")},
+    "qualification/scoring/linkedin_company_size.py": {("lab_arena.scoring_provider_compat", "CompatibilityResponseError"),
+                                                       ("lab_arena.scoring_provider_compat", "_firecrawl_response")},
+}
+
+
+def _arena_import_bindings(source: str) -> set[tuple[str, str]]:
+    tree = ast.parse(source)
+    imports = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            if any(alias.name == "lab_arena" or alias.name.startswith("lab_arena.") for alias in node.names):
-                return True
-        elif isinstance(node, ast.ImportFrom):
+            imports.update((alias.name, "") for alias in node.names
+                           if alias.name == "lab_arena" or alias.name.startswith("lab_arena."))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
             module = node.module or ""
-            if node.level == 0 and (module == "lab_arena" or module.startswith("lab_arena.")):
-                return True
-    return False
+            if module == "lab_arena" or module.startswith("lab_arena."):
+                imports.update((module, alias.name) for alias in node.names)
+    return imports
+
+
+def _imports_lab_arena(path: Path) -> bool:
+    return bool(_arena_import_bindings(path.read_text(encoding="utf-8")))
 
 
 def test_no_measured_package_imports_lab_arena():
-    offenders = []
-    for package in MEASURED_PACKAGES:
-        base = ROOT / package
-        if not base.exists():
-            continue
-        for path in base.rglob("*.py"):
-            if _imports_lab_arena(path):
-                offenders.append(str(path.relative_to(ROOT)))
-    for extra in (ROOT / "validator_tee" / "enclave",):
-        for path in extra.rglob("*.py"):
-            if _imports_lab_arena(path):
-                offenders.append(str(path.relative_to(ROOT)))
-    # Only the canonical signing-message validator can import the small Arena
-    # request contract. No protected code imports the service, scorer or store.
-    assert offenders == ["leadpoet_canonical/arena_weights.py"]
-    source = (ROOT / offenders[0]).read_text(encoding="utf-8")
-    imports = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom) and node.module == "lab_arena"]
-    assert len(imports) == 1 and [item.name for item in imports[0].names] == ["contracts"]
+    from gateway.tee.scoring_import_closure import build_module_index, discover_scoring_modules
+
+    index = build_module_index(gateway_root=ROOT / "gateway", source_root=ROOT)
+    measured = discover_scoring_modules(index)
+    assert measured
+    assert not [module for module in measured if _imports_lab_arena(index[module])]
+    enclave = ROOT / "validator_tee" / "enclave"
+    assert not [str(path.relative_to(ROOT)) for path in enclave.rglob("*.py") if _imports_lab_arena(path)]
+
+    imports = {}
+    for package in SOURCE_PACKAGES:
+        for path in (ROOT / package).rglob("*.py"):
+            bindings = _arena_import_bindings(path.read_text(encoding="utf-8"))
+            if bindings:
+                imports[str(path.relative_to(ROOT))] = bindings
+    assert imports == HOST_ARENA_IMPORTS
     # And the dynamic-import string form, which AST cannot see.
     text_offenders = []
-    for package in MEASURED_PACKAGES:
+    for package in SOURCE_PACKAGES:
         base = ROOT / package
         if not base.exists():
             continue
@@ -163,3 +179,12 @@ def test_no_measured_package_imports_lab_arena():
             if re.search(r"import_module\(\s*['\"]lab_arena", path.read_text(encoding="utf-8", errors="replace")):
                 text_offenders.append(str(path.relative_to(ROOT)))
     assert text_offenders == []
+
+
+@pytest.mark.parametrize("statement", [
+    "from lab_arena import service", "from lab_arena import scoring",
+    "from lab_arena.service import ArenaService", "import lab_arena.service",
+])
+def test_host_contract_allowlist_rejects_service_and_scorer_leakage(statement):
+    for allowed in HOST_ARENA_IMPORTS.values():
+        assert _arena_import_bindings(statement) - allowed

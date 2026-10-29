@@ -190,7 +190,8 @@ def test_attribute_correction_does_not_repeat_or_relax_evidence_validation(monke
         assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
         assert result["claims"]["required_attribute"]["evidence_url"] == ""
         assert result["usage"]["search_calls"] == result["usage"]["fetch_calls"] == 0
-        assert result["_completed_submit"] is True
+        assert result["_completed_submit"] is (final == "unproven")
+        assert result["failure_reason"] == ("" if final == "unproven" else "malformed_response")
 
 
 def test_simple_or_can_reuse_quote_without_a_correction(monkeypatch):

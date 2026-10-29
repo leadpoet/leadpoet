@@ -90,6 +90,7 @@ def _wired_factory(monkeypatch, *, prices=None):
         mark_provider_fallback = staticmethod(lambda *_args: {"status": "none"})
         provider_restart_required_for = staticmethod(lambda *_args: False)
         code_review_key = staticmethod(lambda *_args: "test")
+        champion_score_for = staticmethod(lambda _context: None)
 
     monkeypatch.setattr(wiring, "SubmissionProviderKeys", Keys)
     monkeypatch.setattr(wiring, "SubmissionCodeReviewer", lambda **kw: object())

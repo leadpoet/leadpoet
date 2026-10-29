@@ -3828,7 +3828,7 @@ def test_empty_image_cache_fails_runner_startup_before_api_or_claim(tmp_path, mo
     monkeypatch.setattr(
         wiring, "prepare_validator_scoring",
         lambda *_args, **_kwargs: SimpleNamespace(
-            parallelism=1, verified_proxies=SimpleNamespace(webshare_worker_count=0),
+            parallelism=1, verified_proxies=SimpleNamespace(webshare_worker_count=0, excluded_workers=()),
         ),
     )
     monkeypatch.setattr(proxy_workers, "ProxyWorkerPool", lambda _value: object())

@@ -398,6 +398,7 @@ def test_grounded_wrong_entity_retains_cited_source_without_changing_decision(
     assert quote in result["verified_source_context"][0]["text"]
 
 
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_full_scoring_input_reuses_a_across_mixed_company_submissions(
     monkeypatch,
 ):

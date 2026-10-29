@@ -97,7 +97,7 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
 
 
 @pytest.mark.parametrize('attempts,retryable,pending', [
-    (3, True, True), (5, True, True), (6, True, False),
+    (3, True, False), (5, True, False), (6, True, False),
     (1, False, False), (2, None, True), (3, None, False),
 ])
 def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pending):

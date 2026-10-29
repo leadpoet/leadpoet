@@ -84,7 +84,7 @@ TABLES = (
 )
 
 
-def test_arena_migrations_are_uniquely_numbered():
+def test_arena_migrations_preserve_unique_identities_and_recorded_sequences():
     numbered = {}
     for path in SCRIPTS.glob("*.sql"):
         match = re.match(r"^(\d+)-", path.name)
@@ -110,7 +110,8 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
-    assert all(len(paths) == 1 for paths in numbered.values()), numbered
+    from tests.lab_arena.full_thinking_e2e_schema_tail_test import _assert_migration_identities
+    _assert_migration_identities([SCRIPTS / name for paths in numbered.values() for name in paths])
 
 
 def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():

@@ -13,11 +13,13 @@ import pytest
 from scripts import arena_reviewer_homepage_brand_alias_seam as seam
 from scripts import build_arena_reviewer_runtime as builder
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+from tests.reviewer_frozen_sources import frozen_source
 
+_FROZEN_CORRECTED = {name: frozen_source("homepage_brand", name)
+    for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
 
 def sources():
-    corrected = {name: (builder.ROOT / name).read_bytes()
-                 for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
+    corrected = dict(_FROZEN_CORRECTED)
     return reverse(corrected), corrected
 
 
@@ -40,6 +42,8 @@ def originals(include_brand=True):
     files = {name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
                                    if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in names}
+    # Compare both overlays against the same frozen grader revision.
+    files[builder.GRADER_FILE] = _FROZEN_CORRECTED[builder.GRADER_FILE]
     if include_brand:
         files.update(sources()[0])
     return files

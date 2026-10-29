@@ -165,6 +165,7 @@ def test_new_round_uses_60m_and_historical_profiles_remain_valid():
     service.runner_settings = lambda: (["5" * 48], [])
     service._require_round_ownership = lambda _round_id: None
     service._store = SimpleNamespace(
+        get_round=lambda _round_id: None,
         create_round=lambda *_args: {"status": "created"},
     )
     current = service.create_round(
@@ -185,7 +186,7 @@ def test_new_round_uses_60m_and_historical_profiles_remain_valid():
         "openrouter": 2000,
     }
     assert current["scoring_cap_microusd"] == 50_000_000
-    assert current["scoring_wall_clock_seconds"] == 900
+    assert current["scoring_wall_clock_seconds"] == 1200
     with pytest.raises(contracts.ArenaContractError):
         contracts.validate_round_configuration(
             dict(current, icp_wall_clock_seconds=300)

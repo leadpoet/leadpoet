@@ -1,3 +1,18 @@
+## Scoped production authorization: October 29 full CI recovery
+
+The user authorized investigation and repair of confirmed full-repository CI
+failures, including pre-change comparisons, complete CI runs, independent review,
+push, safe merge, and canonical deployment where needed. The user explicitly
+included PR 885 and fresh read-only OnePatch/Sentry checks. This task may repair
+stale test fixtures and the missing literal Arena telemetry denial code. Preserve
+Arena scoring, judging, training capture, billing, miner behavior, model settings,
+all stored data, release protections, and concurrent work. Do not mask failures,
+weaken test assertions, add dependencies, replay paid calls, change database or
+chain state, or create new collection systems. Internal agents own assigned code
+and tests only; the coordinator owns release and production validation through
+the existing paired controller and shared deployment lock. This authority ends
+when the scoped CI and deployed behavior are verified.
+
 ## Scoped production authorization: October 28 training readiness fixes
 
 The user authorized all four audited training-readiness changes: preserve valid

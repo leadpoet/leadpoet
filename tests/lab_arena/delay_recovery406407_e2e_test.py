@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import proxy_model_capacity401_e2e_test as prior
+from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 
 database = prior.database
@@ -30,8 +31,10 @@ def migrated(database, migrated399):
 
 
 def test_delay_fixes_preserve_baseline_miners_costs_promotion_and_weights(
-    database, migrated, tmp_path,
+    complete_application_database, tmp_path,
 ):
-    prior.test_company_only_baseline_miners_costs_promotion_and_publication(
-        database, migrated, tmp_path,
+    # Exact delay-migration replay fixtures remain available above. This flow
+    # invokes the current service and its complete guarded schema.
+    prior._exercise_company_only_round(
+        complete_application_database, True, tmp_path,
     )

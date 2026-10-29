@@ -266,6 +266,7 @@ def test_hold_stale_token_and_close_claim_lock_preserve_work(database):
 def test_service_billing_return_only_yields_at_execution_cutoff(case):
     now=datetime.now(timezone.utc)
     service=object.__new__(svc.ArenaService)
+    service._lock=threading.RLock()
     calls=[]
     status="stage2_scoring" if case=="scoring" else "stage2"
     config={"schedule":{"stage_2_close":_stamp(now+timedelta(seconds=1 if case=="before" else -1))}}
@@ -273,7 +274,7 @@ def test_service_billing_return_only_yields_at_execution_cutoff(case):
     service._clock=lambda:now
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)
-    service._reconcile_deepline_cost=lambda _:{"status":"none"}
+    service._reconcile_active_deepline_cost=lambda _:{"status":"none", "checked":0}
     service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(now+timedelta(days=1))}
     service._store=SimpleNamespace(operator_hold_active=lambda:case=="held",expire_leases=lambda _:calls.append("expire"))
     service._advance_round_locked=lambda _:calls.append("advance") or {"status":"draining"}

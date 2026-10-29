@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("scorer_process_environment")
+
 from lab_arena import contact_policy, contracts, runner, runtime, scorer_entrypoint, scoring
 from qualification.scoring import contact_verification, lead_scorer
 from tests.test_arena_score_integrity import _icp, _positive_breakdown, _public_company

@@ -151,7 +151,7 @@ def test_repair_identity_scope_allows_only_fully_bound_same_entity_proof():
     )
 
 
-def test_unrelated_repair_cannot_attach_old_stage_proof_to_new_dbs_entity(
+def test_explicit_attribute_review_does_not_reopen_unrelated_dbs_identity_repair(
     monkeypatch,
 ):
     initial = {
@@ -208,7 +208,7 @@ def test_unrelated_repair_cannot_attach_old_stage_proof_to_new_dbs_entity(
 
     async def investigator(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("stage", "industry")
+        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
         finding = {
             "target": "stage",
             "status": "VERIFIED",
@@ -233,6 +233,10 @@ def test_unrelated_repair_cannot_attach_old_stage_proof_to_new_dbs_entity(
         return {
             "claims": {
                 "stage": finding,
+                "required_attribute": {
+                    **finding, "target": "required_attribute", "status": "UNPROVEN",
+                    "evidence_url": "", "evidence_quote": "",
+                },
                 "industry": {
                     **finding,
                     "target": "industry",
@@ -297,7 +301,9 @@ def test_unrelated_repair_cannot_attach_old_stage_proof_to_new_dbs_entity(
         )
     )
 
-    assert calls == {"broad": 2, "investigator": 1, "ground": 1}
+    # A separate negative attribute review must not reopen broad identity
+    # repair beside already retained stage proof.
+    assert calls == {"broad": 1, "investigator": 1, "ground": 2}
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["identity_decision"] == COMPANY_FIT_MATCH
     assert result.details["identity_receipt"]["observed_name"] == "dbs"

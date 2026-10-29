@@ -4,18 +4,25 @@ from datetime import datetime, timezone
 import json
 import threading
 
+import pytest
 
 from lab_arena import runtime, scoring
 from lab_arena.runtime_host import RuntimeHostError
 from tests.lab_arena import proxy_model_capacity401_e2e_test as fullflow
 from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
+from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 
 database=recovery.database
 migrated=recovery.migrated
 
 
-def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(database,migrated,tmp_path,monkeypatch):
+@pytest.mark.parametrize('fault_kind', ['execute', 'score_continuation'])
+def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(complete_application_database,tmp_path,monkeypatch,fault_kind):
+    _exercise_host_fault(complete_application_database,True,tmp_path,monkeypatch,fault_kind=fault_kind)
+
+
+def _exercise_host_fault(database,migrated,tmp_path,monkeypatch,*,fault_kind='execute'):
     install=fullflow._install_company_only_sandbox
     drain=fullflow._drain_both
     observed={}
@@ -28,7 +35,8 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
         def run_icp(spec,**kwargs):
             document=json.loads((spec.input_dir/runtime.INPUT_FILE_NAME).read_text())
             with fault_lock:
-                fail=document.get('schema_version')==scoring.SCORING_INPUT_SCHEMA_VERSION and not observed.get('injected')
+                is_score=document.get('schema_version')==scoring.SCORING_INPUT_SCHEMA_VERSION
+                fail=is_score==(fault_kind=='score_continuation') and not observed.get('injected')
                 if fail: observed['injected']=True
             if fail: raise RuntimeHostError(reason='sandbox_launch_failed')
             return original(spec,**kwargs)
@@ -50,12 +58,33 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
             # Gateway's normal scheduling path calls the exact expiry RPC.
             transition=harness.service.advance_round(harness.round_id)
             assert transition['status'] not in ('cancelled','retry','stale')
+            if fault_kind=='score_continuation':
+                # Modern baseline judges may continue while stage 2 executes.
+                # An old-generation lease cannot take the same-stage fast
+                # expiry path. Prove that fence, then advance only its fixture
+                # lease clock and exercise the real natural-expiry RPC.
+                with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+                    cur.execute('SELECT r.status,r.stage_generation<>a.stage_generation,public.lab_arena__judge_continuation_v1(a,r) '
+                                'FROM public.lab_arena_runs r JOIN public.lab_arena_rounds a USING(round_id) WHERE run_id=%s',(run,))
+                    assert cur.fetchone()==('leased',True,True)
+                    cur.execute('SET LOCAL session_replication_role=replica')
+                    cur.execute('UPDATE public.lab_arena_runs SET lease_expires_at=clock_timestamp() WHERE run_id=%s',(run,))
+                    cur.execute('SET LOCAL session_replication_role=origin')
+                assert harness.service.store.expire_leases(harness.round_id)['expired']==1
+                with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+                    # Advance the existing score-retry cooldown without
+                    # changing failed history, claim receipts or admission.
+                    cur.execute('SET LOCAL session_replication_role=replica')
+                    cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' "
+                                "WHERE run_id=%s AND status='pending'",(run.rsplit(':',1)[0]+':2',))
+                    cur.execute('SET LOCAL session_replication_role=origin')
             with psycopg.connect(**dsn) as conn:
                 with conn.cursor() as cur:
                     cur.execute('SELECT status,terminal_cause,terminal_doc,claim_response FROM public.lab_arena_runs WHERE run_id=%s',(run,))
                     state,cause,doc,frozen=cur.fetchone()
                     assert (state,cause)==('failed','lease_expired') and frozen==claim
-                    assert doc['recovery_reason']=='authenticated_zero_call_runtime_host_error'
+                    if fault_kind=='execute':
+                        assert doc['recovery_reason']=='authenticated_zero_call_runtime_host_error'
             failed=next(r for r in runners if r._config.identity.hotkey==failed_hotkey)
             healthy=next(r for r in runners if r is not failed)
             failed.close()
@@ -76,7 +105,7 @@ def test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(dat
     monkeypatch.setattr(fullflow,'_install_company_only_sandbox',failing_install)
     monkeypatch.setattr(fullflow,'_drain_both',recovering_drain)
     try:
-        fullflow.test_company_only_baseline_miners_costs_promotion_and_publication(database,migrated,tmp_path)
+        fullflow._exercise_company_only_round(database,migrated,tmp_path)
     finally:
         for runner in set(replacements.values()):
             runner.close()

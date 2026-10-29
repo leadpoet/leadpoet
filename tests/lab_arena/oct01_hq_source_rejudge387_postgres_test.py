@@ -8,6 +8,7 @@ import pytest
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena import oct01_hq_source_hold386_postgres_test as held
 from tests.lab_arena import oct01_corrected_scorer_hold378_postgres_test as hashes
@@ -218,6 +219,7 @@ def test_full_archive_preserves_executions_costs_and_original_credential_ids(dat
 
 def test_rerun_namespace_rejudges_and_resumes_130_accepted_miner_outputs(database, monkeypatch):
     psycopg, dsn = database
+    prepare_current_service_reads(lambda: psycopg.connect(**dsn), include_round_reads=False)
     with psycopg.connect(**dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cursor:

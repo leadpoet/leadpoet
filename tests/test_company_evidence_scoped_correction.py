@@ -82,17 +82,18 @@ def _run_scoped_correction(
     monkeypatch, responses, *, max_turns=2, reserve_after_first=True,
 ):
     requests = []
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(investigator, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         arena_operations.validate_operation_request("openrouter.chat", payload)
         requests.append(payload)
         if len(requests) == 1 and reserve_after_first:
-            monkeypatch.setattr(
-                investigator,
-                "JUDGMENT_ADMISSION_RESERVE_SECONDS",
-                investigator.ADMISSION_DEADLINE_SECONDS,
-            )
+            # Admission freezes its reserve at construction. Advance the
+            # clock instead of changing a constant after that construction.
+            clock.now = (investigator.ADMISSION_DEADLINE_SECONDS
+                         - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS)
         findings = responses[len(requests) - 1]
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"call-{len(requests)}",
@@ -223,7 +224,7 @@ def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypat
     )["industry"]
 
 
-def test_malformed_then_unproven_corrections_do_not_erase_valid_industry(
+def test_scoped_explicit_negative_clears_unused_citations_and_retains_industry(
     monkeypatch,
 ):
     malformed_unproven = _finding(
@@ -234,36 +235,25 @@ def test_malformed_then_unproven_corrections_do_not_erase_valid_industry(
         evidence_quote="Rapid7 filed a current report.",
         reason="Public stage remains unproven.",
     )
-    final_unproven = _finding(
-        "stage",
-        status="UNPROVEN",
-        observed_value=None,
-        evidence_url="",
-        evidence_quote="",
-        reason="Public stage remains unproven.",
-    )
     result, requests = _run_scoped_correction(
         monkeypatch,
-        [_initial_findings(), [malformed_unproven], [final_unproven]],
+        [_initial_findings(), [malformed_unproven]],
     )
 
-    assert len(requests) == 3
+    assert len(requests) == 2
     assert requests[0]["tool_choice"] == "required"
     assert all(
         _submit_tool(request)["parameters"]["properties"]["findings"]
         ["items"]["properties"]["target"]["enum"] == ["stage"]
         for request in requests[1:]
     )
-    second_feedback = json.loads(requests[2]["messages"][-1]["content"])
-    assert len(second_feedback["rejected_findings"]) == 1
-    rejected = second_feedback["rejected_findings"][0]
-    assert rejected["target"] == "stage"
-    assert rejected["reason"] == (
-        "UNPROVEN must have empty evidence_url and evidence_quote fields"
-    )
-    assert rejected["source_url"] == SEC_URL
-    assert rejected["source_context"].startswith("Rapid7, Inc.")
+    # The terminal explicit-negative repair (088ee092b) clears unused
+    # citations. This is distinct from rejected positive evidence packets.
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["stage"]["evidence_url"] == ""
+    assert result["claims"]["stage"]["evidence_quote"] == ""
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
 
@@ -273,6 +263,8 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
     monkeypatch, retry_completes,
 ):
     requests = []
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(investigator, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
@@ -280,11 +272,8 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
         requests.append(payload)
         turn = len(requests)
         if turn == 1:
-            monkeypatch.setattr(
-                investigator,
-                "JUDGMENT_ADMISSION_RESERVE_SECONDS",
-                investigator.ADMISSION_DEADLINE_SECONDS,
-            )
+            clock.now = (investigator.ADMISSION_DEADLINE_SECONDS
+                         - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS)
             arguments = json.dumps({"findings": _initial_findings()})
             finish_reason = "tool_calls"
         elif turn == 2 or not retry_completes:

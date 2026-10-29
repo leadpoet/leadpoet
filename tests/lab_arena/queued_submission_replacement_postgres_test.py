@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from lab_arena import contracts
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, new_lease_token
 from lab_arena.owner_admission import OwnerAdmission
 from tests.lab_arena.hotkey_admission_postgres_test import (
@@ -42,6 +43,12 @@ def _config(round_id: str, *, cutoff_after: timedelta):
     config = _round_config(
         round_id,
         cutoff=(now + cutoff_after).isoformat().replace("+00:00", "Z"),
+    )
+    # The source-migration helper predates the dynamic round-count contract.
+    # This fixture runs the current create-round RPC, which requires both.
+    config.update(
+        stage_1_icp_count=contracts.STAGE_1_ICP_COUNT,
+        stage_2_icp_count=contracts.STAGE_2_ICP_COUNT,
     )
     return config
 

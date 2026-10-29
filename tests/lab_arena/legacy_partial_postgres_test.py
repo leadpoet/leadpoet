@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("scorer_process_environment")
+
 from lab_arena import contracts, judgment_cache, scorer_entrypoint, scoring
 from lab_arena.service import ArenaService, ServiceConfig, S3ObjectStore, ServiceError
 from lab_arena.store import ArenaStore, PsycopgTransport

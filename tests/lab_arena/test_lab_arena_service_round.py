@@ -42,6 +42,8 @@ from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_PROVIDER_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    prepare_current_service_reads,
+    current_service_database,
 )
 
 KEYS: Dict[str, Keypair] = {}
@@ -109,6 +111,7 @@ class FakeChain:
         self.epoch = epoch
         self.block = 8_700_000
         self.owned: Dict[str, List[str]] = {}
+        self.registered: List[str] = []
         self.netuid = 71
         self.stakes: Dict[str, float] = {}
         self.permits: Dict[str, bool] = {}
@@ -119,7 +122,7 @@ class FakeChain:
 
     def metagraph(self, finalized=True):
         assert finalized is True
-        hotkeys = list(dict.fromkeys(self.runners + [
+        hotkeys = list(dict.fromkeys(self.runners + self.registered + [
             hotkey for owned in self.owned.values() for hotkey in owned
         ]))
         owners = {hotkey: keypair("owner-" + hotkey).ss58_address for hotkey in hotkeys}
@@ -298,8 +301,15 @@ def deterministic_scorer(companies, icp, is_reference_model):
     for index in scored:
         name = str(companies[index]["company_name"])
         score = 30.0 + int(hashlib.sha256(name.encode()).hexdigest(), 16) % 60
-        rows.append({"final_score": float(score), "failure_reason": "", "intent_signals_detail": [], "verifier_gate_receipts": [], "proof_quote": "private"})
-    return rows
+        from tests.test_arena_company_quality_policy import _positive_breakdown
+        from qualification.scoring.competition import apply_company_judgment_context
+        domain = urlsplit(companies[index]["company_website"]).hostname
+        row = _positive_breakdown(name, domain, name.lower().replace(" ", "-"))
+        row.update(final_score=float(score), intent_signal_raw=float(score),
+                   intent_signal_final=float(score), proof_quote="private")
+        row["intent_signals_detail"][0].update(raw=float(score), after_decay=float(score))
+        rows.append(row)
+    return apply_company_judgment_context(companies, rows, company_quality=False)
 
 
 class ModelSandbox:
@@ -532,7 +542,7 @@ class FixtureObjectStore(svc.LocalObjectStore):
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture(scope="module")
@@ -544,10 +554,30 @@ def connect(database):
 _SHARED_OBJECTS: Dict[str, Path] = {}
 
 
-def shared_objects_root(tmp_path: Path, key: str = "psycopg") -> Path:
+def shared_objects_root(tmp_path: Path, key: str, connect) -> Path:
     """One object store per database, like production's single bucket: a king
     entering from an earlier round must find that round's package objects.
-    ``key`` separates harness families that use different databases."""
+    ``key`` separates harness families. The actual database identity also
+    scopes the bucket: independent fixtures can reuse a family and round ID
+    with different benchmark bytes. Connector identity or the temporary-path
+    parent cannot distinguish those databases reliably.
+    """
+
+    connection = connect()
+    try:
+        with connection.cursor() as cursor:
+            # Disposable fixtures connect as postgres. The cluster identifier
+            # and database OID identify the same database even through distinct
+            # connector functions, and distinguish a reused port or DB name.
+            cursor.execute(
+                "SELECT system_identifier::text, "
+                "(SELECT oid::text FROM pg_database WHERE datname=current_database()) "
+                "FROM pg_control_system()"
+            )
+            database_identity = cursor.fetchone()
+    finally:
+        connection.close()
+    key += "-" + hashlib.sha256(repr(database_identity).encode()).hexdigest()[:24]
 
     root = _SHARED_OBJECTS.get(key)
     if root is None or not root.exists():
@@ -563,7 +593,7 @@ class Harness:
         self.tmp = tmp_path
         self.clock = FakeClock(datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc))
         self.signer = signing.LocalSigner.generate()
-        self.objects_root = shared_objects_root(tmp_path, self.objects_key())
+        self.objects_root = shared_objects_root(tmp_path, self.objects_key(), connect)
         self.objects = FixtureObjectStore(self.objects_root)
         self.runner_keys = [keypair("svc-runner-" + name).ss58_address for name in runners]
         self.chain = FakeChain(self.runner_keys)
@@ -585,6 +615,7 @@ class Harness:
         return "psycopg"
 
     def make_store(self) -> ArenaStore:
+        prepare_current_service_reads(self.connect, include_round_reads=False)
         return ArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
 
     def build_service(self) -> svc.ArenaService:
@@ -622,6 +653,7 @@ class Harness:
             defaults=svc.RoundDefaults(
                 benchmark_icp_count=20, promotion_margin=1.0,
                 checkpoint_deadline_enabled=False, runner_slot_ceiling=8,
+                integrity_from="2000-01-01T00:00:00Z", normalize_intent_scale=False,
                 runner_hotkeys=tuple(self.runner_keys), baseline_hotkey=self.baseline_hotkey,
                 baseline_source_url=svc.DEFAULT_BASELINE_SOURCE_URL,
                 max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc,
@@ -656,6 +688,10 @@ class Harness:
         if self.clock() < submission_open:
             self.clock.advance_to(schedule["submission_open"])
         miner = keypair("svc-miner-" + (miner_label or flavor))
+        # Admitted fixture miners have finalized identities. Negative API tests
+        # still construct their own unregistered and wrong-owner identities.
+        if miner.ss58_address not in self.chain.registered:
+            self.chain.registered.append(miner.ss58_address)
         payload = flavor_source_archive(flavor)
         facts = source_bundle.validate_source_archive(payload)
         presign = contracts.build_signed_request(

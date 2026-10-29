@@ -23,7 +23,7 @@ from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena import test_integrity_round as integrity_fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    CURRENT_REWARD_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 
@@ -170,7 +170,7 @@ class BaselineCostHarness(integrity_fixtures.IntegrityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
 
 
 @pytest.fixture

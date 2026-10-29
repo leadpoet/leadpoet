@@ -17,7 +17,8 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
 
 
 def test_completed_scores_and_diagnostics_precede_round_publication(database, tmp_path, monkeypatch):

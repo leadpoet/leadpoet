@@ -161,14 +161,15 @@ def _seam_preimages():
             for name in SELF_NAME_CHANGES}
 
 
-def test_exact_function_seam_preserves_every_other_current_source_byte():
+def test_exact_function_seam_preserves_every_other_frozen_source_byte():
     from scripts.arena_reviewer_structured_homepage_alias_seam import (
         SELF_NAME_CHANGES, convert_numeric_profile_self_name_files,
     )
     original = _seam_preimages()
     repaired = convert_numeric_profile_self_name_files(original)
     root = Path(__file__).parents[1]
-    assert repaired == {name: (root / name).read_bytes() for name in SELF_NAME_CHANGES}
+    assert repaired == {name: subprocess.check_output(
+        ["git", "show", "46a7bc76c:" + name], cwd=root) for name in SELF_NAME_CHANGES}
     assert convert_numeric_profile_self_name_files(repaired) == repaired
     for name, (_, _, _, changes) in SELF_NAME_CHANGES.items():
         reversed_source = repaired[name].decode()

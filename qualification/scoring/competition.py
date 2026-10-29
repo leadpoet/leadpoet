@@ -1513,7 +1513,7 @@ def _intent_detail_has_source_local_failure(detail: Any) -> bool:
             return False
         if (
             attempt.get("source") == "none"
-            and attempt.get("sd_stage") == "genuine_404"
+            and attempt.get("sd_stage") in {"genuine_404", "genuine_410"}
             and attempt.get("exa_stage") == "exa_target_not_found"
             and _confirmed_exa_target_absence(attempt.get("exa_target_absence"))
         ):

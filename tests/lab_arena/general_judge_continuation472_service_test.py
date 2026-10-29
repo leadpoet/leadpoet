@@ -1,4 +1,5 @@
-"""A prior-day scored round stays frozen; new rounds wait for real judges."""
+"""Prior-day judgments stay frozen under the current final-deadline policy."""
+import copy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,18 +10,23 @@ from tests.lab_arena.complete_baseline_final_authority_test import fixture
 from tests.lab_arena.icp_fixtures import daily_icps
 
 
-def test_oct13_scored_round_does_not_restart_or_cancel_after_deadline():
+@pytest.mark.parametrize('after_deadline', [False, True])
+def test_oct13_scored_round_never_rescores_and_respects_final_deadline(after_deadline):
     instance, row, sources, judges, writes, clock, _ = fixture()
     row["evaluation_date"] = "2026-10-13"
     sources[0]["per_icp_score"] = None
     judges[0].update(status="failed", terminal_cause="judge_error")
-    clock[0] = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    clock[0] = datetime(2026, 10, 14, tzinfo=timezone.utc) if after_deadline else datetime(
+        2026, 10, 13, 19, tzinfo=timezone.utc)
+    before = copy.deepcopy((sources, judges))
     instance._record_recovered_judgment_scores = lambda _row: (_ for _ in ()).throw(
         AssertionError("prior evaluation must not be rescored"))
 
-    assert instance.publish(row["round_id"]) == {
+    expected = {'status': 'cancelled'} if after_deadline else {
         "status": "retry", "round_status": "scored", "reason": "baseline_incomplete"}
-    assert writes == []
+    assert instance.publish(row["round_id"]) == expected
+    assert writes == ([(row['round_id'], 'scoring_incomplete')] if after_deadline else [])
+    assert (sources, judges) == before
     assert sources[0]["per_icp_score"] is None
     assert judges[0]["status"] == "failed"
 

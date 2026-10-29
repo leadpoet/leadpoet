@@ -4920,11 +4920,11 @@ class ArenaService:
             if set(selected) != positions:
                 return {"eligible": False, "reasons": ["selected_execution_coverage_incomplete"],
                         "source_review": source}
-            examples = {}
+            run_ids = [str(selected[position]["run_id"]) for position in sorted(positions)]
             unavailable_outputs = {}
             unavailable_artifacts = {}
-            for position in sorted(positions):
-                run_id = str(selected[position]["run_id"])
+
+            def export_example(run_id):
                 output_ref = "arena/%s/outputs/%s.json" % (round_row["round_id"], run_id)
                 fallback = {}
                 if publication_reads is not None and output_ref in publication_reads.outputs_by_ref:
@@ -4935,7 +4935,7 @@ class ArenaService:
                 # A whole-export exception cannot prove which artifact failed
                 # or whether another identity or receipt was invalid. Only a
                 # completed export can use the narrow typed availability checks.
-                examples[run_id] = training_reader.export_run(self._store, read_view, run_id)
+                example = training_reader.export_run(self._store, read_view, run_id)
                 transient_artifacts = {kind: ref for kind, ref in read_view.artifact_refs.items()
                                        if read_view.transient_failures.get(ref) == "transient"}
                 if transient_artifacts:
@@ -4943,8 +4943,29 @@ class ArenaService:
                 if read_view.unavailable in ({output_ref: "missing"},
                                              {output_ref: "transient"}):
                     unavailable_outputs[run_id] = output_ref
+                return example
+
+            class Exports(Mapping):
+                """Load one exact example on demand; never retain its graph."""
+
+                def __iter__(self):
+                    return iter(run_ids)
+
+                def __len__(self):
+                    return len(run_ids)
+
+                def __getitem__(self, run_id):
+                    if run_id not in run_ids:
+                        raise KeyError(run_id)
+                    return export_example(run_id)
+
+                def get(self, run_id, default=None):
+                    # Mapping.get would swallow an exporter's KeyError and
+                    # misclassify corrupt evidence as a missing-example gap.
+                    return self[run_id] if run_id in run_ids else default
+
             capture = training_eligibility.assess_capture(
-                submission, examples, list(examples), enabled=True,
+                submission, Exports(), run_ids, enabled=True,
                 minimum_coverage_percent=training_coverage.percent_from_configuration(
                     round_row.get("configuration_doc") or {}),
                 maximum_missing_reasoning_percent=(

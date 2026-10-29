@@ -6,6 +6,7 @@ import ast
 import copy
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,20 +29,23 @@ from tests import test_completed_cross_domain_negative as controls
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _current_source():
-    # This suite isolates PR483. Reverse the separate source-access correction
-    # so its original frozen847 hash remains a real immutable-source control.
-    from scripts.arena_reviewer_source_access_seam import FINALITY_DELTAS
-    source = (ROOT / FINALITY_FILE).read_bytes()
-    for _, old, new in FINALITY_DELTAS:
-        source = source.replace(new.encode(), old.encode(), 1)
-    return source
+# Keep the historical source independent of later production predicate edits.
+# CI fetches complete Git history for these exact-source composition checks.
+FROZEN_SOURCE = subprocess.check_output(
+    ["git", "show", "77db393b0bf899c888edd7d3a495aeb0f5f78820:" + FINALITY_FILE],
+    cwd=ROOT,
+)
 
 
 def _original_source():
-    text = _current_source().decode()
-    assert text.count(_CORRECTED_GUARD) == 1
-    return text.replace(_CORRECTED_GUARD, _ORIGINAL_GUARD, 1).encode()
+    return FROZEN_SOURCE
+
+
+def _current_source():
+    assert FROZEN_SOURCE.count(_ORIGINAL_GUARD.encode()) == 1
+    return FROZEN_SOURCE.replace(
+        _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1,
+    )
 
 
 def _predicate_source(source):
@@ -229,4 +233,5 @@ def test_composed_finality_through_fit_zero_and_existing_arena_completion(
                         _predicate(convert_finality_seam(_original_source())))
     controls.test_negative_completion_through_fit_and_arena(
         monkeypatch, semantic, homepage_fault,
+        investigation_fault="", preserve_marker=True,
     )

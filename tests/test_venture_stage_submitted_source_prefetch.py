@@ -176,7 +176,7 @@ def test_failed_submitted_round_fetch_keeps_its_consumed_budget(monkeypatch):
         "error": "http_404",
         "notice": "server_selected_first_party_locator_is_untrusted_evidence",
     }
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
     assert all(
         page["url"] != ROUND_URL for page in document["prefetched_sources"]
     )

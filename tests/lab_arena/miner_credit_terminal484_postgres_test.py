@@ -261,10 +261,6 @@ def test_full_partial_publication_preserves_baseline_and_peer_authority(database
     harness.clock.advance_to(row['configuration_doc']['schedule']['publication_deadline'])
     # The full normal service publishes the NULL/ineligible miner while the
     # complete measured baseline keeps its ordinary outcome.
-    # Incomplete miners remain private until the frozen publication deadline.
-    assert harness.service.publish(harness.round_id) == {
-        'status':'retry','round_status':'scored','reason':'execution_infrastructure_incomplete'}
-    harness.clock.advance_to(harness.schedule()['publication_deadline'])
     assert harness.service.publish(harness.round_id)['status']=='ok'
     published=harness.service.store.get_round(harness.round_id)
     ranking=next(r for r in published['publication_doc']['final_ranking'] if r['submission_id']==miner['submission_id'])

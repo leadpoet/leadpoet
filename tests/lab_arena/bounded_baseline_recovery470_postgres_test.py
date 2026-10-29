@@ -331,19 +331,9 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
             cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' "
                         "WHERE round_id=%s AND status='pending' AND ((kind='score' AND attempt>1) OR (kind='execute' AND attempt>2))",
                         (harness.round_id,))
-        result = normal_run(count)
-        if not recover_successfully and harness.status() == 'stage2_scoring':
-            judges = harness.service.store.list_runs(harness.round_id, kind='score')
-            if any(r['stage'] == 1 and r['icp_position'] == 3
-                   and r['status'] == 'failed' and r['attempt'] >= 3 for r in judges):
-                assert all(r['status'] == 'accepted' for r in judges if r['stage'] == 2)
-                # Unfinished continuation remains pending until the real phase
-                # boundary; it cannot be promoted to a fabricated zero.
-                # advance_to adds one second, which would also cross this
-                # fixture's publication deadline. Exercise both boundaries.
-                harness.clock.now = datetime.fromisoformat(
-                    harness.schedule()['final_scoring_close'].replace('Z', '+00:00'))
-        return result
+        # The explicit stage2 boundary control below owns scheduling time.
+        # Runner drains must not cross final_scoring_close before its hold check.
+        return normal_run(count)
 
     monkeypatch.setattr(harness, 'run_stage_with_runners', run_after_retry_backoff)
     monkeypatch.setattr(flows,'deterministic_scorer',_baseline_first_judge)
@@ -410,6 +400,9 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
             if (status == 'stage2_scoring'
                 and any(r['attempt']==3 and r['icp_position']==0 and r['status']=='accepted' for r in sources)
                 and any(r['scored_run_id']==retained_source['run_id'] and r['attempt']>=4 and r['status']=='pending' for r in judges)):
+                assert all(r['status'] == 'accepted' for r in judges if r['stage'] == 2)
+                assert harness.clock.now < datetime.fromisoformat(
+                    harness.schedule()['final_scoring_close'].replace('Z', '+00:00'))
                 assert harness.service.advance_round(harness.round_id)['status'] == 'waiting'
                 # Close at the exact boundary; the publication deadline is one
                 # second later and must still exercise the retry guard.
@@ -471,7 +464,9 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
         assert incomplete_source['per_icp_score'] is None and incomplete_source['qualification_doc'] is None
         assert not harness.service._baseline_final_ready(final)
         if current_publication:
-            assert harness.service.publish(harness.round_id)['reason']=='baseline_incomplete'
+            assert harness.service.publish(harness.round_id) == {
+                'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete'}
+            assert harness.service.store.get_round(harness.round_id) == final
         # The exact481 claim proof predates484's terminal-credit RPC. Its
         # persisted missing-score/readiness proof creates no publication authority;
         # the separate current database variant exercises today's publish guard.

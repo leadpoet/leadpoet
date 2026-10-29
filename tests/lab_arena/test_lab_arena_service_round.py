@@ -342,14 +342,19 @@ def test_deterministic_scorer_accepts_empty_output_and_preserves_measured_eviden
 class ModelSandbox:
     """A fake model: reads the ICP, calls Deepline's Exa search through the shim bridge, writes companies."""
 
-    def __init__(self, *, flavor_by_submission: Dict[str, str], broken_submissions: set):
+    def __init__(self, *, flavor_by_submission: Dict[str, str], broken_submissions: set, scorer=None):
         self.flavor_by_submission = flavor_by_submission
         self.broken_submissions = broken_submissions  # shared with the harness, mutated by tests
+        self.scorer = scorer
         self.lock = threading.Lock()
         self.runs = 0
         self.inflate_scores = False  # a cheating validator reports 99.0 for every company
         self.judge_failures: set[tuple[str, int]] = set()
         self.empty_outputs: set[tuple[str, int]] = set()
+
+    def _score_companies(self, companies, icp):
+        scorer = deterministic_scorer if self.scorer is None else self.scorer
+        return scorer(companies, icp, False)
 
     def run_icp(self, spec: runtime.SandboxSpec, **_):
         with self.lock:
@@ -396,7 +401,7 @@ class ModelSandbox:
                 return runtime.fake_result(
                     exit_code=1, output_bytes=None, stderr=b"judge failure"
                 )
-            breakdowns = deterministic_scorer(companies, icp, False)
+            breakdowns = self._score_companies(companies, icp)
             if self.inflate_scores:
                 breakdowns = [dict(row, final_score=99.0) for row in breakdowns]
             output = scoring.build_scoring_output(input_document["scored_run_id"], breakdowns)
@@ -3430,6 +3435,7 @@ class _FrozenServiceHarness(HistoricalStoreHarnessMixin, Harness):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.sandbox.scorer = _historical_deterministic_scorer
         self.clock.now = datetime.now(timezone.utc)
 
     def build_service(self):
@@ -3831,7 +3837,7 @@ def test_exhausted_judge_failure_preserves_receipts_without_partial_scores(
         json.dumps(
             scoring.build_scoring_output(
                 accepted["scored_run_id"],
-                deterministic_scorer(companies, icp, False),
+                harness.sandbox._score_companies(companies, icp),
             )
         ).encode("utf-8"),
     )
@@ -4086,3 +4092,80 @@ def test_baseline_judge_failure_holds_publication_without_a_false_zero(historica
     assert len(affected) == 1 and affected[0]["per_icp_score"] is None
 
     harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+# Exact legacy producer from main944; only the frozen harness selects it.
+def _historical_deterministic_scorer(companies, icp, is_reference_model):
+    assert is_reference_model is False
+    scored, _ = verify.bucket_skip(icp, companies)
+    rows = []
+    for index in scored:
+        name = str(companies[index]["company_name"])
+        score = 30.0 + int(hashlib.sha256(name.encode()).hexdigest(), 16) % 60
+        rows.append({"final_score": float(score), "failure_reason": "", "intent_signals_detail": [], "verifier_gate_receipts": [], "proof_quote": "private"})
+    return rows
+
+
+def test_frozen_and_current_sandbox_scores_keep_distinct_store_protocols():
+    icp = daily_icps()[0]
+    company = {
+        "company_name": "Scorer Control",
+        "company_website": "https://scorer-control.example.com",
+        "company_linkedin": "", "employee_count": icp["employee_count"][0],
+        "industry": icp["industry"], "company_stage": icp["company_stage"],
+        "country": "United States", "state": "",
+        "fit_summary": "The company matches the ICP.",
+        "fit_evidence_urls": ["https://scorer-control.example.com/about"],
+        "intent_signals": [{
+            "description": "Raised a round",
+            "url": "https://scorer-control.example.com/funding",
+            "date": "2026-08-01", "why_now": "Funding makes outreach timely.",
+            "snippet": "Funding announced", "matched_icp_signal": 0,
+        }],
+    }
+    current = ModelSandbox(flavor_by_submission={}, broken_submissions=set())
+    frozen = ModelSandbox(flavor_by_submission={}, broken_submissions=set(),
+                          scorer=_historical_deterministic_scorer)
+    legacy_rows = frozen._score_companies([company], icp)
+    current_rows = current._score_companies([company], icp)
+    assert legacy_rows[0]["final_score"] == current_rows[0]["final_score"]
+    assert set(legacy_rows[0]) == {
+        "final_score", "failure_reason", "intent_signals_detail",
+        "verifier_gate_receipts", "proof_quote",
+    }
+    assert current_rows[0]["company_qualified"] is True
+    run = {"run_id": "source", "submission_id": "baseline", "icp_position": 0,
+           "status": "accepted", "attempt": 1}
+
+    def records(breakdowns):
+        stage = {"rows": [{"submission_id": "baseline", "icp_position": 0,
+                           "per_icp_score": breakdowns[0]["final_score"],
+                           "breakdowns": breakdowns}]}
+        return scoring.run_scores_for_store(stage, [run])
+
+    assert records(legacy_rows) == [{
+        "run_id": "source", "per_icp_score": legacy_rows[0]["final_score"],
+    }]
+    current_records = records(current_rows)
+    assert current_records[0]["per_icp_score"] == legacy_rows[0]["final_score"]
+    assert current_records[0]["qualification_doc"]["companies"] == [{
+        key: current_rows[0][key] for key in (
+            "company_index", "company_identity_key", "company_qualified", "duplicate_company",
+        )
+    }]
+    assert frozen._score_companies([], icp) == current._score_companies([], icp) == []
+
+
+def test_current_sandbox_still_resolves_the_scorer_after_construction(monkeypatch):
+    sandbox = ModelSandbox(flavor_by_submission={}, broken_submissions=set())
+    calls = []
+    rows = [{"final_score": 17.0}]
+
+    def replacement(companies, icp, is_reference_model):
+        calls.append((companies, icp, is_reference_model))
+        return rows
+
+    monkeypatch.setattr(__import__(__name__, fromlist=["deterministic_scorer"]),
+                        "deterministic_scorer", replacement)
+    assert sandbox._score_companies(["company"], {"icp_id": "control"}) is rows
+    assert calls == [(["company"], {"icp_id": "control"}, False)]

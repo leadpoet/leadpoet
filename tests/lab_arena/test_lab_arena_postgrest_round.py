@@ -151,12 +151,32 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     else:
         assert service.store.get_round(round_id)["status"] == "stage2"
     harness.advance_until("scored", runners=2)
+    before_executions = service.store.list_runs(round_id, kind="execute")
+    before_judgments = service.store.list_runs(round_id, kind="score")
+    before_ledger = service.store.list_ledger()
+    assert all(run["status"] == "accepted" for run in before_executions + before_judgments)
+    assert {run["scored_run_id"] for run in before_judgments} == {run["run_id"] for run in before_executions}
+    baseline_ids = {p["submission_id"] for p in service.store.get_round(round_id)["participants"] if p["is_king"]}
+    if baseline_first:
+        # Current continuation defers only the baseline projections to the
+        # guarded publication writer; accepted judgments are already complete.
+        unmaterialized = [run for run in before_executions if run["submission_id"] in baseline_ids]
+        assert len(unmaterialized) == contracts.BENCHMARK_ICP_COUNT
+        assert all(run["per_icp_score"] is None and run["qualification_doc"] is None for run in unmaterialized)
+    with harness.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s),"
+                       "public.lab_arena__all_judgments_ready_v1(%s)", (round_id, round_id))
+        assert cursor.fetchone() == ((False, False) if baseline_first else (True, True))
+    # Isolate the real publication writer from the driver's independent billing
+    # tick so the accounting snapshot checks materialization alone.
+    assert service.publish(round_id)["status"] == "ok"
+    assert harness.status() == "published"
     with harness.connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s),"
                        "public.lab_arena__all_judgments_ready_v1(%s)", (round_id, round_id))
         assert cursor.fetchone() == (True, True)
-    harness.advance_until("published", runners=2)
-    assert harness.status() == "published"
+    assert service.store.list_runs(round_id, kind="score") == before_judgments
+    assert service.store.list_ledger() == before_ledger
     rt.assert_canary_absent(harness, harness.connect)
     row = service.store.get_round(round_id)
     publication = row["publication_doc"]
@@ -169,6 +189,17 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
         contracts.STAGE_1_ICP_COUNT + contracts.STAGE_2_ICP_COUNT
     ) * participant_count
     assert all(run["status"] == "accepted" and run["per_icp_score"] is not None for run in execution_runs)
+    before_by_id = {run["run_id"]: run for run in before_executions}
+    assert {run["run_id"] for run in execution_runs} == set(before_by_id)
+    for run in execution_runs:
+        before = before_by_id[run["run_id"]]
+        if baseline_first and run["submission_id"] in baseline_ids:
+            assert run["per_icp_score"] == 80 and run["qualification_doc"] is not None
+            projection_fields = {"per_icp_score", "qualification_doc", "updated_at"}
+            assert {k: v for k, v in run.items() if k not in projection_fields} == {
+                k: v for k, v in before.items() if k not in projection_fields}
+        else:
+            assert run == before
     # Lease expiry runs on every driver tick; the round exercised it with nothing to expire.
     # The service-only read RPC returns real participation, not a domain error.
     runner_hotkey = harness.runner_keys[0]

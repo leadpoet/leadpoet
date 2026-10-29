@@ -20,18 +20,30 @@ from tests.lab_arena.test_lab_arena_promotion_git import git, repository, source
 from tests.lab_arena.test_lab_arena_promotion_migration_postgres import (
     _plan,
     connections,
+    database as historical_promotion_database,
 )
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     BASELINE,
     MINER_A,
     _basis,
+    _publish as historical_publish,
 )
 
 
 @pytest.fixture()
 def database():
     yield from current_service_database()
+
+
+@pytest.fixture()
+def historical_connections():
+    # Reuse the original promotion schema and its existing pool teardown.
+    database = historical_promotion_database.__wrapped__()
+    try:
+        yield from connections.__wrapped__(next(database))
+    finally:
+        database.close()
 
 
 class _Chain:
@@ -448,7 +460,7 @@ def test_incomplete_baseline_cannot_promote_or_activate_rewards(connections, tmp
     assert row["baseline_promoted_at"] is None and row["reward_activated_at"] is None
 
 
-def test_historical_db_barrier_is_explicit_while_service_supersedes_older_promotion(
+def test_newer_published_day_supersedes_older_promotion_without_reward_barrier(
     connections, tmp_path
 ):
     store, control = connections
@@ -468,8 +480,13 @@ def test_historical_db_barrier_is_explicit_while_service_supersedes_older_promot
     signer = signing.LocalSigner.generate()
     basis = _basis(signer, later, later_at, 901, "no_king", "")
     key = signing.signing_key_document(signer.public_key_der)
-    with pytest.raises(ArenaStoreError, match="reward_waiting_for_promotion"):
-        store.activate_reward(later, basis, key)
+    # Current SQL excludes this strictly older day from the predecessor guard.
+    # The original pre-377 barrier is tested on its separate schema below.
+    older_before = store.get_round(older)
+    assert store.activate_reward(later, basis, key)["status"] == "activated"
+    activated = store.get_round(later)
+    assert activated["reward_basis_doc"] == basis
+    assert store.get_round(older) == older_before
 
     remote, _, _ = repository(tmp_path)
     service = _service(
@@ -484,5 +501,60 @@ def test_historical_db_barrier_is_explicit_while_service_supersedes_older_promot
 
     plan = _plan("e")
     assert store.prepare_promotion(older, plan) == {"status": "superseded", "newer_round_id": later}
-    assert store.get_round(older)["baseline_promoted_at"] is None
-    assert service.activate_reward(later)["status"] == "activated"
+    assert store.get_round(older) == older_before
+    assert service.activate_reward(later)["status"] == "existing"
+    assert store.get_round(later) == activated
+
+
+@pytest.mark.parametrize("older_day", ["2026-09-05", "2026-09-06"])
+def test_historical_db_barrier_blocks_pending_promotions_across_days(
+    historical_connections, older_day, monkeypatch,
+):
+    store, control = historical_connections
+    older = "arena-" + older_day + "-histpending"
+    later = "arena-2026-09-06-histlater"
+    create_round = store.create_round
+
+    def create_reward_disabled_round(round_id, configuration):
+        assert round_id == older
+        return create_round(round_id, {**configuration, "rewards_enabled": False})
+
+    # The old global promotion trigger also covers reward-disabled winners.
+    # Keep the real create/publication RPCs; only this round's input differs
+    # from the shared reward helper's normal rewards-enabled configuration.
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "create_round", create_reward_disabled_round)
+        historical_publish(
+            store, control, older, miner=MINER_A, baseline_score=50,
+            miner_score=60, crowned=True, evaluation_date=older_day,
+            published_at=older_day + "T00:00:00Z",
+        )
+    with control.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_submissions "
+            "(submission_id,round_id,miner_hotkey,status,is_king) "
+            "VALUES (%s,%s,%s,'frozen',FALSE)",
+            (older + "-miner", older, MINER_A),
+        )
+    later_at = historical_publish(
+        store, control, later, miner=MINER_A, baseline_score=60,
+        miner_score=50, crowned=False, evaluation_date="2026-09-06",
+        published_at="2026-09-06T01:00:00Z",
+    )
+    signer = signing.LocalSigner.generate()
+    basis = _basis(signer, later, later_at, 901, "no_king", "")
+    key = signing.signing_key_document(signer.public_key_der)
+    before = [store.get_round(round_id) for round_id in (older, later)]
+    assert before[0]["rewards_enabled"] is False
+    assert before[0]["promotion_required"] is True
+    assert before[0]["baseline_promoted_at"] is None
+    with pytest.raises(ArenaStoreError, match="reward_waiting_for_promotion"):
+        store.activate_reward(later, basis, key)
+    assert [store.get_round(round_id) for round_id in (older, later)] == before
+
+    # The real historical RPCs clear only the pending promotion, then permit
+    # the no-winner reward. No current-schema guard is disabled or replaced.
+    plan = _plan("e")
+    assert store.prepare_promotion(older, plan)["status"] == "prepared"
+    assert store.complete_promotion(older, plan)["status"] == "promoted"
+    assert store.activate_reward(later, basis, key)["status"] == "activated"

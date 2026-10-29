@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -28,14 +27,20 @@ def _prepare(cursor, *, deadline_expired=False):
     # execution deadline runnable on the disposable database's real clock.
     cursor.execute("SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s", (hold.recovery.ROUND,))
     config = cursor.fetchone()[0]
-    shift = datetime.now(timezone.utc) + timedelta(hours=-12 if deadline_expired else 0.5) - datetime.fromisoformat(
-        config["schedule"]["benchmark_deadline"].replace("Z", "+00:00"))
+    # The recovery extends scoring well beyond the benchmark deadline. Bind
+    # the negative control to the actual deadline checked by migration370.
+    anchor = "stage_1_scoring_close" if deadline_expired else "benchmark_deadline"
+    shift = datetime.now(timezone.utc) + timedelta(hours=-1 if deadline_expired else 0.5) - datetime.fromisoformat(
+        config["schedule"][anchor].replace("Z", "+00:00"))
     for key, value in config["schedule"].items():
         if key not in ("submission_open", "submission_cutoff"):
             config["schedule"][key] = (datetime.fromisoformat(value.replace("Z", "+00:00")) + shift).isoformat().replace("+00:00", "Z")
     cursor.execute("SET session_replication_role=replica")
     cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s", (json.dumps(config), hold.recovery.ROUND))
     cursor.execute("SET session_replication_role=origin")
+    cursor.execute("SELECT (configuration_doc#>>'{schedule,stage_1_scoring_close}')::timestamptz "
+                   ">clock_timestamp() FROM public.lab_arena_rounds WHERE round_id=%s", (hold.recovery.ROUND,))
+    assert cursor.fetchone()[0] is (not deadline_expired)
     cursor.execute(hold._render_hold(cursor))
     cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',"
                    "terminal_cause='accepted',output_ref='arena/test/score2.json' "

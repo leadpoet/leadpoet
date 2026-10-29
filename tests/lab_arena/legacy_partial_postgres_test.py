@@ -229,21 +229,14 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
     from lab_arena.promotion import GitPromoter
     from leadpoet_canonical import arena_weights
     from tests.lab_arena.test_integrity_round import IntegrityHarness
-    from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
-    class FrozenHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
-        def build_service(self):
-            service = super().build_service()
-            commit = service.commit_benchmark
-            def commit_frozen(round_id):
-                freeze_historical_intake_dates(self, "2026-10-12")
-                return commit(round_id)
-            service.commit_benchmark = commit_frozen
-            return service
+    # This is a current-schema lifecycle with the legacy full-group scorer
+    # protocol. Keep current intake/retry authority; raw468 proofs above pin
+    # historical SQL independently.
     from tests.lab_arena import test_lab_arena_service_round as fixtures
 
     psycopg, dsn = round_database
     connect = lambda: psycopg.connect(**dsn)
-    harness = FrozenHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
+    harness = IntegrityHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
     harness.chain.epoch = 25080
     harness.clock.now = datetime.now(timezone.utc)
     harness.service.config.defaults = replace(harness.service.config.defaults, rewards_enabled=True)
@@ -306,6 +299,8 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
                         (harness.round_id, state['target']))
             pending = cur.fetchall()
             if pending:
+                cur.execute('SELECT public.lab_arena_judge_continuation_enabled_v1(%s)', (harness.round_id,))
+                assert cur.fetchone() == (True,)
                 assert state['failed'] and not advanced_retry_clock
                 assert len(pending) == 1 and pending[0][1] is True
                 assert len([r for r in leases if r['scored_run_id'] == state['target']]) == 1

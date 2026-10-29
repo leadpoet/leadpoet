@@ -21,6 +21,7 @@ ROOT = Path(__file__).parents[2]
 MIGRATION = ROOT / 'scripts/507-lab-arena-closed-provider-round-membership.sql'
 SIGNATURE = 'public.lab_arena_next_closed_deepline_reconciliation_v1(text,text,integer,text,bigint)'
 PREIMAGE = 'a65adc61115dbb1fa7258bffcadc96218cf889534f3de189b82134e2c5effaf0'
+CURRENT_SELECTOR_SHA256 = 'ce8691e166d24a87ff6bbf475dca8cc0eb526b6688f3af22fad6ad8b0a8b6c89'
 # Source Supabase server_version17.6 /170006 verified read-only on2026-10-29.
 # Pin the public multi-platform manifest; other migration fixtures stayPG15.
 POSTGRES_IMAGE = 'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929'
@@ -259,11 +260,29 @@ def plan_database():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(arena_pg, '_database_with_migrations',
                       partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
-        yield from database.__wrapped__()
+        generator = database.__wrapped__()
+        try:
+            db = next(generator)
+            with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
+                # Historical 507 equivalence/replay/security fixtures stay at
+                # their exact schema. Throughput measures the current deployed
+                # selector, including its later guarded scope optimizations.
+                for migration in (
+                    '557-lab-arena-closed-provider-scoped-candidates.sql',
+                    '559-lab-arena-deepline-uncertain-round-entry-index.sql',
+                    '560-lab-arena-closed-provider-score-run-scope.sql',
+                    '573-lab-arena-closed-provider-eligible-run-materialization.sql',
+                ):
+                    cursor.execute((ROOT / 'scripts' / migration).read_text())
+                cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURE,))
+                assert hashlib.sha256(cursor.fetchone()[0].encode()).hexdigest() == CURRENT_SELECTOR_SHA256
+            yield db
+        finally:
+            generator.close()
 
 
 def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
-    """Actual SQL functions plus exposed generic body; no literal-plan proxy."""
+    """Current 573 versus obsolete pre-507 SQL, retaining the scan invariant."""
     database = plan_database
     pg, dsn = database
     store, rid, run, cid, _ = router._call(database, '507plan')
@@ -286,7 +305,8 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
         with pg.connect(**dsn) as conn, conn.cursor() as cur:
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("SET LOCAL statement_timeout='20s'")
-            cur.execute("SET LOCAL work_mem='12MB'")
+            # Deliberate spill stress at half production's 12MB.
+            cur.execute("SET LOCAL work_mem='6MB'")
             cur.execute('SET LOCAL jit=off')
             cur.execute('SET LOCAL random_page_cost=1.1')
             # Sixty closed rounds mirror the observed production cardinality.
@@ -305,11 +325,29 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             cols = [r[0] for r in cur.fetchall()]
             repl = {'run_id':"repeat('r',48)||'plan507-'||s", 'assignment_id':"repeat('r',48)||'plan507-'||s",
                     'round_id':"CASE WHEN s%%60=0 THEN r.round_id ELSE 'arena-2026-10-20-plan507'||(s%%60) END",
+                    'kind':"CASE WHEN (((s-1)/60)+((s-1)%%60))%%2=0 THEN 'execute' ELSE 'score' END",
                     'status':"'failed'", 'terminal_cause':"'provider_error'", 'claim_request_id':'NULL'}
             cur.execute('INSERT INTO lab_arena_runs ('+','.join(cols)+') SELECT '+
                         ','.join(repl.get(k,'r.'+k) for k in cols)+
                         ' FROM lab_arena_runs r CROSS JOIN generate_series(1,40000) s WHERE run_id=%s',
                         (run['run_id'],))
+            # The observed last 60 production rounds contain roughly equal
+            # execute/score histories. Keep 20k of each (above the observed
+            # 13,660 terminal score candidates), mixed inside every round.
+            # Alternating only s%2 would correlate kind with the round s%60.
+            noise_prefix = 'r' * 48 + 'plan507-%'
+            cur.execute('SELECT kind,count(*) FROM lab_arena_runs WHERE run_id LIKE %s GROUP BY kind',
+                        (noise_prefix,))
+            plans['noise_runs_by_kind'] = dict(cur.fetchall())
+            assert plans['noise_runs_by_kind'] == {'execute': 20000, 'score': 20000}
+            cur.execute("SELECT round_id,count(*) FILTER (WHERE kind='execute'),"
+                        "count(*) FILTER (WHERE kind='score') FROM lab_arena_runs "
+                        'WHERE run_id LIKE %s GROUP BY round_id ORDER BY round_id', (noise_prefix,))
+            distribution = cur.fetchall()
+            plans['noise_runs_by_round'] = distribution
+            assert len(distribution) == 60
+            assert all(333 <= execute <= 334 and 333 <= score <= 334
+                       and abs(execute - score) <= 1 for _, execute, score in distribution)
             cur.execute('SELECT max(entry_id) FROM lab_arena_ledger')
             maximum = cur.fetchone()[0]
             cur.execute("SELECT attname FROM pg_attribute WHERE attrelid='lab_arena_ledger'::regclass "
@@ -330,18 +368,27 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                             "WHERE call_identity=%s AND entry_kind='uncertain'",
                             (maximum, first, first + 99999, cid))
                 assert cur.rowcount == 100000
+            # A full fixture sample avoids random estimates flipping the old
+            # join order near its cost threshold (500k rows < 300 * 2000).
+            cur.execute('SET LOCAL default_statistics_target=2000')
             for table in ('lab_arena_ledger','lab_arena_runs','lab_arena_rounds'):
                 cur.execute('ANALYZE '+table)
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')
-            cur.execute("SELECT current_setting('server_version'), current_setting('server_version_num')")
-            server_version, server_version_num = cur.fetchone()
+            cur.execute("SELECT current_setting('server_version'), current_setting('server_version_num'),"
+                        "current_setting('work_mem'),current_setting('default_statistics_target')")
+            server_version, server_version_num, work_mem, statistics_target = cur.fetchone()
             results = []; plans.update(server_version=server_version,
-                                       server_version_num=server_version_num)
+                                       server_version_num=server_version_num, work_mem=work_mem,
+                                       statistics_target=statistics_target)
+            assert work_mem == '6MB' and statistics_target == '2000'
+            cur.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURE,))
+            plans['selector_sha256'] = hashlib.sha256(cur.fetchone()[0].encode()).hexdigest()
+            assert plans['selector_sha256'] == CURRENT_SELECTOR_SHA256
             print('PLAN507_RUNTIME server_version=%s server_version_num=%s' %
                   (server_version, server_version_num), flush=True)
             for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
                 # Only the deliberately obsolete 60-scan reference needs a
-                # larger allowance. Optimized507 retains its 20-second bound.
+                # larger allowance. Current 573 retains its 20-second bound.
                 cur.execute('SET LOCAL statement_timeout=%s',
                             ('60s' if name.startswith('test_before_') else '20s',))
                 checkpoint(name + ':function_select')

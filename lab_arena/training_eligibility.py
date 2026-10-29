@@ -1308,8 +1308,10 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     reasons.extend(reason for reason in run_reasons if reason not in soft)
             else:
                 counts["complete_runs"] += 1
-            # Release this example's owned worker containers before the next run.
+            # The service loads the next export on demand. Drop both the owned
+            # worker view and references into this export before that read.
             worker_proofs = example = report = None
+            calls = call = candidate = delivered = full_segments = None
     if policy_stats_enabled:
         counts.update(reasoning_totals)
         counts["maximum_missing_reasoning_percent"] = maximum_missing_reasoning_percent

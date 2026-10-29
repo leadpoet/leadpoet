@@ -143,13 +143,13 @@ def _validator_policy_document(iam) -> dict[str, object]:
 
 
 def _configure_validator_credential_kms_guard(*, apply: bool, profile="leadpoet-lab") -> dict[str, object]:
-    from scripts.gateway_iam_session import AWS_CLIENT_CONFIG, RECOVERY_PROFILE, validate_gateway_iam_identity
+    from scripts.gateway_iam_session import AWS_CLIENT_CONFIG, validate_gateway_iam_identity
 
     session = _gateway_iam_session(profile=profile)
     sts = session.client("sts", region_name="us-east-1", config=AWS_CLIENT_CONFIG)
     identity = sts.get_caller_identity()
     try:
-        validate_gateway_iam_identity(identity, allow_recovery=profile == RECOVERY_PROFILE)
+        validate_gateway_iam_identity(identity)
     except Exception:
         raise ConfigurationError("gateway IAM caller identity differs") from None
     iam = session.client("iam", region_name="us-east-1", config=AWS_CLIENT_CONFIG)

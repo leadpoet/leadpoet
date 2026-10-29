@@ -73,14 +73,24 @@ def test_attested_release_workflow_is_manual_only_with_integrity_guards() -> Non
     workflow = (ROOT / ".github/workflows/attested-v2-release.yml").read_text(
         encoding="utf-8"
     )
-    trigger = workflow[: workflow.index("\nconcurrency:")]
-    assert trigger == "name: Gateway Attested Release\n\non:\n  workflow_dispatch:\n"
+    import yaml
+    document = yaml.load(workflow, Loader=yaml.BaseLoader)
+    assert set(document["on"]) == {"workflow_dispatch"}
+    assert set(document["on"]["workflow_dispatch"]["inputs"]) == {
+        "reproduce_commit", "expected_pcr0",
+    }
+    guard = (ROOT / ".github/scripts/require_attested_release_source.sh").read_text()
+    assert 'test "${GITHUB_REF:-}" = refs/heads/main' in guard
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in guard
+    assert 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in guard
+    for job in document["jobs"].values():
+        assert any("require_attested_release_source.sh" in step.get("run", "")
+                   for step in job["steps"])
+    builder = (ROOT / ".github/scripts/build_attested_release.sh").read_text()
+    assert "leadpoet_acquire_docker_operation_lock_v2" in builder
+    assert "leadpoet-gateway-v2-builder" not in workflow
+    assert "leadpoet-validator-v2-builder" not in workflow
 
-    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
-    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
-    assert "leadpoet_acquire_docker_operation_lock_v2" in workflow
-    assert "leadpoet-gateway-v2-builder" in workflow
-    assert "leadpoet-validator-v2-builder" in workflow
 
 
 def test_normal_validator_restart_does_not_consult_github_ci() -> None:

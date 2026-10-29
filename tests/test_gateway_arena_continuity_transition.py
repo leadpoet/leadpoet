@@ -207,7 +207,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         record() { printf '%s\\n' "$*" >> "$EVENTS"; }
         arena_ingress_tool() {
           local root="$1"; shift
-          if [ "$1" = --inspect ]; then cat "$INGRESS_FILE"; return; fi
+          if [ "$1" = --inspect ]; then cat "$INGRESS_FILE"; return 0; fi
           [ "$1" = --activate ] || return 1
           shift
           local old_mode= old_slot= old_sha= old_backend=

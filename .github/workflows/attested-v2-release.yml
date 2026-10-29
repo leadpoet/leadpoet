@@ -67,8 +67,6 @@ jobs:
     env:
       BUILD_COMMIT: ${{ needs.source.outputs.build_commit }}
       GATEWAY_V2_BUILDER_DOMAIN: ${{ matrix.domain }}
-      # Temporary: remove after the cross-host config delta is fixed and reproduced.
-      GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}
     steps:
       - name: Check out trusted exact workflow source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

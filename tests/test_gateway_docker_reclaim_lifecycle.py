@@ -238,10 +238,66 @@ def test_role_temporary_cleanup_keeps_its_original_success_timing():
     assert source[start:first_build].strip() == 'COLD_DOCKER_BUILD_STARTED=1'
 
 
-def test_both_workflow_final_cleanup_paths_always_use_preserving_optin():
+@pytest.mark.parametrize('domain', ['gateway', 'validator'])
+@pytest.mark.parametrize('host', ['empty', 'occupied', 'registry-cache', 'production-identity'])
+def test_isolated_workflow_builders_never_reclaim_a_shared_host(tmp_path, domain, host):
     import yaml
-    workflow = yaml.safe_load(Path('.github/workflows/attested-v2-release.yml').read_text())
-    for name in ('gateway-parent', 'gateway-parent-b'):
-        step = next(step for step in workflow['jobs'][name]['steps'] if step.get('id') == 'final_cleanup')
-        assert step['if'] == 'always()'
-        assert 'VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1' in step['run']
+
+    workflow_source = Path('.github/workflows/attested-v2-release.yml').read_text()
+    workflow = yaml.safe_load(workflow_source)
+    builds = workflow['jobs']['builds']
+    assert builds['strategy']['matrix']['include'] == [
+        {'domain': 'gateway', 'runner': 'ubuntu-24.04'},
+        {'domain': 'validator', 'runner': 'runs-on'},
+    ]
+    assert 'attested-v2-isolated' in builds['runs-on']
+    assert any(step.get('run') == 'bash .github/scripts/build_attested_release.sh'
+               for step in builds['steps'])
+    source = Path('.github/scripts/build_attested_release.sh').read_text()
+    assert 'reclaim_docker_storage_v2.sh' not in workflow_source + source
+    # Exercise the actual builder boundary through both domain gates. Stub
+    # only external account/Docker inventory and unrelated Nitro installation;
+    # every Docker mutation is an error, and the real isolation checker runs.
+    preflight = source[:source.index('docker version --format')]
+    retained = tmp_path / 'retained-image-volume'
+    retained.write_bytes(b'rollback-state')
+    commands = tmp_path / 'docker-commands'
+    stubs = r"""
+uname() { echo x86_64; }
+aws() {
+  [ "$*" = 'sts get-caller-identity --query Account --output text' ] || return 90
+  printf '%s\n' "$TEST_ACCOUNT"
+}
+python3() {
+  if [ "$1" = .github/scripts/verify_attested_nitro_toolchain.py ]; then return 0; fi
+  [ "$1" = .github/scripts/verify_attested_builder_isolation.py ] || return 91
+  command python3 "$@"
+}
+docker() {
+  if [ "$*" = 'ps -aq' ]; then
+    echo ps >> "$TEST_COMMANDS"
+    printf '%s' "$TEST_CONTAINERS"
+  elif [ "$1" = info ] && [ "$2" = --format ] && [ "$#" = 3 ]; then
+    echo info >> "$TEST_COMMANDS"
+    printf '%s' "$TEST_MIRRORS"
+  else
+    echo unsafe-docker-command >&2
+    return 92
+  fi
+}
+"""
+    result = subprocess.run(['bash', '-c', stubs + preflight + '\necho admitted\n'],
+        env={'PATH': os.environ['PATH'], 'HOME': str(tmp_path),
+             'GATEWAY_V2_BUILDER_DOMAIN': domain, 'RUNNER_TEMP': str(tmp_path),
+             'RUNNER_ENVIRONMENT': 'self-hosted' if host == 'production-identity' else 'github-hosted',
+             'TEST_ACCOUNT': '493765492819' if host == 'production-identity' else '899952150628',
+             'TEST_COMMANDS': str(commands),
+             'TEST_CONTAINERS': 'retained-container' if host == 'occupied' else '',
+             'TEST_MIRRORS': '["https://cache.example.invalid/"]' if host == 'registry-cache' else '[]'},
+        text=True, capture_output=True)
+    assert (result.returncode == 0) == (host == 'empty'), result.stderr
+    assert ('admitted' in result.stdout) == (host == 'empty')
+    calls = commands.read_text().splitlines() if commands.exists() else []
+    assert calls == ([] if host == 'production-identity' else ['ps'] if host == 'occupied' else ['ps', 'info'])
+    assert 'unsafe-docker-command' not in result.stderr
+    assert retained.read_bytes() == b'rollback-state'

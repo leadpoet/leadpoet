@@ -35,6 +35,25 @@ BEGIN
  ELSIF encode(extensions.digest(d,'sha256'),'hex')='fc3f2bf436135078c83351e3cb6f8045ba77caa35819db8944f4bc16fbb7dfec' THEN
    RAISE EXCEPTION 'Quality readiness helper missing' USING ERRCODE='55000';
  END IF;
+ SELECT * INTO STRICT p FROM pg_proc WHERE oid='public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)'::regprocedure;
+ IF encode(extensions.digest(pg_get_functiondef(p.oid),'sha256'),'hex') NOT IN (
+      '3a0ff0eb9209d66f766daaee4eebab92a81f5f1d05e5d189130d7ec1dc69b0af','c1dd9446626ef01989a5ae53ce4f4e28d4d1692ab2d9fb96747f388281e5649f')
+   OR pg_get_userbyid(p.proowner)<>'lab_arena_owner'
+   OR p.proacl::text IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner}'
+   OR NOT p.prosecdef OR p.provolatile<>'s'
+   OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::text[] THEN
+   RAISE EXCEPTION 'Quality continuation preimage/security differs' USING ERRCODE='55000'; END IF;
+ IF to_regprocedure('public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs)') IS NOT NULL THEN
+   SELECT * INTO p FROM pg_proc WHERE oid='public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs)'::regprocedure;
+   IF encode(extensions.digest(pg_get_functiondef(p.oid),'sha256'),'hex')<>'b94ec8c6ebbd7a94a2b2e3e34d31226f9fe3931e256985b9375f6504e27fa946'
+     OR pg_get_userbyid(p.proowner)<>'lab_arena_owner'
+     OR p.proacl::text IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner}'
+     OR NOT p.prosecdef OR p.provolatile<>'s'
+     OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::text[] THEN
+     RAISE EXCEPTION 'Quality continuation helper differs' USING ERRCODE='55000'; END IF;
+ ELSIF encode(extensions.digest(pg_get_functiondef('public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)'::regprocedure),'sha256'),'hex')='c1dd9446626ef01989a5ae53ce4f4e28d4d1692ab2d9fb96747f388281e5649f' THEN
+   RAISE EXCEPTION 'Quality continuation helper missing' USING ERRCODE='55000';
+ END IF;
  PERFORM set_config('lab_arena.quality_readiness_owner_create',
    has_schema_privilege('lab_arena_owner','public','CREATE')::text,true);
  IF NOT has_schema_privilege('lab_arena_owner','public','CREATE') THEN
@@ -159,6 +178,77 @@ ALTER FUNCTION public.lab_arena__quality_judgment_refs_v1(public.lab_arena_round
 REVOKE ALL ON FUNCTION public.lab_arena__quality_judgment_refs_v1(public.lab_arena_rounds,public.lab_arena_runs,public.lab_arena_runs)
  FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
 
+-- Continuation validates the frozen reference inventory, not accepted results.
+-- A failed partial attempt legitimately has missing cache evidence. Acceptance
+-- still uses the separate immutable-evidence helper above and gateway replay.
+CREATE OR REPLACE FUNCTION public.lab_arena__quality_continuation_refs_v1(
+ p_round public.lab_arena_rounds,p_run public.lab_arena_runs)
+RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path=pg_catalog, public AS $continuation_refs589$
+DECLARE c jsonb:=p_round.configuration_doc; p_refs jsonb:=p_run.company_judgment_refs;
+ ref jsonb; ordinal bigint; scope jsonb; context jsonb;
+BEGIN
+ IF jsonb_typeof(c) IS DISTINCT FROM 'object'
+   OR jsonb_typeof(c->'scorer_policy') IS DISTINCT FROM 'object'
+   OR c->>'integrity_policy' IS DISTINCT FROM 'arena_integrity_v1'
+   OR c->>'company_quality_policy' IS DISTINCT FROM 'company_quality_v1'
+   OR c#>>'{scorer_policy,company_quality_policy}' IS DISTINCT FROM 'company_quality_v1'
+   OR c ? 'company_judgment_policy' OR (c->'scorer_policy') ? 'company_judgment_policy'
+   OR coalesce(c#>>'{scorer_policy,scoring_adapter_version}','') NOT IN
+       ('qualification_integrity_v2','qualification_contacts_v3')
+   OR (c->'scorer_policy') ? 'contact_policy'
+   OR (CASE WHEN c ? 'contact_policy' THEN
+         c->>'contact_policy' IS DISTINCT FROM 'contacts_v1'
+         OR c#>>'{scorer_policy,scoring_adapter_version}' IS DISTINCT FROM 'qualification_contacts_v3'
+       ELSE c#>>'{scorer_policy,scoring_adapter_version}' IS DISTINCT FROM 'qualification_integrity_v2' END)
+   OR p_round.round_id IS NULL OR p_round.arena_network_name IS NULL
+   OR p_round.arena_netuid IS NULL OR p_round.evaluation_date IS NULL
+   OR jsonb_typeof(c->'scorer_image_digest') IS DISTINCT FROM 'string'
+   OR jsonb_typeof(c->'scorer_image_reference') IS DISTINCT FROM 'string'
+   OR jsonb_typeof(p_refs) IS DISTINCT FROM 'array' THEN RETURN FALSE; END IF;
+ IF jsonb_array_length(p_refs)>5 THEN RETURN FALSE; END IF;
+ -- Unclaimed continuation rows have no claim yet; their exact inventory must
+ -- match the failed parent in the outer predicate. A retained claim, including
+ -- a failed partial completion, must prove its own complete ordered inventory.
+ context:=p_run.claim_response->'company_judgment_cache';
+ IF p_run.claim_response IS NOT NULL AND (
+   jsonb_typeof(context) IS DISTINCT FROM 'object'
+   OR context->>'schema_version' IS DISTINCT FROM 'leadpoet.lab_arena.company_judgment_lease.v1'
+   OR jsonb_typeof(context->'hits') IS DISTINCT FROM 'array'
+   OR jsonb_typeof(context->'misses') IS DISTINCT FROM 'array') THEN RETURN FALSE; END IF;
+ IF context IS NOT NULL AND jsonb_array_length(p_refs) <>
+    jsonb_array_length(context->'hits')+jsonb_array_length(context->'misses')
+ THEN RETURN FALSE; END IF;
+ FOR ref,ordinal IN SELECT value,ordinality FROM jsonb_array_elements(p_refs) WITH ORDINALITY LOOP
+   IF jsonb_typeof(ref) IS DISTINCT FROM 'object'
+     OR jsonb_typeof(ref->'cache_key') IS DISTINCT FROM 'string'
+     OR jsonb_typeof(ref->'company_input_hash') IS DISTINCT FROM 'string'
+     OR coalesce(ref->>'cache_key','') !~ '^sha256:[0-9a-f]{64}$'
+     OR coalesce(ref->>'company_input_hash','') !~ '^sha256:[0-9a-f]{64}$'
+   THEN RETURN FALSE; END IF;
+   scope:=jsonb_build_object('schema_version','leadpoet.lab_arena.company_judgment_scope.v1',
+     'integrity_policy','arena_integrity_v1','company_quality_policy','company_quality_v1',
+     'round_id',p_round.round_id,'network_name',p_round.arena_network_name,'netuid',p_round.arena_netuid,
+     'scorer_image_digest',c->>'scorer_image_digest','scorer_image_reference',c->>'scorer_image_reference',
+     'evaluation_date',p_round.evaluation_date,'company_input_hash',ref->>'company_input_hash',
+     'cache_key',ref->>'cache_key');
+   IF ref IS DISTINCT FROM jsonb_build_object('schema_version','leadpoet.lab_arena.company_judgment_ref.v1',
+       'company_index',ordinal-1,'cache_key',ref->>'cache_key',
+       'company_input_hash',ref->>'company_input_hash','scope_doc',scope)
+   THEN RETURN FALSE; END IF;
+   IF context IS NOT NULL AND NOT EXISTS (
+     SELECT 1 FROM jsonb_array_elements((context->'hits')||(context->'misses')) entry
+     WHERE entry->'company_index'=ref->'company_index'
+       AND entry->'cache_key'=ref->'cache_key'
+       AND entry->'company_input_hash'=ref->'company_input_hash')
+   THEN RETURN FALSE; END IF;
+ END LOOP;
+ RETURN TRUE;
+END $continuation_refs589$;
+ALTER FUNCTION public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs) OWNER TO lab_arena_owner;
+REVOKE ALL ON FUNCTION public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs)
+ FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
+
 DO $restore589$
 BEGIN
  IF current_setting('lab_arena.quality_readiness_owner_create')='false' THEN
@@ -195,6 +285,25 @@ BEGIN
  EXECUTE replace(d,old,new);
 END $late589$;
 
+-- Only replace the scope representation check. The original continuation
+-- source/plan/participant/generation/parent checks and every caller's existing
+-- cost, lease, deadline and real-clock backoff fences remain unchanged.
+DO $continuation589$
+DECLARE d text; old text:=$old589$    OR (CASE WHEN public.lab_arena__company_judgment_policy_v1(p_round) THEN$old589$;
+ new text:=$new589$    OR (CASE WHEN p_round.configuration_doc->>'company_quality_policy'='company_quality_v1'
+      OR p_round.configuration_doc#>>'{scorer_policy,company_quality_policy}'='company_quality_v1' THEN
+      NOT public.lab_arena__quality_continuation_refs_v1(p_round,p_run)
+      OR p_run.judgment_cache_key IS NOT NULL OR p_run.judgment_input_hash IS NOT NULL
+      OR p_run.judgment_scope_doc IS NOT NULL
+     WHEN public.lab_arena__company_judgment_policy_v1(p_round) THEN$new589$;
+BEGIN
+ SELECT pg_get_functiondef('public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)'::regprocedure) INTO d;
+ IF strpos(d,new)>0 THEN RETURN; END IF;
+ IF (length(d)-length(replace(d,old,'')))<>length(old) THEN
+   RAISE EXCEPTION 'Quality continuation anchor differs' USING ERRCODE='55000'; END IF;
+ EXECUTE replace(d,old,new);
+END $continuation589$;
+
 DO $verify589$
 DECLARE item record; p pg_proc;
 BEGIN
@@ -203,7 +312,9 @@ BEGIN
     'fc3f2bf436135078c83351e3cb6f8045ba77caa35819db8944f4bc16fbb7dfec','sql'),
    ('public.lab_arena__quality_judgment_refs_v1(public.lab_arena_rounds,public.lab_arena_runs,public.lab_arena_runs)',
     '812d8b76d2d3579e733a2708e20fc7918e565e5c9c84062586f24d19d121cc62','plpgsql'),
-   ('public.lab_arena_record_run_scores(text,smallint,jsonb)','68e0fe2b383b0295e8f121902a8d429e7a0b43b233d4357f0f242779da9fa9f8','plpgsql')) AS expected(signature,hash,language)
+   ('public.lab_arena_record_run_scores(text,smallint,jsonb)','68e0fe2b383b0295e8f121902a8d429e7a0b43b233d4357f0f242779da9fa9f8','plpgsql'),
+   ('public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs)','b94ec8c6ebbd7a94a2b2e3e34d31226f9fe3931e256985b9375f6504e27fa946','plpgsql'),
+   ('public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)','c1dd9446626ef01989a5ae53ce4f4e28d4d1692ab2d9fb96747f388281e5649f','plpgsql')) AS expected(signature,hash,language)
  LOOP
    SELECT * INTO STRICT p FROM pg_proc WHERE oid=item.signature::regprocedure;
    IF encode(extensions.digest(pg_get_functiondef(p.oid),'sha256'),'hex')<>item.hash

@@ -238,8 +238,8 @@ def test_real_partial_producer_can_supply_an_accepted_quality_destination(databa
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(SQL.read_text())
     _negative_refs_matrix(connect, harness, target=target)
-    # This is a committed partial-cache proof, not a claim that589 changes
-    # quality retry admission or completes the incomplete organizer baseline.
+    # This remains a partial-cache proof. No transition was driven after589;
+    # the separate continuation regression proves recovery and publication.
     assert not harness.service.store.get_round(harness.round_id).get('publication_doc')
 
 
@@ -247,8 +247,9 @@ HELPER = 'public.lab_arena__quality_judgment_refs_v1(public.lab_arena_rounds,pub
 TARGET = 'public.lab_arena__all_judgments_ready_v1(text)'
 RECORD = 'public.lab_arena_record_run_scores(text,smallint,jsonb)'
 LEGACY = ('public.lab_arena__company_judgment_policy_v1(public.lab_arena_rounds)',
-          'public.lab_arena__company_judgment_refs_v1(public.lab_arena_rounds,jsonb)',
-          'public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)')
+          'public.lab_arena__company_judgment_refs_v1(public.lab_arena_rounds,jsonb)')
+CONTINUATION = 'public.lab_arena__judge_continuation_v1(public.lab_arena_rounds,public.lab_arena_runs)'
+STRUCTURAL = 'public.lab_arena__quality_continuation_refs_v1(public.lab_arena_rounds,public.lab_arena_runs)'
 
 
 def _negative_refs_matrix(connect, harness, *, target=None):
@@ -388,7 +389,7 @@ def test_migration_replay_security_and_atomic_drift(database):
     try:
         connection.autocommit = True
         with connection.cursor() as cursor:
-            before = _definitions(cursor, (TARGET, RECORD, *LEGACY))
+            before = _definitions(cursor, (TARGET, RECORD, CONTINUATION, *LEGACY))
             data_before = _data_snapshot(cursor)
             cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
             cursor.fetchone()
@@ -403,18 +404,19 @@ def test_migration_replay_security_and_atomic_drift(database):
             assert cursor.fetchone()[0] is False
             original = before[TARGET][0]
             cursor.execute(original.replace('SELECT NOT EXISTS', 'SELECT /* drift */ NOT EXISTS', 1))
-            drift_before_install = _definitions(cursor, (TARGET, RECORD, *LEGACY))
+            drift_before_install = _definitions(cursor, (TARGET, RECORD, CONTINUATION, *LEGACY))
             with pytest.raises(pg.Error, match='preimage differs'):
                 cursor.execute(SQL.read_text())
             cursor.execute('ROLLBACK')
-            assert _definitions(cursor, (TARGET, RECORD, *LEGACY)) == drift_before_install
+            assert _definitions(cursor, (TARGET, RECORD, CONTINUATION, *LEGACY)) == drift_before_install
             cursor.execute('SELECT to_regprocedure(%s)', (HELPER,))
             assert cursor.fetchone()[0] is None
             cursor.execute(original)
             cursor.execute(SQL.read_text())
-            installed = _definitions(cursor, (TARGET, HELPER, RECORD, *LEGACY))
+            installed = _definitions(cursor, (TARGET, HELPER, RECORD, CONTINUATION, STRUCTURAL, *LEGACY))
             assert installed[TARGET][1:] == before[TARGET][1:]
             assert installed[RECORD][1:] == before[RECORD][1:]
+            assert installed[CONTINUATION][1:] == before[CONTINUATION][1:]
             assert all(installed[sig] == before[sig] for sig in LEGACY)
             cursor.execute(SQL.read_text())
             assert _definitions(cursor, tuple(installed)) == installed
@@ -422,17 +424,19 @@ def test_migration_replay_security_and_atomic_drift(database):
             cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
             assert cursor.fetchone()[0] == migration_acl
             for role in ('anon', 'authenticated', 'service_role', 'lab_arena_service'):
-                for signature in (TARGET, HELPER):
+                for signature in (TARGET, HELPER, CONTINUATION, STRUCTURAL):
                     cursor.execute("SELECT has_function_privilege(%s,%s,'EXECUTE')", (role, signature))
                     assert cursor.fetchone()[0] is False
                 cursor.execute("SELECT has_function_privilege(%s,%s,'EXECUTE')", (role, RECORD))
                 assert cursor.fetchone()[0] is (role == 'lab_arena_service')
             cursor.execute('RESET ROLE')
-            for signature in (TARGET, HELPER, RECORD):
+            for signature in (TARGET, HELPER, RECORD, CONTINUATION, STRUCTURAL):
                 # A valid unknown body must not be silently replaced on replay.
                 body = installed[signature][0]
-                if signature == HELPER:
+                if signature in (HELPER, STRUCTURAL):
                     altered = body.replace('RETURN TRUE;', 'RETURN TRUE OR FALSE;', 1)
+                elif signature == CONTINUATION:
+                    altered = body.replace('DECLARE v_source', 'DECLARE /* drift */ v_source', 1)
                 elif signature == RECORD:
                     altered = body.replace('v_late_judge BOOLEAN;', 'v_late_judge BOOLEAN; -- drift', 1)
                 else:
@@ -445,6 +449,15 @@ def test_migration_replay_security_and_atomic_drift(database):
                 cursor.execute('ROLLBACK')
                 assert _definitions(cursor, tuple(installed)) == drift
                 cursor.execute(body)
+            for signature in (CONTINUATION, STRUCTURAL):
+                cursor.execute('GRANT EXECUTE ON FUNCTION ' + signature + ' TO anon')
+                drift = _definitions(cursor, tuple(installed))
+                with pytest.raises(pg.Error, match='(preimage/security|helper) differs'):
+                    cursor.execute(SQL.read_text())
+                cursor.execute('ROLLBACK')
+                assert _definitions(cursor, tuple(installed)) == drift
+                cursor.execute('REVOKE EXECUTE ON FUNCTION ' + signature + ' FROM anon')
+            assert _definitions(cursor, tuple(installed)) == installed
 
     finally:
         connection.close()

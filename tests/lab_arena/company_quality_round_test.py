@@ -8,6 +8,7 @@ import io
 import json
 import subprocess
 import tarfile
+import time
 from urllib.parse import urlsplit
 
 import pytest
@@ -85,8 +86,14 @@ class QualityHarness(IntegrityHarness):
         self.clock.now = datetime.now(timezone.utc)
         runners = [self.runner(index) for index in range(count)]
         try:
-            while any([runner.run_once() for runner in runners]):
-                pass
+            deadline = time.monotonic() + 60
+            while True:
+                # Evaluate every runner per pass; a busy first runner must not
+                # starve the other validator's cache authority opportunity.
+                while any([runner.run_once() for runner in runners]):
+                    pass
+                if not self.wait_for_score_retry_backoff(deadline=deadline):
+                    break
         finally:
             for runner in runners:
                 runner.close()

@@ -3231,6 +3231,7 @@ def test_rounds_overlap_and_every_request_names_its_round(scenario_connect, tmp_
     cache = rn.ImageCache(
         harness.tmp / "images-follower",
         lambda reference, digest, target: (target / "rootfs").mkdir(),
+        max_bytes=1024 * 1024,
     )
     (harness.tmp / "work-follower").mkdir(exist_ok=True)
     follower_api = InProcessApi(service)

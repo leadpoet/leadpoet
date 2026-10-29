@@ -177,7 +177,8 @@ def fixed_scores(monkeypatch):
     scores = {
         "PublicBaseline": 5.0,
         "EfficientWinner": 2.0,
-        "PriorWinner": 10.0,
+        # Current signed reward tiers need an actual 20-point improvement.
+        "PriorWinner": 25.0,
         "LowEligible": 0.5,
         "ExpensiveHigh": 99.0,
     }
@@ -262,7 +263,7 @@ def _accepted_state(harness, epoch, burn_hotkey):
     return state
 
 
-def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_downstream_authority(
+def test_cost_ineligible_baseline_allows_promotion_but_cannot_authorize_a_reward_slot(
     database, tmp_path, fixed_scores
 ):
     psycopg2, dsn = database
@@ -351,20 +352,15 @@ def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_do
         ).decode()
         == "EfficientWinner"
     )
-    assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
-    activated = harness.service.store.get_round(harness.round_id)
-    assert activated["reward_basis_doc"]["king_hotkey"] == winner["miner_hotkey"]
-
-    burn = fixtures.keypair("baseline-cost-zero-burn-one").ss58_address
-    reward_epoch = int(activated["effective_reward_epoch"])
-    state = _accepted_state(harness, reward_epoch, burn)
-    assert state["reward_basis"]["king_hotkey"] == winner["miner_hotkey"]
-    derived = arena_weights.derive_arena_weights(
-        state, [burn, winner["miner_hotkey"]]
-    )
-    assert derived["champion_share_ppb"] == 300_000_000
-    assert derived["burned_residual_ppb"] == 700_000_000
-    assert derived["sparse_uids"] == [0, 1]
+    # Current slot authority requires an eligible measured baseline. A cost
+    # disqualification may change the competition winner, but cannot fabricate
+    # a verified improvement for reward allocation.
+    before_reward = harness.service.store.get_round(harness.round_id)
+    with pytest.raises(fixtures.ArenaStoreError, match="lab_arena_reward_current_achievement_invalid"):
+        harness.service.activate_reward(harness.round_id)
+    assert harness.service.store.get_round(harness.round_id) == before_reward
+    assert before_reward['reward_basis_doc'] is None
+    assert before_reward['reward_activated_at'] is None
     fixtures.assert_canary_absent(harness, connect)
 
 
@@ -480,8 +476,14 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
     derived = arena_weights.derive_arena_weights(
         state, [burn, prior_winner["miner_hotkey"]]
     )
-    assert derived["champion_share_ppb"] == 300_000_000
-    assert derived["burned_residual_ppb"] == 700_000_000
+    assert first_basis['slot_policy']['pool_percent'] == 50
+    assert all(slot['miner_hotkey'] == prior_winner['miner_hotkey']
+               for slot in first_basis['reward_slots'])
+    assert second_basis['reward_slots'] == [
+        {**slot, 'start_epoch': first_activated['effective_reward_epoch']}
+        for slot in first_basis['reward_slots']]
+    assert derived["champion_share_ppb"] == 500_000_000
+    assert derived["burned_residual_ppb"] == 500_000_000
 
     # The next daily round freezes the still-current promoted source again.
     harness.challengers = []

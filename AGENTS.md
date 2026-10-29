@@ -1,3 +1,20 @@
+## Scoped authorization: October 29 complete subnet Supabase retirement
+
+The user explicitly authorized completing the subnet's Supabase exit using the
+existing AWS infrastructure. The coordinator may upgrade required validators and
+auditors through canonical controls, retire proved obsolete processes, make
+minimal tested fixes, merge and deploy, and verify fresh startup, gateway
+communication, a complete epoch, scoring and actual weight submission on AWS.
+Preserve accepted work, accounting, rewards, history and concurrent deployment
+ownership. Add no database migration, service or compatibility architecture.
+After independent review and AWS-only production proof, preserve necessary
+historical data in AWS, decommission only Supabase project
+`qplwoislplkcegvdmbim`, and verify its ongoing project billing has stopped.
+Leave every other Supabase project unchanged. This supersedes the source-retention
+limit of the completed October 28 migration phase only for the named project.
+Internal agents are read-only unless assigned isolated implementation; only the
+coordinator may change production. This authority ends after final verification.
+
 ## Scoped production authorization: October 29 full CI recovery
 
 The user authorized investigation and repair of confirmed full-repository CI

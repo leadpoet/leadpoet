@@ -58,7 +58,7 @@ jobs:
           request = urllib.request.Request(url + separator + urllib.parse.urlencode(query))
           try:
               with urllib.request.urlopen(request, timeout=30) as response:
-                  if response.status != 200:
+                  if not 200 <= response.status < 300:
                       raise ValueError('unexpected check-in response')
           except Exception:
               # The Cron URL includes its authentication key. Never print an

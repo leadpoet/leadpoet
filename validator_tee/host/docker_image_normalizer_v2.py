@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -125,7 +125,12 @@ def _normalized_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
     return normalized
 
 
-def normalize_layer_archive(source: Path, destination: Path) -> str:
+def normalize_layer_archive(
+    source: Path,
+    destination: Path,
+    *,
+    inherited_directories: Optional[dict[str, tuple[Any, ...]]] = None,
+) -> str:
     """Rewrite one uncompressed Docker layer with canonical tar metadata."""
 
     # Docker's containerd image store emits gzip-compressed layer blobs while
@@ -134,8 +139,60 @@ def normalize_layer_archive(source: Path, destination: Path) -> str:
     with tarfile.open(source, "r:*") as original, tarfile.open(
         destination, "w:"
     ) as output:
-        for member in sorted(original.getmembers(), key=lambda item: item.name):
+        members = sorted(original.getmembers(), key=lambda item: item.name)
+        directory_counts: dict[str, int] = {}
+        for member in members:
+            if member.isdir():
+                name = PurePosixPath(member.name).as_posix()
+                directory_counts[name] = directory_counts.get(name, 0) + 1
+        if inherited_directories is not None:
+            # OCI whiteouts affect lower layers only and precede same-layer
+            # creations, even when aliases sort before the whiteout record.
+            for member in members:
+                path = PurePosixPath(member.name)
+                if path.is_absolute() or ".." in path.parts:
+                    inherited_directories.clear()
+                    continue
+                if path.name == ".wh..wh..opq":
+                    parent = path.parent.as_posix()
+                    prefix = "" if parent == "." else parent + "/"
+                    for old in list(inherited_directories):
+                        if old != parent and old.startswith(prefix):
+                            del inherited_directories[old]
+                elif path.name.startswith(".wh."):
+                    target = (path.parent / path.name[4:]).as_posix()
+                    for old in list(inherited_directories):
+                        if old == target or old.startswith(target + "/"):
+                            del inherited_directories[old]
+        for member in members:
             normalized = _normalized_member(member)
+            if inherited_directories is not None:
+                path = PurePosixPath(normalized.name)
+                if path.is_absolute() or ".." in path.parts:
+                    # Keep unfamiliar paths and discard comparison state.
+                    inherited_directories.clear()
+                else:
+                    name = path.as_posix()
+                    basename = path.name
+                    if basename.startswith(".wh."):
+                        pass  # Already applied to inherited state, not this layer.
+                    elif normalized.isdir():
+                        metadata = tuple(getattr(normalized, field) for field in (
+                            "mode", "uid", "gid", "size", "mtime", "type",
+                            "linkname", "uname", "gname", "devmajor", "devminor",
+                        )) + (tuple(sorted(normalized.pax_headers.items())),)
+                        redundant = (
+                            directory_counts[name] == 1
+                            and inherited_directories.get(name) == metadata
+                        )
+                        if redundant:
+                            continue
+                        inherited_directories[name] = metadata
+                    else:
+                        # A file, symlink, or device replaces any old directory.
+                        for old in list(inherited_directories):
+                            if old == name or old.startswith(name + "/"):
+                                del inherited_directories[old]
             content = original.extractfile(member) if member.isfile() else None
             output.addfile(normalized, content)
     return _sha256_file(destination)
@@ -183,26 +240,28 @@ def normalize_saved_image(
             raise DockerImageNormalizationError("Docker image manifest is incomplete")
 
         normalized_layers: list[str] = []
-        normalized_by_source: dict[str, str] = {}
+        inherited_directories: dict[str, tuple[Any, ...]] = {}
+        source_layers: set[Path] = set()
         for layer_name in layers:
             if not isinstance(layer_name, str):
                 raise DockerImageNormalizationError("Docker layer path is invalid")
-            if layer_name in normalized_by_source:
-                normalized_layers.append(normalized_by_source[layer_name])
-                continue
             source = root / layer_name
+            source_layers.add(source)
             temporary_layer = root / (
                 "normalized-layer-%d.tar" % len(normalized_layers)
             )
-            layer_hash = normalize_layer_archive(source, temporary_layer)
+            layer_hash = normalize_layer_archive(
+                source, temporary_layer, inherited_directories=inherited_directories
+            )
             normalized_name = "blobs/sha256/%s" % layer_hash
             normalized_path = root / normalized_name
             normalized_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(temporary_layer), str(normalized_path))
-            if source != normalized_path:
-                source.unlink(missing_ok=True)
-            normalized_by_source[layer_name] = normalized_name
             normalized_layers.append(normalized_name)
+        # A repeated source layer can normalize differently after earlier
+        # layers change inherited state. Keep every source until all uses end.
+        for source in source_layers - {root / name for name in normalized_layers}:
+            source.unlink(missing_ok=True)
 
         config_path = root / config_name
         config = _load_json(config_path, "Docker image config")

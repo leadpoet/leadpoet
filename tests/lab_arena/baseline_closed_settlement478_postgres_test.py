@@ -187,5 +187,13 @@ def test_prior_day_execute_is_unchanged(database, migrated):
             assert cur.fetchone()[0] == 0
 
 
-def test_existing_scoring_publication_and_reward_controls(database, migrated, tmp_path):
-    prior.prior.test_existing_acceptance_publication_and_rewards_still_work(database, True, tmp_path)
+@pytest.fixture()
+def service_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_existing_scoring_publication_and_reward_controls(database, migrated, service_database, tmp_path):
+    # The historical fixture above still proves the exact 478 application.
+    # Its current service/publication control needs the current read schema.
+    prior.prior.test_existing_acceptance_publication_and_rewards_still_work(service_database, tmp_path)

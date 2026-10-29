@@ -124,14 +124,14 @@ def test_benchmark_disclosure_scope_updates_only_one_key(monkeypatch, tmp_path, 
     key = tmp_path / "ssh.pem"
     key.write_text("fixture")
     calls = []
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append((request["secret_id"], request)) or {"ok": True})
     assert MODULE.main([
         "--benchmark-disclosure-from", "2026-09-13T00:00:00Z", "--check",
         "--allowed-account", "493765492819", "--ssh-key", str(key),
     ]) == 0
     assert len(calls) == 1
     request = calls[0][1]
-    assert calls[0][0] == MODULE.GATEWAY_HOST
+    assert calls[0][0] == MODULE.GATEWAY_SECRET
     assert request["role"] == "benchmark_disclosure_only"
     assert request["updates"] == {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "2026-09-13T00:00:00+00:00"}
     assert request["aliases"] == {}
@@ -152,12 +152,12 @@ def test_openrouter_concurrency_scope_targets_only_gateway(monkeypatch, tmp_path
     key = tmp_path / "ssh.pem"
     key.write_text("fixture")
     calls = []
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append((request["secret_id"], request)) or {"ok": True})
     assert MODULE.main([
         "--openrouter-max-concurrency", "200", "--check",
         "--allowed-account", "493765492819", "--ssh-key", str(key),
     ]) == 0
-    assert calls == [(MODULE.GATEWAY_HOST, {
+    assert calls == [(MODULE.GATEWAY_SECRET, {
         "secret_id": MODULE.GATEWAY_SECRET,
         "allowed_accounts": ["493765492819"],
         "apply": False, "role": "openrouter_concurrency_only", "aliases": {},
@@ -181,7 +181,7 @@ def test_openrouter_concurrency_apply_requires_existing_authorization(monkeypatc
     key = tmp_path / "ssh.pem"
     key.write_text("fixture")
     monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
-    monkeypatch.setattr(MODULE, "_ssh", lambda *a: pytest.fail("unauthorized remote call"))
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda *a: pytest.fail("unauthorized remote call"))
     assert MODULE.main([
         "--openrouter-max-concurrency", "4", "--apply",
         "--allowed-account", "493765492819", "--ssh-key", str(key),
@@ -277,7 +277,7 @@ def test_contacts_scope_updates_only_one_key(monkeypatch, tmp_path, capsys, opti
     key = tmp_path / "ssh.pem"
     key.write_text("fixture")
     calls = []
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append((request["secret_id"], request)) or {"ok": True})
     assert MODULE.main(option + ["--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
     assert len(calls) == 1
     request = calls[0][1]
@@ -323,13 +323,13 @@ def test_scorer_image_only_check_updates_only_the_scorer_image(monkeypatch, tmp_
     image = "registry.example/team/scorer@sha256:" + "b" * 64
     calls = []
     monkeypatch.setattr(MODULE, "_read_fd", lambda fd: pytest.fail("must not read service key"))
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append((request["secret_id"], request)) or {"ok": True})
     assert MODULE.main([
         "--scorer-image-only", "--scorer-image", image, "--check",
         "--allowed-account", "493765492819", "--ssh-key", str(key),
     ]) == 0
     assert len(calls) == 1
-    assert calls[0][0] == MODULE.GATEWAY_HOST
+    assert calls[0][0] == MODULE.GATEWAY_SECRET
     assert calls[0][1]["role"] == "scorer_image_only"
     assert calls[0][1]["updates"] == {"LAB_ARENA_SCORER_IMAGE": image}
     assert calls[0][1]["aliases"] == {}
@@ -342,7 +342,7 @@ def test_scorer_image_only_apply_keeps_authorization_gate_and_scope(monkeypatch,
     key.write_text("fixture")
     image = "registry.example/team/scorer@sha256:" + "c" * 64
     monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
-    monkeypatch.setattr(MODULE, "_ssh", lambda *args: pytest.fail("unauthorized remote call"))
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda *args: pytest.fail("unauthorized remote call"))
     assert MODULE.main([
         "--scorer-image-only", "--scorer-image", image, "--apply",
         "--allowed-account", "493765492819", "--ssh-key", str(key),
@@ -355,7 +355,7 @@ def test_scorer_image_only_apply_sends_exactly_one_target(monkeypatch, tmp_path)
     image = "registry.example/team/scorer@sha256:" + "d" * 64
     calls = []
     monkeypatch.setenv(MODULE.AUTH_ENV, "1")
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True, "applied": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append((request["secret_id"], request)) or {"ok": True, "applied": True})
     assert MODULE.main([
         "--scorer-image-only", "--scorer-image", image, "--apply",
         "--allowed-account", "493765492819", "--ssh-key", str(key),
@@ -400,34 +400,20 @@ def test_document_merge_preserves_unrelated_json_and_dotenv_content():
     assert "export LAB_ARENA_MODE=live" in encoded
 
 
-def test_ssh_keeps_secret_payload_out_of_argv_and_output(monkeypatch, tmp_path, capsys):
-    key = service_key()
-    request = {"service_key": key, "updated": "SECRET=value"}
-    seen = {}
-
-    def run(command, **kwargs):
-        seen.update(command=command, input=kwargs["input"])
-        return argparse.Namespace(returncode=0, stdout='{"ok":true,"account":"187445349696"}', stderr="")
-
-    monkeypatch.setattr(MODULE.subprocess, "run", run)
-    result = MODULE._ssh("host", tmp_path / "key", request)
-    assert result["ok"] is True
-    assert key not in " ".join(seen["command"])
-    assert "SECRET=value" not in " ".join(seen["command"])
-    assert key in seen["input"]
-    assert key not in capsys.readouterr().out
-    remote_command = seen["command"][-1]
-    assert shlex.split(remote_command) == ["python3", "-c", MODULE._REMOTE]
-
-
-def test_remote_protocol_checks_version_again_before_stage_move():
-    source = MODULE._REMOTE
-    assert "current_id != before_id or current_raw != raw" in source
-    assert 'fail("version_race")' in source
-    assert '"--version-stages", "AWSCURRENT"' in source
-    assert 'if updated == raw:' in source
-    assert 'fail("secret_document_conflicting_duplicate")' in source
-    assert 'comments=True, posix=True' in source
+def test_secret_configuration_never_starts_ssh_or_aws_subprocess(monkeypatch, tmp_path, capsys):
+    from scripts import production_secret_operator
+    client = _MemorySecrets("export KEEP=same\n")
+    monkeypatch.setattr(production_secret_operator, "secret_operator_client",
+                        lambda **kwargs: (client, "493765492819"))
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *a, **k: pytest.fail("secret subprocess"))
+    result = MODULE._configure_secret({
+        "secret_id": MODULE.GATEWAY_SECRET, "allowed_accounts": ["493765492819"],
+        "apply": True, "role": "testnet_proxy", "aliases": {},
+        "updates": {"LAB_ARENA_TESTNET_ENABLED": "true"},
+    })
+    assert result["applied"] is True
+    assert "KEEP=same" in client.state["versions"][client.state["current"]]
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("selection,expected", [("enabled", "true"), ("disabled", "false")])
@@ -436,11 +422,11 @@ def test_testnet_proxy_configuration_changes_only_the_route(monkeypatch, tmp_pat
     key.write_text("fixture")
     requests_seen = []
 
-    def ssh(host, ssh_key, request):
+    def ssh(request, **_authority):
         requests_seen.append(request)
         return {"ok": True, "applied": request["apply"]}
 
-    monkeypatch.setattr(MODULE, "_ssh", ssh)
+    monkeypatch.setattr(MODULE, "_configure_secret", ssh)
     assert MODULE.main([
         "--testnet-proxy", selection, "--allowed-account", "493765492819",
         "--ssh-key", str(key), "--check",
@@ -456,7 +442,7 @@ def test_testnet_proxy_apply_keeps_the_existing_authorization_gate(monkeypatch, 
     key = tmp_path / "key"
     key.write_text("fixture")
     monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
-    monkeypatch.setattr(MODULE, "_ssh", lambda *args: pytest.fail("unauthorized remote call"))
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda *args: pytest.fail("unauthorized remote call"))
     assert MODULE.main([
         "--testnet-proxy", "enabled", "--allowed-account", "493765492819",
         "--ssh-key", str(key), "--apply",
@@ -476,7 +462,7 @@ def test_testnet_proxy_remote_apply_preserves_mainnet_configuration(tmp_path, en
     values = {"LAB_ARENA_MODE": "live", "LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "keep-key",
               "KEEP": "same", "LAB_ARENA_TESTNET_ENABLED": "false"}
     raw = json.dumps(values) if encoded else "\n".join(k + "=" + v for k, v in values.items())
-    updated = _run_remote_with_fake_aws(tmp_path, raw, request_override={
+    updated = _run_request_with_fake_client(tmp_path, raw, request_override={
         "role": "testnet_proxy", "updates": {"LAB_ARENA_TESTNET_ENABLED": "true"},
         "aliases": {},
     })
@@ -507,31 +493,28 @@ def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monke
     assert "redirect_stdout(sink)" in MODULE._RUNNER_WALLET_REMOTE
 
 
-def _run_remote_with_fake_aws(tmp_path, raw, *, expect_success=True, return_state=False, request_override=None):
-    state = tmp_path / "state.json"
-    state.write_text(json.dumps({"current": "initial", "versions": {"initial": raw}}))
-    aws = tmp_path / "aws"
-    aws.write_text("""#!/usr/bin/env python3
-import json, os, sys
-path = os.environ["TEST_AWS_STATE"]
-state = json.load(open(path))
-args = sys.argv[1:]
-if args[:2] == ["sts", "get-caller-identity"]:
-    print(json.dumps({"Account": "493765492819", "Arn": "redacted"}))
-elif args[:2] == ["secretsmanager", "get-secret-value"]:
-    version = args[args.index("--version-id") + 1] if "--version-id" in args else state["current"]
-    print(json.dumps({"VersionId": version, "SecretString": state["versions"][version]}))
-elif args[:2] == ["secretsmanager", "put-secret-value"]:
-    version = args[args.index("--client-request-token") + 1]
-    state["versions"][version] = sys.stdin.read()
-    if args[args.index("--version-stages") + 1] == "AWSCURRENT":
-        state["current"] = version
-    json.dump(state, open(path, "w"))
-    print(json.dumps({"VersionId": version}))
-else:
-    raise SystemExit(2)
-""")
-    aws.chmod(0o755)
+class _MemorySecrets:
+    def __init__(self, raw):
+        self.state = {"current": "initial", "versions": {"initial": raw}}
+        self.puts = []
+        self.reads = 0
+
+    def get_secret_value(self, **kwargs):
+        self.reads += 1
+        version = kwargs.get("VersionId", self.state["current"])
+        return {"VersionId": version, "SecretString": self.state["versions"][version]}
+
+    def put_secret_value(self, **kwargs):
+        self.puts.append(kwargs)
+        version = kwargs["ClientRequestToken"]
+        self.state["versions"][version] = kwargs["SecretString"]
+        assert kwargs["VersionStages"] == ["AWSCURRENT"]
+        self.state["current"] = version
+        return {"VersionId": version}
+
+
+def _run_request_with_fake_client(tmp_path, raw, *, expect_success=True, return_state=False, request_override=None):
+    client = _MemorySecrets(raw)
     request = {
         "secret_id": MODULE.GATEWAY_SECRET,
         "allowed_accounts": ["493765492819"],
@@ -548,41 +531,42 @@ else:
     }
     if request_override:
         request.update(request_override)
-    env = dict(os.environ, TEST_AWS_STATE=str(state), PATH=str(tmp_path) + os.pathsep + os.environ["PATH"])
-    result = subprocess.run([sys.executable, "-c", MODULE._REMOTE], input=json.dumps(request), text=True, capture_output=True, env=env)
-    if not expect_success:
-        assert result.returncode != 0
-        return json.loads(result.stdout)
-    assert result.returncode == 0, result.stdout
-    final = json.loads(state.read_text())
+    try:
+        result = MODULE._configure_secret_request(request, client=client, account="493765492819")
+    except MODULE.ConfigurationError as exc:
+        assert not expect_success
+        assert client.puts == []
+        assert client.state == {"current": "initial", "versions": {"initial": raw}}
+        return {"ok": False, "code": str(exc)}
+    assert expect_success
     if return_state:
-        return json.loads(result.stdout), final
-    return final["versions"][final["current"]]
+        return result, client.state
+    return client.state["versions"][client.state["current"]]
 
 
-def test_remote_fake_aws_preserves_space_values_and_identical_unrelated_duplicates(tmp_path):
+def test_operator_fake_aws_preserves_space_values_and_identical_unrelated_duplicates(tmp_path):
     raw = "SSH_CLIENT=10.0.0.1 123 22\nREPEAT=same\nREPEAT=same\nOPENROUTER_API_KEY=or\nSCRAPINGDOG_API_KEY=sd\nDEEPLINE_API_KEY=deep\nSUPABASE_URL=https://db.example\nSUPABASE_ANON_KEY=anon\n"
-    updated = _run_remote_with_fake_aws(tmp_path, raw)
+    updated = _run_request_with_fake_client(tmp_path, raw)
     assert "SSH_CLIENT=10.0.0.1 123 22\n" in updated
     assert updated.count("REPEAT=same\n") == 2
     assert "export LAB_ARENA_OPENROUTER_API_KEY=or\n" in updated
 
 
-def test_remote_fake_aws_preserves_json_alias_source_keys(tmp_path):
+def test_operator_fake_aws_preserves_json_alias_source_keys(tmp_path):
     source = {"OPENROUTER_API_KEY": "or", "SCRAPINGDOG_API_KEY": "sd", "DEEPLINE_API_KEY": "deep", "SUPABASE_URL": "https://db.example", "SUPABASE_ANON_KEY": "anon", "KEEP": "same"}
-    updated = json.loads(_run_remote_with_fake_aws(tmp_path, json.dumps(source, separators=(",", ":"))))
+    updated = json.loads(_run_request_with_fake_client(tmp_path, json.dumps(source, separators=(",", ":"))))
     assert updated["OPENROUTER_API_KEY"] == "or"
     assert updated["LAB_ARENA_OPENROUTER_API_KEY"] == "or"
     assert updated["KEEP"] == "same"
 
 
-def test_remote_fake_aws_rejects_duplicate_target_key(tmp_path):
+def test_operator_fake_aws_rejects_duplicate_target_key(tmp_path):
     raw = "LAB_ARENA_MODE=off\nLAB_ARENA_MODE=off\nOPENROUTER_API_KEY=or\nSCRAPINGDOG_API_KEY=sd\nDEEPLINE_API_KEY=deep\nSUPABASE_URL=https://db.example\nSUPABASE_ANON_KEY=anon\n"
-    result = _run_remote_with_fake_aws(tmp_path, raw, expect_success=False)
+    result = _run_request_with_fake_client(tmp_path, raw, expect_success=False)
     assert result == {"ok": False, "code": "target_key_duplicate"}
 
 
-def test_remote_fake_aws_noops_when_current_document_already_matches(tmp_path):
+def test_operator_fake_aws_noops_when_current_document_already_matches(tmp_path):
     source = {
         "OPENROUTER_API_KEY": "or", "SCRAPINGDOG_API_KEY": "sd",
         "DEEPLINE_API_KEY": "deep", "SUPABASE_URL": "https://db.example",
@@ -592,14 +576,14 @@ def test_remote_fake_aws_noops_when_current_document_already_matches(tmp_path):
         "LAB_ARENA_SERVICE_KEY": "sb_secret_scoped-test",
     }
     raw = json.dumps(source, separators=(",", ":"))
-    result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True)
+    result, state = _run_request_with_fake_client(tmp_path, raw, return_state=True)
     assert result["unchanged"] is True
     assert state == {"current": "initial", "versions": {"initial": raw}}
 
 
-def test_remote_scorer_image_scope_updates_only_the_scorer_key(tmp_path):
+def test_operator_scorer_image_scope_updates_only_the_scorer_key(tmp_path):
     source = {"KEEP": "same", "LAB_ARENA_MODE": "live", "LAB_ARENA_SCORER_IMAGE": "old"}
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(source), request_override={
             "role": "scorer_image_only", "updates": {
                 "LAB_ARENA_SCORER_IMAGE": "registry.example/team/scorer@sha256:" + "e" * 64,
@@ -611,8 +595,8 @@ def test_remote_scorer_image_scope_updates_only_the_scorer_key(tmp_path):
     assert updated["LAB_ARENA_MODE"] == "live"
 
 
-def test_remote_scorer_image_scope_rejects_unrelated_targets(tmp_path):
-    result = _run_remote_with_fake_aws(
+def test_operator_scorer_image_scope_rejects_unrelated_targets(tmp_path):
+    result = _run_request_with_fake_client(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override={
             "role": "scorer_image_only", "updates": {
@@ -625,11 +609,11 @@ def test_remote_scorer_image_scope_rejects_unrelated_targets(tmp_path):
 
 @pytest.mark.parametrize("encoded", [False, True])
 @pytest.mark.parametrize("apply", [False, True])
-def test_remote_openrouter_concurrency_preserves_secret_and_reports_only_metadata(tmp_path, encoded, apply):
+def test_operator_openrouter_concurrency_preserves_secret_and_reports_only_metadata(tmp_path, encoded, apply):
     source = {"KEEP": "fixture-sensitive-value", "LAB_ARENA_REWARDS_ENABLED": "true",
               "LAB_ARENA_MODE": "live", "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "2"}
     raw = json.dumps(source, separators=(",", ":")) if encoded else "".join(f"export {k}={v}\n" for k, v in source.items())
-    result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True, request_override={
+    result, state = _run_request_with_fake_client(tmp_path, raw, return_state=True, request_override={
         "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
         "apply": apply, "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "200"},
     })
@@ -647,13 +631,12 @@ def test_remote_openrouter_concurrency_preserves_secret_and_reports_only_metadat
 
 
 @pytest.mark.parametrize("value", ["0", "201", "4.0", "04", "4\n", "", 4, True])
-def test_remote_openrouter_concurrency_rejects_invalid_values_without_write(tmp_path, value):
-    result = _run_remote_with_fake_aws(tmp_path, '{}', expect_success=False, request_override={
+def test_operator_openrouter_concurrency_rejects_invalid_values_without_write(tmp_path, value):
+    result = _run_request_with_fake_client(tmp_path, '{}', expect_success=False, request_override={
         "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
         "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": value},
     })
     assert result == {"ok": False, "code": "openrouter_concurrency_invalid"}
-    assert json.loads((tmp_path / "state.json").read_text())["current"] == "initial"
 
 
 @pytest.mark.parametrize("extra", [
@@ -662,18 +645,17 @@ def test_remote_openrouter_concurrency_rejects_invalid_values_without_write(tmp_
     {"service_key": "sb_secret_fixture"},
     {"updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4", "LAB_ARENA_REWARDS_ENABLED": "false"}},
 ])
-def test_remote_openrouter_concurrency_rejects_scope_expansion(tmp_path, extra):
-    result = _run_remote_with_fake_aws(tmp_path, '{}', expect_success=False, request_override={
+def test_operator_openrouter_concurrency_rejects_scope_expansion(tmp_path, extra):
+    result = _run_request_with_fake_client(tmp_path, '{}', expect_success=False, request_override={
         "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
         "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"}, **extra,
     })
     assert result == {"ok": False, "code": "openrouter_concurrency_scope_invalid"}
-    assert json.loads((tmp_path / "state.json").read_text())["current"] == "initial"
 
 
-def test_remote_openrouter_concurrency_noops_without_new_version(tmp_path):
+def test_operator_openrouter_concurrency_noops_without_new_version(tmp_path):
     raw = '{"KEEP":"same","LAB_ARENA_OPENROUTER_MAX_CONCURRENCY":"4"}'
-    result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True, request_override={
+    result, state = _run_request_with_fake_client(tmp_path, raw, return_state=True, request_override={
         "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
         "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"},
     })
@@ -681,13 +663,13 @@ def test_remote_openrouter_concurrency_noops_without_new_version(tmp_path):
     assert state == {"current": "initial", "versions": {"initial": raw}}
 
 
-def test_remote_benchmark_disclosure_scope_updates_only_target(tmp_path):
+def test_operator_benchmark_disclosure_scope_updates_only_target(tmp_path):
     source = {
         "KEEP": "same",
         "LAB_ARENA_MODE": "live",
         "LAB_ARENA_BENCHMARK_DISCLOSURE_FROM": "old",
     }
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(source), request_override={
             "role": "benchmark_disclosure_only",
             "updates": {
@@ -724,8 +706,8 @@ def test_remote_benchmark_disclosure_scope_updates_only_target(tmp_path):
         "service_key": "sb_secret_forbidden",
     },
 ])
-def test_remote_benchmark_disclosure_scope_rejects_extra_fields(tmp_path, request_override):
-    result = _run_remote_with_fake_aws(
+def test_operator_benchmark_disclosure_scope_rejects_extra_fields(tmp_path, request_override):
+    result = _run_request_with_fake_client(
         tmp_path,
         json.dumps({"KEEP": "same"}),
         expect_success=False,
@@ -739,8 +721,8 @@ def test_remote_benchmark_disclosure_scope_rejects_extra_fields(tmp_path, reques
     "2026-09-13T00:00:00Z\n",
     "not-a-timestamp",
 ])
-def test_remote_benchmark_disclosure_scope_rejects_invalid_timestamp(tmp_path, value):
-    result = _run_remote_with_fake_aws(
+def test_operator_benchmark_disclosure_scope_rejects_invalid_timestamp(tmp_path, value):
+    result = _run_request_with_fake_client(
         tmp_path,
         json.dumps({"KEEP": "same"}),
         expect_success=False,
@@ -754,13 +736,13 @@ def test_remote_benchmark_disclosure_scope_rejects_invalid_timestamp(tmp_path, v
     assert result == {"ok": False, "code": "benchmark_disclosure_timestamp_invalid"}
 
 
-def test_remote_contacts_from_scope_updates_only_target_and_uses_cas(tmp_path):
+def test_operator_contacts_from_scope_updates_only_target_and_uses_cas(tmp_path):
     source = {
         "KEEP": "same",
         "LAB_ARENA_MODE": "live",
         "LAB_ARENA_CONTACTS_FROM": "old",
     }
-    result, state = _run_remote_with_fake_aws(
+    result, state = _run_request_with_fake_client(
         tmp_path,
         json.dumps(source),
         return_state=True,
@@ -784,8 +766,8 @@ def test_remote_contacts_from_scope_updates_only_target_and_uses_cas(tmp_path):
 
 
 @pytest.mark.parametrize("selection,expected", [("enabled", "true"), ("disabled", "false")])
-def test_remote_contacts_generation_scope_preserves_unrelated_values(tmp_path, selection, expected):
-    updated = json.loads(_run_remote_with_fake_aws(
+def test_operator_contacts_generation_scope_preserves_unrelated_values(tmp_path, selection, expected):
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path,
         json.dumps({"KEEP": "same", "LAB_ARENA_MODE": "live"}),
         request_override={
@@ -824,8 +806,8 @@ def test_remote_contacts_generation_scope_preserves_unrelated_values(tmp_path, s
         {"aliases": {}, "service_key": "sb_secret_forbidden"},
     ),
 ])
-def test_remote_contacts_scopes_reject_extra_fields(tmp_path, role, updates, extra):
-    result = _run_remote_with_fake_aws(
+def test_operator_contacts_scopes_reject_extra_fields(tmp_path, role, updates, extra):
+    result = _run_request_with_fake_client(
         tmp_path,
         json.dumps({"KEEP": "same"}),
         expect_success=False,
@@ -842,8 +824,8 @@ def test_remote_contacts_scopes_reject_extra_fields(tmp_path, role, updates, ext
     "2026-09-13T00:00:00Z\n",
     "not-a-timestamp",
 ])
-def test_remote_contacts_from_scope_rejects_invalid_timestamp(tmp_path, value):
-    result = _run_remote_with_fake_aws(
+def test_operator_contacts_from_scope_rejects_invalid_timestamp(tmp_path, value):
+    result = _run_request_with_fake_client(
         tmp_path,
         json.dumps({"KEEP": "same"}),
         expect_success=False,
@@ -864,7 +846,7 @@ def test_prepare_runner_is_standalone_and_does_not_read_or_write_config(monkeypa
     monkeypatch.setattr(MODULE, "_check_remote_account", lambda *a, **k: {"ok": True, "account": "493765492819"})
     monkeypatch.setattr(MODULE, "_prepare_runner_wallet", lambda *a, **k: {"ok": True, "created": True, "ss58_address": "public"})
     monkeypatch.setattr(MODULE, "_read_fd", lambda fd: pytest.fail("must not read service key"))
-    monkeypatch.setattr(MODULE, "_ssh", lambda *a, **k: pytest.fail("must not access env secrets"))
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda *a, **k: pytest.fail("must not access env secrets"))
     result = MODULE.main([
         "--prepare-runner", "--apply", "--allowed-account", "493765492819",
         "--ssh-key", str(key),
@@ -885,7 +867,7 @@ def test_miner_credentials_scope_changes_only_requested_kms_key(tmp_path):
     source = {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "alias/existing-key",
               "LAB_ARENA_MODE": "live", "LAB_ARENA_DAILY_CUTOFF_UTC": "6",
               "LAB_ARENA_SERVICE_KEY": "sb_secret_unchanged"}
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(source), request_override={
             "role": "miner_credentials", "updates": {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "alias/new-key"}, "service_key": "",
             "aliases": {},
@@ -898,9 +880,9 @@ def test_miner_credentials_scope_does_not_require_service_key_or_touch_validator
     key.write_text("test")
     calls = []
     monkeypatch.setattr(MODULE, "_read_fd", lambda fd: pytest.fail("must not read service key"))
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, key, request: calls.append((host, request)) or {"ok": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append((request["secret_id"], request)) or {"ok": True})
     assert MODULE.main(["--miner-credentials-only", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
-    assert len(calls) == 1 and calls[0][0] == MODULE.GATEWAY_HOST
+    assert len(calls) == 1 and calls[0][0] == MODULE.GATEWAY_SECRET
     assert calls[0][1]["updates"] == {} and calls[0][1]["apply"] is False
     assert calls[0][1]["aliases"] == {}
     assert json.loads(capsys.readouterr().out)["ok"] is True
@@ -910,16 +892,16 @@ def test_miner_credentials_can_be_disabled_without_changing_other_configuration(
     key = tmp_path / "ssh.pem"
     key.write_text("test")
     calls = []
-    monkeypatch.setattr(MODULE, "_ssh", lambda host, key, request: calls.append(request) or {"ok": True})
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_authority: calls.append(request) or {"ok": True})
     assert MODULE.main(["--miner-credentials-only", "--miner-credential-kms-key-id", "", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
     assert calls[0]["updates"] == {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": ""}
     assert calls[0]["aliases"] == {}
 
 
 @pytest.mark.parametrize("value", ["2026-09-13T00:00:00Z", ""])
-def test_remote_company_quality_activation_preserves_other_settings(tmp_path, value):
+def test_operator_company_quality_activation_preserves_other_settings(tmp_path, value):
     initial = {"KEEP": "same", "LAB_ARENA_CONTACTS_FROM": "2026-09-12T00:00:00Z", "LAB_ARENA_MODE": "live"}
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(initial), request_override={
             "role": "company_quality_from_only",
             "updates": {"LAB_ARENA_COMPANY_QUALITY_FROM": value},
@@ -930,12 +912,12 @@ def test_remote_company_quality_activation_preserves_other_settings(tmp_path, va
 
 
 @pytest.mark.parametrize("value", ["2026-10-19T00:00:00Z", ""])
-def test_remote_company_cache_activation_preserves_grading_and_image(tmp_path, value):
+def test_operator_company_cache_activation_preserves_grading_and_image(tmp_path, value):
     initial = {
         "KEEP": "same", "LAB_ARENA_COMPANY_QUALITY_FROM": "",
         "LAB_ARENA_SCORER_IMAGE": "keep-image", "LAB_ARENA_MODE": "live",
     }
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(initial), request_override={
             "role": "company_judgment_from_only",
             "updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": value},
@@ -950,13 +932,13 @@ def test_remote_company_cache_activation_preserves_grading_and_image(tmp_path, v
     ({"updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": "2026-10-19T00:00:00Z", "KEEP": "changed"}}, "company_judgment_from_scope_invalid"),
     ({"secret_id": "leadpoet/prod/validator/env"}, "company_judgment_from_scope_invalid"),
 ])
-def test_remote_company_cache_activation_rejects_invalid_scope(tmp_path, overrides, expected):
+def test_operator_company_cache_activation_rejects_invalid_scope(tmp_path, overrides, expected):
     request = {
         "role": "company_judgment_from_only",
         "updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": "2026-10-19T00:00:00Z"},
         "aliases": {}, "service_key": "", **overrides,
     }
-    result = _run_remote_with_fake_aws(
+    result = _run_request_with_fake_client(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override=request,
     )
@@ -973,13 +955,13 @@ def test_company_cache_activation_cannot_change_quality_at_same_time():
 
 
 @pytest.mark.parametrize("value", ["2026-09-15T00:00:00Z", ""])
-def test_remote_intent_details_activation_preserves_other_settings(tmp_path, value):
+def test_operator_intent_details_activation_preserves_other_settings(tmp_path, value):
     initial = {
         "KEEP": "same",
         "LAB_ARENA_CONTACTS_FROM": "2026-09-12T00:00:00Z",
         "LAB_ARENA_MODE": "live",
     }
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(initial), request_override={
             "role": "intent_details_from_only",
             "updates": {"LAB_ARENA_INTENT_DETAILS_FROM": value},
@@ -996,8 +978,8 @@ def test_remote_intent_details_activation_preserves_other_settings(tmp_path, val
     ({"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00"}, "company_quality_from_timestamp_invalid"),
     ({"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00Z", "KEEP": "changed"}, "company_quality_from_scope_invalid"),
 ])
-def test_remote_company_quality_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
-    result = _run_remote_with_fake_aws(
+def test_operator_company_quality_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
+    result = _run_request_with_fake_client(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override={"role": "company_quality_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
@@ -1008,8 +990,8 @@ def test_remote_company_quality_activation_rejects_bad_scope_or_timestamp(tmp_pa
     ({"LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00"}, "intent_details_from_timestamp_invalid"),
     ({"LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00Z", "KEEP": "changed"}, "intent_details_from_scope_invalid"),
 ])
-def test_remote_intent_details_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
-    result = _run_remote_with_fake_aws(
+def test_operator_intent_details_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
+    result = _run_request_with_fake_client(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override={"role": "intent_details_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
@@ -1017,10 +999,10 @@ def test_remote_intent_details_activation_rejects_bad_scope_or_timestamp(tmp_pat
 
 
 @pytest.mark.parametrize("value", ["2026-10-21T00:00:00Z", ""])
-def test_remote_reasoning_capture_activation_preserves_other_settings(tmp_path, value):
+def test_operator_reasoning_capture_activation_preserves_other_settings(tmp_path, value):
     initial = {"KEEP": "same", "LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00+00:00",
                "LAB_ARENA_SCORER_IMAGE": "keep-image", "LAB_ARENA_MODE": "live"}
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(initial), request_override={
             "role": "reasoning_capture_from_only",
             "updates": {"LAB_ARENA_REASONING_CAPTURE_FROM": value,
@@ -1048,8 +1030,8 @@ def test_remote_reasoning_capture_activation_preserves_other_settings(tmp_path, 
       "LAB_ARENA_REASONING_BASELINE_SOURCE_URL": "https://example.org/archive/" + "b" * 40 + ".tar.gz"},
      "reasoning_baseline_source_url_invalid"),
 ])
-def test_remote_reasoning_capture_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
-    result = _run_remote_with_fake_aws(
+def test_operator_reasoning_capture_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
+    result = _run_request_with_fake_client(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override={"role": "reasoning_capture_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
@@ -1074,12 +1056,12 @@ def test_reasoning_activation_requires_pinned_baseline_url():
 
 
 @pytest.mark.parametrize("value", ["2026-10-19T00:00:00Z", ""])
-def test_remote_signal_cache_activation_preserves_grading_and_image(tmp_path, value):
+def test_operator_signal_cache_activation_preserves_grading_and_image(tmp_path, value):
     initial = {
         "KEEP": "same", "LAB_ARENA_COMPANY_QUALITY_FROM": "",
         "LAB_ARENA_SCORER_IMAGE": "keep-image", "LAB_ARENA_MODE": "live",
     }
-    updated = json.loads(_run_remote_with_fake_aws(
+    updated = json.loads(_run_request_with_fake_client(
         tmp_path, json.dumps(initial), request_override={
             "role": "signal_judgment_from_only",
             "updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": value},
@@ -1094,13 +1076,13 @@ def test_remote_signal_cache_activation_preserves_grading_and_image(tmp_path, va
     ({"updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": "2026-10-19T00:00:00Z", "KEEP": "changed"}}, "signal_judgment_from_scope_invalid"),
     ({"secret_id": "leadpoet/prod/validator/env"}, "signal_judgment_from_scope_invalid"),
 ])
-def test_remote_signal_cache_activation_rejects_invalid_scope(tmp_path, overrides, expected):
+def test_operator_signal_cache_activation_rejects_invalid_scope(tmp_path, overrides, expected):
     request = {
         "role": "signal_judgment_from_only",
         "updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": "2026-10-19T00:00:00Z"},
         "aliases": {}, "service_key": "", **overrides,
     }
-    result = _run_remote_with_fake_aws(
+    result = _run_request_with_fake_client(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override=request,
     )
@@ -1114,3 +1096,98 @@ def test_signal_cache_activation_cannot_change_quality_at_same_time():
             "--company-quality-from", "2026-10-19T00:00:00Z",
             "--allowed-account", "493765492819",
         ])
+
+
+def _testnet_request():
+    return {
+        "secret_id": MODULE.GATEWAY_SECRET,
+        "allowed_accounts": ["493765492819"], "apply": True,
+        "role": "testnet_proxy", "aliases": {},
+        "updates": {"LAB_ARENA_TESTNET_ENABLED": "true"},
+    }
+
+
+@pytest.mark.parametrize("changed", ["VersionId", "SecretString"])
+def test_operator_prewrite_race_keeps_concurrent_state_without_a_write(changed):
+    client = _MemorySecrets("export KEEP=same\n")
+    get = client.get_secret_value
+    def raced(**kwargs):
+        value = get(**kwargs)
+        if client.reads == 2:
+            value[changed] = "concurrent"
+        return value
+    client.get_secret_value = raced
+    with pytest.raises(MODULE.ConfigurationError, match="version_race"):
+        MODULE._configure_secret_request(_testnet_request(), client=client, account="493765492819")
+    assert client.puts == []
+
+
+@pytest.mark.parametrize("changed", ["VersionId", "SecretString"])
+def test_operator_postwrite_mismatch_is_reported_without_another_write(changed):
+    client = _MemorySecrets("export KEEP=same\n")
+    get = client.get_secret_value
+    def corrupt(**kwargs):
+        value = get(**kwargs)
+        if client.reads == 3:
+            value[changed] = "unexpected"
+        return value
+    client.get_secret_value = corrupt
+    with pytest.raises(MODULE.ConfigurationError, match="post_apply_mismatch"):
+        MODULE._configure_secret_request(_testnet_request(), client=client, account="493765492819")
+    assert len(client.puts) == 1
+
+
+def test_operator_account_and_secret_scope_are_checked_before_read():
+    client = _MemorySecrets("export KEEP=same\n")
+    with pytest.raises(MODULE.ConfigurationError, match="account_not_allowed"):
+        MODULE._configure_secret_request(_testnet_request(), client=client, account="187445349696")
+    request = dict(_testnet_request(), secret_id="unrelated/secret")
+    with pytest.raises(MODULE.ConfigurationError, match="secret_scope_invalid"):
+        MODULE._configure_secret_request(request, client=client, account="493765492819")
+    assert client.reads == 0 and client.puts == []
+
+
+def test_secret_cli_uses_temporary_operator_without_ssh_key_or_subprocess(monkeypatch, tmp_path, capsys):
+    from scripts import production_secret_operator
+    seen = []
+    client = _MemorySecrets("export KEEP=same\n")
+    monkeypatch.setattr(production_secret_operator, "secret_operator_client",
+                        lambda **kwargs: seen.append(kwargs) or (client, "493765492819"))
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *a, **k: pytest.fail("secret subprocess"))
+    monkeypatch.setenv(MODULE.AUTH_ENV, "1")
+    assert MODULE.main([
+        "--testnet-proxy", "enabled", "--apply", "--allowed-account", "493765492819",
+        "--aws-profile", "leadpoet-lab", "--ssh-key", str(tmp_path / "does-not-exist"),
+    ]) == 0
+    assert seen == [{"profile": "leadpoet-lab"}]
+    assert len(client.puts) == 1
+    assert "KEEP" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failure", ["preflight", "apply"])
+def test_full_configuration_preserves_both_preflights_and_partial_apply(monkeypatch, capsys, failure):
+    calls = []
+    monkeypatch.setenv(MODULE.AUTH_ENV, "1")
+    monkeypatch.setattr(MODULE, "_read_fd", lambda fd: service_key())
+    def configure(request, **kwargs):
+        calls.append((request["secret_id"], request["apply"]))
+        if request["secret_id"] == MODULE.VALIDATOR_SECRET and request["apply"] == (failure == "apply"):
+            raise MODULE.ConfigurationError("aws_command_failed")
+        return {"ok": True, "applied": request["apply"]}
+    monkeypatch.setattr(MODULE, "_configure_secret", configure)
+    assert MODULE.main([
+        "--apply", "--allowed-account", "493765492819", "--service-key-fd", "99",
+        "--bucket", "arena-bucket", "--scorer-image", "registry.example/scorer@sha256:" + "a" * 64,
+        "--runner-hotkey", "runner", "--baseline-hotkey", "baseline",
+        "--chain-endpoint", "wss://chain.example", "--api-base-url", "https://gateway.example",
+        "--arena-signing-key-hash", "sha256:" + "b" * 64,
+    ]) == 2
+    assert calls[:2] == [(MODULE.GATEWAY_SECRET, False), (MODULE.VALIDATOR_SECRET, False)]
+    if failure == "preflight":
+        assert len(calls) == 2
+    else:
+        assert calls[2:] == [(MODULE.GATEWAY_SECRET, True), (MODULE.VALIDATOR_SECRET, True)]
+    output = capsys.readouterr()
+    assert service_key() not in output.out + output.err
+    if failure == "apply":
+        assert "apply failed after 1 target(s)" in output.err

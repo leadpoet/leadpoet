@@ -31,6 +31,12 @@ def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
+@pytest.fixture()
+def service_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
 def test_partial_publication_migration_preserves_guard_identity(database):
     psycopg2, dsn = database
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
@@ -76,12 +82,16 @@ def test_partial_publication_migration_preserves_guard_identity(database):
 
 
 def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_baseline(
-    database, tmp_path, monkeypatch,
+    database, service_database, tmp_path, monkeypatch,
 ):
     psycopg2, dsn = database
-    connect = lambda: psycopg2.connect(**dsn)
+    historical_connect = lambda: psycopg2.connect(**dsn)
+    connect = historical_connect
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(MIGRATION.read_text())
+    service_psycopg, service_dsn = service_database
+    current_connect = lambda: service_psycopg.connect(**service_dsn)
+    connect = current_connect
     harness = IntegrityHarness(
         connect, tmp_path, challengers=["PartialMiner"], runners=["alpha"]
     )
@@ -94,8 +104,6 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
     assert fixtures._start_round(harness, day=27, epoch=62_427) == 2
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
-    harness.advance_until("stage1_scored", runners=1)
-    harness.service.advance_round(harness.round_id)
     harness.advance_until("scored", runners=1)
     round_row = harness.service.store.get_round(harness.round_id)
     ids = {
@@ -117,6 +125,16 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
         harness.service.store.transition_round = transition
     full = captured["publication_doc"]
     assert full["king_decision"]["outcome"] == "no_king"
+    from tests.lab_arena.publication_round_witness460_postgres_test import (
+        _copy_historical_round, _historical_publication_costs,
+    )
+    _copy_historical_round(current_connect, historical_connect, harness.round_id,
+                           tmp_path / 'source-round.json')
+    (tmp_path / 'source-publication.json').write_text(json.dumps(full, sort_keys=True))
+    assert harness.service.publish(harness.round_id)['status'] == 'ok'
+    full = _historical_publication_costs(historical_connect, harness.round_id, full)
+    connect = historical_connect
+
 
     def attempt(*, incomplete_baseline, marker=True, null_score=True,
                 incomplete_reason=True, promote=False, unfinished_judge=False,
@@ -197,6 +215,9 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
                             if item["submission_id"] == ids[False]
                         ),
                     }
+                cursor.execute("SET LOCAL ROLE lab_arena_owner")
+                cursor.execute("SELECT rolsuper FROM pg_roles WHERE rolname=current_user")
+                assert cursor.fetchone()[0] is False
                 cursor.execute(
                     "SELECT public.lab_arena__publication_execution_incomplete_v1(%s,%s)",
                     (harness.round_id, submission_id),

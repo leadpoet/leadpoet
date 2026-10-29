@@ -851,6 +851,7 @@ def test_us_hq_state_variants_match(submitted_state, observed_state):
         "observed_hq_country": "USA",
         "observed_hq_state": observed_state,
         "geography_matches": True,
+        "geography_evidence_quote": f"Acme headquarters: {observed_state}, United States.",
     }
 
     assert _decision_from_observed_geography(
@@ -870,11 +871,13 @@ def test_dc_icp_geography_requires_dc_headquarters(requested):
         "observed_hq_country": "United States",
         "observed_hq_state": "District of Columbia",
         "geography_matches": True,
+        "geography_evidence_quote": "Acme headquarters: District of Columbia, United States.",
     }
     california_verdict = {
         "observed_hq_country": "United States",
         "observed_hq_state": "California",
         "geography_matches": False,
+        "geography_evidence_quote": "Acme headquarters: California, United States.",
     }
 
     assert _decision_from_observed_geography(
@@ -908,6 +911,7 @@ def test_wrong_or_missing_observed_us_hq_state_fails(
             "observed_hq_country": observed_country,
             "observed_hq_state": observed_state,
             "geography_matches": True,
+            "geography_evidence_quote": f"Acme headquarters: {observed_state}, {observed_country}.",
         },
         _icp(),
         company=_company(state="California"),
@@ -927,6 +931,7 @@ def test_observed_us_country_cannot_be_bypassed_by_false_submitted_country(
             "observed_hq_country": "United States",
             "observed_hq_state": "California",
             "geography_matches": True,
+            "geography_evidence_quote": "Acme headquarters: United States.",
         },
         _icp(),
         company=_company(country=submitted_country, state="California"),
@@ -942,6 +947,7 @@ def test_non_us_state_remains_optional_and_historical_state_path_is_unchanged():
             "observed_hq_country": "Canada",
             "observed_hq_state": "",
             "geography_matches": True,
+            "geography_evidence_quote": "Acme headquarters: Canada.",
         },
         _icp(country="Canada", geography="Canada"),
         company=_company(country="Canada", state=""),
@@ -952,6 +958,7 @@ def test_non_us_state_remains_optional_and_historical_state_path_is_unchanged():
             "observed_hq_country": "United States",
             "observed_hq_state": "Nevada",
             "geography_matches": True,
+            "geography_evidence_quote": "Acme headquarters: United States.",
         },
         _icp(),
         company=_company(state="California"),

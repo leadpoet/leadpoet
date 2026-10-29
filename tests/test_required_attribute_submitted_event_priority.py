@@ -121,7 +121,7 @@ def test_submitted_launch_is_fetched_before_generic_contact_with_same_budget(mon
         {"url": EVENT, "text": DESCRIPTION},
     ]
     assert document["server_current_stage_discovery"]["ok"] is True
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["usage"]["fetch_calls"] == 1

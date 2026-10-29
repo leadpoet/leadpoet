@@ -32,7 +32,7 @@ def icp():
 
 def verdict():
     return {"observed_company_name": "Quaise Energy", "observed_company_website": "https://quaise.com/",
-        "observed_company_linkedin": URL, "observed_employee_count": "51-200", "employee_size_matches": True,
+        "observed_company_linkedin": URL, "observed_employee_count": 80, "employee_size_matches": True,
         "employee_size_evidence_url": "https://quaise.com/about", "employee_size_evidence_quote": "Quaise Energy has 80 employees.",
         "observed_industry": "Energy", "observed_subindustry": "", "industry_matches": True,
         "industry_activity_role": "supplier_operator", "industry_evidence_url": "https://quaise.com/",
@@ -338,14 +338,18 @@ def test_proven_foreign_linkedin_hq_mismatch_does_not_need_a_us_state():
     assert projected["observed_hq_state"] == ""
     assert projected["geography_evidence_url"] == URL
     assert scorer._decision_from_observed_geography(projected, request,
-        company=candidate, company_quality=True) == "mismatch"
+        company=candidate, company_quality=True,
+        validated_geography_finding={"target": "geography", "status": "VERIFIED",
+            "observed_country": hq["country"], "observed_state": hq["state"],
+            "evidence_url": hq["url"], "evidence_quote": hq["text"]}) == "mismatch"
 
 
 @pytest.mark.parametrize("company_quality", [False, True])
 @pytest.mark.parametrize("web_country", ["United States", "Germany"])
 def test_partial_us_hq_fallback_for_state_region_is_country_compatible(company_quality, web_country):
-    hq = profile.project_structured_linkedin_company_headquarters("quaise.com", URL, "Quaise Energy", CAPTURE)
-    hq = {**hq, "state": "", "text": "Quaise Energy headquarters: Houston, United States. (harvestapi_get_company locations.headquarter=true)"}
+    body = deepcopy(CAPTURE)
+    body["element"]["locations"] = [{"headquarter": True, "country": "US", "city": "Houston"}]
+    hq = profile.project_structured_linkedin_company_headquarters("quaise.com", URL, "Quaise Energy", body)
     request = icp().model_copy(update={"geography": "United States, West Coast"})
     candidate = company().model_copy(update={"state": "California"})
     observation = verdict()

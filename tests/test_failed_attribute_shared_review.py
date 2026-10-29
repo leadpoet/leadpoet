@@ -218,7 +218,7 @@ def test_mandg_broad_repair_then_one_typed_review_through_fit_and_arena(monkeypa
         }[attribute]
 
 
-@pytest.mark.parametrize("fault", ["incomplete", "provider", "budget", "typed_fetch", "homepage", "profile"])
+@pytest.mark.parametrize("fault", ["incomplete", "provider", "budget", "typed_fetch", "profile"])
 def test_independent_failures_remain_retryable(monkeypatch, fault):
     _install_replay(monkeypatch, fault=fault)
     fit = asyncio.run(scorer._verify_company_fit(
@@ -227,6 +227,18 @@ def test_independent_failures_remain_retryable(monkeypatch, fault):
     ))
     row = {"final_score": 0.0, "verifier_gate_receipts": [fit.receipt("company_fit")]}
     assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row)
+
+
+def test_completed_review_settles_homepage_transport_failure(monkeypatch):
+    _install_replay(monkeypatch, fault="homepage")
+    fit = asyncio.run(scorer._verify_company_fit(
+        _company(), _icp(), 0.0, 1.0, set(), require_https_transport=True,
+        company_quality=True, evidence_investigator=True,
+    ))
+    row = {"final_score": 0.0, "verifier_gate_receipts": [fit.receipt("company_fit")]}
+    assert fit.decision == "unavailable"
+    assert fit.details["company_fit_dimensions"]["identity"] == "unavailable"
+    assert not competition.scorer_breakdown_has_retryable_infrastructure_failure(row)
 
 
 @pytest.mark.parametrize("status,reason,decision,other_target,expected", [

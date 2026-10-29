@@ -30,7 +30,7 @@ def test_later_adverse_listing_event_still_overrides_current_profile_ticker():
     prompt = _prompt()
 
     assert (
-        "a later completed delisting, take-private, or controlling acquisition "
-        "still overrides the ticker row"
+        "a later completed delisting or take-private "
+        "overrides the ticker row"
     ) in prompt
     assert "server-required current-stage search" in prompt

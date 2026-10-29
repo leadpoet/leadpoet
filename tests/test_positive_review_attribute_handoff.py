@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from qualification.scoring import lead_scorer
+from qualification.scoring import lead_scorer, company_evidence_investigator
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_UNAVAILABLE,
@@ -26,8 +26,10 @@ from tests.test_positive_semantic_fit_review import (
         "customer",
         "missing_page",
         "wrong_domain",
+        "wrong_entity",
         "absent_quote",
         "unproven_stage",
+        "attribute_unproven",
     ],
 )
 def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
@@ -39,7 +41,7 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
         "PeerConnect supplies a student enrollment platform to universities."
     )
     source_url = (
-        "https://other.example/platform" if control == "wrong_domain"
+        "https://other.example/platform" if control in {"wrong_domain", "wrong_entity"}
         else "https://peer.example/platform"
     )
     calls = {"provider": 0, "investigator": 0, "fetch": 0}
@@ -65,7 +67,7 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
 
     async def investigate(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("stage", "industry")
+        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
         assert kwargs["positive_semantic_review"] is True
         assert kwargs["requested_attribute"] == (
             icp.required_attribute
@@ -101,8 +103,42 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
                 ),
             },
         }
+        # The attribute has its own finding. The industry's positive label
+        # cannot substitute for proof of the requested attribute.
+        attribute = {**industry, "target": "required_attribute"}
+        if control == "already_grounded":
+            attribute.update(evidence_url=initial["required_attribute_evidence_url"],
+                             evidence_quote=initial["required_attribute_evidence_quote"])
+            pages[attribute["evidence_url"]] = {
+                "final_url": attribute["evidence_url"], "text": attribute["evidence_quote"],
+            }
+        if control == "wrong_entity":
+            # An unbound third-party entity cannot inherit PeerConnect's
+            # identity merely because the mock returned a positive label.
+            industry["evidence_quote"] = "OtherCompany supplies an enrollment platform."
+            attribute["evidence_quote"] = industry["evidence_quote"]
+            pages[source_url]["text"] = industry["evidence_quote"]
+        if control == "attribute_unproven":
+            attribute.update(status="UNPROVEN", activity_role="unresolved",
+                             evidence_url="", evidence_quote="")
+        validated = company_evidence_investigator._validated_findings(
+            {"findings": [industry, attribute]}, targets=("industry", "required_attribute"),
+            fetched_pages={url: page["text"] for url, page in pages.items()},
+            fetched_final_urls={url: page["final_url"] for url, page in pages.items()},
+            first_party_domains={"peer.example"}, identity_names={"peerconnect"},
+            identity_anchor={
+                "submitted_name": "PeerConnect", "submitted_domain": "peer.example",
+                "submitted_linkedin_slug": "peerconnect",
+                "observed_name": "PeerConnect", "observed_domain": "peer.example",
+                "observed_linkedin_slug": "peerconnect",
+                "verified_name": "PeerConnect", "verified_domain": "peer.example",
+                "verified_linkedin_slug": "peerconnect",
+            },
+        )
+        assert validated is not None
         return {
-            "claims": {"stage": stage, "industry": industry},
+            "claims": {"stage": stage, **validated},
+            "_completed_submit": True,
             "_validated_stage_finding": (
                 stage if control != "unproven_stage" else None
             ),
@@ -154,7 +190,12 @@ def test_positive_review_reuses_only_complete_grounded_attribute_evidence(
             assert result.details["required_attribute_grounding"]["cache_hit"] is True
     else:
         assert result.decision != COMPANY_FIT_MATCH
-        if control != "unproven_stage":
+        if control == "wrong_domain":
+            # Exact company-attributed third-party proof may support the
+            # separate attribute, but cannot pass the industry first-party gate.
+            assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
+            assert result.details["dimension_decisions"]["industry"] != COMPANY_FIT_MATCH
+        elif control != "unproven_stage":
             assert result.details["required_attribute_decision"] != COMPANY_FIT_MATCH
         else:
             assert result.details["dimension_decisions"]["stage"] == (

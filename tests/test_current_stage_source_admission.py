@@ -576,11 +576,11 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
     assert document["investigation_limits"]["server_prefetch_fetch_calls"] == 1
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
     assert document["investigation_limits"]["remaining_search_calls"] == 1
 
 
-def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
+def test_diagnostic_page_fallback_counts_and_leaves_locator_room_to_recover(monkeypatch):
     bad_urls = (
         "https://example.com/first",
         "https://example.com/second",
@@ -590,7 +590,6 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
     fetched = []
     actions = [
         ("fetch_page", {"url": bad_urls[0]}),
-        ("fetch_page", {"url": bad_urls[1]}),
         ("fetch_page", {"url": good_url}),
         ("submit_findings", {"findings": [{
             "target": "stage", "status": "VERIFIED", "observed_value": "Public",
@@ -607,6 +606,12 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
+    exa_attempts = []
+
+    async def fake_exact_fallback(_session, url):
+        exa_attempts.append(url)
+        return {"ok": False, "error": "source_access_denied"}
+
     async def fake_bounded(_session, url, **_kwargs):
         fetched.append(url)
         body = (
@@ -621,6 +626,7 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
     monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)
+    monkeypatch.setattr(investigator, "_fetch_exa_exact_page", fake_exact_fallback)
     monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={
         "results": [{"url": url} for url in (*bad_urls, good_url)],
     }))
@@ -632,13 +638,14 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_url"] == good_url
-    assert fetched == [*bad_urls, good_url]
+    assert fetched == [bad_urls[0], good_url]
+    assert exa_attempts == [bad_urls[0]]
     assert _core_usage(result["usage"]) == {
-        "reasoning_turns": 4, "search_calls": 1, "fetch_calls": 3,
+        "reasoning_turns": 3, "search_calls": 1, "fetch_calls": 3,
     }
     assert result["usage"]["total_loaded_pages"] == 1
     assert [item["error_class"] for item in result["usage"]["fetch_outcomes"]] == [
-        "provider_diagnostic_body", "provider_diagnostic_body", "",
+        "provider_diagnostic_body", "source_access_denied", "",
     ]
     assert "Provider account capacity details redacted." not in json.dumps(requests)
     assert TENB_QUOTE in json.dumps(requests[-1])
@@ -969,7 +976,7 @@ def test_three_pe_prefetches_keep_fresh_fetch_budget(monkeypatch):
     fetch.assert_not_awaited()
     assert requests[0]["tool_choice"] == "required"
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 4
 
 
 ACADEMY_IR_URL = (

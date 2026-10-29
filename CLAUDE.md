@@ -517,6 +517,22 @@ The coordinating task owns all production actions. Keep both guides identical.
 
 # Agent Instructions
 
+## Scoped authorization: October 29 Arena training-data audit
+
+The user authorized inspection of the October 28 and October 29 production
+trajectories and the smallest evidence-backed collection or processing fixes,
+including tests, independent review, merge, deployment and live readback.
+Keep original episodes, provider payloads, judgments, scores, costs and rewards
+unchanged. Do not alter miner behavior, prompts, models, reasoning settings or
+logging requirements. Reuse existing SQL and private object storage; do not add
+tables, services, dependencies or duplicate raw trajectories. The coordinating
+task owns release and production actions. Internal agents may edit and test
+their assigned files only. For changes used only by offline preparation tools,
+deploy the exact committed tools and verify them against retained production
+evidence without restarting unrelated live workers. Preserve concurrent work,
+release locks and all existing access controls. This authority ends after the
+scoped fixes and production verification are complete.
+
 Applies to this repository. `AGENTS.md` and `CLAUDE.md` must remain byte-identical.
 
 Historical task-specific authorizations are preserved in

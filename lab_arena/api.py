@@ -331,13 +331,24 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.head("/arena/v1/runs/{run_id}/training-observations")
     async def authorize_training_observations(
         run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None),
+        if_match: Optional[str] = Header(default=None),
     ) -> Response:
         lease_token = _lease_header(x_lab_arena_lease)
-        await run_in_threadpool(
-            service._training_capture_run, run_id, lease_token,
-            allow_observation_finalization=True,
-        )
-        return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        if if_match is None:
+            await run_in_threadpool(
+                service._training_capture_run, run_id, lease_token,
+                allow_observation_finalization=True,
+            )
+        else:
+            if (not if_match.startswith('"') or not if_match.endswith('"')
+                    or not contracts.SHA256_RE.fullmatch(if_match[1:-1])):
+                raise HTTPException(status_code=400, detail="observation digest invalid")
+            digest = await run_in_threadpool(
+                service.verify_training_observations, run_id, lease_token, if_match[1:-1],
+            )
+            headers["ETag"] = '"' + digest + '"'
+        return Response(status_code=204, headers=headers)
 
     @app.post("/arena/v1/runs/{run_id}/training-observations")
     async def capture_training_observations(

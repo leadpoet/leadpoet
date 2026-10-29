@@ -679,7 +679,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None):
                              'source_quality': copy.deepcopy(example.get('completeness') or {})}]}
 
 
-def _build(examples, rules=None, *, host_observed=False):
+def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate=None):
     """Keep strict policy evidence separate from generic host observations."""
     rules = rules or Rules()
     candidates, analysis, sources = {}, [], set()
@@ -699,6 +699,7 @@ def _build(examples, rules=None, *, host_observed=False):
         if reason:
             counts[reason] += 1
             analysis.append({'source_example_hash': str(source) if isinstance(source, str) and contracts.SHA256_RE.fullmatch(source) else None, 'reason': reason})
+            del example
             continue
         group_keys = ['episode:' + contracts.document_hash({k: example.get(k) for k in ('round_id', 'submission_id', 'stage', 'icp_position', 'assignment_id')})]
         if example.get('icp'):
@@ -729,6 +730,12 @@ def _build(examples, rules=None, *, host_observed=False):
                 reason = str(exc) if isinstance(exc, ValueError) and re.fullmatch('[a-z_]+', str(exc)) else 'malformed_call'
                 counts[reason] += 1
                 analysis.append({'source_example_hash': source, 'call_ref_hash': contracts.document_hash(call.get('call_identity')), 'reason': reason})
+            else:
+                if full_thinking_candidate is not None:
+                    full_thinking_candidate(example, record)
+        # Drop the raw source and last raw call before parsing the next episode.
+        call = None
+        del example
     splits = {'train': [], 'eval': [], 'analysis': []}
     for digest, record in sorted(candidates.items()):
         record['source_refs'] = sorted({contracts.canonical_json(ref): ref for ref in record['source_refs']}.values(), key=contracts.canonical_json)

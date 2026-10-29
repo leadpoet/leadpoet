@@ -1,5 +1,14 @@
 # Arena training review
 
+Qualification examples now always keep an original episode in one split.
+The episode is identified by round, submission, stage and ICP position; retries
+and repeated judgments do not create new evaluation tasks. Company aliases and
+duplicate records link their episodes before records are filtered or deduplicated.
+The optional ICP holdout and temporal cutoff apply to these complete groups.
+Missing episode identity sends a candidate to analysis. The manifest records
+the grouping policy and checks episode overlap. Existing datasets are not
+rewritten; rebuild them to apply this rule.
+
 Each dataset preparation CLI writes the original `train.jsonl`, `eval.jsonl`,
 `analysis.jsonl`, and `manifest.json`, plus a private `curation.json` sidecar.
 The sidecar uses `leadpoet.lab_arena.training_curation.v1`. It binds each flag

@@ -1958,78 +1958,122 @@ def selected_research_evidence(example: Mapping[str, Any], *, target_omission_pr
     return None if result is None else result | diagnostic_gaps
 
 
+def _combined_coverage(reports):
+    result = coverage([])
+    returned, trajectories, grouped = Counter(), Counter(), defaultdict(Counter)
+    for report in reports:
+        result["attempts"].extend(report["attempts"])
+        returned.update(report["returned_classes"])
+        trajectories.update(report["trajectories"])
+        for key in ("distinct_verified_exports", "saved_calls", "generated_thinking_texts", "summary_calls"):
+            result[key] += report[key]
+        for row in report["by_role_model_route"]:
+            key = tuple(row[name] for name in ("role", "model_id", "requested_provider_route", "api"))
+            grouped[key].update(row["counts"])
+    result["returned_classes"] = dict(sorted(returned.items()))
+    result["trajectories"] = dict(sorted(trajectories.items()))
+    result["by_role_model_route"] = [dict(zip(("role", "model_id", "requested_provider_route", "api"), key),
+                                         counts=dict(sorted(value.items())))
+                                      for key, value in sorted(grouped.items(), key=lambda item: str(item[0]))]
+    return result
+
+
 def build(examples, rules: training_steps.Rules | None = None):
     """Return private candidates only for proven full generated thinking."""
     rules = rules or training_steps.Rules()
-    examples = list(examples)
-    splits, historical = training_steps._build(examples, rules)
-    # Reuse existing exact request, agent read, receipt and split checks. Its
-    # summary-only candidates are merely a search space, never admitted here.
-    by_hash = {example.get("example_hash"): example for example in examples}
-    scoped = {key: selected_research_evidence(example) for key, example in by_hash.items()}
     output = {"train": [], "eval": [], "analysis": []}
     records_by_split: dict[str, dict[str, dict]] = {"train": {}, "eval": {}}
     reasons = Counter()
-    # Reuse only within this build and only after each source's delivery proof.
     trajectory_reasons: dict[str, str | None] = {}
     diagnostic_gaps_by_source: dict[str, frozenset[str]] = {}
+    projected = {}
+    projected_refs = set()
+    scoped = {}
+    coverage_reports = []
+    coverage_sources = set()
+
+    def project_candidate(example, candidate):
+        # The shared builder calls this while this one source is in memory.
+        # Global candidate deduplication and cluster assignment still run there.
+        ref = candidate["source_refs"][0]
+        ref_key = contracts.canonical_json(ref)
+        if ref_key in projected_refs:
+            return
+        projected_refs.add(ref_key)
+        call = next((row for row in example.get("provider_calls") or []
+                     if row.get("call_identity") == ref["call_identity"] and row.get("run_id") == ref["run_id"]), None)
+        if call is None:
+            return
+        source = ref["example_hash"]
+        if source not in scoped:
+            scoped[source] = selected_research_evidence(example)
+        ancillary_gaps = scoped[source]
+        if ancillary_gaps is None:
+            reasons["trajectory_evidence_incomplete"] += 1
+            return
+        try:
+            delivered = _delivered_response(call, ref["delivered_response_sha256"])
+        except ValueError as exc:
+            reasons[str(exc)] += 1
+            return
+        delivered_call = dict(call, response=delivered,
+                              response_sha256=ref["delivered_response_sha256"])
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
+        source = ref["example_hash"]
+        if source not in trajectory_reasons:
+            trajectory_reasons[source] = _trajectory_reason(example)
+        reason = trajectory_reasons[source]
+        if reason is not None:
+            reasons[reason] += 1
+            return
+        segments, status = full_text_segments(delivered_call, _role(example, call), registry)
+        if not segments:
+            reasons[status["returned"]] += 1
+            return
+        try:
+            prior = _prior_observations(example, call)
+        except ValueError as exc:
+            reasons[str(exc)] += 1
+            return
+        if source not in diagnostic_gaps_by_source:
+            diagnostic_gaps_by_source[source] = provider_visible_view(example)[1]
+        diagnostic_gaps = diagnostic_gaps_by_source[source]
+        record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
+                  "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
+                  "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
+                  "quality": copy.deepcopy(candidate["quality"]),
+                  "source_refs": [{**{key: copy.deepcopy(value) for key, value in ref.items()
+                                       if key != "teacher_reasoning_metadata"},
+                                   "response_sha256": ref["delivered_response_sha256"],
+                                   "route": copy.deepcopy(call["reasoning_capture"]),
+                                   "selected_research_evidence": {
+                                       "complete": True,
+                                       **({"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
+                                       "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps),
+                                       **({"diagnostic_capture_gaps": sorted(diagnostic_gaps)}
+                                          if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {})}}]}
+        record["candidate_id"] = contracts.document_hash({key: record[key] for key in
+            ("format", "input", "prior_observations", "generated_thinking", "target")})
+        projected[contracts.canonical_json(ref)] = record
+
+    def sources():
+        for example in examples:
+            source = example.get("example_hash")
+            if source not in coverage_sources:
+                report = coverage([example])
+                if report["distinct_verified_exports"]:
+                    coverage_sources.add(source)
+                    coverage_reports.append(report)
+            yield example
+            del example
+
+    splits, historical = training_steps._build(sources(), rules, full_thinking_candidate=project_candidate)
     for split in ("train", "eval"):
         for candidate in splits[split]:
             for ref in candidate["source_refs"]:
-                example = by_hash.get(ref["example_hash"])
-                if not example:
+                record = projected.pop(contracts.canonical_json(ref), None)
+                if record is None:
                     continue
-                call = next((row for row in example.get("provider_calls") or []
-                             if row.get("call_identity") == ref["call_identity"] and row.get("run_id") == ref["run_id"]), None)
-                if call is None:
-                    continue
-                ancillary_gaps = scoped[ref["example_hash"]]
-                if ancillary_gaps is None:
-                    reasons["trajectory_evidence_incomplete"] += 1
-                    continue
-                try:
-                    delivered = _delivered_response(call, ref["delivered_response_sha256"])
-                except ValueError as exc:
-                    reasons[str(exc)] += 1
-                    continue
-                delivered_call = dict(call, response=delivered,
-                                      response_sha256=ref["delivered_response_sha256"])
-                registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
-                source = ref["example_hash"]
-                if source not in trajectory_reasons:
-                    trajectory_reasons[source] = _trajectory_reason(example)
-                reason = trajectory_reasons[source]
-                if reason is not None:
-                    reasons[reason] += 1
-                    continue
-                segments, status = full_text_segments(delivered_call, _role(example, call), registry)
-                if not segments:
-                    reasons[status["returned"]] += 1
-                    continue
-                try:
-                    prior = _prior_observations(example, call)
-                except ValueError as exc:
-                    reasons[str(exc)] += 1
-                    continue
-                if source not in diagnostic_gaps_by_source:
-                    diagnostic_gaps_by_source[source] = provider_visible_view(example)[1]
-                diagnostic_gaps = diagnostic_gaps_by_source[source]
-                record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
-                          "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
-                          "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
-                          "quality": copy.deepcopy(candidate["quality"]),
-                          "source_refs": [{**{key: copy.deepcopy(value) for key, value in ref.items()
-                                               if key != "teacher_reasoning_metadata"},
-                                           "response_sha256": ref["delivered_response_sha256"],
-                                           "route": copy.deepcopy(call["reasoning_capture"]),
-                                           "selected_research_evidence": {
-                                               "complete": True,
-                                               **({"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
-                                               "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps),
-                                               **({"diagnostic_capture_gaps": sorted(diagnostic_gaps)}
-                                                  if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {})}}]}
-                record["candidate_id"] = contracts.document_hash({key: record[key] for key in
-                    ("format", "input", "prior_observations", "generated_thinking", "target")})
                 existing = records_by_split[split].get(record["candidate_id"])
                 if existing is None:
                     records_by_split[split][record["candidate_id"]] = record
@@ -2046,7 +2090,7 @@ def build(examples, rules: training_steps.Rules | None = None):
                 "source_dataset_version": historical["dataset_version"],
                 "counts": {"records_by_split": {key: len(rows) for key, rows in output.items()},
                            "exclusion_reasons": dict(sorted(reasons.items()))},
-                "coverage": coverage(examples)}
+                "coverage": _combined_coverage(coverage_reports)}
     manifest["dataset_version"] = contracts.document_hash(manifest)
     return output, manifest
 

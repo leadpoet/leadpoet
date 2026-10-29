@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from lab_arena import broker as br, contracts, operations
+from lab_arena import broker as br, contracts, operations, training_observations as obs
 from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import _candidate
 from tests.lab_arena.deepline_terminal_error_test import (
     ErrorTransport, REQUEST_ID, RetainedErrorStore, billing, execute,
@@ -201,6 +201,40 @@ def test_live_shaped_broker_worker_transition_returns_before_sixty_seconds(clock
     assert store.log.count("dispatch") == 1
     assert sum(r["method"] == "POST" for r in transport.sent) == 1
     assert "deepline_terminal_failure" not in store.calls[initial.call["call_identity"]]["uncertain_doc"]
+
+
+@pytest.mark.parametrize("written", [False, True])
+def test_host_fact_does_not_change_http_body_receipt_or_final_snapshot(clock, tmp_path, written):
+    initial, _, _, _, arguments = execute(CompleteErrorTransport(clock=clock))
+    parsed = br.parse_broker_document(initial.to_document())
+    assert parsed.body == initial.body and parsed.call["deepline_terminal_failure"] is True
+    api = Api(parsed.to_document())
+    host = worker(tmp_path, api, monotonic=clock.monotonic)
+    report = {}
+    status, headers, body = host.handle_http("POST",
+        "https://code.deepline.com/api/v2/integrations/exa_search/execute",
+        contracts.canonical_json({"payload": arguments["parameters"]["payload"]}).encode(),
+        {"content-type": "application/json"}, delivery_report=report)
+    assert status == initial.status and body == initial.body
+    assert "deepline_terminal_failure" not in headers and len(api.frames) == 1
+    host._mark_socket_delivery(report, written=written)
+    payload = host._state.worker_observations.document()
+    assert "deepline_terminal_failure" not in json.dumps(payload)
+    receipt = payload["response_receipts"][0]
+    assert receipt["body_sha256"] == contracts.hash_bytes(body)
+    assert receipt["write_state"] == ("socket_written" if written else "socket_write_failed")
+    assert payload["complete"] is written
+    run_id = host._state.lease["run_id"]
+    claim_hash = "sha256:" + "c" * 64
+    snapshot, compressed = obs.build_snapshot(run_id, "execute", payload,
+        lease_generation=1, claim_request_hash=claim_hash)
+
+    class Objects:
+        def get_bounded(self, ref, limit):
+            assert ref == obs.object_ref(run_id, 1, claim_hash) and len(compressed) <= limit
+            return compressed
+
+    assert obs.read_snapshot(Objects(), run_id, "execute", 1, claim_hash) == snapshot
 
 
 @pytest.mark.parametrize("fact", [None, False, 1, "true"])

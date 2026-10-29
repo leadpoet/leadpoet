@@ -43,6 +43,10 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    if options.get("archive_snapshot_https"):
+        # A historical overlay accepts its reviewed archive function only.
+        from tests.test_arena_archive_snapshot_https import original_source
+        result[builder.ARCHIVE_FILE] = original_source()
     if options.get("rejected_final_packet"):
         from tests.lab_arena.reviewer_rejected_final_packet_seam_test import corrected_grader
         result[builder.GRADER_FILE] = corrected_grader()

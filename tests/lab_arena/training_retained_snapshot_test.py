@@ -79,6 +79,70 @@ def test_both_final_replies_lost_keep_exact_snapshot_without_authoritative_links
     assert retained["complete"] is False and retained["payload"]["complete"] is True
 
 
+@pytest.mark.parametrize("verification", ["verified", "legacy", "wrong_digest", "timeout", "same_count_conflict"])
+def test_exact_ack_recovery_and_unverified_export_retention_coexist(tmp_path, verification):
+    import httpx
+    from fastapi.testclient import TestClient
+    from lab_arena.api import create_app
+    from tests.lab_arena.training_input_test import TOKEN, service_for
+
+    values, snapshot, resource = prepared()
+    service, objects = service_for(tmp_path)
+    owner = service._store.get_run("r1")
+    owner["run_id"] = RUN_ID
+    service._store.get_run = lambda run_id: owner if run_id == RUN_ID else None
+    # Use the real write-once store for both the HTTP service and exporter.
+    for ref, raw in values["objects"].values.items():
+        objects.put(ref, raw)
+    values["objects"] = objects
+    state = runner.RunState(lease={"run_id": RUN_ID}, lease_token=TOKEN)
+    document = copy.deepcopy(snapshot["payload"])
+    if verification == "same_count_conflict":
+        document["agent_observations"][1]["data"]["value"] = {"different": True}
+        assert contracts.document_hash(document) != snapshot["payload_sha256"]
+    state.worker_observations.response_receipts = document["response_receipts"]
+    state.worker_observations.response_receipt_count = document["response_receipt_count"]
+    state.worker_observations.agent_observations = document["agent_observations"]
+    state.worker_observations.agent_observation_count = document["agent_observation_count"]
+    gateway = TestClient(create_app(service))
+    methods = []
+    route = "/arena/v1/runs/%s/training-observations" % RUN_ID
+
+    def transport(request):
+        methods.append(request.method)
+        if request.method == "POST":
+            response = gateway.post(route, content=request.content, headers=dict(request.headers))
+            assert response.status_code == (409 if verification == "same_count_conflict" else 200)
+            if response.status_code == 200:
+                raise httpx.ReadTimeout("synthetic lost ACK", request=request)
+        elif verification == "timeout":
+            raise httpx.ReadTimeout("synthetic HEAD timeout", request=request)
+        elif verification == "legacy":
+            return httpx.Response(204)
+        elif verification == "wrong_digest":
+            return httpx.Response(204, headers={"ETag": '"' + contracts.hash_bytes(b"different") + '"'})
+        else:
+            response = gateway.head(route, headers=dict(request.headers))
+            assert response.status_code == (412 if verification == "same_count_conflict" else 204)
+        return httpx.Response(response.status_code, content=response.content, headers=dict(response.headers))
+
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        api = runner.HttpArenaApiClient("http://localhost", client=client)
+        resource["worker_observations"] = runner._record_training_observations(
+            SimpleNamespace(api=api), state.lease, TOKEN, state)
+    assert methods == ["POST", "POST", "HEAD"]
+    exported = assemble_example(**values)
+    if verification == "verified":
+        assert resource["worker_observations"] == summary_for(snapshot)
+        assert exported["worker_observation_artifacts"][RUN_ID] == snapshot
+        assert not exported.get("unverified_worker_observation_artifacts")
+        assert exported["completeness"]["complete"]
+        assert exported["provider_calls"][0]["response_provenance"]["delivery_to_worker"] == "socket_written"
+    else:
+        assert resource["worker_observations"]["status"] == "unavailable"
+        assert_unverified(exported, snapshot)
+
+
 @pytest.mark.parametrize("damage", ["unavailable", "non_mapping", "status", "hash", "count",
                                     "local_refusal_count", "complete", "same_count_conflict"])
 def test_every_summary_mismatch_retains_only_unverified_evidence(damage):

@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -21,6 +22,35 @@ class DockerImageNormalizationError(RuntimeError):
 
 
 _EPOCH = "1970-01-01T00:00:00Z"
+
+
+def _emit_canonical_config_diagnostic(config: dict[str, Any], payload: bytes) -> None:
+    # Temporary reproduction-only evidence. Remove after identifying the
+    # cross-host delta and proving the regression fix on both real builders.
+    if os.environ.get("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS") != "1":
+        return
+    allowed_env = {
+        "PATH", "LANG", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256",
+        "PYTHONDONTWRITEBYTECODE", "PYTHONHASHSEED", "SOURCE_DATE_EPOCH",
+        "LEADPOET_ENCLAVE_ROLE", "PYTHONPATH",
+    }
+    env = config.get("config", {}).get("Env", [])
+    text = payload.decode("utf-8")
+    sensitive = re.search(
+        r"(?i)(?:password|secret|token|authorization|(?:https?|all)_proxy)[\"\s]*[:=]"
+        r"|(?:AKIA|ASIA)[A-Z0-9]{16}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+"
+        r"|://[^/\s:\"\\]+:[^/\s@\"\\]+@|BEGIN [A-Z ]*PRIVATE KEY",
+        text,
+    )
+    if (
+        len(payload) > 65536
+        or not isinstance(env, list)
+        or any(not isinstance(item, str) or item.split("=", 1)[0] not in allowed_env for item in env)
+        or sensitive
+    ):
+        print("Canonical Docker config diagnostic withheld by bounds or credential check", file=sys.stderr)
+        return
+    print("Canonical Docker config diagnostic: " + text, file=sys.stderr)
 
 
 def _normalization_temp_parent() -> Optional[Path]:
@@ -191,6 +221,7 @@ def normalize_saved_image(
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
+        _emit_canonical_config_diagnostic(config, config_bytes)
         config_hash = hashlib.sha256(config_bytes).hexdigest()
         normalized_config_name = "blobs/sha256/%s" % config_hash
         normalized_config_path = root / normalized_config_name

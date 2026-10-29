@@ -8664,7 +8664,6 @@ async def _run_targeted_company_evidence_investigation(
         *(
             (required_attribute_source_cache or {}).keys()
             if preserve_matched_industry or review_positive_semantics
-            or "required_attribute" in investigation_targets
             else []
         ),
         *(

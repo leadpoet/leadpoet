@@ -9,6 +9,13 @@ import pytest
 
 from lab_arena import contracts, public_dashboard, source_disclosure
 from lab_arena.service import ArenaService, ServiceError
+
+
+class _Service(SimpleNamespace):
+    """Exercise current public-read and identifier hooks with bounded stores."""
+    _public_submissions_round = ArenaService._public_submissions_round
+    _require_identifier = staticmethod(ArenaService._require_identifier)
+
 from lab_arena.store import ArenaStore
 
 
@@ -124,7 +131,7 @@ def test_open_round_dates_are_planned_but_no_scores_are_disclosed():
 def test_intermediate_scores_are_not_read_or_released(status):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("Unpublished score rows must not be read")
-    service = SimpleNamespace(_store=SimpleNamespace(list_runs=forbidden))
+    service = _Service(_store=SimpleNamespace(list_runs=forbidden))
     assert public_dashboard._stage1_scores(service, {"status": status}) == {}
 
 
@@ -295,7 +302,7 @@ def test_competition_snapshot_is_scoped_and_separates_open_running_and_completed
             return [opened, running, cancelled, published]
 
     store = Store()
-    service = SimpleNamespace(
+    service = _Service(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -339,7 +346,7 @@ def test_competition_snapshot_fetches_the_latest_published_outside_recent_window
             return [published] if kwargs.get("status") == "published" else [opened, cancelled]
 
     store = Store()
-    service = SimpleNamespace(
+    service = _Service(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -407,7 +414,7 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
             rows = pages.get(kwargs.get("offset", 0), [])
             if archive_reason == "authorized_baseline_recovery440":
                 # Production fetches compact JSON projections, not full config.
-                assert "cfg_recovery_source_round_id:" in kwargs["columns"]
+                assert "configuration_doc:lab_arena_public_configuration_v1" in kwargs["columns"]
                 return [
                     {
                         **{key: value for key, value in row.items()
@@ -420,7 +427,7 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
             return rows
 
     store = Store()
-    service = SimpleNamespace(
+    service = _Service(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -453,7 +460,7 @@ def test_competition_snapshot_keeps_a_real_cancelled_round():
         def list_rounds(**_kwargs):
             return [cancelled, published]
 
-    service = SimpleNamespace(
+    service = _Service(
         _config=SimpleNamespace(mode="live"),
         _store=Store(),
         _chain_scope=lambda: ("finney", 71),
@@ -483,7 +490,7 @@ def test_competition_snapshot_honors_an_explicitly_pinned_archive():
         def list_rounds(**_kwargs):
             raise AssertionError("pinned public reads must not enumerate rounds")
 
-    service = SimpleNamespace(
+    service = _Service(
         _config=SimpleNamespace(
             mode="live", pinned_round_id=archive["round_id"]
         ),
@@ -516,7 +523,7 @@ def test_competition_snapshot_stops_on_a_repeated_archive_page():
             return [] if kwargs.get("status") == "published" else [archive]
 
     store = Store()
-    service = SimpleNamespace(
+    service = _Service(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -569,7 +576,7 @@ def test_open_submissions_disclose_only_accepted_intake_as_queued():
             assert "encrypted_credentials" not in kwargs["columns"]
             return records
 
-    service = SimpleNamespace(
+    service = _Service(
         _round=lambda _round_id: round_row,
         _store=Store(),
         now=_now,
@@ -654,7 +661,7 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
             }
             return runs
 
-    service = SimpleNamespace(
+    service = _Service(
         _round=lambda _round_id: round_row,
         _store=Store(),
         now=_now,
@@ -783,7 +790,7 @@ def _published_submission_records():
 
 def test_per_icp_stage1_uses_frozen_cost_adjusted_baseline_and_miner_scores():
     row = _per_icp_published_round()
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -813,7 +820,7 @@ def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
         def list_submissions(*_args, **_kwargs):
             return _published_submission_records()
 
-    service = SimpleNamespace(
+    service = _Service(
         _round=lambda _round_id: row,
         _store=Store(),
         now=_now,
@@ -835,7 +842,7 @@ def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
 def test_per_icp_stage1_does_not_restore_raw_cost_ineligible_miner_score():
     row = _per_icp_published_round()
     row["publication_doc"]["stage1_ranking"][0]["stage1_score"] = 0.0
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(
             list_runs=lambda *_args, **_kwargs: _stage1_runs(miner_position=0)
         )
@@ -854,7 +861,7 @@ def test_per_icp_stage1_does_not_fall_back_to_raw_miner_score(published_score):
         del ranking["stage1_score"]
     else:
         ranking["stage1_score"] = published_score
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -873,7 +880,7 @@ def test_per_icp_stage1_hides_baseline_when_frozen_cost_basis_is_invalid(
         baseline["cost_summary"] = None
     else:
         baseline["cost_summary"]["per_icp"][1]["icp_position"] = 0
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -888,7 +895,7 @@ def test_successful_calls_policy_round_keeps_historical_raw_stage1_rule():
     row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
         contracts.SUCCESSFUL_CALLS_COST_POLICY
     )
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -918,7 +925,7 @@ def test_cancelled_round_never_fabricates_aggregate_scores():
             "accepted_at": "2026-09-08T01:05:00Z",
         }
     ]
-    service = SimpleNamespace(
+    service = _Service(
         _round=lambda _round_id: row,
         _store=SimpleNamespace(list_submissions=lambda *_args, **_kwargs: records,
                                list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []),
@@ -943,7 +950,7 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
         "round_id": "arena-2026-09-09",
     }
     checked = []
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(get_submission=lambda _submission_id: submission),
         _round=lambda round_id: checked.append(round_id),
         _objects=object(),
@@ -972,7 +979,7 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
 
 def test_submission_status_uses_full_round_scope_check():
     checked = []
-    service = SimpleNamespace(
+    service = _Service(
         _store=SimpleNamespace(
             get_submission=lambda _submission_id: {
                 "submission_id": "sub-miner",
@@ -1014,7 +1021,7 @@ def test_previously_admitted_review_exclusion_remains_visible_without_scores(rou
             "provider_response": "private-provider-do-not-publish",
         },
     }
-    service = SimpleNamespace(_round=lambda _: row, now=_now,
+    service = _Service(_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
                              list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     result = public_dashboard.submissions_snapshot(service, row["round_id"])
@@ -1041,7 +1048,7 @@ def test_review_visibility_does_not_disclose_unadmitted_or_superseded_sources(ch
     submission = {"submission_id": "private-id", "miner_hotkey": MINER_HOTKEY,
         "status": "rejected", "rejection_rule": "code_review_incomplete",
         "accepted_at": "2026-09-08T17:50:08Z", **change}
-    service = SimpleNamespace(_round=lambda _: row, now=_now,
+    service = _Service(_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
                              list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     assert public_dashboard.submissions_snapshot(service, row["round_id"])["submissions"] == []

@@ -390,7 +390,7 @@ def test_unproven_structured_fit_scores_zero_without_arena_retry(
         return verdict, ""
 
     async def fetch_current_profile(
-        url, *, diagnostic=None, source_text_sink=None,
+        url, *, diagnostic=None, source_text_sink=None, **_kwargs,
     ):
         assert unproven_dimension == "employee_size"
         assert url == "https://www.linkedin.com/company/strandtx"
@@ -512,9 +512,9 @@ def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
         observed_company_name="Day AI",
         observed_company_website="https://day.ai/",
         observed_company_linkedin="https://linkedin.com/company/day-ai",
-        observed_employee_count="11-50",
+        observed_employee_count=35,
         employee_size_evidence_url="https://yespress.io/day-ai",
-        employee_size_evidence_quote="The company is roughly 35 people.",
+        employee_size_evidence_quote="Day.ai has 35 employees.",
         observed_industry="Software",
         observed_subindustry="AI-native CRM platform",
         industry_evidence_url="https://day.ai/",
@@ -619,7 +619,7 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
         provider_calls.append(kwargs["telemetry_purpose"])
         return dict(verdict), ""
 
-    async def no_current_size(url, *, diagnostic=None, source_text_sink=None):
+    async def no_current_size(url, *, diagnostic=None, source_text_sink=None, **_kwargs):
         profile_fetches.append(url)
         return {
             "outcome": "insufficient_evidence",
@@ -860,7 +860,7 @@ def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
     async def provider(**_kwargs):
         return verdict, ""
 
-    async def timeout(url, *, diagnostic=None, source_text_sink=None):
+    async def timeout(url, *, diagnostic=None, source_text_sink=None, **_kwargs):
         fetches.append(url)
         return None
 
@@ -942,7 +942,7 @@ def test_exact_profile_without_size_accepts_zero_after_invalid_repair_guess(
         provider_calls.append(kwargs["telemetry_purpose"])
         return verdicts.pop(0), ""
 
-    async def no_current_size(url, *, diagnostic=None, source_text_sink=None):
+    async def no_current_size(url, *, diagnostic=None, source_text_sink=None, **_kwargs):
         fetches.append(url)
         return {
             "outcome": "insufficient_evidence",

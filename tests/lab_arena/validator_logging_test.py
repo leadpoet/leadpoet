@@ -252,12 +252,12 @@ def test_active_work_is_not_a_stalled_poll():
 
 def test_claim_observations_track_effective_capacity_and_bounded_result(tmp_path):
     from lab_arena import runner
-    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config, lease
 
     log = logger()
     pool = SimpleNamespace(capacity=5, quarantined=0)
     api = FakeApi([{'status': 'no_free_slot'}, {'status': 'no_pending'},
-                   {'status': 'paused'}, {'status': 'leased'},
+                   {'status': 'paused'}, lease(),
                    {'status': 'secret=DO-NOT-LOG'}])
     config = replace(make_config(tmp_path, api, None, parallel=5),
                      proxy_worker_pool=pool, operational_logger=log)
@@ -519,7 +519,7 @@ def test_transport_uses_direct_origin_no_redirect_or_response_body(monkeypatch):
 def test_repeated_claim_denial_does_not_fabricate_recovery(tmp_path):
     from dataclasses import replace
     from lab_arena import runner
-    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config, lease
 
     log = logger()
     class Api(FakeApi):

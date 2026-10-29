@@ -75,8 +75,12 @@ def _wired_factory(monkeypatch, *, prices=None):
     monkeypatch.setattr(wiring, "_daily_cutoff_hour_from_environment", lambda: None)
     monkeypatch.setattr(wiring, "_pool_percent_from_environment", lambda: 0)
     monkeypatch.setattr(wiring, "_baseline_source_url_from_environment", lambda _mode: "https://example.com/baseline")
+    def account_price_table(*, api_key):
+        assert api_key == HOST_KEYS["openrouter"]
+        return price_table() if prices is None else prices
+
     monkeypatch.setattr(wiring.broker_module, "fetch_openrouter_price_table",
-                        price_table if prices is None else lambda: prices)
+                        account_price_table)
     monkeypatch.setattr(wiring.broker_module, "HttpxProviderTransport", lambda: provider)
 
     class Keys:

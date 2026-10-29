@@ -1,3 +1,18 @@
+## Scoped authorization: October 29 account-scoped Arena model catalog
+
+The user authorized the smallest tested fix for the confirmed mismatch between
+the public OpenRouter model list and the organizer account's allowed model list.
+Use the existing organizer key to restrict the production Arena price table to
+model IDs in the authenticated account catalog. Keep the existing public-list
+prices for shared models. If either catalog is unavailable or invalid, retain
+the existing fail-closed startup behavior; do not silently offer public-only
+models. Preserve existing pricing math, frozen round rules, model
+requests, billing, judgments, accepted results, and privacy policy. Add no
+provider calls, dependencies, cache, or database objects. Internal agents may
+change code and tests in isolated worktrees and commit only. The coordinator
+owns review, safe push and merge, canonical deployment, and live readback.
+This authority ends after the scoped deployed behavior is verified.
+
 ## Scoped authorization: October 29 complete subnet Supabase retirement
 
 The user explicitly authorized completing the subnet's Supabase exit using the

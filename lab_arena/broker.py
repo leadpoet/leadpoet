@@ -46,6 +46,7 @@ PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 JUDGMENT_CACHE_SCHEMA_VERSION = "leadpoet.lab_arena.verifier_provider_request.v1"
 JUDGMENT_CACHE_BUSY_POLL_SECONDS = 1.0
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_USER_MODELS_URL = "https://openrouter.ai/api/v1/models/user"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
 OPENROUTER_GPT6_LUNA_RESPONSES_MODEL = "openai/gpt-6-luna"
@@ -85,6 +86,18 @@ MICROUSD = Decimal(1_000_000)
 TOKENS_PER_CHAR_BOUND = 1
 REQUEST_TOKEN_OVERHEAD = 16
 _DIRECT_URLOPEN = urlrequest.build_opener(urlrequest.ProxyHandler({})).open
+
+
+class _RejectCatalogRedirects(urlrequest.HTTPRedirectHandler):
+    """Keep the organizer key on the fixed account-catalog origin."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+_DIRECT_ACCOUNT_CATALOG_URLOPEN = urlrequest.build_opener(
+    urlrequest.ProxyHandler({}), _RejectCatalogRedirects()
+).open
 
 GENERIC_ERRORS = {
     "invalid_request": 400,
@@ -676,30 +689,77 @@ def price_table_from_models_response(response: Mapping[str, Any], model_ids: Opt
     })
 
 
+def _read_models_document(
+    url: str, *, urlopen: Callable[..., Any], timeout_seconds: int,
+    api_key: Optional[str] = None,
+) -> Mapping[str, Any]:
+    headers = {"Accept": "application/json"}
+    if api_key is not None:
+        headers["Authorization"] = "Bearer " + api_key
+    request = urlrequest.Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read(MAX_PRICE_TABLE_BYTES + 1)
+    except HTTPError as exc:
+        raise ArenaContractError("models endpoint returned HTTP %d" % exc.code) from exc
+    except (URLError, TimeoutError) as exc:
+        raise ArenaContractError("models endpoint unreachable") from exc
+    if len(raw) > MAX_PRICE_TABLE_BYTES:
+        raise ArenaContractError("models endpoint response exceeds the size cap")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ArenaContractError("models endpoint returned invalid JSON") from exc
+
+
 def fetch_openrouter_price_table(
     model_ids: Optional[Sequence[str]] = None,
     *,
     urlopen: Optional[Callable[..., Any]] = None,
     timeout_seconds: int = 20,
     now: Optional[Callable[[], datetime]] = None,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    urlopen = urlopen or _DIRECT_URLOPEN
-    request = urlrequest.Request(OPENROUTER_MODELS_URL, headers={"Accept": "application/json"}, method="GET")
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            raw = response.read(MAX_PRICE_TABLE_BYTES + 1)
-    except HTTPError as exc:
-        raise ArenaContractError("models endpoint returned HTTP %d" % exc.code) from exc
-    except URLError as exc:
-        raise ArenaContractError("models endpoint unreachable") from exc
-    if len(raw) > MAX_PRICE_TABLE_BYTES:
-        raise ArenaContractError("models endpoint response exceeds the size cap")
-    try:
-        decoded = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ArenaContractError("models endpoint returned invalid JSON") from exc
+    """Keep public prices, but admit only models in the organizer account list."""
+
     moment = (now or (lambda: datetime.now(timezone.utc)))()
-    return price_table_from_models_response(decoded, model_ids, fetched_at=moment.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    fetched_at = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    account_models = None
+    if api_key is not None:
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise ArenaContractError("models account key is unavailable")
+        account_document = _read_models_document(
+            OPENROUTER_USER_MODELS_URL,
+            urlopen=urlopen or _DIRECT_ACCOUNT_CATALOG_URLOPEN,
+            timeout_seconds=timeout_seconds,
+            api_key=api_key,
+        )
+        account_models = set(price_table_from_models_response(
+            account_document, fetched_at=fetched_at
+        )["models"])
+    public_document = _read_models_document(
+        OPENROUTER_MODELS_URL,
+        urlopen=urlopen or _DIRECT_URLOPEN,
+        timeout_seconds=timeout_seconds,
+    )
+    table = price_table_from_models_response(
+        public_document, model_ids if account_models is None else None,
+        fetched_at=fetched_at,
+    )
+    if account_models is None:
+        return table  # Explicit no-key helper path; production always supplies a key.
+    allowed = set(table["models"]) & account_models
+    if model_ids is not None:
+        wanted = {str(model) for model in model_ids}
+        missing = sorted(wanted - allowed)
+        if missing:
+            raise ArenaContractError("models endpoint lacks allowed models: %s" % ", ".join(missing))
+        allowed &= wanted
+    if not allowed:
+        raise ArenaContractError("models endpoint has no account-allowed priced models")
+    table["models"] = {model: pricing for model, pricing in table["models"].items()
+                       if model in allowed}
+    return validate_price_table(table)
 
 
 def _microusd_ceiling(usd: Decimal) -> int:

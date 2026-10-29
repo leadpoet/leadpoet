@@ -106,6 +106,7 @@ Resources:
       Parameters:
         rds.force_ssl: '1'
         rds.logical_replication: '1'
+        max_slot_wal_keep_size: '3072'
   DatabaseGatewayIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:

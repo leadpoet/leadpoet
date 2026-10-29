@@ -15,6 +15,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolate_optional_industry_policy(monkeypatch):
+    # score_input binds its process policy directly. Each production judge is
+    # a fresh process; a prior test must not opt later legacy fixtures in.
+    # Tests of the new reviewer or policy conflicts set the value themselves.
+    monkeypatch.delenv("ARENA_INDUSTRY_EVIDENCE_MODEL", raising=False)
+
 # `lab_arena.validator.main` replaces its own process with `sudo ... validator`
 # when it runs on a non-root Linux host that already grants non-interactive
 # sudo. CI runners are exactly that host, so any check that calls `main`

@@ -291,6 +291,7 @@ def test_actual_psycopg_query_and_full_competition_response(current_database, mo
 
 @pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
 def test_actual_postgrest_computed_selection_and_response(stack, monkeypatch):
+    psycopg2 = pytest.importorskip('psycopg2')
     rows = _history_rows()
     with stack["connection"].cursor() as cursor:
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))

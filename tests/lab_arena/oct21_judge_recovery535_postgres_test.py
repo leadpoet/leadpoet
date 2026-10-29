@@ -71,6 +71,8 @@ def prepare(conn):
     text = re.sub(r"(expected_state CONSTANT JSONB:=')[^']+('::JSONB;)",lambda m:m[1]+json.dumps(state)+m[2],text)
     # Only the test clock changes. The production migration keeps exact UTC bounds.
     text = text.replace("clock_timestamp()>='2026-10-21T23:59:58Z'::TIMESTAMPTZ", "'2026-10-21T22:00:00Z'::TIMESTAMPTZ>='2026-10-21T23:59:58Z'::TIMESTAMPTZ")
+    # Keep the recovered frozen deadlines too. The lifecycle control first
+    # proves their real expiry, then projects both clocks into a coherent window.
     return text
 
 
@@ -108,12 +110,29 @@ def test_preserves_all_rows_and_normal_continuation_only_adds_score(database):
             cur.execute('SET LOCAL session_replication_role=origin')
             # The original frozen Oct21 window has elapsed on today's DB
             # clock; its normal claim guard must reject the retained successor.
+            cur.execute("SELECT configuration_doc#>>'{schedule,final_scoring_close}',configuration_doc#>>'{schedule,publication_deadline}' FROM public.lab_arena_rounds WHERE round_id=%s", (RID,))
+            assert cur.fetchone() == ('2026-10-21T23:59:58Z','2026-10-21T23:59:59Z')
+            denied_before = rows(cur)
             lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
             assert lease['status'] == 'no_pending', lease
             cur.execute('RESET ROLE')
+            assert rows(cur) == denied_before
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((clock_timestamp()+interval '1 hour')::text)),'{schedule,publication_deadline}',to_jsonb((clock_timestamp()+interval '1 hour 1 second')::text)) WHERE round_id=%s",(RID,))
             cur.execute('SET LOCAL session_replication_role=origin')
+            # Independently expire only publication admission after the coherent
+            # retry window is open; denial must preserve every retained run.
+            cur.execute('SAVEPOINT expired_fixture_admission')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,publication_deadline}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE round_id=%s", (RID,))
+            cur.execute('SET LOCAL session_replication_role=origin')
+            denied_before = rows(cur)
+            assert previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER) == {'status': 'no_pending'}
+            cur.execute('RESET ROLE')
+            assert rows(cur) == denied_before
+            cur.execute('ROLLBACK TO SAVEPOINT expired_fixture_admission')
+            cur.execute("SELECT (configuration_doc#>>'{schedule,publication_deadline}')::timestamptz>clock_timestamp() FROM public.lab_arena_rounds WHERE round_id=%s", (RID,))
+            assert cur.fetchone()[0] is True
             lease = previous.prior.queue.claim(cur,RID,runner=shape.fast.seed.RUNNER)
             assert lease['status'] == 'leased' and lease['run_id'] == TARGET+':14', lease
             cur.execute('RESET ROLE')

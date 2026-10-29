@@ -944,11 +944,13 @@ def test_retained_responses_429_pauses_gate_before_billing_readback(
     assert results["following"].call["reason"] == "provider_admission_cancelled"
     assert results["limited"].status == 502
     assert results["limited"].call["provider_status"] == 429
-    # A retained response with no usage or readback price is still unbilled.
-    # Throttle admission cannot turn that unknown charge into a free call.
+    # No usage or billing record proves that the retained generation was free.
     assert results["limited"].call["outcome"] == "uncertain"
     assert "actual_microusd" not in results["limited"].call
     assert limited_store.log == ["reserve", "dispatch", "uncertain"]
+    retained = limited_store.calls[results["limited"].call["call_identity"]]
+    assert retained["kind"] == "uncertain"
+    assert retained["uncertain_doc"]["openrouter_generation_present"] is True
     assert len(limited_transport.sent) == 1
     with gate._condition:
         state = gate._states[fingerprint()]

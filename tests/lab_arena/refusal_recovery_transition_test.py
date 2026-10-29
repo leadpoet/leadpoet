@@ -8,22 +8,22 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
-from pathlib import Path
+
+import pytest
 
 from lab_arena import broker, runner as rn, runtime, scoring, shim
 from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge
-import pytest
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verified_test_pool
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 
 
+REFUSAL_QUERY = "fixture-credit-refusal"
+
+
 @pytest.fixture()
 def database():
     yield from current_service_database()
-
-
-REFUSAL_QUERY = "fixture-credit-refusal"
 
 
 class CreditRefusalTransport(fixtures.FakeProviderTransport):

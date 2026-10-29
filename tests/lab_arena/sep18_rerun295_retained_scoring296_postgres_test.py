@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import sep18_published_rerun295_postgres_test as previous
-from tests.lab_arena import parallel_twenty_icp_execution_postgres_test as ordinary
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
     test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs as ordinary_lifecycle,
 )
@@ -21,6 +21,11 @@ MIGRATION = ROOT / "scripts/296-arena-2026-09-18-rerun295-retained-scoring.sql"
 CONFIG_HASH = "a583f20ca7573721258e27b5f80fd9128511a01a4ab50203f234ea8c69db3fb9"
 SOURCE_HASH = "1ba24d1abac3849b8900238cb3f8f2ced3aab41fbe8f30064c0dcbeefc9c3cd3"
 SOURCE_COMMIT = "e21d29698edb60e6b5635f5f27e5a0058709210f"
+
+
+@pytest.fixture()
+def current_application_database():
+    yield from current_service_database()
 
 
 def _fixture_sql(configuration):
@@ -113,7 +118,7 @@ def _instrument_seal_calls(cursor):
         cursor.execute(f"ALTER FUNCTION public.{name}() OWNER TO lab_arena_owner")
 
 
-def test_canonical_retained_scores_survive_both_stages_and_publication(database, tmp_path, monkeypatch):
+def test_canonical_retained_scores_survive_both_stages_and_publication(database, current_application_database, tmp_path, monkeypatch):
     monkeypatch.setattr(previous.Harness, "objects_key", lambda self: "repair296-" + tmp_path.name)
     seed = previous._seed_published_terminal
     prepare = previous._prepare
@@ -197,8 +202,9 @@ def test_canonical_retained_scores_survive_both_stages_and_publication(database,
         with connection.cursor() as cursor:
             cursor.execute("SELECT status,public.lab_arena_sep18_published_rerun295_nonbaseline_valid_v1() FROM public.lab_arena_rounds WHERE round_id=%s", (previous.ROUND,))
             assert cursor.fetchone() == ("published", True)
-    ordinary_path = tmp_path / "ordinary"
-    ordinary_path.mkdir()
-    # The ordinary admission control owns a later schema than the sealed296 DB.
-    for current_pg, current_dsn in ordinary.database.__wrapped__():
-        ordinary_lifecycle(lambda: current_pg.connect(**current_dsn), ordinary_path)
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    # The retained295/296 migration proof above keeps its exact historical
+    # database. This independent current-app control needs its full runtime RPCs.
+    current_pg, current_dsn = current_application_database
+    ordinary_lifecycle(lambda: current_pg.connect(**current_dsn), ordinary)

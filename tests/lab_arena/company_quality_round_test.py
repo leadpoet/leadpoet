@@ -1,8 +1,6 @@
 """Frozen activation and complete saved/public company-quality rounds."""
 from __future__ import annotations
 
-from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
-
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
@@ -32,8 +30,7 @@ from qualification.scoring.competition import (
 )
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_REWARD_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
 from tests.test_arena_company_quality_policy import _positive_breakdown
@@ -106,7 +103,7 @@ class QualityHarness(IntegrityHarness):
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.mark.parametrize(
@@ -121,7 +118,7 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     with_contacts = with_contacts not in (False, "partial")
     psycopg2, dsn = database
     challengers = ["Broad", "Sparse", "Padded"]
-    harness = _HistoricalQualityHarness(lambda: psycopg2.connect(**dsn), tmp_path, challengers=challengers, runners=["alpha", "beta"])
+    harness = QualityHarness(lambda: psycopg2.connect(**dsn), tmp_path, challengers=challengers, runners=["alpha", "beta"])
     if with_contacts:
         from tests.lab_arena.contact_round_test import _contact_icps
         source = harness.service.config.daily_icp_source
@@ -257,6 +254,19 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     sparse = harness.submit("Sparse", round_id)
     padded = harness.submit("Padded", round_id)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    if partial_recovery:
+        harness.advance_until("stage1_scoring", runners=2)
+        harness.run_stage_with_runners(2)
+        assert harness.service.advance_round(round_id) == {
+            "status": "waiting", "round_status": "stage1_scoring",
+        }
+        # The real continuation retry is subject to SQL backoff. Prove that
+        # it cannot run early, then move only its disposable creation clock.
+        waiting = harness.service.store.list_runs(round_id, kind="score")
+        harness.run_stage_with_runners(2)
+        assert harness.service.store.list_runs(round_id, kind="score") == waiting
+        fixtures._make_pending_judge_retries_ready(harness)
+        harness.run_stage_with_runners(2)
     harness.advance_until("scored", runners=2, max_steps=120)
 
     if partial_recovery:
@@ -477,17 +487,7 @@ def test_quality_round_publishes_coverage_winner_after_restart(
 
 def test_historical_rounds_still_publish_after_quality_migration(database, tmp_path, monkeypatch):
     psycopg2, dsn = database
-    monkeypatch.setattr(fixtures, "Harness", _HistoricalServiceHarness)
     monkeypatch.setattr(fixtures.Harness, "objects_key", lambda self: "quality-historical-" + self.tmp.name)
     fixtures.test_full_round_publishes_results_and_next_day_uses_the_public_baseline(
         lambda: psycopg2.connect(**dsn), tmp_path,
     )
-
-
-# These local tests pin pre-474 SQL. Shared harness classes keep current clients.
-class _HistoricalQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
-    pass
-
-
-class _HistoricalServiceHarness(HistoricalStoreHarnessMixin, fixtures.Harness):
-    pass

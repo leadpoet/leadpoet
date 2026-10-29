@@ -543,11 +543,24 @@ def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
     )
     provider_calls = []
 
+    async def current_profile(url, *, expected_company_identity, **_kwargs):
+        # Retain the rounded public quote above. It is not exact size proof;
+        # this controlled independent profile supplies the canonical range.
+        assert url == "https://www.linkedin.com/company/day-ai"
+        assert expected_company_identity["linkedin_company_slug"] == "day-ai"
+        return {"url": url, "employee_count": "11-50",
+                "quote": "Company size 11-50 employees"}
+
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("prechecks passed")
 
     async def homepage(*_args, **_kwargs):
-        return company_fit_match("homepage identity verified")
+        return company_fit_match("homepage identity verified", details={
+            "identity": {"decision": "match", "evidence_source": "company_homepage",
+                         "observed_name": "dayai", "observed_domain": "day.ai",
+                         "observed_linkedin_slug": "day-ai"},
+            "verified_homepage_transport_domain": "day.ai",
+        })
 
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
@@ -563,6 +576,7 @@ def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
         ]
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", current_profile)
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
     monkeypatch.setattr(

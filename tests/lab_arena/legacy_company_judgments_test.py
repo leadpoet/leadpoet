@@ -5,6 +5,8 @@ import copy
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("scorer_process_environment")
+
 from lab_arena import company_judgments, contracts, scorer_entrypoint, scoring, verify
 from qualification.scoring import lead_scorer
 from qualification.scoring.competition import (

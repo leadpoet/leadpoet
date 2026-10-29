@@ -45,6 +45,10 @@ class _Store:
         self.rounds = {current["round_id"]: current}
         self.submissions = {row["submission_id"]: row for row in submissions}
         for row in published or []:
+            row.setdefault("evaluation_date", row["round_id"][-10:])
+            if row.get("promotion_required"):
+                row.setdefault("participants", [{"submission_id": "prior-baseline",
+                    "miner_hotkey": "baseline", "is_king": True}])
             self.rounds[row["round_id"]] = row
         self.runs = []
         for row in self.rounds.values():
@@ -77,6 +81,33 @@ class _Store:
 
     def get_round(self, round_id):
         return self.rounds.get(round_id)
+
+    def latest_published_day(self, *, network_name, netuid):
+        rows = [row for row in self.rounds.values() if row["status"] == "published"
+                and row["configuration_doc"].get("mode") == "live"
+                and row["configuration_doc"].get("network_name", "finney") == network_name
+                and row["configuration_doc"].get("netuid", 71) == netuid]
+        return max(rows, key=lambda row: row["evaluation_date"], default=None)
+
+    def list_runs(self, round_id, *, kind):
+        # Pending promotion fixtures represent a fully judged historical day.
+        # Supply the accepted executions and matching judgments required by
+        # the current final-readiness check, rather than bypassing that check.
+        row = self.rounds[round_id]
+        baseline = next(p for p in row["participants"] if p["is_king"])
+        runs = []
+        for stage in (1, 2):
+            for position in contracts.execution_positions(stage, None, row["configuration_doc"]):
+                execution_id = f"{round_id}-execute-{position}"
+                runs.append({"run_id": execution_id if kind == "execute" else f"{round_id}-score-{position}",
+                    "scored_run_id": execution_id if kind == "score" else None,
+                    "round_id": round_id, "submission_id": baseline["submission_id"],
+                    "miner_hotkey": baseline["miner_hotkey"], "stage": stage,
+                    "icp_position": position, "attempt": 1, "status": "accepted",
+                    "terminal_cause": "accepted", "per_icp_score": 50.0,
+                    "output_ref": f"{round_id}/{kind}-{position}.json",
+                    "result_doc": {"terminal_status": "accepted"}})
+        return runs
 
     def freeze_champion_funding(self, round_id):
         row = self.rounds[round_id]
@@ -351,6 +382,32 @@ def test_same_chain_pending_promotion_still_blocks_baseline(tmp_path):
 
     with pytest.raises(ServiceError, match="baseline_promotion_pending"):
         service.freeze_participants(current["round_id"])
+
+
+@pytest.mark.parametrize("missing", ["execution_result", "judgment", "judgment_identity"])
+def test_pending_promotion_needs_complete_matching_baseline_work(tmp_path, missing):
+    previous = {"round_id": "arena-2026-09-04", "status": "published",
+                "promotion_required": True, "configuration_doc": {"mode": "live"},
+                "publication_doc": {"king_decision": {"outcome": "crowned"}}}
+    store = _Store(_round(), [], [previous])
+    service = _service(store, _Objects(), _archive(tmp_path))
+    assert service._baseline_final_ready(previous)
+    assert service._pending_promotion_blocks()
+    original = store.list_runs
+
+    def incomplete(round_id, *, kind):
+        rows = original(round_id, kind=kind)
+        if missing == "execution_result" and kind == "execute":
+            rows[0]["result_doc"] = None
+        elif missing == "judgment" and kind == "score":
+            rows.pop(0)
+        elif missing == "judgment_identity" and kind == "score":
+            rows[0]["scored_run_id"] = "foreign-execution"
+        return rows
+
+    store.list_runs = incomplete
+    assert not service._baseline_final_ready(previous)
+    assert not service._pending_promotion_blocks()
 
 
 def test_existing_frozen_baseline_recovers_without_refetching_old_main():

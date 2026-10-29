@@ -270,6 +270,7 @@ def test_hold_stale_token_and_close_claim_lock_preserve_work(database):
 def test_service_billing_return_only_yields_at_execution_cutoff(case):
     now=datetime.now(timezone.utc)
     service=object.__new__(svc.ArenaService)
+    service._lock=threading.RLock()
     calls=[]
     status="stage2_scoring" if case=="scoring" else "stage2"
     config={"schedule":{"stage_2_close":_stamp(now+timedelta(seconds=1 if case=="before" else -1))}}
@@ -278,8 +279,7 @@ def test_service_billing_return_only_yields_at_execution_cutoff(case):
     service._clock=lambda:now
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)
-    service._reconcile_deepline_cost=lambda _:{"status":"none"}
-    service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
+    service._reconcile_active_deepline_cost=lambda _:{"status":"none", "checked":0}
     service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(now+timedelta(days=1))}
     service._store=SimpleNamespace(operator_hold_active=lambda:case=="held",expire_leases=lambda _:calls.append("expire"))
     service._advance_round_locked=lambda _:calls.append("advance") or {"status":"draining"}
@@ -444,7 +444,13 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(c
         store.close()
 
 
-def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path):
+@pytest.fixture()
+def current_application_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_real_signed_late_execution_preserves_costs_and_publishes(current_application_database,tmp_path):
     """Actual service, signed runner, cost RPCs and scoring/publication.
 
     Only local fixture schedule boundaries are projected before claiming.
@@ -452,6 +458,7 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     """
     import time
     from tests.lab_arena.confirmed_cost_admission_postgres_test import _reserve,_dispatch,_settle
+    database=current_application_database
     psycopg,dsn=database
     connect=lambda:psycopg.connect(**dsn)
     with connect() as conn,conn.cursor() as cur:
@@ -546,7 +553,20 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
         old_accepted=[r for r in before["lab_arena_runs"] if r["status"]=="accepted"]
         for old in old_accepted:
             current=next(r for r in after["lab_arena_runs"] if r["run_id"]==old["run_id"])
-            assert current==old
+            if old['kind']=='execute' and old['per_icp_score'] is None:
+                # Current baseline judging can continue during stage 2. The
+                # accepted execution remains immutable while its first actual
+                # judgment adds only these derived projection fields.
+                projected_fields={'qualification_doc','per_icp_score','updated_at'}
+                assert {k:v for k,v in current.items() if k not in projected_fields}=={
+                    k:v for k,v in old.items() if k not in projected_fields}
+                baseline_ids={p['submission_id'] for p in participants if p['is_king']}
+                assert current['per_icp_score']==(30 if old['submission_id'] in baseline_ids else 60)
+                assert len(current['qualification_doc']['companies'])==5
+                assert all(c['company_qualified'] for c in current['qualification_doc']['companies'])
+                assert current['updated_at']>=old['updated_at']
+            else:
+                assert current==old
         assert all(r["status"]=="accepted" for r in after["lab_arena_runs"])
         assert _close(conn)["status"]=="existing"
         assert _state(conn)==after

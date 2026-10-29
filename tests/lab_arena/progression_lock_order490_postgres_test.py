@@ -11,6 +11,7 @@ import pytest
 
 from tests.lab_arena import baseline_infrastructure_continuation485_postgres_test as prior
 from tests.lab_arena import publication_transition_timeout437_postgres_test as publication
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
 
 ROOT = Path(__file__).parents[2]
@@ -246,10 +247,10 @@ def proven_round(database, tmp_path_factory):
     # Build signed source evidence on the established complete service fixture.
     # Its historical helpers are intentionally absent from the isolated485
     # catalog; the tested transition/projection then runs on exact490 bodies.
-    generator = prior.database.__wrapped__()
+    generator = current_service_database()
     source = next(generator)
     try:
-        return publication.proven_round.__wrapped__(source, tmp_path_factory)
+        return publication.current_proven_round(source, tmp_path_factory)
     finally:
         generator.close()
 

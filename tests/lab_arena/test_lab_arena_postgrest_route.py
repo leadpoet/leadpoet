@@ -12,8 +12,8 @@ import json
 import shutil
 import socket
 import subprocess
+import sys
 import time
-from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -22,8 +22,6 @@ import pytest
 from lab_arena import contracts
 from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport, TABLES
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ROOT / "scripts"
 DOCKER = shutil.which("docker")
 POSTGREST_IMAGE = "postgrest/postgrest:v14.5@sha256:b574528fe109c8343c1247155734d03df8c34b462f342dca0ccc20244fc36ef9"
 POSTGRES_IMAGE = "postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545"

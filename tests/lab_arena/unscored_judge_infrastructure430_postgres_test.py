@@ -10,6 +10,7 @@ import json
 import pytest
 
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+from tests.lab_arena.historical_service import start_pre470_round
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
 )
@@ -73,7 +74,7 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     )
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-    assert fixtures._start_round(harness, day=29, epoch=62_429) == 2
+    assert start_pre470_round(harness, round_id="arena-2026-09-29", epoch=62_429) == 2
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     harness.advance_until("stage1_scored", runners=1)
     harness.service.advance_round(harness.round_id)
@@ -284,9 +285,13 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
             "WHERE round_id=%s", (harness.round_id,)
         )
         cur.execute("SET LOCAL session_replication_role=origin")
-    waiting = harness.service.score_stage(harness.round_id, 2)
-    assert waiting["status"] == "retry" and waiting["reason"] == "judge_incomplete"
-    assert harness.service.store.get_run(execution_id)["per_icp_score"] is None
+    before_round = harness.service.store.get_round(harness.round_id)
+    before_runs = harness.service.store.list_runs(harness.round_id)
+    held = harness.service.score_stage(harness.round_id, 2)
+    assert held == {'status': 'retry', 'round_status': 'stage2_judged',
+                    'reason': 'judge_incomplete', 'remaining': 1}
+    assert harness.service.store.get_round(harness.round_id) == before_round
+    assert harness.service.store.list_runs(harness.round_id) == before_runs
     # Current service waits through the frozen publication deadline. Reconstruct
     # a coherently elapsed execution window only after all real work above.
     configuration = harness.service.store.get_round(harness.round_id)["configuration_doc"]
@@ -302,7 +307,7 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     harness.service._invalidate_hot_round()
     harness.clock.now = elapsed_end + timedelta(seconds=1)
     scored = harness.service.score_stage(harness.round_id, 2)
-    assert scored["status"] == "ok"
+    assert scored["status"] == "ok", scored
     assert harness.service.store.get_run(execution_id)["per_icp_score"] is None
     assert harness.service.publish(harness.round_id)["status"] == "ok"
     published = harness.service.store.get_round(harness.round_id)

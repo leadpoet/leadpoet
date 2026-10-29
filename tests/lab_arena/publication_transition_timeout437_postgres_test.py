@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+from tests.lab_arena.historical_service import start_pre470_round
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge,
     _enable_verified_proxy_runtime,
@@ -89,7 +90,31 @@ def test_migration_fails_closed_on_unexpected_preimage(database, drift):
 
 @pytest.fixture(scope="module")
 def proven_round(database, tmp_path_factory):
-    """Use the established signed service/broker fixture, not mocked guards."""
+    """Published source evidence for the exact pre-470 migration437 schema."""
+    def exercise(h):
+        assert start_pre470_round(h, round_id="arena-2026-09-28", epoch=62_428) == 2
+        h.clock.advance_to(h.schedule()["stage_1_start"])
+        h.advance_until("stage1_scored", runners=1)
+        h.service.advance_round(h.round_id)
+        h.advance_until("scored", runners=1)
+
+    return _build_proven_round(database, tmp_path_factory, exercise)
+
+
+def current_proven_round(database, tmp_path_factory):
+    """Published source evidence using the real current recovery lifecycle."""
+    def exercise(h):
+        assert fixtures._start_round(h, day=28, epoch=62_428) == 2
+        h.clock.advance_to(h.schedule()["stage_1_start"])
+        # Current baseline judging may continue into miner execution. Its
+        # accepted projections are finalized by the real publication writer.
+        h.advance_until("scored", runners=1)
+
+    return _build_proven_round(database, tmp_path_factory, exercise)
+
+
+def _build_proven_round(database, tmp_path_factory, exercise):
+    """Share the signed runner and evidence capture, with an explicit lifecycle."""
     psycopg, dsn = database
     connect = lambda: psycopg.connect(**dsn)
     h = _FrozenIntegrityHarness(connect, tmp_path_factory.mktemp("publication437"),
@@ -101,11 +126,7 @@ def proven_round(database, tmp_path_factory):
     # are produced and validated by the real completion and publication paths.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-        assert fixtures._start_round(h, day=28, epoch=62_428) == 2
-        h.clock.advance_to(h.schedule()["stage_1_start"])
-        h.advance_until("stage1_scored", runners=1)
-        h.service.advance_round(h.round_id)
-        h.advance_until("scored", runners=1)
+        exercise(h)
         assert h.service.publish(h.round_id)["status"] == "ok"
     with connect() as c, c.cursor() as cur:
         cur.execute("SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s", (h.round_id,))

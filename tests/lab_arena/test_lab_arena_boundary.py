@@ -241,3 +241,61 @@ def test_boundary_does_not_ignore_unparseable_source(tmp_path):
     path.write_text("from lab_arena import (", encoding="utf-8")
     with pytest.raises(SyntaxError):
         _assert_no_arena_runtime_imports(path, tmp_path)
+
+
+SOURCE_PACKAGES = (
+    "gateway",
+    "leadpoet_canonical",
+    "leadpoet_verifier",
+    "qualification",
+    "Leadpoet",
+)
+
+
+HOST_ARENA_IMPORTS = {
+    "gateway/api/arena_proxy.py": {("lab_arena", name) for name in ("operations", "training_input", "training_observations")},
+    "gateway/middleware/body_size.py": {("lab_arena", "training_observations")},
+    "gateway/observability/otel_bootstrap.py": {("lab_arena.store", "safe_store_error_metadata")},
+    "gateway/tasks/icp_generator.py": {("lab_arena", "contracts"), ("lab_arena.integrity", "company_only_icp"),
+                                        ("lab_arena.store", "ArenaStore"), ("lab_arena.store", "PostgrestTransport")},
+    "leadpoet_canonical/arena_weights.py": {("lab_arena", "contracts")},
+    "qualification/scoring/company_evidence_investigator.py": {("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS")},
+    "qualification/scoring/competition.py": {("lab_arena.provider_observations", "company_observation")},
+    "qualification/scoring/linkedin_company_size.py": {("lab_arena.scoring_provider_compat", "CompatibilityResponseError"),
+                                                       ("lab_arena.scoring_provider_compat", "_firecrawl_response")},
+}
+
+
+def _arena_import_bindings(source: str) -> set[tuple[str, str]]:
+    tree = ast.parse(source)
+    imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update((alias.name, "") for alias in node.names
+                           if alias.name == "lab_arena" or alias.name.startswith("lab_arena."))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            module = node.module or ""
+            if module == "lab_arena" or module.startswith("lab_arena."):
+                imports.update((module, alias.name) for alias in node.names)
+    return imports
+
+
+@pytest.mark.parametrize("statement", [
+    "from lab_arena import service", "from lab_arena import scoring",
+    "from lab_arena.service import ArenaService", "import lab_arena.service",
+])
+def test_host_contract_allowlist_rejects_service_and_scorer_leakage(statement):
+    for allowed in HOST_ARENA_IMPORTS.values():
+        assert _arena_import_bindings(statement) - allowed
+
+
+def test_host_arena_imports_remain_the_exact_reviewed_contracts():
+    imports = {}
+    for package in SOURCE_PACKAGES:
+        for path in (ROOT / package).rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            bindings = _arena_import_bindings(text)
+            if bindings:
+                imports[str(path.relative_to(ROOT))] = bindings
+            assert not re.search(r"(?:import_module|__import__)\(\s*['\"]lab_arena", text), path
+    assert imports == HOST_ARENA_IMPORTS

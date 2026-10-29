@@ -1,4 +1,4 @@
-"""Frozen company-only V6 lifecycle proof on the disposable Arena database."""
+"""Company-only V6 lifecycle proof on the disposable Arena database."""
 
 from __future__ import annotations
 
@@ -24,11 +24,9 @@ from leadpoet_canonical import arena_weights
 from qualification.scoring.competition import apply_company_judgment_context
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_REWARD_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.company_quality_round_test import QualityHarness
-from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
     _verified_test_pool,
 )
@@ -38,7 +36,7 @@ from tests.test_arena_company_quality_policy import _positive_breakdown
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def _company(name: str = "Acme") -> dict:
@@ -136,14 +134,14 @@ def test_v6_discards_legacy_contact_claims_before_cache_identity():
 @pytest.mark.parametrize(
     "company_quality",
     [False, True],
-    ids=["historical-integrity-policy", "company-quality-policy"],
+    ids=["current-production-policy", "company-quality-policy"],
 )
 def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
     database, tmp_path, company_quality, normalized_scale
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = _FrozenQualityHarness(
+    harness = QualityHarness(
         connect,
         tmp_path,
         challengers=["Miner"],
@@ -441,16 +439,3 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
     )
     assert vector["champion_share_ppb"] > 0
     assert vector["burned_residual_ppb"] > 0
-
-
-class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
-    def build_service(self):
-        service = super().build_service()
-        commit = service.commit_benchmark
-
-        def commit_historical(round_id):
-            freeze_historical_intake_dates(self, "2026-09-24")
-            return commit(round_id)
-
-        service.commit_benchmark = commit_historical
-        return service

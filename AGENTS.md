@@ -1,3 +1,29 @@
+## Scoped production authorization: October 29 full CI recovery
+
+The user authorized investigation and repair of confirmed full-repository CI
+failures, including pre-change comparisons, complete CI runs, independent review,
+push, safe merge, and canonical deployment where needed. The user explicitly
+included PR 885 and fresh read-only OnePatch/Sentry checks. This task may repair
+stale test fixtures, the missing literal Arena telemetry denial code, and the
+confirmed continuation score-materialization ordering defect. The confirmed
+company-quality judgment-format gap may be repaired only through exact committed
+`589-lab-arena-company-quality-judgment-authority.sql`, after independent review
+and full regression checks, using the existing migration helper. The confirmed query CPU defect may also
+be repaired through exact committed `590-lab-arena-closed-miner-binding-gate.sql`:
+repeat the existing necessary execution-key predicate inside the existing miner
+proof CASE, retain it outside, and preserve every full proof and all callers.
+Require exact helper/dependency hashes and security metadata, old/new equivalence,
+billing selection and settlement controls, and the unchanged 500,000-row,
+20-second CI bound before application. These migrations change private validation
+functions only; no stored records may be rewritten. Preserve
+Arena scoring, judging, training capture, billing, miner behavior, model settings,
+all stored data, release protections, and concurrent work. Do not mask failures,
+weaken test assertions, add dependencies, replay paid calls, make other database
+changes or chain writes, or create new collection systems. Internal agents own assigned code
+and tests only; the coordinator owns release and production validation through
+the existing paired controller and shared deployment lock. This authority ends
+when the scoped CI and deployed behavior are verified.
+
 ## Scoped authorization: October 29 retained capture export
 
 The user authorized the narrow capture fix to retain validated stored worker

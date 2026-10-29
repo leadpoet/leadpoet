@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lab_arena import scoring
+from lab_arena import contracts, scoring
 
 
 def _run(
@@ -47,12 +47,10 @@ def _plan(runs: list[dict]) -> dict:
     )
 
 
-def test_deadline_closed_dispatched_retry_preserves_provider_incompleteness():
+def test_deadline_closed_provider_retry_remains_incomplete_without_model_blame():
     plan = _plan([_run(1, "provider_error"), _deadline_retry()])
 
     assert plan["work_items"] == []
-    # Publication isolation (ffb48c012) keeps infrastructure failures unmeasured.
-    # A deadline marker cannot turn a provider failure into a miner's zero.
     assert plan["zero_rows"] == []
     assert plan["incomplete_rows"] == [
         {
@@ -81,13 +79,25 @@ def test_deadline_closed_dispatched_retry_preserves_provider_incompleteness():
         ],
     ],
 )
-def test_unproved_or_unsupported_deadline_retry_never_invents_a_score(runs):
+def test_unproved_or_unsupported_deadline_retry_stays_fail_closed(runs):
     plan = _plan(runs)
+    assert plan["work_items"] == plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [{"submission_id": "submission-1",
+        "icp_position": 0, "cause": "stage_closed"}]
+
+
+@pytest.mark.parametrize("cause", sorted(contracts.MODEL_CAUSED_TERMINAL_CAUSES))
+def test_proved_model_failure_keeps_its_zero_after_infrastructure_retry(cause):
+    plan = _plan([_run(1, cause), _deadline_retry()])
     assert plan["work_items"] == []
-    assert plan["zero_rows"] == []
-    assert plan["incomplete_rows"] == [{
-        "submission_id": "submission-1", "icp_position": 0, "cause": "stage_closed",
-    }]
+    assert not plan.get("incomplete_rows")
+    assert plan["zero_rows"] == [{"submission_id": "submission-1",
+        "icp_position": 0, "cause": cause}]
+
+
+def test_unknown_terminal_evidence_is_rejected():
+    with pytest.raises(contracts.ArenaContractError, match="invalid terminal evidence"):
+        _plan([_run(1, "unproved_failure")])
 
 
 def test_accepted_attempt_keeps_authority_over_deadline_marker():

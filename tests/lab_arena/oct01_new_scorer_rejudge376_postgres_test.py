@@ -15,6 +15,7 @@ from tests.lab_arena.historical_service_harness import HistoricalArenaStore
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from tests.lab_arena import oct01_held_deadline_recovery372_postgres_test as prior
 from tests.lab_arena.icp_fixtures import daily_icps
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
 
 
 MIGRATION = Path(__file__).parents[2] / "scripts/376-arena-2026-10-01-new-scorer-rejudge.sql"

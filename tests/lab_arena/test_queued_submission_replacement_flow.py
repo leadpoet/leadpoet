@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 from lab_arena import contact_policy, contracts, credentials as credentials_module, icp_disclosure, service as svc, source_bundle
 from lab_arena.api import create_app
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
-from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness, FixtureObjectStore, CANARY_DEEPLINE_KEY, CANARY_OPENROUTER_KEY,
     CANARY_OPENROUTER_MANAGEMENT_KEY, _run_stage_one_to_scoring,
@@ -125,10 +124,10 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
     h.service.config.defaults = replace(h.service.config.defaults, benchmark_disclosure_from="2026-01-01T00:00:00Z")
     round_id = "arena-2026-11-01"
     h.round_id = round_id
-    configuration = h.service.create_round(datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id)
+    h.clock.now = datetime.now(timezone.utc)
+    configuration = h.service.create_round(h.clock.now + timedelta(hours=12), round_id=round_id)
     assert configuration["benchmark_disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
     expected_freeze = (datetime.fromisoformat(configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    h.clock.now = datetime.now(timezone.utc)
     public_round = h.service.public_round(round_id)
     public_current = h.service.public_current()["open_round"]
     for view in (public_round, public_current):
@@ -144,6 +143,8 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
     credential_miner = keypair("queued-flow-credential-owner")
     abandoned_miner = keypair("queued-flow-abandoned-owner")
     newcomer = keypair("queued-flow-new-owner")
+    h.chain.registered.extend(key.ss58_address for key in (
+        miner, license_miner, credential_miner, abandoned_miner, newcomer))
 
     source_a = flavor_source_archive("SourceA")
     a = reserve(h, round_id, miner, source_a)
@@ -269,17 +270,8 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
         assert h.service.store.get_submission(submission_id)["code_review_status"] == "passed"
     for submission_id in discarded:
         assert h.service.store.get_submission(submission_id)["code_review_status"] != "passed"
-    # All admission checks above use real current database time. Freeze a
-    # coherent historical intake window for this fixture's legacy judge; the
-    # normal commit derives its bank/evaluation dates and retains live leases.
-    assert h.service.store.list_runs(round_id) == []
-    freeze_historical_intake_dates(h, "2026-10-12")
     assert h.service.advance_round(round_id)["status"] == "ok"
     committed = h.service.store.get_round(round_id)
-    frozen = h.service.store.get_round(round_id)
-    assert frozen["status"] == "committed"
-    assert str(frozen["evaluation_date"]) == "2026-10-12"
-    assert str(frozen["icp_set_date"]) == "2026-10-11"
     selected = {item["submission_id"] for item in committed["participants"]}
     assert selected_challengers <= selected
     assert selected.isdisjoint(discarded)

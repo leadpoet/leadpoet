@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from lab_arena import contracts
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, new_lease_token
 from lab_arena.owner_admission import OwnerAdmission
 from tests.lab_arena.hotkey_admission_postgres_test import (

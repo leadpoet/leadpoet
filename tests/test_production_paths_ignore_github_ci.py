@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,36 +70,38 @@ def test_gateway_current_release_path_does_not_consult_github_ci() -> None:
 
 
 def test_attested_release_workflow_is_manual_only_with_integrity_guards() -> None:
+    import yaml
     workflow = (ROOT / ".github/workflows/attested-v2-release.yml").read_text(
         encoding="utf-8"
     )
     document = yaml.load(workflow, Loader=yaml.BaseLoader)
-    assert set(document["on"]) == {"workflow_dispatch"}
-    inputs = document["on"]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"reproduce_commit", "expected_pcr0"}
-    assert all(value["required"] == "false" and value["default"] == ""
-               and value["type"] == "string" for value in inputs.values())
-
-    source_guard = ".github/scripts/require_attested_release_source.sh"
-    jobs = document["jobs"]
-    assert set(jobs) == {"source", "builds", "verify", "publish"}
+    assert set(document['on']) == {'workflow_dispatch'}
+    inputs = document['on']['workflow_dispatch']['inputs']
+    assert set(inputs) == {'reproduce_commit', 'expected_pcr0'}
+    for declaration in inputs.values():
+        assert (declaration['required'], declaration['default'], declaration['type']) == ('false', '', 'string')
+    assert document['concurrency']['cancel-in-progress'] == 'false'
+    assert document['permissions'] == {'contents': 'read'}
+    jobs = document['jobs']
+    assert set(jobs) == {'source', 'builds', 'verify', 'publish'}
     for job in jobs.values():
-        assert any("bash " + source_guard in step.get("run", "")
-                   for step in job["steps"])
-    guard = (ROOT / source_guard).read_text(encoding="utf-8")
-    assert 'test "${GITHUB_EVENT_NAME:-}" = workflow_dispatch' in guard
-    assert 'test "${GITHUB_REF:-}" = refs/heads/main' in guard
-    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in guard
-    assert 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in guard
-
-    build_script = ".github/scripts/build_attested_release.sh"
-    assert any(step.get("run") == "bash " + build_script
+        assert any('require_attested_release_source.sh' in step.get('run', '')
+                   for step in job['steps'])
+    build_script = (ROOT / ".github/scripts/build_attested_release.sh").read_text()
+    assert "leadpoet_acquire_docker_operation_lock_v2" in build_script
+    assert any(step.get("run") == "bash .github/scripts/build_attested_release.sh"
                for step in jobs["builds"]["steps"])
-    assert "leadpoet_acquire_docker_operation_lock_v2" in (
-        ROOT / build_script
-    ).read_text(encoding="utf-8")
-    assert "needs.source.outputs.mode == 'publish'" in jobs["publish"]["if"]
-    assert "inputs.reproduce_commit == ''" in jobs["publish"]["if"]
+    source_gate = (ROOT / '.github/scripts/require_attested_release_source.sh').read_text()
+    assert '"${GITHUB_EVENT_NAME:-}" = workflow_dispatch' in source_gate
+    assert '"${GITHUB_REF:-}" = refs/heads/main' in source_gate
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in source_gate
+    assert 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in source_gate
+    assert jobs['publish']['environment'] == 'attested-release'
+    assert jobs['publish']['permissions'] == {'contents': 'read', 'id-token': 'write'}
+    assert "needs.source.outputs.mode == 'publish'" in jobs['publish']['if']
+    assert "inputs.reproduce_commit == ''" in jobs['publish']['if']
+    for name in ('source', 'builds', 'verify'):
+        assert 'permissions' not in jobs[name]
 
 
 def test_normal_validator_restart_does_not_consult_github_ci() -> None:

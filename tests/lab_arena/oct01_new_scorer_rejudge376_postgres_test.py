@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -152,7 +153,10 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
                            (prior.ROUND,))
             assert cursor.fetchone()[0] == submissions_before
             cursor.execute(sql)
-    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    from tests.lab_arena.historical_round_reads import pre517_round_select
+    transport = PsycopgTransport(lambda: psycopg.connect(**dsn))
+    transport.select = pre517_round_select(transport.select)
+    store = ArenaStore(transport)
     archive = store.get_round(prior.ROUND+'-r376archive')
     assert archive['status'] == 'cancelled'
     assert archive['configuration_doc']['mode'] == 'live'
@@ -205,6 +209,9 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     service = object.__new__(ArenaService)
     service._store = store
     service._config = SimpleNamespace(mode='live', pinned_round_id=None)
+    # Read the archived recovery beside the original October 2 intake window.
+    cutoff = store.get_round('arena-2026-10-02')['configuration_doc']['schedule']['submission_cutoff']
+    service._clock = lambda: datetime.fromisoformat(cutoff.replace('Z', '+00:00')) - timedelta(seconds=1)
     service._chain_scope = lambda: ('finney', 71)
     service._pinned_round_id = lambda: None
     service._round = lambda rid: store.get_round(rid)

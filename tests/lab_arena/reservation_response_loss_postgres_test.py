@@ -29,7 +29,6 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
     frozen_participants,
     hotkey,
     round_config,
-    stage_positions,
 )
 
 
@@ -57,7 +56,9 @@ def _open_round(store, round_id: str, *, prefix: str, stage_1_icps: int, cap=5_0
     assert store.create_round(round_id, config)["status"] == "created"
     participants = frozen_participants(store, round_id, 1, prefix=prefix)
     commit_round(store, round_id, participants)
-    assert store.open_stage(round_id, 1, participants, stage_positions(1))[
+    # Open exactly this fixture's frozen stage count, independent of the
+    # module-wide twenty-ICP default used by other migration tests.
+    assert store.open_stage(round_id, 1, participants, list(range(stage_1_icps)))[
         "status"
     ] == "ok"
     return runners

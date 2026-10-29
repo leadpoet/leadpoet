@@ -11,6 +11,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
 )
 from tests.lab_arena.public_submissions_projection_test import _row, _service
+from tests.lab_arena.historical_round_reads import pre517_round_select
 
 
 @pytest.fixture()
@@ -27,6 +28,8 @@ def test_real_projection_keeps_rankings_validation_disclosure_and_fresh_generati
     connection = pg.connect(**dsn)
     connection.autocommit = True
     transport = PsycopgTransport(lambda: pg.connect(**dsn))
+    # CURRENT_SERVICE_MIGRATIONS is the explicit pre517 historical prefix.
+    transport.select = pre517_round_select(transport.select)
     service, fixture_transport = _service(row)
     service._store = ArenaStore(transport)
     try:

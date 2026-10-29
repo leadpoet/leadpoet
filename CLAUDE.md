@@ -1,3 +1,12 @@
+## Scoped authorization: October 28 stale publisher exit
+
+The user authorized the narrow publication recovery fix: stop remaining training
+assessments when another publisher has already finalized the round. Preserve
+the final atomic transition, all accepted work, eligibility rules, scores and
+rewards. The coordinating task owns independent review, safe push and merge,
+canonical deployment and live verification. Do not interrupt another task's
+publisher or create a second publication path.
+
 ## Scoped authorization: October 28 Docker mount record ordering
 
 The user authorized the narrow confirmed live-restore snapshot guard fix:

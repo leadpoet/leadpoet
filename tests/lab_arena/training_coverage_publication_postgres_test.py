@@ -208,16 +208,25 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             assert cursor.fetchone()[0]["eligibility_reason"] == "eligible"
             cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
                            (harness.round_id,))
-            assert cursor.fetchone()[0] is True
+            # Continuation publication materializes verified numeric projections
+            # in its scored phase. Accepted judgments alone are not finality.
+            assert cursor.fetchone()[0] is False
+            assert all(run["per_icp_score"] is None for run in selected[baseline_id])
+            baseline_judges = harness.service.store.list_runs(
+                harness.round_id, submission_id=baseline_id, kind="score", status="accepted")
+            assert len(baseline_judges) == 10
+            assert {run["scored_run_id"] for run in baseline_judges} == {
+                run["run_id"] for run in selected[baseline_id]}
             # Historical frozen full-thinking rounds without this setting keep
             # the old uncertainty decision; a newly frozen 90% or 100% floor
             # keeps confirmed-cost accounting.
             first = selected[bad_id][-1]
-            for floor, reason in ((None, "provider_cost_uncertain"),
+            cost_policy_probes = ((None, "provider_cost_uncertain"),
                                   (0, "provider_cost_uncertain"),
                                   (101, "provider_cost_uncertain"),
                                   ("80", "provider_cost_uncertain"),
-                                  (90, "eligible"), (100, "eligible")):
+                                  (90, "eligible"), (100, "eligible"))
+            for floor, reason in cost_policy_probes:
                 cursor.execute("SAVEPOINT cost_policy_probe")
                 if floor is None:
                     cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc="
@@ -230,9 +239,6 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
                 cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
                                (harness.round_id, bad_id, first["icp_position"]))
                 assert cursor.fetchone()[0]["eligibility_reason"] == reason
-                cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
-                               (harness.round_id,))
-                assert cursor.fetchone()[0] is (floor in (90, 100))
                 cursor.execute("ROLLBACK TO SAVEPOINT cost_policy_probe")
             for outcome in (True, None):
                 cursor.execute("SAVEPOINT confirmed_over_cap_probe")
@@ -271,6 +277,46 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     assert outcome["status"] == "ok"
     saved = harness.service.store.get_round(harness.round_id)
     assert saved["status"] == "published"
+    if gap == "unsettled":
+        # The real publisher must produce complete baseline authority while
+        # retaining uncertainty. Probe legacy/frozen floor rules only after
+        # that guarded writer, and roll every disposable probe back exactly.
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            def authority_snapshot():
+                snapshot = {}
+                for table in ("lab_arena_rounds", "lab_arena_runs", "lab_arena_ledger"):
+                    cursor.execute("SELECT to_jsonb(t) FROM public." + table
+                                   + " t WHERE round_id=%s ORDER BY to_jsonb(t)::text",
+                                   (harness.round_id,))
+                    snapshot[table] = cursor.fetchall()
+                return snapshot
+
+            before = authority_snapshot()
+            cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
+                           (harness.round_id,))
+            assert cursor.fetchone()[0] is True
+            baseline_runs = harness.service.store.list_runs(
+                harness.round_id, submission_id=baseline_id, kind="execute", status="accepted")
+            assert len(baseline_runs) == 10
+            assert all(run["per_icp_score"] is not None for run in baseline_runs)
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            for floor, _reason in cost_policy_probes:
+                cursor.execute("SAVEPOINT baseline_cost_policy_probe")
+                if floor is None:
+                    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc="
+                                   "configuration_doc-'training_minimum_icp_coverage_percent' "
+                                   "WHERE round_id=%s", (harness.round_id,))
+                else:
+                    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc="
+                                   "jsonb_set(configuration_doc,'{training_minimum_icp_coverage_percent}',%s::jsonb) "
+                                   "WHERE round_id=%s", (json.dumps(floor), harness.round_id))
+                cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
+                               (harness.round_id,))
+                assert cursor.fetchone()[0] is (floor in (90, 100))
+                cursor.execute("ROLLBACK TO SAVEPOINT baseline_cost_policy_probe")
+                assert authority_snapshot() == before
+            cursor.execute("SET LOCAL session_replication_role=origin")
+        assert harness.service.store.get_round(harness.round_id) == saved
     ranking = {harness.flavors[item["submission_id"]]: item
                for item in saved["publication_doc"]["final_ranking"]}
     assert all(item["final_score"] is not None for item in ranking.values())

@@ -67,8 +67,6 @@ jobs:
     env:
       BUILD_COMMIT: ${{ needs.source.outputs.build_commit }}
       GATEWAY_V2_BUILDER_DOMAIN: ${{ matrix.domain }}
-      # Temporary: remove after the cross-host config delta is fixed and reproduced.
-      GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}
     steps:
       - name: Check out trusted exact workflow source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -86,14 +84,6 @@ jobs:
         run: python3 .github/scripts/install_attested_nitro_toolchain.py --output "$RUNNER_TEMP/nitro-toolchain"
       - name: Build three clean independent measurements
         run: bash .github/scripts/build_attested_release.sh
-      - name: Retain temporary layer diagnostics for reproduction only
-        if: ${{ always() && needs.source.outputs.mode == 'reproduce' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: v2-layer8-diagnostic-${{ matrix.domain }}-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 7
-          if-no-files-found: error
-          path: ${{ runner.temp }}/gateway-normalization-diagnostics/layer-8-*.json
       - name: Upload only this domain's evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

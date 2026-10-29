@@ -1,3 +1,17 @@
+## Scoped authorization: October 28 aggregate exporter text reuse
+
+The user authorized bounded reuse of exact plain-string sanitizer results only
+within one aggregate export invocation. Preserve the existing short-string and
+custom-string cache behavior, every node/path/key/partition/privacy check, all
+redaction outputs, and standalone request behavior. Use a separate cache capped
+at 512 entries and 8 MiB of conservatively counted Python Unicode key/output
+storage; skip oversized entries. Do not add an input prewalk, global cache,
+provider calls, dependencies, or source, scoring, billing, or standards changes.
+Internal implementation agents may test and commit only. The coordinating task
+owns independent review, saved-artifact native validation, and any later release.
+Do not change production, processes, restart guards, or concurrent work under
+this implementation scope.
+
 ## Scoped authorization: October 28 Docker mount record ordering
 
 The user authorized the narrow confirmed live-restore snapshot guard fix:

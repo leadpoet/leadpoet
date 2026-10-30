@@ -343,6 +343,14 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
                "storage_failed" if capture_reason == "response_capture_failed" else
                "size_limited" if capture_reason == "response_size_limit" else "unavailable")
     request_state = _reasoning_request_state(call, annotation)
+    # The route annotation describes a probe. Report the saved outbound controls
+    # separately: an absent control is different from an unavailable request.
+    body = (((call.get("request") or {}).get("outbound") or {}).get("body"))
+    outbound_controls = ({key: copy.deepcopy(body[key])
+                          for key in ("reasoning", "reasoning_effort", "include_reasoning")
+                          if key in body} if isinstance(body, Mapping) else None)
+    controls_status = ("unavailable" if outbound_controls is None else
+                       "present" if outbound_controls else "absent")
     contains_opaque = opaque or "hidden_reasoning" in redactions
     if storage == "storage_failed":
         content_class = "storage_failed"
@@ -374,6 +382,9 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
             "model_id": annotation.get("model_id") or (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model"),
             "requested_provider_route": annotation.get("provider_route"), "api": call.get("operation_id"),
             "requested": request_state == "requested", "request_state": request_state,
+            "outbound_reasoning_controls": outbound_controls,
+            "outbound_reasoning_controls_status": controls_status,
+            "probe_reasoning_mode": copy.deepcopy(annotation.get("mode")),
             "route_reviewed": policy_verified,
             "provider_route_verified": observation_verified,
             "returned": content_class, "storage": storage, "finish_reason": finish,

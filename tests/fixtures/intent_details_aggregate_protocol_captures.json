@@ -1,0 +1,494 @@
+{
+  "scope": "Exact public unit text, admitted evidence and response fields; only parser-required document keys retained. Not a complete request-wire replay or semantic label.",
+  "cases": {
+    "AHF": {
+      "capture_name": "075459.json",
+      "capture_sha256": "9ff6a3d4bdeead5f4fd547be6f80a692e88e51b1b296d5acd0fa113afb345dd0",
+      "document": {
+        "intent_details_units": [
+          {
+            "text": "A report dated November 21, 2025 says US flooring manufacturer AHF Products completed the acquisition of the SPC plant in Cartersville/Georgia previously operated by Wellmade Industries Manufacturing NA LLC.",
+            "unit_id": 0
+          },
+          {
+            "text": "This acquisition may help AHF Products expand its exterior and interior building products such as windows, siding, doors, and trim.",
+            "unit_id": 1
+          }
+        ],
+        "verified_signals": [
+          {
+            "matched_icp_signal": 0
+          }
+        ],
+        "admitted_evidence": [
+          {
+            "admitted_text": [
+              "AHF Products integrates Wellmade Floor plant - EUWID Wood Products and Panels EUWID News Services YEARS OF INDUSTRY INSIGHTS Login Suchen Search EUWID Wood Products and Panels News Building products AHF Products integrates Wellmade Floor plant 21 November 2025 Bookmark Add News to dashboard On 7 November, four weeks after receiving clearance from the US Bankruptcy Court for the Northern District of Georgia, US flooring manufacturer AHF Products completed the acquisition of the SPC plant in Cartersville/Georgia previously operated by Wellmade Industries Manufacturing NA LLC.... Read more You can only use this article with a valid subscription and registration. Registered subscribers can access all articles after entering their user name and password. More info Login - Ad - Article topics design flooring floor coverings Article categories Building products - Ad - © 2025 EUWID Europäischer Wirtschaftsdienst GmbH | All Rights Reserved. Copyright notice The individual articles, tables and other contents published by EUWID are protected by copyright and are provided exclusively for the client's own use and the use of the client's employees. In the absence of a more extensive licence agreement, only one copy may be printed for circulation at a single business location designated by the client. Digital distribution of EUWID contents, especially by intranet or by e-mail, within a company, throughout a group of companies, or outside a company is not permitted and constitutes an infringement of copyright law. Read more in our FAQ. Free trial More on You can only use this function with a valid subscription and registration. Registered subscribers can access all functions after entering their user name and password. More info Login Privacy We use cookies and external services on our website. Some are necessary, others enhance your user experience or help us improve this website. You can change your privacy settings any time by clicking privacy policy . Necessary cookies External services Allow All Cookies Decline non-necessary cookies Save settings Show Details Close Details Necessary cookies Necessary cookies are required for the correct functioning of the website. currentPage Name: currentPage Provider: EUWID Purpose: Website navigation; stores the current page’s URL Cookie duration: 1 day lastTargetClass Name: lastTargetClass Provider: EUWID Purpose: Website navigation; saves the last clicked website element Cookie duration: 1 day fe_typo_user Name: fe_typo_user Provider: EUWID Purpose: User login; if auto login option was checked during login, the cookie is stored for 1 year; otherwise, the cookie is only stored for the duration of the session. Cookie duration: max. 1 year cookie_consent Name: cookie_consent Provider: EUWID Purpose: Required to remember the user and to store the user’s privacy settings. Cookie duration: 1 year External services Content from video platforms and map services is blocked by default. If access to these services is accepted, separate consent is no longer required when using them. You can find more information on the individual external services in our privacy policy . YouTube Name: Consent Provider: Google Purpose: Displays videos hosted by YouTube on the website Cookie duration: 2 years OpenStreetMap Name: OpenStreetMap Provider: OpenStreetMap Purpose: Displays map on the website Cookie duration: no cookie Corporate | Privacy Policy",
+              "AHF Products integrates Wellmade Floor plant - EUWID Wood Products and Panels"
+            ],
+            "evidence_kind": "verified_source_context",
+            "matched_icp_signal": 0,
+            "observed_dates": [
+              {
+                "basis": "source_publication_date",
+                "date": "2025-11-21"
+              }
+            ],
+            "source_index": 0,
+            "source_url": "https://www.euwid-wood-products.com/news/building-products/ahf-products-integrates-wellmade-floor-plant-211125/"
+          },
+          {
+            "evidence_kind": "verified_signal_observation",
+            "matched_icp_signal": 0,
+            "observed_dates": [
+              {
+                "basis": "event_date",
+                "date": "2025-11-07"
+              }
+            ],
+            "source_index": 1,
+            "source_url": "https://www.euwid-wood-products.com/news/building-products/ahf-products-integrates-wellmade-floor-plant-211125/"
+          },
+          {
+            "admitted_text": [
+              "AHF Products announced it has completed the purchase of the former Wellmade manufacturing facility in Cartersville, Georgia."
+            ],
+            "evidence_kind": "non_qualifying_supporting_quotes",
+            "matched_icp_signal": 1,
+            "observed_dates": [
+              {
+                "basis": "source_publication_date",
+                "date": "1900-01-01"
+              }
+            ],
+            "source_index": 2,
+            "source_url": "https://www.redbooklumberdata.com/2025/12/01/ahf-products-completes-purchase-of-u-s-rigid-core-flooring-manufacturing-facility/"
+          },
+          {
+            "admitted_text": [
+              "November 2025: AHF Products acquired Cartersville, Ga., rigid core manufacturing facility."
+            ],
+            "evidence_kind": "non_qualifying_supporting_quotes",
+            "matched_icp_signal": 1,
+            "source_index": 3
+          },
+          {
+            "admitted_text": [
+              "AHF | Residential, Commercial & Builder Hard Surface Solutions honoring our Past. Innovating for the future AHF Products is home to the most trusted names in flooring built on a 150-year legacy of innovation, technical mastery, and surfaces engineered to perform. From Bruce® Hardwood to Armstrong Flooring®, and Crossville® Porcelain Tile. Learn More Crossville ® Crafting porcelain tile in Tennessee with a commitment to sustainability and thoughtful, design-forward surfaces. Crossville is a leading brand of porcelain stone, glass, and natural stone tile for both residential and commercial settings in interior and exterior floors, walls, and countertops. Made from natural elements, our surface covering products yield a variety of unique textures, looks, and functions for designers and architects. Visit Website Crossville Studios Crossville Studios is a tile and countertops distributor with 26 locations nationwide. Our staff can help you find the right surface material for the right application — commercial or residential. View Website Bruce ® The Bruce brand has been serving America’s flooring needs since 1865. The Pro’s Choice for decades, Bruce is synonymous with quality and craftsmanship. From solid and engineered hardwood to laminated wood flooring and luxury vinyl tile, the Bruce brand has been the trusted name in flooring for decades. Visit Website Armstrong Flooring ® The Armstrong Flooring™ brand has been serving the needs of the residential and commercial markets for over a century. The name Armstrong is known as a leader in flooring products. America was built on these floors with industries such as healthcare, hospitality, retail and offices spaces depending on these quality products, many of which are produced right here in the United States. Visit Website Hartco ® The Hartco brand thrives as a leader in flooring for distributor partners throughout the United States. From solid and engineered hardwood to laminated wood flooring and luxury vinyl tile, America can count on Hartco for durable, premium flooring options. Visit Website Robbins ® The Robbins brand has been operating in America since 1886. Today the Robbins portfolio offers solid and engineered hardwood, porcelain tile, and rigid core flooring directly to our independent retail partners. Visit Website LMFlooring ® LM Flooring manufactures flooring the way nature intended it. Our engineered hardwoods feature a durable plywood core with a top layer of natural hardwood. That core delivers greater stability to your flooring, meaning it’s less likely to expand and contract when exposed to moisture, humidity, and temperature extremes. Visit Website tmbr ® Tmbr. flooring is the true natural flooring selection for your home. We bring the outdoors inside with rich, natural hardwood floors that wrap you in the beauty of America’s national parks. Visit Website Parterre ® The Parterre® brand offers a robust selection of commercial luxury vinyl flooring and engineered hardwood for a range of spaces and industries. Dozens of architect and design firms have been trusting Parterre for their flooring needs since 1992. Visit Website AHF Contract ® As one of our commercial brands, choose from a broad selection of styles and colors to bring large or small spaces to life. Our lineup of vinyl flooring enhances any commercial space, including healthcare, assisted living, education, corporate, hospitality, restaurant, retail, and more. Visit Website Autograph ® You’re a unique individual and your floors should match your personality. With Autograph Flooring, express yourself with the biggest design element in your home – your floors. Choose from unique styles in different types of flooring materials to show off your unique style and taste. Visit Website CRAFTING OUR LEGACY DAILY Craftsmanship is at the heart of AHF. We manufacture beautiful, durable hard surface solutions in a range of textures, styles, and designs to meet the needs of the consumer and commercial markets. View All Brands Our Technology The Flooring Game Changer AHF is now at the core of innovation! We’re adding Rigid Core Flooring to our domestic manufacturing capabilities, which means our hard-surface portfolio is stronger than "
+            ],
+            "company_dimension": "industry",
+            "evidence_kind": "verified_company_source_context",
+            "source_index": 4,
+            "source_url": "https://ahfproducts.com/"
+          },
+          {
+            "admitted_text": [
+              "Headquarters \n\n Mountville, Pennsylvania"
+            ],
+            "company_dimension": "geography",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 5,
+            "source_url": "https://www.linkedin.com/company/ahfproducts"
+          },
+          {
+            "admitted_text": [
+              "Paceline Equity Partners Completes Acquisition of Leading Hard Surface Flooring Manufacturer AHF Products Home Paceline Equity Partners Completes Acquisition of Leading Hard Surface Flooring Manufacturer AHF Products Paceline Equity Partners Completes Acquisition of Leading Hard Surface Flooring Manufacturer AHF Products ' Back To Press Releases Paceline Equity Partners Completes Acquisition of Leading Hard Surface Flooring Manufacturer AHF Products February 2, 2022 An affiliate of Paceline Equity Partners, LLC (“Paceline”), a Dallas-based private equity manager, announced it has closed the acquisition of AHF Products (“AHF”, or the “Company”), a leading North American hard surface flooring manufacturer. Headquartered in Mountville, Pennsylvania, AHF is the largest hardwood flooring manufacturer in North America and has experienced rapid growth across a range of additional flooring categories, including vinyl plank, laminate, and commercial flooring products. The Company operates eight manufacturing facilities, seven in the U.S. and one in Cambodia, and three domestic distribution facilities to serve customers through a multi-channel strategy that includes dealers, home centers, and distributors around the world. Sam Loughlin, Chief Executive Officer of Paceline, said, “AHF is primed to benefit from strong outlooks in residential repair & remodel spend and new residential housing construction, driven by an aging housing stock, record home equity levels, and a severe inventory shortage from years of underbuilding. Further, the Company’s domestic production capacity provides insulation from volatility around tariffs, duties, and high shipping costs, which positions AHF well to continue providing superior customer service given the dislocated global supply chain.” “The Paceline team has extensive experience from our time together at a global private equity manager and a history of success in the building products industry, having completed six platform investments and over 40 bolt-on acquisitions,” added Leigh Sansone, Chief Investment Officer of Paceline. “Our team will leverage its prior expertise, including long-standing industry relationships, to help AHF grow both organically and inorganically.” Brian Carson, Chief Executive Officer of AHF added, “the Company has seen incredible growth since its inception in 2019, and we are thrilled to be partnered with Paceline given our shared visions for growth and their team’s experience in the building products industry. Our valued customers, suppliers, and employees drive the tremendous momentum within our business, and we look forward to continuing to support these stakeholders with accelerated growth in new products, brands, and innovation.” About Paceline Equity Partners Paceline is a Dallas-based private equity manager focused on value-oriented, opportunistic, and special situations investments across corporate credit, real assets, and private equity. Paceline’s senior leadership team members average 20 years of professional experience. Prior to the formation of Paceline, the senior leadership team worked together for approximately 10 years at a global private equity manager and its affiliates. To learn more, please visit www.pacelineequity.com. About AHF Products AHF Products is the leader in hardwood and vinyl flooring with a family of strong brands serving the residential and commercial markets. With decades of experience in award-winning wood flooring design, innovation, product development, manufacturing, and service, AHF improves the quality of people’s lives through great products and a deep commitment to outstanding customer service. AHF’s flooring brands include Bruce®, Hartco®, LM Flooring®, Robbins®, Capella®, HomerWood®, tmbr™, Hearthwood and Parterre. Headquartered in Mountville, Pennsylvania with manufacturing operations across the United States and in Cambodia, AHF Products employs over 2,400 dedicated team members. To learn more, please visit. www.AHFProducts.com Media Contact: Nathaniel Garnick Gasthalter & Co. (212) 257-4170 ' [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] https://www.ahfproducts.com/en-us https://www.ahfproducts.com/en-us/press/paceline-eq"
+            ],
+            "company_dimension": "stage",
+            "evidence_kind": "verified_company_source_context",
+            "source_index": 6,
+            "source_url": "https://www.ahfproducts.com/en-us/press/paceline-equity-partners-completes-acquisition-of-leading-hard-surface-flooring-manufacturer-ahf-products.html"
+          },
+          {
+            "admitted_text": [
+              "Thanks to the 2025 acquisition of our USA Rigid Core Factory in Cartersville GA, AHF Products manufactures rigid core flooring in the USA, combining advanced technology with American craftsmanship. Our solid hardwood is produced at our Beverly, WV facility, including our most popular legacy brands Bruce® Dundee™, American Treasures™ and Manchester™ hardwood flooring."
+            ],
+            "company_dimension": "required_attribute",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 7,
+            "source_url": "https://www.ahfproducts.com/en-us/about-us/manufacturing.html"
+          },
+          {
+            "admitted_text": [
+              "Structured provider observation (employeeCountRange): 1,001-5,000"
+            ],
+            "company_dimension": "employee_size",
+            "evidence_kind": "structured_provider_observation",
+            "source_index": 8,
+            "source_url": "https://www.linkedin.com/company/ahfproducts"
+          }
+        ]
+      },
+      "initial_response": {
+        "connects_icp": false,
+        "facts_supported": false,
+        "natural_paragraph": true,
+        "relevance_grounded": false,
+        "signal_coverage": [
+          {
+            "covered": true,
+            "matched_icp_signal": 0
+          }
+        ],
+        "unit_grounding": [
+          {
+            "contains_factual_claim": true,
+            "evidence": [
+              {
+                "quote": "On 7 November, four weeks after receiving clearance from the US Bankruptcy Court for the Northern District of Georgia, US flooring manufacturer AHF Products completed the acquisition of the SPC plant in Cartersville/Georgia previously operated by Wellmade Industries Manufacturing NA LLC.",
+                "source_index": 0
+              },
+              {
+                "quote": "2025-11-21",
+                "source_index": 0
+              }
+            ],
+            "status": "VERIFIED",
+            "unit_id": 0
+          },
+          {
+            "contains_factual_claim": false,
+            "evidence": [],
+            "status": "VERIFIED",
+            "unit_id": 1
+          }
+        ],
+        "verified_signals_covered": true
+      }
+    },
+    "CACI": {
+      "capture_name": "current-76445--purpose-prose-r1.json",
+      "capture_sha256": "d81864cefd890caaeb91ed0e0a7afb60e23f58cff100cecabe6238c55152ebd3",
+      "document": {
+        "intent_details_units": [
+          {
+            "text": "On August 3, 2026, CACI International announced that it will serve as one of Oracle's technology partners for the U.S.",
+            "unit_id": 0
+          },
+          {
+            "text": "office of Personnel Management's federal human resources information technology modernization contract.",
+            "unit_id": 1
+          },
+          {
+            "text": "That role on the federal HR information technology modernization contract may extend the technology work CACI performs for the Office of Personnel Management.",
+            "unit_id": 2
+          }
+        ],
+        "verified_signals": [
+          {
+            "matched_icp_signal": 0
+          }
+        ],
+        "admitted_evidence": [
+          {
+            "admitted_text": [
+              "CACI Partners with Oracle to Deliver Federal Human Resources IT Modernization to the Office of Personnel Management Accessibility Statement Skip Navigation CACI Partners with Oracle to Deliver Federal Human Resources IT Modernization to the Office of Personnel Management News provided by CACI International Inc Aug 03, 2026, 16:15 ET Share this article Share this article RESTON, Va. , Aug. 3, 2026 /PRNewswire/ -- CACI International Inc (NYSE: CACI ) announced today that it will serve as one of Oracle's technology partners for the U.S. Office of Personnel Management's (OPM) Federal Human Resources Information Technology (HRIT) Modernization contract. Working alongside Oracle, Baker Tilly, and Deloitte on this 10-year contract worth nearly $400 million, CACI will modernize and consolidate disparate federal human resource systems into a single, secure, cloud-based platform for federal civilian employees, including HR professionals and leaders. The consolidation of federal HR systems into a single shared platform is expected to reduce taxpayer costs by more than 90 percent while improving efficiency, security, and service delivery across the government. \"Modernizing federal human resources systems at this scale requires trusted technology partners and deep implementation experience,\" said John Mengucci , CACI President and Chief Executive Officer. \" We have already demonstrated that we can deliver complex HR modernization across the federal government. We will apply that experience to help OPM build a secure, modern platform that strengthens data quality, improves the employee experience, and provides the reliability and security federal agencies expect.\" CACI will support the development, deployment, and implementation of the Oracle Fusion HCM SaaS solution, The platform will include embedded artificial intelligence, standardized data exchange, and continuously updated privacy and security protections. The award builds on CACI and Oracle's proven success delivering large-scale federal HR modernization. Together, the companies supported the Army's Integrated Personnel and Pay System–Army (IPPS-A) , the first successful modernization of the Army's personnel and pay environment after decades of unsuccessful efforts. IPPS-A now supports more than 1.1 million soldiers and established a proven model for transforming complex federal HR systems. The OPM program represents the next step in applying that experience across a large federal HR modernization market. It also expands a long-standing CACI and Oracle partnership that includes work on the Global Combat Support System–Marine Corps (GCSS-MC) platform , the Defense Agencies Initiative (DAI) , and the U.S. Air Force's Defense Enterprise Accounting and Management System (DEAMS) program. About CACI CACI International Inc (NYSE: CACI ) is a technology-first national security company that expands the limits of national security through innovation, discipline, and operational excellence. We deliver advanced technologies that help our customers move faster, operate more efficiently, and anticipate and defeat evolving threats. Our 27,000 talented employees and strong culture drive our success and have earned CACI recognition as a Fortune World's Most Admired Company. CACI is a member of the Fortune 500™, the Russell 1000 Index, and the S&P MidCap 400 Index. For more information, visit caci.com. There are statements made herein which do not address historical facts and therefore could be interpreted to be forward-looking statements as that term is defined in the Private Securities Litigation Reform Act of 1995. Such statements are subject to factors that could cause actual results to differ materially from anticipated results. The factors that could cause actual results to differ materially from those anticipated include, but are not limited to, the risk factors set forth in CACI's Annual Report on Form 10-K for the fiscal year ended June 30, 2025, and other such filings that CACI makes with the Securities and Exchange Commission from time to time. Any forward-looking statements should not be unduly relied upon and only speak as of the date hereof. Corporate Communications and Media: Investor Relations: Gino Bona George Price Executive Vice President, Corporate Communications Senior Vice President, Investor Relations (571) 597-2787, gino.bona@caci.com (703) 841-7818, george.price@caci.com SOURCE CACI International Inc Modal title Also from this source CACI Secures U.S. Navy Task Order to Strengthen Electromagnetic Spectrum Dominance CACI International Inc (NYSE: CACI) announced today that it has been awarded a five-year task order valued at up to $281 million by the U.S. Navy's... CACI Reports Results for Its Fiscal 2027 First Quarter CACI International Inc (NYSE: CACI) announced results today for its fiscal first quarter ended September 30, 2026. \"Our first quarter results... More Releases From This Source Explore Human Resource & Workforce Management Homeland Security High Tech Security Computer Software News Releases in Similar Topics",
+              "CACI Partners with Oracle to Deliver Federal Human Resources IT Modernization to the Office of Personnel Management"
+            ],
+            "evidence_kind": "verified_source_context",
+            "matched_icp_signal": 0,
+            "source_index": 0,
+            "source_url": "https://prnewswire.com/news-releases/caci-partners-with-oracle-to-deliver-federal-human-resources-it-modernization-to-the-office-of-personnel-management-302841499.html"
+          },
+          {
+            "evidence_kind": "verified_signal_observation",
+            "matched_icp_signal": 0,
+            "observed_dates": [
+              {
+                "basis": "event_date",
+                "date": "2026-08-03"
+              }
+            ],
+            "source_index": 1,
+            "source_url": "https://prnewswire.com/news-releases/caci-partners-with-oracle-to-deliver-federal-human-resources-it-modernization-to-the-office-of-personnel-management-302841499.html"
+          },
+          {
+            "admitted_text": [
+              "CACI Investor Relations ## CACI Awarded $376 Million Task Order to Support USDA Supply Chain Management System ARLINGTON, Va.--(BUSINESS WIRE)-- CACI International Inc (NYSE: CACI) announced today that it was awarded a seven year task order, with a ceiling value of $376 million, to provide mission technology to the U.S. Department of Agriculture to sustain and modernize the department’s Web Based Supply Chain Management (WBSCM) system, which supports domestic and international food and nutrition programs administered by the USDA and USAID. Under the task order, awarded under the GSA Alliant II contract vehicle, CACI will provide continued sustainment and business process improvements to USDA’s WBSCM system, including a cloud migration, modernization to SAP S/4HANA, and deployment of additional Salesforce capabilities. These improvements will help increase the productivity and lower the sustainment costs of USDA’s food and nutrition assistance programs by modernizing and automating software functions. The WBSCM program is a web-based commodity ordering, acquisition, distribution, and tracking system built on SAP® and Salesforce commercial software. It supports USDA and USAID-administered food and nutrition assistance programs, including the National School Lunch Program, the global UN World Food Program, the Emergency Food Assistance Program, and the Farmers to Families Food Box program. The Farmers to Families Food Box was launched last year to purchase and distribute more than 125 million food boxes containing American agricultural products to families experiencing food in"
+            ],
+            "company_dimension": "industry",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 2,
+            "source_url": "https://investor.caci.com/2021-04-14-CACI-Awarded-376-Million-Task-Order-to-Support-USDA-Supply-Chain-Management-System?asPDF=1"
+          },
+          {
+            "admitted_text": [
+              "{\"name\":\"CACI International Inc\",\"linkedinUrl\":\"https://www.linkedin.com/company/caci-international-inc/\",\"locations\":[{\"headquarter\":true,\"country\":\"US\",\"city\":\"Reston\",\"geographicArea\":\"Virginia\",\"parsed\":{\"country\":\"United States\",\"countryCode\":\"US\",\"countryFull\":\"United States of America\",\"state\":\"Virginia\",\"city\":\"Reston\"}}]}"
+            ],
+            "company_dimension": "geography",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 3,
+            "source_url": "https://www.linkedin.com/company/caci-international-inc"
+          },
+          {
+            "admitted_text": [
+              "CACI Partners with Oracle to Deliver Federal Human Resources IT Modernization to the Office of Personnel Management - Aug 3, 2026 Close Search Search Open Menu Search Close News Releases Event Calendar Close SEC Filings Annual Reports Quarterly Results Financial & Operating Database Close Leadership and Board of Directors Governance Documents ESG Investors Committee Charters Committee Composition CACI Hotline Program & FAQs Close Stock Quote Financial Calculators Historic Price Lookup Close Analyst Coverage Email Alerts Investor FAQs Stock Transfer Agent Info Contact Us News Releases Download PDF Company Release - 08/03/2026 CACI Partners with Oracle to Deliver Federal Human Resources IT Modernization to the Office of Personnel Management RESTON, Va., Aug. 3, 2026 / PRNewswire / -- CACI International Inc (NYSE: CACI) announced today that it will serve as one of Oracle's technology partners for the U.S. Office of Personnel Management's (OPM) Federal Human Resources Information Technology (HRIT) Modernization contract. Working alongside Oracle, Baker Tilly, and Deloitte on this 10-year contract worth nearly $400 million, CACI will modernize and consolidate disparate federal human resource systems into a single, secure, cloud-based platform for federal civilian employees, including HR professionals and leaders. The consolidation of federal HR systems into a single shared platform is expected to reduce taxpayer costs by more than 90 percent while improving efficiency, security, and service delivery across the government. \"Modernizing federal human resources systems at this scale requires trusted technology partners and deep implementation experience,\" said John Mengucci, CACI President and Chief Executive Officer. \" We have already demonstrated that we can deliver complex HR modernization across the federal government. We will apply that experience to help OPM build a secure, modern platform that strengthens data quality, improves the employee experience, and provides the reliability and security federal agencies expect.\" CACI will support the development, deployment, and implementation of the Oracle Fusion HCM SaaS solution, The platform will include embedded artificial intelligence, standardized data exchange, and continuously updated privacy and security protections. The award builds on CACI and Oracle's proven success delivering large-scale federal HR modernization. Together, the companies supported the Army's Integrated Personnel and Pay System–Army (IPPS-A), the first successful modernization of the Army's personnel and pay environment after decades of unsuccessful efforts. IPPS-A now supports more than 1.1 million soldiers and established a proven model for transforming complex federal HR systems. The OPM program represents the next step in applying that experience across a large federal HR modernization market. It also expands a long-standing CACI and Oracle partnership that includes work on the Global Combat Support System–Marine Corps (GCSS-MC) platform, the Defense Agencies Initiative (DAI), and the U.S. Air Force's Defense Enterprise Accounting and Management System (DEAMS) program. About CACI CACI International Inc (NYSE: CACI) is a technology-first national security company that expands the limits of national security through innovation, discipline, and operational excellence. We deliver advanced technologies that help our customer"
+            ],
+            "company_dimension": "stage",
+            "evidence_kind": "verified_company_source_context",
+            "source_index": 4,
+            "source_url": "https://investor.caci.com/2026-08-03-CACI-Partners-with-Oracle-to-Deliver-Federal-Human-Resources-IT-Modernization-to-the-Office-of-Personnel-Management"
+          },
+          {
+            "admitted_text": [
+              "Working alongside Oracle, Baker Tilly, and Deloitte on this 10-year contract worth nearly $400 million, CACI will modernize and consolidate disparate federal human resource systems into a single, secure, cloud-based platform for federal civilian employees, including HR professionals and leaders."
+            ],
+            "company_dimension": "required_attribute",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 5,
+            "source_url": "https://investor.caci.com/2026-08-03-CACI-Partners-with-Oracle-to-Deliver-Federal-Human-Resources-IT-Modernization-to-the-Office-of-Personnel-Management"
+          },
+          {
+            "admitted_text": [
+              "critical mission knowledge and experience to help combat multi-domain threats. Our deep expertise in fields such as software and algorithm development across the domains of land, air, sea, space, the electromagnetic spectrum, and cyberspace was critical to our being awarded an IDIQ contract by the U.S. Air Force Life Cycle Management Center/Chief Architect Integration Office. As part of this effort, CACI experts will mature, demonstrate, and help proliferate key capabilities across platforms and domains leveraging open systems design to help U.S. forces integrate their operations across all domains against the most capable adversaries. CACI also received a five-year task order with a ceiling value of $128 million to provide mission expertise for the U.S. Army Program Executive Office for Solider (PEO Soldier). This work will include training and field support on key technologies such as laser range finders, night vision goggles, visual augmentation systems, and others used by Army soldiers to increase their capability in the field and minimize the risks they face. CACI proactively blends deep mission and domain expertise with an understanding of the latest technologies and trends (such as cloud migration, Agile software development, and AI) to inform the technology requirements needed to address our customers' daily missions. Our mission expertise is essential in delivering efficient and effective results. ## Modernizing the Data-Driven Enterprise As CACI looks to the future, it is increasingly defined and shaped by software and data. Many of our customers' most pressing challenges have common technology needs that must be solved rapidly, securely, and efficiently. CACI is an industry leader in the enterprise technology that our customers require to meet emerging national security needs, such as Agile software development at scale, DevSecOps using tool-based automation, and a focus on open software architectures. We believe all these elements are key to our future growth. Our Agile-at-scale capabilities enable the industrialization of software development for our customers to modernize critical national security and intelligence missions. Our enterprise and mission Agile development work for U.S. Customs and Border Protection’s (CBP) Border Enforcement Applications for Government Leading Edge (BEAGLE) IT task order, a $1.1 billion award CACI first received in FY20, has expanded significantly in the last fiscal year. Currently, BEAGLE is the largest Agile software development program in the U.S. Government. CACI has developed more than 100 applications for BEAGLE and is continuing to work closely with our CBP customer to respond rapidly to changing demands and deliver more efficient and materially higher-quality capabilities for CBP mission-critical systems and services. CACI also provides enterprise technology as part of a five-year, $450 million single-award blanket purchase agreement (BPA) contract awarded in FY21 for the Department of Homeland Security’s (DHS) headquarters. An expansion of existing business, this award enables CACI to use its innovative model to incorporate automation and Agile program management approaches to continuously improve desktop support services at DHS headquarters — increasing productivity for end users, engineers, mission support personnel, administration, and other components of the department’s mission. C"
+            ],
+            "company_dimension": "first_party_context",
+            "evidence_kind": "verified_company_source_context",
+            "source_index": 6,
+            "source_url": "https://www.caci.com/sites/default/files/AnnualReport2021/index.html"
+          },
+          {
+            "admitted_text": [
+              "Structured provider observation (employeeCountRange): 10,001+"
+            ],
+            "company_dimension": "employee_size",
+            "evidence_kind": "structured_provider_observation",
+            "source_index": 7,
+            "source_url": "https://www.linkedin.com/company/caci-international-inc"
+          }
+        ]
+      },
+      "initial_response": {
+        "connects_icp": false,
+        "facts_supported": false,
+        "natural_paragraph": false,
+        "relevance_grounded": true,
+        "signal_coverage": [
+          {
+            "covered": true,
+            "matched_icp_signal": 0
+          }
+        ],
+        "unit_grounding": [
+          {
+            "contains_factual_claim": true,
+            "evidence": [
+              {
+                "quote": "CACI International Inc (NYSE: CACI ) announced today that it will serve as one of Oracle's technology partners for the U.S. Office of Personnel Management's (OPM) Federal Human Resources Information Technology (HRIT) Modernization contract.",
+                "source_index": 0
+              },
+              {
+                "quote": "Aug. 3, 2026",
+                "source_index": 0
+              }
+            ],
+            "status": "VERIFIED",
+            "unit_id": 0
+          },
+          {
+            "contains_factual_claim": true,
+            "evidence": [
+              {
+                "quote": "Office of Personnel Management's (OPM) Federal Human Resources Information Technology (HRIT) Modernization contract.",
+                "source_index": 0
+              }
+            ],
+            "status": "VERIFIED",
+            "unit_id": 1
+          },
+          {
+            "contains_factual_claim": false,
+            "evidence": [],
+            "status": "VERIFIED",
+            "unit_id": 2
+          }
+        ],
+        "verified_signals_covered": true
+      }
+    },
+    "Nitra": {
+      "capture_name": "current-76502--consolidated.json",
+      "capture_sha256": "726615666723eb8dd854f049c988beaa7e12fb56e1c32bdced663ae2149c883a",
+      "document": {
+        "intent_details_units": [
+          {
+            "text": "On March 10, 2026, Nitra announced $187 million in financing across its Series A and Series B rounds, venture debt, and warehouse facility, bringing total capital raised to $205 million.",
+            "unit_id": 0
+          },
+          {
+            "text": "On May 7, 2026, Nitra announced the Future of Care Initiative, a $20 billion financing commitment through 2028 for independent physicians and medical practices.",
+            "unit_id": 1
+          },
+          {
+            "text": "The $187 million in financing may help strengthen the AI-native, all-in-one operating platform Nitra provides for healthcare practices and their back offices.",
+            "unit_id": 2
+          }
+        ],
+        "verified_signals": [
+          {
+            "matched_icp_signal": 0
+          }
+        ],
+        "admitted_evidence": [
+          {
+            "admitted_text": [
+              "Nitra Raises $187 Million as AI-Native Platform for Healthcare Practices Surpasses $1 Billion in Processing Volume | Nitra Log In Book a Demo Nitra Raises $187 Million as AI-Native Platform for Healthcare Practices Surpasses $1 Billion in Processing Volume Revenues Grew 8x in 2025 and Targets $4 Billion in Annualized Processing Volume in 2026 CityMD Founder Dr. Richard Park joins Board March 9, 2026 From left: Tim Hwang, CEO; and Jonathan Chen, President. Watch the founder video and read our blog post Nitra , the leading AI-native, all-in-one operating platform for healthcare practices and their back offices, today announced $187 million in financing across its Series A and Series B rounds, venture debt, and warehouse facility, bringing the company’s total capital raised to $205 million and total equity raised to $90 million. The funding follows a breakout year for Nitra, which grew revenues 740%+ in 2025, surpassing $1 billion in annualized processing volume as healthcare practices increasingly expand uses of AI beyond clinical decision support and scribing into administration, finances and inventory, and the back office. The financing includes $72 million of new equity across a $50 million Series B round and a previously unannounced $22 million Series A completed in August 2025 from investors including Actions Capital, AppWorks, Comma Capital, Dunamu & Partners, Era Funds, New Enterprise Associates (NEA), Pantera Capital, and Sazze Partners. The financing also included participation from AAF, Gaingels, Hyphen Capital, K8, Mana Ventures, Necessary Ventures, PIDC/Uni-President, Purestone Silks, SignalRank, Simu Liu’s Markham Valley Ventures, Soma Capital, and others. The company also secured $20 million in venture debt from Avenue Capital Group and an expanded $95 million warehouse facility from Treville Capital Group and Encina Lender Finance, LLC. Dr. Richard Park, founder and former CEO of CityMD, joined Nitra’s Board of Directors. CityMD merged with Summit Health, and the combined company was acquired by VillageMD (owned by Walgreens) for $8.9 billion in 2023. Today, Dr. Park oversees Ascend Partners as the co-founder and Managing Partner. His appointment adds deep operational healthcare experience as the company scales its platform. Healthcare is a nearly $5.9 trillion industry in the United States, yet an estimated 25% of spending goes toward administrative costs. Medical practices still rely on fragmented systems for payments, procurement, inventory, scheduling, and insurance verification. Launched in 2024 by Tim Hwang (CEO) and Jonathan Chen (President), Nitra’s platform embeds AI agents directly into the operational backbone of practices. Nitra gives physicians, who are overwhelmed by administrative overload, complete control over their back office and administrative functions. Nitra's all-in-one platform for healthcare practices now includes: Financial Automation , offering a Visa-powered expense card, expense management, bill pay, patient payment processing, and AI agents for healthcare accounting automation; Commerce and Inventory , providing direct access to tens of thousands of biopharmaceuticals and medical equipment products in partnership with firms like McKesson and Medline. Nitra’s AI procurement agents handle suppliers, negotiate prices, onboard vendors, execute purchases, and monitor inventory end-to-end, and Patient Management , launched this month, powers voice AI agents for patient scheduling and insurance eligibility checks. The system integrates scheduling, benefits verification, and patient communication into the broader operational stack, reducing administrative burden for healthcare practices. In 2025, the company grew by over 740% from $4 million of annualized revenues to over $33 million in a single year. This growth was powered by a platform that is now used by thousands of doctors in over 700 clinics and processed over $1 billion in annualized volumes across its platform. In December of 2025, Nitra supported upwards of $9 million in high-stakes, patient-critical biopharma and medical purchases for physicians in a single day. The company is on track to cross over 3,000 clinics, more than $150 million of annualized revenues, and over $4 billion in annualized processing volumes in 2026. As part of its growth, the company has announced that headcount is expected to grow from 50 people last year to over 200 by the end of 2026 and plans to launch additional AI modules in revenue cycle management, patient marketing, and payroll/staffing. With this raise, Nitra plans to accelerate AI development, expand its engineering team, and scale its operating system across thousands of healthcare practices nationwide. “We’re on a mission to serve the people that serve our communities and help doctors save time and money,” said Tim Hwang. “Practices are running critical workflows across disconnected systems that were never designed to work together. Nitra brings those layers together into a single AI-native operating system that helps healthcare practices run their operations more efficiently.” Nitra has attracted some of the most prominent healthcare practices in the country, such as Bay Area Retina Associates, Southern Vitreoretinal Associates (SVA), Elase Medspa, PhyNet Dermatology, Brandywine Urology, and Empower Aesthetics. “Nitra is creating a new category of platform for healthcare practices,” said Adarsh Bhatt, General Partner at Comma Capital . “From the beginning, we viewed the fintech entry point as the wedge into a much larger opportunity to build the AI-native operating platform for healthcare providers. Since our seed investment, the Nitra team has consistently executed on that vision. As someone who regularly speaks with clinicians and practice owners, it’s clear there is a strong demand for modern financial and operational infrastructure purpose-built for healthcare practices. This round positions Nitra to deepen that platform and expand the capabilities providers rely on every day.” “Providing $20 million in venture debt reflects our conviction in the Nitra team and the company’s momentum,” said Dan Holman, Senior Portfolio Manager for Avenue Capital Group’s Growth Lending Strategy. “Tim Hwang and Jonathan Chen are exceptional founders with a strong track record of building and scaling ambitious platforms, and we believe Nitra is well positioned to become critical infrastructure for healthcare practices.” Nitra previously raised its Seed round in 2022 from investors including Andreessen Horowitz, NEA, Pantera, KB Financial Group, Jerry Yang/AME Cloud Ventures, Gold House Ventures, Primer Sazze, Will Smith and Keisuke Honda’s Dreamers VC, Sparklabs, Expa, Era, Comma Capital, Dunamu and Partners, etc. and others. About Nitra Nitra is an AI-native operating system for healthcare practices to run their business and back office. The platform spans finance, procurement, a medical supplies marketplace and patient administration, automating workflows like payments, purchasing, inventory, scheduling, insurance verification, and patient communication. By embedding AI directly into its infrastructure, Nitra unifies these functions into a single system, reducing manual administrative work and improving operational visibility. Media Contact Jessica Ortiz, VP Ditto PR nitra@dittopr.co Nitra is hiring, come build the future with us. Previous slide Next slide 美 의료기관 AI 올인원 운영 플랫폼 ‘나이트라(Nitra)’, 1억8700만 달러(약 2750억원) 투자 유치 美國 AI 整合醫療營運平台 Nitra 完成 1.87 億美元融資，年化交易額突破 10 億美元 Healthcare Companies Can Now Obtain Insurance Right on the Nitra Platform Nitra Seed Round Raise - Press Release August 2022 Nitra Joins Visa Fast Track Program - Press Release March 2023",
+              "Nitra Raises $187 Million as AI-Native Platform for Healthcare Practices Surpasses $1 Billion in Processing Volume | Nitra"
+            ],
+            "evidence_kind": "verified_source_context",
+            "matched_icp_signal": 0,
+            "observed_dates": [
+              {
+                "basis": "source_publication_date",
+                "date": "2026-03-10"
+              }
+            ],
+            "source_index": 0,
+            "source_url": "https://nitra.com/resources/nitra-raises-187-million-as-ai-native-platform-for-healthcare-practices-surpasses-1-billion-in-processing-volume"
+          },
+          {
+            "admitted_text": [
+              "Nitra, the leading AI-native, all-in-one operating platform for healthcare practices and their back offices, today announced $187 million in financing across its Series A and Series B rounds, venture debt, and warehouse facility, bringing the company’s total capital raised to $205 million and total equity raised to $90 million."
+            ],
+            "evidence_kind": "verified_signal_observation",
+            "matched_icp_signal": 0,
+            "observed_dates": [
+              {
+                "basis": "event_date",
+                "date": "2026-03-09"
+              }
+            ],
+            "source_index": 1,
+            "source_url": "https://nitra.com/resources/nitra-raises-187-million-as-ai-native-platform-for-healthcare-practices-surpasses-1-billion-in-processing-volume"
+          },
+          {
+            "admitted_text": [
+              "Nitra , the leading AI-native operating platform for healthcare practices, today announced the Future of Care Initiative , a $20 billion financing commitment through 2028 to provide capital, technology, and operational infrastructure to independent physicians and medical practices across all 50 states.",
+              "ree-Year $20 Billion Commitment Through 2028 to Finance, Build, and Scale the Next Generation of Independent Medical Practices To learn more or get started, visit nitra.com/future-of-care or contact the Nitra team at sales@nitra.com May 6, 2026 Nitra , the leading AI-native operating platform for healthcare practices, today announced the Future of Care Initiative , a $20 billion financing commitment through 2028 to provide capital, technology, and operational infrastructure to independent physicians and medical practices across all 50 states. The initiative comes at a time when independent physicians face mounting pressure from slow-paying payers, rising administrative burden, and increasing"
+            ],
+            "evidence_kind": "non_qualifying_supporting_quotes",
+            "matched_icp_signal": 1,
+            "observed_dates": [
+              {
+                "basis": "source_publication_date",
+                "date": "2026-05-07"
+              }
+            ],
+            "source_index": 2,
+            "source_url": "https://nitra.com/resources/nitra-launches-future-of-care-initiative-commits-20-billion-in-financing-for-independent-medical-practices-across-america"
+          },
+          {
+            "admitted_text": [
+              "See the Time Saved See Accounting Front Desk The teammate who answers, schedules, and verifies, so your team doesn't have to. Inside: Trina Meet Trina The more of your practice lives here, the smarter it all gets. The card trains the books. The books inform the capital. It only works because it's one home. BillPay, Accounting, and Expenses are free with the Nitra Card, no per-seat fees, no per-transaction fees, no software subscription. THE AI BUILT FOR MEDICINE Meet Trina One AI, Both Sides of Your Practice She answers your phones and audits your books. Answers your phones in any language, 24/7, and verifies insurance before every visit. Codes an Allergan invoice to Injectables the moment it posts, and matches the receipt your nurse texted from the parking lot. Syncs with Nextech and QuickBooks, the tools you already use. Hear Trina answer a real call A Typical Tuesday 7:42 AM Trina answers a call before the office opens. 10:06 AM A $4,200 supply order goes through on the card, automatically coded. 12:30 PM Three claims clear before lunch. 2:54 PM Your office manager approves a vendor invoice between patients. No catching up at 6pm. 5:18 PM You close the laptop. The books are done. Run by doctors. Loved by their teams. Practices switched to Nitra because their banks didn't get medicine. They stayed because everything else got easier. \"Nitra, for me, has been a lifeline. It's so much more accurate, from day to day, month to month, I could see where we are. Having set limits on certain credit cards is also very helpful, whereas before, it was sort of a free-for-all.\" Andrea"
+            ],
+            "company_dimension": "industry",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 3,
+            "source_url": "https://nitra.com/"
+          },
+          {
+            "admitted_text": [
+              "t, executives from Intuit, Governors and White House senior staffers, and has raised $200 million+ from Andreessen Horowitz (a16z), New Enterprise Associates (NEA), Sazze Partners, Pantera, KB Financial Group (South Korea’s largest bank), Jerry Yang, Will Smith’s Dreamers VC, Dunamu & Partners (associated with Korea’s largest crypto exchange Upbit), Coventure and others. www.nitra.com. Interested? We are growing fast and actively building our team. Look at our job postings and let us know where you fit! \n\n Website \n\n https://www.nitra.com \n\nExternal link for Nitra\n\n Industry \n\n Technology, Information and Internet \n\n Company size \n\n 51-200 employees \n\n Headquarters \n\n New York, NY \n\n Type \n\n Privately Held \n\n Founded \n\n 2021 \n\n Specialties \n\n FinTech and Healthcare \n\n## Employees at Nitra \n\n- Dave Lu \n\nDave Lu is an Influencer\n\n## Locations \n\n- Primary \n\n 285 Fulton St \n\n STE 84A \n\n New York, NY 10007, US \n\n Get directions \n- 1201 Pennsylvania Ave NW \n\n STE 6 \n\n Washington, District of Columbia 20004, US \n\n Get directions \n\n## Updates \n\n- Nitra reposted this \n\n \n\n Tim Hwang \n\n 12h Edited \n\n- Report this post \n\nWhat does 24 hours inside America’s fastest-growing healthcare AI company (Nitra) look like? 7am. Interviews for our new offices in LA and Miami, with Houston, Chicago and Seattle next. We're hiring the top healthcare bankers out of Amex, US Bank, Bank of America and JPMorgan. Now they’re working with an AI native platform their former employers never could have built. 9am. FlexPay kickoff with a rheumatology clinic in Boston that buys $2M of biologics a year. Until today that meant fronting every dollar, waiting 65 days on payers, and carrying a credit line with a personal guarantee to cover the gap. Now Nitra buys the drug and the practice pays us when the payer pays them. No cash tied up. Noon. Lunch with a dozen dermatology practice owners in NYC. The same Botox and filler they buy today, 15% cheaper through NitraMart and our GPO relationships, pai"
+            ],
+            "company_dimension": "geography",
+            "evidence_kind": "verified_company_source_context",
+            "source_index": 4,
+            "source_url": "https://www.linkedin.com/company/nitrahq"
+          },
+          {
+            "admitted_text": [
+              "Nitra, the leading AI-native, all-in-one operating platform for healthcare practices and their back offices, today announced $187 million in financing across its Series A and Series B rounds, venture debt, and warehouse facility, bringing the company’s total capital raised to $205 million and total equity raised to $90 million."
+            ],
+            "company_dimension": "stage",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 5,
+            "source_url": "https://nitra.com/resources/nitra-raises-187-million-as-ai-native-platform-for-healthcare-practices-surpasses-1-billion-in-processing-volume"
+          },
+          {
+            "admitted_text": [
+              "Nitra is an AI-native operating system for healthcare practices to run their business and back office. The platform spans finance, procurement, a medical supplies marketplace and patient administration, automating workflows like payments, purchasing, inventory, scheduling, insurance verification, and patient communication."
+            ],
+            "company_dimension": "required_attribute",
+            "evidence_kind": "verified_company_fact",
+            "source_index": 6,
+            "source_url": "https://nitra.com/resources/nitra-raises-187-million-as-ai-native-platform-for-healthcare-practices-surpasses-1-billion-in-processing-volume"
+          },
+          {
+            "admitted_text": [
+              "Nitra Launches \"Future of Care Initiative,” Commits $20 Billion in Financing for Independent Medical Practices Across America | Nitra Log In Book a Demo Nitra Launches \"Future of Care Initiative,” Commits $20 Billion in Financing for Independent Medical Practices Across America Three-Year $20 Billion Commitment Through 2028 to Finance, Build, and Scale the Next Generation of Independent Medical Practices To learn more or get started, visit nitra.com/future-of-care or contact the Nitra team at sales@nitra.com May 6, 2026 Nitra, the leading AI-native operating platform for healthcare practices, today announced the Future of Care Initiative, a $20 billion financing commitment through 2028 to provide capital, technology, and operational infrastructure to independent physicians and medical practices across all 50 states. The initiative comes at a time when independent physicians face mounting pressure from slow-paying payers, rising administrative burden, and increasing consolidation across the healthcare industry. According to the American Medical Association, the share of physicians in small independent practices has declined sharply from 60.1% in 2012 to 42.2% in 2024, reflecting the rapid consolidation reshaping American healthcare. \"The dream of independent medicine in America is slipping away,\" said Tim Hwang, Co-Founder and CEO of Nitra. \"Physicians are being forced to choose between their autonomy and their survival. We don't believe they should have to make that choice. The Future of Care Initiative is our $20 billion commitment to back the physicians who want to build, grow, and control their own practices, and to give them the capital and tools to do it.” A Commitment to Independent Medicine Independent physicians are the backbone of American healthcare, yet they operate in a system increasingly stacked against them. Payers are squeezing cash flows. Biopharma and supply costs fluctuate unpredictably. Regulatory complexity grows by the year. And the infrast"
+            ],
+            "company_dimension": "first_party_context",
+            "evidence_kind": "verified_company_source_context",
+            "source_index": 7,
+            "source_url": "https://nitra.com/resources/nitra-launches-future-of-care-initiative-commits-20-billion-in-financing-for-independent-medical-practices-across-america"
+          },
+          {
+            "admitted_text": [
+              "Structured provider observation (employeeCountRange): 51-200"
+            ],
+            "company_dimension": "employee_size",
+            "evidence_kind": "structured_provider_observation",
+            "source_index": 8,
+            "source_url": "https://www.linkedin.com/company/nitrahq"
+          }
+        ]
+      },
+      "initial_response": {
+        "connects_icp": true,
+        "facts_supported": false,
+        "natural_paragraph": true,
+        "relevance_grounded": true,
+        "signal_coverage": [
+          {
+            "covered": true,
+            "matched_icp_signal": 0
+          }
+        ],
+        "unit_grounding": [
+          {
+            "contains_factual_claim": true,
+            "evidence": [
+              {
+                "quote": "Nitra, the leading AI-native, all-in-one operating platform for healthcare practices and their back offices, today announced $187 million in financing across its Series A and Series B rounds, venture debt, and warehouse facility, bringing the company’s total capital raised to $205 million and total equity raised to $90 million.",
+                "source_index": 1
+              },
+              {
+                "quote": "2026-03-10",
+                "source_index": 0
+              }
+            ],
+            "status": "VERIFIED",
+            "unit_id": 0
+          },
+          {
+            "contains_factual_claim": true,
+            "evidence": [
+              {
+                "quote": "Nitra , the leading AI-native operating platform for healthcare practices, today announced the Future of Care Initiative , a $20 billion financing commitment through 2028 to provide capital, technology, and operational infrastructure to independent physicians and medical practices across all 50 states.",
+                "source_index": 2
+              },
+              {
+                "quote": "2026-05-07",
+                "source_index": 2
+              }
+            ],
+            "status": "VERIFIED",
+            "unit_id": 1
+          },
+          {
+            "contains_factual_claim": true,
+            "evidence": [
+              {
+                "quote": "Nitra is an AI-native operating system for healthcare practices to run their business and back office.",
+                "source_index": 6
+              }
+            ],
+            "status": "VERIFIED",
+            "unit_id": 2
+          }
+        ],
+        "verified_signals_covered": true
+      }
+    }
+  }
+}

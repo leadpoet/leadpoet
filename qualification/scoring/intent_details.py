@@ -2120,6 +2120,8 @@ class _BoundedReviewRepairNeeded(ValueError):
         held_response: Mapping[str, Any],
         semantic_unit_ids: set[int],
         relative_time_targets: Mapping[int, Mapping[str, Any]] | None = None,
+        *,
+        complete_response_correction: bool = False,
     ):
         if any(
             category not in _CITATION_REPAIR_CATEGORIES
@@ -2136,6 +2138,7 @@ class _BoundedReviewRepairNeeded(ValueError):
         self.relative_time_targets = copy.deepcopy(
             dict(relative_time_targets or {})
         )
+        self.complete_response_correction = complete_response_correction
         super().__init__("Intent Details requires one bounded local review")
 
 
@@ -2169,8 +2172,6 @@ def _validate_review_response(
     # A negative unit verdict is the detailed, fail-closed result.  It can
     # safely correct a conflicting positive aggregate, but a negative
     # aggregate must never be promoted from the unit summaries.
-    if facts_aggregate_conflict and unit_facts_supported:
-        raise ValueError("factual aggregate conflicts with unit grounding")
     coverage = checks.pop("signal_coverage")
     if not isinstance(coverage, list) or any(
         not isinstance(item, dict)
@@ -2200,6 +2201,15 @@ def _validate_review_response(
         raise ValueError("coverage aggregate conflicts during citation repair")
     if citation_issues and facts_aggregate_conflict:
         raise ValueError("factual aggregate conflicts during citation repair")
+    if facts_aggregate_conflict and unit_facts_supported:
+        if initial_review and any_factual_claim and coverage_aggregate_consistent:
+            # The complete answer is internally invalid, not a valid negative
+            # verdict. One fresh full answer may correct it; no initial field
+            # becomes an acceptance value or a permanent negative veto.
+            raise _BoundedReviewRepairNeeded(
+                {}, raw_checks, set(), complete_response_correction=True,
+            )
+        raise ValueError("factual aggregate conflicts with unit grounding")
     relative_time_targets = (
         _relative_time_recheck_targets(unit_grounding, document)
         if initial_review else {}
@@ -2578,6 +2588,17 @@ def _merge_semantic_repairs(
     return merged
 
 
+_COMPLETE_RESPONSE_CORRECTION = """
+
+STRUCTURED REVIEW CORRECTION:
+The previous answer's facts_supported aggregate and unit_grounding conflict.
+That answer is invalid and is not evidence. Re-evaluate the complete unchanged
+document, including every unit's factual classification, status and evidence,
+and all required checks. Return one fresh complete schema-valid verdict. Do not
+copy a conclusion from the invalid answer. No particular decision is requested.
+"""
+
+
 async def review_intent_details(
     company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
     company_fit_receipt: Mapping[str, Any],
@@ -2671,13 +2692,16 @@ missing review into an accepted paragraph or a terminal company mismatch.
     try:
         checks = _validate_review_response(response, document)
     except _BoundedReviewRepairNeeded as exc:
-        # The original response structure was valid. Recheck exact
-        # contradicted units and repair any citations in the same final call.
-        # Provider failures below remain infrastructure errors.
+        # Use the one remaining call for the identified structural or factual
+        # review issue. Provider failures remain infrastructure errors.
         citation_failure = any(exc.issues.values())
         semantic_unit_ids = exc.semantic_unit_ids
         try:
-            if semantic_unit_ids:
+            if exc.complete_response_correction:
+                repair_prompt = prompt
+                repair_system_prompt = system_prompt + _COMPLETE_RESPONSE_CORRECTION
+                repair_response_format = _RESPONSE_FORMAT
+            elif semantic_unit_ids:
                 repair_prompt = _semantic_repair_user_prompt(
                     document, exc.issues, exc.held_response,
                     semantic_unit_ids, exc.relative_time_targets,
@@ -2712,7 +2736,21 @@ missing review into an accepted paragraph or a terminal company mismatch.
                     "failure_reason_code": "provider_error",
                 }
             try:
-                if semantic_unit_ids:
+                if exc.complete_response_correction:
+                    # Discard every field of the invalid first verdict. The
+                    # fresh complete response must pass the native contract;
+                    # a new repair request cannot dispatch a third call.
+                    _validate_review_response(
+                        repair_response, document, initial_review=False,
+                    )
+                    merged = json.loads(repair_response)
+                    grounding = merged["unit_grounding"]
+                    _validate_unit_grounding(grounding, document)
+                    _validate_relative_time_repair_date_proof(
+                        json.dumps({"repairs": grounding}), document,
+                        _relative_time_recheck_targets(grounding, document),
+                    )
+                elif semantic_unit_ids:
                     _validate_relative_time_repair_date_proof(
                         repair_response, document, exc.relative_time_targets,
                     )

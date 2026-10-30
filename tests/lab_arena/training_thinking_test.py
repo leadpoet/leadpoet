@@ -233,6 +233,64 @@ def test_request_coverage_reads_budget_and_legacy_include_controls():
         assert training_thinking._reasoning_request_state(call, {}) == expected
 
 
+@pytest.mark.parametrize("controls", [
+    {"reasoning": {"effort": "low", "exclude": False}},
+    {"reasoning": {"effort": "medium"}},
+    {"reasoning": {"max_tokens": 2048}},
+    {"reasoning": {"budget_tokens": 1024}},
+    {"reasoning_effort": "low", "include_reasoning": True},
+    {"reasoning": {"enabled": True}},
+    {"reasoning": {"enabled": False}},
+    {},
+])
+def test_attempt_reports_saved_controls_separately_from_high_probe(controls):
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call["reasoning_capture"]["mode"] = {"effort": "high"}
+    body = call["request"]["outbound"]["body"]
+    for field in ("reasoning", "reasoning_effort", "include_reasoning"):
+        body.pop(field, None)
+    body.update(copy.deepcopy(controls))
+    before = copy.deepcopy(call)
+
+    row = training_thinking.attempt_coverage(call, "miner")
+
+    assert row["outbound_reasoning_controls"] == controls
+    assert row["outbound_reasoning_controls_status"] == ("present" if controls else "absent")
+    assert row["probe_reasoning_mode"] == {"effort": "high"}
+    assert call == before
+    if controls:
+        row["outbound_reasoning_controls"].clear()
+        assert call == before
+
+
+def test_attempt_does_not_infer_actual_controls_from_probe_without_saved_body():
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call["reasoning_capture"]["mode"] = {"effort": "high"}
+    del call["request"]["outbound"]["body"]
+
+    row = training_thinking.attempt_coverage(call, "miner")
+
+    assert row["outbound_reasoning_controls"] is None
+    assert row["outbound_reasoning_controls_status"] == "unavailable"
+    assert row["probe_reasoning_mode"] == {"effort": "high"}
+
+
+def test_saved_controls_reach_json_coverage_and_readable_trace():
+    example = full_example()
+    call = example["provider_calls"][0]
+    call["request"]["outbound"]["body"]["reasoning"] = {"effort": "low"}
+    example = seal(example)
+
+    coverage = json.loads(json.dumps(training_thinking.coverage([example])))
+    trace = training_thinking.readable_trace(example)
+    markdown = training_thinking.readable_trace_markdown(trace)
+    for row in (coverage["attempts"][0], trace["calls"][0]["reasoning_coverage"]):
+        assert row["outbound_reasoning_controls"] == {"reasoning": {"effort": "low"}}
+        assert row["probe_reasoning_mode"] == {"effort": "high"}
+    assert '"effort": "low"' in markdown
+    assert '"probe_reasoning_mode"' in markdown
+
+
 def test_reasoning_usage_null_alias_does_not_hide_nested_count():
     call = {"operation_id": "openrouter.responses", "response": {
         "status": "completed", "output": [], "usage": {

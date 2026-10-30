@@ -75,11 +75,15 @@ returns one row of counts for the submission's execute runs: runs, ICP
 positions, completed OpenRouter calls, calls whose saved body reports reasoning
 tokens, the token sum, and the first and last call times. It returns no hotkeys,
 credentials, prompts, bodies or model output. Score runs and other submissions
-are excluded. Counting follows the training export: the latest terminal must be
-a saved 2xx success, and the reasoning count is the largest non-negative integer
-at `usage.reasoning_tokens`, `usage.completion_tokens_details.reasoning_tokens`
+are excluded. Counting uses the training export's terminal and token rules:
+the latest terminal must be a saved 2xx success, and the reasoning count is the
+largest non-negative integer at `usage.reasoning_tokens`, `usage.completion_tokens_details.reasoning_tokens`
 or `usage.output_tokens_details.reasoning_tokens`. A body that cannot be decoded
-counts as a call without reported usage.
+counts as a call without reported usage. If the token sum exceeds BIGINT's
+maximum, the sum is NULL (unknown); the usage call count remains available.
+These provider-reported counts do not prove export completeness or training
+eligibility. The reader does not run the exporter's privacy or structure
+sanitizer.
 
 To enable it:
 

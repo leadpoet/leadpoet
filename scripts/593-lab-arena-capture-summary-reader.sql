@@ -4,7 +4,8 @@
 -- credentials, prompts, bodies or model output. No stored row, table ACL,
 -- existing function or existing role changes.
 --
--- Counting mirrors lab_arena/training_export.py and training_thinking.py:
+-- Count saved provider usage with the terminal/token rules used by
+-- lab_arena/training_export.py and training_thinking.py:
 -- a call is one openrouter.chat/openrouter.responses call_identity with a
 -- reservation in the submission's execute runs; its latest terminal (highest
 -- entry_id) must hold a saved 2xx success (broker
@@ -14,6 +15,9 @@
 -- usage.completion_tokens_details.reasoning_tokens or
 -- usage.output_tokens_details.reasoning_tokens. Any other body counts as a
 -- completed call with no reported usage and never raises.
+-- This is not an export-completeness or training-eligibility check: it does not
+-- run the exporter's privacy and structure sanitizer. An aggregate above the
+-- BIGINT range returns NULL (unknown) while retaining the usage call count.
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
@@ -63,6 +67,7 @@ DECLARE
   body_text TEXT;
   usage_doc JSON;
   tokens NUMERIC;
+  token_total NUMERIC := 0;
 BEGIN
   round_id := p_round_id;
   submission_id := p_submission_id;
@@ -124,7 +129,7 @@ BEGIN
             -- PostgreSQL rejects. They sit only inside strings, so replacing
             -- them never changes a usage number.
             usage_doc := regexp_replace(body_text,
-              '\\u(0000|[dD][89abAB][0-9a-fA-F]{2})', '\\ufffd', 'g')::JSON -> 'usage';
+              '\\u(0000|[dD][89a-fA-F][0-9a-fA-F]{2})', '\\ufffd', 'g')::JSON -> 'usage';
           END;
           IF json_typeof(usage_doc) = 'object' THEN
             SELECT max(v::TEXT::NUMERIC) INTO tokens
@@ -142,9 +147,12 @@ BEGIN
     END IF;
     IF tokens >= 0 THEN
       usage_calls := usage_calls + 1;
-      reasoning_tokens := coalesce(reasoning_tokens, 0) + tokens::BIGINT;
+      token_total := token_total + tokens;
     END IF;
   END LOOP;
+  IF usage_calls > 0 AND token_total <= 9223372036854775807 THEN
+    reasoning_tokens := token_total::BIGINT;
+  END IF;
   RETURN NEXT;
 END;
 $summary593$;

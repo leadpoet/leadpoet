@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -220,6 +221,60 @@ def test_unmatched_scope_returns_one_empty_row(database, migrated):
     assert _summary(database, ROUND, "sub-missing") == {"round_id": ROUND, "submission_id": "sub-missing", **empty}
     summary = _summary(database, ROUND, OTHER)
     assert (summary["execute_runs"], summary["model_calls"], summary["reasoning_tokens"]) == (1, 1, 2000)
+
+
+def _summary_for_bodies(database, bodies):
+    """Seed a separate submission through the same ledger path as the main cases."""
+    psycopg2, dsn = database
+    submission = "sub593-" + uuid4().hex
+    run_id = "run593-" + uuid4().hex
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cur:
+        cur.execute("SET session_replication_role = replica")
+        cur.execute(
+            "INSERT INTO public.lab_arena_runs (run_id, assignment_id, round_id, submission_id, "
+            "miner_hotkey, stage, icp_position, attempt, kind, scoring_generation_floor) "
+            "VALUES (%s,%s,%s,%s,'hk593',1,1,1,'execute',0)",
+            (run_id, run_id, ROUND, submission))
+        for index, body in enumerate(bodies):
+            identity = _identity(submission + str(index))
+            for kind, terminal in (("reservation", None), ("settlement", _ok(_body(body)))):
+                cur.execute(
+                    "INSERT INTO public.lab_arena_ledger (entry_kind, miner_hotkey, round_id, submission_id, "
+                    "run_id, stage, call_identity, provider, operation_id, amount_microusd, terminal_response) "
+                    "VALUES (%s,'hk593',%s,%s,%s,1,%s,'openrouter','openrouter.chat',0,%s)",
+                    (kind, ROUND, submission, run_id, identity,
+                     None if terminal is None else json.dumps(terminal)))
+        cur.execute("SET session_replication_role = origin")
+    return _summary(database, submission_id=submission)
+
+
+@pytest.mark.parametrize("body,reported", [
+    (b'{"usage":{"reasoning_tokens":123},"x":"\\udc00"}', 123),
+    (b'{"usage":{"reasoning_tokens":123},"x":"\\u0000","y":"\\ud83d\\ude00"}', 123),
+    # Literal backslash escapes remain strings, never token counts or token keys.
+    (json.dumps({"usage": {"reasoning_tokens": r"\udc00"}, "x": "\0"}).encode(), None),
+    (json.dumps({"usage": {r"reasoning_tokens\udc00": 123}, "x": "\0"}).encode(), None),
+    (json.dumps({"usage": {"reasoning_tokens": 123}, "x": r"\udc00", "y": "\0"}).encode(), 123),
+])
+def test_usage_with_surrogate_and_literal_escapes(database, migrated, body, reported):
+    assert _python_tokens(_ok(_body(body)), "openrouter.chat") == reported
+    summary = _summary_for_bodies(database, [body])
+    assert summary["model_calls"] == 1
+    assert summary["usage_calls"] == (0 if reported is None else 1)
+    assert summary["reasoning_tokens"] == reported
+
+
+@pytest.mark.parametrize("values,expected", [
+    ([0], 0),
+    ([0, 1, 123], 124),
+    ([999999999999999999] * 9 + [223372036854775816], 9223372036854775807),
+    ([999999999999999999] * 9 + [223372036854775816, 1], None),
+    ([999999999999999999] * 10, None),
+])
+def test_token_sum_keeps_bigint_contract_without_overflow(database, migrated, values, expected):
+    summary = _summary_for_bodies(database, [{"usage": {"reasoning_tokens": value}} for value in values])
+    assert summary["model_calls"] == summary["usage_calls"] == len(values)
+    assert summary["reasoning_tokens"] == expected
 
 
 def test_reader_reaches_arena_data_only_through_the_summary(database, migrated):

@@ -1371,6 +1371,7 @@ def review_evidence(
             raise ValueError("verified signal lacks a criterion index")
         quotes: list[str] = []
         urls: list[str] = []
+        recovered_urls: list[str] = []
         if isinstance(evaluations, list):
             for evaluation in evaluations:
                 item = _mapping(evaluation)
@@ -1382,11 +1383,34 @@ def review_evidence(
                     maximum=5 if result.get("evidence_type") == "FUNDING" else 3,
                     length=2_048,
                 ))
+                # Same-event recovery can verify a fetched replacement URL.
+                # Bind it to this evaluation and its actual source body, not
+                # the submitted URL or another evaluation's quotations.
+                resolution = _mapping(trace.get("source_resolution"))
+                if (item.get("verification_mode") == "source_grounded"
+                    and resolution.get("status") == "verified"):
+                    from qualification.scoring.company_evidence_investigator import _safe_https_url
+
+                    cited = _texts(item.get("evidence_urls_used"), maximum=3, length=2_048)
+                    supplied = _texts(item.get("source_urls_supplied"), maximum=3, length=2_048)
+                    selected = _texts(resolution.get("selected_urls"), maximum=3, length=2_048)
+                    for raw in (trace.get("verified_source_context") or [])[:3]:
+                        context = _mapping(raw)
+                        url, text = context.get("url"), context.get("text")
+                        if (url in cited and url in supplied and url in selected
+                            and _safe_https_url(url) == url
+                            and not context.get("source_role")
+                            and isinstance(text, str) and text
+                            and any(_quote_is_bound(quote, [text]) for quote in _texts(
+                                item.get("supporting_quotes"), maximum=6, length=2_000,
+                            ))):
+                            recovered_urls.append(url)
         if not quotes:
             raise ValueError("verified signal lacks supporting source quotes")
         declared_urls = _texts(result.get("evidence_urls"), maximum=3, length=2_048)
         if not declared_urls and isinstance(trace.get("evidence_url"), str):
             declared_urls = [trace["evidence_url"]]
+        declared_urls.extend(recovered_urls)
         stage_urls = []
         company_context_urls = []
         if result.get("evidence_type") == "FUNDING" and company_fit_receipt.get("decision") == "match":

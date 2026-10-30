@@ -1535,7 +1535,7 @@ def review_evidence(
     company_context_candidates: list[dict[str, Any]] = []
     if company_source_contexts is not None:
         from qualification.scoring.company_evidence_investigator import (
-            MAX_PAGE_CHARACTERS,
+            MAX_SOURCE_CHARACTERS,
             _quote_occurs,
             _registrable_domain,
             _safe_https_url,
@@ -1641,7 +1641,7 @@ def review_evidence(
                     and _registrable_domain(source_url) == observed_domain
                     and _registrable_domain(final_url) == observed_domain
                     and isinstance(source_text, str)
-                    and 0 < len(source_text) <= MAX_PAGE_CHARACTERS
+                    and 0 < len(source_text) <= MAX_SOURCE_CHARACTERS
                     and normalized_name in _compact_company_name(source_text)
                     and (
                         _source_overlap_score(paragraph, source_text)

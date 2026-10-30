@@ -5545,16 +5545,25 @@ async def verify_three_stage(
             and verified_funding_stage_context[1].get("dimension") == "first_party_context"
         ))
     ):
+        from qualification.scoring.company_evidence_investigator import (
+            MAX_PAGE_CHARACTERS, MAX_SOURCE_CHARACTERS,
+        )
+        from qualification.scoring.intent_details import _continuous_source_window
+
         context = verified_funding_stage_context[0]
         if (
             isinstance(context, Mapping)
             and set(context) == {"dimension", "url", "text"}
             and context.get("dimension") == "stage"
             and isinstance(context.get("text"), str)
-            and 0 < len(context["text"]) <= MAX_SCRAPED_CHARS
+            and 0 < len(context["text"]) <= MAX_SOURCE_CHARACTERS
             and _prompt_exact_url_or_empty(context.get("url")) == context.get("url")
             and context.get("url")
         ):
+            if len(context["text"]) > MAX_PAGE_CHARACTERS:
+                context = {**context, "text": _continuous_source_window(
+                    context["text"], MAX_PAGE_CHARACTERS, [],
+                )}
             stage_context_valid = True
             validated_stage_url = context["url"]
             if _normalize_url(context["url"]) not in {
@@ -5580,6 +5589,11 @@ async def verify_three_stage(
             context = _validated_first_party_source_context(
                 auxiliary["url"], {"final_url": auxiliary["final_url"], "text": auxiliary["text"]},
                 verified_company_identity, company_name=company_name,
+            )
+        if context and len(context["text"]) > MAX_PAGE_CHARACTERS:
+            context["text"] = _continuous_source_window(
+                context["text"], MAX_PAGE_CHARACTERS, [],
+                paragraph=str(row.get("claim") or ""),
             )
         if context and _normalize_url(context["url"]) not in {
             _normalize_url(url) for url in [*row["claimed_source_urls"], validated_stage_url]

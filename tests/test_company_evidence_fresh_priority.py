@@ -187,4 +187,8 @@ def test_fresh_terms_keeps_page_and_model_message_text_bounds(monkeypatch):
     assert len(terms["text"]) <= investigator.MAX_PAGE_CHARACTERS
     assert terms["text"].startswith(TERMS_QUOTE)
     assert len(requests[0]["messages"][1]["content"]) <= investigator.OPENROUTER_MAX_CONTENT_CHARS
-    assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY][TERMS]["text"]) == 24_000
+    retained = result[investigator.PRIVATE_FETCHED_PAGES_KEY][TERMS]["text"]
+    assert retained == TERMS_QUOTE + " details" * 10_000
+    assert len(retained) <= investigator.MAX_SOURCE_CHARACTERS
+    assert terms["next_offset"] == len(terms["text"])
+    assert terms["available_length"] == len(retained)

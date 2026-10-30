@@ -10,7 +10,7 @@ from qualification.scoring import lead_scorer
 from qualification.scoring.company_evidence_investigator import (
     MAX_FETCH_CALLS,
     MAX_PREFETCHED_PAGES,
-    MAX_PAGE_CHARACTERS,
+    MAX_SOURCE_CHARACTERS,
 )
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
@@ -315,7 +315,7 @@ def test_retry_source_cache_enforces_existing_page_count_and_size_bounds():
     ) == {}
 
     cache = _retry_cache()
-    cache["pages"][PLATFORM_URL]["text"] = "x" * (MAX_PAGE_CHARACTERS + 1)
+    cache["pages"][PLATFORM_URL]["text"] = "x" * (MAX_SOURCE_CHARACTERS + 1)
     assert lead_scorer._matched_company_retry_prefetched_pages(
         cache, IDENTITY
     ) == {}

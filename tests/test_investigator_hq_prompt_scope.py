@@ -15,6 +15,20 @@ from qualification.scoring.linkedin_company_size import project_structured_linke
 from tests.test_company_evidence_investigator import _finding
 
 SNAPSHOT = json.loads((Path(__file__).parent/'fixtures/oct24_hq_prompt_target_scope.json').read_text())
+
+# The historical HQ snapshot predates the cache-window instruction. Prove that
+# the sole general prompt change leaves every HQ-specific byte unchanged.
+CACHE_WINDOW_INSTRUCTION = (
+    "When a page has next_offset, use fetch_page with that cached offset to read later\n"
+    "passages when needed. Offsets address only retained text; they do not fetch more\n"
+    "content or increase the reasoning or research budgets.\n"
+)
+
+
+def historical_prompt(value):
+    assert value.count(CACHE_WINDOW_INSTRUCTION) == 1
+    return value.replace(CACHE_WINDOW_INSTRUCTION, "", 1)
+
 URL = 'https://acme.example/'
 INDUSTRY = 'Acme supplies management consulting services to corporate clients.'
 HQ = 'Acme is headquartered in London, United Kingdom.'
@@ -58,8 +72,8 @@ def invoke(monkeypatch,targets,post,**kwargs):
 
 
 def test_generic_system_prompt_remains_exact_main_snapshot():
-    assert len(inv._SYSTEM_PROMPT)==SNAPSHOT['main_system_characters']==31626
-    assert hashlib.sha256(inv._SYSTEM_PROMPT.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
+    assert len(historical_prompt(inv._SYSTEM_PROMPT))==SNAPSHOT['main_system_characters']==31626
+    assert hashlib.sha256(historical_prompt(inv._SYSTEM_PROMPT).encode()).hexdigest()==SNAPSHOT['main_system_sha256']
     assert inv._SYSTEM_PROMPT.count(SNAPSHOT['old_paragraph'])==1
     assert inv._LITERAL_HEADQUARTERS_INSTRUCTION==SNAPSHOT['new_paragraph']
 
@@ -84,7 +98,7 @@ def test_98_original_target_sets_without_literal_hq_keep_exact_main_system_bytes
         actual=requests[0]['messages'][0]['content']
         counts['main']+=1
         assert actual==inv._SYSTEM_PROMPT
-        assert hashlib.sha256(actual.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
+        assert hashlib.sha256(historical_prompt(actual).encode()).hexdigest()==SNAPSHOT['main_system_sha256']
     assert counts=={'main':98}
 
 
@@ -155,7 +169,7 @@ def test_literal_instruction_requires_the_actual_bound_quotable_provider_record(
     elif fault=='wrong-final':options['prefetched_pages'][profile]['final_url']='https://www.linkedin.com/company/other'
     elif fault=='missing-final':options['prefetched_pages'][profile].pop('final_url')
     elif fault=='identity-only':options['prefetched_pages'][profile]['text']='Baringa | LinkedIn'+inv._IDENTITY_LINK_CONTEXT_MARKER+source['text']
-    elif fault=='invalid-page':options['prefetched_pages'][profile]['text']='x'*(inv.MAX_PAGE_CHARACTERS+1)+source['text']
+    elif fault=='invalid-page':options['prefetched_pages'][profile]['text']='x'*(inv.MAX_SOURCE_CHARACTERS+1)+source['text']
     elif fault=='not-submitted':options['prior_observations']['submitted_source_urls']=[]
     requests=[]
     async def post(_session,_url,*,headers,payload):
@@ -171,8 +185,8 @@ def test_literal_instruction_requires_the_actual_bound_quotable_provider_record(
     expected=inv._SYSTEM_PROMPT
     if fault is None:
         expected=expected.replace(SNAPSHOT['old_paragraph'],SNAPSHOT['new_paragraph'],1)
-        assert hashlib.sha256(expected.encode()).hexdigest()==SNAPSHOT['five_ac_system_sha256']
-        assert len(expected)==SNAPSHOT['five_ac_system_characters']
+        assert hashlib.sha256(historical_prompt(expected).encode()).hexdigest()==SNAPSHOT['five_ac_system_sha256']
+        assert len(historical_prompt(expected))==SNAPSHOT['five_ac_system_characters']
     assert all(request['messages'][0]['content']==expected for request in requests),fault
 
 

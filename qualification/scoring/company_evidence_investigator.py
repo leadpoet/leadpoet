@@ -89,6 +89,8 @@ MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_FETCH_CALLS
 MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_PAGE_CHARACTERS = 24_000
+# Retained evidence is separate from each model-visible passage.
+MAX_SOURCE_CHARACTERS = 96_000
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
@@ -225,6 +227,9 @@ the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
 exact quote from it without fetching the URL again. At most three prefetched
 sources are available and they do not consume the four fresh fetch_page calls.
+When a page has next_offset, use fetch_page with that cached offset to read later
+passages when needed. Offsets address only retained text; they do not fetch more
+content or increase the reasoning or research budgets.
 Reuse a prefetched source instead of fetching the same URL again. Otherwise use
 fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
@@ -642,15 +647,22 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "fetch_page",
-            "description": "Fetch one candidate page. Only fetched page text can be quoted.",
+            "description": (
+                "Fetch one candidate page, or read a later cached passage using offset. "
+                "Only fetched page text can be quoted."
+            ),
             "strict": True,
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "url": {"type": "string", "minLength": 10, "maxLength": 2000},
+                    "offset": {
+                        "type": ["integer", "null"], "minimum": 0,
+                        "maximum": MAX_SOURCE_CHARACTERS - 1,
+                    },
                 },
-                "required": ["url"],
+                "required": ["url", "offset"],
             },
         },
         {
@@ -820,7 +832,12 @@ def _valid_multi_research_reply(
         except (TypeError, ValueError):
             return False
         key = "query" if name == "search_web" else "url"
-        if not isinstance(arguments, Mapping) or set(arguments) != {key}:
+        if not isinstance(arguments, Mapping) or (
+            set(arguments) != {key}
+            and not (name == "fetch_page" and set(arguments) == {"url", "offset"})
+        ):
+            return False
+        if name == "fetch_page" and not _valid_page_offset(arguments.get("offset")):
             return False
         value = arguments[key]
         if not isinstance(value, str) or not value.strip():
@@ -1054,7 +1071,7 @@ def _plain_text(value: str) -> str:
     combined = visible_quote_text
     if linked_urls:
         combined += f" {_IDENTITY_LINK_CONTEXT_MARKER} {linked_urls}"
-    return " ".join(combined.split())[:MAX_PAGE_CHARACTERS]
+    return " ".join(combined.split())[:MAX_SOURCE_CHARACTERS]
 
 
 def _visible_stage_archive_cards(
@@ -1120,6 +1137,31 @@ def _visible_stage_archive_cards(
     ][:MAX_STAGE_ARCHIVE_CARDS]
 
 
+def _valid_page_offset(value: Any) -> bool:
+    return value is None or (type(value) is int and 0 <= value < MAX_SOURCE_CHARACTERS)
+
+
+def _page_window(page: Mapping[str, Any], offset: int = 0) -> dict[str, Any]:
+    """Expose one contiguous passage of the original retained URL body."""
+    text = page.get("text")
+    if (
+        not _valid_page_offset(offset) or offset is None
+        or not isinstance(text, str) or not 0 < len(text) <= MAX_SOURCE_CHARACTERS
+        or offset >= len(text)
+    ):
+        return {"ok": False, "error": "invalid_cached_offset"}
+    result = dict(page)
+    result["text"] = text[offset:offset + MAX_PAGE_CHARACTERS]
+    # Preserve the established short-page response shape.
+    if offset or len(text) > MAX_PAGE_CHARACTERS:
+        result.update(offset=offset, available_length=len(text))
+        result["next_offset"] = (
+            offset + len(result["text"])
+            if offset + len(result["text"]) < len(text) else None
+        )
+    return result
+
+
 def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
     """Serialize JSON within the broker message bound by trimming evidence text."""
 
@@ -1130,6 +1172,7 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
         if isinstance(item, dict):
             for key, child in item.items():
                 if key == "text" and isinstance(child, str):
+                    item["text"] = child[:MAX_PAGE_CHARACTERS]
                     evidence_texts.append((item, child))
                 else:
                     collect(child)
@@ -1138,6 +1181,23 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
                 collect(child)
 
     def encode() -> str:
+        for container, original_text in evidence_texts:
+            if (
+                isinstance(container.get("url"), str)
+                and "offset" not in container
+                and len(container["text"]) < len(original_text) <= MAX_SOURCE_CHARACTERS
+            ):
+                container.update(offset=0, available_length=len(original_text))
+            if (
+                type(container.get("available_length")) is int
+                and type(container.get("offset")) is int
+                and 0 <= container["offset"] < container["available_length"]
+                <= MAX_SOURCE_CHARACTERS
+            ):
+                end = container["offset"] + len(container["text"])
+                container["next_offset"] = (
+                    end if end < container["available_length"] else None
+                )
         return prefix + json.dumps(
             document,
             ensure_ascii=False,
@@ -1146,11 +1206,11 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
             separators=(",", ":"),
         )
 
+    collect(document)
     content = encode()
     message_limit = OPENROUTER_MAX_CONTENT_CHARS - 1
     if len(content) <= message_limit:
         return content
-    collect(document)
     for container, _text in evidence_texts:
         container["text"] = ""
     navigation_locators = document.get(
@@ -1183,7 +1243,7 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
         return encode()
 
     low = 0
-    high = max(len(text) for _container, text in evidence_texts)
+    high = max(min(len(text), MAX_PAGE_CHARACTERS) for _container, text in evidence_texts)
     while low < high:
         candidate = (low + high + 1) // 2
         for container, text in evidence_texts:
@@ -1256,7 +1316,7 @@ def _validated_server_pages(
             not safe_url
             or not safe_final_url
             or not text
-            or len(text) > MAX_PAGE_CHARACTERS
+            or len(text) > MAX_SOURCE_CHARACTERS
             or _is_known_binary_document(text)
             or _is_known_provider_diagnostic_only(text)
         ):
@@ -4026,7 +4086,7 @@ async def investigate_company_evidence(
         )
     if fetched_pages:
         input_document["prefetched_sources"] = [
-            {"url": url, "text": text}
+            _page_window({"url": url, "text": text})
             for url, text in fetched_pages.items()
         ]
         input_document["investigation_limits"].update(
@@ -4486,7 +4546,7 @@ async def investigate_company_evidence(
                     )
                 if source_result.get("ok"):
                     input_document["prefetched_sources"] = [
-                        {"url": url, "text": text}
+                        _page_window({"url": url, "text": text})
                         for url, text in fetched_pages.items()
                     ]
                 input_document["investigation_limits"].update(
@@ -4549,7 +4609,7 @@ async def investigate_company_evidence(
                         overview_result.get("final_url") or overview_url
                     )
                     input_document["prefetched_sources"] = [
-                        {"url": url, "text": text}
+                        _page_window({"url": url, "text": text})
                         for url, text in fetched_pages.items()
                     ]
                 input_document["investigation_limits"].update(
@@ -5936,15 +5996,22 @@ async def investigate_company_evidence(
                         if isinstance(arguments, Mapping)
                         else None
                     )
-                    if safe_url in fetched_pages:
-                        tool_result = {
+                    offset = (
+                        arguments.get("offset") if isinstance(arguments, Mapping) else None
+                    )
+                    if not _valid_page_offset(offset):
+                        tool_result = {"ok": False, "error": "invalid_cached_offset"}
+                    elif safe_url in fetched_pages:
+                        tool_result = _page_window({
                             "ok": True,
                             "url": safe_url,
                             "text": fetched_pages[safe_url],
                             "cache_hit": True,
-                        }
+                        }, offset or 0)
                         if industry_followup_search_completed:
                             industry_followup_fetched_urls.add(safe_url)
+                    elif offset not in (None, 0):
+                        tool_result = {"ok": False, "error": "source_not_cached"}
                     elif (
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -5975,11 +6042,11 @@ async def investigate_company_evidence(
                                 tool_result.get("final_url")
                                 or tool_result["url"]
                             )
-                            tool_result = {
+                            tool_result = _page_window({
                                 key: value
                                 for key, value in tool_result.items()
                                 if key != "final_url"
-                            }
+                            })
                 else:
                     raise ValueError("reasoning_tool_unknown")
                 admission.tool_settled(

@@ -79,6 +79,14 @@ DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
 )
 PRICED_COMPONENTS = ("prompt", "completion", "request", "image", "web_search", "internal_reasoning")
+# These routes charge the catalog's search fee once per request, even without
+# a tools field (https://openrouter.ai/perplexity/sonar and /sonar-pro).
+# Do not infer this billing unit from a nonzero optional-tool price or extend
+# it to Deep Research: that route charges for multiple searches and additional
+# provider-owned citation/reasoning tokens, without a caller-controlled bound.
+OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS = frozenset({
+    "perplexity/sonar", "perplexity/sonar-pro",
+})
 MAX_PRICE_TABLE_BYTES = 8 * 1024 * 1024
 MICROUSD = Decimal(1_000_000)
 # Conservative input-token bound: no production tokenizer emits more tokens
@@ -725,7 +733,7 @@ def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, par
     if pricing is None:
         raise BrokerError("model_not_allowed")
     return _max_openrouter_cost_for_pricing(
-        pricing, parameters, max_output_tokens=max_output_tokens
+        pricing, parameters, max_output_tokens=max_output_tokens, model=model
     )
 
 
@@ -734,6 +742,7 @@ def _max_openrouter_cost_for_pricing(
     parameters: Mapping[str, Any],
     *,
     max_output_tokens: int,
+    model: Optional[str] = None,
 ) -> int:
     input_tokens = bounded_input_tokens(parameters)
     output_tokens = int(max_output_tokens)
@@ -746,12 +755,22 @@ def _max_openrouter_cost_for_pricing(
         Decimal(pricing["web_search"]),
         OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL,
     ) if web_search_enabled else Decimal("0")
+    if (model if model is not None else parameters.get("model")) in OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS:
+        # Operation validation forbids plugins/web_search_options, so these
+        # are the unchanged default native-search requests. Their search is
+        # intrinsic, not the optional bounded server tool above.
+        intrinsic_search_price = Decimal(pricing["web_search"])
+        if intrinsic_search_price <= 0:
+            raise BrokerError("broker_unavailable")
+    else:
+        intrinsic_search_price = Decimal("0")
     usd = (
         Decimal(pricing["prompt"]) * input_tokens
         + Decimal(pricing["completion"]) * output_tokens
         + Decimal(pricing["internal_reasoning"]) * output_tokens
         + Decimal(pricing["request"])
         + web_search_price * web_search_calls
+        + intrinsic_search_price
     )
     return _microusd_ceiling(usd)
 
@@ -4941,6 +4960,7 @@ class Broker:
                     ),
                     normalized,
                     max_output_tokens=max_output_tokens,
+                    model=normalized["model"],
                 )
             elif effective_operation.provider == "scrapingdog":
                 reservation_cost = provider_costs.scrapingdog_cost(

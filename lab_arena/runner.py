@@ -2475,7 +2475,7 @@ class WorkerSocketServer:
             return contracts.canonical_json({"recorded": False}).encode("utf-8")
         return contracts.canonical_json({"recorded": True}).encode("utf-8")
 
-    def _handle_training_control(self, raw: bytes) -> Optional[bytes]:
+    def _handle_training_control(self, raw: bytes, *, replayed: bool = False) -> Optional[bytes]:
         """Store only explicit sandbox reports under this worker's active lease."""
         if len(raw) > lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES:
             self._mark_observations_incomplete()
@@ -2535,7 +2535,8 @@ class WorkerSocketServer:
                         return unavailable
                 value = {"id": len(buffer.agent_observations), "kind": frame["kind"],
                          "observed_at": _timestamp(lambda: datetime.now(timezone.utc)),
-                         "after_action_sequence": self._state.action_sequence - 1 if self._state.action_sequence else None,
+                         "after_action_sequence": (None if replayed else
+                                                   self._state.action_sequence - 1 if self._state.action_sequence else None),
                          "depends_on": references, "data": data,
                          "privacy": {"redacted": False, "redactions": []}}
                 identity = buffer.append_agent_observation(value, secrets=(
@@ -4614,20 +4615,6 @@ class AssignmentExecutor:
                 runtime_entered = True
                 result = config.sandbox_runtime.run_icp(spec)
                 if not scoring_run:
-                    capture_summary = getattr(result, "automatic_capture_summary", None)
-                    if capture_summary is not None:
-                        # The exit report survives a blocked asynchronous sender.
-                        # It remains reported training evidence, not run authority.
-                        with state.lock:
-                            state.worker_observations.append_agent_observation({
-                                "id": len(state.worker_observations.agent_observations),
-                                "kind": "state_snapshot", "observed_at": _timestamp(config.clock),
-                                "after_action_sequence": state.action_sequence - 1 if state.action_sequence else None,
-                                "depends_on": [], "data": {
-                                    "name": "automatic_capture_summary", "value": capture_summary,
-                                },
-                                "privacy": {"redacted": False, "redactions": []},
-                            }, secrets=(state.lease_token,))
                     execution_diagnostic = _execution_diagnostic_from_stderr(
                         result.stderr
                     )
@@ -4821,6 +4808,37 @@ class AssignmentExecutor:
                 except Exception:
                     with state.lock:
                         state.worker_observations.failures.add("capture_incomplete")
+            if not scoring_run and result is not None:
+                # Runtime copied these bounded bytes before cleanup. Import
+                # after admitted socket handlers settle, including a cleanup
+                # error carrying a result, before final journal/snapshot freeze.
+                if result.automatic_capture_handoff_invalid:
+                    with state.lock:
+                        state.worker_observations.failures.add("capture_incomplete")
+                for raw in result.automatic_capture_handoff:
+                    if not server._allow_training_frame(len(raw)):
+                        break
+                    reply = server._handle_training_control(raw, replayed=True)
+                    try:
+                        recorded = json.loads(reply).get("recorded") is True
+                    except (TypeError, ValueError, UnicodeError):
+                        recorded = False
+                    if not recorded:
+                        with state.lock:
+                            state.worker_observations.failures.add("capture_incomplete")
+                capture_summary = result.automatic_capture_summary
+                if capture_summary is not None:
+                    # The exit report remains evidence, never run authority.
+                    with state.lock:
+                        state.worker_observations.append_agent_observation({
+                            "id": len(state.worker_observations.agent_observations),
+                            "kind": "state_snapshot", "observed_at": _timestamp(config.clock),
+                            "after_action_sequence": None,
+                            "depends_on": [], "data": {
+                                "name": "automatic_capture_summary", "value": capture_summary,
+                            },
+                            "privacy": {"redacted": False, "redactions": []},
+                        }, secrets=(state.lease_token,))
             if journal is not None:
                 try:
                     journal.stop()

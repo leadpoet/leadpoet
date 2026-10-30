@@ -50,13 +50,15 @@ class ResponseStore(FakeLedgerStore):
 
 
 class LateTransport:
-    def __init__(self, *, state='running', complete=False, bill=False):
+    def __init__(self, *, state='running', complete=False, bill=False, initial_running=False):
         self.state, self.complete, self.bill = state, complete, bill
         self.requests = []
         self.key = None
         self.paid = 0
         self.supported = True
         self.patch = {}
+        self.initial_running = initial_running
+        self.first_lookup = True
 
     def send(self, **request):
         self.requests.append(request)
@@ -73,8 +75,14 @@ class LateTransport:
             return br.ProviderResponse(200, {}, json.dumps(record()['response']).encode())
         if '/executions/by-key/' in request['url']:
             value = record()
-            value['executionRecovery'].update(idempotencyKey=self.key,
-                state='completed' if self.complete else self.state)
+            state = 'completed' if self.complete else self.state
+            if self.first_lookup and state == 'running' and not self.initial_running:
+                # These cases exercise a later explicit recovery, after an
+                # initial unproved lookup. A proved initial running response
+                # now resumes within the first execute's original deadline.
+                state = 'outcome_unknown'
+            self.first_lookup = False
+            value['executionRecovery'].update(idempotencyKey=self.key, state=state)
             if not self.complete:
                 value.pop('response'); value.pop('responseStatus')
             elif not self.bill:

@@ -8,6 +8,7 @@ import pytest
 
 from lab_arena import shim
 from qualification.scoring import intent_verification_three_stage as intent
+from tests.reviewer_frozen_sources import frozen_source
 
 ORIGINAL = "https://publisher.example/article?edition=one"
 TIMESTAMP = "20261008185541"
@@ -86,21 +87,31 @@ def test_matching_private_or_ip_original_cannot_gain_archive_https_transport(mon
 
 
 def original_source():
-    from pathlib import Path
     from scripts import arena_reviewer_archive_https_seam as seam
-    current = Path(intent.__file__).read_bytes()
-    assert current.count(seam.REPLACEMENT.encode()) == 1
-    return current.replace(seam.REPLACEMENT.encode(), seam.ANCHOR.encode(), 1)
+    reviewed = frozen_source(
+        "archive_https", "qualification/scoring/intent_verification_three_stage.py",
+    )
+    assert reviewed.count(seam.REPLACEMENT.encode()) == 1
+    return reviewed.replace(seam.REPLACEMENT.encode(), seam.ANCHOR.encode(), 1)
 
 
 def test_frozen_overlay_changes_only_the_complete_reviewed_function():
     from scripts import arena_reviewer_archive_https_seam as seam
-    from pathlib import Path
     original = original_source()
     repaired = seam.convert_archive_https_seam(original)
-    assert repaired == Path(intent.__file__).read_bytes()
+    assert repaired == frozen_source(
+        "archive_https", "qualification/scoring/intent_verification_three_stage.py",
+    )
     assert seam.convert_archive_https_seam(repaired) == repaired
     assert repaired.replace(seam.REPLACEMENT.encode(), seam.ANCHOR.encode(), 1) == original
+
+
+def test_native_body_guard_does_not_expand_the_historical_overlay():
+    from pathlib import Path
+    from scripts import arena_reviewer_archive_https_seam as seam
+
+    with pytest.raises(seam.ArchiveHttpsSeamError):
+        seam.convert_archive_https_seam(Path(intent.__file__).read_bytes())
 
 
 @pytest.mark.parametrize("fault", ["unknown", "weakened", "shadowed", "duplicate", "decorated", "decoy", "crlf"])

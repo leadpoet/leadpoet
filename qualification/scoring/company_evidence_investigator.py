@@ -6654,6 +6654,11 @@ async def investigate_company_evidence(
                             search_options = {}
                             alternative_locators = bool(
                                 exchange_fetch_for_search and fetch_call_limit - fetch_calls >= 2
+                                # A locator needs another selection/read cycle.
+                                # Near the cutoff, use the existing full-text
+                                # search instead of returning unreadable links.
+                                and elapsed < ADMISSION_DEADLINE_SECONDS
+                                - 2 * JUDGMENT_ADMISSION_RESERVE_SECONDS
                             )
                             if exchange_fetch_for_search:
                                 fetch_call_limit -= 1

@@ -2598,6 +2598,37 @@ async def _review_industry_sources(
     return finding, '', 1
 
 
+def _industry_search_scopes(domains, identity, careers_locators):
+    """Search only domains and exact employer paths already bound by the host."""
+    scopes = {domain for domain in domains if _independently_bound_first_party_url(
+        f'https://{domain}/', domains, identity)}
+    for locator in careers_locators[:MAX_HOMEPAGE_NAVIGATION_LOCATORS]:
+        url = locator.get('url', '')
+        if (_recognized_careers_board_locator(url, locator.get('label', ''))
+                and _industry_source_is_bound(url, url, domains=domains,
+                    identity=identity, careers_locators=careers_locators)):
+            parsed = urlsplit(url)
+            scopes.add(parsed.netloc + parsed.path.rstrip('/'))
+    return tuple(sorted(scopes))
+
+
+def _industry_search_scope_contains(url, scopes):
+    """Keep ordinary company domains broad, but never broaden an ATS tenant."""
+    parsed = urlsplit(url)
+    for scope in scopes:
+        if '/' not in scope:
+            if _registrable_domain(url) == scope:
+                return True
+        else:
+            host, path = scope.split('/', 1)
+            prefix = '/' + path.rstrip('/')
+            if parsed.hostname == host and (
+                parsed.path == prefix or parsed.path.startswith(prefix + '/')
+            ):
+                return True
+    return False
+
+
 async def _search_web(
     session: aiohttp.ClientSession,
     query: str,
@@ -2663,7 +2694,7 @@ async def _search_web(
             # Offer it only for a fresh fetch. The exact-URL equality below
             # prevents HTTP content from becoming evidence for another URL.
             url = _safe_https_url('https://' + raw_url[len('http://'):])
-        if not url or (include_domains and _registrable_domain(url) not in include_domains):
+        if not url or (include_domains and not _industry_search_scope_contains(url, include_domains)):
             continue
         try:
             public_http_url(url)
@@ -2711,7 +2742,7 @@ async def _search_industry_locators(
             {'role': 'system', 'content': (
                 'Find company-owned source pages for the requested fact. Return a short '
                 'list of relevant source URLs with a brief description of what each page '
-                'covers. Search only the named company domain and its subdomains. Prefer '
+                'covers. Search only the supplied company domains and exact employer paths. Prefer '
                 'product or service documentation and customer projects. Do not decide '
                 'whether the company fits an ICP, and do not invent URLs. Search output '
                 'will be used only as discovery; each page must be fetched and checked '
@@ -2739,7 +2770,7 @@ async def _search_industry_locators(
         raise ValueError('search_response_malformed') from None
     def safe_locator(value):
         url = _safe_https_url(value)
-        if not url or _registrable_domain(url) not in include_domains:
+        if not url or not _industry_search_scope_contains(url, include_domains):
             return ''
         try:
             public_http_url(url)
@@ -5182,6 +5213,9 @@ async def investigate_company_evidence(
                 < ADMISSION_DEADLINE_SECONDS - JUDGMENT_ADMISSION_RESERVE_SECONDS
             )
             industry_discovery = None
+            industry_search_scopes = _industry_search_scopes(
+                first_party_domains, identity_anchor, bounded_homepage_navigation_locators,
+            ) if industry_review_model else ()
             if industry_gap_search_needed:
                 # Keep the reviewer's most discriminative missing fact, which
                 # need not be the first item in its requirement list. Reuse
@@ -5196,19 +5230,15 @@ async def investigate_company_evidence(
                 industry_discovery = await _search_web(
                     session, query, key=exa_key, discovery_highlights=True,
                     read_source_text=True,
-                    include_domains=tuple(sorted(
-                        domain for domain in first_party_domains
-                        if _independently_bound_first_party_url(
-                            f'https://{domain}/', first_party_domains, identity_anchor,
-                        )
-                    )),
+                    include_domains=industry_search_scopes,
                 )
                 # These are provider-returned full bodies on independently
                 # bound company domains, with the same freshness request as
                 # the exact-URL reader. Keep them in existing source storage.
                 # Preserve any directly fetched body/redirect already present.
                 for url, text in industry_discovery.pop('_source_pages', {}).items():
-                    if _independently_bound_first_party_url(url, first_party_domains, identity_anchor):
+                    if _industry_source_is_bound(url, url, domains=first_party_domains,
+                            identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators):
                         fetched_pages.setdefault(url, text)
                         fetched_final_urls.setdefault(url, url)
                 input_document['server_industry_discovery'] = industry_discovery
@@ -5227,9 +5257,7 @@ async def investigate_company_evidence(
                         and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS):
                     return (), 0
-                domains = tuple(sorted(domain for domain in first_party_domains
-                    if _independently_bound_first_party_url(
-                        f'https://{domain}/', first_party_domains, identity_anchor)))
+                domains = industry_search_scopes
                 capacity = max(0, industry_classification.MAX_TOTAL_CHARS - sum(
                     len(_visible_quote_surface(body).strip())
                     for source_url, body in fetched_pages.items()
@@ -6667,13 +6695,7 @@ async def investigate_company_evidence(
                                     read_source_text=True, include_domains=exchange_domains)
                             elif forced_industry_search_call and industry_review_model:
                                 search_options["discovery_highlights"] = True
-                                search_options["include_domains"] = tuple(sorted(
-                                    domain for domain in first_party_domains
-                                    if _independently_bound_first_party_url(
-                                        f"https://{domain}/", first_party_domains,
-                                        identity_anchor,
-                                    )
-                                ))
+                                search_options["include_domains"] = industry_search_scopes
                             if alternative_locators:
                                 tool_result = await _search_industry_locators(
                                     session, query.strip(), key=openrouter_key,
@@ -6690,8 +6712,10 @@ async def investigate_company_evidence(
                                             or exchange_text_capacity <= 0):
                                         break
                                     if (source_url not in fetched_pages
-                                            and _independently_bound_first_party_url(
-                                                source_url, first_party_domains, identity_anchor)):
+                                            and _industry_source_is_bound(
+                                                source_url, source_url, domains=first_party_domains,
+                                                identity=identity_anchor,
+                                                careers_locators=bounded_homepage_navigation_locators)):
                                         body = _visible_quote_surface(body).strip()[:exchange_text_capacity]
                                         if not body:
                                             continue

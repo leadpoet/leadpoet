@@ -37,7 +37,8 @@ def test_native_search_keeps_query_budget_and_discovery_only_evidence(monkeypatc
 
 @pytest.mark.parametrize('funding_source', ['host', 'miner_key'])
 @pytest.mark.parametrize('source_text', [False, True])
-def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch, funding_source, source_text):
+@pytest.mark.parametrize('employer_path', [False, True])
+def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch, funding_source, source_text, employer_path):
     import json
     from tests.lab_arena.score_compat_capability_test import routed_broker, score_context
     from tests.lab_arena.test_deepline_catalog import frozen, row
@@ -50,9 +51,11 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
             'includeDomains': {'type': 'array', 'items': {'type': 'string'}},
             'contents': {'type': 'object'},
         }, 'required': ['query']}))
+    scope = 'job-boards.greenhouse.io/coreworks' if employer_path else 'coreworks.ai'
+    source = 'https://' + scope + ('/jobs/123' if employer_path else '/project')
     transport = FakeTransport([(200, {
         'status': 'completed', 'billing': {'credits_charged': 0.17 if source_text else 0.1},
-        'result': {'data': {'results': [{'url': 'https://coreworks.ai/project', 'title': 'Project',
+        'result': {'data': {'results': [{'url': source, 'title': 'Project',
                                        'text':'Coreworks supplies this service.'}]}},
     })])
     broker, ledger, _ = routed_broker(funding_source=funding_source, transport=transport)
@@ -66,17 +69,17 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
 
     monkeypatch.setattr(investigator, '_post_json', post)
     result = asyncio.run(investigator._search_web(None, 'Coreworks mainframe services',
-        key='test-key', include_domains=('coreworks.ai',),
+        key='test-key', include_domains=(scope,),
         discovery_highlights=source_text, read_source_text=source_text))
-    assert result['results'] == [{'url': 'https://coreworks.ai/project', 'title': 'Project'}]
+    assert result['results'] == [{'url': source, 'title': 'Project'}]
     assert len(transport.sent) == len(ledger.calls) == len(receipts) == 1
     wire = json.loads(transport.sent[0]['body'])
-    assert wire['payload']['includeDomains'] == ['coreworks.ai']
+    assert wire['payload']['includeDomains'] == [scope]
     assert wire['payload']['numResults'] == (10 if source_text else investigator.MAX_SEARCH_RESULTS)
     assert wire['payload']['type'] == 'auto'
     if source_text:
         assert wire['payload']['contents'] == {'text':{'maxCharacters':24000},'maxAgeHours':0}
-        assert result['_source_pages'] == {'https://coreworks.ai/project':'Coreworks supplies this service.'}
+        assert result['_source_pages'] == {source:'Coreworks supplies this service.'}
     else:
         assert '_source_pages' not in result
     assert receipts[0]['funding_source'] == funding_source

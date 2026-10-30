@@ -19,9 +19,7 @@ SNAPSHOT = json.loads((Path(__file__).parent/'fixtures/oct24_hq_prompt_target_sc
 # The historical HQ snapshot predates the cache-window instruction. Prove that
 # the sole general prompt change leaves every HQ-specific byte unchanged.
 CACHE_WINDOW_INSTRUCTION = (
-    "When a page has next_offset, use fetch_page with that cached offset to read later\n"
-    "passages when needed. Offsets address only retained text; they do not fetch more\n"
-    "content or increase the reasoning or research budgets.\n"
+    "Use fetch_page(offset=next_offset) to read the next cached passage.\n"
 )
 
 
@@ -213,3 +211,51 @@ def test_bound_literal_hq_target_shrink_retains_original_prompt(monkeypatch):
     assert all(request['messages'][0]['content']==expected for request in requests)
     assert result['claims']['geography']['status']=='VERIFIED'
     assert result['claims']['industry']['activity_role']=='supplier_operator'
+
+
+
+@pytest.mark.parametrize("literal_hq", [False, True])
+def test_full_all_target_payload_passes_native_broker_message_bounds(monkeypatch, literal_hq):
+    from lab_arena import operations
+
+    requests = []
+    admission_errors = []
+    targets = tuple(sorted(inv.TARGETS))
+    options = literal_context()[1] if literal_hq else {}
+
+    async def post(_session, url, *, headers, payload):
+        requests.append(deepcopy(payload))
+        try:
+            operation_id, normalized = operations.match_request(
+                "POST", url, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            assert operation_id == "openrouter.chat"
+            assert normalized["messages"] == payload["messages"]
+        except Exception as exc:
+            admission_errors.append(repr(exc))
+            raise
+        choice = payload.get("tool_choice")
+        if isinstance(choice, dict) and choice["function"]["name"] == "search_web":
+            query = "Baringa management consulting" if literal_hq else "Acme management consulting"
+            return 200, {"choices": [{"message": {"tool_calls": [{
+                "id": str(len(requests)), "type": "function", "function": {
+                    "name": "search_web", "arguments": json.dumps({"query": query}),
+                },
+            }]}}]}
+        return 200, response([
+            _finding(target, status="UNPROVEN", observed_value=None,
+                     evidence_url="", evidence_quote="")
+            for target in tool_targets(payload)
+        ], str(len(requests)))
+
+    result = invoke(monkeypatch, targets, post, **options)
+    assert requests and not admission_errors, (result, admission_errors)
+    assert result.get("_completed_submit"), result
+    expected = inv._SYSTEM_PROMPT
+    if literal_hq:
+        expected = expected.replace(SNAPSHOT["old_paragraph"], SNAPSHOT["new_paragraph"], 1)
+    for request in requests:
+        assert request["messages"][0]["content"] == expected
+        assert len(expected) <= operations.OPENROUTER_MAX_CONTENT_CHARS == 32000
+    assert len(CACHE_WINDOW_INSTRUCTION) <= 80

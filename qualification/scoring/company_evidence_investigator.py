@@ -227,9 +227,7 @@ the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
 exact quote from it without fetching the URL again. At most three prefetched
 sources are available and they do not consume the four fresh fetch_page calls.
-When a page has next_offset, use fetch_page with that cached offset to read later
-passages when needed. Offsets address only retained text; they do not fetch more
-content or increase the reasoning or research budgets.
+Use fetch_page(offset=next_offset) to read the next cached passage.
 Reuse a prefetched source instead of fetching the same URL again. Otherwise use
 fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
@@ -649,7 +647,8 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
             "name": "fetch_page",
             "description": (
                 "Fetch one candidate page, or read a later cached passage using offset. "
-                "Only fetched page text can be quoted."
+                "Only fetched page text can be quoted. Cached passages use no fresh "
+                "fetch calls and consume the existing reasoning turns."
             ),
             "strict": True,
             "parameters": {

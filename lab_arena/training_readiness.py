@@ -106,7 +106,11 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
 
     qualification, qualification_totals = [], Counter()
     for (image, policy), records in sorted(cohorts.items(), key=lambda item: str(item[0])):
-        splits, manifest = training_dataset.build(records, training_dataset.Rules(production_rounds_only=production_rounds_only))
+        # Keep the complete verified source graph even when labels are selected
+        # from one scorer cohort. Steps and thinking use this same corpus.
+        splits, manifest = training_dataset.build(
+            records, training_dataset.Rules(production_rounds_only=production_rounds_only),
+            split_sources=valid)
         counts = {name: len(items) for name, items in splits.items()}
         qualification_totals.update(counts)
         qualification.append({"scorer_image_digest": image, "scorer_policy_hash": policy,

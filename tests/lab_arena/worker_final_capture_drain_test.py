@@ -1,6 +1,7 @@
 """Final worker capture retains each admitted handler's original deadline."""
 
 import base64
+import errno
 import http.client
 import json
 import socket
@@ -469,8 +470,126 @@ def test_failed_socket_write_is_retained_after_drain(short_dir, protocol):
         assert summary["complete"] is False
         assert api.uploaded[0]["response_receipt_count"] == 1
         assert api.uploaded[0]["response_receipts"][0]["write_state"] == "socket_write_failed"
+        events = runner._provider_error_events(state)
+        assert len(events) == 1 and events[0]["kind"] == "runtime.socket_write_failed"
+        assert events[0]["content"]["exception_class"] in {"BrokenPipeError", "ConnectionResetError"}
+        assert events[0]["content"]["protocol"] == protocol
     finally:
         api.release.set()
+        connection.close()
+
+
+@pytest.mark.parametrize("protocol", ["http", "frame"])
+@pytest.mark.parametrize("failure", [None, "timeout", "broken_pipe", "reset", "os_error"])
+def test_socket_write_diagnostics_preserve_delivery_and_hide_exception_prose(
+    short_dir, monkeypatch, protocol, failure,
+):
+    api = PausedApi()
+    server, state = _start(short_dir, api)
+    sendall = socket.socket.sendall
+    errors = {
+        "timeout": TimeoutError("private diagnostic text"),
+        "broken_pipe": BrokenPipeError(errno.EPIPE, "private diagnostic text"),
+        "reset": ConnectionResetError(errno.ECONNRESET, "private diagnostic text"),
+        "os_error": OSError(errno.EBADF, "private diagnostic text", "/private/secret"),
+    }
+
+    def write(connection, payload, *args, **kwargs):
+        if failure and getattr(server._handler_context, "admission", None) is not None:
+            raise errors[failure]
+        return sendall(connection, payload, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "sendall", write)
+    if protocol == "frame":
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(3)
+        connection.connect(str(server._path))
+        raw = shim.build_operation_frame("openrouter.chat", {
+            "model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "write proof"}],
+            "max_tokens": 8,
+        }, 1000)
+        connection.sendall(len(raw).to_bytes(4, "big") + raw)
+    else:
+        connection = _request_socket(server._path)
+    try:
+        assert api.entered.wait(3)
+        server.stop()
+        api.release.set()
+        assert server.wait_for_handlers()
+        summary = _capture(api, state)
+        receipt = api.uploaded[0]["response_receipts"][0]
+        events = runner._provider_error_events(state)
+        assert len(api.frames) == state.action_sequence == 1
+        assert summary["complete"] is (failure is None)
+        assert receipt["write_state"] == ("socket_write_failed" if failure else "socket_written")
+        if failure:
+            assert len(events) == 1 and events[0]["kind"] == "runtime.socket_write_failed"
+            content = events[0]["content"]
+            assert content == {
+                "receipt_ordinal": receipt["ordinal"],
+                "action_sequence": receipt["action_sequence"],
+                "call_identity": receipt["call_identity"],
+                "operation_id": receipt["operation_id"],
+                "protocol": protocol,
+                "exception_class": type(errors[failure]).__name__,
+                "errno": errors[failure].errno,
+            }
+            assert "private" not in json.dumps(events)
+        else:
+            assert events == []
+            if protocol == "frame":
+                _read_frame(connection)
+            else:
+                response = connection.getresponse()
+                assert response.status == 200 and response.read() == BODY
+    finally:
+        api.release.set()
+        server.stop()
+        connection.close()
+
+
+def test_socket_write_diagnostics_use_fixed_categories_and_the_existing_bound():
+    class PrivateExceptionName(BrokenPipeError):
+        pass
+
+    receipt = {
+        "ordinal": 3, "action_sequence": 2, "call_identity": IDENTITY,
+        "operation_id": "openrouter.chat", "protocol": "frame",
+    }
+    error = PrivateExceptionName("private exception text")
+    error.errno = "private errno"
+    event = runner._socket_write_failure_event(receipt, error)
+    assert event["content"]["exception_class"] == "BrokenPipeError"
+    assert event["content"]["errno"] is None
+    assert "private" not in json.dumps(event).lower()
+    state = runner.RunState(lease=lease(), lease_token="private lease token")
+    for _ in range(runner.MAX_BUFFERED_PROVIDER_ERROR_EVENTS + 3):
+        runner._buffer_provider_error_event_locked(state, runner._socket_write_failure_event(receipt, error))
+    events = runner._provider_error_events(state)
+    assert len(events) == runner.MAX_BUFFERED_PROVIDER_ERROR_EVENTS
+    assert events[-1]["content"]["dropped_count"] == 3
+    assert state.calls == [] and state.action_sequence == 0
+    assert state.worker_observations.document()["complete"] is True
+
+
+def test_socket_write_diagnostic_failure_cannot_change_the_receipt(short_dir, monkeypatch):
+    def fail_diagnostic(*_):
+        raise ValueError("private diagnostic failure")
+
+    monkeypatch.setattr(runner, "_socket_write_failure_event", fail_diagnostic)
+    api, server, state, connection = _start_frame(short_dir, read_timeout=3)
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+        connection.close()
+        api.release.set()
+        assert server.wait_for_handlers()
+        assert _capture(api, state)["complete"] is False
+        assert api.uploaded[0]["response_receipts"][0]["write_state"] == "socket_write_failed"
+        assert runner._provider_error_events(state) == []
+        assert len(api.frames) == state.action_sequence == 1
+    finally:
+        api.release.set()
+        server.stop()
         connection.close()
 
 

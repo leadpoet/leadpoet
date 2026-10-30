@@ -196,14 +196,14 @@ def _provider_call_path(path: tuple[str, ...], root: Any = None
     return None
 
 
-def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
-    """Recognize only the host's rejected model-frame observation containers.
+def _rejected_model_config_path(path: tuple[str, ...], root: Any) -> bool:
+    """Bind rejected frame/HTTP controls to canonical host request containers.
 
-    Parse errors have no admitted operation identity. Bind controls to the
-    decoded model frame instead, never to arbitrary nested ``parameters``.
-    The same bytes must remain a fixed point in saved and exported evidence.
+    Parse errors have no admitted operation identity. The same decoded control
+    values must remain a fixed point in saved and exported evidence.
     """
-    if path[-3:] != ("admitted_parameters", "raw_frame", "parameters"):
+    http = path[-2:] == ("admitted_parameters", "body_text")
+    if not http and path[-3:] != ("admitted_parameters", "raw_frame", "parameters"):
         return False
     if not isinstance(root, Mapping) or (isinstance(root.get("choices"), list)
             or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
@@ -220,7 +220,7 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
                 return None
         return item
 
-    request_path = path[:-3]
+    request_path = path[:-2] if http else path[:-3]
     if request_path:
         # No suffix matching: provider bodies and arbitrary wrappers cannot
         # establish a host observation by copying canonical field names.
@@ -259,15 +259,29 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
                 or observation.get("call_identity") is not None
                 or observation.get("contributes_to_provider_call_count") is not False
                 or not isinstance(observation.get("outcome"), Mapping)
-                or observation["outcome"].get("protocol") != "frame"):
+                or observation["outcome"].get("protocol") != ("http" if http else "frame")):
             return False
     request = at(request_path)
     if (not isinstance(request, Mapping) or set(request) != {"admitted_parameters", "timeout_ms"}
             or type(request.get("timeout_ms")) is not int or request["timeout_ms"] != 0
-            or not isinstance(request.get("admitted_parameters"), Mapping)
-            or set(request["admitted_parameters"]) != {"raw_frame"}):
+            or not isinstance(request.get("admitted_parameters"), Mapping)):
         return False
-    frame = request["admitted_parameters"]["raw_frame"]
+    admitted = request["admitted_parameters"]
+    if http:
+        body = admitted.get("body_text")
+        return (set(admitted) == {"method", "url", "headers", "body_text"}
+                and admitted.get("method") == "POST"
+                and admitted.get("url") in (
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    "https://openrouter.ai/api/v1/responses")
+                and isinstance(admitted.get("headers"), Mapping)
+                and isinstance(body, Mapping)
+                and isinstance(body.get("model"), str) and bool(body["model"].strip())
+                and not isinstance(body.get("choices"), list)
+                and body.get("object") not in ("response", "chat.completion", "chat.completion.chunk"))
+    if set(admitted) != {"raw_frame"}:
+        return False
+    frame = admitted["raw_frame"]
     return (isinstance(frame, Mapping)
             and {"operation_id", "parameters"} <= set(frame)
             and set(frame) <= {"schema_version", "operation_id", "parameters", "timeout_ms"}
@@ -278,7 +292,7 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
             and bool(frame["parameters"]["model"].strip()))
 
 
-def _rejected_frame_controls(value: Mapping[str, Any]) -> bool:
+def _rejected_model_controls(value: Mapping[str, Any]) -> bool:
     """Allow only control values, not arbitrary strings in control-shaped data."""
     choices = {
         "effort": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
@@ -600,7 +614,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())
                     and (request_config_path(path)
                          or item.get("object") == "response" and isinstance(item.get("output"), list)
-                         or _rejected_frame_config_path(path, value) and _rejected_frame_controls(child))
+                         or _rejected_model_config_path(path, value) and _rejected_model_controls(child))
                 )
                 # False and zero retain the existing sensitive-value handling.
                 empty_credential = child is None or (

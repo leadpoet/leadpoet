@@ -78,7 +78,8 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
     assert wire['payload']['numResults'] == (10 if source_text else investigator.MAX_SEARCH_RESULTS)
     assert wire['payload']['type'] == 'auto'
     if source_text:
-        assert wire['payload']['contents'] == {'text':{'maxCharacters':24000},'maxAgeHours':0}
+        assert wire['payload']['contents'] == {'text':{'maxCharacters':24000},'maxAgeHours':0,
+            'extras':{'links':investigator.MAX_HOMEPAGE_NAVIGATION_LOCATORS}}
         assert result['_source_pages'] == {source:'Coreworks supplies this service.'}
     else:
         assert '_source_pages' not in result

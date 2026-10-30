@@ -28,7 +28,8 @@ def test_exact_domain_source_text_is_retained_without_trusting_highlights(monkey
     monkeypatch.setattr(c, '_post_json', post)
     result = asyncio.run(c._search_web(None, 'Example account workflows', key='test-key',
         include_domains=('example.com',), discovery_highlights=True, read_source_text=True))
-    assert requests[0]['contents'] == {'text':{'maxCharacters':24000}, 'maxAgeHours':0}
+    assert requests[0]['contents'] == {'text':{'maxCharacters':24000}, 'maxAgeHours':0,
+                                      'extras':{'links':c.MAX_HOMEPAGE_NAVIGATION_LOCATORS}}
     assert requests[0]['numResults'] == 10
     assert requests[0]['type'] == 'auto'
     assert set(requests[0]) == {'query', 'type', 'numResults', 'contents', 'includeDomains'}

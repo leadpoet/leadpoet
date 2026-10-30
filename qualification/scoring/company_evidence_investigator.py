@@ -1205,6 +1205,13 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
     collect(document)
     for container, _text in evidence_texts:
         container["text"] = ""
+    # Additional source links are optional discovery. Drop trailing locators
+    # before they can make the unchanged criterion/request metadata too large.
+    for discovery in (document, document.get('server_industry_discovery')):
+        if isinstance(discovery, dict) and discovery.get('notice') == 'discovery_only_not_evidence':
+            results = discovery.get('results')
+            while isinstance(results, list) and results and len(encode()) > message_limit:
+                results.pop()
     navigation_locators = document.get(
         "untrusted_homepage_navigation_locators"
     )
@@ -2648,7 +2655,8 @@ async def _search_web(
     # consume the page-read window; retain the same fresh full-text contents.
     payload = {"query": query[:500], "type": "auto", "numResults": result_limit}
     if read_source_text:
-        payload['contents'] = {'text': {'maxCharacters': MAX_PAGE_CHARACTERS}, 'maxAgeHours': 0}
+        payload['contents'] = {'text': {'maxCharacters': MAX_PAGE_CHARACTERS}, 'maxAgeHours': 0,
+                               'extras': {'links': MAX_HOMEPAGE_NAVIGATION_LOCATORS}}
     elif discovery_highlights:
         payload["contents"] = {"highlights": {"maxCharacters": MAX_SEARCH_LOCATOR_EXCERPT_CHARS}}
     if include_domains:
@@ -2672,6 +2680,9 @@ async def _search_web(
         raise ValueError("search_response_malformed")
     locators = []
     source_pages = {}
+    linked_locators = []
+    linked_urls = set()
+    linked_characters = 0
     statuses = body.get('statuses')
     valid_statuses = statuses is None or (
         isinstance(statuses, list) and all(
@@ -2724,6 +2735,29 @@ async def _search_web(
             text = _plain_text(raw)
             if text and not _is_known_provider_diagnostic_only(text):
                 source_pages.setdefault(url, text)
+                extras = item.get('extras')
+                links = extras.get('links') if isinstance(extras, Mapping) else None
+                for link in links[:MAX_HOMEPAGE_NAVIGATION_LOCATORS] if isinstance(links, list) else ():
+                    linked = _safe_https_url(link)
+                    if (not linked or linked in linked_urls
+                            or not _industry_search_scope_contains(linked, include_domains)):
+                        continue
+                    try:
+                        public_http_url(linked)
+                    except ValueError:
+                        continue
+                    title = ('Linked from ' + url)[:300]
+                    size = len(linked) + len(title)
+                    if (len(linked_locators) >= MAX_HOMEPAGE_NAVIGATION_LOCATORS
+                            or linked_characters + size > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS):
+                        continue
+                    linked_urls.add(linked)
+                    linked_characters += size
+                    linked_locators.append({'url': linked, 'title': title})
+    # Preserve search order and all primary results. Hrefs only guide the
+    # existing fetch allowance; their destinations have no loaded quote body.
+    primary_urls = {item['url'] for item in locators}
+    locators.extend(item for item in linked_locators if item['url'] not in primary_urls)
     return {"results": locators, "notice": "discovery_only_not_evidence",
             **({'_source_pages': source_pages} if read_source_text else {})}
 

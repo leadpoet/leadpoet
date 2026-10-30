@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
-from lab_arena import contracts, training_steps, training_thinking
-from tests.lab_arena.training_eligibility_test import captured_example, refresh_response_links
+from lab_arena import contracts, training_eligibility, training_steps, training_thinking
+from tests.lab_arena.training_eligibility_test import captured_example, refresh_response_links, submission
 from tests.lab_arena.training_hidden_retry_test import recovered_example
 from tests.lab_arena.training_steps_test import seal
 
@@ -43,48 +43,48 @@ def example_for(case):
 
 # Digests bind the complete result after shared source grouping. Counts make
 # the policy outcomes readable.
-BASELINES = {'diagnostic_gaps': ('sha256:1f652461e4945d14b33b1574e74d29e08103c91564cd1c24dd65bf03d7122e1e',
-                                    2, {'requested_empty': 1}, 1),'legacy': ('sha256:03e6d0528b576472b25d028e607b7b82c7aec1ebcb8b68f0e936adf032fb30df',
+BASELINES = {'diagnostic_gaps': ('sha256:7d811bfcf5f8828551e9dc64ffc7c3b27b88036c7ace6017761a745f800a243f',
+                                    2, {'requested_empty': 1}, 1),'legacy': ('sha256:c87cb732f2b95898ff134fdc1865a297c6b780734e0c2af3124295d18408d92e',
             2,
             {'requested_empty': 1},
             1),
- 'new_policy': ('sha256:3f6070eca4b5885546253ae8735ed090411be60305ce1dcaee9917c7d3d0cd6c',
+ 'new_policy': ('sha256:cbcdbf6b37705e93fb9cf6e369984396c16610c928b6e0ac7909ea955f541939',
                 2,
                 {'requested_empty': 1},
                 1),
- 'missing_at_limit': ('sha256:1e0ac8dca4fba16ea238b75c4b4cf3da293107a1046a3e69b18f440bf841907a',
+ 'missing_at_limit': ('sha256:32e370ea000f6ec435a07e8dc840f6a29331f00022884a04a181208d6467648d',
                       2,
                       {'missing_thinking': 1},
                       1),
- 'missing_over_limit': ('sha256:b8312102f6bff139355adda832db71897de9ffe670beed2ab55c46cf9fcff94a',
+ 'missing_over_limit': ('sha256:b4b4e682ada6ef2660b83e3aba9d3badab68e1c4d692100bb839d054d64e20e8',
                         0,
                         {'missing_reasoning_share_exceeded': 3},
                         1),
- 'combined_failure': ('sha256:403d69678e8bd0ec369ae07a484eddeb844bcb864de41b51e77037f29f64be3d',
+ 'combined_failure': ('sha256:fccf782635abab7ea8ab75ce2e8593a5710bc653431ffd7501c88e2f6dfe00f0',
                       0,
                       {'missing_reasoning_share_exceeded': 2},
                       1),
- 'tampered_route': ('sha256:f28d15d7c34efd3ce5a49729d6706fc2a43346eaa62f4a2c3d43e30b4d77155b',
+ 'tampered_route': ('sha256:33e20b97d3c18e74dc51052806789217c7c0bdae7a9beeae7fff94fa10165bd2',
                     0,
                     {'trajectory_reasoning_ineligible': 3},
                     1),
- 'missing_usage': ('sha256:2125b81ed65743254bbf88fa0832007f856e2fc83001635a4ca1215814a85c25',
+ 'missing_usage': ('sha256:c91bef69bc360ecb181335d400ae1b81f0a6ed17c8e1cf240c29fdfedf598bbd',
                    0,
                    {'trajectory_reasoning_ineligible': 3},
                    1),
- 'privacy': ('sha256:3190e152711788bf7888956f399be70e83e5364628eb7203bc890318cde1cd24',
+ 'privacy': ('sha256:553cbc7e7bd0eec845e8cca9e3e2943f5174fac5ceac16f3ecf023b9402e65e7',
              0,
              {'trajectory_evidence_incomplete': 2},
              0),
- 'invalid_policy': ('sha256:fba0c7383440db855937480f5bd6905b79cd219267f83773d92a233507e85200',
+ 'invalid_policy': ('sha256:dd2e0b7f3940d7eb9350f6e819c007cdc6db8d695938d22a8da306178db80fab',
                     0,
                     {'frozen_reasoning_policy_invalid': 3},
                     1),
- 'failed_retry': ('sha256:00e1cdeef48081f62b7025c0b3eba3c64925e27ef05fcc2dabcb48a9aa9fe8db',
+ 'failed_retry': ('sha256:4e396526a6f081311c2db42fb0823131fff78304634c93653956366481accdb7',
                   3,
                   {},
                   1),
- 'cap_retry': ('sha256:d3a48e8320c61955512adf1d8c41fd6baafaf955bdce92bffc33f799225e0708', 2, {}, 1)}
+ 'cap_retry': ('sha256:20aa2d26f3db0874b7cc8b8f812c708a23f0cceb66d89383c19ec370a40c155e', 2, {}, 1)}
 
 
 @pytest.mark.parametrize('case', BASELINES)
@@ -114,6 +114,45 @@ def test_reuse_is_local_to_one_build_and_rechecks_changed_saved_evidence():
         assert validate.call_count == 3
     assert not splits['train'] and not splits['eval']
     assert manifest['counts']['exclusion_reasons'] == {'trajectory_reasoning_ineligible': 3}
+
+
+@pytest.mark.parametrize('case', BASELINES)
+def test_request_control_diagnostics_preserve_targets_policy_and_eligibility(case):
+    example = example_for(case)
+    before = deepcopy(example)
+    current = training_thinking.build([example], RULES)
+    attempt_coverage = training_thinking.attempt_coverage
+    diagnostic_fields = ('outbound_reasoning_controls', 'outbound_reasoning_controls_status',
+                         'probe_reasoning_mode')
+
+    def previous_attempt_shape(*args, **kwargs):
+        row = attempt_coverage(*args, **kwargs)
+        for field in diagnostic_fields:
+            row.pop(field)
+        return row
+
+    def eligibility():
+        run_id = example['run_id']
+        return training_eligibility.assess_capture(
+            submission(), {run_id: example}, [run_id], enabled=True,
+            minimum_coverage_percent=80, maximum_missing_reasoning_percent=(
+                1 if 'training_maximum_missing_reasoning_percent' in example['configuration'] else 0))
+
+    current_eligibility = eligibility()
+    with patch.object(training_thinking, 'attempt_coverage', side_effect=previous_attempt_shape):
+        previous = training_thinking.build([example], RULES)
+        assert eligibility() == current_eligibility
+    # Entire records bind targets, controls, source/provenance and record hashes.
+    assert current[0] == previous[0]
+    projected_manifest = deepcopy(current[1])
+    for row in projected_manifest['coverage']['attempts']:
+        for field in diagnostic_fields:
+            row.pop(field)
+    # Only these diagnostics and their derived manifest digest may differ.
+    projected_manifest.pop('dataset_version')
+    projected_manifest['dataset_version'] = contracts.document_hash(projected_manifest)
+    assert projected_manifest == previous[1]
+    assert example == before
 
 
 def test_distinct_sources_sharing_candidates_each_get_their_own_proof():

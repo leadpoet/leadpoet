@@ -9,17 +9,21 @@ these limits; a successful installation does not prove complete agent coverage.
 from __future__ import annotations
 
 import builtins
+import base64
 import collections
 import contextvars
 import functools
 import hashlib
 import http.client
 import importlib
+import json
+import os
 import queue
 import re
 import sys
 import threading
 import time
+import uuid
 import weakref
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -32,6 +36,9 @@ _BINARY_LIMIT = 5 * 1024 * 1024
 _STATE_LIMIT = 2048
 _SOURCE = "runtime_http_v1"
 _PROVIDER_HOSTS = frozenset({"openrouter.ai", "code.deepline.com", "api.scrapingdog.com"})
+HANDOFF_PREFIX = ".arena-capture-frame-"
+HANDOFF_MAX_FILES = 128
+HANDOFF_MAX_BYTES = 48 * 1024 * 1024
 
 
 def _redirect_url(url, location):
@@ -75,6 +82,7 @@ class _Body:
         self.complete = False
         self.provider_wire = False
         self.stream_key = None
+        self.handoff = None
         self.lock = threading.RLock()
 
     def add(self, value):
@@ -114,12 +122,14 @@ class _Body:
                     if anchor is not None and anchor[0] is self:
                         del holder._arena_http_capture_stream
                 self.owner.counts["responses_complete" if self.complete else "responses_partial"] += 1
-            self.owner._enqueue(self)
+                # Preserve finish order across concurrent response readers.
+                self.owner._enqueue(self)
 
 
 class Recorder:
     """Bounded asynchronous observation writer. ``close`` never drains responses."""
-    def __init__(self, checkpoint, *, memory_limit, queue_limit, close_timeout):
+    def __init__(self, checkpoint, *, memory_limit, queue_limit, close_timeout,
+                 handoff_dir=None):
         self.checkpoint = checkpoint
         self.memory_limit = max(0, int(memory_limit))
         self.close_timeout = max(0.0, min(float(close_timeout), 0.25))
@@ -140,6 +150,10 @@ class Recorder:
         self.closed = False
         self.stopping = threading.Event()
         self.summary = None
+        self.handoff_dir = handoff_dir
+        self.handoff_bytes = 0
+        self.handoff_files = 0
+        self.handoff_sequence = 0
         self.worker = threading.Thread(target=self._work, name="arena-http-capture", daemon=True)
         self.worker.start()
 
@@ -231,19 +245,78 @@ class Recorder:
             with self.lock:
                 self.retained -= len(body.buffer)
             body.buffer.clear()
+            # The HTTP response can outlive this recorder. The staged file is
+            # the failure handoff; its prepared in-memory copy is no longer used.
+            body.handoff = None
 
     def _enqueue(self, body):
+        try:
+            body.handoff = self._prepare(body)
+        except Exception:
+            self._count("adapter_failure")
+            body.handoff = None
+        if body.handoff is not None and self.handoff_dir is not None:
+            self._stage(body)
         try:
             self.queue.put_nowait(body)
         except queue.Full:
             self._count("queue_overflow")
             self._release(body)
 
+    def _stage(self, body):
+        kind, data = body.handoff
+        token = uuid.uuid4().hex
+        frame = {"schema_version": self.checkpoint.TRAINING_SCHEMA_VERSION,
+                 "control": self.checkpoint.TRAINING_CONTROL, "kind": kind,
+                 "depends_on": [], "data": data, "retry_token": token}
+        try:
+            self.checkpoint.validate_training_frame(frame)
+            encoded = json.dumps(frame, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=False).encode("utf-8")
+            if (self.handoff_files >= HANDOFF_MAX_FILES
+                    or self.handoff_bytes + len(encoded) > HANDOFF_MAX_BYTES):
+                self._count("handoff_overflow")
+                return
+            sequence = self.handoff_sequence
+            self.handoff_sequence += 1
+            path = os.path.join(self.handoff_dir, HANDOFF_PREFIX + f"{sequence:08d}")
+            temporary = path + ".writing"
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                os.replace(temporary, path)
+            finally:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+            self.handoff_bytes += len(encoded)
+            self.handoff_files += 1
+            body.handoff = (kind, data, token, path, len(encoded))
+        except Exception:
+            self._count("handoff_failure")
+
+    def _ack_handoff(self, body):
+        if body.handoff is None or len(body.handoff) != 5:
+            return
+        _, _, _, path, size = body.handoff
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            self._count("handoff_failure")
+            return
+        with self.lock:
+            self.handoff_files -= 1
+            self.handoff_bytes -= size
+
     def _checkpoint_result(self, kind, result):
         if result is not None:
             self._count("provider_ack_written" if kind == "response_received" else
                         "response_metadata_written" if kind == "http_response_metadata" else "web_written")
-            return
+            return True
         self._count("checkpoint_failure")
         getter = getattr(self.checkpoint, "_training_failure_reason", None)
         try:
@@ -254,20 +327,18 @@ class Recorder:
                           "invalid_frame", "socket_unavailable"}:
             reason = "unknown"
         self._count("checkpoint_failure_" + kind + "_" + reason)
+        return False
 
-    def _emit(self, body):
+    def _prepare(self, body):
         if body.identity:
             if body.complete:
                 if body.content_encoding not in {"", "identity"} and not body.provider_wire:
                     self._count("provider_encoded_body_unsupported")
-                    return
-                result = self.checkpoint.record_response_received(
-                    call_identity=body.identity, status=body.status,
-                    body_sha256="sha256:" + body.digest.hexdigest(), body_bytes=body.size,
-                    _retry_ambiguous=True)
-                self._checkpoint_result("response_received", result)
-            else:
-                self._count("provider_ack_ineligible")
+                    return None
+                return ("response_received", {
+                    "call_identity": body.identity, "status": body.status,
+                    "body_sha256": "sha256:" + body.digest.hexdigest(), "body_bytes": body.size})
+            self._count("provider_ack_ineligible")
             return
         if body.truncated:
             # The digest covers all bytes seen; the retained prefix does not.
@@ -276,19 +347,16 @@ class Recorder:
         if not body.size and not body.complete:
             # Headers are evidence of a response, not evidence of a body read.
             # Keep this distinct from both a consumed empty body and a prefix.
-            result = self.checkpoint.record_http_response_metadata(
-                url=body.url, status=body.status, content_type=body.content_type,
-                redirect_url=body.redirect_url, retrieved_at=body.retrieved_at,
-                source=_SOURCE, body_unconsumed=True, _retry_ambiguous=True)
-            self._checkpoint_result("http_response_metadata", result)
-            return
+            return ("http_response_metadata", {
+                "url": body.url, "status": body.status, "content_type": body.content_type,
+                "redirect_url": body.redirect_url, "retrieved_at": body.retrieved_at,
+                "source": _SOURCE, "body_unconsumed": True})
         media = body.content_type.split(";", 1)[0].strip().lower()
         textual = (not media or media.startswith("text/") or media in {
             "application/json", "application/xml", "application/javascript", "application/xhtml+xml",
             "application/x-ndjson", "application/graphql-response+json"} or media.endswith(("+json", "+xml")))
         if not textual:
-            self._emit_binary(body)
-            return
+            return self._prepare_binary(body)
         try:
             # Strict round trip also rejects split multibyte partial prefixes.
             text = body.buffer.decode(body.encoding, errors="strict")
@@ -298,30 +366,44 @@ class Recorder:
                 self._count("text_size_limit")
                 return
         except (UnicodeError, LookupError, ValueError):
-            self._emit_binary(body)
-            return
-        result = self.checkpoint.record_web_fetch(
-            url=body.url, final_url=body.url, status=body.status,
-            content_type=body.content_type, body=text, retrieved_at=body.retrieved_at,
-            capture={"source": _SOURCE, "complete": body.complete, "encoding": body.encoding,
-                     "received_body_sha256": "sha256:" + body.digest.hexdigest(),
-                     "received_body_bytes": body.size}, _retry_ambiguous=True)
-        self._checkpoint_result("web_fetch", result)
+            return self._prepare_binary(body)
+        return ("web_fetch", {
+            "url": body.url, "final_url": body.url, "status": body.status,
+            "content_type": body.content_type, "body": text, "retrieved_at": body.retrieved_at,
+            "capture": {"source": _SOURCE, "complete": body.complete, "encoding": body.encoding,
+                        "received_body_sha256": "sha256:" + body.digest.hexdigest(),
+                        "received_body_bytes": body.size}})
 
-    def _emit_binary(self, body):
+    def _prepare_binary(self, body):
         """Store bounded consumed bytes, with privacy review still required."""
         if not body.truncated:
             if len(body.buffer) > _BINARY_LIMIT:
                 self._count("binary_size_limit")
-                return
+                return None
+            return ("web_fetch_binary", {
+                "url": body.url, "final_url": body.url, "status": body.status,
+                "content_type": body.content_type,
+                "body_b64": base64.b64encode(body.buffer).decode("ascii"),
+                "retrieved_at": body.retrieved_at,
+                "capture": {"source": _SOURCE, "complete": body.complete,
+                            "received_body_sha256": "sha256:" + body.digest.hexdigest(),
+                            "received_body_bytes": body.size}})
+        return None
+
+    def _emit(self, body):
+        if body.handoff is None:
+            return True
+        kind, data = body.handoff[:2]
+        options = {"_retry_ambiguous": True}
+        if len(body.handoff) == 5:
+            options["_retry_token"] = body.handoff[2]
+        if kind == "web_fetch_binary":
             result = self.checkpoint.record_web_fetch_binary(
-                url=body.url, final_url=body.url, status=body.status,
-                content_type=body.content_type, body=bytes(body.buffer),
-                retrieved_at=body.retrieved_at,
-                capture={"source": _SOURCE, "complete": body.complete,
-                         "received_body_sha256": "sha256:" + body.digest.hexdigest(),
-                         "received_body_bytes": body.size}, _retry_ambiguous=True)
-            self._checkpoint_result("web_fetch_binary", result)
+                **{key: value for key, value in data.items() if key != "body_b64"},
+                body=base64.b64decode(data["body_b64"]), **options)
+        else:
+            result = getattr(self.checkpoint, "record_" + kind)(**data, **options)
+        return self._checkpoint_result(kind, result)
 
     def _work(self):
         while not self.stopping.is_set() or not self.queue.empty():
@@ -332,7 +414,8 @@ class Recorder:
             with self.lock:
                 self.inflight += 1
             try:
-                self._emit(body)
+                if self._emit(body):
+                    self._ack_handoff(body)
             except Exception:
                 self._count("checkpoint_failure")
             finally:
@@ -347,7 +430,8 @@ class Recorder:
                 "body_buffer_overflow", "response_limit", "queue_overflow", "checkpoint_failure",
                 "binary_size_limit", "text_encoding_unsupported", "text_size_limit",
                 "provider_encoded_body_unsupported", "responses_partial", "adapter_failure",
-                "close_flush_timeout", "metadata_unsupported", "stream_association_unsupported"}}
+                "close_flush_timeout", "metadata_unsupported", "stream_association_unsupported",
+                "handoff_overflow", "handoff_failure"}}
             return {"source": _SOURCE, "complete": not failures and self.queue.empty() and self.inflight == 0,
                     "pending_queue": self.queue.qsize(), "inflight": self.inflight,
                     "counts": dict(self.counts), "adapters": sorted(self.adapters),
@@ -799,13 +883,14 @@ class Recorder:
 
 
 def install(checkpoint_module, *, memory_limit=16 * 1024 * 1024, queue_limit=128,
-            close_timeout=0.25):
+            close_timeout=0.25, handoff_dir=None):
     """Install once before miner imports. No third-party module is imported here."""
     global _INSTALLED
     if _INSTALLED is not None and not _INSTALLED.closed:
         return _INSTALLED
     recorder = Recorder(checkpoint_module, memory_limit=memory_limit,
-                        queue_limit=queue_limit, close_timeout=close_timeout)
+                        queue_limit=queue_limit, close_timeout=close_timeout,
+                        handoff_dir=handoff_dir)
     _INSTALLED = recorder
     recorder._install_stdlib()
     # Public import entry points retain their exact result and exceptions. Do not

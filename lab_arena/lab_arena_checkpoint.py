@@ -275,7 +275,7 @@ def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str
                      body: str, retrieved_at: str | None = None,
                      depends_on: list[str] | None = None,
                      capture: dict[str, Any] | None = None,
-                     _retry_ambiguous: bool = False) -> int | None:
+                     _retry_ambiguous: bool = False, _retry_token: str | None = None) -> int | None:
     """Report exact text returned by a cooperative direct-web fetch."""
     try:
         body_size = len(body.encode("utf-8")) if isinstance(body, str) else -1
@@ -291,13 +291,14 @@ def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str
         "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat()}
     if capture is not None:
         data["capture"] = capture
-    return _record_training("web_fetch", data, depends_on, retry_ambiguous=_retry_ambiguous)
+    return _record_training("web_fetch", data, depends_on, retry_ambiguous=_retry_ambiguous,
+                            retry_token=_retry_token)
 
 
 def record_web_fetch_binary(*, url: str, final_url: str, status: int, content_type: str,
                             body: bytes, retrieved_at: str | None = None,
                             capture: dict[str, Any], depends_on: list[str] | None = None,
-                            _retry_ambiguous: bool = False) -> int | None:
+                            _retry_ambiguous: bool = False, _retry_token: str | None = None) -> int | None:
     """Report already consumed bytes to the private run artifact."""
     if not isinstance(body, bytes) or len(body) > MAX_TRAINING_BINARY_BODY_BYTES:
         _record_training("capture_failure", {"category": "web_fetch_binary", "reason": "size_limit"}, depends_on)
@@ -307,26 +308,27 @@ def record_web_fetch_binary(*, url: str, final_url: str, status: int, content_ty
         "url": url, "final_url": final_url, "status": status, "content_type": content_type,
         "body_b64": base64.b64encode(body).decode("ascii"),
         "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat(),
-        "capture": capture}, depends_on, retry_ambiguous=_retry_ambiguous)
+        "capture": capture}, depends_on, retry_ambiguous=_retry_ambiguous,
+        retry_token=_retry_token)
 
 
 def record_http_response_metadata(*, url: str, status: int, content_type: str,
                                   redirect_url: str | None, retrieved_at: str,
                                   source: str, body_unconsumed: bool,
                                   depends_on: list[str] | None = None,
-                                  _retry_ambiguous: bool = False) -> int | None:
+                                  _retry_ambiguous: bool = False, _retry_token: str | None = None) -> int | None:
     """Report already available response headers; do not claim consumed bytes."""
     return _record_training("http_response_metadata", {
         "url": url, "status": status, "content_type": content_type,
         "redirect_url": redirect_url, "retrieved_at": retrieved_at,
         "source": source, "body_unconsumed": body_unconsumed}, depends_on,
-        retry_ambiguous=_retry_ambiguous)
+        retry_ambiguous=_retry_ambiguous, retry_token=_retry_token)
 
 
 def record_response_received(*, call_identity: str, status: int, body: bytes | None = None,
                              body_sha256: str | None = None, body_bytes: int | None = None,
                              depends_on: list[str] | None = None,
-                             _retry_ambiguous: bool = False) -> int | None:
+                             _retry_ambiguous: bool = False, _retry_token: str | None = None) -> int | None:
     """Report that agent code obtained a broker response; the host checks its digest."""
     if body is not None:
         if body_sha256 is not None or body_bytes is not None:
@@ -347,7 +349,7 @@ def record_response_received(*, call_identity: str, status: int, body: bytes | N
         return None
     return _record_training("response_received", {"call_identity": call_identity, "status": status,
         "body_sha256": body_sha256, "body_bytes": body_bytes}, depends_on,
-        retry_ambiguous=_retry_ambiguous)
+        retry_ambiguous=_retry_ambiguous, retry_token=_retry_token)
 
 
 def record_state_snapshot(name: str, value: Any, *, depends_on: list[str] | None = None) -> int | None:

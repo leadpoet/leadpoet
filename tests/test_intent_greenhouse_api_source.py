@@ -1,10 +1,27 @@
 """A retained API posting must use the same bound source path as its human URL."""
 import json
+import sys
+import types
 
 import httpx
 import pytest
 
 from qualification.scoring import intent_verification_three_stage as intent
+
+
+@pytest.fixture(params=["default", "frozen_runtime"], autouse=True)
+def source_variant(request, monkeypatch):
+    if request.param == "default":
+        return
+    from scripts.arena_reviewer_greenhouse_api_source_seam import convert_greenhouse_api_source_seam
+    from tests.reviewer_frozen_sources import frozen_source
+    source = convert_greenhouse_api_source_seam(frozen_source(
+        "archive_https", "qualification/scoring/intent_verification_three_stage.py",
+    ))
+    module = types.ModuleType("greenhouse_frozen_runtime_control")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(source, "frozen_greenhouse_control.py", "exec"), module.__dict__)
+    monkeypatch.setattr(sys.modules[__name__], "intent", module)
 
 API = "https://boards-api.greenhouse.io/v1/boards/equalexperts/jobs/8425346002"
 HUMAN = "https://job-boards.greenhouse.io/equalexperts/jobs/8425346002"
@@ -24,8 +41,11 @@ def transport(monkeypatch, payload=POSTING):
     class Client:
         async def __aenter__(self): return self
         async def __aexit__(self, *_args): return None
-        async def get(self, url, *, headers, params):
+        async def get(self, url, *, headers=None, params, **_kwargs):
             calls.append(params["url"])
+            if params["url"] == "https://equalexperts.com/":
+                return httpx.Response(200, text="<html><body><p>" +
+                                      "Equal Experts company information. " * 120 + "</p></body></html>")
             return httpx.Response(200, json=payload)
 
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-runtime-handle")
@@ -81,11 +101,19 @@ async def test_api_source_keeps_returned_posting_binding(monkeypatch, replacemen
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["supported", "contradicted"])
-async def test_api_source_still_obeys_stage3_verdict(monkeypatch, status):
+@pytest.mark.parametrize("status,owner,expected", [
+    ("supported", "equalexperts.com", "approve"),
+    ("contradicted", "equalexperts.com", "reject"),
+    ("supported", "other-employer.example", "review"),
+    ("supported", None, "review"),
+])
+async def test_api_source_still_obeys_stage3_verdict(monkeypatch, status, owner, expected):
     # A substantive body is a separate control. The retained link-only body
     # below must still fail the existing job-body gate.
-    calls = transport(monkeypatch, {**POSTING, "content": "<h2>About the role</h2><p>Senior Delivery Lead</p>"})
+    content = "<h2>About the role</h2><p>Senior Delivery Lead</p>"
+    if owner:
+        content += f'<a href="https://{owner}/careers">Careers</a>'
+    calls = transport(monkeypatch, {**POSTING, "content": content})
     prompts = []
 
     async def judge(_client, _model, prompt):
@@ -113,13 +141,15 @@ async def test_api_source_still_obeys_stage3_verdict(monkeypatch, status):
         target_signal_text="Actively hiring for consulting, delivery, or practice-lead roles.",
         evidence_type="HIRING", declared_source="job_board", stage1_soft_reject=True,
     )
-    assert len(calls) == len(prompts) == 1, result
+    assert len(prompts) == 1, result
     assert "Senior Delivery Lead" in json.dumps(prompts[0])
     assert result["stage3"]["status"] == status
-    # This fixture provides no independently observed first-party ownership
-    # anchor. A model's supported label cannot bypass that existing gate.
-    assert result["decision"] == ("review" if status == "supported" else "reject"), result
-    if status == "supported":
+    assert result["decision"] == expected, result
+    assert result["client_ready"] is (expected == "approve")
+    if owner == "equalexperts.com":
+        assert calls == [API + "?content=true"]
+        assert result["ats_employer_ownership"]["resolved"] is True
+    elif status == "supported":
         assert result["ats_employer_ownership"]["resolved"] is False
 
 

@@ -717,7 +717,7 @@ def test_retry_retained_sources_fail_closed_on_provenance_and_bounds():
     assert lead_scorer._validated_retry_retained_sources({
         source_url: {
             **valid_entry,
-            "text": "x" * (lead_scorer.MAX_PAGE_CHARACTERS + 1),
+            "text": "x" * (lead_scorer.MAX_SOURCE_CHARACTERS + 1),
         }
     }) == {}
     assert lead_scorer._validated_retry_retained_sources({
@@ -1108,7 +1108,7 @@ def test_intermediate_unavailable_source_survives_final_fit_repair():
         ("final_url", "https://other.example/news/series-e"),
         ("text", "The exact final quote is absent."),
         ("text", "%PDF-1.7 binary"),
-        ("text", "x" * (investigator.MAX_PAGE_CHARACTERS + 1)),
+        ("text", "x" * (investigator.MAX_SOURCE_CHARACTERS + 1)),
     ],
 )
 def test_investigator_source_retention_fails_closed(mutation, mutated_value):

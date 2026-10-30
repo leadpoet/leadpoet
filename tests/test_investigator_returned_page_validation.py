@@ -75,7 +75,7 @@ def test_returned_bound_does_not_change_incoming_prefetch_bound(count):
 
 @pytest.mark.parametrize("override", [
     {"text": ""},
-    {"text": "x" * (investigator.MAX_PAGE_CHARACTERS + 1)},
+    {"text": "x" * (investigator.MAX_SOURCE_CHARACTERS + 1)},
     {"text": "%PDF-1.7 decoded binary"},
     {"text": "Provider account capacity details redacted."},
     {"final_url": "http://127.0.0.1/private"},

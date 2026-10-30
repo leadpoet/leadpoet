@@ -1,5 +1,6 @@
 """Protocol repair composition preserves every unrelated frozen byte."""
 import ast
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,44 @@ from scripts import build_arena_reviewer_runtime as composer
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def historical_protocol_source(source):
+    """Use the reviewed historical helper only in frozen-source test inputs."""
+    text = source.decode("utf-8")
+    lines = text.splitlines(keepends=True)
+    helpers = [node for node in ast.parse(text).body
+               if isinstance(node, ast.FunctionDef)
+               and node.name == "_valid_multi_research_reply"]
+    assert len(helpers) == 1
+    helper = helpers[0]
+    current = "".join(lines[helper.lineno - 1:helper.end_lineno])
+    # Fail when either fixture input or the historical repair changes. This
+    # does not teach the frozen converter to accept the current offset helper.
+    assert hashlib.sha256(current.encode()).hexdigest() == (
+        "241ab4e3c5bcecf2bbf89aed49da9f49dc739225f24e8048f2b9c85e276be15b"
+    )
+    assert hashlib.sha256(seam._HELPER.encode()).hexdigest() == (
+        "57ba91aff2d9d1a914624712965859c46c1f2f233e2ccae7d846b87734dd8de3"
+    )
+    lines[helper.lineno - 1:helper.end_lineno] = [seam._HELPER.rstrip("\n") + "\n"]
+    return "".join(lines).encode("utf-8")
+
+
 def _sources():
-    repaired = (ROOT / composer.GRADER_FILE).read_bytes()
+    repaired = historical_protocol_source((ROOT / composer.GRADER_FILE).read_bytes())
     assert repaired.count(seam._HELPER.encode()) == repaired.count(seam._REPAIR.encode()) == 1
     original = repaired.replace(seam._HELPER.encode(), b"", 1).replace(seam._REPAIR.encode(), b"", 1)
     return original, repaired
+
+
+def test_current_offset_helper_still_fails_closed_in_frozen_converter():
+    current = (ROOT / composer.GRADER_FILE).read_bytes()
+    with pytest.raises(seam.ProtocolRepairSeamError, match="partially corrected protocol source"):
+        seam.convert_protocol_repair_seam(current)
+    unknown = current.replace(b"len(value) > 500", b"len(value) > 501", 1)
+    with pytest.raises(seam.ProtocolRepairSeamError, match="partially corrected protocol source"):
+        seam.convert_protocol_repair_seam(unknown)
+    with pytest.raises(AssertionError):
+        historical_protocol_source(unknown)
 
 
 def test_exact_two_insertions_only_and_idempotent():

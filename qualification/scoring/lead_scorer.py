@@ -80,6 +80,7 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PREFETCHED_PAGES,
     MAX_RETURNED_FETCHED_PAGES,
     MAX_PAGE_CHARACTERS,
+    MAX_SOURCE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
     _IDENTITY_LINK_CONTEXT_MARKER,
@@ -2581,7 +2582,7 @@ def _validated_retry_retained_sources(
             canonical_url != raw_url
             or final_url != raw_final_url
             or not text
-            or len(text) > MAX_PAGE_CHARACTERS
+            or len(text) > MAX_SOURCE_CHARACTERS
         ):
             continue
         retained[canonical_url] = {
@@ -2730,7 +2731,7 @@ def _hydrate_required_attribute_source_cache(
             canonical_url != raw_url
             or not isinstance(text, str)
             or not text
-            or len(text) > MAX_PAGE_CHARACTERS
+            or len(text) > MAX_SOURCE_CHARACTERS
         ):
             continue
         existing = source_cache.get(canonical_url)
@@ -2780,7 +2781,7 @@ def _reviewed_required_attribute_source_cache(
         url != raw_url
         or not isinstance(text, str)
         or not text
-        or len(text) > MAX_PAGE_CHARACTERS
+        or len(text) > MAX_SOURCE_CHARACTERS
         or not _quote_occurs(quote, text)
     ):
         return fallback if fallback is not None else {}
@@ -3186,7 +3187,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         not isinstance(raw_final_url, str)
         or not isinstance(page_text, str)
         or not page_text
-        or len(page_text) > MAX_PAGE_CHARACTERS
+        or len(page_text) > MAX_SOURCE_CHARACTERS
         or not _quote_occurs(quote, page_text)
     ):
         return False
@@ -3456,7 +3457,7 @@ def _investigator_prefetched_pages(
                 text = source_text + "\n\n" + text
                 if identity_marker:
                     text += "\n\n" + identity_marker + identity_links
-                if len(text) > MAX_PAGE_CHARACTERS:
+                if len(text) > MAX_SOURCE_CHARACTERS:
                     continue
             candidates[submitted_profile_url] = {
                 "final_url": evidence_url,
@@ -3529,7 +3530,7 @@ def _hydrated_required_attribute_source_for_final_url(
             not isinstance(raw_final_url, str)
             or not isinstance(source_text, str)
             or not source_text
-            or len(source_text) > MAX_PAGE_CHARACTERS
+            or len(source_text) > MAX_SOURCE_CHARACTERS
         ):
             continue
         try:
@@ -3574,7 +3575,7 @@ def _recovery_required_attribute_www_alias_source(
             not isinstance(raw_final_url, str)
             or not isinstance(source_text, str)
             or not source_text
-            or len(source_text) > MAX_PAGE_CHARACTERS
+            or len(source_text) > MAX_SOURCE_CHARACTERS
             or not _quote_occurs(quote, source_text)
         ):
             continue
@@ -5174,7 +5175,7 @@ async def _ground_employee_size_observation(
             entry = sources[url]
     if (
         isinstance(entry, Mapping) and entry.get("status") in {None, "fetched"}
-        and isinstance(entry.get("text"), str) and 0 < len(entry["text"]) <= MAX_PAGE_CHARACTERS
+        and isinstance(entry.get("text"), str) and 0 < len(entry["text"]) <= MAX_SOURCE_CHARACTERS
         and _valid_web_evidence_url(entry.get("final_url"))
         and _registrable_domain(url) == _registrable_domain(entry["final_url"])
     ):
@@ -5221,7 +5222,7 @@ async def _lookup_first_party_headcount_profile(
             not _valid_web_evidence_url(url) or not _valid_web_evidence_url(final_url)
             or not str(url).startswith("https://") or not str(final_url).startswith("https://")
             or _registrable_domain(url) != domain or _registrable_domain(final_url) != domain
-            or not isinstance(text, str) or not text or len(text) > MAX_PAGE_CHARACTERS
+            or not isinstance(text, str) or not text or len(text) > MAX_SOURCE_CHARACTERS
             or _company_name(company.company_name) not in _company_name(text)
         ):
             continue
@@ -11636,7 +11637,7 @@ def _matched_investigator_source_contexts(
             not isinstance(final_url, str)
             or not isinstance(text, str)
             or not text
-            or len(text) > MAX_PAGE_CHARACTERS
+            or len(text) > MAX_SOURCE_CHARACTERS
             or _registrable_domain(source_url) != _registrable_domain(final_url)
             or not quote
             or not _quote_occurs(quote, text)
@@ -11795,7 +11796,7 @@ def _matched_company_source_contexts(
         and _registrable_domain(source_entry.get("final_url"))
         == _registrable_domain(submitted_url)
         and isinstance(source_entry.get("text"), str)
-        and 0 < len(source_entry["text"]) <= MAX_PAGE_CHARACTERS
+        and 0 < len(source_entry["text"]) <= MAX_SOURCE_CHARACTERS
         and _quote_occurs(submitted_quote, source_entry["text"])
         and submitted_name in _compact_company_name(source_entry["text"])
     ):
@@ -12054,6 +12055,22 @@ async def score_company_competition_intent(
                 matched_company_retry_source_cache, matched_company_source_cache, company_fit,
                 funding_contexts=funding_stage_context,
             )
+    if funding_stage_context:
+        # Retain the original body in the source cache. The funding reviewer
+        # receives only its existing bounded continuous passage.
+        from qualification.scoring.intent_details import _continuous_source_window
+
+        dimensions = (company_fit.details or {}).get("dimension_evidence", {})
+        for context in funding_stage_context:
+            if (
+                context["dimension"] == "stage"
+                and len(context["text"]) > MAX_PAGE_CHARACTERS
+            ):
+                evidence = dimensions.get("stage", {}).get("web_evidence", {})
+                context["text"] = _continuous_source_window(
+                    context["text"], MAX_PAGE_CHARACTERS,
+                    [str(evidence.get("quote") or "")],
+                )
     try:
         (
             intent_raw,

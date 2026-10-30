@@ -1943,7 +1943,7 @@ def test_oversized_verified_homepage_prefetch_fails_closed():
         verified_homepage_pages={
             homepage_url: {
                 "final_url": homepage_url,
-                "text": "x" * (investigator.MAX_PAGE_CHARACTERS + 1),
+                "text": "x" * (investigator.MAX_SOURCE_CHARACTERS + 1),
             }
         },
     ) == {}
@@ -2087,7 +2087,7 @@ def test_grab_prefetch_repairs_only_stage_and_stays_out_of_receipt(monkeypatch):
             {
                 "status": "fetched",
                 "final_url": "https://example.com/oversized",
-                "text": "x" * (investigator.MAX_PAGE_CHARACTERS + 1),
+                "text": "x" * (investigator.MAX_SOURCE_CHARACTERS + 1),
             },
         ),
         (

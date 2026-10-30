@@ -452,7 +452,7 @@ def test_invalid_auxiliary_never_reaches_funding_judge(monkeypatch, mutation):
     elif mutation == "redirect": context["final_url"] = "https://other.example/login"
     elif mutation == "company": context["text"] = "An unrelated company raised a Seed round."
     elif mutation == "empty": context["text"] = ""
-    elif mutation == "oversize": context["text"] = "Aurasell " + "x" * 24000
+    elif mutation == "oversize": context["text"] = "Aurasell " + "x" * lead_scorer.MAX_SOURCE_CHARACTERS
     elif mutation == "extra_field": context["proof"] = "model says verified"
     elif mutation == "http": context["url"] = context["final_url"] = "http://aurasell.ai/round"
     _, _, _, provider = _run(monkeypatch, context=[LATER_CONTEXT, context], urls=[SECONDARY])
@@ -656,3 +656,39 @@ def test_auxiliary_initial_window_keeps_late_literal_date_without_inventing_one(
     assert ("August 26, 2025" in retained) is literal_date
     assert retained in text
     assert len(retained.encode()) <= intent_details._MAX_SOURCE_CONTEXT_BYTES
+
+
+def test_long_retained_stage_keeps_late_quote_without_expanding_model_handoff(monkeypatch):
+    body = "Aurasell source. " + "Earlier unrelated material. " * 1700 + STAGE_TEXT
+    assert 24000 < len(body) <= lead_scorer.MAX_SOURCE_CHARACTERS
+
+    async def fit(*args, **kwargs):
+        kwargs["matched_company_source_sink"][PRIMARY] = {"final_url": PRIMARY, "text": body}
+        return _fit()
+
+    score_signal = AsyncMock(return_value=(0, 0, 0, 0, True, []))
+    retry = {}
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", score_signal)
+    asyncio.run(lead_scorer.score_company_competition_intent(
+        _company(), _icp(), 0, 0, set(), integrity_policy=True,
+        matched_company_retry_source_cache=retry,
+    ))
+    context = score_signal.await_args.kwargs["verified_funding_stage_context"][0]
+    assert STAGE_TEXT in context["text"]
+    assert context["text"] in body and len(context["text"]) <= lead_scorer.MAX_PAGE_CHARACTERS
+    assert retry["pages"][PRIMARY]["text"] == body
+
+
+def test_long_auxiliary_is_bound_before_its_funding_model_projection(monkeypatch):
+    body = "Aurasell company. " + "Earlier source background. " * 1600 + RECAP_TEXT
+    auxiliary_url = "https://www.aurasell.ai/about"
+    auxiliary = {"dimension": "first_party_context", "url": auxiliary_url,
+                 "final_url": auxiliary_url, "text": body}
+    _, receipts, fetch, provider = _run(
+        monkeypatch, context=[CONTEXT, auxiliary], urls=[SECONDARY, PRIMARY, auxiliary_url],
+    )
+    assert fetch.await_count == provider.await_count == 1
+    retained = next(x for x in receipts[-1]["verification_trace"]["verified_source_context"] if x["url"] == auxiliary_url)
+    assert len(retained["text"]) <= lead_scorer.MAX_PAGE_CHARACTERS
+    assert retained["text"] in body

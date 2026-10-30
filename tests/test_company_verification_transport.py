@@ -15,6 +15,7 @@ from qualification.scoring.company_fit_decision import (
 )
 from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
+    MAX_SOURCE_CHARACTERS,
     _validated_findings,
 )
 from qualification.scoring.company_verification import (
@@ -2451,10 +2452,10 @@ def test_unbound_homepage_body_is_retained_only_for_same_company_domain(
         ]["text"]
 
 
-def test_verified_homepage_evidence_text_uses_existing_page_cap(monkeypatch):
+def test_verified_homepage_evidence_text_uses_retained_source_cap(monkeypatch):
     from qualification.scoring import company_verification
 
-    visible_text = "Flam " + "campaign measurement " * 2_000
+    visible_text = "Flam " + "campaign measurement " * 6_000
     homepage = (
         "<html><head><title>Flam</title>"
         '<meta property="og:site_name" content="Flam"></head><body>'
@@ -2477,7 +2478,7 @@ def test_verified_homepage_evidence_text_uses_existing_page_cap(monkeypatch):
 
     assert result.decision == COMPANY_FIT_MATCH
     assert len(homepage_pages["https://flamapp.ai/"]["text"]) == (
-        MAX_PAGE_CHARACTERS
+        MAX_SOURCE_CHARACTERS
     )
 
 

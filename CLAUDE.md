@@ -1,3 +1,17 @@
+## Scoped authorization: October 29 verifier evidence audit
+
+The user authorized independent review of the Arena Verifier Fix List, the
+98-company benchmark and unseen controls, followed by narrow proven fixes,
+safe merge and canonical deployment. The coordinator may preserve source evidence
+through the existing investigator and retry paths, build and select the tested
+scorer for future rounds, and verify baseline and miner scoring. Total test
+provider spend is capped at $16, including at most $1 for Deepline. Preserve
+frozen rounds, accepted results, evidence standards, scoring, billing, privacy,
+rewards and concurrent PR793 work. Add no extra judge, cache or recovery layer.
+Only the coordinator may perform production actions through existing controls.
+Use valid fixed cached Admin credentials; never issue or refresh them in this
+task. This authority ends when the scoped fixes and production checks complete.
+
 ## Scoped authorization: October 29 exact champion exception
 
 The user explicitly authorized manually crowning the highest-scoring October 29

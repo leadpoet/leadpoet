@@ -594,7 +594,8 @@ class ArenaWeightOrchestrator:
                 if signed is None:
                     return not self._prior_recovery_failures
                 self._recover_protected_state(signed)
-                self._confirm(signed)
+                if self._confirm(signed) == "not_included_expired":
+                    self._record_expired(signed, self._last_confirmation or {})
             self._prior_recovery_failures.discard(epoch)
         except Exception as exc:
             self._prior_recovery_failures.add(epoch)

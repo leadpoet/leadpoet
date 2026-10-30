@@ -13,6 +13,7 @@ from scripts.arena_reviewer_rejected_final_packet_seam import (
     convert_rejected_final_packet_seam as convert,
 )
 from tests import test_final_unproven_normalization as controls
+from tests.test_arena_reviewer_protocol_repair_seam import historical_protocol_source
 
 
 def sources(**options):
@@ -34,6 +35,8 @@ def sources(**options):
     result[builder.GRADER_FILE] = result[builder.GRADER_FILE].replace(
         NEW.encode(), OLD.encode(), 1,
     )
+    if options.get("single_tool_protocol_repair"):
+        result[builder.GRADER_FILE] = historical_protocol_source(result[builder.GRADER_FILE])
     return result
 
 

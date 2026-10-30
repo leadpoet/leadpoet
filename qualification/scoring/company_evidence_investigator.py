@@ -2511,6 +2511,9 @@ async def _review_industry_sources(
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
     }, pages)
+    # This identifies the supplied source bytes, not a completed verdict. Keep
+    # checked text available to the identity-bound retry cache if review fails.
+    review['packet_sha256'] = packet.digest
     review['source_urls'] = [page['source_url'] for page in pages]
     careers = [dict(locator) for locator in careers_locators
                if _recognized_careers_board_locator(locator['url'], locator['label'])]
@@ -2532,13 +2535,20 @@ async def _review_industry_sources(
         finding = copy.deepcopy(previous)
         finding['_industry_review']['reused_completed_packet'] = True
         return finding, '', 0
-    status, body = await _post_openrouter_json(
-        session, 'https://openrouter.ai/api/v1/chat/completions',
-        headers={'Authorization': f'Bearer {openrouter_key}', 'Content-Type': 'application/json'},
-        payload=industry_classification.request_payload(packet, model=model, research=research), started=started,
-    )
+    payload = industry_classification.request_payload(packet, model=model, research=research)
+    try:
+        status, body = await _post_openrouter_json(
+            session, 'https://openrouter.ai/api/v1/chat/completions',
+            headers={'Authorization': f'Bearer {openrouter_key}', 'Content-Type': 'application/json'},
+            payload=payload, started=started,
+        )
+    except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
+        # Preserve unrelated validated findings and exact source facts through
+        # the normal incomplete-submit return. Cancellation and contract bugs
+        # must retain their existing handling rather than become provider faults.
+        return unproven, PROVIDER_ERROR_FAILURE_REASON, 1
     if status != 200 or not isinstance(body, Mapping) or body.get('error') or body.get('errors'):
-        raise RuntimeError('industry_review_provider_unavailable')
+        return unproven, PROVIDER_ERROR_FAILURE_REASON, 1
     choices = body.get('choices')
     if (not isinstance(choices, list) or len(choices) != 1
             or not isinstance(choices[0], Mapping)

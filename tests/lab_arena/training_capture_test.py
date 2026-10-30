@@ -1281,6 +1281,94 @@ def test_repeated_text_scans_once_but_still_checks_every_node(monkeypatch):
     assert calls == {public: 1, oversized: 1}
 
 
+def _rejected_http_model_request():
+    return {"admitted_parameters": {"method": "POST",
+        "url": "https://openrouter.ai/api/v1/responses", "headers": {},
+        "body_text": {"model": "synthetic/model", "input": "synthetic",
+                      "instructions": "Return JSON", "tools": [], "provider": {},
+                      "max_output_tokens": 12000, "reasoning": {"effort": "high"}}},
+        "timeout_ms": 0}
+
+
+@pytest.mark.parametrize("controls", [
+    {"effort": "low"}, {"effort": "high"},
+    {"summary": "concise", "context": "all_turns"},
+    {"enabled": True, "exclude": False, "max_tokens": 2048},
+    {"enabled": False, "exclude": True}, {},
+])
+def test_rejected_http_preserves_only_control_values(controls):
+    value = _rejected_http_model_request()
+    value["admitted_parameters"]["body_text"]["reasoning"] = controls
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+@pytest.mark.parametrize("mutation", [
+    "wrong_host", "plain_http", "query", "userinfo", "port", "wrong_path", "get",
+    "missing_model", "invalid_headers", "extra_admitted", "wrong_timeout",
+    "provider_response", "body_response", "arbitrary_wrapper", "wrong_protocol",
+    "wrong_observation_kind", "paid_identity",
+])
+def test_rejected_http_cannot_create_trust_from_other_contexts(mutation):
+    value = _rejected_http_model_request()
+    admitted = value["admitted_parameters"]
+    if mutation == "wrong_host": admitted["url"] = "https://example.com/api/v1/responses"
+    elif mutation == "plain_http": admitted["url"] = "http://openrouter.ai/api/v1/responses"
+    elif mutation == "query": admitted["url"] += "?source=synthetic"
+    elif mutation == "userinfo": admitted["url"] = "https://user@openrouter.ai/api/v1/responses"
+    elif mutation == "port": admitted["url"] = "https://openrouter.ai:443/api/v1/responses"
+    elif mutation == "wrong_path": admitted["url"] = "https://openrouter.ai/other"
+    elif mutation == "get": admitted["method"] = "GET"
+    elif mutation == "missing_model": del admitted["body_text"]["model"]
+    elif mutation == "invalid_headers": admitted["headers"] = []
+    elif mutation == "extra_admitted": admitted["other"] = True
+    elif mutation == "wrong_timeout": value["timeout_ms"] = 1000
+    elif mutation == "provider_response": value.update(object="response", output=[])
+    elif mutation == "body_response": admitted["body_text"].update(object="chat.completion", choices=[])
+    elif mutation == "arbitrary_wrapper": value = {"nested": value}
+    else:
+        value = {"ordinal": 0, "privacy": {"redacted": False, "redactions": []},
+                 "kind": "local_parse_error", "operation_id": "unknown", "action_sequence": None,
+                 "call_identity": None, "contributes_to_provider_call_count": False,
+                 "request": value, "outcome": {"protocol": "http"}}
+        if mutation == "wrong_protocol": value["outcome"]["protocol"] = "frame"
+        elif mutation == "wrong_observation_kind": value["kind"] = "transport_failure"
+        else: value["call_identity"] = "sha256:" + "1" * 64
+    cleaned, redactions = capture.sanitize_training_value(value)
+    assert redactions == (["credential", "hidden_reasoning"] if mutation == "userinfo" else ["hidden_reasoning"])
+    assert '"effort": "high"' not in json.dumps(cleaned)
+
+
+@pytest.mark.parametrize("controls", [
+    {"effort": "private prose"}, {"effort": {"text": "opaque state"}},
+    {"effort": "high", "encrypted_content": "sealed state"},
+    {"effort": "high", "authorization": "private-value"},
+])
+def test_rejected_http_invalid_controls_are_still_private(controls):
+    value = _rejected_http_model_request()
+    value["admitted_parameters"]["body_text"]["reasoning"] = controls
+    cleaned, redactions = capture.sanitize_training_value(value)
+    assert redactions == ["hidden_reasoning"]
+    assert cleaned["admitted_parameters"]["body_text"]["reasoning"] == "[REDACTED]"
+
+
+def test_rejected_http_keeps_nested_reasoning_and_authentication_private():
+    value = _rejected_http_model_request()
+    admitted = value["admitted_parameters"]
+    admitted["headers"] = {"authorization": "Bearer synthetic-private-value"}
+    admitted["body_text"].update(authorization="private-value",
+        nested={"reasoning": {"effort": "high"}}, encrypted_content="sealed state")
+    cleaned, redactions = capture.sanitize_training_value(value)
+    assert redactions == ["credential", "hidden_reasoning"]
+    body = cleaned["admitted_parameters"]["body_text"]
+    assert body["reasoning"] == {"effort": "high"}
+    assert body["nested"]["reasoning"] == body["encrypted_content"] == "[REDACTED]"
+    assert body["authorization"] == cleaned["admitted_parameters"]["headers"]["authorization"] == "[REDACTED]"
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+    exact, changes = capture.sanitize_training_value(value, secrets=("high",))
+    assert "credential" in changes
+    assert exact["admitted_parameters"]["body_text"]["reasoning"] == {"effort": "[REDACTED]"}
+
+
 def test_aggregate_reuses_short_plain_keys_and_values_with_node_limit(monkeypatch):
     label = "public short label"
     value_text = "public short value"

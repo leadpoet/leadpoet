@@ -1174,7 +1174,8 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         r"\b(?:completed|completes|closed)\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
-        r'(?:\s+\((?:"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)\))?'
+        r'(?:\s+\((?P<alias>"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)'
+        r'(?:(?:\s*,?\s*or\s+|\s*,\s*)(?:the\s+)?(?:"Company"|“Company”))?\))?'
         r"(?=\s+(?:on|for|after|from|in)\b|[,;.!?\n]|$)",
         re.I,
     ),
@@ -1470,6 +1471,19 @@ def _acquired_stage_quote_supports_names(
             subject = tuple(re.findall(
                 r"[a-z0-9]+", match.group("subject").casefold()
             ))
+            # A quoted name immediately after the acquired entity names that
+            # same target. Do not use mentions of another party or a label for
+            # acquired assets/partial interests as a company-identity alias.
+            alias = tuple(re.findall(r"[a-z0-9]+", str(
+                match.groupdict().get("alias") or ""
+            ).casefold()))
+            if (alias and alias not in {("company",), ("we",), ("us",)}
+                    and not set(subject) & {
+                        "assets", "business", "division", "unit", "brand",
+                        "portfolio", "stake", "interest", "shares",
+                    }
+                    and any("".join(alias) == "".join(name) for name in normalized_names)):
+                return True
             legal_suffixes = {
                 "co", "company", "corp", "corporation", "inc",
                 "incorporated", "limited", "llc", "ltd", "plc",

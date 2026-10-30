@@ -55,7 +55,7 @@ def test_closed_acquisition_with_target_alias_is_bound(verb, alias):
     'Parent Holdings closed its acquisition of Acme Analytics (“Acme”), but the deal was cancelled.',
     'Parent Holdings closed its acquisition of Acme Analytics minority shares (“Acme”).',
     'Parent Holdings closed its acquisition of Acme Analytics assets (“Acme”).',
-    'Parent Holdings closed its acquisition of Other Company (“Acme Analytics”).',
+    'Parent Holdings closed its acquisition of Other Company (a partner of Acme Analytics).',
     'Parent Holdings closed its acquisition of Acme Analytics Systems (“Acme”).',
     'Parent Holdings closed its acquisition of Acme Analytics (“Acme”), which later became independent.',
 ])
@@ -84,12 +84,12 @@ def test_real_closed_acquisition_survives_investigator_and_saved_stage_decision(
             observed_value="Acquired", evidence_url=url, evidence_quote=quote)]},
         targets=("stage",), fetched_pages={url: quote},
         fetched_final_urls={url: url}, first_party_domains={"omnimax.com"},
-        identity_names={"omnimaxinternational", "omnimax"},
+        identity_names={"omnimax"},
         requested_stage="private equity",
     )["stage"]
     assert finding["status"] == "CONTRADICTED"
     assert finding["evidence_quote"] == quote
-    company = _company(name="OmniMax International", website="https://omnimax.com")
+    company = _company(name="OmniMax", website="https://omnimax.com")
     projected = lead_scorer._project_investigator_stage(
         {"observed_company_name": company.company_name}, finding,
         icp_stage="private equity")
@@ -105,6 +105,20 @@ def test_real_closed_acquisition_survives_investigator_and_saved_stage_decision(
         company, {"observed_company_name": company.company_name,
                   "dimension_evidence": {"required_attribute": {"url": url, "quote": quote}}},
         "series b")
+
+
+@pytest.mark.parametrize("subject", ["assets of Acme Analytics", "Acme Analytics assets",
+    "a division of Acme Analytics", "a minority stake in Acme Analytics"])
+def test_alias_cannot_turn_partial_assets_into_a_company_acquisition(subject):
+    quote = f'Parent closed its acquisition of {subject} (“Acme Analytics”).'
+    assert not _acquired_stage_quote_supports_names(("Acme Analytics",), quote)
+
+
+def test_explicit_target_alias_binds_the_same_target_not_a_mentioned_parent():
+    quote = 'Parent closed its acquisition of Example Legal Name (“Acme Analytics”).'
+    assert _acquired_stage_quote_supports_names(("Acme Analytics",), quote)
+    assert not _acquired_stage_quote_supports_names(("Parent",), quote)
+    assert not _acquired_stage_quote_supports_names(("Acme",), quote)
 
 
 def test_nested_reported_acquisition_does_not_bind_outer_company():

@@ -9,6 +9,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.request import urlopen
 
 import pytest
@@ -1342,3 +1343,94 @@ def test_staged_recorder_keeps_later_live_success_and_only_failed_frame(tmp_path
     frames = sorted(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
     assert len(frames) == 1
     assert json.loads(frames[0].read_bytes())["data"]["body"] == "first"
+
+
+def test_completed_response_objects_do_not_retain_prepared_pages(tmp_path):
+    class SuccessfulCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+    checkpoint = SuccessfulCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024 * 1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    responses = []
+    for number in range(12):
+        body = recorder._new("fixture", f"https://example.com/{number}", 200,
+                             {"content-type": "text/plain"})
+        body.add(b"x" * 1024 * 1024)
+        body.finish(True)
+        responses.append(SimpleNamespace(_arena_http_capture_body=body))
+        recorder.queue.join()
+        assert recorder.retained == 0
+    summary = recorder.close()
+    assert summary["complete"] is True
+    assert len(checkpoint.web) == 12
+    assert not list(tmp_path.iterdir())
+    assert all(response._arena_http_capture_body.handoff is None for response in responses)
+
+
+def test_failed_send_keeps_file_without_retaining_prepared_body(tmp_path):
+    class FailedCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            return None
+
+    recorder = automatic_capture.Recorder(FailedCheckpoint(), memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    body = recorder._new("fixture", "https://example.com/page", 200,
+                         {"content-type": "text/plain"})
+    body.add(b"failed but already consumed")
+    body.finish(True)
+    response = SimpleNamespace(_arena_http_capture_body=body)
+    recorder.queue.join()
+    summary = recorder.close()
+    files = list(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_bytes())["data"]["body"] == "failed but already consumed"
+    assert response._arena_http_capture_body.handoff is None
+    assert summary["complete"] is False
+
+
+def test_full_queue_releases_payload_and_keeps_staged_file(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockedCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            if kwargs["body"] == "first":
+                entered.set()
+                assert release.wait(2)
+            return super().record_web_fetch(**kwargs)
+
+    checkpoint = BlockedCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=1, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    bodies = []
+    for value in (b"first", b"second", b"third"):
+        body = recorder._new("fixture", "https://example.com/page", 200,
+                             {"content-type": "text/plain"})
+        body.add(value)
+        body.finish(True)
+        bodies.append(body)
+        if value == b"first":
+            assert entered.wait(1)
+    assert bodies[2].handoff is None
+    assert bodies[2].buffer == bytearray()
+    release.set()
+    summary = recorder.close()
+    files = list(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_bytes())["data"]["body"] == "third"
+    assert [row["body"] for row in checkpoint.web] == ["first", "second"]
+    assert summary["counts"]["queue_overflow"] == 1

@@ -245,6 +245,9 @@ class Recorder:
             with self.lock:
                 self.retained -= len(body.buffer)
             body.buffer.clear()
+            # The HTTP response can outlive this recorder. The staged file is
+            # the failure handoff; its prepared in-memory copy is no longer used.
+            body.handoff = None
 
     def _enqueue(self, body):
         try:

@@ -2017,6 +2017,7 @@ def _provider_error_event(
 def _buffer_provider_error_event_locked(
     state: RunState, provider_event: Dict[str, Any],
 ) -> None:
+    """Bound the existing runtime diagnostics, including failed socket writes."""
     if len(state.provider_error_events) < MAX_BUFFERED_PROVIDER_ERROR_EVENTS:
         state.provider_error_events.append(provider_event)
         return
@@ -2024,6 +2025,23 @@ def _buffer_provider_error_event_locked(
     content = state.provider_error_events[-1]["content"]
     content["dropped"] = True
     content["dropped_count"] = state.provider_error_events_dropped
+
+
+def _socket_write_failure_event(receipt: Mapping[str, Any], exc: BaseException) -> Dict[str, Any]:
+    # Never retain exception prose, filenames or an arbitrary subclass name.
+    category = next((kind.__name__ for kind in (
+        BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError,
+    ) if isinstance(exc, kind)), "other")
+    number = getattr(exc, "errno", None)
+    return trajectory.event("runtime.socket_write_failed", {
+        "receipt_ordinal": receipt["ordinal"],
+        "action_sequence": receipt["action_sequence"],
+        "call_identity": receipt["call_identity"],
+        "operation_id": receipt["operation_id"],
+        "protocol": receipt["protocol"],
+        "exception_class": category,
+        "errno": number if type(number) is int and 0 <= number <= 65535 else None,
+    })
 
 
 def _provider_error_events(state: RunState) -> List[Dict[str, Any]]:
@@ -2535,7 +2553,9 @@ class WorkerSocketServer:
             self._mark_observations_incomplete()
             return unavailable
 
-    def _mark_socket_delivery(self, report: Mapping[str, Any], *, written: bool) -> None:
+    def _mark_socket_delivery(
+        self, report: Mapping[str, Any], *, written: bool, error: BaseException | None = None,
+    ) -> None:
         ordinal = report.get("receipt_ordinal")
         if type(ordinal) is not int:
             return
@@ -2545,6 +2565,12 @@ class WorkerSocketServer:
                     self._state.worker_observations.mark_socket_write(
                         ordinal, written_at=_timestamp(lambda: datetime.now(timezone.utc)) if written else None,
                     )
+                    if not written and error is not None:
+                        receipt = next(row for row in self._state.worker_observations.response_receipts
+                                       if row["ordinal"] == ordinal)
+                        _buffer_provider_error_event_locked(
+                            self._state, _socket_write_failure_event(receipt, error),
+                        )
         except Exception:
             self._mark_observations_incomplete()
 
@@ -3610,8 +3636,8 @@ class WorkerSocketServer:
                 )
                 try:
                     self._answer(status, response_headers, payload)
-                except BaseException:
-                    server_self._mark_socket_delivery(delivery_report, written=False)
+                except BaseException as exc:
+                    server_self._mark_socket_delivery(delivery_report, written=False, error=exc)
                     raise
                 server_self._mark_socket_delivery(delivery_report, written=True)
 
@@ -3696,8 +3722,8 @@ class WorkerSocketServer:
                     try:
                         server_self._retain_socket_write_deadline(connection)
                         connection.sendall(len(payload).to_bytes(4, "big") + payload)
-                    except OSError:
-                        server_self._mark_socket_delivery(delivery_report, written=False)
+                    except OSError as exc:
+                        server_self._mark_socket_delivery(delivery_report, written=False, error=exc)
                         raise
                     server_self._mark_socket_delivery(delivery_report, written=True)
                 except OSError:

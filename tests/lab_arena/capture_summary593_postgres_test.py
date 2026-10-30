@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,12 @@ import pytest
 from lab_arena.broker import _has_successful_terminal_response
 from lab_arena.training_export import _response_value
 from lab_arena.training_thinking import attempt_coverage
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 SQL = Path(__file__).resolve().parents[2] / "scripts/593-lab-arena-capture-summary-reader.sql"
+POSTGRES_IMAGE = "postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545"
 FUNCTION = "public.lab_arena_capture_summary_v1(text,text)"
 READER = "leadpoet_capture_reader"
 ROUND, SUBMISSION, OTHER = "round-capture593", "sub-capture593", "sub-other593"
@@ -95,7 +99,16 @@ def _python_tokens(terminal, operation):
 
 @pytest.fixture(scope="module")
 def database():
-    yield from current_service_database()
+    # Role membership options (WITH INHERIT FALSE, SET TRUE) need PostgreSQL 16; build on the deployed PG17.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, "_database_with_migrations",
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        generator = current_service_database()
+        database = next(generator)
+    try:
+        yield database
+    finally:
+        generator.close()
 
 
 def _catalog(cur):

@@ -1049,8 +1049,20 @@ class ArenaService:
 
         reading_public = getattr(self, "_reading_public", None)
         if reading_public is not None and getattr(reading_public, "active", False):
-            return self._public_read_store
-        return self._primary_store
+            public_read_store = getattr(self, "_public_read_store", None)
+            if public_read_store is not None:
+                return public_read_store
+        primary_store = getattr(self, "_primary_store", None)
+        if primary_store is not None:
+            return primary_store
+        # Many tests build a service with ``object.__new__`` and drop a store
+        # straight into ``__dict__``, which this data descriptor now shadows.
+        # Honour that injected store rather than making every such test learn
+        # about the primary/public split.
+        injected = self.__dict__.get("_store")
+        if injected is not None:
+            return injected
+        raise AttributeError("_store")
 
     @_store.setter
     def _store(self, value: ArenaStore) -> None:

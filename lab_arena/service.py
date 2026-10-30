@@ -1047,9 +1047,25 @@ class ArenaService:
         together, including the helpers it reaches through.
         """
 
-        if getattr(self._reading_public, "active", False):
+        reading_public = getattr(self, "_reading_public", None)
+        if reading_public is not None and getattr(reading_public, "active", False):
             return self._public_read_store
         return self._primary_store
+
+    @_store.setter
+    def _store(self, value: ArenaStore) -> None:
+        """Replace the store for both the primary and public-read paths.
+
+        Tests (and a few call sites predating the public-read pool) inject a
+        fake or test-specific store by assigning ``service._store`` directly,
+        expecting every read and write to see it regardless of which pool
+        would otherwise be selected. Setting both keeps that pre-split
+        behaviour rather than requiring every call site to know about
+        ``public_reads()``.
+        """
+
+        self._primary_store = value
+        self._public_read_store = value
 
     @property
     def store(self) -> ArenaStore:

@@ -2192,6 +2192,105 @@ def _wayback_original_url(url: str) -> str:
         return ""
 
 
+class _WaybackErrorParser(HTMLParser):
+    """Locate complete archive-service error documents, including iframe HTML."""
+
+    _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
+                       "input", "link", "meta", "param", "source", "track", "wbr"})
+
+    def __init__(self, body: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.body = body
+        self.lines = [0, *(match.end() for match in re.finditer("\n", body))]
+        self.nodes: list[tuple[str, dict, int, dict]] = []
+        self.frames: list[dict] = []
+        self.errors: list[tuple[int, int]] = []
+        self.toolbars: list[tuple[int, int]] = []
+
+    def _offset(self) -> int:
+        line, column = self.getpos()
+        return self.lines[line - 1] + column
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "html":
+            self.frames.append({"start": self._offset(), "title": [],
+                                "service_body": False, "form": False,
+                                "error": False, "source_body": False})
+        if not self.frames:
+            return
+        frame, attributes = self.frames[-1], dict(attrs)
+        if tag == "body" and "navia" in str(attributes.get("class") or "").split():
+            frame["service_body"] = True
+        if tag == "form":
+            action = urlsplit(str(attributes.get("action") or ""))
+            if action.hostname == "web.archive.org" and action.path == "/web/submit":
+                frame["form"] = True
+        if tag not in self._VOID:
+            self.nodes.append((tag, attributes, self._offset(), frame))
+
+    def handle_data(self, data: str) -> None:
+        if not self.frames or not data.strip():
+            return
+        frame = self.frames[-1]
+        nodes = [node for node in self.nodes if node[3] is frame]
+        if any(node[0] in _HTMLShellParser._HIDDEN for node in self.nodes):
+            return
+        ids = {node[1].get("id") for node in nodes}
+        if any(node[0] == "title" for node in nodes):
+            frame["title"].append(data)
+        if {"errorBorder", "error"} <= ids and any(
+            "error-text" in str(node[1].get("class") or "").split() for node in nodes
+        ):
+            frame["error"] = True
+        # Preserve all visible source text, including div/span/direct body
+        # text; only the archive's error, donation and navigation UI is chrome.
+        if (not ids & {"errorBorder", "wm-ipp-base", "wm-ipp-print", "donation-link"}
+            and not any(node[0] in {"footer", "nav", "head"} for node in nodes)
+            and any(node[0] == "body" for node in nodes)):
+            frame["source_body"] = True
+
+    def handle_endtag(self, tag: str) -> None:
+        index = next((i for i in range(len(self.nodes) - 1, -1, -1)
+                      if self.nodes[i][0] == tag), None)
+        if index is None:
+            return
+        end = self.body.find(">", self._offset()) + 1
+        for node_tag, attributes, start, frame in reversed(self.nodes[index:]):
+            if attributes.get("id") in {"wm-ipp-base", "wm-ipp-print"}:
+                self.toolbars.append((start, end))
+            if node_tag == "html":
+                if (" ".join(" ".join(frame["title"]).split()).casefold() == "wayback machine"
+                    and frame["service_body"] and frame["form"] and frame["error"]
+                    and not frame["source_body"]):
+                    self.errors.append((start, end))
+                if self.frames and self.frames[-1] is frame:
+                    self.frames.pop()
+        del self.nodes[index:]
+
+
+def _has_wayback_error_body(body: str) -> bool:
+    """Reject archive error/chrome only when no independent source body remains."""
+    if not _HTML_DOCUMENT_RE.search(body):
+        return False
+    document = _WaybackErrorParser(body)
+    try:
+        document.feed(body)
+        document.close()
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not document.errors:
+        return False
+    remaining, offset = [], 0
+    for start, end in sorted([*document.errors, *document.toolbars]):
+        if start > offset:
+            remaining.append(body[offset:start])
+        offset = max(offset, end)
+    cleaned = "".join([*remaining, body[offset:]])
+    if not _HTML_DOCUMENT_RE.search(cleaned):
+        cleaned = "<html><body>" + cleaned + "</body></html>"
+    return _has_empty_html_body(cleaned)
+
+
 
 async def _try_wayback(url: str) -> Dict[str, Any]:
     """Final-fallback: Wayback Machine snapshot of the URL.
@@ -2241,9 +2340,33 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                 return {"ok": False, "stage": "wayback_http_error",
                         "content": "", "error": f"HTTP {r.status_code}"}
             body = r.text or ""
-            if len(body) < 500:
+            empty_html_body = _has_empty_html_body(body)
+            if len(body) < 500 and not empty_html_body:
                 return {"ok": False, "stage": "wayback_too_short",
                         "content": "", "error": f"len={len(body)}"}
+            # Archive scripts can make an empty challenge shell long enough
+            # to pass the raw-size bound. Reuse direct-fetch body validation
+            # so the caller can continue its exact-source Exa fallback.
+            if empty_html_body or _has_wayback_error_body(body):
+                failure_stage = (
+                    "wayback_html_empty_body" if empty_html_body else "wayback_error_body"
+                )
+                # Discovery may use this failure only when the actual archive
+                # response still belongs to this exact requested source.
+                actual_archive_url = _prompt_exact_url_or_empty(str(r.url))
+                original = _wayback_original_url(actual_archive_url)
+                bound_failure = (
+                    {"requested_url": url, "archive_url": actual_archive_url,
+                     "stage": failure_stage}
+                    if original and _normalize_url(original) == _normalize_url(url)
+                    else None
+                )
+                return {"ok": False, "stage": failure_stage,
+                        "content": "", "error": (
+                            "empty visible HTML body" if empty_html_body
+                            else "archive error without source body"
+                        ),
+                        **({"archive_failure": bound_failure} if bound_failure else {})}
             snapshot_url = str(r.url)
             ownership_meta = {}
             if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):
@@ -2477,6 +2600,7 @@ async def _scrape_sd_hardened(
             "stage_history": history,
         }
 
+    archive_failure = None
     # All ScrapingDog tiers exhausted. Try Wayback as the final source of
     # content — stale snapshot is better than nothing for evidence verification.
     if last_verdict != "pdf_binary" and (
@@ -2484,25 +2608,28 @@ async def _scrape_sd_hardened(
     ):
         wb = await _try_wayback(url)
         history.append(("wayback", wb["stage"]))
+        archive_failure = wb.get("archive_failure")
         if wb["ok"]:
             return {"ok": True, "stage": "wayback",
                     "content": wb["content"], "error": None,
                     "meta": wb.get("meta") or {}, "stage_history": history}
 
-    # A target 404 alone cannot prove semantic absence. The caller compares it
+    # A target 404/410 alone cannot prove semantic absence. The caller compares it
     # with the independent Exa result before separating a missing source from
     # verifier infrastructure failure. Neither case proves miner fabrication.
-    every_attempt_not_found = bool(history) and all(
-        verdict == "http_404" for _tier, verdict in history
+    direct_history = [(tier, verdict) for tier, verdict in history if tier != "wayback"]
+    every_attempt_absent = bool(direct_history) and all(
+        verdict == f"http_{last_status}" for _tier, verdict in direct_history
     )
     fail_label = (
-        "genuine_404"
-        if every_attempt_not_found and last_status == 404
+        f"genuine_{last_status}"
+        if every_attempt_absent and last_status in (404, 410)
         else f"all_tiers_exhausted:{last_verdict}"
     )
     return {"ok": False, "stage": fail_label,
             "content": "", "error": last_verdict,
-            "stage_history": history}
+            "stage_history": history,
+            **({"archive_failure": archive_failure} if archive_failure else {})}
 
 
 def _exa_target_absence_receipt(
@@ -2571,6 +2698,7 @@ def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
 
 
 _EXA_TARGET_CRAWL_FAILURES = {
+    ("CRAWL_EMPTY_CONTENT", 500),
     ("CRAWL_LIVECRAWL_TIMEOUT", 504),
     ("CRAWL_UNKNOWN_ERROR", 500),
     ("SOURCE_NOT_AVAILABLE", 403),
@@ -3326,8 +3454,9 @@ def _confirmed_source_absence(
         isinstance(status, Mapping)
         and status.get("url") == requested_url
         and status.get("source") == "none"
-        and status.get("sd_stage") == "genuine_404"
-        and status.get("sd_error") == "http_404"
+        and (status.get("sd_stage"), status.get("sd_error")) in {
+            ("genuine_404", "http_404"), ("genuine_410", "http_410"),
+        }
         and status.get("exa_stage") == "exa_target_not_found"
         and status.get("exa_error") == "target_not_found"
         and _canonical_target_absence_receipt(
@@ -3361,8 +3490,30 @@ def _unusable_source_allows_same_event_search(
     # Generic 400/403 can also be provider credential or request errors. Do
     # not infer a local denial from those labels alone.
     local_sd_errors = _SD_CONTENT_ESCALATION_VERDICTS | {"http_422", "pdf_binary"}
+    archive_failure = status.get("sd_archive_failure")
+    bound_archive_error = bool(
+        isinstance(archive_failure, Mapping)
+        and set(archive_failure) == {"requested_url", "archive_url", "stage"}
+        and archive_failure.get("requested_url") == requested_url
+        and archive_failure.get("stage") in ("wayback_error_body", "wayback_html_empty_body")
+        and _prompt_exact_url_or_empty(archive_failure.get("archive_url"))
+        and (archived_original := _wayback_original_url(archive_failure["archive_url"]))
+        and _normalize_url(archived_original) == _normalize_url(requested_url)
+    )
+    if sd_stage == "all_tiers_exhausted:http_502" and sd_error == "http_502":
+        # A 502 alone is still uncertain. A bound unusable archive plus two
+        # completed exact-target crawl failures permits the existing search;
+        # none of these observations proves absence or a false company claim.
+        return bool(
+            bound_archive_error and status.get("exa_stage") == "exa_no_results"
+            and _canonical_target_crawl_failure_receipt(
+                status.get("exa_target_crawl_failure")
+            ) is not None
+        )
     if not (
-        (sd_stage == "genuine_404" and sd_error == "http_404")
+        ((sd_stage, sd_error) in {
+            ("genuine_404", "http_404"), ("genuine_410", "http_410"),
+        })
         or (sd_error in local_sd_errors
             and sd_stage == "all_tiers_exhausted:" + sd_error)
     ):
@@ -3923,6 +4074,8 @@ async def _fetch_sd_then_exa(
                 "exa_stage": exa.get("stage"),
                 "exa_error": exa.get("error"),
             }
+            if sd.get("archive_failure"):
+                status["sd_archive_failure"] = sd["archive_failure"]
             target_absence = _canonical_target_absence_receipt(
                 exa.get("target_absence")
             )

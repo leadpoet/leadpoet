@@ -260,11 +260,6 @@ BUYER_REQUEST_EVENT_BLOCK = """  BUYER ORIGINAL REQUEST — MATCHED EVENT ONLY:
     announced, previewed, or planned. Do not turn independent company-fit,
     product-fit, contact-role, or attribute requirements in that broader request into
     extra intent gates; those are checked elsewhere.
-    Evaluate only the chosen target_icp_signal. Other independently listed primary or
-    bonus intent requirements are checked separately; their absence must not change
-    this signal's status or overall verdict. Preserve every requirement within the
-    chosen target, including an explicit conjunction or dependency. A supported
-    bonus does not replace the caller's required primary intent.
     A request for a shipped, released, launched, or currently available
     capability needs source-body proof that customers could use the exact
     submitted capability by the claimed event date. Introducing, announcing,

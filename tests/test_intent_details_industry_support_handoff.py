@@ -83,7 +83,7 @@ def test_support_and_primary_duplicates_are_not_added_twice(monkeypatch):
 
 
 @pytest.mark.parametrize("guard", ["policy_disabled", "fit_not_match", "industry_not_match",
-                                  "identity_not_match", "incomplete_identity"])
+                                  "identity_not_match", "missing_observed_domain", "missing_observed_name"])
 def test_existing_policy_and_match_identity_guards(monkeypatch, guard):
     monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "reviewer")
     inputs = _inputs();receipt = inputs[3]
@@ -91,7 +91,8 @@ def test_existing_policy_and_match_identity_guards(monkeypatch, guard):
     elif guard == "fit_not_match":receipt["decision"] = "unavailable"
     elif guard == "industry_not_match":receipt["dimension_evidence"]["industry"]["decision"] = "mismatch"
     elif guard == "identity_not_match":receipt["dimension_evidence"]["identity"]["web_identity_receipt"]["decision"] = "mismatch"
-    else:receipt["dimension_evidence"]["identity"]["web_identity_receipt"]["observed_linkedin_slug"] = ""
+    elif guard == "missing_observed_domain":receipt["dimension_evidence"]["identity"]["web_identity_receipt"]["observed_domain"] = ""
+    else:receipt["dimension_evidence"]["identity"]["web_identity_receipt"]["observed_name"] = ""
     document = intent_details.review_evidence(*inputs)
     texts = [t for s in document["admitted_evidence"] for t in s.get("admitted_text", [])]
     assert inputs[3]["dimension_evidence"]["industry"]["web_evidence"]["supporting_evidence"][0]["quote"] not in texts

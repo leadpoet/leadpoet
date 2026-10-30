@@ -1579,13 +1579,27 @@ def review_evidence(
         and identity.get("decision") == "match"
         and all(isinstance(identity.get(key), str) and identity[key].strip()
                 for key in (
-                    "observed_name", "observed_domain", "observed_linkedin_slug",
+                    "observed_name", "observed_domain",
                 ))
         and "industry" in company_facts
     ):
         from qualification.scoring.lead_scorer import _industry_supporting_pairs
 
         support = _industry_supporting_pairs(dimensions)
+        if not (isinstance(identity.get("observed_linkedin_slug"), str)
+                and identity["observed_linkedin_slug"].strip()):
+            # The fit gate can verify name/domain without a LinkedIn slug.
+            # Keep its already checked own-domain citations under the same
+            # domain binding used by the industry reviewer. This grants no
+            # authority to ATS, partner or other external-domain citations.
+            from qualification.scoring.company_evidence_investigator import (
+                _independently_bound_first_party_url,
+            )
+            domains = {identity["observed_domain"]}
+            support = [(url, quote) for url, quote in support
+                       if _independently_bound_first_party_url(url, domains, identity)
+                       and _independently_bound_first_party_url(
+                           company_facts["industry"].get("url", ""), domains, identity)]
         if support:
             company_facts["industry"]["supporting_evidence"] = [
                 {"url": url, "quote": quote} for url, quote in support

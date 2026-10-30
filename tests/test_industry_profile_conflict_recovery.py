@@ -1,6 +1,7 @@
 """An unfetched, model-reported profile is not stronger than an exact profile read."""
 
 import asyncio
+import json
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
@@ -123,6 +124,19 @@ def test_native_reverification_fetches_once_and_keeps_other_dimensions(monkeypat
     if homepage_state == "fetch_failure":
         assert result.details["identity_decision"] == "match"
         assert result.details["identity_receipt"]["structured_profile_identity"] == evidence
+        requests.clear()
+        monkeypatch.setattr(scorer, "verify_company_exists", AsyncMock(return_value=homepage))
+        monkeypatch.setattr(scorer, "run_company_zero_checks",
+                            AsyncMock(return_value=scorer.company_fit_match("prechecks passed")))
+        aggregate = asyncio.run(scorer._verify_company_fit(company, _icp(), 0, 0, set(),
+            require_https_transport=True, company_quality=True, evidence_investigator=True))
+        saved = json.loads(json.dumps(aggregate.details))
+        identity = saved["dimension_evidence"]["identity"]
+        assert saved["company_fit_dimensions"]["identity"] == "match"
+        assert identity["homepage_identity_decision"] == "unavailable"
+        assert identity["web_identity_receipt"]["structured_profile_identity"] == evidence
+        assert identity["web_identity_receipt"]["raw_observed_linkedin_slug"] == "acme"
+        assert requests == [("acme.com", company.company_linkedin)]
     else:
         assert result.details["identity_decision"] != "match"
     assert result.details["dimension_decisions"]["industry"] == "match"

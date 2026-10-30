@@ -1073,14 +1073,26 @@ class ArenaService:
 
     @contextlib.contextmanager
     def public_reads(self):
-        """Serve the work in this block from the reserved public pool."""
+        """Serve the work in this block from the reserved public pool.
 
-        previous = getattr(self._reading_public, "active", False)
-        self._reading_public.active = True
+        Some call sites (notably tests that build an ``ArenaService`` with
+        ``object.__new__`` to exercise a single handler) never run
+        ``__init__`` and so never get a ``_reading_public`` thread-local.
+        Create one lazily rather than requiring every such construction to
+        know about this attribute.
+        """
+
+        reading_public = getattr(self, "_reading_public", None)
+        if reading_public is None:
+            reading_public = threading.local()
+            self._reading_public = reading_public
+
+        previous = getattr(reading_public, "active", False)
+        reading_public.active = True
         try:
             yield
         finally:
-            self._reading_public.active = previous
+            reading_public.active = previous
 
     @property
     def scorer_policy(self) -> Dict[str, Any]:

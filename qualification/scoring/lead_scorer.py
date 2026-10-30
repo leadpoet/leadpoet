@@ -4181,6 +4181,17 @@ def _web_identity_receipt(
         verified_homepage_transport_domain,
         company_quality=company_quality,
         homepage_navigation_locators=verified_homepage_navigation_locators,
+        allow_unverified_profile_conflict=(
+            not verified_homepage_identity
+            or (
+                _company_name(verified_homepage_identity.get("normalized_name"))
+                == receipt.get("submitted_name")
+                and verified_homepage_identity.get("registrable_dns_domain")
+                == receipt.get("submitted_domain")
+                and verified_homepage_identity.get("linkedin_company_slug")
+                == receipt.get("submitted_linkedin_slug")
+            )
+        ),
     )
     if structured_receipt:
         if structured_receipt.get("reason_code") == "structured_official_child_identity_verified":
@@ -6209,6 +6220,37 @@ def _structured_profile_identity_anchor(
             }
         if not numeric_alias_recovery_needed:
             return homepage_identity
+    # A recovered exact profile is also the identity for its size, company
+    # type and headquarters fields. Keep those existing checks bound to the
+    # same independent proof instead of losing them with the failed homepage.
+    if (
+        not transport_domain
+        and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        and web_identity.get("decision") == COMPANY_FIT_MATCH
+        and web_identity.get("evidence_source") == "company_web_reverification"
+        and web_identity.get("reason_code") == "structured_exact_profile_identity_verified"
+    ):
+        evidence = web_identity.get("structured_profile_identity")
+        if (
+            isinstance(evidence, Mapping)
+            and set(evidence) == {"name", "provider", "source_field", "url", "website"}
+            and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+            and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+            and _strict_linkedin_company_profile_url(evidence.get("url"))
+            and _company_name(evidence.get("name"))
+            and _canonical_company_domain(evidence.get("website"))
+            and _company_name(evidence.get("name"))
+            == web_identity.get("submitted_name") == web_identity.get("observed_name")
+            and _canonical_company_domain(evidence.get("website"))
+            == web_identity.get("submitted_domain") == web_identity.get("observed_domain")
+            and linkedin_company_page_slug(evidence.get("url"))
+            == web_identity.get("submitted_linkedin_slug") == web_identity.get("observed_linkedin_slug")
+        ):
+            return {
+                "normalized_name": str(evidence["name"]),
+                "registrable_dns_domain": str(web_identity["observed_domain"]),
+                "linkedin_company_slug": str(web_identity["observed_linkedin_slug"]),
+            }
     if (
         web_identity.get("decision") != COMPANY_FIT_MATCH
         or web_identity.get("evidence_source") != "company_web_reverification"
@@ -6478,6 +6520,36 @@ def _alias_unresolved_structured_profile_lookup(
     }
 
 
+def _unverified_profile_conflict_lookup(
+    web_identity: Mapping[str, Any],
+) -> Mapping[str, str]:
+    """Locate independent proof; a model's conflicting profile is not proof."""
+
+    submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "")
+    observed_slug = str(web_identity.get("observed_linkedin_slug") or "")
+    submitted_name = _company_name(web_identity.get("submitted_name"))
+    submitted_domain = str(web_identity.get("submitted_domain") or "")
+    if (
+        not os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        or web_identity.get("evidence_source") != "company_web_reverification"
+        or web_identity.get("decision") != COMPANY_FIT_MISMATCH
+        or web_identity.get("reason_code") != "identity_mismatch"
+        or not submitted_name
+        or submitted_name != _company_name(web_identity.get("observed_name"))
+        or not submitted_domain
+        or submitted_domain != web_identity.get("observed_domain")
+        or not submitted_slug or not observed_slug
+        or submitted_slug == observed_slug
+        or submitted_slug.isdigit() or observed_slug.isdigit()
+    ):
+        return {}
+    return {
+        "normalized_name": submitted_name,
+        "registrable_dns_domain": submitted_domain,
+        "linkedin_company_slug": submitted_slug,
+    }
+
+
 def _structured_profile_alias_identity_receipt(
     company: CompanyOutput,
     web_identity: Mapping[str, Any],
@@ -6487,6 +6559,7 @@ def _structured_profile_alias_identity_receipt(
     company_quality: bool,
     server_verified_homepage_receipt: bool = False,
     homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+    allow_unverified_profile_conflict: bool = False,
 ) -> dict[str, Any]:
     """Bind a common submitted name to one exact structured company profile."""
 
@@ -6503,6 +6576,16 @@ def _structured_profile_alias_identity_receipt(
         else "company_web_reverification"
     )
     base_keys = {"name", "provider", "source_field", "url", "website"}
+    profile_conflict = (
+        _unverified_profile_conflict_lookup(web_identity)
+        if allow_unverified_profile_conflict
+        and not server_verified_homepage_receipt and not transport_domain
+        else {}
+    )
+    identity_domain = (
+        profile_conflict["registrable_dns_domain"]
+        if profile_conflict else transport_domain
+    )
     numeric_alias = web_identity.get("reason_code") == (
         "identity_linkedin_alias_unresolved"
     )
@@ -6528,20 +6611,24 @@ def _structured_profile_alias_identity_receipt(
         or evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
         or evidence.get("source_field") != STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
         or (
-            not official_child
+            not official_child and not profile_conflict
             and web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
         )
         or (
-            not numeric_alias and not official_child
+            not numeric_alias and not official_child and not profile_conflict
             and web_identity.get("reason_code")
             not in {"identity_name_alias_unresolved", "identity_not_proven"}
         )
         or web_identity.get("evidence_source") != expected_source
-        or not transport_domain
-        or web_identity.get("submitted_domain") != transport_domain
+        or not identity_domain
+        or web_identity.get("submitted_domain") != identity_domain
         or (
             not official_child
-            and web_identity.get("observed_domain") != transport_domain
+            and web_identity.get("observed_domain") != identity_domain
+        )
+        or (
+            profile_conflict
+            and not _strict_linkedin_company_profile_url(evidence.get("url"))
         )
         or (
             official_child
@@ -6628,9 +6715,11 @@ def _structured_profile_alias_identity_receipt(
         structured_receipt.get("decision") != COMPANY_FIT_MATCH
         or structured_receipt.get("submitted_name")
         != structured_receipt.get("observed_name")
-        or structured_receipt.get("observed_domain") != transport_domain
+        or structured_receipt.get("observed_domain") != identity_domain
         or structured_receipt.get("observed_linkedin_slug")
-        != web_identity.get("observed_linkedin_slug")
+        != web_identity.get(
+            "submitted_linkedin_slug" if profile_conflict else "observed_linkedin_slug"
+        )
         or (
             web_identity.get("submitted_linkedin_slug")
             and web_identity.get("submitted_linkedin_slug")
@@ -6644,6 +6733,12 @@ def _structured_profile_alias_identity_receipt(
         reason_code="structured_profile_alias_verified",
         structured_profile_identity=dict(evidence),
     )
+    if profile_conflict:
+        resolved.update(
+            reason_code="structured_exact_profile_identity_verified",
+            raw_observed_linkedin_slug=web_identity["observed_linkedin_slug"],
+            observed_linkedin_slug=structured_receipt["observed_linkedin_slug"],
+        )
     if official_child:
         resolved.update(
             reason_code="structured_official_child_identity_verified",
@@ -8686,6 +8781,12 @@ async def _run_targeted_company_evidence_investigation(
         )
     )
     investigation_observed_linkedin = verdict.get("observed_company_linkedin")
+    if investigation_web_identity.get("reason_code") == "structured_exact_profile_identity_verified":
+        # Carry the fetched profile into research without rewriting the raw
+        # model observation retained with the identity receipt.
+        investigation_observed_linkedin = investigation_web_identity[
+            "structured_profile_identity"
+        ]["url"]
     if (
         investigation_observed_linkedin == ""
         and investigation_web_identity.get("decision") == COMPANY_FIT_MATCH
@@ -9941,11 +10042,23 @@ async def _llm_reverify_company(
     if not profile_identity:
         lookup_receipt: Mapping[str, Any] = web_identity_receipt
         server_verified_homepage_receipt = False
+        unverified_profile_conflict = False
         lookup_identity = _alias_unresolved_structured_profile_lookup(
             web_identity_receipt,
             verified_transport_domain,
             homepage_navigation_locators=verified_homepage_navigation_locators,
         )
+        if (
+            not lookup_identity and not verified_identity
+            and not verified_transport_domain
+            and verified_homepage_identity is not None
+            and _homepage_identity_has_retryable_failure(verified_homepage_identity)
+            and not details.get("actual_final_url")
+        ):
+            # The submitted URL locates an independent profile; it cannot
+            # itself override the model's conflicting identity observation.
+            lookup_identity = _unverified_profile_conflict_lookup(web_identity_receipt)
+            unverified_profile_conflict = bool(lookup_identity)
         if not lookup_identity:
             lookup_receipt = unresolved_homepage_identity
             server_verified_homepage_receipt = True
@@ -9981,12 +10094,13 @@ async def _llm_reverify_company(
                     server_verified_homepage_receipt
                 ),
                 homepage_navigation_locators=verified_homepage_navigation_locators,
+                allow_unverified_profile_conflict=unverified_profile_conflict,
             )
             if resolved_identity:
                 current_profile_cache["structured_employee_size_applicable"] = True
                 profile_identity = {
                     "normalized_name": str(structured_identity["name"]),
-                    "registrable_dns_domain": verified_transport_domain,
+                    "registrable_dns_domain": str(resolved_identity["observed_domain"]),
                     "linkedin_company_slug": str(
                         resolved_identity["observed_linkedin_slug"]
                     ),

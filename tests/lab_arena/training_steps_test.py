@@ -51,7 +51,7 @@ def fixture():
             'response': response, 'terminal_entry_id': 5,
             'response_receipts': [{'entry_id': 5, 'response_ref': {'field': 'response', 'entry_id': 5}, 'response_sha256': c.document_hash(response), 'wire_body_sha256': wire, 'wire_body_bytes': 100, 'metadata': {'status': 200}}],
             'response_provenance': {'agent_receipt': 'reported_exact_body_received', 'delivery_to_worker': 'socket_written', 'worker_received_receipt_entry_ids': [5], 'worker_receipt_ref': {'run_id': 'run', 'ordinal': 1, 'payload_sha256': ph}, 'agent_receipt_refs': [{'run_id': 'run', 'id': 'ack', 'payload_sha256': ph}]}}
-    return seal({'schema_version': 'leadpoet.lab_arena.training_example.v1', 'run_id': 'run', 'round_id': 'arena-2026-10-20', 'round_status': 'published', 'submission_id': 'sub', 'icp_position': 0, 'assignment_id': 'a', 'attempt': 1, 'icp': {'industry': 'test'}, 'provider_calls': [call], 'worker_observation_artifacts': {'run': {'payload': payload, 'payload_sha256': ph}}, 'judgment': {'per_icp_score': 1, 'future_secret': 'FUTURE JUDGE'}, 'completeness': {'complete': False, 'incomplete_reasons': ['direct_web_content_not_captured']}})
+    return seal({'schema_version': 'leadpoet.lab_arena.training_example.v1', 'run_id': 'run', 'round_id': 'arena-2026-10-20', 'round_status': 'published', 'submission_id': 'sub', 'stage': 1, 'icp_position': 0, 'assignment_id': 'a', 'attempt': 1, 'icp': {'industry': 'test'}, 'provider_calls': [call], 'worker_observation_artifacts': {'run': {'payload': payload, 'payload_sha256': ph}}, 'judgment': {'per_icp_score': 1, 'future_secret': 'FUTURE JUDGE'}, 'completeness': {'complete': False, 'incomplete_reasons': ['direct_web_content_not_captured']}})
 
 
 def records(example):

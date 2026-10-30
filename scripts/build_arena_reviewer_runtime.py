@@ -244,6 +244,7 @@ def extract_frozen_sources(
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
     archive_snapshot_https: bool = False,
+    greenhouse_api_source: bool = False,
     auxiliary_source_name_binding: bool = False,
     homepage_linkedin_conflict_repair: bool = False,
     observed_linkedin_ampersand: bool = False,
@@ -265,7 +266,7 @@ def extract_frozen_sources(
             names += BOUND_IDENTITY_FILES
         if verified_homepage_brand_alias:
             names += BRAND_IDENTITY_FILES
-        if archive_snapshot_https:
+        if archive_snapshot_https or greenhouse_api_source:
             names += (ARCHIVE_FILE,)
         for name in dict.fromkeys(names):
             path = destination / name
@@ -289,6 +290,7 @@ def expected_overlay(
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
     archive_snapshot_https: bool = False,
+    greenhouse_api_source: bool = False,
     numeric_profile_legal_self_name: bool = False,
     single_tool_protocol_repair: bool = False,
     rejected_final_packet: bool = False,
@@ -316,7 +318,7 @@ def expected_overlay(
         expected.update(BOUND_IDENTITY_FILES)
     if verified_homepage_brand_alias:
         expected.update(BRAND_IDENTITY_FILES)
-    if archive_snapshot_https:
+    if archive_snapshot_https or greenhouse_api_source:
         expected.add(ARCHIVE_FILE)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
@@ -393,6 +395,11 @@ def expected_overlay(
     if archive_snapshot_https:
         from scripts.arena_reviewer_archive_https_seam import convert_archive_https_seam
         files[ARCHIVE_FILE] = convert_archive_https_seam(original[ARCHIVE_FILE])
+    if greenhouse_api_source:
+        from scripts.arena_reviewer_greenhouse_api_source_seam import convert_greenhouse_api_source_seam
+        files[ARCHIVE_FILE] = convert_greenhouse_api_source_seam(
+            files.get(ARCHIVE_FILE, original[ARCHIVE_FILE])
+        )
     if auxiliary_source_name_binding:
         from scripts.arena_reviewer_auxiliary_source_name_seam import (
             convert_auxiliary_source_name_seam,
@@ -486,6 +493,10 @@ def main() -> int:
         help="use HTTPS for an exact source-bound Wayback snapshot locator; use the same option for --verify-image",
     )
     parser.add_argument(
+        "--greenhouse-api-source", action="store_true",
+        help="read exact Greenhouse API postings through the existing bound source parser; use the same option for --verify-image",
+    )
+    parser.add_argument(
         "--auxiliary-source-name-binding", action="store_true",
         help="omit optional auxiliary context rejected by the existing exact-name rule; use the same option for --verify-image",
     )
@@ -537,6 +548,8 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
                if args.bound_homepage_legal_alias else {}),
             **({"archive_snapshot_https": True}
                if args.archive_snapshot_https else {}),
+            **({"greenhouse_api_source": True}
+               if args.greenhouse_api_source else {}),
             **({"authenticated_page_refusal": True}
                if args.authenticated_page_refusal else {}),
             **({"auxiliary_source_name_binding": True}
@@ -562,6 +575,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             single_tool_protocol_repair=args.single_tool_protocol_repair,
             rejected_final_packet=args.rejected_final_packet,
             archive_snapshot_https=args.archive_snapshot_https,
+            greenhouse_api_source=args.greenhouse_api_source,
             **({"source_blocked_alias": True} if args.source_blocked_alias else {}),
             auxiliary_source_name_binding=args.auxiliary_source_name_binding,
             homepage_linkedin_conflict_repair=args.homepage_linkedin_conflict_repair,
@@ -582,6 +596,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-bound-homepage-legal-alias" if args.bound_homepage_legal_alias else "")
             + ("-numeric-legal-self-name" if args.numeric_profile_legal_self_name else "")
             + ("-archive-https" if args.archive_snapshot_https else "")
+            + ("-greenhouse-api" if args.greenhouse_api_source else "")
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
             + ("-rejected-final-packet" if args.rejected_final_packet else "")
             + ("-auxiliary-name-binding" if args.auxiliary_source_name_binding else "")
@@ -653,6 +668,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         if args.archive_snapshot_https:
             from scripts.arena_reviewer_archive_https_seam import CORRECTION_ID as ARCHIVE_HTTPS_CORRECTION_ID
             corrections.append(ARCHIVE_HTTPS_CORRECTION_ID)
+        if args.greenhouse_api_source:
+            from scripts.arena_reviewer_greenhouse_api_source_seam import CORRECTION_ID as GREENHOUSE_API_CORRECTION_ID
+            corrections.append(GREENHOUSE_API_CORRECTION_ID)
         if args.auxiliary_source_name_binding:
             from scripts.arena_reviewer_auxiliary_source_name_seam import CORRECTION_ID as AUXILIARY_NAME_CORRECTION_ID
             corrections.append(AUXILIARY_NAME_CORRECTION_ID)

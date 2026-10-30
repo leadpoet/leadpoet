@@ -98,8 +98,9 @@ To enable it:
    `capture_reader_key` to the private renderer input, render both files and
    restart the pair as an explicit key rotation (README, "Private
    configuration"). The other keys stay unchanged.
-4. Store the key as the site's Arena capture reader secret. Never reuse the
-   Arena, gateway or public key.
+4. Store the key as the site's `LEADPOET_ARENA_CAPTURE_KEY` (leadpoet-site
+   `docs/runbooks/aws-ecs-cutover.md`, "Read the arena call ledger"). Never
+   reuse the Arena, gateway or public key.
 5. Verify with the new key: `POST /rest/v1/rpc/lab_arena_capture_summary_v1`
    with `{"p_round_id": ..., "p_submission_id": ...}` returns one row, and a
    table read such as `GET /rest/v1/lab_arena_ledger?limit=1` returns 403.

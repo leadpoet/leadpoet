@@ -3,6 +3,7 @@ import asyncio
 import gzip
 import hashlib
 import http.client
+import json
 import threading
 import sys
 import time
@@ -12,6 +13,7 @@ from urllib.request import urlopen
 
 import pytest
 
+from lab_arena import automatic_capture, lab_arena_checkpoint
 from lab_arena.automatic_capture import install
 
 
@@ -1229,3 +1231,114 @@ def test_unread_metadata_checkpoint_failure_does_not_change_response(endpoint):
     assert summary["counts"]["checkpoint_failure"] == 1
     assert summary["complete"] is False
     assert endpoint[1].paths == ["/text"]
+
+
+def test_shutdown_keeps_consumed_inflight_bytes_with_exact_retry_token(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockedCheckpoint:
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            self.sent = kwargs
+            entered.set()
+            release.wait(2)
+            return None
+
+        def _training_failure_reason(self):
+            return "timeout"
+
+    checkpoint = BlockedCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.01,
+                                          handoff_dir=tmp_path)
+    body = recorder._new("fixture", "https://example.com/page", 200, {"content-type": "text/plain"})
+    body.add(b"consumed before shutdown")
+    body.finish(True)
+    assert entered.wait(1)
+    started = time.monotonic()
+    summary = recorder.close()
+    assert time.monotonic() - started < 0.2
+    assert summary["complete"] is False and summary["inflight"] == 1
+    frames = list(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(frames) == 1
+    frame = json.loads(frames[0].read_bytes())
+    assert frame["data"]["body"] == "consumed before shutdown"
+    assert frame["data"]["retrieved_at"] == body.retrieved_at
+    assert frame["retry_token"] == checkpoint.sent["_retry_token"]
+    release.set()
+    recorder.worker.join(2)
+    assert frames[0].is_file()
+
+
+def test_handoff_capacity_marks_gap_and_keeps_response_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(automatic_capture, "HANDOFF_MAX_BYTES", 1)
+
+    class CheckpointWithSchema(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+    checkpoint = CheckpointWithSchema()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    body = recorder._new("fixture", "https://example.com/page", 200, {"content-type": "text/plain"})
+    body.add(b"unchanged response")
+    body.finish(True)
+    summary = recorder.close()
+    assert summary["counts"]["handoff_overflow"] == 1
+    assert summary["complete"] is False
+    assert not list(tmp_path.iterdir())
+    assert [row["body"] for row in checkpoint.web] == ["unchanged response"]
+
+
+def test_unstaged_recorder_keeps_best_effort_after_one_failed_checkpoint():
+    class IntermittentCheckpoint(Checkpoint):
+        def record_web_fetch(self, **kwargs):
+            if not hasattr(self, "failed"):
+                self.failed = True
+                return None
+            return super().record_web_fetch(**kwargs)
+
+    checkpoint = IntermittentCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25)
+    for value in (b"first", b"second"):
+        body = recorder._new("fixture", "https://example.com/page", 200,
+                             {"content-type": "text/plain"})
+        body.add(value)
+        body.finish(True)
+    summary = recorder.close()
+    assert summary["counts"]["checkpoint_failure"] == 1
+    assert [row["body"] for row in checkpoint.web] == ["second"]
+
+
+def test_staged_recorder_keeps_later_live_success_and_only_failed_frame(tmp_path):
+    class IntermittentCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            self.web.append(kwargs)
+            return None if len(self.web) == 1 else len(self.web)
+
+    checkpoint = IntermittentCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    for value in (b"first", b"second"):
+        body = recorder._new("fixture", "https://example.com/page", 200,
+                             {"content-type": "text/plain"})
+        body.add(value)
+        body.finish(True)
+    summary = recorder.close()
+    assert [row["body"] for row in checkpoint.web] == ["first", "second"]
+    assert summary["counts"]["checkpoint_failure"] == 1
+    frames = sorted(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(frames) == 1
+    assert json.loads(frames[0].read_bytes())["data"]["body"] == "first"

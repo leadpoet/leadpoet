@@ -33,5 +33,14 @@
         "sha256": "1d2f64ccd8defa1dab4ca28f18955d766881f0de382a0d7a5f1b32beb21c5f92"
       }
     }
+  },
+  "archive_https": {
+    "commit": "b3d19fdb2293d275cd267d184a30dcdfcffe6983",
+    "files": {
+      "qualification/scoring/intent_verification_three_stage.py": {
+        "fixture": "archive_https-intent_verification_three_stage.py.gz",
+        "sha256": "c14e0c66fee5c08d4e896bc1dc83dcfd18e7debfa659437103a52e67abf3c0c2"
+      }
+    }
   }
 }

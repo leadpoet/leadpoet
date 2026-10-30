@@ -2384,6 +2384,11 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                     ),
                     "ownership_archive_url": snapshot_url,
                 }
+            # Before truncating, reuse direct-fetch extraction so a large
+            # style/script header cannot consume the whole evidence bound.
+            if len(body) > MAX_SCRAPED_CHARS:
+                from qualification.scoring.verification_helpers import extract_article_body
+                body = extract_article_body(body)
             return {"ok": True, "stage": "wayback",
                     "content": body[:MAX_SCRAPED_CHARS], "meta": ownership_meta, "error": None}
     except Exception as e:

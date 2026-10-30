@@ -2210,14 +2210,15 @@ def _quote_supports_sec_equity_listing(
         return False
     # A bare NASDAQ cell ends the quoted row or precedes the next SEC heading;
     # it must not admit a different venue such as Nasdaq Private Market.
+    # Allow Markdown cell/alignment syntax without joining separate data rows.
     return bool(re.search(
         r"securities\s+registered\s+pursuant\s+to\s+section\s+12\s*\(b\)"
         r".{0,100}title\s+of\s+each\s+class"
         r".{0,40}trading\s+symbol(?:s|\(s\))?(?![a-z]|\s*\(s\))"
         r".{0,40}name\s+of\s+each\s+exchange\s+on\s+which\s+registered"
-        r"\s+(?:(?:class\s+[a-z]|voting|non-voting)\s+)?"
+        r"[\s|:-]{1,100}(?:(?:class\s+[a-z]|voting|non-voting)\s+)?"
         r"(?:common\s+(?:stock|shares)|ordinary\s+shares)"
-        r"[^;]{0,100}?\s+[a-z][a-z0-9.-]{0,9}\s+(?:the\s+)?"
+        r"[^;|]{0,100}?\s+(?:\|\s*)?[a-z][a-z0-9.-]{0,9}\s+(?:\|\s*)?(?:the\s+)?"
         r"(?:nasdaq\s+(?:stock\s+market|global\s+(?:select\s+)?market|"
         r"capital\s+market)|nasdaq(?=\s*[.;]?\s*(?:$|"
         r"indicate\s+by\s+check\s+mark\b))|new\s+york\s+stock\s+exchange)\b",

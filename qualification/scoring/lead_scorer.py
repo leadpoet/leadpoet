@@ -426,7 +426,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(
         r"(?:(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+){1,8}"
-        r"|(?<=[a-z])\s+"
+        r"|(?<=[a-z0-9])\s+"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*(?<!\.)|(?:[A-Z]\.)+|[&+])\s+){0,7}"
         r"(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+)"
         + _PUBLIC_EXCHANGE_TICKER_LOCATOR,
@@ -641,6 +641,22 @@ def _has_affirmed_stage_proof(
                 if supersession_patterns
                 else suffix_clause
             )
+            if pattern is _PUBLIC_STAGE_PROOF_PATTERNS[2]:
+                # The issuer/ticker is a complete listing statement. A separate
+                # business announcement does not make that listing prospective.
+                # Keep listing/ownership announcements and later supersession
+                # subject to the normal guards below.
+                announcement = re.split(r"[.!?;\n]", text[match.end():], maxsplit=1)[0]
+                if re.match(
+                    r"\s+(?:today\s+)?announc(?:ed|es)\s+(?:today\s+)?that\s+",
+                    announcement, re.I,
+                ) and not re.search(
+                    r"\b(?:list(?:ed|ing)?|trad(?:e|ed|es|ing)|ipo|public|private|"
+                    r"shares?|stock|securities|exchange|ticker|ownership|acqui\w*|"
+                    r"merger|delist\w*|status)\b", announcement, re.I,
+                ):
+                    proof_suffix_clause = ""
+                    suffix = ""
             context = text[max(0, match.start() - 40):match.end() + 60]
             if (
                 _has_stage_proof_uncertainty(prefix)

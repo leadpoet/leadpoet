@@ -81,6 +81,25 @@ def test_registered_equity_table_accepts_sec_symbol_header_variants(header):
     assert validate(quote)["status"] == "VERIFIED"
 
 
+@pytest.mark.parametrize("alignment", ["", "| --- | --- | --- |", "| :--- | :---: | ---: |"])
+def test_fetched_markdown_table_preserves_registered_equity_proof(alignment):
+    quote = QUOTE[:QUOTE.index("Title of each class")] + (
+        "| Title of each class | Trading Symbol(s) | "
+        "Name of each exchange on which registered | " + alignment +
+        " | Common Stock, $0.00001 par value | CISO | The Nasdaq Stock Market LLC |"
+    )
+    finding = validate(quote)
+    assert finding["status"] == "VERIFIED"
+    assert finding["evidence_quote"] == quote
+    assert validate(quote.replace("Common Stock", "Convertible Notes"))["status"] == "UNPROVEN"
+    assert validate(quote.replace("CISO GLOBAL, INC.", "OTHER COMPANY, INC."))["status"] == "UNPROVEN"
+    assert validate(quote, page=QUOTE)["status"] == "UNPROVEN"
+    assert validate(quote.replace(
+        "| CISO | The Nasdaq Stock Market LLC |",
+        "| None | None | | Convertible Notes | CISO | The Nasdaq Stock Market LLC |",
+    ))["status"] == "UNPROVEN"
+
+
 @pytest.mark.parametrize("quote", [
     QUOTE.replace("Common Stock", "Convertible Notes"),
     QUOTE.replace("Common Stock", "Preferred Stock"),

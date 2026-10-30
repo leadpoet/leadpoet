@@ -769,6 +769,7 @@ def _openrouter_web_search_enabled(parameters: Mapping[str, Any]) -> bool:
 class OpenRouterHostRoute:
     provider_policy: Mapping[str, Any]
     reservation_pricing: Mapping[str, str]
+    industry_schema_order: bool = False
 
 
 def _json_decimal_number(value: Decimal) -> Any:
@@ -858,6 +859,7 @@ def _openrouter_host_route(
     }
     return OpenRouterHostRoute(
         provider_policy=provider_policy,
+        industry_schema_order=industry_route,
         reservation_pricing={
             component: format(value.normalize(), "f")
             for component, value in regional.items()
@@ -5057,6 +5059,7 @@ class Broker:
                     effective_operation_id, effective_normalized,
                     deepline_catalog=context.deepline_catalog,
                     source_html_profile=source_html_profile,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
@@ -5128,6 +5131,7 @@ class Broker:
                     effective_operation_id,
                     effective_normalized,
                     deepline_catalog=context.deepline_catalog,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
@@ -6036,6 +6040,7 @@ class Broker:
             effective_normalized,
             deepline_catalog=context.deepline_catalog,
             source_html_profile=source_html_profile,
+            industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
             openrouter_provider_policy=(
                 openrouter_host_route.provider_policy
                 if openrouter_host_route is not None

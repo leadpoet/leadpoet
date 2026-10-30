@@ -11,7 +11,7 @@
 -- entry_id) must hold a saved 2xx success (broker
 -- _has_successful_terminal_response). Its body is strict base64 of at most
 -- 16 MiB, UTF-8 (optional BOM) JSON. Reasoning tokens are the largest
--- non-negative integer at usage.reasoning_tokens,
+-- non-negative integer with 1 to 19 digits at usage.reasoning_tokens,
 -- usage.completion_tokens_details.reasoning_tokens or
 -- usage.output_tokens_details.reasoning_tokens. Any other body counts as a
 -- completed call with no reported usage and never raises.
@@ -136,7 +136,7 @@ BEGIN
             FROM unnest(ARRAY[usage_doc -> 'reasoning_tokens',
                               usage_doc -> 'completion_tokens_details' -> 'reasoning_tokens',
                               usage_doc -> 'output_tokens_details' -> 'reasoning_tokens']) AS v
-            WHERE json_typeof(v) = 'number' AND v::TEXT ~ '^-?[0-9]{1,18}$';
+            WHERE json_typeof(v) = 'number' AND v::TEXT ~ '^-?[0-9]{1,19}$';
           END IF;
         EXCEPTION
           WHEN character_not_in_repertoire OR invalid_text_representation

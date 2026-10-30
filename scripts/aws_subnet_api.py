@@ -92,6 +92,9 @@ def render_nginx(values: Mapping[str, str], *, upstream: str = "127.0.0.1:3000",
     if not _UPSTREAM.fullmatch(upstream) or not _UPSTREAM.fullmatch(listen):
         raise ConfigurationError("invalid HTTP address")
     roles = key_roles(values)
+    # The optional reader's role:role map key exceeds nginx's default bucket.
+    # Keep the existing three-key configuration byte-identical when disabled.
+    map_size = "    map_hash_bucket_size 128;\n" if roles.keys() - KEY_ROLES.keys() else ""
     keys = "\n".join('        ~^%s$ %s;' % (values[name], role) for name, role in roles.items())
     bearers = "\n".join('        "~^[Bb][Ee][Aa][Rr][Ee][Rr] +%s$" %s;' % (values[name], role)
                         for name, role in roles.items())
@@ -105,7 +108,7 @@ pid /tmp/nginx.pid;
 error_log /dev/null crit;
 events {{ worker_connections 1024; }}
 http {{
-    access_log off;
+{map_size}    access_log off;
     server_tokens off;
     client_body_temp_path /tmp/client-body;
     proxy_temp_path /tmp/proxy;

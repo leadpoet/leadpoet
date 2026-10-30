@@ -68,6 +68,8 @@ def test_optional_capture_reader_key_maps_only_its_own_role():
     values["capture_reader_key"] = "sb_secret_Capture_" + "Ee5_" * 10
     body = api.render_nginx(values)
     reader = "leadpoet_capture_reader"
+    assert "    map_hash_bucket_size 128;\n" in body
+    assert "map_hash_bucket_size" not in before[0]
     assert "        ~^%s$ %s;" % (values["capture_reader_key"], reader) in body
     assert '        "~^[Bb][Ee][Aa][Rr][Ee][Rr] +%s$" %s;' % (values["capture_reader_key"], reader) in body
     assert "        %s %s;" % (reader, api.role_jwt(reader, values["jwt_secret"])) in body

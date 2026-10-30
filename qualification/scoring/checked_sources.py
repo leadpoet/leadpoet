@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -44,6 +45,34 @@ def _url_ref(value):
     return {"url_sha256": _hash(value), **(
         {"url": value} if not parsed.query and not parsed.fragment else {}
     )}
+
+
+def _industry_excerpt(page):
+    # Recognize the host's source_messages envelope, not arbitrary user JSON,
+    # locator snippets or model replies. IDs/offsets check representation only;
+    # neither they nor these private observations attest source authority.
+    if (not isinstance(page, Mapping) or set(page) != {"source_id", "source_url", "spans"}
+            or not isinstance(page["source_id"], str)
+            or not isinstance(page["spans"], list) or not 1 <= len(page["spans"]) <= 3):
+        return None
+    chunks, previous = [], None
+    for span in page["spans"]:
+        if (not isinstance(span, Mapping) or set(span) != {"span_id", "text"}
+                or not isinstance(span["span_id"], str) or len(span["span_id"]) > 200
+                or not isinstance(span["text"], str) or not span["text"]):
+            return None
+        ref = re.fullmatch(r"([0-9a-f]{16}):([A-Za-z0-9_.-]{1,120}):([0-9]+):([0-9]+)", span["span_id"])
+        if not ref or ref[2] != page["source_id"]:
+            return None
+        start, end = int(ref[3]), int(ref[4])
+        if (end - start != len(span["text"].encode("utf-8"))
+                or (previous is not None and (ref[1], start) != previous)):
+            return None
+        previous = ref[1], end
+        chunks.append(span["text"])
+    # A page may span several host messages. Hash this exact contiguous shown
+    # excerpt, not an unseen whole page or the span IDs/JSON wrapper.
+    return {"url": page["source_url"], "text": "".join(chunks)}
 
 
 def checked_source_provenance(*, request_document, messages, claims):
@@ -139,6 +168,13 @@ def _checked_source_provenance(request_document, messages, claims):
             if isinstance(industry_discovery, Mapping):
                 for position, item in enumerate(industry_discovery.get('results') or ()):
                     add('search_locator_only', item, index, position, raw)
+        elif message.get("role") == "user" and raw.startswith('{"untrusted_source_pages":'):
+            envelope = json.loads(raw)
+            if (set(envelope) == {"untrusted_source_pages"}
+                    and isinstance(envelope["untrusted_source_pages"], list)
+                    and len(envelope["untrusted_source_pages"]) == 1):
+                add("loaded_page_excerpt", _industry_excerpt(envelope["untrusted_source_pages"][0]),
+                    index, 0, raw)
         elif message.get("role") == "tool" and message.get("name") in {"fetch_page", "search_web"}:
             result = json.loads(raw)
             if not isinstance(result, Mapping) or result.get("error"):

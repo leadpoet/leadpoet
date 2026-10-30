@@ -234,3 +234,34 @@ def test_aggregate_trim_of_three_short_prefetches_exposes_exact_continuation():
         assert later["text"] == body[page["next_offset"]:]
     short = {"url": URL, "text": "Untrimmed original short page."}
     assert json.loads(c._bounded_message_json(short)) == short
+
+
+
+def test_trimmed_submitted_hints_do_not_advertise_uncached_continuation():
+    body = "Original cached material. " * 800
+    assert 15000 < len(body) < c.MAX_PAGE_CHARACTERS
+    hint = {"url": "https://acme.example/unfetched", "text": "Submitted hint. " * 1300}
+    document = {
+        "prior_observations": {"submitted_source_hints": [hint]},
+        "prefetched_sources": [
+            {"url": URL + str(index), "text": body} for index in range(3)
+        ],
+    }
+    shown = json.loads(c._bounded_message_json(document))
+    shown_hint = shown["prior_observations"]["submitted_source_hints"][0]
+    assert len(shown_hint["text"]) < len(hint["text"])
+    assert set(shown_hint) == {"url", "text"}
+    for page in shown["prefetched_sources"]:
+        assert page["available_length"] == len(body)
+        assert page["offset"] == 0
+        assert page["next_offset"] == len(page["text"]) < 15000
+    assert document["prior_observations"]["submitted_source_hints"][0] == hint
+
+
+def test_trimmed_top_level_successful_fetch_advertises_cached_continuation():
+    body = "Original cached material. " * 800
+    page = {"ok": True, "url": URL, "text": body, "notice": "n" * 18000}
+    shown = json.loads(c._bounded_message_json(page))
+    assert shown["available_length"] == len(body)
+    assert shown["next_offset"] == len(shown["text"]) < len(body)
+    assert shown["offset"] == 0

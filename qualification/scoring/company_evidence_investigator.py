@@ -1180,10 +1180,17 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
             for child in item:
                 collect(child)
 
+    def cached_page_projection(container: dict[str, Any]) -> bool:
+        if container is document:
+            return container.get("ok") is True
+        pages = document.get("prefetched_sources") if isinstance(document, dict) else None
+        return isinstance(pages, list) and any(container is page for page in pages)
+
     def encode() -> str:
         for container, original_text in evidence_texts:
             if (
-                isinstance(container.get("url"), str)
+                cached_page_projection(container)
+                and isinstance(container.get("url"), str)
                 and "offset" not in container
                 and len(container["text"]) < len(original_text) <= MAX_SOURCE_CHARACTERS
             ):

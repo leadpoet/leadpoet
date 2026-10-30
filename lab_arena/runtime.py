@@ -42,7 +42,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from lab_arena import contracts
+from lab_arena import automatic_capture, contracts, lab_arena_checkpoint
 from lab_arena.operations import SCRAPINGDOG_RUNTIME_HANDLE
 from lab_arena.runtime_host import (
     ArenaRuntimeError,
@@ -612,6 +612,8 @@ class SandboxResult:
     checkpoint_output_invalid: bool = False
     # Bounded sandbox report only; never scoring or billing authority.
     automatic_capture_summary: Optional[Dict[str, Any]] = None
+    automatic_capture_handoff: Tuple[bytes, ...] = ()
+    automatic_capture_handoff_invalid: bool = False
 
 
 def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Optional[bytes]:
@@ -665,6 +667,43 @@ def read_automatic_capture_summary(spec: SandboxSpec) -> Optional[Dict[str, Any]
         return document
     except (SandboxOutputError, ValueError, UnicodeError, RecursionError):
         return unavailable
+
+
+def read_automatic_capture_handoff(spec: SandboxSpec) -> Tuple[Tuple[bytes, ...], bool]:
+    """Copy bounded run-local frames before the output tmpfs is removed."""
+    if spec.automatic_capture_path is None:
+        return (), False
+    frames: List[bytes] = []
+    invalid = False
+    total = 0
+    names: List[str] = []
+    try:
+        for scanned, entry in enumerate(spec.output_dir.iterdir()):
+            if scanned >= 4096:
+                invalid = True
+                break
+            if entry.name.startswith(automatic_capture.HANDOFF_PREFIX):
+                if (not re.fullmatch(r"\.arena-capture-frame-[0-9]{8}", entry.name)
+                        or len(names) >= automatic_capture.HANDOFF_MAX_FILES):
+                    invalid = True
+                    continue
+                names.append(entry.name)
+        for name in sorted(names):
+            try:
+                raw = _read_bounded_output(
+                    spec.output_dir / name, max_bytes=lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES,
+                )
+            except SandboxOutputError:
+                invalid = True
+                continue
+            if raw is None or total + len(raw) > automatic_capture.HANDOFF_MAX_BYTES:
+                invalid = True
+                continue
+            frames.append(raw)
+            total += len(raw)
+    except OSError:
+        invalid = True
+    return tuple(frames), invalid
 
 
 class _BoundedCapture:
@@ -1151,6 +1190,7 @@ def run_sandbox(
                 output_bytes = read_output(spec)
             except SandboxOutputError as exc:
                 output_error = str(exc)
+        handoff_frames, handoff_invalid = read_automatic_capture_handoff(spec)
         result = SandboxResult(
             exit_code=None if timed_out else int(process.returncode),
             timed_out=timed_out,
@@ -1166,6 +1206,8 @@ def run_sandbox(
             output_error=output_error,
             checkpoint_output_invalid=latest_checkpoint_invalid,
             automatic_capture_summary=read_automatic_capture_summary(spec),
+            automatic_capture_handoff=handoff_frames,
+            automatic_capture_handoff_invalid=handoff_invalid,
         )
     finally:
         if process is not None and process.poll() is None:

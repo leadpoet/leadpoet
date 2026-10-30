@@ -553,20 +553,26 @@ def _greenhouse_posting_identity(source_url: str) -> tuple[str, str] | None:
         parsed = urlsplit(canonical)
     except (TypeError, ValueError):
         return None
-    if (
-        _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(
-            (parsed.hostname or "").casefold()
-        )
-        is None
-        or parsed.fragment
-    ):
+    if parsed.fragment:
         return None
-    match = _GREENHOUSE_EXACT_POSTING_PATH_RE.fullmatch(parsed.path)
+    api_source = (parsed.hostname or "").casefold() == "boards-api.greenhouse.io"
+    if api_source:
+        match = re.fullmatch(
+            r"/v1/boards/(?P<board>[A-Za-z0-9_-]{1,100})/jobs/"
+            r"(?P<posting>[0-9]{5,20})/?", parsed.path,
+        )
+    elif _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(
+        (parsed.hostname or "").casefold()
+    ):
+        match = _GREENHOUSE_EXACT_POSTING_PATH_RE.fullmatch(parsed.path)
+    else:
+        return None
     if match is None:
         return None
     posting = match.group("posting")
     query = parse_qsl(parsed.query, keep_blank_values=True)
-    if query and query != [("gh_jid", posting)]:
+    allowed_query = [("content", "true")] if api_source else [("gh_jid", posting)]
+    if query and query != allowed_query:
         return None
     return match.group("board"), posting
 
@@ -1914,7 +1920,9 @@ def _ats_board_identity(url: str) -> tuple[str, str] | None:
         clean = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
         host = (parsed.hostname or "").casefold()
         provider = host
-        if _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(host):
+        if host == "boards-api.greenhouse.io":
+            provider = "greenhouse:"
+        elif _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(host):
             region = host.split(".")[1:-2]
             provider = "greenhouse:" + ".".join(region)
         for parser in (_ashby_posting_identity, _greenhouse_posting_identity,
@@ -2844,7 +2852,11 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                             last_error = "target_result_mismatch"
                             terminal_stage = "exa_source_mismatch"
                         else:
-                            text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
+                            text = result.get("text")
+                            if text is not None and not isinstance(text, str):
+                                return {"ok": False, "stage": "exa_failed",
+                                        "content": "", "error": "non_string_text"}
+                            text = (text or "")[:MAX_SCRAPED_CHARS]
                             if len(text) >= 300:
                                 from qualification.scoring.intent_details import _validated_source_title
                                 source_title = _validated_source_title(result.get("title"))

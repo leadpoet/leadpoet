@@ -11,6 +11,16 @@ OTHER = "https://example.test/news/related"
 BODY = "The requested page describes its own launch. " * 12
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [{"title": "Not source text"}, ["Not source text"], 42, True])
+async def test_non_string_text_is_an_explicit_provider_contract_failure(monkeypatch, text):
+    calls = _transport(monkeypatch, [{"results": [_result(text=text)]}])
+    scraped = await verifier._scrape_exa(URL)
+    assert len(calls) == 1
+    assert scraped == {"ok": False, "stage": "exa_failed",
+                       "content": "", "error": "non_string_text"}
+
+
 def _result(url=URL, **extra):
     return {"url": url, "text": BODY, "title": "Launch report",
             "publishedDate": "2026-08-04T12:00:00Z", **extra}

@@ -2,7 +2,10 @@
 import json
 import threading
 
+import pytest
+
 from lab_arena import contracts, validator
+from lab_arena.weight_signer import ArenaWeightSignerError
 from test_arena_validator import _orchestrator, _protected, _Signer
 
 
@@ -118,3 +121,81 @@ def test_already_reported_outcomes_use_no_recovery_slot(tmp_path):
     orchestrator._confirm = lambda _signed: None
     orchestrator.poll_prior_outcomes(10)
     assert seen == [6]
+
+
+def test_proved_prior_expiry_is_terminal_across_polls_and_restart(tmp_path):
+    proof = {
+        "status": "not_included_expired", "finalized": False,
+        "finalized_head": {"block": 1200}, "finalized_nonce": 7,
+    }
+    signer = _Signer(_protected(), [proof])
+    broadcasts = []
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    assert orchestrator.run_once(9) == "broadcast"
+    signed_path = orchestrator.paths.signed(9)
+    signed_bytes = signed_path.read_bytes()
+    signed = validator._read_hashed_json(signed_path)
+
+    def unexpected_sign_or_report(_document):
+        raise AssertionError("expired prior outcome needs no signature or report")
+
+    signer.sign_arena_chain_outcome_v1 = unexpected_sign_or_report
+    orchestrator.api.submit_chain_outcome = unexpected_sign_or_report
+    assert orchestrator.poll_prior_outcomes(10) is True
+    outcome = validator._read_hashed_json(orchestrator.paths.outcome(9))
+    assert outcome is not None
+    assert outcome == {
+        "schema_version": "leadpoet.arena.validator_chain_outcome.v1",
+        "state_hash": signed["state_hash"], "epoch": 9,
+        "extrinsic_hash": signed["extrinsic_hash"], "outcome": proof,
+        "report_document": None, "reported": True,
+        "record_hash": outcome["record_hash"],
+    }
+    outcome_bytes = orchestrator.paths.outcome(9).read_bytes()
+    assert orchestrator.poll_prior_outcomes(10) is True
+    restarted = _orchestrator(tmp_path, signer, broadcasts)
+    assert restarted.poll_prior_outcomes(10) is True
+    assert signed_path.read_bytes() == signed_bytes
+    assert orchestrator.paths.outcome(9).read_bytes() == outcome_bytes
+    assert signer.prepares == signer.confirms == signer.recoveries == 1
+    assert broadcasts == ["0xdeadbeef"]
+
+
+@pytest.mark.parametrize("result", [
+    {"status": "pending", "finalized": False},
+    {"status": "included_pending_reveal", "finalized": False},
+    {"status": "unproved", "finalized": False},
+    "confirm_error",
+    "recovery_error",
+])
+def test_unproved_prior_outcomes_remain_recoverable_without_new_submission(tmp_path, result):
+    outcomes = [result, result] if isinstance(result, dict) else []
+    signer = _Signer(_protected(), outcomes)
+    broadcasts = []
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    assert orchestrator.run_once(9) == "broadcast"
+    signed_path = orchestrator.paths.signed(9)
+    signed_bytes = signed_path.read_bytes()
+    errors = []
+
+    def fail(_request):
+        errors.append(result)
+        raise ArenaWeightSignerError("unproved prior outcome")
+
+    if result == "confirm_error":
+        signer.confirm_arena_weight_extrinsic_v1 = fail
+    elif result == "recovery_error":
+        signer.recover_arena_weight_extrinsic_v1 = fail
+    expected_ok = isinstance(result, dict) and result["status"] in {
+        "pending", "included_pending_reveal",
+    }
+    for _ in range(2):
+        assert orchestrator.poll_prior_outcomes(10) is expected_ok
+        assert not orchestrator.paths.outcome(9).exists()
+        assert signed_path.read_bytes() == signed_bytes
+    if isinstance(result, dict):
+        assert signer.confirms == signer.recoveries == 2
+    else:
+        assert errors == [result, result]
+    assert signer.prepares == 1
+    assert broadcasts == ["0xdeadbeef"]

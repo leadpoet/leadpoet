@@ -36,15 +36,13 @@ def sources(**options):
         names.append(builder.VERIFICATION_FILE)
     if options.get("bound_homepage_legal_alias"):
         names.extend(builder.BOUND_IDENTITY_FILES)
-    if options.get("archive_snapshot_https"):
-        names.append(builder.ARCHIVE_FILE)
     result = {
         name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
     if options.get("archive_snapshot_https"):
-        # A historical overlay accepts its reviewed archive function only.
+        # This seam accepts its exact historical function, not today's source.
         from tests.test_arena_archive_snapshot_https import original_source
         result[builder.ARCHIVE_FILE] = original_source()
     if options.get("rejected_final_packet"):

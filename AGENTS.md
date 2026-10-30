@@ -1,3 +1,22 @@
+## Scoped authorization: October 29 exact champion exception
+
+The user explicitly authorized manually crowning the highest-scoring October 29
+submission sub-cb3105f830853c1452b889ab5cadee7e for its earned +8 reward slot.
+The coordinator may prepare, independently review, test, commit and merge one
+exact, identity- and hash-guarded database correction, preserving the original
+publication and signed history, measured scores, training failures and already
+issued or accepted epochs. Record the operator exception without pretending that
+training evidence passed. Use the existing canonical promotion, atomic lab/main
+Git publication, signing, reward activation and normal validator weight flow.
+Publish the exact winning model code and verify baseline, champion, rewards and
+finalized weights end to end. Add no separate manual promotion/signing path,
+generic eligibility bypass, arbitrary weights, dependencies or unrelated changes.
+Internal agents own isolated implementation and review only; the coordinator
+owns production actions through existing AWS administrative and release controls.
+Permanent capture or accounting fixes remain investigation and recommendation
+only until the user approves them. This authority ends after the exact champion
+correction is verified. Preserve all concurrent work and deployment ownership.
+
 ## Scoped authorization: October 29 post-migration production audit
 
 The user explicitly authorized a full post-migration production audit with fresh
@@ -466,7 +485,7 @@ security review and production deployment. Do not change PR 825 scorer behavior
 or unrelated runtime work. This authority ends after deployment and native
 validation complete.
 
-AWS access: use the existing `leadpoet-lab` (SSO `LabOperator`) profile for routine work in account `493765492819`, region `us-east-1`. Use the `leadpoet-admin` profile with Identity Center `pranav-admin` only for explicitly authorized administrative changes. Never use a root session. Verify the caller identity before any write. Reuse valid cached temporary credentials across checks and subagents; start a new session only when no valid cached credentials remain.
+AWS access: use the existing `leadpoet-lab` (SSO `LabOperator`) profile for routine work in account `493765492819`, region `us-east-1`. Use the `leadpoet-admin` profile with Identity Center `pranav-admin` only for explicitly authorized administrative changes. Never use a root session. Verify the caller identity before any write. For Admin, use cache-only `gateway_iam_session` or `python3 -m scripts.aws_admin_cached`; checks and subagents must never renew credentials, and one designated coordinator may renew once after expiry.
 
 ## Scoped authorization: October 27 SSM access hardening
 

@@ -1,7 +1,7 @@
 """Native paragraph requests retain mixed facts and uncertain outcomes separately.
 
 Model replies are controlled fixtures. These tests prove request/guard behavior,
-not that a live model follows the clarification.
+not that a live model follows the rubric.
 """
 import asyncio
 from copy import deepcopy
@@ -66,13 +66,11 @@ def test_healthy_conditional_and_mixed_fact_controls(monkeypatch, text, factual,
     assert result['checks']['facts_supported'] is supported
     assert result['checks']['connects_icp'] is business
     system = ' '.join(calls[0]['system_prompt'].split())
-    assert 'asserted or presupposed company products or capabilities' in system
-    assert 'Mark a mixed unit factual if it contains any such claim' in system
-    assert 'conditional outcome itself need not have occurred' in system
-    assert 'without adding ownership, exclusivity, or development-method restrictions' in system
-    assert 'it does not establish that the company created the original component' in system
-    assert 'Source attribution is valid prose.' in system
-    assert 'completeness of a selected excerpt' in system
+    assert 'check every factual clause' in system
+    assert 'conditional commercial implication with no new asserted fact' in system
+    assert 'An unconditional increase, effect, or performance outcome is a factual assertion' in system
+    assert 'Require natural prose, not headings, bullet lists, field labels or internal scoring commentary' in system
+
 
 
 @pytest.mark.parametrize('correction_consistent', [False, True])
@@ -86,10 +84,8 @@ def test_existing_complete_correction_preserves_guard_and_call_bound(monkeypatch
     assert all(c['max_tokens'] == 800 and c['model'] == review.REVIEW_MODEL
                and c['max_retries'] == 0 and c['response_format'] == review._RESPONSE_FORMAT for c in calls)
     correction = ' '.join(calls[1]['system_prompt'].split())
-    assert 'If facts_supported is false, identify at least one' in correction
-    assert 'UNPROVEN or CONTRADICTED factual unit' in correction
-    assert 'assess the independent relevance and ICP checks separately' in correction
-    assert 'without adding ownership, exclusivity, or development-method restrictions' in correction
+    assert "every unit's factual classification, status and evidence" in correction
+    assert 'No particular decision is requested' in correction
     if correction_consistent:
         assert result['decision'] == 'mismatch'
         assert result['checks']['facts_supported'] is False

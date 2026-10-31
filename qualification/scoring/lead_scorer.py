@@ -8083,6 +8083,20 @@ def _positive_semantic_review_needed(
     dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
     if dimensions.get("industry") != COMPANY_FIT_MATCH:
         return False
+    if (
+        os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        and result.decision == COMPANY_FIT_MISMATCH
+        and "rebrand" not in investigation_targets
+        and "identity" in _incomplete_company_reverify_dimensions(
+            result,
+            icp_attribute=active_attribute,
+            icp_stage=_normalize_company_stage(getattr(icp, "company_stage", "")),
+        )
+    ):
+        # A recognized homepage identity conflict still permits the full
+        # schema repair to replace this mismatch. Share the already planned
+        # investigation; its industry finding must survive that later repair.
+        return True
     attribute_decision = details.get("required_attribute_decision")
     if active_attribute and attribute_decision not in {
         COMPANY_FIT_MATCH,

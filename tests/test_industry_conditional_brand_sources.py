@@ -45,7 +45,7 @@ def native_loop(monkeypatch, *, proof=PROOF, parent_text=RELATION, href=HOME,
         if target == PARENT:
             link = '<a href="' + href + '">WorkflowCo</a>' if href else ''
             return 200, PARENT, '<main>' + parent_text + link + '</main>'
-        assert target == CHILD
+        assert target in {CHILD, c.public_http_url(CHILD)}
         return 200, child_final, '<main>' + child_text + '</main>'
 
     async def search(*args, **kwargs):
@@ -60,7 +60,8 @@ def native_loop(monkeypatch, *, proof=PROOF, parent_text=RELATION, href=HOME,
         reviews.append(payload)
         pages = [page for message in payload['messages'][2:]
                  for page in json.loads(message['content'])['untrusted_source_pages']]
-        available = any(page['source_url'] == CHILD for page in pages)
+        child_urls = {CHILD, c.public_http_url(CHILD)}
+        available = any(page['source_url'] in child_urls for page in pages)
         parent_spans = [span for page in pages if page['source_url'] == PARENT for span in page['spans']]
         parent_body = ''.join(span['text'] for span in parent_spans)
         parent_quote = proof.get('parent_quote', RELATION) if isinstance(proof, dict) else RELATION
@@ -70,7 +71,7 @@ def native_loop(monkeypatch, *, proof=PROOF, parent_text=RELATION, href=HOME,
         selected = [span['span_id'] for span in parent_spans
                     if not omit_relation and int(span['span_id'].rsplit(':', 2)[2]) > start
                     and int(span['span_id'].rsplit(':', 2)[1]) < end]
-        selected += [span['span_id'] for page in pages if page['source_url'] == CHILD for span in page['spans']]
+        selected += [span['span_id'] for page in pages if page['source_url'] in child_urls for span in page['spans']]
         selected = list(dict.fromkeys(selected))
         if child_first:
             selected = sorted(selected, key=lambda key: next(
@@ -557,11 +558,18 @@ def test_native_linked_brand_root_accepts_empty_path_equivalent_without_request_
     target = 'https://workflowco.example' + query
     home = 'https://workflowco.example/' + query
     monkeypatch.setitem(globals(), 'CHILD', target)
+    requested = []
+    original = c._fetch_page
+    async def record_read(session, url, **kwargs):
+        requested.append(url)
+        return await original(session, url, **kwargs)
+    monkeypatch.setattr(c, '_fetch_page', record_read)
     proof = {**PROOF, 'official_child_homepage': home}
     result, reads, _, _ = native_loop(monkeypatch, proof=proof, href=home)
-    assert reads == [PARENT, target]
+    assert requested == [PARENT, target]  # The scope check did not rewrite the tool argument.
+    assert reads == [PARENT, home]  # Existing exact reader canonicalization is unchanged.
     assert result['claims']['industry']['status'] == 'VERIFIED'
-    assert result[c.PRIVATE_INDUSTRY_BINDINGS_KEY]['brands'][target]['child_final_url'] == target
+    assert result[c.PRIVATE_INDUSTRY_BINDINGS_KEY]['brands'][home]['child_final_url'] == home
 
 
 def test_root_spelling_equivalence_does_not_relax_homepage_query_scope():

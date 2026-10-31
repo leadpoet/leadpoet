@@ -7284,7 +7284,7 @@ async def investigate_company_evidence(
                                 if key != "final_url"
                             }
                     if brand_proposal is not None and tool_result.get('ok'):
-                        if remember_brand_source(brand_proposal, safe_url):
+                        if remember_brand_source(brand_proposal, str(tool_result['url'])):
                             tool_result['industry_source_status'] = 'conditional_provenance_not_ownership'
                         else:
                             tool_result = {'ok': False, 'error': 'unbound_industry_brand_source'}

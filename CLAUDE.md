@@ -10,6 +10,18 @@ coordinator owns independent review, push, merge and canonical deployment after
 checks. Do not change production or renew credentials from an internal agent.
 This scope does not establish the cause of the initial thread-resource shortage.
 
+## Scoped authorization: October 31 bounded launcher pipe drain
+
+The user authorized the narrow fix for the locally reproduced blocking pipe
+close after an interrupted sandbox launcher. Internal agents may change the
+runtime, focused tests and these identical instruction files, then test and
+commit only. Preserve captured bytes, completed outputs, timeout and signal
+classification, cleanup, scoring, costs and all concurrent work. The coordinator
+owns independent review and any later push, merge or canonical deployment.
+Internal agents must not change production. Add no dependencies, provider
+replays, credential renewals or host process-kill workarounds. The coordinator
+may deploy through the existing canonical controllers after review and tests.
+This fix does not establish the cause of the Yuma interruption or missing events.
 
 ## Scoped authorization: October 30 usable training eligibility
 

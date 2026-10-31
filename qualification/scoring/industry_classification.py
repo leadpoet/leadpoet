@@ -236,7 +236,7 @@ def request_payload(packet, *, model, research=False):
             'evaluation_date. Mere investment ownership, partner/dealer/customer links, reversed or '
             'negated relationships, future/pending acquisitions, and brands divested before that date '
             'cannot supply its capabilities. Later divestiture does not erase proved earlier operation. '
-            'Read all supporting and contrary parent context. If using child facts for match, cite '
+            'Read all supporting and contrary parent context. If using child facts for match or mismatch, cite '
             'both the actual parent relationship/operating context and child capability spans. '
             'A parent-name/identity passage alone is insufficient. If the relationship or complete '
             'criterion remains unproved, return unavailable/mismatch under the normal rules. '
@@ -321,7 +321,7 @@ def resolve(packet, response, *, research=False):
         raise ValueError("conclusive decision requires bound evidence")
     if decision == "match" and role != "supplier_operator":
         raise ValueError("match requires own supplier/operator role")
-    if decision == 'match':
+    if decision in {'match', 'mismatch'}:
         cited = [spans[i] for i in ids]
         used_urls = {item['source_url'] for item in cited}
         for item in packet.conditional_sources:

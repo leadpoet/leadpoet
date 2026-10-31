@@ -577,3 +577,34 @@ def test_root_spelling_equivalence_does_not_relax_homepage_query_scope():
         'https://workflowco.example/?tenant=one')
     assert not c._industry_brand_scope('https://workflowco.example/?tenant=two',
         'https://workflowco.example?tenant=one')
+
+
+def test_child_only_mismatch_cannot_establish_nonfit_about_canonical_parent(monkeypatch):
+    result, _, _, _ = native_loop(monkeypatch, decision='mismatch', omit_relation=True)
+    assert result['claims']['industry']['status'] != 'CONTRADICTED'
+    assert result['failure_reason'] == 'malformed_response'
+
+
+def test_paired_parent_relationship_and_child_can_support_native_mismatch(monkeypatch):
+    result, _, _, _ = native_loop(monkeypatch, decision='mismatch')
+    assert result['failure_reason'] == ''
+    assert result['claims']['industry']['_industry_review']['decision'] == 'mismatch'
+
+
+def test_parent_only_negative_and_child_only_unavailable_keep_existing_contract(monkeypatch):
+    result, _, _, _ = native_loop(monkeypatch)
+    packet = industry.prepare({'industry': 'Software', 'subindustry': '', 'product_service': 'Workflows'},
+        {'name': 'Coreworks', 'website': 'https://www.coreworks.ai/'},
+        [{'source_id': 'parent', 'source_url': PARENT, 'body': RELATION},
+         {'source_id': 'child', 'source_url': CHILD, 'body': FACT}],
+        evaluation_date='2026-10-24',
+        conditional_sources=result[c.PRIVATE_INDUSTRY_BINDINGS_KEY]['brands'])
+    refs={url:[key for key,span in packet.spans().items()if span['source_url']==url]
+          for url in(PARENT,CHILD)}
+    response={'decision':'mismatch','role':'supplier_operator','observed_activity':'Different offering',
+        'reason':'Parent evidence establishes a different operating offering.',
+        'missing_requirements':['Requested offering'],'evidence_span_ids':refs[PARENT]}
+    assert industry.resolve(packet,response)['decision']=='mismatch'
+    response.update(decision='unavailable',reason='The parent relationship remains unproved.',
+        evidence_span_ids=refs[CHILD])
+    assert industry.resolve(packet,response)['decision']=='unavailable'

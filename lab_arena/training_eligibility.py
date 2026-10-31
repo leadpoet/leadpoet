@@ -295,6 +295,11 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 try:
                     candidate = training_steps._candidate(example, call, worker_proofs=worker_proofs)
                 except ValueError as exc:
+                    if (new_policy and str(exc) == "response_privacy_nonexact"
+                            and training_thinking.verified_private_explicit_truncation(
+                                example, call, worker_proofs=worker_proofs)):
+                        reasoning_counts["truncated_model_calls"] += 1
+                        continue
                     if new_policy and _verified_provider_output_fault(example, call, worker_proofs=worker_proofs):
                         run_reasons.append("provider_output_untrainable")
                         continue

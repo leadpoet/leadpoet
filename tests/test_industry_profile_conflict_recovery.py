@@ -235,4 +235,3 @@ def test_research_uses_fetched_profile_and_retains_raw_observation(monkeypatch):
     assert result[1].details["identity_receipt"]["structured_profile_identity"] == evidence
     assert result[1].details["dimension_decisions"]["industry"] == "unavailable"
     assert verdict == original
-

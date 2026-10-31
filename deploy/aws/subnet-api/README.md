@@ -14,7 +14,8 @@ Docker Desktop deployment recipe.
 
 ## Private configuration
 
-The renderer takes a mode 0600 JSON regular file with exactly these names:
+The renderer takes a mode 0600 JSON regular file with exactly these names,
+plus the optional names listed after them:
 
 - `arena_key`: existing Arena `sb_secret_` key; maps to `lab_arena_service` on RDS.
 - `gateway_key`: separate existing gateway `sb_secret_` key; maps to `service_role` on RDS.
@@ -27,6 +28,13 @@ The renderer takes a mode 0600 JSON regular file with exactly these names:
   `sslmode=verify-full&sslrootcert=/run/subnet-api/rds-ca.pem`. The CLI
   requires these TLS settings. Set `SUBNET_API_CA_FILE` to the reviewed AWS
   CA file for compose's read-only mount; neither tool retrieves it.
+
+Optional:
+
+- `capture_reader_key`: Leadpoet website's own distinct `sb_secret_` key; maps
+  to `leadpoet_capture_reader`, which may execute only
+  `lab_arena_capture_summary_v1` (`lab_arena/RUNBOOK.md`, "Capture summary
+  reader"). Leaving it out renders the same bytes as before it existed.
 
 The API uses only the dedicated AWS RDS PostgREST connection. Target is the
 default backend; explicit `--rest-backend target` produces the same private
@@ -155,7 +163,8 @@ own payload limits. Request and response buffering are disabled.
 The owner must create/review the authenticator on RDS separately. It must be LOGIN,
 NOINHERIT, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION and NOBYPASSRLS.
 On PostgreSQL 17 its only SET memberships must be `anon`, `service_role` and
-`lab_arena_service`, with INHERIT and ADMIN false. It must never SET
+`lab_arena_service`, plus `leadpoet_capture_reader` once the capture reader is
+enabled, with INHERIT and ADMIN false. It must never SET
 `lab_arena_owner`, `postgres`, `arena_admin` or a platform owner role.
 
 Run these password-free, read-only review queries on the RDS target:
@@ -165,7 +174,8 @@ SELECT rolname,rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,
        rolreplication,rolbypassrls,rolconfig
 FROM pg_roles
 WHERE rolname IN ('anon','service_role','lab_arena_service',
-                  'lab_arena_owner','leadpoet_subnet_authenticator');
+                  'leadpoet_capture_reader','lab_arena_owner',
+                  'leadpoet_subnet_authenticator');
 
 SELECT granted.rolname AS granted_role,recipient.rolname AS recipient,
        m.admin_option,m.inherit_option,m.set_option
@@ -179,6 +189,7 @@ FROM pg_db_role_setting s
 LEFT JOIN pg_roles r ON r.oid=s.setrole
 LEFT JOIN pg_database d ON d.oid=s.setdatabase
 WHERE r.rolname IN ('anon','service_role','lab_arena_service',
+                   'leadpoet_capture_reader',
                    'leadpoet_subnet_authenticator') OR s.setrole=0;
 ```
 

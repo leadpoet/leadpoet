@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -138,12 +139,15 @@ def stack(tmp_path_factory):
                       TO service_role USING (auth.role()='service_role')
                       WITH CHECK (auth.role()='service_role');
                 """)
+                cursor.execute((Path(__file__).resolve().parents[2] /
+                    "scripts/593-lab-arena-capture-summary-reader.sql").read_text())
             directory = tmp_path_factory.mktemp("private-api-" + suffix)
             directory.chmod(0o700)
             values = {
                 "arena_key": "sb_secret_Arena_Aa1_" + suffix * 4,
                 "gateway_key": "sb_secret_Gateway_Bb2_" + suffix * 4,
                 "public_key": "sb_publishable_Public_Cc3_" + suffix * 4,
+                "capture_reader_key": "sb_secret_Capture_Dd4_" + suffix * 4,
                 "jwt_secret": JWT_SECRET,
                 "db_uri": "postgres://authenticator:authenticator-pw@database:5432/postgres",
             }
@@ -170,17 +174,22 @@ def stack(tmp_path_factory):
             base_url = "http://127.0.0.1:%d" % proxy_port
             with httpx.Client(timeout=10, trust_env=False) as client:
                 deadline = time.monotonic() + 60
+                last_status = None
                 while time.monotonic() < deadline:
                     try:
                         response = client.post(base_url + "/rest/v1/rpc/api_test_identity",
                             headers={"apikey": values["arena_key"]}, json={})
+                        last_status = response.status_code
                         if response.status_code == 200:
                             break
                     except httpx.HTTPError:
                         pass
                     time.sleep(0.25)
                 else:
-                    pytest.fail("private compatibility pair did not become ready")
+                    states = [_docker("inspect", "--format", "{{.State.Status}}:{{.State.ExitCode}}", name).stdout.strip()
+                              for name in (rest_name, proxy_name)]
+                    pytest.fail("private compatibility pair did not become ready: HTTP %s, states %s" %
+                                (last_status, states))
             yield {"base_url": base_url, "connection": connection, "values": values,
                    "proxy_name": proxy_name, "rest_name": rest_name}
         finally:
@@ -457,6 +466,82 @@ def test_private_backend_has_no_anonymous_fallback(stack):
     response = _docker("exec", stack["proxy_name"], "wget", "-q", "-O", "-",
                        "http://" + stack["rest_name"] + ":3000/rpc/api_test_identity")
     assert response.returncode != 0 and "401" in response.stderr
+
+
+def test_capture_reader_opaque_key_returns_only_aggregates_and_cannot_escalate(stack):
+    headers = {"apikey": stack["values"]["capture_reader_key"]}
+    arguments = {"p_round_id": "capture-reader-route", "p_submission_id": "baseline-route"}
+    with httpx.Client(base_url=stack["base_url"], timeout=10, trust_env=False) as client:
+        response = client.post("/rest/v1/rpc/lab_arena_capture_summary_v1", headers=headers, json=arguments)
+        assert response.status_code == 200, response.text
+        assert response.json() == [{"round_id": arguments["p_round_id"],
+            "submission_id": arguments["p_submission_id"], "execute_runs": 0, "icp_positions": [],
+            "model_calls": 0, "usage_calls": 0, "reasoning_tokens": None,
+            "first_call_at": None, "last_call_at": None}]
+        for table in ("lab_arena_ledger", "lab_arena_runs", "lab_arena_submissions"):
+            assert client.get("/rest/v1/" + table + "?limit=1", headers=headers).status_code == 403
+            assert client.post("/rest/v1/" + table, headers=headers, json={}).status_code == 403
+        assert client.post("/rest/v1/rpc/lab_arena_create_round", headers=headers,
+                           json={"p_round_id": "reader-must-not-create", "p_configuration": {}}).status_code in (403, 404)
+        for name in ("arena_key", "gateway_key", "public_key"):
+            assert client.post("/rest/v1/rpc/lab_arena_capture_summary_v1",
+                headers={"apikey": stack["values"][name]}, json=arguments).status_code == 403
+            assert client.post("/rest/v1/rpc/lab_arena_capture_summary_v1",
+                headers={**headers, "Authorization": "Bearer " + stack["values"][name]},
+                json=arguments).status_code == 401
+        assert client.post("/rest/v1/rpc/lab_arena_capture_summary_v1",
+            headers={**headers, "X-JWT-Claims": '{"role":"service_role"}'}, json=arguments).status_code == 200
+        assert client.get("/rest/v1/lab_arena_ledger?limit=1",
+            headers={**headers, "X-JWT-Claims": '{"role":"service_role"}'}).status_code == 403
+
+
+def test_capture_reader_request_timeout_is_applied_by_postgrest(stack):
+    # Temporary fixture-only introspection; the production reader still has one RPC.
+    with stack["connection"].cursor() as cursor:
+        cursor.execute("GRANT EXECUTE ON FUNCTION public.api_test_identity() TO leadpoet_capture_reader")
+    try:
+        response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_identity",
+            headers={"apikey": stack["values"]["capture_reader_key"]}, json={}, timeout=10, trust_env=False)
+        assert response.status_code == 200, response.text
+        assert response.json()["role"] == "leadpoet_capture_reader"
+        assert response.json()["statement_timeout"] == "1min"
+    finally:
+        with stack["connection"].cursor() as cursor:
+            cursor.execute("REVOKE EXECUTE ON FUNCTION public.api_test_identity() FROM leadpoet_capture_reader")
+
+
+def test_capture_reader_baseline_and_miner_usage_reaches_http_without_private_bodies(stack):
+    round_id = "capture-route-" + uuid4().hex[:10]
+    with stack["connection"].cursor() as cursor:
+        cursor.execute("SET session_replication_role=replica")
+        for submission, kind, reported in (("baseline", "execute", 123), ("miner", "execute", 456),
+                                          ("miner", "score", 9999)):
+            run_id = round_id + submission + kind
+            cursor.execute("INSERT INTO public.lab_arena_runs (run_id,assignment_id,round_id,submission_id,"
+                "miner_hotkey,stage,icp_position,attempt,kind,scoring_generation_floor) "
+                "VALUES (%s,%s,%s,%s,'private-test-hotkey',1,0,1,%s,0)",
+                (run_id, run_id, round_id, submission, kind))
+            terminal = {"call_succeeded": True, "status": 200, "body_b64": base64.b64encode(json.dumps({
+                "usage": {"reasoning_tokens": reported}, "private_reasoning": "private-test-reasoning"
+            }).encode()).decode()}
+            for entry_kind in ("reservation", "settlement"):
+                cursor.execute("INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,round_id,"
+                    "submission_id,run_id,stage,call_identity,provider,operation_id,amount_microusd,terminal_response) "
+                    "VALUES (%s,'private-test-hotkey',%s,%s,%s,1,%s,'openrouter','openrouter.chat',0,%s)",
+                    (entry_kind, round_id, submission, run_id, 'sha256:' + hashlib.sha256(run_id.encode()).hexdigest(),
+                     json.dumps(terminal) if entry_kind == "settlement" else None))
+        cursor.execute("SET session_replication_role=origin")
+    with httpx.Client(base_url=stack["base_url"], timeout=10, trust_env=False) as client:
+        for submission, reported in (("baseline", 123), ("miner", 456)):
+            response = client.post("/rest/v1/rpc/lab_arena_capture_summary_v1",
+                headers={"apikey": stack["values"]["capture_reader_key"]},
+                json={"p_round_id": round_id, "p_submission_id": submission})
+            assert response.status_code == 200, response.text
+            assert len(response.json()) == 1
+            summary = response.json()[0]
+            assert (summary["execute_runs"], summary["model_calls"], summary["usage_calls"],
+                    summary["reasoning_tokens"]) == (1, 1, 1, reported)
+            assert "private-test" not in response.text and "body_b64" not in response.text
 
 
 def test_long_run_filter_and_postgrest_content_location_survive_target(stack):

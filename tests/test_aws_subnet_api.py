@@ -62,6 +62,38 @@ def test_client_identities_cannot_share_key():
         api.render_nginx(values)
 
 
+def test_optional_capture_reader_key_maps_only_its_own_role():
+    values = secrets()
+    before = api.render_nginx(values), api.render_postgrest(values)
+    values["capture_reader_key"] = "sb_secret_Capture_" + "Ee5_" * 10
+    body = api.render_nginx(values)
+    reader = "leadpoet_capture_reader"
+    assert "    map_hash_bucket_size 128;\n" in body
+    assert "map_hash_bucket_size" not in before[0]
+    assert "        ~^%s$ %s;" % (values["capture_reader_key"], reader) in body
+    assert '        "~^[Bb][Ee][Aa][Rr][Ee][Rr] +%s$" %s;' % (values["capture_reader_key"], reader) in body
+    assert "        %s %s;" % (reader, api.role_jwt(reader, values["jwt_secret"])) in body
+    assert '        "%s:%s" 1;\n        "%s:absent" 1;' % (reader, reader, reader) in body
+    assert body.count(reader + ":") == 2
+    assert api.render_postgrest(values) == before[1]
+    # Removing the key is the rollback: it restores the exact previous files.
+    del values["capture_reader_key"]
+    assert (api.render_nginx(values), api.render_postgrest(values)) == before
+
+
+@pytest.mark.parametrize("name,value", [
+    ("capture_reader_key", "sb_publishable_Capture_" + "Ee5_" * 10),
+    ("capture_reader_key", 'sb_secret_";include /etc/passwd;'),
+    ("capture_reader_key", None),
+    ("reader_key", "sb_secret_Capture_" + "Ee5_" * 10),
+])
+def test_capture_reader_key_must_be_a_valid_named_secret_key(name, value):
+    values = secrets()
+    values[name] = value if value is not None else values["arena_key"]
+    with pytest.raises(api.ConfigurationError):
+        api.render_nginx(values)
+
+
 @pytest.mark.parametrize("backend_args", [[], ["--rest-backend", "target"]])
 def test_configuration_permissions_and_no_secret_stdout(tmp_path, backend_args):
     source = tmp_path / "private-input.json"

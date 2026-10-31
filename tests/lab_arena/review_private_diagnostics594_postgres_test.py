@@ -95,17 +95,77 @@ def test_diagnostics_persist_only_in_per_attempt_private_ledger(recovery_store, 
 def test_invalid_diagnostic_cannot_cross_database_edge(recovery_store, index, field, value):
     submission, miner, token = _claim(recovery_store, "f%02x" % index)
     diagnostic = {**DIAGNOSTIC, field: value}
-    with pytest.raises(ArenaStoreError, match="lab_arena_code_review_input_invalid"):
-        recovery_store.finish_submission_review(
-            submission, miner, token, "error",
-            {**_document(), "provider_diagnostic": diagnostic}, 1234,
+    assert recovery_store.finish_submission_review(
+        submission, miner, token, "error",
+        {**_document(), "provider_diagnostic": diagnostic}, 1234,
+    )["status"] == "error"
+    ledger = recovery_store.list_ledger(submission_id=submission)
+    assert len(ledger) == 3
+    assert ledger[-1]["amount_microusd"] == 1234
+    assert "provider_diagnostic" not in ledger[-1]["entry_doc"]
+
+
+@pytest.mark.parametrize("status,actual", [("passed", 1234), ("rejected", 1234), ("error", 1234), ("error", None)])
+@pytest.mark.parametrize("diagnostic", [
+    None, [], {}, {**DIAGNOSTIC, "response_model": "future/review-model"},
+    {**DIAGNOSTIC, "raw_response": "private provider prose"},
+    {**DIAGNOSTIC, "raw_response": "private provider prose" * 5000},
+], ids=["null", "array", "empty", "future_model", "unknown_field", "oversize"])
+def test_invalid_optional_diagnostic_matches_absent_diagnostic(recovery_store, status, actual, diagnostic):
+    results, documents, ledgers = [], [], []
+    for suffix, extra in (("f01", {}), ("f02", {"provider_diagnostic": diagnostic})):
+        submission, miner, token = _claim(recovery_store, suffix)
+        result = recovery_store.finish_submission_review(
+            submission, miner, token, status, {**_document(status), **extra}, actual,
         )
+        results.append({k: v for k, v in result.items() if k != "call_identity"})
+        documents.append(recovery_store.get_submission(submission)["code_review_doc"])
+        ledgers.append([{k: row.get(k) for k in (
+            "entry_kind", "provider", "operation_id", "funding_source",
+            "amount_microusd", "entry_doc", "terminal_response",
+        )} for row in recovery_store.list_ledger(submission_id=submission)])
+    assert results[0] == results[1]
+    assert documents[0] == documents[1]
+    assert ledgers[0] == ledgers[1]
+    assert "private provider prose" not in json.dumps(ledgers[1])
+
+
+@pytest.mark.parametrize("status,patch,actual", [
+    ("error", {"error_code": "invented"}, 1234),
+    ("error", {"error_reason": "private"}, 1234),
+    ("passed", {"model": "unbound/model"}, 1234),
+    ("rejected", {"categories": ["private"]}, 1234),
+    ("passed", {"passed": False}, 1234),
+    ("error", {"file_count": 4}, 1234),
+    ("error", {}, -1),
+    ("error", {"unrelated": "x" * 30001}, 1234),
+])
+def test_discarding_optional_diagnostic_keeps_authoritative_validation_strict(recovery_store, status, patch, actual):
+    submission, miner, token = _claim(recovery_store, "f01")
+    doc = {**_document(status), **patch, "provider_diagnostic": {"raw_response": "unsafe"}}
+    with pytest.raises(ArenaStoreError, match="lab_arena_code_review_input_invalid"):
+        recovery_store.finish_submission_review(submission, miner, token, status, doc, actual)
     assert recovery_store.get_submission(submission)["code_review_status"] == "reviewing"
     assert len(recovery_store.list_ledger(submission_id=submission)) == 2
-    # The same old caller can finish unchanged after a refused diagnostic.
+
+
+def test_future_bound_review_model_can_finish_without_recognized_diagnostic(recovery_store):
+    model = "future/review-model"
+    _round, submission, miner = accepted_recovery_submission(recovery_store, "f01")
+    token = new_lease_token()
+    assert recovery_store.begin_submission_review(
+        submission, miner, token, 50_000, model, 3, 1200,
+    )["status"] == "claimed"
+    doc = {**_document("passed"), "model": model,
+           "provider_diagnostic": {**DIAGNOSTIC, "response_model": model, "selected_model": model}}
     assert recovery_store.finish_submission_review(
-        submission, miner, token, "error", _document(), 1234,
-    )["status"] == "error"
+        submission, miner, token, "passed", doc, 1234,
+    )["status"] == "passed"
+    row = recovery_store.get_submission(submission)
+    assert row["code_review_doc"]["model"] == model
+    terminal = recovery_store.list_ledger(submission_id=submission)[-1]
+    assert terminal["amount_microusd"] == 1234
+    assert "provider_diagnostic" not in terminal["entry_doc"]
 
 
 def test_upgrade_reapply_and_failed_upgrade_preserve_function_security():

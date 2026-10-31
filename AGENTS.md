@@ -1,3 +1,16 @@
+## Scoped authorization: October 31 renewable lease drain budget
+
+The coordinating task authorized the smallest correction to the canonical
+restart drain timeout after reproducing a valid runtime plus renewed-lease
+deadline that exceeds its existing budget. Internal agents may change only
+the fixed controller budget, focused regression tests and these identical
+instruction files in an isolated latest-main worktree, then test and commit.
+Preserve guard ownership, bounded waiting, natural expiry, completed outputs,
+capture, scoring, costs, runtime limits and concurrent releases. Add no forced
+expiry, bypass, recovery path, dependencies, provider calls or credential renewal.
+The coordinator owns independent review, push, merge and canonical deployment.
+Internal agents must not change production or run a restart.
+
 ## Scoped authorization: October 31 private reviewer diagnostics
 
 The coordinating task authorized bounded per-attempt provider diagnostics in

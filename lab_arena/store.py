@@ -556,7 +556,24 @@ class StoreTransport:
         return None
 
 
-def create_http1_client(timeout_seconds: float) -> httpx.Client:
+#: Connection ceilings for a store client. httpx would otherwise apply its own
+#: defaults (100 connections, 20 kept alive) silently, which makes the pool an
+#: invisible queue: once run work holds every connection, a public read waits
+#: inside the pool with no error of its own until the request timeout expires.
+#: Naming the ceilings keeps that budget reviewable and lets a second client be
+#: sized independently.
+DEFAULT_STORE_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=100,
+    keepalive_expiry=30.0,
+)
+
+
+def create_http1_client(
+    timeout_seconds: float,
+    *,
+    limits: Optional[httpx.Limits] = None,
+) -> httpx.Client:
     """The HTTP/1.1-pinned construction copied from ``gateway/db/client.py``.
 
     postgrest-py enables HTTP/2 by default, but its shared HPACK encoder is
@@ -570,6 +587,7 @@ def create_http1_client(timeout_seconds: float) -> httpx.Client:
         timeout=httpx.Timeout(float(timeout_seconds)),
         follow_redirects=False,
         trust_env=False,
+        limits=limits or DEFAULT_STORE_LIMITS,
     )
 
 
@@ -583,6 +601,7 @@ class PostgrestTransport(StoreTransport):
         service_key: str,
         timeout_seconds: float = 8.0,
         http_client: Optional[httpx.Client] = None,
+        limits: Optional[httpx.Limits] = None,
     ) -> None:
         parsed = urlsplit(base_url)
         is_https = parsed.scheme == "https" and bool(parsed.hostname)
@@ -603,7 +622,7 @@ class PostgrestTransport(StoreTransport):
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        self._client = http_client or create_http1_client(timeout_seconds)
+        self._client = http_client or create_http1_client(timeout_seconds, limits=limits)
         self.deadlock_retries = 0
 
     def __repr__(self) -> str:  # never expose the token

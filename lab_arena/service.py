@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import contextlib
 import hmac
 import json
 import logging
@@ -728,6 +729,12 @@ class ServiceConfig:
     ] = None
     # Observational uploads use a separate bounded client in production.
     training_object_store: Optional[ObjectStore] = None
+    # A second store, on its own connection pool, reserved for the public read
+    # path. Run work and public pages otherwise share one pool, so a busy
+    # entrant's writes can hold every connection and a visitor's page waits
+    # behind them. Absent, the public path keeps using ``store`` and nothing
+    # about today's behaviour changes.
+    public_read_store: Optional[ArenaStore] = None
 
     def __post_init__(self) -> None:
         if (
@@ -996,7 +1003,9 @@ class _PublicRunLookup(Mapping):
 class ArenaService:
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
-        self._store = config.store
+        self._primary_store = config.store
+        self._public_read_store = config.public_read_store or config.store
+        self._reading_public = threading.local()
         self._objects = config.object_store
         self._public_result_reads = _PublicResultInFlightReads(self._objects)
         self._signer = config.signer
@@ -1028,8 +1037,74 @@ class ArenaService:
         return self._config
 
     @property
+    def _store(self) -> ArenaStore:
+        """The store this thread should use.
+
+        Every read and write in this class goes through here. A public request
+        marks its own worker thread with :meth:`public_reads` and so gets the
+        reserved pool; everything else keeps the primary one. Selecting per
+        thread rather than per call site means the whole public read path moves
+        together, including the helpers it reaches through.
+        """
+
+        reading_public = getattr(self, "_reading_public", None)
+        if reading_public is not None and getattr(reading_public, "active", False):
+            public_read_store = getattr(self, "_public_read_store", None)
+            if public_read_store is not None:
+                return public_read_store
+        primary_store = getattr(self, "_primary_store", None)
+        if primary_store is not None:
+            return primary_store
+        # Many tests build a service with ``object.__new__`` and drop a store
+        # straight into ``__dict__``, which this data descriptor now shadows.
+        # Honour that injected store rather than making every such test learn
+        # about the primary/public split.
+        injected = self.__dict__.get("_store")
+        if injected is not None:
+            return injected
+        raise AttributeError("_store")
+
+    @_store.setter
+    def _store(self, value: ArenaStore) -> None:
+        """Replace the store for both the primary and public-read paths.
+
+        Tests (and a few call sites predating the public-read pool) inject a
+        fake or test-specific store by assigning ``service._store`` directly,
+        expecting every read and write to see it regardless of which pool
+        would otherwise be selected. Setting both keeps that pre-split
+        behaviour rather than requiring every call site to know about
+        ``public_reads()``.
+        """
+
+        self._primary_store = value
+        self._public_read_store = value
+
+    @property
     def store(self) -> ArenaStore:
-        return self._store
+        return self._primary_store
+
+    @contextlib.contextmanager
+    def public_reads(self):
+        """Serve the work in this block from the reserved public pool.
+
+        Some call sites (notably tests that build an ``ArenaService`` with
+        ``object.__new__`` to exercise a single handler) never run
+        ``__init__`` and so never get a ``_reading_public`` thread-local.
+        Create one lazily rather than requiring every such construction to
+        know about this attribute.
+        """
+
+        reading_public = getattr(self, "_reading_public", None)
+        if reading_public is None:
+            reading_public = threading.local()
+            self._reading_public = reading_public
+
+        previous = getattr(reading_public, "active", False)
+        reading_public.active = True
+        try:
+            yield
+        finally:
+            reading_public.active = previous
 
     @property
     def scorer_policy(self) -> Dict[str, Any]:

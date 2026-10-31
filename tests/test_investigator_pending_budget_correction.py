@@ -14,6 +14,7 @@ from scripts.arena_reviewer_budget_seam import (
     BudgetSeamError, _NATIVE_NEW as _NEW, _NATIVE_OLD as _OLD, convert_budget_seam,
 )
 from tests.test_company_evidence_investigator import _finding
+from tests.reviewer_frozen_sources import frozen_source
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "qualification/scoring/company_evidence_investigator.py"
@@ -170,9 +171,15 @@ def test_final_correction_cannot_research_or_accept_fabricated_proof(monkeypatch
 
 
 def test_budget_seam_changes_only_reviewed_predicate_and_is_idempotent():
-    original = _source(repaired=False)
+    # Historical admission conversion must use its reviewed source. The
+    # behavioral replays above still exercise the current investigator.
+    repaired = frozen_source(
+        "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+    )
+    assert repaired.count(_NEW.encode()) == 1
+    original = repaired.replace(_NEW.encode(), _OLD.encode(), 1)
     corrected = convert_budget_seam(convert_admission_seam(original))
-    assert corrected == _source(repaired=True)
+    assert corrected == repaired
     assert convert_budget_seam(corrected) == corrected
     assert convert_admission_seam(corrected) == corrected
 

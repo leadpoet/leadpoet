@@ -6,9 +6,10 @@ runtime, focused tests and these identical instruction files, then test and
 commit only. Preserve captured bytes, completed outputs, timeout and signal
 classification, cleanup, scoring, costs and all concurrent work. The coordinator
 owns independent review and any later push, merge or canonical deployment.
-Do not add dependencies, replay providers, renew credentials, change production
-or add host process-kill workarounds. This fix does not establish the cause of
-the Yuma interruption or its missing terminal events.
+Internal agents must not change production. Add no dependencies, provider
+replays, credential renewals or host process-kill workarounds. The coordinator
+may deploy through the existing canonical controllers after review and tests.
+This fix does not establish the cause of the Yuma interruption or missing events.
 
 ## Scoped authorization: October 30 usable training eligibility
 

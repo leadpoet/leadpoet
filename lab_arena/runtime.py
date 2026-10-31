@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
 import stat
 import subprocess
@@ -713,6 +714,7 @@ class _BoundedCapture:
         self.captured = 0
         self.truncated = False
         self.failed = False
+        self.incomplete = False
 
     def append(self, chunk: bytes) -> None:
         remaining = self.limit - self.captured
@@ -727,13 +729,32 @@ class _BoundedCapture:
         return b"".join(self.chunks)
 
 
-def _drain(stream: Any, capture: _BoundedCapture) -> None:
+def _drain(stream: Any, capture: _BoundedCapture, stop: threading.Event) -> None:
     try:
-        while True:
-            chunk = stream.read(PIPE_CHUNK_BYTES)
-            if not chunk:
-                break
-            capture.append(chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk))
+        try:
+            descriptor = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            # Keep in-memory process-runner test doubles working.
+            while True:
+                chunk = stream.read(PIPE_CHUNK_BYTES)
+                if not chunk:
+                    break
+                capture.append(chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk))
+        else:
+            # The reader alone owns close(). Closing a BufferedReader from a
+            # second thread can wait forever behind its blocking read lock.
+            with selectors.DefaultSelector() as selector:
+                selector.register(descriptor, selectors.EVENT_READ)
+                while not stop.is_set():
+                    if not selector.select(timeout=0.05):
+                        continue
+                    chunk = os.read(descriptor, PIPE_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    capture.append(chunk)
+                else:
+                    capture.incomplete = True
+                    capture.truncated = True
     except (OSError, ValueError):
         capture.failed = True
     finally:
@@ -989,6 +1010,7 @@ def run_sandbox(
     output_mounted = False
     process: Any = None
     threads: List[threading.Thread] = []
+    pipe_stop = threading.Event()
     result: Optional[SandboxResult] = None
     try:
         runsc_root.mkdir(mode=0o700)
@@ -1067,7 +1089,7 @@ def run_sandbox(
             start_new_session=True,
         )
         for stream, capture in ((process.stdout, stdout_capture), (process.stderr, stderr_capture)):
-            thread = threading.Thread(target=_drain, args=(stream, capture), daemon=True)
+            thread = threading.Thread(target=_drain, args=(stream, capture, pipe_stop), daemon=True)
             thread.start()
             threads.append(thread)
         deadline = (
@@ -1128,11 +1150,7 @@ def run_sandbox(
         for thread in threads:
             thread.join(STOP_GRACE_SECONDS)
         if any(thread.is_alive() for thread in threads):
-            for stream in (process.stdout, process.stderr):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+            pipe_stop.set()
             for thread in threads:
                 thread.join(STOP_GRACE_SECONDS)
         if any(thread.is_alive() for thread in threads):
@@ -1176,6 +1194,12 @@ def run_sandbox(
             raise launch_failure(
                 "sandbox_launcher_signaled", checkpoint_bytes=interrupted_checkpoint,
             )
+        if not timed_out and (stdout_capture.incomplete or stderr_capture.incomplete):
+            # Retain the specific host-signal diagnostic above, but never
+            # accept a normal launcher result without proving pipe EOF.
+            # Timeouts keep their already-frozen checkpoint and result, with
+            # the incomplete log streams explicitly marked truncated.
+            raise ArenaRuntimeError("sandbox pipes did not close")
         cpu_seconds, max_rss = _completed_process_rusage(
             process,
             injected_rusage=rusage,
@@ -1215,6 +1239,11 @@ def run_sandbox(
                 _stop_process(process, grace=STOP_GRACE_SECONDS)
             except ArenaRuntimeError as exc:
                 cleanup_errors.append("launcher: %s" % exc)
+        pipe_stop.set()
+        for thread in threads:
+            thread.join(STOP_GRACE_SECONDS)
+        if any(thread.is_alive() for thread in threads):
+            cleanup_errors.append("pipe readers did not stop")
         try:
             if _run_command(process_runner, runsc_delete_command(config, runsc_root, spec.sandbox_id), timeout=config.cleanup_timeout_seconds) != 0:
                 cleanup_errors.append("delete: nonzero exit")

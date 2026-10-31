@@ -52,9 +52,9 @@ def test_exact_missing_upstream_response_keeps_unknown_charge_and_consumes_one_i
     assert training_thinking.verified_failed_attempt(example, call)
     result = assess_ten(bank(example))
     assert result['eligible'], result
-    assert result['counts']['complete_runs'] == 9 and result['counts']['incomplete_runs'] == 1
+    assert result['counts']['complete_runs'] == 10 and result['counts']['incomplete_runs'] == 0
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not strict['train'] and not strict['eval']
+    assert len(strict['train']) + len(strict['eval']) == 2
     assert call['accounting_state'] == 'uncertain' and call['actual_microusd'] is None
     assert example == original
 
@@ -97,7 +97,7 @@ def test_no_upstream_waiver_requires_exact_failure_and_unchanged_unknown_bill(da
     rebind_payload(example)
     seal(example)
     assert not training_thinking.verified_failed_attempt(example, call), damage
-    assert not assess_ten(bank(example))['eligible'], damage
+    assert not assess_ten(bank(example), percent=100)['eligible'], damage
 
 
 @pytest.mark.parametrize('field', ['upstream_response_receipts', 'response_privacy_redactions'])
@@ -108,7 +108,7 @@ def test_missing_upstream_proof_rejects_malformed_empty_metadata(field, value):
     call[field] = value
     seal(example)
     assert not training_thinking.verified_failed_attempt(example, call)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 def test_missing_actual_cost_field_is_not_a_recorded_unknown_charge():
@@ -117,7 +117,7 @@ def test_missing_actual_cost_field_is_not_a_recorded_unknown_charge():
     call.pop('actual_microusd')
     seal(example)
     assert not training_thinking.verified_failed_attempt(example, call)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 @pytest.mark.parametrize('damage', ['settled', 'charged', 'duplicate', 'missing', 'identity', 'bool_amount'])
@@ -133,4 +133,4 @@ def test_missing_upstream_exception_requires_matching_uncertain_terminal(damage)
     else: row['amount_microusd'] = False
     seal(example)
     assert not training_thinking.verified_failed_attempt(example, call)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']

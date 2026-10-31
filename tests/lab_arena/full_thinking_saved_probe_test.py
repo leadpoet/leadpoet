@@ -8,7 +8,7 @@ import pytest
 
 from lab_arena import contracts, reasoning_capture, training_capture, training_thinking
 from lab_arena.training_export import _calls
-from tests.lab_arena.training_steps_test import fixture, seal
+from tests.lab_arena.training_steps_test import bind_selected_output, fixture, seal
 
 PROBES = sorted((Path(__file__).parents[2] / "docs/evidence/full-thinking").glob("*price-bound.json"))
 
@@ -115,7 +115,7 @@ def _example(probe):
                 worker_observation_artifacts={"run": {"payload": payload,
                                                        "payload_sha256": payload_hash}},
                 completeness={"complete": True, "incomplete_reasons": []})
-    return seal(base)
+    return bind_selected_output(base)
 
 
 @pytest.mark.parametrize("probe", [json.loads(path.read_text()) for path in PROBES],

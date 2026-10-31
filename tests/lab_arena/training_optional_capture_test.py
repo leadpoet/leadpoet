@@ -226,6 +226,14 @@ def test_optional_flag_does_not_waive_required_or_unknown_failures(damage):
     if damage == "payload_hash": artifact["payload_sha256"] = contracts.hash_bytes(b"wrong")
     elif damage == "missing_snapshot": example["worker_observation_artifacts"] = {}
     seal(example)
-    assert not training_eligibility.assess_capture(submission(), {"run": example}, ["run"], enabled=True)["eligible"]
+    required_failure = damage in {"missing_host", "failed_write", "host_hash", "payload_hash",
+                                  "missing_snapshot", "contradictory_ack", "legacy", "missing_attempt",
+                                  "run_identity", "kind", "claim", "generation"}
+    result = training_eligibility.assess_capture(submission(), {"run": example}, ["run"], enabled=True)
+    assert result["eligible"] is (not required_failure), result
     splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not splits["train"] and not splits["eval"]
+    records = splits["train"] + splits["eval"]
+    expected = (0 if damage in {"payload_hash", "missing_snapshot", "legacy", "missing_attempt",
+                                 "run_identity", "kind", "claim", "generation"}
+                else 1 if damage == "missing_host" else 2)
+    assert len(records) == expected

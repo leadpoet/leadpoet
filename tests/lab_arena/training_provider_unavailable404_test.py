@@ -13,7 +13,7 @@ from tests.lab_arena.training_eligibility_test import (
     _unsettled_selected_call, captured_example, refresh_response_links, submission,
     ten_selected_examples,
 )
-from tests.lab_arena.training_steps_test import seal
+from tests.lab_arena.training_steps_test import bind_selected_output, seal
 
 FIXTURES = Path(__file__).parents[1] / 'fixtures/full_thinking_provider_unavailable'
 
@@ -39,7 +39,7 @@ def selected_context(probe):
                    worker_observation_artifacts=deepcopy(probe['worker_observation_artifacts']),
                    configuration={**deepcopy(probe['configuration']),
                                   'training_maximum_missing_reasoning_percent': 5})
-    return seal(example)
+    return bind_selected_output(example)
 
 
 @pytest.mark.parametrize('size', ['120b', '20b'])
@@ -131,9 +131,9 @@ def test_filtered_404_with_uncertain_cost_uses_one_incomplete_slot_at_80_and_1()
     assert result['counts']['incomplete_runs'] == 1
     failed_run = next(row for row in result['counts']['reasoning_by_run']
                       if row['run_id'] == example['run_id'])
-    assert failed_run['verified_failed_model_attempts'] == 0
+    assert failed_run['verified_failed_model_attempts'] == 1
     assert failed_run['completed_untruncated_verified_reasoning_tokens'] == 0
-    assert training_thinking.selected_research_evidence(example) is None
+    assert training_thinking.selected_research_evidence(example) is not None
     splits, _ = training_thinking.build(
         [example], training_steps.Rules(production_rounds_only=False))
     assert not splits['train'] and not splits['eval']

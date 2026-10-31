@@ -32,7 +32,7 @@ def harness(examples, percent=80, missing_percent=None, objects=None):
 
 def eager_reference(obj, row, export, *, publication=None):
     """Original eager handoff, with the same canonical aggregate and read view."""
-    examples, unavailable_outputs, unavailable_artifacts = {}, {}, {}
+    examples, unavailable_outputs, unavailable_artifacts, unavailable_exports = {}, {}, {}, {}
     try:
         for selected in obj._selected_accepted_execution_runs([], "sub").values():
             run_id = selected["run_id"]
@@ -43,7 +43,12 @@ def eager_reference(obj, row, export, *, publication=None):
                 if cached is not None:
                     fallback[output_ref] = cached
             view = training_reader.AvailabilityReadView(obj._objects, fallback)
-            examples[run_id] = export(obj._store, view, run_id)
+            try:
+                examples[run_id] = export(obj._store, view, run_id)
+            except Exception as exc:
+                examples[run_id] = None
+                unavailable_exports[run_id] = type(exc).__name__[:64]
+                continue
             transient = {kind: ref for kind, ref in view.artifact_refs.items()
                          if view.transient_failures.get(ref) == "transient"}
             if transient:
@@ -55,6 +60,7 @@ def eager_reference(obj, row, export, *, publication=None):
             submission(), examples, list(examples), enabled=True,
             minimum_coverage_percent=training_coverage.percent_from_configuration(row["configuration_doc"]),
             maximum_missing_reasoning_percent=training_coverage.missing_reasoning_percent_from_configuration(row["configuration_doc"]),
+            unavailable_exports=unavailable_exports,
             unavailable_outputs=unavailable_outputs, unavailable_artifacts=unavailable_artifacts)
         return {"eligible": source["eligible"] and capture["eligible"],
                 "reasons": sorted(set(source["reasons"] + capture["reasons"])),
@@ -126,7 +132,7 @@ def test_full_result_matches_eager_aggregate(monkeypatch, percent, case):
     monkeypatch.setattr(training_reader, "export_run", export)
     assert actual(obj, row) == expected
     assert reads == list(examples)
-    assert expected["eligible"] is (case == "complete" or case == "two_cost_gaps" and percent == 80)
+    assert expected["eligible"] is (case in {"complete", "two_cost_gaps", "three_cost_gaps"} or percent == 80)
 
 
 @pytest.mark.parametrize("percent", [80, 100])
@@ -181,11 +187,11 @@ def test_completed_export_artifact_markers_match_eager(monkeypatch, percent, fau
     expected = eager_reference(obj, row, export)
     monkeypatch.setattr(training_reader, "export_run", export)
     assert actual(obj, row) == expected
-    assert expected["eligible"] is (fault == "transient" and percent == 80)
+    assert expected["eligible"] is (percent == 80)
 
 
 @pytest.mark.parametrize("failure", [KeyError, ValueError, training_reader.ExportError, FileNotFoundError])
-def test_whole_export_errors_keep_outer_failure_even_at_80_percent(monkeypatch, failure):
+def test_whole_export_errors_exclude_only_the_affected_icp(monkeypatch, failure):
     examples = ten_selected_examples()
     obj, row = harness(examples)
     reads = []
@@ -199,7 +205,11 @@ def test_whole_export_errors_keep_outer_failure_even_at_80_percent(monkeypatch, 
     expected = eager_reference(obj, row, export)
     reads.clear()
     monkeypatch.setattr(training_reader, "export_run", export)
-    assert actual(obj, row) == expected == {"eligible": False, "reasons": ["training_evidence_check_failed"]}
+    assert actual(obj, row) == expected
+    assert expected["eligible"] is True
+    assert expected["capture"]["counts"]["complete_runs"] == 9
+    assert expected["capture"]["counts"]["rejected_runs"] == [{
+        "run_id": "run-9", "reasons": ["selected_run_export_invalid"], "error_class": failure.__name__}]
     assert reads == list(examples)
 
 

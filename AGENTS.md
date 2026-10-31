@@ -1,3 +1,17 @@
+## Scoped authorization: October 30 usable training eligibility
+
+The user authorized implementation, tests, merge and canonical production deployment
+of the shared usable-trajectory eligibility/exporter correction. Keep the frozen
+80% ICP coverage and 1% missing-reasoning tolerance. Remove unrelated whole-miner,
+billing and operational vetoes; preserve exact requests, responses, provider-exposed
+full thinking, required tool context, source identity, privacy, outputs and score
+links. Retain valid individual examples even when a miner does not qualify.
+Recompute October 29/30 read-only and preserve published outcomes, scoring,
+billing, cost limits and model behavior. No provider replay or new dependencies.
+The coordinator owns production deployment; internal agents may test and commit.
+Use fixed cached AWS credentials without refresh. This authority ends after the
+deployed gate and exports are verified against saved production trajectories.
+
 ## Scoped authorization: PR936 aggregate capture reader
 
 The user authorized review, narrow fixes, merge and deployment of PR936's

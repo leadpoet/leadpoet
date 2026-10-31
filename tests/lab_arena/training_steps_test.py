@@ -37,6 +37,32 @@ def seal(example):
     return example
 
 
+def bind_selected_output(example):
+    """Attach the exact accepted output and score inputs used by strict exports."""
+    proof = example.setdefault('completeness', {})
+    for name in ('context', 'source_identity'):
+        proof.setdefault('dimensions', {}).setdefault(name, True)
+        proof.setdefault('reasons_by_dimension', {}).setdefault(name, [])
+    run_id = example['run_id']
+    score_id = example.get('score_run_id', 'score-' + run_id)
+    example['score_run_id'] = score_id
+    example.setdefault('output', {'companies': []})
+    example.setdefault('output_identity', {'document_hash': c.document_hash(example['output'])})
+    attempts = example.setdefault('attempts', [])
+    for identity, kind in ((run_id, 'execute'), (score_id, 'score')):
+        if not any(row.get('run_id') == identity for row in attempts):
+            attempts.append({'run_id': identity, 'kind': kind, 'status': 'accepted'})
+    snapshots = example.setdefault('input_snapshots', {})
+    for identity, document in ((run_id, {'icp': example.get('icp', {})}),
+                               (score_id, {'scored_run_id': run_id, 'companies': example['output']['companies']})):
+        snapshots.setdefault(identity, {'input': document, 'input_sha256': c.document_hash(document),
+                                        'privacy': {'redacted': False, 'redactions': []}})
+    for snapshot in snapshots.values():
+        snapshot.setdefault('privacy', {'redacted': False, 'redactions': []})
+        snapshot['input_sha256'] = c.document_hash(snapshot['input'])
+    return seal(example)
+
+
 def fixture():
     body = {'model': 'test/model', 'messages': [{'role': 'user', 'content': 'Find a company'}], 'temperature': 0.2}
     response = {'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Observed answer', 'reasoning_content': 'Readable summary'}}]}
@@ -51,7 +77,7 @@ def fixture():
             'response': response, 'terminal_entry_id': 5,
             'response_receipts': [{'entry_id': 5, 'response_ref': {'field': 'response', 'entry_id': 5}, 'response_sha256': c.document_hash(response), 'wire_body_sha256': wire, 'wire_body_bytes': 100, 'metadata': {'status': 200}}],
             'response_provenance': {'agent_receipt': 'reported_exact_body_received', 'delivery_to_worker': 'socket_written', 'worker_received_receipt_entry_ids': [5], 'worker_receipt_ref': {'run_id': 'run', 'ordinal': 1, 'payload_sha256': ph}, 'agent_receipt_refs': [{'run_id': 'run', 'id': 'ack', 'payload_sha256': ph}]}}
-    return seal({'schema_version': 'leadpoet.lab_arena.training_example.v1', 'run_id': 'run', 'round_id': 'arena-2026-10-20', 'round_status': 'published', 'submission_id': 'sub', 'stage': 1, 'icp_position': 0, 'assignment_id': 'a', 'attempt': 1, 'icp': {'industry': 'test'}, 'provider_calls': [call], 'worker_observation_artifacts': {'run': {'payload': payload, 'payload_sha256': ph}}, 'judgment': {'per_icp_score': 1, 'future_secret': 'FUTURE JUDGE'}, 'completeness': {'complete': False, 'incomplete_reasons': ['direct_web_content_not_captured']}})
+    return bind_selected_output({'schema_version': 'leadpoet.lab_arena.training_example.v1', 'run_id': 'run', 'round_id': 'arena-2026-10-20', 'round_status': 'published', 'submission_id': 'sub', 'stage': 1, 'icp_position': 0, 'assignment_id': 'a', 'attempt': 1, 'icp': {'industry': 'test'}, 'provider_calls': [call], 'worker_observation_artifacts': {'run': {'payload': payload, 'payload_sha256': ph}}, 'judgment': {'per_icp_score': 1, 'future_secret': 'FUTURE JUDGE'}, 'completeness': {'complete': False, 'incomplete_reasons': ['direct_web_content_not_captured']}})
 
 
 def records(example):

@@ -18,7 +18,7 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness
 from tests.lab_arena.test_lab_arena_service_round import daily_icps
 from tests.lab_arena.training_coverage_publication_postgres_test import _rename_run
 from tests.lab_arena.training_eligibility_test import captured_example
-from tests.lab_arena.training_steps_test import seal
+from tests.lab_arena.training_steps_test import bind_selected_output, seal
 
 
 @pytest.fixture()
@@ -118,7 +118,7 @@ def test_later_missing_output_keeps_measured_publication(database, tmp_path, mon
         if run_id == target["run_id"]:
             assert read_view.get_bounded(target_ref, MAX_OUTPUT_BYTES) == (
                 fault_store.source.get_bounded(target_ref, MAX_OUTPUT_BYTES))
-        example = _rename_run(deepcopy(captured_example()), run_id)
+        example = bind_selected_output(_rename_run(deepcopy(captured_example()), run_id))
         example["round_id"] = harness.round_id
         example["submission_id"] = execution["submission_id"]
         submission = harness.service.store.get_submission(execution["submission_id"])

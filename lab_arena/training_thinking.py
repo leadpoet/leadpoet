@@ -649,8 +649,12 @@ def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[
             return False
         for recovered in example.get("provider_calls") or []:
             later_request = recovered.get("request") or {}
+            recovered_amount = recovered.get("actual_microusd")
             if internal:
                 later_attempt = recovered.get("provider_attempt")
+                recovered_accounting = recovered.get("accounting_state")
+                heads = [row for row in recovered.get("lifecycle") or []
+                         if row.get("entry_id") == recovered.get("terminal_entry_id")]
                 if (recovered.get("base_call_identity") != base
                         or recovered.get("provider") != "openrouter"
                         or recovered.get("funding_source") != "miner_key"
@@ -661,10 +665,21 @@ def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[
                         or type(recovered.get("reservation_entry_id")) is not int
                         or recovered["reservation_entry_id"] <= response_id
                         or type(recovered.get("terminal_entry_id")) is not int
-                        or recovered["terminal_entry_id"] <= recovered["reservation_entry_id"]):
+                        or recovered["terminal_entry_id"] <= recovered["reservation_entry_id"]
+                        or not (recovered_accounting == "uncertain" and "actual_microusd" in recovered
+                                and recovered_amount is None
+                                or recovered_accounting == "settlement" and type(recovered_amount) is int
+                                and recovered_amount >= 0)
+                        or len(heads) != 1 or heads[0].get("entry_kind") != recovered_accounting
+                        or type(heads[0].get("amount_microusd")) is not int
+                        or heads[0]["amount_microusd"] != (0 if recovered_amount is None else recovered_amount)
+                        or ("provider_cost_unresolved" in (recovered.get("evidence_gaps") or []))
+                            != (recovered_accounting == "uncertain")):
                     continue
             elif (type(recovered.get("action_sequence")) is not int
-                  or recovered["action_sequence"] <= sequence):
+                  or recovered["action_sequence"] <= sequence
+                  or recovered.get("accounting_state") != "settlement"
+                  or type(recovered_amount) is not int or recovered_amount < 0):
                 continue
             if (recovered.get("run_id") != call["run_id"] or recovered.get("call_identity") == call.get("call_identity")
                     or recovered.get("operation_id") != operation
@@ -673,8 +688,7 @@ def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[
                     or later_request.get("hashed_parameters") != request["hashed_parameters"]
                     or (later_request.get("outbound") or {}).get("body") != body
                     or (later_request.get("outbound") or {}).get("body_sha256") != outbound["body_sha256"]
-                    or recovered.get("accounting_state") != "settlement" or recovered.get("response_status") != 200
-                    or type(recovered.get("actual_microusd")) is not int or recovered["actual_microusd"] < 0
+                    or recovered.get("response_status") != 200
                     or not _policy(recovered, registry)):
                 continue
             # Recovery proves a delivered provider response, not target quality.

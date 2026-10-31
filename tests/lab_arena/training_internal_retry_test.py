@@ -35,6 +35,9 @@ def internal_retry_example(*, accounting='uncertain', amount=None, api='openrout
     failed['upstream_response_receipts'][0]['entry_id'] = 3
     success.update(call_identity=success_identity, base_call_identity=base, provider_attempt=2,
                    funding_source='miner_key', reservation_entry_id=4, terminal_entry_id=6)
+    for row in success['lifecycle']:
+        row['entry_id'] += 3
+        row['funding_source'] = 'miner_key'
     success['response_receipts'][0].update(entry_id=6, response_ref={'entry_id': 6, 'field': 'response'})
     success['response_provenance']['worker_received_receipt_entry_ids'] = [6]
     artifact = value['worker_observation_artifacts']['run']
@@ -175,3 +178,83 @@ def test_later_billing_keeps_the_same_error_and_retry_proof(api, damage):
     if damage is None:
         assert training_eligibility.assess_capture(submission(), {'run': value}, ['run'], enabled=True)['eligible']
     assert value == original
+
+
+def unsettled_success_example(api):
+    value = internal_retry_example(api=api)
+    success = value['provider_calls'][1]
+    success.update(accounting_state='uncertain', actual_microusd=None,
+                   evidence_gaps=['provider_cost_unresolved'])
+    success['lifecycle'][-1].update(entry_kind='uncertain', amount_microusd=0)
+    success['response_receipts'][0]['entry_kind'] = 'uncertain'
+    return seal(value)
+
+
+@pytest.mark.parametrize('api', ['openrouter.responses', 'openrouter.chat'])
+def test_uncertain_success_cost_does_not_veto_a_proved_internal_recovery(api):
+    known = internal_retry_example(api=api)
+    value = unsettled_success_example(api)
+    original = deepcopy(value)
+    failed, success = value['provider_calls'][:2]
+    candidate = training_steps._candidate(value, success)
+    assert candidate['target'] == training_steps._candidate(known, known['provider_calls'][1])['target']
+    assert training_thinking.verified_failed_attempt(value, failed)
+    result = training_eligibility.assess_capture(submission(), {'run': value}, ['run'], enabled=True)
+    assert result['eligible'], result
+    assert result['counts']['reasoning_by_run'][0]['verified_failed_model_attempts'] == 1
+    linked = deepcopy(value)
+    assert not training_export._link_worker_receipts(
+        {'run_id': 'run', 'kind': 'execute'}, linked['provider_calls'],
+        linked['worker_observation_artifacts']['run'], require_client_ack=False,
+        configuration=value['configuration'])
+    records, _ = training_thinking.build([value], training_steps.Rules(production_rounds_only=False))
+    expected, _ = training_thinking.build([known], training_steps.Rules(production_rounds_only=False))
+    fields = ('candidate_id', 'input', 'target', 'generated_thinking')
+    assert [{key: row[key] for key in fields} for row in records['train'] + records['eval']] == [
+        {key: row[key] for key in fields} for row in expected['train'] + expected['eval']]
+    assert success['accounting_state'] == 'uncertain' and success['actual_microusd'] is None
+    assert value == original
+
+
+@pytest.mark.parametrize('api', ['openrouter.responses', 'openrouter.chat'])
+@pytest.mark.parametrize('damage', ['missing_cost', 'known_cost', 'terminal_kind', 'terminal_amount',
+    'missing_terminal', 'duplicate_terminal', 'missing_cost_gap', 'worker', 'privacy', 'request', 'route'])
+def test_uncertain_success_still_requires_coherent_accounting_and_exact_delivery(api, damage):
+    value = unsettled_success_example(api)
+    failed, success = value['provider_calls'][:2]
+    if damage == 'missing_cost': success.pop('actual_microusd')
+    elif damage == 'known_cost': success['actual_microusd'] = 0
+    elif damage == 'terminal_kind': success['lifecycle'][-1]['entry_kind'] = 'settlement'
+    elif damage == 'terminal_amount': success['lifecycle'][-1]['amount_microusd'] = 7
+    elif damage == 'missing_terminal': success['lifecycle'].pop()
+    elif damage == 'duplicate_terminal': success['lifecycle'].append(deepcopy(success['lifecycle'][-1]))
+    elif damage == 'missing_cost_gap': success['evidence_gaps'] = []
+    elif damage == 'worker': success['response_provenance']['delivery_to_worker'] = 'write_failed'
+    elif damage == 'privacy': success['response_receipts'][0]['privacy_redactions'] = ['credential']
+    elif damage == 'request': success['request_hash'] = contracts.hash_bytes(b'different')
+    else: success['reasoning_capture']['provider_route'] = 'other'
+    seal(value)
+    assert not training_thinking.verified_failed_attempt(value, failed)
+
+
+def test_legacy_later_action_recovery_keeps_its_settled_success_requirement():
+    value = recovered_example()
+    failed, success = value['provider_calls'][:2]
+    success.update(accounting_state='uncertain', actual_microusd=None,
+                   evidence_gaps=['provider_cost_unresolved'])
+    success['lifecycle'][-1].update(entry_kind='uncertain', amount_microusd=0)
+    seal(value)
+    training_steps._candidate(value, success)
+    assert not training_thinking.verified_failed_attempt(value, failed)
+
+
+@pytest.mark.parametrize('api', ['openrouter.responses', 'openrouter.chat'])
+@pytest.mark.parametrize('damage', ['amount', 'kind', 'cost_gap'])
+def test_settled_internal_success_cannot_claim_a_contradictory_accounting_head(api, damage):
+    value = internal_retry_example(api=api)
+    failed, success = value['provider_calls'][:2]
+    if damage == 'amount': success['lifecycle'][-1]['amount_microusd'] += 1
+    elif damage == 'kind': success['lifecycle'][-1]['entry_kind'] = 'uncertain'
+    else: success['evidence_gaps'] = ['provider_cost_unresolved']
+    seal(value)
+    assert not training_thinking.verified_failed_attempt(value, failed)

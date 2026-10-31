@@ -7406,8 +7406,13 @@ class ArenaService:
         # one run outcome to telemetry.
         expected_status = "accepted" if terminal_status == "accepted" else "failed"
         if result.get("status") == expected_status and result.get("idempotent") is False:
+            # The completion already validated this diagnostic against its own
+            # closed choice sets; only those two bounded fields are reported.
+            diagnostic = body.get("failure_diagnostic") or {}
             telemetry.record_run(
-                kind, terminal_status, run_identity=_telemetry_run_identity(run)
+                kind, terminal_status, run_identity=_telemetry_run_identity(run),
+                failure_stage=str(diagnostic.get("stage") or "-"),
+                failure_class=str(diagnostic.get("error_class") or "-"),
             )
         return result
 
@@ -7518,6 +7523,10 @@ class ArenaService:
             round_row = self._round(round_id)
             status = round_row["status"]
             schedule = round_row["configuration_doc"]["schedule"]
+            # Two rounds can be open at once, and the stage spans below could not say
+            # which one they served, nor when its last-resort cancellation becomes due.
+            round_scope = {"round_id": round_id,
+                           "scoring_deadline": str(schedule.get("final_scoring_close") or "")}
             now = self.now()
             if (
                 status not in TERMINAL_STATUSES
@@ -7525,10 +7534,10 @@ class ArenaService:
             ):
                 return {"status": "waiting", "round_status": status}
             if status == "open":
-                with telemetry.stage("advance_commit_benchmark"):
+                with telemetry.stage("advance_commit_benchmark", round_scope=round_scope):
                     return self.commit_benchmark(round_id)
             if status == "committed":
-                with telemetry.stage("advance_open_stage"):
+                with telemetry.stage("advance_open_stage", round_scope=round_scope):
                     return self.open_stage(round_id, 1)
             if (status in ("stage1_scoring", "stage1_judged")
                 and round_row["configuration_doc"].get("execution_sequence_policy")
@@ -7545,24 +7554,24 @@ class ArenaService:
                 self._recover_baseline(round_row)
             if status in ("stage1", "stage2"):
                 stage = int(status[-1])
-                with telemetry.stage("advance_expire_leases"):
+                with telemetry.stage("advance_expire_leases", round_scope=round_scope):
                     self._store.expire_leases(round_id)
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
-                    with telemetry.stage("advance_close_stage"):
+                    with telemetry.stage("advance_close_stage", round_scope=round_scope):
                         return self.close_stage(round_id, stage)
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_closed", "stage2_closed"):
                 stage = int(status[5])
                 if not round_row.get("stage%d_scoring_plan_doc" % stage):
-                    with telemetry.stage("advance_commit_scoring_plan"):
+                    with telemetry.stage("advance_commit_scoring_plan", round_scope=round_scope):
                         return self.commit_scoring_plan(round_id, stage)
-                with telemetry.stage("advance_open_scoring"):
+                with telemetry.stage("advance_open_scoring", round_scope=round_scope):
                     return self.open_scoring(round_id, stage)
             if status in ("stage1_scoring", "stage2_scoring"):
                 stage = int(status[5])
-                with telemetry.stage("advance_expire_leases"):
+                with telemetry.stage("advance_expire_leases", round_scope=round_scope):
                     self._store.expire_leases(round_id)
-                with telemetry.stage("advance_list_scoring_runs") as observed:
+                with telemetry.stage("advance_list_scoring_runs", round_scope=round_scope) as observed:
                     scoring_runs = self._scoring_runs_for_stage(round_id, stage)
                     observed.count = len(scoring_runs)
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
@@ -7585,33 +7594,33 @@ class ArenaService:
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs
                 ):
-                    with telemetry.stage("advance_close_scoring"):
+                    with telemetry.stage("advance_close_scoring", round_scope=round_scope):
                         return self.close_scoring(round_id, stage)
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
-                with telemetry.stage("advance_expire_leases"):
+                with telemetry.stage("advance_expire_leases", round_scope=round_scope):
                     self._store.expire_leases(round_id)
                 try:
-                    with telemetry.stage("advance_score_stage"):
+                    with telemetry.stage("advance_score_stage", round_scope=round_scope):
                         return self.score_stage(round_id, stage)
                 except scoring.ScoringError:
                     if now >= _parse_iso(window) + timedelta(hours=2):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
                     return {"status": "retry", "round_status": status}
             if status == "stage1_scored":
-                with telemetry.stage("advance_open_stage"):
+                with telemetry.stage("advance_open_stage", round_scope=round_scope):
                     return self.open_stage(round_id, 2)
             if status == "scored":
                 if _judge_continuation_enabled(round_row):
-                    with telemetry.stage("advance_expire_leases"):
+                    with telemetry.stage("advance_expire_leases", round_scope=round_scope):
                         self._store.expire_leases(round_id)
                 if self._frozen_unfinished_judgment(round_row):
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}
                 try:
-                    with telemetry.stage("advance_publish"):
+                    with telemetry.stage("advance_publish", round_scope=round_scope):
                         return self.publish(round_id)
                 except ServiceError as exc:
                     if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):

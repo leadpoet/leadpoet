@@ -821,7 +821,91 @@ def test_run_span_names_the_kind_and_the_terminal_cause():
         "arena.run_kind": "execute",
         "arena.terminal_cause": "budget_exhausted",
         "arena.outcome": "failed",
+        "arena.failure_stage": "-",
+        "arena.failure_class": "-",
     }
+
+
+def test_run_span_reports_where_and_what_failed():
+    """A repeated judging failure must be readable without reading the judge."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="scoring_output", failure_class="scoring_output_invalid",
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.failure_stage"] == "scoring_output"
+    assert span.attributes["arena.failure_class"] == "scoring_output_invalid"
+
+
+def test_every_contract_failure_diagnostic_value_is_admitted():
+    """A diagnostic the completion contract accepts must survive the exporter."""
+    from lab_arena import contracts
+
+    field = next(
+        f for f in contracts.RUN_RESULT_FIELDS if f.name == "failure_diagnostic"
+    )
+    stages = next(f for f in field.fields if f.name == "stage").choices
+    classes = next(f for f in field.fields if f.name == "error_class").choices
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    for stage in stages:
+        for error_class in classes:
+            recorder.record_run(
+                "score", "judge_error",
+                failure_stage=stage, failure_class=error_class,
+            )
+    assert len(exp.get_finished_spans()) == len(stages) * len(classes)
+
+
+def test_a_failure_diagnostic_outside_the_choice_sets_drops_the_span():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="scorer", failure_class="the judge said: acme corp",
+    )
+    assert exp.get_finished_spans() == ()
+
+
+def test_round_advance_stage_names_its_round_and_scoring_deadline():
+    """With two rounds open, a stage span must say which one it served."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record(
+        "advance_score_stage", "ok",
+        round_scope={
+            "round_id": "arena-2026-10-21",
+            "scoring_deadline": "2026-10-22T08:30:00Z",
+        },
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.round_id"] == "arena-2026-10-21"
+    assert span.attributes["arena.scoring_deadline"] == "2026-10-22T08:30:00Z"
+
+
+@pytest.mark.parametrize(
+    "round_scope",
+    [
+        {"round_id": "not-a-round", "scoring_deadline": "2026-10-22T08:30:00Z"},
+        {"round_id": "arena-2026-10-21", "scoring_deadline": "tomorrow morning"},
+        {"round_id": "arena-2026-10-21"},
+    ],
+)
+def test_an_unshaped_round_scope_is_dropped_without_losing_the_stage(round_scope):
+    """The liveness signal must survive a diagnostic it cannot vouch for."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record("advance_score_stage", "ok", round_scope=round_scope)
+
+    (span,) = exp.get_finished_spans()
+    assert span.name == "arena.advance_score_stage"
+    assert "arena.round_id" not in span.attributes
+    assert "arena.scoring_deadline" not in span.attributes
 
 
 def test_every_contract_terminal_cause_is_admitted():

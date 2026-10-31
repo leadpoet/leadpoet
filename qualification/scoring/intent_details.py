@@ -76,7 +76,7 @@ _EXCLUDED_MARKDOWN_BOUNDARY = "\x00"
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
-        "name": "arena_intent_details_review", "strict": True,
+        "name": "arena_intent_details_review_v3", "strict": True,
         "schema": {
             "type": "object", "additionalProperties": False,
             "properties": {

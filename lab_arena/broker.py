@@ -2837,6 +2837,19 @@ def _complete_declared_tool_calls(message: Mapping[str, Any], request: Mapping[s
     return True
 
 
+def _paragraph_cache_protocol_conflict(value: Mapping[str, Any], schema_name: Any) -> bool:
+    """Do not share a new paragraph verdict that its native parser must retry."""
+
+    if schema_name != "arena_intent_details_review_v3" or value.get("facts_supported") is not False:
+        return False
+    units = value.get("unit_grounding")
+    if not isinstance(units, list):
+        return False  # The declared-schema shape check owns malformed fields.
+    factual = [unit for unit in units if isinstance(unit, Mapping)
+               and unit.get("contains_factual_claim") is True]
+    return all(unit.get("status") == "VERIFIED" for unit in factual)
+
+
 def _complete_judgment_response(
     operation_id: str,
     request: Mapping[str, Any],
@@ -2844,6 +2857,7 @@ def _complete_judgment_response(
     status: int,
     body: bytes,
     call_succeeded: bool,
+    shared_cache: bool = True,
 ) -> bool:
     """Cache a complete model answer only; never freeze a retryable failure."""
 
@@ -2905,6 +2919,8 @@ def _complete_judgment_response(
                     )
                 ):
                     return False
+                if shared_cache and _paragraph_cache_protocol_conflict(parsed, declared.get("name")):
+                    return False
                 if declared.get("name") == "verification":
                     evaluations = parsed.get("signal_evaluations")
                     if (
@@ -2961,6 +2977,8 @@ def _complete_judgment_response(
                     parsed, format_doc.get("schema")
                 )
             ):
+                return False
+            if shared_cache and _paragraph_cache_protocol_conflict(parsed, format_doc.get("name")):
                 return False
         else:
             return False
@@ -5595,13 +5613,13 @@ class Broker:
             })
             return BrokerResult(cached_status, cached_headers, cached_body, summary)
         billing_terminal = reserved.get("terminal_response")
-        delayed_error_settlement = (
+        delayed_generation_settlement = (
             status == "settled" and isinstance(billing_terminal, Mapping)
-            and billing_terminal.get("call_succeeded") is not True
+            and not _has_successful_terminal_response(billing_terminal)
             and isinstance(billing_terminal.get("provider_cost"), Mapping)
             and billing_terminal["provider_cost"].get("basis") == "openrouter_generation_cost"
         )
-        if effective_operation.provider == "openrouter" and (status == "uncertain" or delayed_error_settlement):
+        if effective_operation.provider == "openrouter" and (status == "uncertain" or delayed_generation_settlement):
             # Billing-only reconciliation changes the ledger head, not the error
             # already delivered to the worker. Reuse the existing terminal shape
             # from bound uncertainty history; raw upstream receipts have no replay
@@ -5617,6 +5635,44 @@ class Broker:
                 # observed history against the refreshed authoritative head.
                 reserved = self._store.reserve_call(**reservation_arguments)
                 status = reserved.get("status")
+            # A paid response can be structurally replayable for its own call
+            # while failing the new shared-cache paragraph protocol. SQL does
+            # not expose noneligible pending replies as shared authority.
+            own_pending_replies = [
+                entry.get("entry_doc", {}).get("call", {}).get("judgment_cache_response")
+                for entry in ledger_entries
+                if isinstance(entry, Mapping) and entry.get("entry_kind") == "uncertain"
+                and isinstance(entry.get("entry_doc"), Mapping)
+                and isinstance(entry["entry_doc"].get("call"), Mapping)
+                and isinstance(entry["entry_doc"]["call"].get("judgment_cache_response"), Mapping)
+                and entry["entry_doc"]["call"]["judgment_cache_response"].get("judgment_cache_eligible") is not True
+            ]
+            if own_pending_replies:
+                if (not judgment_cache_key or len(own_pending_replies) != 1
+                    or status not in {"uncertain", "settled"}
+                    or not _reservation_readback_matches(
+                        self._store, reservation_arguments, reserved,
+                        confirmed_cost_admission=True, ledger_entries=ledger_entries,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                own_terminal = own_pending_replies[0]
+                try:
+                    own_status, own_headers, own_body = _decode_terminal(own_terminal, secret=secret)
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                if ("judgment_cache_source_call_identity" in own_terminal
+                    or not _complete_judgment_response(
+                        effective_operation_id, effective_normalized,
+                        status=own_status, body=own_body,
+                        call_succeeded=own_terminal.get("call_succeeded") is True,
+                        shared_cache=False,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                summary.update(outcome=status, idempotent=True, status=own_status,
+                               response_hash=contracts.hash_bytes(own_body))
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                return BrokerResult(own_status, own_headers, own_body, summary)
             saved_errors = []
             for entry in ledger_entries:
                 entry_doc = entry.get("entry_doc") if isinstance(entry, Mapping) else None
@@ -5953,6 +6009,7 @@ class Broker:
                     effective_operation_id, effective_normalized,
                     status=terminal_status, body=terminal_body,
                     call_succeeded=terminal_document.get("call_succeeded") is True,
+                    shared_cache=False,
                 ):
                     return _error_result("broker_unavailable", summary)
                 summary.update({
@@ -6669,6 +6726,7 @@ class Broker:
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
+        judgment_response_replayable = False
         accounting_store_deadline = time.monotonic() + _ACCOUNTING_STORE_RECOVERY_SECONDS
         try:
             if effective_operation.provider == "openrouter":
@@ -6825,6 +6883,14 @@ class Broker:
                     call_succeeded=call_succeeded,
                 )
             )
+            judgment_response_replayable = judgment_cache_eligible or bool(
+                judgment_cache_key and not request_refused and not miner_credential_failure
+                and _complete_judgment_response(
+                    effective_operation_id, effective_normalized,
+                    status=sanitized_status, body=sanitized_body,
+                    call_succeeded=call_succeeded, shared_cache=False,
+                )
+            )
             if missing_deepline_cost or missing_openrouter_cost:
                 uncertain_doc = _missing_provider_cost_call_doc(
                     response,
@@ -6860,12 +6926,12 @@ class Broker:
                         sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
                         account_failure_evidence=account_failure_evidence,
                     )
-                if judgment_cache_eligible:
+                if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
                             sanitized_status, sanitized_headers, sanitized_body,
                             call_succeeded=True,
-                            judgment_cache_eligible=True,
+                            judgment_cache_eligible=judgment_cache_eligible,
                         )
                     )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
@@ -7252,12 +7318,12 @@ class Broker:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:
                     uncertain_doc["provider_cost"] = cost_record
-                if judgment_cache_eligible:
+                if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
                             sanitized_status, sanitized_headers, sanitized_body,
                             call_succeeded=True,
-                            judgment_cache_eligible=True,
+                            judgment_cache_eligible=judgment_cache_eligible,
                         )
                     )
             if scrapingdog_observed_success_status is not None:

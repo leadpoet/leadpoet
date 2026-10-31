@@ -184,7 +184,10 @@ def test_current_and_frozen_judge_policies_use_exact_catalog_models(historical):
         "anthropic/claude-sonnet-5.5": ("0.000002", "0.00001"),
     }
     table = br.price_table_from_models_response({"data": [
-        {"id": model, "pricing": dict(zip(("prompt", "completion"), prices.get(model, ("0.000001", "0.000002"))))}
+        {"id": model, "pricing": {
+            **dict(zip(("prompt", "completion"), prices.get(model, ("0.000001", "0.000002")))),
+            "web_search": "0.005" if model in {"perplexity/sonar", "perplexity/sonar-pro"} else "0",
+        }}
         for model in sorted(catalog_ids)
     ]}, fetched_at="2026-10-21T00:00:00Z")
     broker = br.Broker(

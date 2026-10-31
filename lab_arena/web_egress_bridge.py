@@ -190,10 +190,18 @@ class LoopbackWebEgressBridge:
             self.port = int(listener.getsockname()[1])
             self._listener = listener
             self._stop.clear()
-            self._thread = threading.Thread(
-                target=self._serve, name="arena-web-egress-bridge", daemon=True
-            )
-            self._thread.start()
+            try:
+                self._thread = threading.Thread(
+                    target=self._serve, name="arena-web-egress-bridge", daemon=True
+                )
+                self._thread.start()
+            except BaseException as exc:
+                self._stop.set()
+                self._thread = None
+                self._listener = None
+                _close_socket(listener)
+                self._record_failure("listener_start", exc)
+                raise
         return self
 
     def _serve(self) -> None:
@@ -213,16 +221,32 @@ class LoopbackWebEgressBridge:
             if not self._slots.acquire(blocking=False):
                 _close_socket(client)
                 continue
-            worker = threading.Thread(
-                target=self._run_client,
-                args=(client,),
-                name="arena-web-egress-bridge-client",
-                daemon=True,
-            )
             with self._lock:
-                self._connections.add(client)
-                self._workers.add(worker)
-            worker.start()
+                if self._stop.is_set():
+                    _close_socket(client)
+                    self._slots.release()
+                    continue
+                worker = None
+                try:
+                    worker = threading.Thread(
+                        target=self._run_client,
+                        args=(client,),
+                        name="arena-web-egress-bridge-client",
+                        daemon=True,
+                    )
+                    self._connections.add(client)
+                    self._workers.add(worker)
+                    # Stop must see either a started worker or a complete
+                    # rollback, never a thread that cannot yet be joined.
+                    worker.start()
+                except BaseException as exc:
+                    self._workers.discard(worker)
+                    self._connections.discard(client)
+                    _close_socket(client)
+                    self._slots.release()
+                    self._record_failure("worker_start", exc)
+                    if not isinstance(exc, RuntimeError):
+                        raise
 
     def _run_client(self, client: Any) -> None:
         host_socket = None

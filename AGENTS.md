@@ -10,6 +10,18 @@ owns independent review, push, merge, migration and release. Add no dependencies
 tables, RPCs, telemetry system, provider replay or credential renewal. This is
 a visibility fix; it does not establish historical review failure causes.
 
+## Scoped authorization: October 31 web-bridge thread startup cleanup
+
+The user authorized the smallest general fix for the confirmed web-bridge worker
+startup/cleanup error found in the October 31 production baseline. Internal agents
+may edit the bridge, focused regression tests and these identical instruction
+files in this isolated worktree, test and commit only. Preserve miner behavior,
+sandbox limits, closed network access, completed output, capture, scoring, costs,
+recovery and concurrent releases. Add no dependencies or provider calls. The
+coordinator owns independent review, push, merge and canonical deployment after
+checks. Do not change production or renew credentials from an internal agent.
+This scope does not establish the cause of the initial thread-resource shortage.
+
 ## Scoped authorization: October 31 bounded launcher pipe drain
 
 The user authorized the narrow fix for the locally reproduced blocking pipe

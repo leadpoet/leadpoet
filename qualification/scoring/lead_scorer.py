@@ -3545,6 +3545,7 @@ def _investigator_prefetched_pages(
     verified_identity: Optional[Mapping[str, Any]] = None,
     include_structured_description: bool = False,
     include_structured_headquarters: bool = False,
+    homepage_fills_unused_slots: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Return bounded private pages from already validated server sources."""
 
@@ -3553,11 +3554,13 @@ def _investigator_prefetched_pages(
         verified_homepage_pages,
         submitted_source_urls=submitted_source_urls,
     )
-    candidates.update({
+    validated_homepages = {
         url: _prefetched_page_with_industry_bindings(
             url, text, homepage_final_urls[url], (verified_homepage_pages or {}).get(url))
         for url, text in homepage_pages.items()
-    })
+    }
+    if not homepage_fills_unused_slots:
+        candidates.update(validated_homepages)
     retry_pages, retry_final_urls = _validated_matched_retry_pages(matched_company_retry_pages)
     for url, text in retry_pages.items():
         if url not in submitted_source_urls:
@@ -3687,6 +3690,13 @@ def _investigator_prefetched_pages(
         )
     ):
         candidates.setdefault(profile_url, {"final_url": profile_url, "text": profile_text})
+    if homepage_fills_unused_slots:
+        # Newly eligible industry context must not displace existing target
+        # sources, including retry, required-attribute and disputed-HQ pages.
+        for url, page in validated_homepages.items():
+            if len(candidates) >= MAX_PREFETCHED_PAGES:
+                break
+            candidates.setdefault(url, page)
     pages, final_urls = _validated_prefetched_pages(
         candidates,
         submitted_source_urls=submitted_source_urls,
@@ -8952,6 +8962,15 @@ async def _run_targeted_company_evidence_investigation(
         )
         if not independently_bound_homepage:
             homepage_pages = {}
+    fill_industry_homepage_slots = bool(
+        "industry" in investigation_targets
+        and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        and not (
+            review_positive_semantics
+            or verified_rebrand_redirect
+            or "stage" in investigation_targets
+        )
+    )
     matched_industry_bindings = {}
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
@@ -9056,6 +9075,42 @@ async def _run_targeted_company_evidence_investigation(
         )
         else {}
     )
+    prefetch_source_urls = list(submitted_source_urls)
+    if fill_industry_homepage_slots:
+        prefetch_source_urls.extend(
+            url for url in homepage_pages if url not in prefetch_source_urls
+        )
+        prefetch_source_urls = prefetch_source_urls[:MAX_SUBMITTED_SOURCE_URLS]
+    prefetched_pages = _investigator_prefetched_pages(
+        prefetch_attribute_pages,
+        prefetch_source_urls,
+        verified_homepage_pages=(
+            homepage_pages
+            if review_positive_semantics
+            or verified_rebrand_redirect
+            or "stage" in investigation_targets
+            or fill_industry_homepage_slots
+            else None
+        ),
+        homepage_fills_unused_slots=fill_industry_homepage_slots,
+        matched_company_retry_pages=matched_company_retry_pages,
+        structured_profile_description_evidence=(
+            structured_profile_description_evidence
+        ),
+        structured_profile_headquarters_evidence=(
+            structured_profile_headquarters_evidence
+        ),
+        linkedin_profile_source=linkedin_profile_source,
+        verified_identity=investigation_verified_identity,
+        include_structured_description="stage" in investigation_targets,
+        include_structured_headquarters="geography" in investigation_targets,
+    )
+    if fill_industry_homepage_slots:
+        # Only sources actually selected into unused page slots may use a new
+        # URL slot. Full existing selections and their request bytes stay intact.
+        submitted_source_urls.extend(
+            url for url in prefetched_pages if url not in submitted_source_urls
+        )
     investigation = await investigate_company_evidence(
         company_locator={
             "name": company.company_name,
@@ -9170,28 +9225,7 @@ async def _run_targeted_company_evidence_investigation(
             )
             else ()
         ),
-        prefetched_pages=_investigator_prefetched_pages(
-            prefetch_attribute_pages,
-            submitted_source_urls,
-            verified_homepage_pages=(
-                homepage_pages
-                if review_positive_semantics
-                or verified_rebrand_redirect
-                or "stage" in investigation_targets
-                else None
-            ),
-            matched_company_retry_pages=matched_company_retry_pages,
-            structured_profile_description_evidence=(
-                structured_profile_description_evidence
-            ),
-            structured_profile_headquarters_evidence=(
-                structured_profile_headquarters_evidence
-            ),
-            linkedin_profile_source=linkedin_profile_source,
-            verified_identity=investigation_verified_identity,
-            include_structured_description="stage" in investigation_targets,
-            include_structured_headquarters="geography" in investigation_targets,
-        ),
+        prefetched_pages=prefetched_pages,
         diagnostic=investigation_diagnostic,
         **({"retained_industry_pages": matched_company_retry_pages}
            if "industry" in investigation_targets

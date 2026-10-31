@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -378,6 +379,56 @@ def test_timeout_aborts_only_owned_pre_destructive_guard(monkeypatch):
     with pytest.raises(guard_cli.GuardError, match="did not drain"):
         guard_cli._drain(_args())
     assert calls[-1] == "lab_arena_abort_restart_guard_v1"
+
+
+@pytest.mark.parametrize("receipt_after", [
+    pytest.param(30, id="completed-work"),
+    pytest.param(2700 - 1 + 3600, id="late-45m-heartbeat"),
+    pytest.param(3600 - 1 + 4500, id="late-60m-heartbeat"),
+    pytest.param(5400 - 1 + 6300, id="late-90m-heartbeat"),
+    pytest.param(None, id="bounded-timeout"),
+])
+def test_gateway_budget_covers_runtime_then_renewed_lease(monkeypatch, receipt_after):
+    # Provider activity can renew a captured lease to now + its full TTL near
+    # the end of execution. Model the subsequent natural-expiry receipt without
+    # running a provider, changing a lease, or waiting on the wall clock.
+    script = (SCRIPT.parents[1] / "gw_restart.sh").read_text(encoding="utf-8")
+    drain = script.split("drain_lab_arena_for_restart() {", 1)[1].split("\n}", 1)[0]
+    timeout = int(re.search(r"--timeout-seconds (\d+)", drain).group(1))
+    now = [0.0]
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function in ("lab_arena_restart_guard_state_v1", "lab_arena_acquire_restart_guard_v1"):
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            preserved = receipt_after is not None and now[0] >= receipt_after
+            return {
+                **_drain_state(preserved=preserved),
+                "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+            }
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(guard_cli.time, "sleep", sleep)
+    args = _args(timeout_seconds=timeout, poll_seconds=1, lease_seconds=14400)
+    if receipt_after is None:
+        with pytest.raises(guard_cli.GuardError, match="did not drain"):
+            guard_cli._drain(args)
+        assert now[0] == timeout
+        assert calls.count("lab_arena_abort_restart_guard_v1") == 1
+    else:
+        assert guard_cli._drain(args)["preserved"] is True
+        assert receipt_after <= now[0] < timeout
+        assert "lab_arena_abort_restart_guard_v1" not in calls
+    assert calls.count("lab_arena_acquire_restart_guard_v1") > 1
 
 
 @pytest.mark.parametrize("interrupt", [signal.SIGHUP, signal.SIGINT, signal.SIGTERM])

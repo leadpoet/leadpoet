@@ -1132,13 +1132,32 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                     run.get("claim_request_hash"))
                 if partial is not None:
                     partial_artifacts[run_id] = {
+                        "schema_version": training_observations.JOURNAL_SCHEMA_VERSION,
+                        "run_id": run_id, "kind": run["kind"],
+                        "lease_generation": run["lease_generation"],
+                        "claim_request_hash": run["claim_request_hash"],
                         "complete": False, "payload": partial,
+                        "payload_sha256": contracts.document_hash(partial),
                         "segment_refs": [training_observations.segment_ref(
                             run_id, run["lease_generation"], run["claim_request_hash"],
                             segment["number"]) for segment in segments],
                         "segment_sha256": [segment["segment_sha256"] for segment in segments],
                     }
                     record_error("worker_observations_incomplete", run_id)
+                    if not require_client_ack:
+                        # The reader verified every retained segment and its
+                        # lease-bound chain. Link only its persisted writes;
+                        # this prefix cannot establish the absent final tail.
+                        prefix = partial_artifacts[run_id]
+                        for error in _link_worker_receipts(
+                                run, paid, prefix, require_completed_phases=False,
+                                require_client_ack=False, configuration=configuration,
+                                ledger_rows=ledger_rows):
+                            record_error(error, run_id)
+                        for call in paid:
+                            ref = (call.get("response_provenance") or {}).get("worker_receipt_ref")
+                            if ref is not None:
+                                ref["artifact_field"] = "partial_worker_observation_artifacts"
                 if journal_error:
                     record_error("worker_observation_journal_unavailable", run_id)
             except NotImplementedError:

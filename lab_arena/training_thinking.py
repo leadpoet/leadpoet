@@ -1012,6 +1012,50 @@ def _incomplete_json_object_prefix(value: str) -> bool:
     return False
 
 
+def verified_private_explicit_truncation(example, call, *, worker_proofs=None) -> bool:
+    """Discard a proved explicit cap stop; never admit its private response.
+
+    A redacted source excerpt can coexist with a provider's explicit truncation
+    status. The entire turn stays outside targets and reasoning-token totals.
+    Its exact request, input history, selected route and host-written receipt
+    must still be proved. Later requests keep their ordinary privacy checks.
+    """
+    if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+            or call.get("operation_id") != "openrouter.responses"
+            or not isinstance(call.get("response"), Mapping)
+            or call["response"].get("status") != "incomplete"
+            or call["response"].get("incomplete_details") != {"reason": "max_output_tokens"}
+            or call["response"].get("error")
+            or "credential" not in (call.get("response_privacy_redactions") or [])
+            or not set(call.get("evidence_gaps") or []) <= {
+                "response_privacy_nonexact", "provider_cost_unresolved"}):
+        return False
+    try:
+        operation, body, _ = training_steps._model_request(example, call, worker_proofs=worker_proofs)
+        evidence = training_steps._host_result(example, call, allow_privacy=True, worker_proofs=worker_proofs)
+        response = evidence["response"]
+        if (evidence["write"]["status"] != 200 or response != call["response"]
+                or contracts.document_hash(response) != call.get("response_sha256")):
+            return False
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
+        state = attempt_coverage(call, _role(example, call), registry)
+        if (not state["requested"] or not state["route_reviewed"]
+                or not state["provider_route_verified"]
+                or not (_legacy_tested_controls_match(call)
+                        or _captured_reasoning_controls_match(call, registry))):
+            return False
+        try:
+            # This preserves input-history and retrieval checks before the
+            # ordinary explicit-incomplete branch. It never returns a target.
+            training_steps._target(body, response, operation, allow_reasoning_history=True,
+                                   allow_tool_error_history=True)
+        except ValueError as exc:
+            return str(exc) == "response_not_complete"
+        return False
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def verified_cap_truncated_target(example, call, *, worker_proofs=None) -> bool:
     """Recognize exact cap-hit tool JSON ending at EOF, never repair a target.
 
@@ -1149,7 +1193,8 @@ def coverage(examples) -> dict:
                     training_steps._candidate(example, call)
                     target_usable = True
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-                    omitted_truncation = verified_cap_truncated_target(example, call) or (
+                    private_truncation = verified_private_explicit_truncation(example, call)
+                    omitted_truncation = private_truncation or verified_cap_truncated_target(example, call) or (
                         isinstance(exc, ValueError) and str(exc) == "response_not_complete"
                         and row["returned"] == "truncated" and row["route_reviewed"]
                         and row["provider_route_verified"])
@@ -1160,7 +1205,8 @@ def coverage(examples) -> dict:
                 if not full and verified_missing_thinking(row):
                     missing_reasoning_tokens += row["tokens_reported"]
             if omitted_truncation and row["returned"] != "truncated":
-                row["target_omission_reason"] = "inferred_output_cap_json_eof"
+                row["target_omission_reason"] = ("explicit_output_cap_private_response" if private_truncation
+                                                 else "inferred_output_cap_json_eof")
             has_text |= execution_model and bool(full) and target_usable
             bad |= execution_model and new_policy and not (target_usable or failed or omitted_truncation)
             empty = (verified_no_thinking(call, call.get("response") or {}, row) if new_policy
@@ -1344,6 +1390,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "response_status": call.get("response_status"),
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
                       "reasoning_coverage": attempt_coverage(call, _role(example, call), registry),
+                      **({"target_omission_reason": "explicit_output_cap_private_response"}
+                         if verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs) else {}),
                       **({"target_omission_reason": "inferred_output_cap_json_eof"}
                          if verified_cap_truncated_target(example, call, worker_proofs=worker_proofs) else {}),
                       "actual_microusd": call.get("actual_microusd"),
@@ -1478,7 +1526,7 @@ def readable_trace_markdown(report: Mapping[str, Any], *, raw_export_name: str |
 
 
 def _prior_observations(example: Mapping[str, Any], call: Mapping[str, Any]) -> list[dict]:
-    artifact = (example.get("worker_observation_artifacts") or {}).get(call.get("run_id")) or {}
+    artifact = training_steps._worker_artifact(example, call, allow_journal_prefix=True)
     payload = artifact.get("payload") or {}
     if contracts.document_hash(payload) != artifact.get("payload_sha256"):
         raise ValueError("worker_payload_hash_mismatch")

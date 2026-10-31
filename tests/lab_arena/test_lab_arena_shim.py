@@ -111,6 +111,7 @@ def test_typed_socket_timeout_covers_provider_and_billing_windows(
         operations.BUDGET_ADMISSION_MAX_SECONDS
         + min(requested_timeout_ms / 1000.0, float(operation.timeout_seconds))
         + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
         + shim.SOCKET_GRACE_SECONDS
     )
 

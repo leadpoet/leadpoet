@@ -509,7 +509,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 for key, child in parse_qsl(parts.query, keep_blank_values=True):
                     safe_key = redact(key)
                     normalized = safe_key.lower().replace("-", "_")
-                    if normalized in _URL_SECRET_KEYS or trajectory._SENSITIVE_KEY_RE.fullmatch(normalized):
+                    # A blank query value contains no credential bytes. Keep
+                    # its exact spelling, as with empty structured fields.
+                    if child and (normalized in _URL_SECRET_KEYS or trajectory._SENSITIVE_KEY_RE.fullmatch(normalized)):
                         safe_child = "[REDACTED]"
                     else:
                         safe_child = redact(child)

@@ -66,7 +66,11 @@ def test_exact_retained_miter_payload_changes_only_notice_without_trimming_evide
     assert restored==before
     assert len(metadata_message(after)['content'])<=len(metadata_message(before)['content'])
     assert len(notice)<=len(original['industry_source_research_brief']['notice'])
-    assert industry.CRITERION_RULES in ''.join(m['content']for m in before['messages']if m['role']=='system')
+    # This hash-bound historical request retains its historical criterion rules.
+    # The notice change must not replace them with today's rules. The live-wire
+    # test above independently checks the current shared criterion instructions.
+    assert [m for m in after['messages'] if m['role']=='system']==[
+        m for m in before['messages'] if m['role']=='system']
     assert 'industry_brand_source' in ''.join(m['content']for m in before['messages']if m['role']=='system')
     validate_operation_request('openrouter.chat',before)
     validate_operation_request('openrouter.chat',after)

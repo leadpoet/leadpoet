@@ -335,6 +335,9 @@ def _dispatch_with_response_url(
             # The shim does not have the run context needed to know whether a
             # legacy scoring request will route to Deepline in the broker.
             + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+            # The upstream API has its own transport allowance. Keep the
+            # separate socket margin for dispatch and carrying its reply back.
+            + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
             + SOCKET_GRACE_SECONDS
         )
         try:

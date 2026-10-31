@@ -1,0 +1,1195 @@
+{
+  "provenance": {
+    "source_commit": "55b084a39252cbb44f4928b03c04a63c4f03aa20",
+    "slot_id": "unavailable:0:vytexwindows.com",
+    "native_score_sha256": "f2d52c391320a4e057c4877f4281bbcf8f87cd8c57be102524fe190d12937605",
+    "raw_output_sha256": "sha256:9674b3ec1be984b0572bd3c4a8a21cd067726b2d407284de57e3b7c0ddd57849",
+    "scope": "Exact saved completed scorer output; not an accepted completion or accuracy label."
+  },
+  "native_output": {
+    "breakdowns": [
+      {
+        "company_identity_alias_keys": [
+          "domain:vytexwindows.com|name:vytex",
+          "linkedin:vytexwindows"
+        ],
+        "company_identity_key": "linkedin:vytexwindows",
+        "company_index": 0,
+        "company_qualified": false,
+        "cost_penalty": 0.0,
+        "decision_maker": 0.0,
+        "duplicate_company": false,
+        "failure_reason": "Company fit unavailable: unproven dimensions: industry, stage, required_attribute",
+        "final_score": 0.0,
+        "icp_fit": 0.0,
+        "intent_signal_final": 0.0,
+        "intent_signal_raw": 0.0,
+        "intent_signals_detail": null,
+        "time_decay_multiplier": 1.0,
+        "time_penalty": 0.0,
+        "verifier_gate_receipts": [
+          {
+            "company_fit_decision": "unavailable",
+            "company_fit_dimensions": {
+              "employee_size": "match",
+              "geography": "match",
+              "identity": "match",
+              "industry": "unavailable",
+              "stage": "unavailable"
+            },
+            "company_fit_stage_required": true,
+            "contract_id": "company-fit-decision:v1",
+            "contract_version": "company-fit-decision:v1",
+            "decision": "unavailable",
+            "dimension_evidence": {
+              "employee_size": {
+                "decision": "match",
+                "observed_decision": "match",
+                "submitted_decision": "match",
+                "web_evidence": {
+                  "employee_count": "201-500",
+                  "provider": "harvestapi_get_company",
+                  "source_field": "employeeCountRange",
+                  "url": "https://www.linkedin.com/company/vytexwindows",
+                  "website": "https://vytexwindows.com/"
+                }
+              },
+              "geography": {
+                "decision": "match",
+                "observed_decision": "match",
+                "submitted_decision": "match",
+                "web_evidence": {
+                  "quote": "Headquarters \n\n Laurel, MD",
+                  "url": "https://www.linkedin.com/company/vytexwindows"
+                }
+              },
+              "identity": {
+                "actual_final_url": "https://vytexwindows.com/",
+                "decision": "match",
+                "homepage_identity_decision": "match",
+                "homepage_identity_reason": "verified: independently observed first-party name, final domain, and exact LinkedIn company identity",
+                "identity": {
+                  "decision": "match",
+                  "evidence_source": "company_homepage",
+                  "observed_domain": "vytexwindows.com",
+                  "observed_linkedin_slug": "vytexwindows",
+                  "observed_name": "vytex",
+                  "reason_code": "verifier_accepted",
+                  "submitted_domain": "vytexwindows.com",
+                  "submitted_linkedin_slug": "vytexwindows",
+                  "submitted_name": "vytex"
+                },
+                "reason": "verified: independently observed first-party name, final domain, and exact LinkedIn company identity",
+                "web_identity_decision": "match",
+                "web_identity_receipt": {
+                  "decision": "match",
+                  "evidence_source": "company_web_reverification",
+                  "observed_domain": "vytexwindows.com",
+                  "observed_linkedin_slug": "vytexwindows",
+                  "observed_name": "vytex",
+                  "reason_code": "verifier_accepted",
+                  "submitted_domain": "vytexwindows.com",
+                  "submitted_linkedin_slug": "vytexwindows",
+                  "submitted_name": "vytex"
+                }
+              },
+              "industry": {
+                "decision": "unavailable",
+                "observed_decision": "unavailable",
+                "submitted_decision": "unavailable",
+                "web_evidence": {
+                  "quote": "",
+                  "url": ""
+                }
+              },
+              "required_attribute": {
+                "decision": "unavailable",
+                "web_evidence": {
+                  "quote": "",
+                  "url": ""
+                }
+              },
+              "stage": {
+                "decision": "unavailable",
+                "observed_decision": "unavailable",
+                "submitted_decision": "match",
+                "web_evidence": {
+                  "quote": "Akerman represented Vytex, a portfolio company of private equity firm Graycliff Partners, in the acquisition of Vinyl Kraft.",
+                  "url": "https://www.akerman.com/en/firm/newsroom/akerman-represents-graycliff-partners-in-acquisition-of-vinyl-kraft.html"
+                }
+              },
+              "web_observations": {
+                "attribute_evidence": "",
+                "geography_matches": true,
+                "industry_activity_role": "unresolved",
+                "industry_matches": null,
+                "observed_company_linkedin": "https://www.linkedin.com/company/vytexwindows",
+                "observed_company_name": "Vytex",
+                "observed_company_stage": "Private Equity",
+                "observed_company_website": "https://vytexwindows.com/",
+                "observed_employee_count": null,
+                "observed_hq_country": "United States",
+                "observed_hq_state": "Maryland",
+                "observed_industry": "",
+                "observed_subindustry": ""
+              }
+            },
+            "failure_class": "insufficient_fit_evidence",
+            "gate": "company_fit",
+            "reason": "unproven dimensions: industry, stage, required_attribute",
+            "required_attribute_decision": "unavailable",
+            "supporting_receipts": [
+              {
+                "checked_source_provenance": {
+                  "company_locator_sha256": "sha256:188bfbc99f859b21d567e3342b96311b9592e28a6393ed9ae584a543c1d920d1",
+                  "request_sha256": "sha256:e6a8ac4fe4b2cdca61674469f658d95cbdf3c24bf49c5f7a22e31f756012edf2",
+                  "schema": "checked_investigation_sources_v1",
+                  "scope": "investigation_request_only_not_criterion_proof",
+                  "source_limit_reached": true,
+                  "sources": [
+                    {
+                      "kind": "loaded_page_excerpt",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:069bb87a3f1041cc7e0a065c782769bfb629a350c8b345edfe7359445ef3245b",
+                      "source_index": 0,
+                      "url": "https://vytexwindows.com/",
+                      "url_sha256": "sha256:c9c7fe607149cc55f74dc401c8ee66ee69f26a38ae8e7151294b765d29584c2f"
+                    },
+                    {
+                      "kind": "loaded_page_excerpt",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:4d5ef2a4b5dedc1275eda9530d957658c5d0c0ea45fa90d7504e245d791fd9c3",
+                      "source_index": 1,
+                      "url": "https://graycliffpartners.com/investments/vytex",
+                      "url_sha256": "sha256:6a7fa9ee2b4f0b58f8a1fb0f5fc14b757bcf39f30759fc4c3a6906f7e5dca868"
+                    },
+                    {
+                      "kind": "loaded_page_excerpt",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:46836101cee9200841ffb0d15df2482b9fcf48406ae73dfc949e9dfec11fba47",
+                      "source_index": 2,
+                      "url": "https://vytexwindows.com/about-us/",
+                      "url_sha256": "sha256:3cfff1e7068a1546a368dc20298261a84b2c4035893d8f32dee8b861344d3fc2"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:e74b07e63b2159153369772dc96eeacb4eae3483ef530fa2d45883cc09d92cb1",
+                      "source_index": 0,
+                      "url": "https://corporatefinance.kpmg.com/us/en/transactions/vytex-corporation.html",
+                      "url_sha256": "sha256:27c6af0375dccb1e4fd02b1173a134b159ca943fa6ce2d303427148b9f4668c0"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:50415121d7c22b2705461477ab16a0a4cd0fec0cc4c3e10772d829292ef7667a",
+                      "source_index": 1,
+                      "url": "https://graycliffpartners.com/investments/vytex",
+                      "url_sha256": "sha256:6a7fa9ee2b4f0b58f8a1fb0f5fc14b757bcf39f30759fc4c3a6906f7e5dca868"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:f537626d9c214b394d7abc17f6aac0ad79b0a2c40f19cadf0c25d17cf4a3622b",
+                      "source_index": 2,
+                      "url": "https://graycliffpartners.com/news/graycliff-invests-in-vytex",
+                      "url_sha256": "sha256:4da06b6102a1a64c00be4a9232a3b1bc4f6ba8b268877f201639476dfe09ae68"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:ae897ad82416af6b94e291fd79ffae27d083ee3267aea4d49509275aae2c18bf",
+                      "source_index": 3,
+                      "url": "https://graycliffpartners.com/news/vytex-vinyl-kraft",
+                      "url_sha256": "sha256:fa175b689307b4100428ca5326e1e5cb5dec8d8f9feb5be937568e84935a81b6"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:d89b9ba633f1310419628ceec18ff294fc949b09b781aa7817782fcd5a05cead",
+                      "source_index": 4,
+                      "url": "https://brooksidecp.com/brookside-capital-partners-frames-a-bright-future-with-an-investment-in-vytex/",
+                      "url_sha256": "sha256:f86e9d032cc7fd67f01e04f06a5b4a14956568f1df0c669e508126190261fe65"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:d218e2f1b5ebb002e2af05697beeecef5dc9c57b9d746f56491a42c599e8a21a",
+                      "source_index": 0,
+                      "url": "https://vytexwindows.com/product-literature/",
+                      "url_sha256": "sha256:b6b87e20d4954d619558ae8d088e8ba252231a959f0182d1ef5b7f773ba82721"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:acd82ae56f31979664a60ee248f71b7d852e2c2578fa68171c529d058308d66b",
+                      "source_index": 1,
+                      "url": "https://vytexwindows.com/technical-specifications/",
+                      "url_sha256": "sha256:885511fa395cdc404f2cbd24221ae717e615920633e80196e6a8c7d9c2693821"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:3cd984d45c73bd37bd7b732aef82586cea5a44fb49f143d16051d3214c3ebbad",
+                      "source_index": 2,
+                      "url": "https://vytexwindows.com/how-to/",
+                      "url_sha256": "sha256:250dac9e2d1bf4069a205d2de63bb5d2c882f6161fba352c7443cd889cf17273"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:7929c4a860e689fd37ea76d3a3790f512da8b2d554b607e4add7ad9bba4bda22",
+                      "source_index": 3,
+                      "url": "https://vytexwindows.com/wp-content/uploads/2025/08/Vinyl-Window-Door-Size-Limits-9.24.pdf",
+                      "url_sha256": "sha256:b0a9b3a7f21e942adc2b1dc34ffd67f0794796a09c5d1b20f0b72157ce379e95"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:4eefbddd58ede91644140d41fcb8555836241278f978851d4be61b8d64939f96",
+                      "source_index": 4,
+                      "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Signature-Install-guide-9.25.pdf",
+                      "url_sha256": "sha256:0d0d5ad0e2a7525573d50974c6cb26aab33471361841aec956fd986a6b5f8567"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:d895bc62b34adc51db0c187e8209960599589a224944913957fc60423a55d3a4",
+                      "source_index": 5,
+                      "url": "https://vytexwindows.com/wp-content/uploads/2025/08/7000-Installation-guide-8.25.pdf",
+                      "url_sha256": "sha256:feb5bf3a27c4ab4373b628a0d3ef57e320a4dc7781115ce4f5d42d9e1523056b"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:627bb94167368104d87559278888c85463bb7590c4e07b29d6d5efb7a11b83fe",
+                      "source_index": 6,
+                      "url": "https://vytexwindows.com/3d-flip-book/specialty-windows/",
+                      "url_sha256": "sha256:778c59030a074a03b8f4f6890e763ca58270acb7225759bb081a2919865ac458"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:d86608fc35e314369801d7ec84972806b15d01cdd8f1b6cefc65c8d6bf895c3a",
+                      "source_index": 7,
+                      "url": "https://vytexwindows.com/8-26-qr_potomac-hp/",
+                      "url_sha256": "sha256:03f805558d036d042ced3688f6e028f397370636e56a8ea59c74da7c5866f36d"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:783c828fd17f8e4d70229251637d5e7ec5db07c03c26d4b367c7fcd17ccf3dbc",
+                      "source_index": 8,
+                      "url": "https://vytexwindows.com/wp-content/uploads/2025/06/FL47071_R1_II_29261.01-1001-R1-6000-HS-XOX-Impact-Installation-Drawings-3SL-QHQ-110-x-63.pdf",
+                      "url_sha256": "sha256:83000094ec88a4742c3645a111d3a300755374b3857e93ae506daabe35bbee95"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:d2ee4234aeffbaafdf63a269988450f361cef406d619e10655b7d4162f0b2ae8",
+                      "source_index": 9,
+                      "url": "https://vytexwindows.com/windows/potomac-hp/",
+                      "url_sha256": "sha256:9e46e66276f3fa1dc42d8293ff3088e182692d859804dc756020a991bfb59d44"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:f2d9966687255d76c411d36d9eedbe798e00cc78dbbf0d5689e4da8c742e5790",
+                      "source_index": 10,
+                      "url": "https://vytexwindows.com/3d-flip-book/potomac-coastal/",
+                      "url_sha256": "sha256:7cdba256fc94c9489ef4e8ae5adea60523fd7f474e5255de1155ec68fe417b82"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:ce1d0c8f0016e43a3206238e9cb92f1146af77d17a99ca786e5981fc5bcf9b89",
+                      "source_index": 11,
+                      "url": "https://vytexwindows.com/3d-flip-book/potomac-series-brochure/",
+                      "url_sha256": "sha256:f73c81d32fc276a5c55da56a3e04e076185300f3e55ea1955e9b06596530d040"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:8ac3132c47fc89158132957c578209555f40184af37f9472c33a33d804a51032",
+                      "source_index": 12,
+                      "url": "https://vytexwindows.com/3d-flip-book/fortis-series-brochure/",
+                      "url_sha256": "sha256:8099a0790959beef68c0e79e2ee697a768ad4e0f33280050ab72262f577aadb6"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:0fc2258667a4c0626e4427ce81a46879f3cb0d318229b921b1f2100a2743c0a1",
+                      "source_index": 13,
+                      "url": "https://vytexwindows.com/3d-flip-book/georgetown-series/",
+                      "url_sha256": "sha256:9e16c048286cf1da447dc5b8e9d6469726b9bde3a4f14b4910edc6e9a220aeaf"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:b9c51b0e1587d6763dda692b19e6d394a5f16caeb84bcca6cae0f3324a7cce8f",
+                      "source_index": 14,
+                      "url": "https://vytexwindows.com/3d-flip-book/sliding-patio-door-brochure/",
+                      "url_sha256": "sha256:d156bbd38c2d670d9a5f8501bb0badc2722306f2aed53aa5159e0363555edaa0"
+                    },
+                    {
+                      "kind": "search_locator_only",
+                      "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                      "message_index": 0,
+                      "shown_content_sha256": "sha256:d0e1fcd4a5873d5918c798a0c498a9d90b631a0ac299f5c280a07f34029f70b5",
+                      "source_index": 15,
+                      "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Spanish-Signature-Install-guide-9.25.pdf",
+                      "url_sha256": "sha256:b7f3ef33794b5fb2d24cbb1fca56e488eb6228f51d2533bea50f71922afd325a"
+                    }
+                  ],
+                  "unproven_claims": {
+                    "industry": {
+                      "claim_sha256": "sha256:74b5c21d4b34906767344a872da146cf722dbe9e813811db38179eb37d51bfac",
+                      "criterion_sha256": "sha256:de7342d2102a9d33f47108bd68a773b3c3d29aef555fa0e49a88da41a880296a",
+                      "status": "UNPROVEN"
+                    },
+                    "required_attribute": {
+                      "claim_sha256": "sha256:85cdd996b5718bcd9f35c1a2e4713b707fa791d1358af1b2819fb6120a06f3a5",
+                      "criterion_sha256": "sha256:4f7df580f564185069a89255199cd571e69378032efac5596bfff795bcd825fe",
+                      "status": "UNPROVEN"
+                    },
+                    "stage": {
+                      "claim_sha256": "sha256:d092d27c0277e08e8a8ad13f0965128194fec963a7385245bccfed673df8538f",
+                      "criterion_sha256": "sha256:719d4bf0412d9d33561fdd4d9c45964fa61cd56a5775e8acb3d1f27ccebb47be",
+                      "status": "UNPROVEN"
+                    }
+                  }
+                },
+                "claims": {
+                  "industry": {
+                    "_industry_review": {
+                      "decision": "unavailable",
+                      "evidence": [
+                        {
+                          "quote": "Learn About Vytex: Innovation, Quality & Service Careers Online Ordering Dashboard Search Crafted by Experts. Trusted by Homeowners. Preferred by Dealers. As a premier window manufacturer, we combine innovation, precision, and craftsmanship to create high-performance vinyl windows and doors. Designed for beauty. Engineered for excellence. Built to last. Explore Products Become a Partner Our History Since 1988, Vytex has been committed to manufacturing high-quality windows and doors with a focus on performance, craftsmanship, and customer care. Backed by more than 35 years of industry experience, our reputation for excellence has been recognized by ENERGY STAR®, Window & Door Magazine, and the Fenestration and Glazing Industry Alliance (FGIA). Today, our continued investment in innovation, energy efficiency, and exceptional service drives our success—and the success of our partners. Our Mission To advance the window industry with energy-efficient solutions, exceptional quality, and unparalleled customer support. Together, we redefine excellence through sustainable partnerships that transform the way people experience their spaces. Industry-Leading Products As a premier window manufacturer, we deliver unmatched quality, innovation, and performance. Our windows and doors are engineered for lasting beauty, energy efficiency, and superior durability—providing homeowners with exceptional comfort and style while giving dealers a competitive edge with products designed to exceed expectations. Learn More Reduce Energy Costs with Advanced Solutions Advanced technology for superior in",
+                          "url": "https://vytexwindows.com/about-us/"
+                        },
+                        {
+                          "quote": "Windows Potomac-hp Series by Vytex: Features & Options # POTOMAC-hp The ultimate in energy efficiency, durability, and beauty. Trusted by home improvement companies throughout the Eastern United States for exceptional performance, craftsmanship, and support. ## Built to Perform. Designed to Last. Potomac-hp represents the pinnacle of Vytex performance, combining industry-leading air infiltration, exceptional structural ratings, advanced energy efficiency, and virtually limitless design possibilities. Engineered for lasting comfort and built with the craftsmanship remodelers can confidently stand behind, Potomac-hp delivers premium performance homeowners can feel..01 Air Infiltration Rating R65 Rating | 198 mph Wind Resistance.20 U-Factor (with our most energy-efficient glass option).18 Solar Heat Gain Coefficient (varies by glass package) ## Features & Options The Potomac-hp Series stands apart with industry-leading energy efficiency and unmatched customization. Featuring our exclusive magnetic seal—unique to this series—along with advanced VyFoam™ insulation and high-performance glass packages, these windows provide superior thermal performance and airtight protection. With extensive style options, you can customize every detail to suit your home without compromising on efficiency. - Window Anatomy - Glass Options - Customizations Elegant, sculpted frame with a picture-perfect view Welded corners for lasting strength VyCore™ Reinforcement: Strength where it matters VyFoam™: Superior insulation and performance Magnetic Seal: Ensures a precise, airtight closure Tilt-In Sashe",
+                          "url": "https://vytexwindows.com/8-26-qr_potomac-hp/"
+                        },
+                        {
+                          "quote": "How to Become a Vinyl Windows & Doors Dealer - Vytex # Join The Vytex Family ###### Industry-Leading Products Offer your customers the best. Our premium, energy-efficient windows and doors are crafted for durability, performance, and superior aesthetics—setting your business apart from the competition. ###### Seamless Ordering & Delivery Get what you need, when you need it. Our streamlined ordering process and dependable manufacturing ensure accurate, on-time deliveries, so you can confidently meet customer demand. ###### Dedicated Dealer Support You’re never alone. Our expert dealer support team is here to provide guidance, answer questions, and ensure you have everything you need to succeed. ## Become a Partner ## Partner with Confidence—See Why Dealers Choose Vytex. Experience the Vytex difference—where exceptional craftsmanship meets unmatched performance. Our clients consistently highlight the superior quality of our windows and doors, the energy efficiency we deliver, and the dedicated service that supports them every step of the way. Explore their testimonials and discover why Vytex is the preferred choice for discerning homeowners and trusted dealers alike. > Working with Vytex is great! They have great products and their staff is very helpful. Communication and customer service from them is top tier! > > Capital Windows Dealer > We Install Vytex windows In alot of our projects for ourselves and for our customers. For Burke Home Services they are a great company to deal with! Lots of customer service and support. The windows are a High quality product at a great cos",
+                          "url": "https://vytexwindows.com/become-a-partner/"
+                        },
+                        {
+                          "quote": "al, state, local or other taxes, excises or charges, or increases thereof upon the production, sale or transportation of the Products sold pursuant to the Agreement not now included in the price specified therein, Buyer shall reimburse Seller for the same. 5. Shipping; Pick-Up. Unless Buyer has specified that it will pick-up Products from Seller’s facilities, Seller will arrange for shipment of the Products to an address designated by Buyer. Title to and risk of loss of all Products sold pursuant to the Agreement shall pass to Buyer as follows: (a) if Buyer has specified that it will pick-up Products from Seller’s facilities, title to and risk of loss passes to Buyer upon Buyer’s receipt of the Products at Seller’s facilities for loading on the vehicle(s) used by Buyer to pick-up the Products from Seller’s facilities, and (b) otherwise, title to and risk of loss passes to Buyer upon Seller’s delivery of the Products to the address designated by Buyer. 6. Buyer Risk. Buyer assumes all risks and liability for results arising out of Buyer’s unloading, storage, handling and/or use of the Products, or arising out of compliance or non-compliance with federal, state, municipal or local laws and regulations with reference thereto. 7. Buyer Indemnity. Unless Product sold pursuant to the Order fails to meet Seller’s Limited Warranty referenced in Section 2 above, Buyer shall indemnify, defend and hold Seller harmless from all costs, expenses, damages, judgments or other loss, including costs of investigation, litigation and reasonable attorney’s fees, arising out of Buyer’s selection",
+                          "url": "https://vytexwindows.com/terms-conditions-of-sale/"
+                        },
+                        {
+                          "quote": "f our products, painting or staining of the original finish, acts of God, misuse, or abuse. This warranty may also be voided in the event of brickwash damage due to misuse. All windows and doors must be protected prior to application of brickwash. Vytex’s obligation under this warranty is limited to furnishing replacement material and does not cover any possible labor charges. WARRANTY CLAIM PROCEDURE Vytex, or an authorized dealer representative, reserves the right to inspect any window or patio door product submitted for warranty claim. If you have a problem with your Vytex windows or patio door products, contact the dealer, distributor, or contractor from whom you purchased these products or contact us directly:",
+                          "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Commercial-Warranty-1.pdf"
+                        },
+                        {
+                          "quote": "tall the keeper: Confirm which direction the screen handle operates by compressing the lever either upward or downward. The hook for the keeper must be oriented so that the lock clears when engaged. Depending on door operation, you may need to remove and reorient the screen handle before securing. See figure 17. FIGURE 17 a. Apply minimal expanding foam into any gaps between the frame and the rough opening, as needed. NOTE: Vytex recommends using only minimal expansion foam. b. Install exterior flashing, interior trim, and caulking as necessary to prevent air and water infiltration. ##### 9. Final Installation #### TROUBLESHOOTING NOTE: The moveable panel must be fully closed in order for the locking mechanism to be activated. a. Verify alignment: Check that the reveal between the movable panel and the strike jamb is even from top to bottom, and confirm the door is level and plumb. If not, review the Master Frame Installation section. b. Remove the handle and test the lock: With the panel open, remove the handle. Depress the lock safety located on the side of the panel while using a flat head screwdriver to turn the lock actuator. Check for binding in the lock and in the top and bottom extensions. c. Inspect and adjust lock extensions: If necessary, remove the lock extensions and ensure they are not bent. Reshape by hand if required so that the slides move freely without scraping. Reinstall the extensions and retest operation. ##### 1. Internal Locking Mechanism & Keeper Bar Adjustment #### TROUBLESHOOTING d. Loosen retention screws if binding persists: If binding remains, ",
+                          "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Signature-Install-guide-9.25.pdf"
+                        }
+                      ],
+                      "industry_source_bindings": {
+                        "brands": {},
+                        "evaluation_date": "2026-10-24",
+                        "links": {
+                          "https://vytexwindows.com/about-us/": {
+                            "body_sha256": "46836101cee9200841ffb0d15df2482b9fcf48406ae73dfc949e9dfec11fba47",
+                            "final_url": "https://vytexwindows.com/about-us/",
+                            "hrefs": [
+                              "https://www.facebook.com/VytexWindows/",
+                              "https://www.instagram.com/vytexwindows/",
+                              "https://www.youtube.com/channel/UCMZYRPvaAK8HpWb5BS-cjRg",
+                              "https://www.linkedin.com/company/vytexwindows/?viewAsMember=true"
+                            ]
+                          }
+                        },
+                        "parent_domain": "vytexwindows.com",
+                        "parent_name": "vytex",
+                        "schema": "industry_source_bindings_v1"
+                      },
+                      "missing_requirements": [
+                        "Manufacture and supply of interior building products within the relevant offering.",
+                        "Sales or stated customer positioning for builders within the relevant offering."
+                      ],
+                      "model": "openai/gpt-6.1-sol",
+                      "packet_sha256": "a8abfbfd001dc3260ce3d2fc790ab7b63c64440d18d0fd54ea8fb848c92e11ba",
+                      "reason": "The sources establish Vytex's manufacturer/supplier role, exterior building products, remodeler customers, and North American ordering and delivery channels. The commercial warranty explicitly identifies distributors as a purchasing channel. However, the complete criterion also requires interior building products and builder customers. Neither is established: interior-facing window components and installation instructions mentioning interior trim do not demonstrate a separately supplied interior building-product offering, and generic contractor testimonials do not establish builder positioning",
+                      "research_brief": {
+                        "decision": "unavailable",
+                        "excluded_source_urls": [
+                          "https://graycliffpartners.com/investments/vytex"
+                        ],
+                        "missing_requirements": [
+                          "Manufacture of interior building products within the connected offering.",
+                          "Sales of the offering to builders and remodelers.",
+                          "North American scope of the offering's supply channels."
+                        ],
+                        "notice": "Fallible assessment of loaded company-bound sources, not proof. source_urls lists the loaded pages eligible for industry review. excluded_source_urls remain available for other targets under their own rules, but cannot establish industry capabilities. A marketplace or third-party description cannot close these industry gaps; find the company-bound source for that fact. New industry sources need independently bound first-party requested and final URLs, an observed company careers link to the same exact ATS employer, or verified rebrand continuity. Company job descriptions may describe work on its own offering; experience requested from applicants alone does not prove a product capability. Use remaining research to resolve these specific capability or customer-role gaps. Search for the missing fact, then select specific product/service documentation, technical brochures, or company customer/project evidence from the results. Choose sources that can support OR contradict the requirement. Generic category pages, internal use and a separate partner offering do not resolve a missing supplied capability. PDF brochures are eligible locators. Search-loaded text may be incomplete; fetch_page may refresh it once within the remaining ordinary fetch/time allowance. Prefetched, retained and exact-read sources remain cached. Never treat snippets as proof. After fetching a page, check the remaining gaps; one new page does not by itself resolve them. Use remaining research for specific unanswered facts before submitting. Keep all other requested targets and existing research limits.",
+                        "packet_sha256": "3bbd0cb85adaff830fa2aeaa4cc9af1c6ea964bca5e8fd4414de266fa2544e07",
+                        "reason": "The sources establish Vytex's supplier/manufacturer role and exterior building products: it explicitly manufactures windows and doors, including patio doors. Its dealer network establishes a resale distribution channel. However, the criterion requires exterior AND interior building products, sales to builders, remodelers, and distributors, and North American supply channels. The supplied pages do not establish interior products, builder or remodeler customers, or the geographic scope of the channels. Homeowner installation and replacement testimonials do not establish sales to those profession",
+                        "research_query": "Product catalog or technical brochure documenting manufactured interior doors or other interior building products",
+                        "source_urls": [
+                          "https://vytexwindows.com/",
+                          "https://vytexwindows.com/about-us/"
+                        ]
+                      },
+                      "schema": "industry_evidence_review_v1",
+                      "source_urls": [
+                        "https://vytexwindows.com/",
+                        "https://vytexwindows.com/about-us/",
+                        "https://vytexwindows.com/product-literature/",
+                        "https://vytexwindows.com/technical-specifications/",
+                        "https://vytexwindows.com/how-to/",
+                        "https://vytexwindows.com/wp-content/uploads/2025/08/Vinyl-Window-Door-Size-Limits-9.24.pdf",
+                        "https://vytexwindows.com/wp-content/uploads/2025/09/Signature-Install-guide-9.25.pdf",
+                        "https://vytexwindows.com/wp-content/uploads/2025/08/7000-Installation-guide-8.25.pdf",
+                        "https://vytexwindows.com/3d-flip-book/specialty-windows/",
+                        "https://vytexwindows.com/8-26-qr_potomac-hp/",
+                        "https://vytexwindows.com/wp-content/uploads/2025/06/FL47071_R1_II_29261.01-1001-R1-6000-HS-XOX-Impact-Installation-Drawings-3SL-QHQ-110-x-63.pdf",
+                        "https://vytexwindows.com/windows/potomac-hp/",
+                        "https://vytexwindows.com/blog/vytex-windows-announces-acquisition-of-vinyl-kraft/",
+                        "https://vytexwindows.com/privacy-policy/",
+                        "https://vytexwindows.com/become-a-partner/",
+                        "https://vytexwindows.com/terms-conditions-of-sale/",
+                        "https://vytexwindows.com/careers/",
+                        "https://vytexwindows.com/wp-content/uploads/2025/09/Commercial-Warranty-1.pdf",
+                        "https://vytexwindows.com/wp-content/uploads/2025/06/FL47071_R1_II_29261.08-1001-6200-HS-XOX-non-Impact-Installation-Drawings-3SL-QHQ-110-x-63.pdf"
+                      ]
+                    },
+                    "activity_role": "unresolved",
+                    "evidence_quote": "",
+                    "evidence_url": "",
+                    "new_domain": "",
+                    "new_name": "",
+                    "observed_country": "",
+                    "observed_industry": "",
+                    "observed_state": "",
+                    "observed_subindustry": "",
+                    "observed_value": null,
+                    "old_domain": "",
+                    "old_name": "",
+                    "reason": "The sources establish Vytex's manufacturer/supplier role, exterior building products, remodeler customers, and North American ordering and delivery channels. The commercial warranty explicitly identifies distributors as a purchasing channel. However, the complete criterion also requires interior bui",
+                    "shared_linkedin_slug": "",
+                    "status": "UNPROVEN",
+                    "supporting_evidence": [],
+                    "target": "industry"
+                  },
+                  "required_attribute": {
+                    "activity_role": "unresolved",
+                    "evidence_quote": "",
+                    "evidence_url": "",
+                    "new_domain": "",
+                    "new_name": "",
+                    "observed_country": "",
+                    "observed_industry": "",
+                    "observed_state": "",
+                    "observed_subindustry": "",
+                    "observed_value": null,
+                    "old_domain": "",
+                    "old_name": "",
+                    "reason": "The acquired Ohio manufacturer and combined East Coast/Midwest manufacturing platform support an expanded residential-products manufacturing footprint. However, the complete compound attribute remains unproven because loaded evidence does not establish current controlling ownership by an independent",
+                    "shared_linkedin_slug": "",
+                    "status": "UNPROVEN",
+                    "supporting_evidence": [],
+                    "target": "required_attribute"
+                  },
+                  "stage": {
+                    "activity_role": "unresolved",
+                    "evidence_quote": "",
+                    "evidence_url": "",
+                    "new_domain": "",
+                    "new_name": "",
+                    "observed_country": "",
+                    "observed_industry": "",
+                    "observed_state": "",
+                    "observed_subindustry": "",
+                    "observed_value": null,
+                    "old_domain": "",
+                    "old_name": "",
+                    "reason": "The dated 2026 announcement establishes Graycliff ownership and an acquisition by Vytex, not an acquisition of Vytex. Loaded evidence does not establish Graycliff's controlling stake and same-owner private-equity identity. Current PE control therefore remains unproven.",
+                    "shared_linkedin_slug": "",
+                    "status": "UNPROVEN",
+                    "supporting_evidence": [],
+                    "target": "stage"
+                  }
+                },
+                "completed_submitted_findings": true,
+                "failure_reason": "",
+                "gate": "company_evidence_investigation",
+                "positive_semantic_review": true,
+                "positive_semantic_review_resolved": false,
+                "prior_decision": "unavailable",
+                "prior_dimension_decisions": {
+                  "employee_size": "match",
+                  "geography": "match",
+                  "industry": "match",
+                  "stage": "unavailable"
+                },
+                "projected_decision": "unavailable",
+                "targets": [
+                  "stage",
+                  "industry",
+                  "required_attribute"
+                ],
+                "usage": {
+                  "fetch_calls": 3,
+                  "fetch_outcomes": [
+                    {
+                      "error_class": "",
+                      "loaded_text_length": 3759,
+                      "ok": true,
+                      "url_sha256": "3cfff1e7068a1546a368dc20298261a84b2c4035893d8f32dee8b861344d3fc2"
+                    },
+                    {
+                      "error_class": "",
+                      "loaded_text_length": 2225,
+                      "ok": true,
+                      "url_sha256": "4da06b6102a1a64c00be4a9232a3b1bc4f6ba8b268877f201639476dfe09ae68"
+                    },
+                    {
+                      "error_class": "",
+                      "loaded_text_length": 2770,
+                      "ok": true,
+                      "url_sha256": "fa175b689307b4100428ca5326e1e5cb5dec8d8f9feb5be937568e84935a81b6"
+                    }
+                  ],
+                  "industry_review_calls": 2,
+                  "prefetched_pages": 2,
+                  "reasoning_turns": 6,
+                  "search_calls": 3,
+                  "total_loaded_pages": 22
+                }
+              },
+              {
+                "cache_hit": false,
+                "final_url_sha256": "",
+                "gate": "required_attribute_source",
+                "source_url_sha256": "",
+                "status": "unproven"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "company_judgments": [
+      {
+        "authority_slot": 0,
+        "cache_key": "sha256:89af19165f6162ed01298441c1db9cc065176eca0dcf6e0063a5a0c5598306d3",
+        "company_index": 0,
+        "company_input_hash": "sha256:ec011f94fbe7b9ce37b6de37e0b84e88d45f0db17698d8340a5593ef5156fdcb",
+        "raw_judgment": {
+          "company_identity_alias_keys": [
+            "domain:vytexwindows.com|name:vytex",
+            "linkedin:vytexwindows"
+          ],
+          "company_identity_key": "linkedin:vytexwindows",
+          "company_judgment_policy": "company_judgment_v1",
+          "cost_penalty": 0.0,
+          "decision_maker": 0.0,
+          "failure_reason": "Company fit unavailable: unproven dimensions: industry, stage, required_attribute",
+          "final_score": 0.0,
+          "icp_fit": 0.0,
+          "intent_signal_final": 0.0,
+          "intent_signal_raw": 0.0,
+          "intent_signals_detail": null,
+          "time_decay_multiplier": 1.0,
+          "time_penalty": 0.0,
+          "verifier_gate_receipts": [
+            {
+              "company_fit_decision": "unavailable",
+              "company_fit_dimensions": {
+                "employee_size": "match",
+                "geography": "match",
+                "identity": "match",
+                "industry": "unavailable",
+                "stage": "unavailable"
+              },
+              "company_fit_stage_required": true,
+              "contract_id": "company-fit-decision:v1",
+              "contract_version": "company-fit-decision:v1",
+              "decision": "unavailable",
+              "dimension_evidence": {
+                "employee_size": {
+                  "decision": "match",
+                  "observed_decision": "match",
+                  "submitted_decision": "match",
+                  "web_evidence": {
+                    "employee_count": "201-500",
+                    "provider": "harvestapi_get_company",
+                    "source_field": "employeeCountRange",
+                    "url": "https://www.linkedin.com/company/vytexwindows",
+                    "website": "https://vytexwindows.com/"
+                  }
+                },
+                "geography": {
+                  "decision": "match",
+                  "observed_decision": "match",
+                  "submitted_decision": "match",
+                  "web_evidence": {
+                    "quote": "Headquarters \n\n Laurel, MD",
+                    "url": "https://www.linkedin.com/company/vytexwindows"
+                  }
+                },
+                "identity": {
+                  "actual_final_url": "https://vytexwindows.com/",
+                  "decision": "match",
+                  "homepage_identity_decision": "match",
+                  "homepage_identity_reason": "verified: independently observed first-party name, final domain, and exact LinkedIn company identity",
+                  "identity": {
+                    "decision": "match",
+                    "evidence_source": "company_homepage",
+                    "observed_domain": "vytexwindows.com",
+                    "observed_linkedin_slug": "vytexwindows",
+                    "observed_name": "vytex",
+                    "reason_code": "verifier_accepted",
+                    "submitted_domain": "vytexwindows.com",
+                    "submitted_linkedin_slug": "vytexwindows",
+                    "submitted_name": "vytex"
+                  },
+                  "reason": "verified: independently observed first-party name, final domain, and exact LinkedIn company identity",
+                  "web_identity_decision": "match",
+                  "web_identity_receipt": {
+                    "decision": "match",
+                    "evidence_source": "company_web_reverification",
+                    "observed_domain": "vytexwindows.com",
+                    "observed_linkedin_slug": "vytexwindows",
+                    "observed_name": "vytex",
+                    "reason_code": "verifier_accepted",
+                    "submitted_domain": "vytexwindows.com",
+                    "submitted_linkedin_slug": "vytexwindows",
+                    "submitted_name": "vytex"
+                  }
+                },
+                "industry": {
+                  "decision": "unavailable",
+                  "observed_decision": "unavailable",
+                  "submitted_decision": "unavailable",
+                  "web_evidence": {
+                    "quote": "",
+                    "url": ""
+                  }
+                },
+                "required_attribute": {
+                  "decision": "unavailable",
+                  "web_evidence": {
+                    "quote": "",
+                    "url": ""
+                  }
+                },
+                "stage": {
+                  "decision": "unavailable",
+                  "observed_decision": "unavailable",
+                  "submitted_decision": "match",
+                  "web_evidence": {
+                    "quote": "Akerman represented Vytex, a portfolio company of private equity firm Graycliff Partners, in the acquisition of Vinyl Kraft.",
+                    "url": "https://www.akerman.com/en/firm/newsroom/akerman-represents-graycliff-partners-in-acquisition-of-vinyl-kraft.html"
+                  }
+                },
+                "web_observations": {
+                  "attribute_evidence": "",
+                  "geography_matches": true,
+                  "industry_activity_role": "unresolved",
+                  "industry_matches": null,
+                  "observed_company_linkedin": "https://www.linkedin.com/company/vytexwindows",
+                  "observed_company_name": "Vytex",
+                  "observed_company_stage": "Private Equity",
+                  "observed_company_website": "https://vytexwindows.com/",
+                  "observed_employee_count": null,
+                  "observed_hq_country": "United States",
+                  "observed_hq_state": "Maryland",
+                  "observed_industry": "",
+                  "observed_subindustry": ""
+                }
+              },
+              "failure_class": "insufficient_fit_evidence",
+              "gate": "company_fit",
+              "reason": "unproven dimensions: industry, stage, required_attribute",
+              "required_attribute_decision": "unavailable",
+              "supporting_receipts": [
+                {
+                  "checked_source_provenance": {
+                    "company_locator_sha256": "sha256:188bfbc99f859b21d567e3342b96311b9592e28a6393ed9ae584a543c1d920d1",
+                    "request_sha256": "sha256:e6a8ac4fe4b2cdca61674469f658d95cbdf3c24bf49c5f7a22e31f756012edf2",
+                    "schema": "checked_investigation_sources_v1",
+                    "scope": "investigation_request_only_not_criterion_proof",
+                    "source_limit_reached": true,
+                    "sources": [
+                      {
+                        "kind": "loaded_page_excerpt",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:069bb87a3f1041cc7e0a065c782769bfb629a350c8b345edfe7359445ef3245b",
+                        "source_index": 0,
+                        "url": "https://vytexwindows.com/",
+                        "url_sha256": "sha256:c9c7fe607149cc55f74dc401c8ee66ee69f26a38ae8e7151294b765d29584c2f"
+                      },
+                      {
+                        "kind": "loaded_page_excerpt",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:4d5ef2a4b5dedc1275eda9530d957658c5d0c0ea45fa90d7504e245d791fd9c3",
+                        "source_index": 1,
+                        "url": "https://graycliffpartners.com/investments/vytex",
+                        "url_sha256": "sha256:6a7fa9ee2b4f0b58f8a1fb0f5fc14b757bcf39f30759fc4c3a6906f7e5dca868"
+                      },
+                      {
+                        "kind": "loaded_page_excerpt",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:46836101cee9200841ffb0d15df2482b9fcf48406ae73dfc949e9dfec11fba47",
+                        "source_index": 2,
+                        "url": "https://vytexwindows.com/about-us/",
+                        "url_sha256": "sha256:3cfff1e7068a1546a368dc20298261a84b2c4035893d8f32dee8b861344d3fc2"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:e74b07e63b2159153369772dc96eeacb4eae3483ef530fa2d45883cc09d92cb1",
+                        "source_index": 0,
+                        "url": "https://corporatefinance.kpmg.com/us/en/transactions/vytex-corporation.html",
+                        "url_sha256": "sha256:27c6af0375dccb1e4fd02b1173a134b159ca943fa6ce2d303427148b9f4668c0"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:50415121d7c22b2705461477ab16a0a4cd0fec0cc4c3e10772d829292ef7667a",
+                        "source_index": 1,
+                        "url": "https://graycliffpartners.com/investments/vytex",
+                        "url_sha256": "sha256:6a7fa9ee2b4f0b58f8a1fb0f5fc14b757bcf39f30759fc4c3a6906f7e5dca868"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:f537626d9c214b394d7abc17f6aac0ad79b0a2c40f19cadf0c25d17cf4a3622b",
+                        "source_index": 2,
+                        "url": "https://graycliffpartners.com/news/graycliff-invests-in-vytex",
+                        "url_sha256": "sha256:4da06b6102a1a64c00be4a9232a3b1bc4f6ba8b268877f201639476dfe09ae68"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:ae897ad82416af6b94e291fd79ffae27d083ee3267aea4d49509275aae2c18bf",
+                        "source_index": 3,
+                        "url": "https://graycliffpartners.com/news/vytex-vinyl-kraft",
+                        "url_sha256": "sha256:fa175b689307b4100428ca5326e1e5cb5dec8d8f9feb5be937568e84935a81b6"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:d89b9ba633f1310419628ceec18ff294fc949b09b781aa7817782fcd5a05cead",
+                        "source_index": 4,
+                        "url": "https://brooksidecp.com/brookside-capital-partners-frames-a-bright-future-with-an-investment-in-vytex/",
+                        "url_sha256": "sha256:f86e9d032cc7fd67f01e04f06a5b4a14956568f1df0c669e508126190261fe65"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:d218e2f1b5ebb002e2af05697beeecef5dc9c57b9d746f56491a42c599e8a21a",
+                        "source_index": 0,
+                        "url": "https://vytexwindows.com/product-literature/",
+                        "url_sha256": "sha256:b6b87e20d4954d619558ae8d088e8ba252231a959f0182d1ef5b7f773ba82721"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:acd82ae56f31979664a60ee248f71b7d852e2c2578fa68171c529d058308d66b",
+                        "source_index": 1,
+                        "url": "https://vytexwindows.com/technical-specifications/",
+                        "url_sha256": "sha256:885511fa395cdc404f2cbd24221ae717e615920633e80196e6a8c7d9c2693821"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:3cd984d45c73bd37bd7b732aef82586cea5a44fb49f143d16051d3214c3ebbad",
+                        "source_index": 2,
+                        "url": "https://vytexwindows.com/how-to/",
+                        "url_sha256": "sha256:250dac9e2d1bf4069a205d2de63bb5d2c882f6161fba352c7443cd889cf17273"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:7929c4a860e689fd37ea76d3a3790f512da8b2d554b607e4add7ad9bba4bda22",
+                        "source_index": 3,
+                        "url": "https://vytexwindows.com/wp-content/uploads/2025/08/Vinyl-Window-Door-Size-Limits-9.24.pdf",
+                        "url_sha256": "sha256:b0a9b3a7f21e942adc2b1dc34ffd67f0794796a09c5d1b20f0b72157ce379e95"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:4eefbddd58ede91644140d41fcb8555836241278f978851d4be61b8d64939f96",
+                        "source_index": 4,
+                        "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Signature-Install-guide-9.25.pdf",
+                        "url_sha256": "sha256:0d0d5ad0e2a7525573d50974c6cb26aab33471361841aec956fd986a6b5f8567"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:d895bc62b34adc51db0c187e8209960599589a224944913957fc60423a55d3a4",
+                        "source_index": 5,
+                        "url": "https://vytexwindows.com/wp-content/uploads/2025/08/7000-Installation-guide-8.25.pdf",
+                        "url_sha256": "sha256:feb5bf3a27c4ab4373b628a0d3ef57e320a4dc7781115ce4f5d42d9e1523056b"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:627bb94167368104d87559278888c85463bb7590c4e07b29d6d5efb7a11b83fe",
+                        "source_index": 6,
+                        "url": "https://vytexwindows.com/3d-flip-book/specialty-windows/",
+                        "url_sha256": "sha256:778c59030a074a03b8f4f6890e763ca58270acb7225759bb081a2919865ac458"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:d86608fc35e314369801d7ec84972806b15d01cdd8f1b6cefc65c8d6bf895c3a",
+                        "source_index": 7,
+                        "url": "https://vytexwindows.com/8-26-qr_potomac-hp/",
+                        "url_sha256": "sha256:03f805558d036d042ced3688f6e028f397370636e56a8ea59c74da7c5866f36d"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:783c828fd17f8e4d70229251637d5e7ec5db07c03c26d4b367c7fcd17ccf3dbc",
+                        "source_index": 8,
+                        "url": "https://vytexwindows.com/wp-content/uploads/2025/06/FL47071_R1_II_29261.01-1001-R1-6000-HS-XOX-Impact-Installation-Drawings-3SL-QHQ-110-x-63.pdf",
+                        "url_sha256": "sha256:83000094ec88a4742c3645a111d3a300755374b3857e93ae506daabe35bbee95"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:d2ee4234aeffbaafdf63a269988450f361cef406d619e10655b7d4162f0b2ae8",
+                        "source_index": 9,
+                        "url": "https://vytexwindows.com/windows/potomac-hp/",
+                        "url_sha256": "sha256:9e46e66276f3fa1dc42d8293ff3088e182692d859804dc756020a991bfb59d44"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:f2d9966687255d76c411d36d9eedbe798e00cc78dbbf0d5689e4da8c742e5790",
+                        "source_index": 10,
+                        "url": "https://vytexwindows.com/3d-flip-book/potomac-coastal/",
+                        "url_sha256": "sha256:7cdba256fc94c9489ef4e8ae5adea60523fd7f474e5255de1155ec68fe417b82"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:ce1d0c8f0016e43a3206238e9cb92f1146af77d17a99ca786e5981fc5bcf9b89",
+                        "source_index": 11,
+                        "url": "https://vytexwindows.com/3d-flip-book/potomac-series-brochure/",
+                        "url_sha256": "sha256:f73c81d32fc276a5c55da56a3e04e076185300f3e55ea1955e9b06596530d040"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:8ac3132c47fc89158132957c578209555f40184af37f9472c33a33d804a51032",
+                        "source_index": 12,
+                        "url": "https://vytexwindows.com/3d-flip-book/fortis-series-brochure/",
+                        "url_sha256": "sha256:8099a0790959beef68c0e79e2ee697a768ad4e0f33280050ab72262f577aadb6"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:0fc2258667a4c0626e4427ce81a46879f3cb0d318229b921b1f2100a2743c0a1",
+                        "source_index": 13,
+                        "url": "https://vytexwindows.com/3d-flip-book/georgetown-series/",
+                        "url_sha256": "sha256:9e16c048286cf1da447dc5b8e9d6469726b9bde3a4f14b4910edc6e9a220aeaf"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:b9c51b0e1587d6763dda692b19e6d394a5f16caeb84bcca6cae0f3324a7cce8f",
+                        "source_index": 14,
+                        "url": "https://vytexwindows.com/3d-flip-book/sliding-patio-door-brochure/",
+                        "url_sha256": "sha256:d156bbd38c2d670d9a5f8501bb0badc2722306f2aed53aa5159e0363555edaa0"
+                      },
+                      {
+                        "kind": "search_locator_only",
+                        "message_content_sha256": "sha256:adcd35831f8fadd6315b5f0ff5b9959dc53a1db29fd531bd5a3308b6cd813d0a",
+                        "message_index": 0,
+                        "shown_content_sha256": "sha256:d0e1fcd4a5873d5918c798a0c498a9d90b631a0ac299f5c280a07f34029f70b5",
+                        "source_index": 15,
+                        "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Spanish-Signature-Install-guide-9.25.pdf",
+                        "url_sha256": "sha256:b7f3ef33794b5fb2d24cbb1fca56e488eb6228f51d2533bea50f71922afd325a"
+                      }
+                    ],
+                    "unproven_claims": {
+                      "industry": {
+                        "claim_sha256": "sha256:74b5c21d4b34906767344a872da146cf722dbe9e813811db38179eb37d51bfac",
+                        "criterion_sha256": "sha256:de7342d2102a9d33f47108bd68a773b3c3d29aef555fa0e49a88da41a880296a",
+                        "status": "UNPROVEN"
+                      },
+                      "required_attribute": {
+                        "claim_sha256": "sha256:85cdd996b5718bcd9f35c1a2e4713b707fa791d1358af1b2819fb6120a06f3a5",
+                        "criterion_sha256": "sha256:4f7df580f564185069a89255199cd571e69378032efac5596bfff795bcd825fe",
+                        "status": "UNPROVEN"
+                      },
+                      "stage": {
+                        "claim_sha256": "sha256:d092d27c0277e08e8a8ad13f0965128194fec963a7385245bccfed673df8538f",
+                        "criterion_sha256": "sha256:719d4bf0412d9d33561fdd4d9c45964fa61cd56a5775e8acb3d1f27ccebb47be",
+                        "status": "UNPROVEN"
+                      }
+                    }
+                  },
+                  "claims": {
+                    "industry": {
+                      "_industry_review": {
+                        "decision": "unavailable",
+                        "evidence": [
+                          {
+                            "quote": "Learn About Vytex: Innovation, Quality & Service Careers Online Ordering Dashboard Search Crafted by Experts. Trusted by Homeowners. Preferred by Dealers. As a premier window manufacturer, we combine innovation, precision, and craftsmanship to create high-performance vinyl windows and doors. Designed for beauty. Engineered for excellence. Built to last. Explore Products Become a Partner Our History Since 1988, Vytex has been committed to manufacturing high-quality windows and doors with a focus on performance, craftsmanship, and customer care. Backed by more than 35 years of industry experience, our reputation for excellence has been recognized by ENERGY STAR®, Window & Door Magazine, and the Fenestration and Glazing Industry Alliance (FGIA). Today, our continued investment in innovation, energy efficiency, and exceptional service drives our success—and the success of our partners. Our Mission To advance the window industry with energy-efficient solutions, exceptional quality, and unparalleled customer support. Together, we redefine excellence through sustainable partnerships that transform the way people experience their spaces. Industry-Leading Products As a premier window manufacturer, we deliver unmatched quality, innovation, and performance. Our windows and doors are engineered for lasting beauty, energy efficiency, and superior durability—providing homeowners with exceptional comfort and style while giving dealers a competitive edge with products designed to exceed expectations. Learn More Reduce Energy Costs with Advanced Solutions Advanced technology for superior in",
+                            "url": "https://vytexwindows.com/about-us/"
+                          },
+                          {
+                            "quote": "Windows Potomac-hp Series by Vytex: Features & Options # POTOMAC-hp The ultimate in energy efficiency, durability, and beauty. Trusted by home improvement companies throughout the Eastern United States for exceptional performance, craftsmanship, and support. ## Built to Perform. Designed to Last. Potomac-hp represents the pinnacle of Vytex performance, combining industry-leading air infiltration, exceptional structural ratings, advanced energy efficiency, and virtually limitless design possibilities. Engineered for lasting comfort and built with the craftsmanship remodelers can confidently stand behind, Potomac-hp delivers premium performance homeowners can feel..01 Air Infiltration Rating R65 Rating | 198 mph Wind Resistance.20 U-Factor (with our most energy-efficient glass option).18 Solar Heat Gain Coefficient (varies by glass package) ## Features & Options The Potomac-hp Series stands apart with industry-leading energy efficiency and unmatched customization. Featuring our exclusive magnetic seal—unique to this series—along with advanced VyFoam™ insulation and high-performance glass packages, these windows provide superior thermal performance and airtight protection. With extensive style options, you can customize every detail to suit your home without compromising on efficiency. - Window Anatomy - Glass Options - Customizations Elegant, sculpted frame with a picture-perfect view Welded corners for lasting strength VyCore™ Reinforcement: Strength where it matters VyFoam™: Superior insulation and performance Magnetic Seal: Ensures a precise, airtight closure Tilt-In Sashe",
+                            "url": "https://vytexwindows.com/8-26-qr_potomac-hp/"
+                          },
+                          {
+                            "quote": "How to Become a Vinyl Windows & Doors Dealer - Vytex # Join The Vytex Family ###### Industry-Leading Products Offer your customers the best. Our premium, energy-efficient windows and doors are crafted for durability, performance, and superior aesthetics—setting your business apart from the competition. ###### Seamless Ordering & Delivery Get what you need, when you need it. Our streamlined ordering process and dependable manufacturing ensure accurate, on-time deliveries, so you can confidently meet customer demand. ###### Dedicated Dealer Support You’re never alone. Our expert dealer support team is here to provide guidance, answer questions, and ensure you have everything you need to succeed. ## Become a Partner ## Partner with Confidence—See Why Dealers Choose Vytex. Experience the Vytex difference—where exceptional craftsmanship meets unmatched performance. Our clients consistently highlight the superior quality of our windows and doors, the energy efficiency we deliver, and the dedicated service that supports them every step of the way. Explore their testimonials and discover why Vytex is the preferred choice for discerning homeowners and trusted dealers alike. > Working with Vytex is great! They have great products and their staff is very helpful. Communication and customer service from them is top tier! > > Capital Windows Dealer > We Install Vytex windows In alot of our projects for ourselves and for our customers. For Burke Home Services they are a great company to deal with! Lots of customer service and support. The windows are a High quality product at a great cos",
+                            "url": "https://vytexwindows.com/become-a-partner/"
+                          },
+                          {
+                            "quote": "al, state, local or other taxes, excises or charges, or increases thereof upon the production, sale or transportation of the Products sold pursuant to the Agreement not now included in the price specified therein, Buyer shall reimburse Seller for the same. 5. Shipping; Pick-Up. Unless Buyer has specified that it will pick-up Products from Seller’s facilities, Seller will arrange for shipment of the Products to an address designated by Buyer. Title to and risk of loss of all Products sold pursuant to the Agreement shall pass to Buyer as follows: (a) if Buyer has specified that it will pick-up Products from Seller’s facilities, title to and risk of loss passes to Buyer upon Buyer’s receipt of the Products at Seller’s facilities for loading on the vehicle(s) used by Buyer to pick-up the Products from Seller’s facilities, and (b) otherwise, title to and risk of loss passes to Buyer upon Seller’s delivery of the Products to the address designated by Buyer. 6. Buyer Risk. Buyer assumes all risks and liability for results arising out of Buyer’s unloading, storage, handling and/or use of the Products, or arising out of compliance or non-compliance with federal, state, municipal or local laws and regulations with reference thereto. 7. Buyer Indemnity. Unless Product sold pursuant to the Order fails to meet Seller’s Limited Warranty referenced in Section 2 above, Buyer shall indemnify, defend and hold Seller harmless from all costs, expenses, damages, judgments or other loss, including costs of investigation, litigation and reasonable attorney’s fees, arising out of Buyer’s selection",
+                            "url": "https://vytexwindows.com/terms-conditions-of-sale/"
+                          },
+                          {
+                            "quote": "f our products, painting or staining of the original finish, acts of God, misuse, or abuse. This warranty may also be voided in the event of brickwash damage due to misuse. All windows and doors must be protected prior to application of brickwash. Vytex’s obligation under this warranty is limited to furnishing replacement material and does not cover any possible labor charges. WARRANTY CLAIM PROCEDURE Vytex, or an authorized dealer representative, reserves the right to inspect any window or patio door product submitted for warranty claim. If you have a problem with your Vytex windows or patio door products, contact the dealer, distributor, or contractor from whom you purchased these products or contact us directly:",
+                            "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Commercial-Warranty-1.pdf"
+                          },
+                          {
+                            "quote": "tall the keeper: Confirm which direction the screen handle operates by compressing the lever either upward or downward. The hook for the keeper must be oriented so that the lock clears when engaged. Depending on door operation, you may need to remove and reorient the screen handle before securing. See figure 17. FIGURE 17 a. Apply minimal expanding foam into any gaps between the frame and the rough opening, as needed. NOTE: Vytex recommends using only minimal expansion foam. b. Install exterior flashing, interior trim, and caulking as necessary to prevent air and water infiltration. ##### 9. Final Installation #### TROUBLESHOOTING NOTE: The moveable panel must be fully closed in order for the locking mechanism to be activated. a. Verify alignment: Check that the reveal between the movable panel and the strike jamb is even from top to bottom, and confirm the door is level and plumb. If not, review the Master Frame Installation section. b. Remove the handle and test the lock: With the panel open, remove the handle. Depress the lock safety located on the side of the panel while using a flat head screwdriver to turn the lock actuator. Check for binding in the lock and in the top and bottom extensions. c. Inspect and adjust lock extensions: If necessary, remove the lock extensions and ensure they are not bent. Reshape by hand if required so that the slides move freely without scraping. Reinstall the extensions and retest operation. ##### 1. Internal Locking Mechanism & Keeper Bar Adjustment #### TROUBLESHOOTING d. Loosen retention screws if binding persists: If binding remains, ",
+                            "url": "https://vytexwindows.com/wp-content/uploads/2025/09/Signature-Install-guide-9.25.pdf"
+                          }
+                        ],
+                        "industry_source_bindings": {
+                          "brands": {},
+                          "evaluation_date": "2026-10-24",
+                          "links": {
+                            "https://vytexwindows.com/about-us/": {
+                              "body_sha256": "46836101cee9200841ffb0d15df2482b9fcf48406ae73dfc949e9dfec11fba47",
+                              "final_url": "https://vytexwindows.com/about-us/",
+                              "hrefs": [
+                                "https://www.facebook.com/VytexWindows/",
+                                "https://www.instagram.com/vytexwindows/",
+                                "https://www.youtube.com/channel/UCMZYRPvaAK8HpWb5BS-cjRg",
+                                "https://www.linkedin.com/company/vytexwindows/?viewAsMember=true"
+                              ]
+                            }
+                          },
+                          "parent_domain": "vytexwindows.com",
+                          "parent_name": "vytex",
+                          "schema": "industry_source_bindings_v1"
+                        },
+                        "missing_requirements": [
+                          "Manufacture and supply of interior building products within the relevant offering.",
+                          "Sales or stated customer positioning for builders within the relevant offering."
+                        ],
+                        "model": "openai/gpt-6.1-sol",
+                        "packet_sha256": "a8abfbfd001dc3260ce3d2fc790ab7b63c64440d18d0fd54ea8fb848c92e11ba",
+                        "reason": "The sources establish Vytex's manufacturer/supplier role, exterior building products, remodeler customers, and North American ordering and delivery channels. The commercial warranty explicitly identifies distributors as a purchasing channel. However, the complete criterion also requires interior building products and builder customers. Neither is established: interior-facing window components and installation instructions mentioning interior trim do not demonstrate a separately supplied interior building-product offering, and generic contractor testimonials do not establish builder positioning",
+                        "research_brief": {
+                          "decision": "unavailable",
+                          "excluded_source_urls": [
+                            "https://graycliffpartners.com/investments/vytex"
+                          ],
+                          "missing_requirements": [
+                            "Manufacture of interior building products within the connected offering.",
+                            "Sales of the offering to builders and remodelers.",
+                            "North American scope of the offering's supply channels."
+                          ],
+                          "notice": "Fallible assessment of loaded company-bound sources, not proof. source_urls lists the loaded pages eligible for industry review. excluded_source_urls remain available for other targets under their own rules, but cannot establish industry capabilities. A marketplace or third-party description cannot close these industry gaps; find the company-bound source for that fact. New industry sources need independently bound first-party requested and final URLs, an observed company careers link to the same exact ATS employer, or verified rebrand continuity. Company job descriptions may describe work on its own offering; experience requested from applicants alone does not prove a product capability. Use remaining research to resolve these specific capability or customer-role gaps. Search for the missing fact, then select specific product/service documentation, technical brochures, or company customer/project evidence from the results. Choose sources that can support OR contradict the requirement. Generic category pages, internal use and a separate partner offering do not resolve a missing supplied capability. PDF brochures are eligible locators. Search-loaded text may be incomplete; fetch_page may refresh it once within the remaining ordinary fetch/time allowance. Prefetched, retained and exact-read sources remain cached. Never treat snippets as proof. After fetching a page, check the remaining gaps; one new page does not by itself resolve them. Use remaining research for specific unanswered facts before submitting. Keep all other requested targets and existing research limits.",
+                          "packet_sha256": "3bbd0cb85adaff830fa2aeaa4cc9af1c6ea964bca5e8fd4414de266fa2544e07",
+                          "reason": "The sources establish Vytex's supplier/manufacturer role and exterior building products: it explicitly manufactures windows and doors, including patio doors. Its dealer network establishes a resale distribution channel. However, the criterion requires exterior AND interior building products, sales to builders, remodelers, and distributors, and North American supply channels. The supplied pages do not establish interior products, builder or remodeler customers, or the geographic scope of the channels. Homeowner installation and replacement testimonials do not establish sales to those profession",
+                          "research_query": "Product catalog or technical brochure documenting manufactured interior doors or other interior building products",
+                          "source_urls": [
+                            "https://vytexwindows.com/",
+                            "https://vytexwindows.com/about-us/"
+                          ]
+                        },
+                        "schema": "industry_evidence_review_v1",
+                        "source_urls": [
+                          "https://vytexwindows.com/",
+                          "https://vytexwindows.com/about-us/",
+                          "https://vytexwindows.com/product-literature/",
+                          "https://vytexwindows.com/technical-specifications/",
+                          "https://vytexwindows.com/how-to/",
+                          "https://vytexwindows.com/wp-content/uploads/2025/08/Vinyl-Window-Door-Size-Limits-9.24.pdf",
+                          "https://vytexwindows.com/wp-content/uploads/2025/09/Signature-Install-guide-9.25.pdf",
+                          "https://vytexwindows.com/wp-content/uploads/2025/08/7000-Installation-guide-8.25.pdf",
+                          "https://vytexwindows.com/3d-flip-book/specialty-windows/",
+                          "https://vytexwindows.com/8-26-qr_potomac-hp/",
+                          "https://vytexwindows.com/wp-content/uploads/2025/06/FL47071_R1_II_29261.01-1001-R1-6000-HS-XOX-Impact-Installation-Drawings-3SL-QHQ-110-x-63.pdf",
+                          "https://vytexwindows.com/windows/potomac-hp/",
+                          "https://vytexwindows.com/blog/vytex-windows-announces-acquisition-of-vinyl-kraft/",
+                          "https://vytexwindows.com/privacy-policy/",
+                          "https://vytexwindows.com/become-a-partner/",
+                          "https://vytexwindows.com/terms-conditions-of-sale/",
+                          "https://vytexwindows.com/careers/",
+                          "https://vytexwindows.com/wp-content/uploads/2025/09/Commercial-Warranty-1.pdf",
+                          "https://vytexwindows.com/wp-content/uploads/2025/06/FL47071_R1_II_29261.08-1001-6200-HS-XOX-non-Impact-Installation-Drawings-3SL-QHQ-110-x-63.pdf"
+                        ]
+                      },
+                      "activity_role": "unresolved",
+                      "evidence_quote": "",
+                      "evidence_url": "",
+                      "new_domain": "",
+                      "new_name": "",
+                      "observed_country": "",
+                      "observed_industry": "",
+                      "observed_state": "",
+                      "observed_subindustry": "",
+                      "observed_value": null,
+                      "old_domain": "",
+                      "old_name": "",
+                      "reason": "The sources establish Vytex's manufacturer/supplier role, exterior building products, remodeler customers, and North American ordering and delivery channels. The commercial warranty explicitly identifies distributors as a purchasing channel. However, the complete criterion also requires interior bui",
+                      "shared_linkedin_slug": "",
+                      "status": "UNPROVEN",
+                      "supporting_evidence": [],
+                      "target": "industry"
+                    },
+                    "required_attribute": {
+                      "activity_role": "unresolved",
+                      "evidence_quote": "",
+                      "evidence_url": "",
+                      "new_domain": "",
+                      "new_name": "",
+                      "observed_country": "",
+                      "observed_industry": "",
+                      "observed_state": "",
+                      "observed_subindustry": "",
+                      "observed_value": null,
+                      "old_domain": "",
+                      "old_name": "",
+                      "reason": "The acquired Ohio manufacturer and combined East Coast/Midwest manufacturing platform support an expanded residential-products manufacturing footprint. However, the complete compound attribute remains unproven because loaded evidence does not establish current controlling ownership by an independent",
+                      "shared_linkedin_slug": "",
+                      "status": "UNPROVEN",
+                      "supporting_evidence": [],
+                      "target": "required_attribute"
+                    },
+                    "stage": {
+                      "activity_role": "unresolved",
+                      "evidence_quote": "",
+                      "evidence_url": "",
+                      "new_domain": "",
+                      "new_name": "",
+                      "observed_country": "",
+                      "observed_industry": "",
+                      "observed_state": "",
+                      "observed_subindustry": "",
+                      "observed_value": null,
+                      "old_domain": "",
+                      "old_name": "",
+                      "reason": "The dated 2026 announcement establishes Graycliff ownership and an acquisition by Vytex, not an acquisition of Vytex. Loaded evidence does not establish Graycliff's controlling stake and same-owner private-equity identity. Current PE control therefore remains unproven.",
+                      "shared_linkedin_slug": "",
+                      "status": "UNPROVEN",
+                      "supporting_evidence": [],
+                      "target": "stage"
+                    }
+                  },
+                  "completed_submitted_findings": true,
+                  "failure_reason": "",
+                  "gate": "company_evidence_investigation",
+                  "positive_semantic_review": true,
+                  "positive_semantic_review_resolved": false,
+                  "prior_decision": "unavailable",
+                  "prior_dimension_decisions": {
+                    "employee_size": "match",
+                    "geography": "match",
+                    "industry": "match",
+                    "stage": "unavailable"
+                  },
+                  "projected_decision": "unavailable",
+                  "targets": [
+                    "stage",
+                    "industry",
+                    "required_attribute"
+                  ],
+                  "usage": {
+                    "fetch_calls": 3,
+                    "fetch_outcomes": [
+                      {
+                        "error_class": "",
+                        "loaded_text_length": 3759,
+                        "ok": true,
+                        "url_sha256": "3cfff1e7068a1546a368dc20298261a84b2c4035893d8f32dee8b861344d3fc2"
+                      },
+                      {
+                        "error_class": "",
+                        "loaded_text_length": 2225,
+                        "ok": true,
+                        "url_sha256": "4da06b6102a1a64c00be4a9232a3b1bc4f6ba8b268877f201639476dfe09ae68"
+                      },
+                      {
+                        "error_class": "",
+                        "loaded_text_length": 2770,
+                        "ok": true,
+                        "url_sha256": "fa175b689307b4100428ca5326e1e5cb5dec8d8f9feb5be937568e84935a81b6"
+                      }
+                    ],
+                    "industry_review_calls": 2,
+                    "prefetched_pages": 2,
+                    "reasoning_turns": 6,
+                    "search_calls": 3,
+                    "total_loaded_pages": 22
+                  }
+                },
+                {
+                  "cache_hit": false,
+                  "final_url_sha256": "",
+                  "gate": "required_attribute_source",
+                  "source_url_sha256": "",
+                  "status": "unproven"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "schema_version": "leadpoet.lab_arena.scoring_output.v1",
+    "scored_run_id": "arena-2026-10-24-374d0f2f56e48a78:validation-balanced-001:2:0:1"
+  }
+}

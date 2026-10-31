@@ -450,9 +450,11 @@ PUBLICATION_LIMITS = StrictLimits(
     max_total_bytes=64 * 1_048_576,
 )
 # A completion can contain the judge's accepted 2 MiB scoring output. Keep one
-# small allowance for the signed request fields that wrap that output.
+# small allowance for the signed request fields that wrap that output, including
+# exactly two nesting levels for envelope.body.output. The output's own bound
+# remains PUBLICATION_LIMITS and is validated separately by the service.
 COMPLETION_REQUEST_LIMITS = StrictLimits(
-    max_depth=16,
+    max_depth=PUBLICATION_LIMITS.max_depth + 2,
     max_list_items=20_000,
     max_object_keys=512,
     max_string_bytes=65_536,

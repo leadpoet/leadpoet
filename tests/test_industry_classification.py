@@ -16,7 +16,7 @@ def packet():
          'body': 'Example supplies ticket management software.'},
         {'source_id': 's1', 'source_url': 'https://example.com/accounts',
          'body': 'Account workflows connect to the same product through its supported integration.'},
-    ])
+    ], evaluation_date='2026-10-24')
 
 
 def proposal(value, **updates):
@@ -51,7 +51,7 @@ def test_source_reference_is_bound_to_criterion_and_company():
     value = packet()
     other = industry.prepare({**CRITERION, 'product_service': 'Only billing software'},
                              COMPANY, [{'source_id': sid, 'body': body, 'source_url': url}
-                                       for sid, body, url in value.pages])
+                                       for sid, body, url in value.pages], evaluation_date='2026-10-24')
     with pytest.raises(ValueError):
         industry.resolve(other, proposal(value))
 
@@ -62,7 +62,8 @@ def test_request_has_no_prior_verdict_and_uses_frozen_role():
     assert request['max_tokens'] == 2000
     assert request['reasoning']['effort'] == 'low'
     data = json.loads(request['messages'][1]['content'])
-    assert set(data) == {'criterion', 'company_locator'}
+    assert set(data) == {'criterion', 'company_locator', 'evaluation_date'}
+    assert data['evaluation_date'] == '2026-10-24'
     assert data['criterion'] == CRITERION
     assert len(request['messages']) == 4
 
@@ -77,7 +78,7 @@ def test_decoder_citations_are_limited_to_this_packet():
     assert malformed not in allowed
     other = industry.prepare({**CRITERION, 'industry': 'Other'}, COMPANY, [
         {'source_id': sid, 'body': body, 'source_url': url}
-        for sid, body, url in value.pages])
+        for sid, body, url in value.pages], evaluation_date='2026-10-24')
     assert not set(other.spans()).intersection(allowed)
     # Provider constraints do not replace host validation.
     with pytest.raises(ValueError, match='unknown or foreign'):
@@ -86,7 +87,7 @@ def test_decoder_citations_are_limited_to_this_packet():
 
 
 def test_no_sources_permit_only_an_empty_citation_list():
-    value = industry.prepare(CRITERION, COMPANY, [])
+    value = industry.prepare(CRITERION, COMPANY, [], evaluation_date='2026-10-24')
     request = industry.request_payload(value, model=industry.DEFAULT_MODEL)
     citations = request['response_format']['json_schema']['schema']['properties']['evidence_span_ids']
     assert citations['maxItems'] == 0
@@ -103,7 +104,7 @@ def test_full_native_corpus_passes_arena_request_bounds_without_losing_text(body
     from lab_arena.operations import validate_operation_request
     pages = [{'source_id': f's{i}', 'source_url': f'https://example.com/p{i}',
               'body': body[:24000]} for i in range(7)]
-    value = industry.prepare(CRITERION, COMPANY, pages)
+    value = industry.prepare(CRITERION, COMPANY, pages, evaluation_date='2026-10-24')
     request = industry.request_payload(value, model='openai/gpt-6.1-sol')
     validate_operation_request('openrouter.chat', request)
     restored = [json.loads(m['content'])['untrusted_source_pages'][0]
@@ -118,10 +119,10 @@ def test_native_source_bounds_reject_extra_pages_and_oversized_bodies():
     with pytest.raises(ValueError):
         industry.prepare(CRITERION, COMPANY, [
             {'source_id': f's{i}', 'body': 'Source', 'source_url': 'https://example.com'}
-            for i in range(industry.MAX_PAGES + 1)])
+            for i in range(industry.MAX_PAGES + 1)], evaluation_date='2026-10-24')
     with pytest.raises(ValueError):
         industry.prepare(CRITERION, COMPANY, [
-            {'source_id': 's0', 'body': 'x' * 24001, 'source_url': 'https://example.com'}])
+            {'source_id': 's0', 'body': 'x' * 24001, 'source_url': 'https://example.com'}], evaluation_date='2026-10-24')
 
 
 @pytest.mark.parametrize('character', ['X', '"', '\U0001f30d'])
@@ -130,7 +131,7 @@ def test_retry_corpus_fits_citation_schema_without_losing_source_bytes(character
     # Uneven page lengths can exceed 128 spans even below the text ceiling.
     pages = [{'source_id': f's{i}', 'source_url': f'https://example.com/{i}',
               'body': character * (6401 if i < 14 else 4801)} for i in range(30)]
-    value = industry.prepare(CRITERION, COMPANY, pages)
+    value = industry.prepare(CRITERION, COMPANY, pages, evaluation_date='2026-10-24')
     request = industry.request_payload(value, model=industry.DEFAULT_MODEL)
     validate_operation_request('openrouter.chat', request)
     assert len(value.spans()) <= 128

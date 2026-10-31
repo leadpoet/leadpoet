@@ -137,12 +137,12 @@ def test_larger_private_source_map_is_only_valid_under_new_frozen_policy(monkeyp
 
 def test_larger_source_count_keeps_the_original_total_context_budget():
     pages = [{'source_id':f's{i}','source_url':f'https://example.com/{i}', 'body':'X'*24000} for i in range(industry.MAX_PAGES)]
-    packet = industry.prepare(CRITERION, COMPANY, pages)
+    packet = industry.prepare(CRITERION, COMPANY, pages, evaluation_date='2026-10-24')
     assert len(packet.pages) == industry.MAX_PAGES
     assert sum(len(body) for _,body,_ in packet.pages) <= 7*24000
     assert max(len(body) for _,body,_ in packet.pages) - min(len(body) for _,body,_ in packet.pages) <= 1
     validate_operation_request('openrouter.chat', industry.request_payload(packet, model=industry.DEFAULT_MODEL))
-    legacy = industry.prepare(CRITERION, COMPANY, pages[:7])
+    legacy = industry.prepare(CRITERION, COMPANY, pages[:7], evaluation_date='2026-10-24')
     assert all(len(body) == 24000 for _,body,_ in legacy.pages)
 
 

@@ -191,6 +191,7 @@ def industry_messages(*, url=URL, text=TEXT):
         {'industry': 'Software', 'subindustry': '', 'product_service': 'Supplies software.'},
         {'name': 'Acme', 'website': 'https://acme.example'},
         [{'source_id': 's0', 'source_url': url, 'body': text}],
+        evaluation_date='2026-10-24',
     )
     return industry.source_messages(packet)
 

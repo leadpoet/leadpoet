@@ -17,6 +17,7 @@ def request(research=False):
         dict(name="Supplier", website="https://supplier.example", linkedin=""),
         [dict(source_id="s0", source_url="https://supplier.example/product",
               body="Supplier sells support software to business customers.")],
+        evaluation_date='2026-10-24',
     )
     return industry.request_payload(packet, model=MODEL, research=research)
 

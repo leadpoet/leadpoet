@@ -53,7 +53,7 @@ def test_unadmitted_industry_review_still_stops_at_research_deadline(monkeypatch
     finding, failure, count = asyncio.run(c._review_industry_sources(
         None, model='openai/gpt-6.1-sol', openrouter_key='offline-key', started=0,
         company_locator={}, criteria={}, fetched_pages={}, fetched_final_urls={},
-        first_party_domains=set(), identity_anchor={}, identity_names=[]))
+        first_party_domains=set(), identity_anchor={}, identity_names=[], evaluation_date_value='2026-10-24'))
     assert finding['status'] == 'UNPROVEN'
     assert failure == c.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
     assert count == 0 and not reviews

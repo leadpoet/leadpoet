@@ -42,7 +42,7 @@ def test_primary_citation_uses_bound_company_evidence(monkeypatch, named_support
                   'product_service': 'Managed infrastructure, cloud migration and mainframe modernization'},
         fetched_pages=pages, fetched_final_urls={url: url for url in pages},
         first_party_domains={'coreworks.ai'}, identity_names={'coreworks'},
-        identity_anchor={'submitted_domain': 'coreworks.ai', 'observed_domain': 'coreworks.ai'}))
+        identity_anchor={'submitted_domain': 'coreworks.ai', 'observed_domain': 'coreworks.ai'}, evaluation_date_value='2026-10-24'))
     assert calls == len(requests) == 1 and not failure
     assert finding['status'] == ('VERIFIED' if named_support or separate_identity_source else 'UNPROVEN')
     if named_support:

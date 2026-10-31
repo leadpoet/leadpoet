@@ -132,6 +132,7 @@ def test_review_receives_only_bound_job_body_and_preserves_its_exact_support(mon
         fetched_final_urls={HOME: HOME, POSTING: POSTING},
         first_party_domains={'coreworks.ai'}, identity_anchor=IDENTITY,
         identity_names={'coreworks'}, careers_locators=LOCATORS if linked else (),
+        evaluation_date_value='2026-10-24',
     ))
     assert failure == '' and calls == 1
     assert (POSTING in seen) is linked

@@ -2457,6 +2457,7 @@ async def _post_openrouter_json(
 
 async def _review_industry_sources(
     session, *, model, openrouter_key, started, company_locator, criteria,
+    evaluation_date_value,
     fetched_pages, fetched_final_urls, first_party_domains, identity_anchor,
     identity_names, rebrand_finding=None, research=False,
     admitted_final_judgment=False,
@@ -2510,7 +2511,7 @@ async def _review_industry_sources(
         return unproven, '', 0
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
-    }, pages)
+    }, pages, evaluation_date=evaluation_date_value)
     # This identifies the supplied source bytes, not a completed verdict. Keep
     # checked text available to the identity-bound retry cache if review fails.
     review['packet_sha256'] = packet.digest
@@ -5172,6 +5173,7 @@ async def investigate_company_evidence(
             industry_review_arguments = {
                 'model': industry_review_model, 'openrouter_key': openrouter_key,
                 'started': started, 'company_locator': company_locator,
+                'evaluation_date_value': input_document['evaluation_date'],
                 'criteria': {'industry': requested_industry or '',
                              'subindustry': requested_subindustry or '',
                              'product_service': requested_product_service or ''},
@@ -5354,6 +5356,7 @@ async def investigate_company_evidence(
                         {key: str(company_locator.get(key) or '')
                          for key in ('name', 'website', 'linkedin')},
                         loaded_industry_sources,
+                        evaluation_date=input_document['evaluation_date'],
                     )
                     messages.append({'role': 'user', 'content': (
                         'The following company-bound source bodies are already loaded, '
@@ -6869,6 +6872,7 @@ async def investigate_company_evidence(
                         {key: str(company_locator.get(key) or '')
                          for key in ('name', 'website', 'linkedin')},
                         added_industry_sources,
+                        evaluation_date=input_document['evaluation_date'],
                     )
                     messages.extend(industry_classification.source_messages(packet))
     except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):

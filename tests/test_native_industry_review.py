@@ -517,7 +517,7 @@ def test_identity_navigation_metadata_alone_is_not_industry_evidence(monkeypatch
         fetched_pages={url:c._IDENTITY_LINK_CONTEXT_MARKER + '\nhttps://acme.example/reporting'},
         fetched_final_urls={url:url}, first_party_domains={'acme.example'},
         identity_anchor={'submitted_domain':'acme.example','observed_domain':'acme.example',
-                         'verified_domain':'acme.example'}, identity_names={'acme'}))
+                         'verified_domain':'acme.example'}, identity_names={'acme'}, evaluation_date_value='2026-10-24'))
     assert finding['status'] == 'UNPROVEN'
     assert calls == 0 and not failure
 
@@ -642,7 +642,7 @@ def test_full_company_reverification_retains_multi_source_industry_receipt(monke
             first_party_domains={'acme.example'}, identity_names={'acme'},
             identity_anchor={'submitted_domain':'acme.example','observed_domain':'acme.example',
                              'verified_domain':'acme.example','submitted_name':'Acme',
-                             'observed_name':'Acme','verified_name':'Acme'})
+                             'observed_name':'Acme','verified_name':'Acme'}, evaluation_date_value='2026-10-24')
         assert not failure and count == 1
         return {'claims': {'industry': finding}, '_completed_submit': True,
                 'failure_reason': '', 'usage': {'reasoning_turns': 1, 'search_calls': 0, 'fetch_calls': 0},

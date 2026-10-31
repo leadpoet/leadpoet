@@ -8,12 +8,20 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 from scripts import build_arena_reviewer_runtime as composer
 
 from scripts.build_arena_reviewer_runtime import (
     CompositionError, verify_image_configuration, verify_overlay,
 )
 ROOT = composer.ROOT
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def test_build_tag_retains_distinct_repairs_within_docker_limit():
@@ -135,6 +143,7 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
+    original[composer.GRADER_FILE] = _FROZEN_GRADER
     # Model a frozen pre-correction image without depending on Git history.
     for name, deltas in ((builder.GRADER_FILE, INVESTIGATOR_DELTAS),
                          (builder.FINALITY_FILE, FINALITY_DELTAS)):
@@ -178,6 +187,7 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    original[composer.GRADER_FILE] = _FROZEN_GRADER
     if reserved_industry_turns:
         _OLD, _NEW = _NATIVE_OLD, _NATIVE_NEW
     else:
@@ -223,6 +233,7 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
                               if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
+    sources[composer.GRADER_FILE] = _FROZEN_GRADER
     sources[builder.FINALITY_FILE] = original
     prior = builder.expected_overlay(sources, complete_negative_finality=True)
     repaired = builder.expected_overlay(
@@ -399,6 +410,7 @@ def _numeric_alias_sources():
                        if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (composer.GRADER_FILE, composer.FINALITY_FILE, *composer.ENTRYPOINT_FILES)
     }
+    sources[composer.GRADER_FILE] = _FROZEN_GRADER
 
     from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CHANGES
     # This fixture represents the prior approved correction, before the new

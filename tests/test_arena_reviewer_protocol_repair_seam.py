@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts import arena_reviewer_protocol_repair_seam as seam
 from scripts import build_arena_reviewer_runtime as composer
@@ -10,8 +11,15 @@ from scripts import build_arena_reviewer_runtime as composer
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
 def _sources(*, reserved_industry_turns=True):
-    repaired = (ROOT / composer.GRADER_FILE).read_bytes()
+    repaired = _FROZEN_GRADER
     if not reserved_industry_turns:
         repaired = repaired.replace(seam._NATIVE_REPAIR.encode(), seam._REPAIR.encode(), 1)
         repaired = repaired.replace(
@@ -93,3 +101,10 @@ def test_builder_flag_is_explicit_and_preserves_existing_composition(prior_flags
     assert set(before) == set(after)
     assert after[composer.GRADER_FILE] == seam.convert_protocol_repair_seam(before[composer.GRADER_FILE])
     assert all(after[name] == before[name] for name in before if name != composer.GRADER_FILE)
+
+
+def test_current_unreviewed_tool_schema_is_not_silently_transplanted():
+    current = (ROOT / composer.GRADER_FILE).read_bytes()
+    assert current != _FROZEN_GRADER
+    with pytest.raises(seam.ProtocolRepairSeamError):
+        seam.convert_protocol_repair_seam(current)

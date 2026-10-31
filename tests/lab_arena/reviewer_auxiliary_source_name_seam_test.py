@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from qualification.scoring import lead_scorer
 from scripts import build_arena_reviewer_runtime as builder
@@ -17,6 +18,13 @@ from scripts.arena_reviewer_auxiliary_source_name_seam import (
 )
 from tests import test_intent_details_fetched_first_party_context as controls
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def corrected_finality(source=None):
@@ -41,6 +49,7 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    result[builder.GRADER_FILE] = _FROZEN_GRADER
     if options.get("archive_snapshot_https"):
         # This seam accepts its exact historical function, not today's source.
         from tests.test_arena_archive_snapshot_https import original_source

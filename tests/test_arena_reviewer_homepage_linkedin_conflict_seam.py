@@ -8,10 +8,18 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts import build_arena_reviewer_runtime as builder
 from scripts import arena_reviewer_homepage_linkedin_conflict_seam as seam
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def previous_broad_dispatch():
@@ -41,6 +49,7 @@ def originals(include_finality=True, finality_source=None):
     files = {name: (builder.ROOT / ('lab_arena/scorer_entrypoint.py'
                                    if name == 'scorer_entrypoint.py' else name)).read_bytes()
              for name in names}
+    files[builder.GRADER_FILE] = _FROZEN_GRADER
     if include_finality:
         files[builder.FINALITY_FILE] = source_pair(finality_source)[0]
     return files

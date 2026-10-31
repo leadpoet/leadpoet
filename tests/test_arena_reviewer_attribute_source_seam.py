@@ -20,6 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 _FROZEN_POSTIMAGE = frozen_source("attribute_source", composer.FINALITY_FILE)
 
 
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
 def _sources():
     # Preserve the exact reviewed frozen function hashes as current grading
     # evolves. The converter must still change only its two owned blocks.
@@ -98,6 +105,7 @@ def test_unknown_ambiguous_and_partially_corrected_source_fails_closed(fault):
 def _base_sources():
     files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py" if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in (composer.GRADER_FILE, *composer.ENTRYPOINT_FILES)}
+    files[composer.GRADER_FILE] = _FROZEN_GRADER
     files[composer.FINALITY_FILE] = _sources()[0]
     return files
 

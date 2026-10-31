@@ -42,5 +42,14 @@
         "sha256": "c14e0c66fee5c08d4e896bc1dc83dcfd18e7debfa659437103a52e67abf3c0c2"
       }
     }
+  },
+  "native_industry_budget": {
+    "commit": "654c07032ef6b87ebf1e1fda20c452151e9f2841",
+    "files": {
+      "qualification/scoring/company_evidence_investigator.py": {
+        "fixture": "native_industry_budget-company_evidence_investigator.py.gz",
+        "sha256": "fa65d603c7acc9d2363594061eb40812256c1be3c2490f16549c00b084b4cf94"
+      }
+    }
   }
 }

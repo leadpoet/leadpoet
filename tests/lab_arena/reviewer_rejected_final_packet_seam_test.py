@@ -6,6 +6,7 @@ import json
 import sys
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from qualification.scoring import company_evidence_investigator as investigator
 from scripts import build_arena_reviewer_runtime as builder
@@ -16,12 +17,19 @@ from scripts.arena_reviewer_rejected_final_packet_seam import (
 from tests import test_final_unproven_normalization as controls
 
 
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
 def corrected_grader():
     # Reuse the exact upstream197048255 investigator already pinned for the
     # frozen brand overlay. Do not loosen the release converter's source guard.
     frozen = (builder.ROOT / 'tests/fixtures/arena_reviewer/frozen_brand_investigator.py.txt').read_bytes()
     assert hashlib.sha256(frozen).hexdigest() == '4ee4e5c966a6f1815c860a3b43e7cb151712eadf7ac7912e90e271cf06c19005'
-    text = (builder.ROOT / builder.GRADER_FILE).read_text()
+    text = _FROZEN_GRADER.decode()
     node = next(n for n in ast.parse(text).body
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == 'investigate_company_evidence')
     lines = text.splitlines(keepends=True)

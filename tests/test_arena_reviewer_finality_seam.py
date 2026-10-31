@@ -32,6 +32,13 @@ _FROZEN_POSTIMAGE = _FROZEN_ORIGINAL.replace(
     _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1)
 
 
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
 def _current_source():
     # The seam targets frozen847, not the evolving current implementation.
     # Keep its original predicate golden bound to the reviewed postimage.
@@ -109,9 +116,11 @@ def test_unknown_partial_and_ambiguous_shapes_fail_closed(fault):
 
 
 def _base_sources():
-    return {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
+    files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
                           if name == "scorer_entrypoint.py" else name)).read_bytes()
             for name in (GRADER_FILE, *ENTRYPOINT_FILES)}
+    files[GRADER_FILE] = _FROZEN_GRADER
+    return files
 
 
 def test_composition_requires_explicit_opt_in_and_exact_frozen_input():

@@ -9,6 +9,17 @@ billing uncertainty, frozen coverage rules, historical exports and concurrent
 work. Add no provider calls, recovery path, dependency or credential renewal.
 The coordinator owns independent review, push, merge and production release.
 
+## Scoped authorization: October 31 aggregate capture accuracy
+
+The user authorized the smallest tested correction to admin capture totals,
+including exact committed migration595 and its paired site collector change.
+The coordinator may apply only that reviewed function-body migration through
+the existing owner route, then verify aggregate output and unchanged security.
+Preserve all raw records, accepted results, scoring, eligibility, billing,
+keys and grants. Add no provider replay, dependency or recovery system.
+Internal agents may test and review only; no credential renewal or production
+operation is authorized to an internal agent. Use fixed cached credentials.
+
 ## Scoped authorization: October 31 capture failure prevention
 
 The user authorized the narrow privacy, socket return-window and terminal

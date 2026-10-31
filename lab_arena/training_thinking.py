@@ -769,7 +769,13 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
                 or any(row["kind"] == "response_received" and row["data"]["call_identity"] == identity
                        for row in payload["agent_observations"])):
             return False
-        observations = [row for row in payload["observations"] if row["action_sequence"] == sequence]
+        observations = [row for row in payload["observations"]
+                        if row["action_sequence"] == sequence or row["call_identity"] == identity]
+        if not observations:
+            # SQL closes only an unused reservation under the same run lock
+            # as dispatch. That exact ledger chain proves no provider call;
+            # a worker exception is optional, and no reply is manufactured.
+            return "worker_observation_ref" not in call
         if len(observations) != 1:
             return False
         row = observations[0]
@@ -782,7 +788,8 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
                             or outcome["protocol"] == "http" and outcome["response"] == {
                                 "status": 503, "headers": {}, "body_b64": base64.b64encode(json.dumps(
                                     {"error": {"code": "worker_unavailable"}}, sort_keys=True).encode()).decode()}))
-        return (row["kind"] == "transport_failure" and row["operation_id"] == call["operation_id"]
+        return (row["action_sequence"] == sequence
+                and row["kind"] == "transport_failure" and row["operation_id"] == call["operation_id"]
                 and row["call_identity"] in (None, identity)
                 and row["contributes_to_provider_call_count"] is True and row["privacy"]["redacted"] is False
                 and row["request"]["admitted_parameters"] == request.get("admitted_parameters")
@@ -794,13 +801,14 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
 
 
 def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
-    """Prove a delivered retryable error without making it a model target.
+    """Prove no generation or a delivered error without making a model target.
 
     Provider errors need no observed generation route: no generation is
     claimed. The reviewed request, saved failure bytes, host write and agent
     read must agree. Unsettled billing does not establish whether the delivered bytes are usable.
     """
-    if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
+    if (verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs)
+            or verified_undispatched_transport(example, call, worker_proofs=worker_proofs)):
         return True
     try:
         run_id = example["run_id"]

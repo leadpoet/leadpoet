@@ -7417,6 +7417,19 @@ class ArenaService:
             raise ServiceError("lease_token_invalid", 403)
         return token
 
+    def _sweep_expired_leases(self, round_id: str) -> Dict[str, Any]:
+        """Run the lease sweep and report how many runs it reclaimed.
+
+        A run whose lease expires never reaches the completion RPC, so it
+        never contributes a ``arena.run.<kind>`` outcome — the loss is only
+        visible as the absence of a span. Carrying the sweep's own ``expired``
+        count onto the stage record makes that population directly countable.
+        """
+        with telemetry.stage("advance_expire_leases") as observed:
+            swept = self._store.expire_leases(round_id)
+            observed.count = int(swept.get("expired") or 0)
+        return swept
+
     # -- daily driver (section 14.4) -------------------------------------------
 
     def advance_round(self, round_id: str) -> Dict[str, Any]:
@@ -7469,8 +7482,7 @@ class ArenaService:
                             )
                             and not self._store.operator_hold_active()
                         ):
-                            with telemetry.stage("advance_expire_leases"):
-                                self._store.expire_leases(round_id)
+                            self._sweep_expired_leases(round_id)
                         return {
                             "status": "retry",
                             "round_status": row["status"],
@@ -7545,8 +7557,7 @@ class ArenaService:
                 self._recover_baseline(round_row)
             if status in ("stage1", "stage2"):
                 stage = int(status[-1])
-                with telemetry.stage("advance_expire_leases"):
-                    self._store.expire_leases(round_id)
+                self._sweep_expired_leases(round_id)
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     with telemetry.stage("advance_close_stage"):
                         return self.close_stage(round_id, stage)
@@ -7560,8 +7571,7 @@ class ArenaService:
                     return self.open_scoring(round_id, stage)
             if status in ("stage1_scoring", "stage2_scoring"):
                 stage = int(status[5])
-                with telemetry.stage("advance_expire_leases"):
-                    self._store.expire_leases(round_id)
+                self._sweep_expired_leases(round_id)
                 with telemetry.stage("advance_list_scoring_runs") as observed:
                     scoring_runs = self._scoring_runs_for_stage(round_id, stage)
                     observed.count = len(scoring_runs)
@@ -7591,8 +7601,7 @@ class ArenaService:
             if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
-                with telemetry.stage("advance_expire_leases"):
-                    self._store.expire_leases(round_id)
+                self._sweep_expired_leases(round_id)
                 try:
                     with telemetry.stage("advance_score_stage"):
                         return self.score_stage(round_id, stage)
@@ -7605,8 +7614,7 @@ class ArenaService:
                     return self.open_stage(round_id, 2)
             if status == "scored":
                 if _judge_continuation_enabled(round_row):
-                    with telemetry.stage("advance_expire_leases"):
-                        self._store.expire_leases(round_id)
+                    self._sweep_expired_leases(round_id)
                 if self._frozen_unfinished_judgment(round_row):
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}

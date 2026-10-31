@@ -1251,9 +1251,13 @@ def _review_document_prompt(document: Mapping[str, Any]) -> str:
     return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+class _ReviewRequestBoundsError(ValueError):
+    """The local request cannot fit the native message contract."""
+
+
 def _validate_review_prompt_bounds(prompt: str, system_prompt: str) -> None:
     if any(len(value) > _MAX_REVIEW_DOCUMENT_CHARACTERS for value in (prompt, system_prompt)):
-        raise ValueError("Intent Details review request exceeds its input bound")
+        raise _ReviewRequestBoundsError("Intent Details review request exceeds its input bound")
 
 
 def _review_evidence_with_context_budget(
@@ -2437,7 +2441,7 @@ def _citation_repair_user_prompt(
         },
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if len(prompt) > _MAX_REVIEW_DOCUMENT_CHARACTERS:
-        raise ValueError("Intent Details citation repair exceeds its input bound")
+        raise _ReviewRequestBoundsError("Intent Details citation repair exceeds its input bound")
     return prompt
 
 
@@ -2560,7 +2564,7 @@ def _semantic_repair_user_prompt(
         },
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if len(prompt) > _MAX_REVIEW_DOCUMENT_CHARACTERS:
-        raise ValueError("Intent Details bounded unit repair exceeds its input bound")
+        raise _ReviewRequestBoundsError("Intent Details bounded unit repair exceeds its input bound")
     return prompt
 
 
@@ -2813,6 +2817,12 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 )
                 repair_response_format = _CITATION_REPAIR_RESPONSE_FORMAT
             _validate_review_prompt_bounds(repair_prompt, repair_system_prompt)
+        except _ReviewRequestBoundsError:
+            return {
+                **receipt, "decision": "unavailable",
+                "failure_class": "intent_details_evidence_unavailable",
+                "failure_reason_code": "malformed_response",
+            }
         except ValueError:
             checks = None
         else:

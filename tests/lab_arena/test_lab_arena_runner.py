@@ -4052,3 +4052,46 @@ def test_installer_unmount_failure_does_not_remove_the_mounted_tree(tmp_path, mo
             for directory, _, _ in os.walk(stage):
                 os.chmod(directory, 0o700)
             shutil.rmtree(stage)
+
+
+def _sd_call(identity, status, outcome="settled", provider="scrapingdog"):
+    return {
+        "call_identity": identity,
+        "provider": provider,
+        "outcome": outcome,
+        "provider_status": status,
+        "error_code": None if 200 <= status < 300 else "provider_unavailable",
+    }
+
+
+def test_scrapingdog_403_is_a_target_refusal_when_the_account_is_proven():
+    calls = (
+        _sd_call("a", 200),
+        _sd_call("b", 403),
+        _sd_call("c", 403),
+    )
+    assert rn._scrapingdog_target_refusal_identities(calls) == {"b", "c"}
+
+
+def test_scrapingdog_403_stays_infrastructure_without_a_proven_account():
+    calls = (
+        _sd_call("b", 403),
+        _sd_call("c", 403),
+    )
+    assert rn._scrapingdog_target_refusal_identities(calls) == frozenset()
+
+
+def test_another_provider_success_does_not_prove_the_scrapingdog_account():
+    calls = (
+        _sd_call("a", 200, provider="deepline"),
+        _sd_call("b", 403),
+    )
+    assert rn._scrapingdog_target_refusal_identities(calls) == frozenset()
+
+
+def test_an_unsettled_scrapingdog_2xx_does_not_prove_the_account():
+    calls = (
+        _sd_call("a", 200, outcome="uncertain"),
+        _sd_call("b", 403),
+    )
+    assert rn._scrapingdog_target_refusal_identities(calls) == frozenset()

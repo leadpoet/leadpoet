@@ -1954,6 +1954,37 @@ def _execution_output_observation(
     }
 
 
+def _scrapingdog_target_refusal_identities(
+    calls: Sequence[Mapping[str, Any]],
+) -> frozenset:
+    """Identify ScrapingDog 403s that describe the fetched page, not the account.
+
+    A bare 403 is ambiguous: it can name a blocked target or a failed account,
+    and the broker cannot tell them apart from one response. The run can. A
+    ScrapingDog call that settled 2xx on the same credential proves the account
+    is working, so the 403s beside it belong to the pages they requested. With
+    no such proof the status keeps its account reading and stays infrastructure.
+    """
+
+    credential_proven = any(
+        call.get("provider") == "scrapingdog"
+        and call.get("outcome") == "settled"
+        and type(call.get("provider_status")) is int
+        and 200 <= call["provider_status"] < 300
+        for call in calls
+    )
+    if not credential_proven:
+        return frozenset()
+    return frozenset(
+        call["call_identity"]
+        for call in calls
+        if call.get("provider") == "scrapingdog"
+        and type(call.get("provider_status")) is int
+        and call["provider_status"] == 403
+        and isinstance(call.get("call_identity"), str)
+    )
+
+
 def _unresolved_operation_failures(
     latest_calls: Sequence[Mapping[str, Any]],
     recovered_identities: Collection[str],
@@ -4919,9 +4950,13 @@ class AssignmentExecutor:
                 and call.get("error_code") in ("budget_refused", "budget_exhausted")
                 for call in completed_calls
             )
+            scrapingdog_target_refusals = _scrapingdog_target_refusal_identities(
+                completed_calls
+            )
             infrastructure_failures = tuple(
                 call for call in completed_calls
                 if call.get("call_identity") not in recovered_responses_retries
+                and call.get("call_identity") not in scrapingdog_target_refusals
                 and (
                     call.get("error_code") in (
                         "broker_unavailable",

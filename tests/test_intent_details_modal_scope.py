@@ -69,6 +69,10 @@ def test_healthy_conditional_and_mixed_fact_controls(monkeypatch, text, factual,
     assert 'asserted or presupposed company products or capabilities' in system
     assert 'Mark a mixed unit factual if it contains any such claim' in system
     assert 'conditional outcome itself need not have occurred' in system
+    assert 'without adding ownership, exclusivity, or development-method restrictions' in system
+    assert 'it does not establish that the company created the original component' in system
+    assert 'Source attribution is valid prose.' in system
+    assert 'completeness of a selected excerpt' in system
 
 
 @pytest.mark.parametrize('correction_consistent', [False, True])
@@ -85,6 +89,7 @@ def test_existing_complete_correction_preserves_guard_and_call_bound(monkeypatch
     assert 'If facts_supported is false, identify at least one' in correction
     assert 'UNPROVEN or CONTRADICTED factual unit' in correction
     assert 'assess the independent relevance and ICP checks separately' in correction
+    assert 'without adding ownership, exclusivity, or development-method restrictions' in correction
     if correction_consistent:
         assert result['decision'] == 'mismatch'
         assert result['checks']['facts_supported'] is False

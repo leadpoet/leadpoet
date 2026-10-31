@@ -240,6 +240,11 @@ literal copies of criterion wording. A supported paraphrase is acceptable.
 For facts_supported, check every factual clause, including numbers, dates,
 entity, event status and scope. A posting is not a completed hire; plans are not
 completed expansion. Do not accept facts drawn only from a submitted claim.
+Judge the assertion as written, without adding ownership, exclusivity, or
+development-method restrictions it does not assert. Evidence that the company
+uses or adapts a component can support that use or adaptation; it does not
+establish that the company created the original component. Apply the same
+distinction to factual premises within conditional implications.
 An unconditional claim that an event increases or causes usage, transactions,
 checkout activity, visits, revenue, savings, or performance is factual and
 requires supporting admitted evidence. Marking such an outcome as relevance
@@ -338,6 +343,9 @@ independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
 false. Require natural prose, not headings, bullet lists, field labels or
 internal scoring commentary.
+Source attribution is valid prose. Commentary about the review process or the
+completeness of a selected excerpt is not a business explanation for the client
+and makes natural_paragraph false.
 Selection commentary describes why the company or activity matches the search
 request, its filters or the scoring rubric. Any such commentary makes
 natural_paragraph false, even when the paragraph also states a supported

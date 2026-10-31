@@ -74,7 +74,11 @@ def test_optional_capture_reader_key_maps_only_its_own_role():
     assert '        "~^[Bb][Ee][Aa][Rr][Ee][Rr] +%s$" %s;' % (values["capture_reader_key"], reader) in body
     assert "        %s %s;" % (reader, api.role_jwt(reader, values["jwt_secret"])) in body
     assert '        "%s:%s" 1;\n        "%s:absent" 1;' % (reader, reader, reader) in body
-    assert body.count(reader + ":") == 2
+    assert 'map "$request_role:$request_method:$uri:$request_uri:' in body
+    assert "~^leadpoet_capture_reader:POST:/rest/v1/rpc/lab_arena_capture_summary_v1:" in body
+    assert "        ~^leadpoet_capture_reader: 0;" in body
+    assert "if ($capture_reader_route_allowed = 0) { return 403; }" in body
+    assert "capture_reader_route_allowed" not in before[0]
     assert api.render_postgrest(values) == before[1]
     # Removing the key is the rollback: it restores the exact previous files.
     del values["capture_reader_key"]

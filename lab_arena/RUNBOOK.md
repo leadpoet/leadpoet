@@ -68,8 +68,8 @@ one submission. Public round data shows verified reasoning only for runs that
 pass the training check, so the site needs this private aggregate.
 
 Migration `593-lab-arena-capture-summary-reader.sql` adds the NOLOGIN role
-`leadpoet_capture_reader` with a 60 s role statement timeout and no table
-privileges. It may execute one SECURITY DEFINER function,
+`leadpoet_capture_reader` with a 60 s role statement timeout and no explicit
+table grants. Its explicit EXECUTE grant is one SECURITY DEFINER function,
 `lab_arena_capture_summary_v1(p_round_id, p_submission_id)`. The function
 returns one row of counts for the submission's execute runs: runs, ICP
 positions, completed OpenRouter calls, calls whose saved body reports reasoning
@@ -86,13 +86,28 @@ These provider-reported counts do not prove export completeness or training
 eligibility. The reader does not run the exporter's privacy or structure
 sanitizer.
 
+Existing database `PUBLIC` grants also apply to this role. `NOINHERIT` does not
+remove them, and revoking a grant from the reader cannot override `PUBLIC`.
+Review and record that effective surface; do not revoke unrelated shared grants
+as part of this rollout. The distinct opaque reader key is restricted at nginx
+to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1`, with JSON
+arguments in the body. Other methods, paths, query strings, non-public schema
+profiles and method/path override headers return 403. Explicit `public` profiles
+are allowed. Both the normalized URI and original request target must match.
+This is an HTTP boundary, not a claim of database-level one-function isolation.
+The backend must remain loopback-only and its internal role JWT must remain
+private (`deploy/aws/subnet-api/README.md`).
+
 To enable it:
 
 1. Apply 593 through the configured repository migration helper. It is
    idempotent and changes no stored row, table ACL or existing function. It
    grants the role to a role named `authenticator` only if one exists.
-2. Grant the role to the exact reviewed RDS authenticator, then rerun the
-   read-only review queries in `deploy/aws/subnet-api/README.md`:
+2. Review direct, inherited and `PUBLIC` privileges with the read-only queries
+   in `deploy/aws/subnet-api/README.md`. Verify the reader-only HTTP restriction,
+   private backend and exact summary function before granting the role to the
+   reviewed RDS authenticator. A stopped permission review is not permission to
+   activate the key. Do not rerun 593 after an unknown commit without readback.
 
    ```sql
    GRANT leadpoet_capture_reader TO <reviewed_authenticator>
@@ -109,6 +124,8 @@ To enable it:
 5. Verify with the new key: `POST /rest/v1/rpc/lab_arena_capture_summary_v1`
    with `{"p_round_id": ..., "p_submission_id": ...}` returns one row, and a
    table read such as `GET /rest/v1/lab_arena_ledger?limit=1` returns 403.
+   Prove other methods, aliases and a catalog-confirmed harmless PUBLIC RPC
+   are denied. Never invoke a mutating legacy RPC to test the boundary.
 
 Rollback: remove `capture_reader_key` from the renderer input and restart the
 pair, which revokes the key. To also close the database path, run

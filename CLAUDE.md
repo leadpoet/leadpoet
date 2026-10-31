@@ -1,3 +1,15 @@
+## Scoped authorization: October 31 capture-reader HTTP boundary
+
+The coordinating task authorized the smallest reader-only ingress correction
+after production review found retained PUBLIC database privileges. Internal
+agents may change the optional reader's exact POST route restriction, focused
+unit and real nginx/PostgREST tests, documentation and these identical files
+in a clean latest-main worktree, then test and commit. Preserve existing keys,
+database PUBLIC grants, data, raw capture, scoring, billing and concurrent work.
+Add no dependencies, credential renewal, provider calls or production changes.
+The coordinator owns independent review, push, merge, grants and pair rollout.
+The reader key must remain disabled until its HTTP boundary is verified.
+
 ## Scoped authorization: October 31 renewable lease drain budget
 
 The coordinating task authorized the smallest correction to the canonical

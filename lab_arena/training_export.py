@@ -1154,11 +1154,23 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                     record_error("agent_task_state_unverified", run_id)
             continue
         payload = snapshot["payload"]
+        # Native host-result proof comes from this exact immutable, validated
+        # snapshot. An unavailable upload acknowledgement is not a conflicting
+        # claim about its bytes. Require every supplied claim to agree, and
+        # keep the legacy acknowledgement policy unchanged.
+        unconfirmed_native_capture = (
+            not require_client_ack and isinstance(capture, dict)
+            and set(capture) <= {"status", "payload_sha256", "observation_count", "local_refusal_count", "complete"}
+            and capture.get("status") == "unavailable"
+            and ("payload_sha256" not in capture or capture["payload_sha256"] == snapshot["payload_sha256"])
+            and all(type(capture.get(key)) is int and capture[key] == payload[key]
+                    for key in ("observation_count", "local_refusal_count"))
+            and type(capture.get("complete")) is bool and capture["complete"] == payload["complete"])
         if capture is not None and (not isinstance(capture, dict)
                 or capture.get("status") != "stored" or capture.get("payload_sha256") != snapshot["payload_sha256"]
                 or capture.get("observation_count") != payload["observation_count"]
                 or capture.get("local_refusal_count") != payload["local_refusal_count"]
-                or capture.get("complete") != payload["complete"]):
+                or capture.get("complete") != payload["complete"]) and not unconfirmed_native_capture:
             # The object passed identity, hash, schema and privacy validation.
             # Retain it for inspection, but a failed or conflicting completion
             # summary cannot authorize receipt links or verified counters.

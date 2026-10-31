@@ -520,12 +520,13 @@ def _captured_reasoning_controls_match(call, registry) -> bool:
         return False
 
 
-def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
-    """Prove a hidden free throttle recovered by the same request's host write.
+def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
+    """Prove a hidden throttle recovered by the same request's host write.
 
     A managed retry is provider evidence, never a delivered response or target.
-    Keep its missing write explicit; only an exact settled-zero 429 can borrow
-    proof of recovery from a later successful request on the frozen route.
+    Retain the settled-zero later-action proof. Broker-internal attempts instead
+    need exact same-action lineage; their saved billing remains authoritative,
+    including uncertainty. Both require saved 429 bytes and a successful write.
     """
     try:
         registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
@@ -535,26 +536,60 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
         provenance = call.get("response_provenance") or {}
         terminal_id = call.get("terminal_entry_id")
         sequence = call.get("action_sequence")
-        expected_error = {"error": {"code": "provider_unavailable"}}
+        operation = call.get("operation_id")
+        internal = call.get("response_status") == 402
+        expected_status = 402 if internal else 502
+        expected_error = {"error": {"code": "miner_credentials_unavailable" if internal else "provider_unavailable"}}
         digest = contracts.document_hash(expected_error)
+        amount = call.get("actual_microusd")
+        accounting = call.get("accounting_state")
+        response_id = training_export.response_entry_id(call) if internal else terminal_id
+        accounting_view = call
+        if internal and response_id != terminal_id:
+            # The existing retained-response primitive proves the delayed bill
+            # points back to this error. Verify both amounts; order recovery
+            # against the saved error, never the later accounting-only head.
+            prior = [row for row in call.get("lifecycle") or [] if row.get("entry_id") == response_id]
+            if (len(prior) != 1 or prior[0].get("entry_kind") != "uncertain"
+                    or type(prior[0].get("amount_microusd")) is not int or prior[0]["amount_microusd"] != 0):
+                return False
+            accounting_view = {**call, "lifecycle": [row for row in call.get("lifecycle") or []
+                                                    if row.get("entry_id") != response_id]}
+        if internal:
+            base, attempt = call.get("base_call_identity"), call.get("provider_attempt")
+            if (call.get("provider") != "openrouter" or call.get("funding_source") != "miner_key"
+                    or not isinstance(base, str) or contracts.SHA256_RE.fullmatch(base) is None
+                    or type(attempt) is not int or attempt < 1
+                    or call.get("call_identity") != (base if attempt == 1 else contracts.document_hash(
+                        {"base_call_identity": base, "provider_attempt": attempt}))
+                    or not (accounting == "uncertain" and "actual_microusd" in call and amount is None
+                            or accounting == "settlement" and type(amount) is int and amount >= 0)
+                    or not _terminal_accounting_matches(accounting_view, accounting, 0 if amount is None else amount)
+                    or type(call.get("reservation_entry_id")) is not int
+                    or not 0 < call["reservation_entry_id"] < response_id
+                    or set(call.get("evidence_gaps") or []) != (
+                        {"provider_cost_unresolved"} if accounting == "uncertain" else set())):
+                return False
+        elif (accounting != "settlement" or type(amount) is not int or amount != 0
+              or call.get("evidence_gaps")):
+            return False
         if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
                 or call.get("run_id") != example.get("run_id")
-                or call.get("operation_id") != "openrouter.responses"
+                or operation not in reasoning_capture.OPERATIONS
+                or not internal and operation != "openrouter.responses"
                 or call.get("funding_source") not in {"host", "miner_key"}
-                or call.get("accounting_state") != "settlement"
-                or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
                 or type(sequence) is not int or sequence < 0 or type(terminal_id) is not int or terminal_id < 1
-                or not _policy(call, registry) or call.get("evidence_gaps")
+                or not _policy(call, registry)
                 or (call.get("request_capture") or {}).get("redacted")
                 or not training_steps._exact(request)
-                or request.get("operation_id") != "openrouter.responses"
+                or request.get("operation_id") != operation
                 or request.get("request_hash") != call.get("request_hash")
                 or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(body, Mapping)
                 or contracts.document_hash(body) != outbound.get("body_sha256")
                 or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
-                or outbound.get("path") != "/api/v1/responses"
-                or call.get("response_status") != 502 or call.get("response") != expected_error
+                or outbound.get("path") != operations.OPERATIONS[operation].path
+                or call.get("response_status") != expected_status or call.get("response") != expected_error
                 or call.get("response_sha256") != digest or call.get("response_privacy_redactions")
                 or provenance.get("delivery_to_worker") != "not_proved"
                 or provenance.get("agent_receipt") not in (None, "not_reported")
@@ -569,19 +604,25 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
                 or not (_legacy_tested_controls_match(call)
                         or _captured_reasoning_controls_match(call, registry))):
             return False
-        settlements = [row for row in call.get("lifecycle") or []
-                       if row.get("entry_id") == terminal_id and row.get("entry_kind") == "settlement"]
-        if (len(settlements) != 1 or type(settlements[0].get("amount_microusd")) is not int
-                or settlements[0]["amount_microusd"] != 0):
-            return False
-        receipts = [row for row in call.get("response_receipts") or [] if row.get("entry_id") == terminal_id]
+        if not internal:
+            settlements = [row for row in call.get("lifecycle") or []
+                           if row.get("entry_id") == terminal_id and row.get("entry_kind") == "settlement"]
+            if (len(settlements) != 1 or type(settlements[0].get("amount_microusd")) is not int
+                    or settlements[0]["amount_microusd"] != 0):
+                return False
+        receipts = [row for row in call.get("response_receipts") or [] if row.get("entry_id") == response_id]
         if (len(receipts) != 1 or receipts[0].get("response_sha256") != digest
                 or receipts[0].get("wire_body_sha256") != digest
                 or receipts[0].get("wire_body_bytes") != len(contracts.canonical_json(expected_error).encode())
-                or (receipts[0].get("metadata") or {}).get("status") != 502
+                or (receipts[0].get("metadata") or {}).get("status") != expected_status
                 or (receipts[0].get("metadata") or {}).get("call_succeeded") is not False
-                or receipts[0].get("response_ref") != {"entry_id": terminal_id, "field": "response"}
+                or receipts[0].get("response_ref") != {"entry_id": response_id, "field": "response"}
                 or receipts[0].get("response_unavailable") or receipts[0].get("privacy_redactions")):
+            return False
+        if internal and (receipts[0].get("entry_kind") != ("uncertain" if response_id != terminal_id else accounting)
+                or (receipts[0].get("metadata") or {}).get("account_failure_evidence") != {
+                    "error_class": "account_credential_failure", "provider_status": 429,
+                    "action_sequence": sequence, "provider_attempt": attempt, "base_call_identity": base}):
             return False
         upstream = call.get("upstream_response_receipts") or []
         if not upstream:
@@ -589,7 +630,7 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
         for receipt in upstream:
             response = receipt.get("response")
             if (receipt.get("status") != 429 or not isinstance(response, Mapping)
-                    or type(receipt.get("entry_id")) is not int or not 0 < receipt["entry_id"] <= terminal_id
+                    or type(receipt.get("entry_id")) is not int or not 0 < receipt["entry_id"] <= response_id
                     or not isinstance(response.get("error"), Mapping) or response["error"].get("code") != 429
                     or response.get("choices") or response.get("output")
                     or receipt.get("provenance") != "private_upstream_response_receipt"
@@ -608,10 +649,26 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
             return False
         for recovered in example.get("provider_calls") or []:
             later_request = recovered.get("request") or {}
+            if internal:
+                later_attempt = recovered.get("provider_attempt")
+                if (recovered.get("base_call_identity") != base
+                        or recovered.get("provider") != "openrouter"
+                        or recovered.get("funding_source") != "miner_key"
+                        or type(later_attempt) is not int or later_attempt <= attempt
+                        or recovered.get("call_identity") != contracts.document_hash(
+                            {"base_call_identity": base, "provider_attempt": later_attempt})
+                        or recovered.get("action_sequence") != sequence
+                        or type(recovered.get("reservation_entry_id")) is not int
+                        or recovered["reservation_entry_id"] <= response_id
+                        or type(recovered.get("terminal_entry_id")) is not int
+                        or recovered["terminal_entry_id"] <= recovered["reservation_entry_id"]):
+                    continue
+            elif (type(recovered.get("action_sequence")) is not int
+                  or recovered["action_sequence"] <= sequence):
+                continue
             if (recovered.get("run_id") != call["run_id"] or recovered.get("call_identity") == call.get("call_identity")
-                    or recovered.get("operation_id") != "openrouter.responses"
-                    or type(recovered.get("action_sequence")) is not int or recovered["action_sequence"] <= sequence
-                    or type(recovered.get("terminal_entry_id")) is not int or recovered["terminal_entry_id"] <= terminal_id
+                    or recovered.get("operation_id") != operation
+                    or type(recovered.get("terminal_entry_id")) is not int or recovered["terminal_entry_id"] <= response_id
                     or recovered.get("request_hash") != call.get("request_hash")
                     or later_request.get("hashed_parameters") != request["hashed_parameters"]
                     or (later_request.get("outbound") or {}).get("body") != body
@@ -807,7 +864,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
     claimed. The reviewed request, saved failure bytes, host write and agent
     read must agree. Unsettled billing does not establish whether the delivered bytes are usable.
     """
-    if (verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs)
+    if (verified_recovered_provider_retry(example, call, worker_proofs=worker_proofs)
             or verified_undispatched_transport(example, call, worker_proofs=worker_proofs)):
         return True
     try:
@@ -1715,7 +1772,7 @@ def _optional_capture_runs_proven(example, *, worker_proofs=None):
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         delivered = []
         for call in calls:
-            if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
+            if verified_recovered_provider_retry(example, call, worker_proofs=worker_proofs):
                 continue
             training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
             delivered.append(call["call_identity"])

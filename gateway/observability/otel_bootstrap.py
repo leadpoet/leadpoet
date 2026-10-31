@@ -284,6 +284,22 @@ ARENA_REVIEW_ERROR_CODES = frozenset({
     "review_response_invalid",
 })
 
+# Which validation clause rejected an otherwise successful generation. A copy
+# of ``code_review_policy.RESPONSE_ERROR_REASONS``, already sanitized and
+# already persisted on the review row; "-" when the decision carries no
+# response-level reason.
+ARENA_REVIEW_ERROR_REASONS = frozenset({
+    "-",
+    "envelope", "model_mismatch", "choice", "not_finished", "message",
+    "refusal_or_tools", "content", "content_json", "document_keys",
+    "verdict", "summary", "coverage", "coverage_order", "findings",
+    "verdict_findings", "finding_keys", "finding_classification",
+    "finding_evidence", "finding_evidence_mismatch", "finding_explanation",
+    "context_integrity",
+    "research_keys", "research_binding", "research_classification",
+    "research_evidence", "research_evidence_mismatch", "research_limitations",
+})
+
 # How a wait on the shared OpenRouter concurrency gate ended. A call admitted
 # with no wait at all emits nothing, so gate spans appear only under
 # contention.
@@ -797,6 +813,7 @@ RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(
 REVIEW_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.review_status": (str,),
     "arena.error_code": (str,),
+    "arena.error_reason": (str,),
     "arena.review_categories": (str,),
     "arena.provider_http_status": (int,),
     "arena.retryable": (bool,),
@@ -1229,6 +1246,8 @@ def _validating_exporter(
             return "review_status"
         if attributes["arena.error_code"] not in ARENA_REVIEW_ERROR_CODES:
             return "error_code"
+        if attributes["arena.error_reason"] not in ARENA_REVIEW_ERROR_REASONS:
+            return "error_reason"
         if attributes["arena.review_status"] != "error" and attributes["arena.error_code"] != "-":
             return "error_code"
         if attributes["arena.review_status"] == "error" and attributes["arena.error_code"] == "-":
@@ -1830,6 +1849,7 @@ class ArenaTelemetry:
         self, status: str, *, error_code: str, categories: str,
         provider_http_status: int, retryable: bool, funding_route: str,
         round_id: str, submission_id: str, miner_hotkey: str, attempt: int,
+        error_reason: str = ARENA_NO_ERROR,
     ) -> None:
         try:
             if self._review_tracer is None:
@@ -1839,6 +1859,7 @@ class ArenaTelemetry:
             span = self._start(self._review_tracer, "arena.review.decision", None)
             span.set_attribute("arena.review_status", status)
             span.set_attribute("arena.error_code", error_code)
+            span.set_attribute("arena.error_reason", error_reason)
             span.set_attribute("arena.review_categories", categories)
             span.set_attribute("arena.provider_http_status", provider_http_status)
             span.set_attribute("arena.retryable", retryable)

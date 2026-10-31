@@ -2019,7 +2019,12 @@ def _industry_brand_scope(url: str, homepage: str) -> bool:
     if not _safe_https_url(url) or not _safe_https_url(homepage):
         return False
     try:
-        if public_http_url(url) != url:
+        canonical = public_http_url(url)
+        source = urlsplit(url)
+        # The empty root path and '/' are the same resource. Validate only
+        # that spelling difference; keep the actual request/final URL intact.
+        if canonical != url and not (not source.path
+                and canonical == source._replace(path='/').geturl()):
             return False
         homepage = public_http_url(homepage)
     except ValueError:

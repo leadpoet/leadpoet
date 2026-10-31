@@ -550,3 +550,22 @@ def test_actual_native_binding_rejects_tenant_traversal_even_if_provider_echoes_
     assert result['claims']['industry']['status'] != 'VERIFIED'
     assert not result.get(c.PRIVATE_INDUSTRY_BINDINGS_KEY, {}).get('brands')
     assert reads == [PARENT, target] if at_final else reads == [PARENT]
+
+
+@pytest.mark.parametrize('query', ['', '?view=brand'])
+def test_native_linked_brand_root_accepts_empty_path_equivalent_without_request_rewrite(monkeypatch, query):
+    target = 'https://workflowco.example' + query
+    home = 'https://workflowco.example/' + query
+    monkeypatch.setitem(globals(), 'CHILD', target)
+    proof = {**PROOF, 'official_child_homepage': home}
+    result, reads, _, _ = native_loop(monkeypatch, proof=proof, href=home)
+    assert reads == [PARENT, target]
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert result[c.PRIVATE_INDUSTRY_BINDINGS_KEY]['brands'][target]['child_final_url'] == target
+
+
+def test_root_spelling_equivalence_does_not_relax_homepage_query_scope():
+    assert not c._industry_brand_scope('https://workflowco.example?tenant=two',
+        'https://workflowco.example/?tenant=one')
+    assert not c._industry_brand_scope('https://workflowco.example/?tenant=two',
+        'https://workflowco.example?tenant=one')

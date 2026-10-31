@@ -192,6 +192,22 @@ def _telemetry_tool(operation_id: str, parameters: Mapping[str, Any]) -> str:
     return tool if tool in operations.DEEPLINE_TOOLS else telemetry.NO_TOOL
 
 
+def _telemetry_model(operation_id: str, parameters: Mapping[str, Any]) -> str:
+    """Name the model behind one provider call, or nothing.
+
+    Only an OpenRouter chat call names a model, and the admitted frame already
+    validates it against the price table's own ``model_id`` format. Anything
+    else degrades to "no model" rather than exporting free text, so the
+    attribute stays bounded the way ``_telemetry_tool`` keeps the tool bounded.
+    """
+
+    operation = operations.get_operation(operation_id)
+    if operation is None or operation.provider != "openrouter":
+        return telemetry.NO_MODEL
+    model = str(parameters.get("model") or "")
+    return model if operations._MODEL_ID_RE.fullmatch(model) else telemetry.NO_MODEL
+
+
 def _provider_telemetry_fields(
     call: Mapping[str, Any], http_status: Any, attempts: int
 ) -> Dict[str, Any]:
@@ -7043,6 +7059,7 @@ class ArenaService:
                 error_type=type(exc).__name__,
                 store_error=store_error or None,
                 tool=_telemetry_tool(operation_id, frame["parameters"]),
+                model=_telemetry_model(operation_id, frame["parameters"]),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 run_identity=run_identity,
             )
@@ -7067,6 +7084,10 @@ class ArenaService:
                     provider_fields["store_error"] = setup_diagnostics["store_error"]
             telemetry.record_provider(
                 tool=_telemetry_tool(
+                    call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
+                    frame["parameters"],
+                ),
+                model=_telemetry_model(
                     call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
                     frame["parameters"],
                 ),

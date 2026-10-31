@@ -1384,7 +1384,7 @@ async def verify_company_exists(
     require_https_transport: bool = False,
     company_quality: bool = False,
     homepage_navigation_locator_sink: Optional[list[dict[str, str]]] = None,
-    homepage_evidence_sink: Optional[dict[str, dict[str, str]]] = None,
+    homepage_evidence_sink: Optional[dict[str, dict[str, Any]]] = None,
 ) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
@@ -1572,7 +1572,7 @@ async def verify_company_exists(
                 }
                 if homepage_evidence_sink is not None:
                     from qualification.scoring.company_evidence_investigator import (
-                        _plain_text,
+                        _plain_text, _homepage_industry_link_metadata,
                     )
 
                     evidence_text = _plain_text(text)
@@ -1580,6 +1580,9 @@ async def verify_company_exists(
                         homepage_evidence_sink[canonical_request_url] = {
                             "final_url": canonical_final_url,
                             "text": evidence_text,
+                            **_homepage_industry_link_metadata(
+                                text, canonical_request_url, canonical_final_url, evidence_text,
+                                company_name),
                         }
         return _identity_result(
             redirect_receipt,
@@ -1676,7 +1679,7 @@ async def verify_company_exists(
                     for name in observed_names)
         ):
             from qualification.scoring.company_evidence_investigator import (
-                _plain_text,
+                _plain_text, _homepage_industry_link_metadata,
             )
 
             try:
@@ -1707,6 +1710,9 @@ async def verify_company_exists(
                 homepage_evidence_sink[canonical_request_url] = {
                     "final_url": canonical_final_url,
                     "text": evidence_text,
+                    **_homepage_industry_link_metadata(
+                        text, canonical_request_url, canonical_final_url, evidence_text,
+                        company_name),
                 }
                 if homepage_navigation_locator_sink is not None:
                     homepage_navigation_locator_sink.extend(
@@ -1786,7 +1792,7 @@ async def verify_company_exists(
             # The investigator owns the exact visible-text and binary guards.
             # Import here to avoid a module cycle during initialization.
             from qualification.scoring.company_evidence_investigator import (
-                _plain_text,
+                _plain_text, _homepage_industry_link_metadata,
             )
 
             try:
@@ -1824,6 +1830,9 @@ async def verify_company_exists(
                 homepage_evidence_sink[canonical_request_url] = {
                     "final_url": canonical_final_url,
                     "text": evidence_text,
+                    **_homepage_industry_link_metadata(
+                        text, canonical_request_url, canonical_final_url, evidence_text,
+                        company_name),
                 }
         return _identity_result(
             matched_receipt,
@@ -1835,7 +1844,9 @@ async def verify_company_exists(
         # An incomplete homepage identity can still supply untrusted source
         # text. Carry its observed LinkedIn slug so the later independent web
         # identity gate can reject a different company on the same domain.
-        from qualification.scoring.company_evidence_investigator import _plain_text
+        from qualification.scoring.company_evidence_investigator import (
+            _plain_text, _homepage_industry_link_metadata,
+        )
 
         evidence_text = _plain_text(text)
         visible_text = evidence_text.partition(
@@ -1879,6 +1890,9 @@ async def verify_company_exists(
             homepage_evidence_sink[canonical_request_url] = {
                 "final_url": canonical_final_url,
                 "text": evidence_text,
+                **_homepage_industry_link_metadata(
+                    text, canonical_request_url, canonical_final_url, evidence_text,
+                    company_name),
                 "observed_linkedin_slug": urlsplit(
                     observed_linkedins[0]
                 ).path.rstrip("/").rsplit("/", 1)[-1].casefold(),

@@ -3255,6 +3255,71 @@ async def _search_industry_locators(
     return {'results': list(locators.values()), 'notice': 'discovery_only_not_evidence'}
 
 
+def _industry_source_links(raw_html: str, final_url: str) -> list[str]:
+    """Bounded observed outgoing locators, never ownership or visible facts."""
+    source_links = []
+    if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
+        for href, _label in visible_html_link_labels(raw_html):
+            try:
+                candidate = _safe_https_url(urljoin(final_url, href))
+            except ValueError:
+                continue
+            if not candidate or _registrable_domain(candidate) == _registrable_domain(final_url):
+                continue
+            try:
+                candidate = public_http_url(candidate)
+            except ValueError:
+                continue
+            if candidate not in source_links:
+                if (len(source_links) >= MAX_HOMEPAGE_NAVIGATION_LOCATORS
+                        or sum(map(len, source_links)) + len(candidate)
+                        > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS):
+                    break
+                source_links.append(candidate)
+    return source_links
+
+
+def _homepage_industry_link_metadata(raw_html: str, request_url: str,
+                                     final_url: str, text: str, parent_name: str) -> dict[str, Any]:
+    """Retain a pending observation in the existing private binding envelope."""
+    hrefs = _industry_source_links(raw_html, final_url)
+    if not hrefs:
+        return {}
+    return {PRIVATE_INDUSTRY_BINDINGS_KEY: {
+        'schema': 'industry_source_bindings_v1',
+        'parent_domain': _registrable_domain(final_url),
+        'parent_name': _company_name(parent_name),
+        'evaluation_date': evaluation_date().isoformat(),
+        'links': {request_url: {'final_url': final_url,
+            'body_sha256': hashlib.sha256(text.encode()).hexdigest(), 'hrefs': hrefs}},
+        'brands': {},
+    }}
+
+
+def _prefetched_page_with_industry_bindings(url: str, text: str, final_url: str,
+                                          raw_page: Any) -> dict[str, Any]:
+    """Project pending metadata without rebinding its identity, date or bytes."""
+    page = {'final_url': final_url, 'text': text}
+    if not os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
+        return page
+    value = raw_page.get(PRIVATE_INDUSTRY_BINDINGS_KEY) if isinstance(raw_page, Mapping) else None
+    if (not isinstance(value, Mapping) or value.get('brands') != {}
+            or not isinstance(value.get('links'), Mapping) or set(value['links']) != {url}
+            or not isinstance(value.get('parent_domain'), str)
+            or not isinstance(value.get('parent_name'), str)):
+        return page
+    # This preserves only a pending server observation. The investigator later
+    # validates it against the actual independently verified current identity.
+    domain = value['parent_domain']
+    validated = _validated_industry_bindings(value, {url: text}, {url: final_url},
+        domains={domain}, identity={'submitted_domain': domain, 'observed_domain': domain,
+                                  'observed_name': value['parent_name']},
+        evaluation_date_value=evaluation_date().isoformat())
+    if url in validated['links']:
+        page[PRIVATE_INDUSTRY_BINDINGS_KEY] = validated
+    return page
+
+
 async def _fetch_page(
     session: aiohttp.ClientSession,
     url: str,
@@ -3417,25 +3482,7 @@ async def _fetch_page(
             text += suffix
     if not text:
         return {"ok": False, "error": "empty_page"}
-    source_links = []
-    if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
-        for href, _label in visible_html_link_labels(raw):
-            try:
-                candidate = _safe_https_url(urljoin(safe_final_url, href))
-            except ValueError:
-                continue
-            if not candidate or _registrable_domain(candidate) == _registrable_domain(safe_final_url):
-                continue
-            try:
-                candidate = public_http_url(candidate)
-            except ValueError:
-                continue
-            if candidate not in source_links:
-                if (len(source_links) >= MAX_HOMEPAGE_NAVIGATION_LOCATORS
-                        or sum(map(len, source_links)) + len(candidate)
-                        > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS):
-                    break
-                source_links.append(candidate)
+    source_links = _industry_source_links(raw, safe_final_url)
     return {
         "ok": True,
         "url": canonical_url,
@@ -5160,6 +5207,17 @@ async def investigate_company_evidence(
     industry_bindings = _validated_industry_bindings(None, fetched_pages, fetched_final_urls,
         domains=first_party_domains, identity=identity_anchor,
         evaluation_date_value=input_document['evaluation_date'])
+    if industry_review_model and isinstance(prefetched_pages, Mapping):
+        for url, page in prefetched_pages.items():
+            if url not in fetched_pages or not isinstance(page, Mapping):
+                continue
+            observed = _validated_industry_bindings(page.get(PRIVATE_INDUSTRY_BINDINGS_KEY),
+                fetched_pages, fetched_final_urls, domains=first_party_domains,
+                identity=identity_anchor, evaluation_date_value=input_document['evaluation_date'])
+            # Each initial homepage observation may contribute only its own
+            # source link record, never child bindings or other page authority.
+            if observed['brands'] == {} and set(observed['links']) == {url}:
+                industry_bindings['links'][url] = observed['links'][url]
 
     def current_industry_bindings():
         return _validated_industry_bindings(industry_bindings, fetched_pages, fetched_final_urls,

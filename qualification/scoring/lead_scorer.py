@@ -86,6 +86,7 @@ from qualification.scoring.company_evidence_investigator import (
     PRIVATE_FETCHED_PAGES_KEY,
     PRIVATE_INDUSTRY_BINDINGS_KEY,
     _validated_industry_bindings,
+    _prefetched_page_with_industry_bindings,
     _IDENTITY_LINK_CONTEXT_MARKER,
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
@@ -3544,16 +3545,17 @@ def _investigator_prefetched_pages(
     verified_identity: Optional[Mapping[str, Any]] = None,
     include_structured_description: bool = False,
     include_structured_headquarters: bool = False,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     """Return bounded private pages from already validated server sources."""
 
-    candidates: dict[str, dict[str, str]] = {}
+    candidates: dict[str, dict[str, Any]] = {}
     homepage_pages, homepage_final_urls = _validated_prefetched_pages(
         verified_homepage_pages,
         submitted_source_urls=submitted_source_urls,
     )
     candidates.update({
-        url: {"final_url": homepage_final_urls[url], "text": text}
+        url: _prefetched_page_with_industry_bindings(
+            url, text, homepage_final_urls[url], (verified_homepage_pages or {}).get(url))
         for url, text in homepage_pages.items()
     })
     retry_pages, retry_final_urls = _validated_matched_retry_pages(matched_company_retry_pages)
@@ -3690,7 +3692,8 @@ def _investigator_prefetched_pages(
         submitted_source_urls=submitted_source_urls,
     )
     return {
-        url: {"final_url": final_urls[url], "text": page_text}
+        url: _prefetched_page_with_industry_bindings(
+            url, page_text, final_urls[url], candidates.get(url))
         for url, page_text in pages.items()
     }
 

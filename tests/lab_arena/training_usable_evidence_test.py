@@ -252,3 +252,71 @@ def test_present_snapshot_identity_must_match_known_attempt_metadata(field, valu
     seal(example)
     assert not check(example)['eligible']
     assert not exported(example)
+
+
+def checkout_diagnostic(example):
+    proof = example['completeness']
+    proof['complete'] = False
+    proof['dimensions']['source_identity'] = False
+    proof['reasons_by_dimension']['source_identity'] = ['runtime_source_unverified']
+    proof['incomplete_reasons'].append('runtime_source_unverified')
+    return seal(example)
+
+
+def test_validator_checkout_diagnostic_keeps_verified_thinking_pairs():
+    # A modified validator checkout is not a failed miner-source, request,
+    # response, or accepted-score identity check.
+    example = checkout_diagnostic(usable_example())
+    original = deepcopy(example)
+    assert check(example)['eligible']
+    assert len(exported(example)) == 2
+    assert example == original
+    assert not example['completeness']['complete']
+
+
+@pytest.mark.parametrize('reason', [
+    'source_unverified', 'scorer_image_identity_missing',
+    'reviewer_runtime_identity_unverified', 'unknown_identity_failure',
+])
+def test_checkout_diagnostic_cannot_hide_essential_source_failures(reason):
+    example = checkout_diagnostic(usable_example())
+    proof = example['completeness']
+    proof['reasons_by_dimension']['source_identity'].append(reason)
+    proof['incomplete_reasons'].append(reason)
+    seal(example)
+    assert not check(example)['eligible']
+    assert not exported(example)
+
+
+@pytest.mark.parametrize('damage', [
+    'dimension', 'missing_reason', 'missing_diagnostic', 'complete',
+    'global_source_failure', 'global_unknown_failure',
+])
+def test_inconsistent_checkout_diagnostic_does_not_grant_eligibility(damage):
+    example = checkout_diagnostic(usable_example())
+    proof = example['completeness']
+    if damage == 'dimension':
+        proof['dimensions']['source_identity'] = True
+    elif damage == 'missing_reason':
+        proof['reasons_by_dimension']['source_identity'] = []
+    elif damage == 'missing_diagnostic':
+        proof['incomplete_reasons'].remove('runtime_source_unverified')
+    elif damage == 'complete':
+        proof['complete'] = True
+    else:
+        proof['incomplete_reasons'].append(
+            'source_unverified' if damage == 'global_source_failure' else 'unknown_identity_failure')
+    seal(example)
+    assert not check(example)['eligible']
+    assert not exported(example)
+
+
+def test_checkout_diagnostics_keep_eight_of_ten_coverage_requirement():
+    examples = {key: checkout_diagnostic(value)
+                for key, value in ten_selected_examples().items()}
+    examples['run-8'] = examples['run-9'] = None
+    result = assess_ten(examples)
+    assert result['eligible'], result
+    assert result['counts']['complete_runs'] == 8
+    examples['run-7'] = None
+    assert not assess_ten(examples)['eligible']

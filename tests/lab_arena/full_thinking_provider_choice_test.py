@@ -186,7 +186,7 @@ def test_alternative_provider_survives_actual_worker_storage_and_strict_training
     from pathlib import Path
     from lab_arena import runner, training_export, training_steps
     from tests.lab_arena.test_lab_arena_runner import lease
-    from tests.lab_arena.training_steps_test import fixture, seal
+    from tests.lab_arena.training_steps_test import bind_selected_output, fixture, seal
 
     frozen = registry(api)
     route = frozen['approved_routes'][1]
@@ -242,11 +242,14 @@ def test_alternative_provider_survives_actual_worker_storage_and_strict_training
     snapshot = {'payload': payload, 'payload_sha256': contracts.document_hash(payload)}
     assert not training_export._link_worker_receipts({'run_id': 'r1', 'kind': 'execute'}, calls, snapshot, require_client_ack=False)
     example = fixture()
+    example['attempts'][0]['run_id'] = 'r1'
+    example['input_snapshots']['r1'] = example['input_snapshots'].pop('run')
+    example['input_snapshots'][example['score_run_id']]['input']['scored_run_id'] = 'r1'
     example.update(run_id='r1', provider_calls=calls, worker_observation_artifacts={'r1': snapshot},
         configuration={'reasoning_capture_policy': rc.POLICY, 'reasoning_route_registry': frozen,
                        'training_maximum_missing_reasoning_percent': 0},
         completeness={'complete': True, 'incomplete_reasons': []})
-    seal(example)
+    bind_selected_output(example)
     splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
     records = splits['train'] + splits['eval']
     assert len(records) == 1

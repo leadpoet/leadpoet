@@ -143,6 +143,6 @@ def test_full_thinking_multi_episode_global_split_and_manifest_golden():
     seal(second)
     splits, manifest = training_thinking.build(iter([first, second, first]))
     # Bind the shared source graph, cross-source dedup, and coverage.
-    assert manifest["dataset_version"] == "sha256:921c625962bc3a50f92e886001bb75751c7558f1bee8f57ee9d8978d74d8b4a0"
+    assert manifest["dataset_version"] == "sha256:4b8067822b5508c8c787facf305445b7d22d7af138859acba3598bd7a72693f5"
     assert manifest["coverage"]["distinct_verified_exports"] == 2
     assert not (splits["train"] and splits["eval"])

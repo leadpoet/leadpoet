@@ -798,7 +798,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
 
     Provider errors need no observed generation route: no generation is
     claimed. The reviewed request, saved failure bytes, host write and agent
-    read must agree. Unsettled billing remains a separate eligibility gate.
+    read must agree. Unsettled billing does not establish whether the delivered bytes are usable.
     """
     if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
         return True
@@ -867,9 +867,10 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                     if "full_response_unavailable" in (call.get("evidence_gaps") or [])
                     and _verified_unavailable_upstream_failure(example, call, worker_proofs=worker_proofs)
                     else {"provider_cost_unresolved"})
-                or set((example.get("completeness") or {}).get("incomplete_reasons") or []) & {
-                    "worker_response_receipt_link_invalid", "agent_response_receipt_link_invalid",
-                    "agent_dependency_link_invalid", "runtime_input_context_mismatch"}):
+                or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+                    and set((example.get("completeness") or {}).get("incomplete_reasons") or []) & {
+                        "worker_response_receipt_link_invalid", "agent_response_receipt_link_invalid",
+                        "agent_dependency_link_invalid", "runtime_input_context_mismatch"})):
             return False
         if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
             evidence = training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
@@ -1527,9 +1528,7 @@ def verified_output_projection(example: Mapping[str, Any]) -> bool:
             and projected_hash == contracts.document_hash(output))
 
 
-def _selected_input_output_binding(
-    example: Mapping[str, Any], *, allow_selected_cost_unavailable: bool = False,
-) -> set[str] | None:
+def _selected_input_output_binding(example: Mapping[str, Any]) -> set[str] | None:
     """Verify the accepted score, output hash, and both exact input snapshots."""
     run_id = example.get("run_id")
     score_id = example.get("score_run_id")
@@ -1543,9 +1542,11 @@ def _selected_input_output_binding(
             or not verified_output_projection(example)):
         return None
     attempts = example.get("attempts") or []
+    selected_runs = [row for row in attempts if row.get("run_id") == run_id]
     score_runs = [row for row in attempts if row.get("run_id") == score_id
                   and row.get("kind") == "score" and row.get("status") == "accepted"]
-    if len(score_runs) != 1:
+    if (len(score_runs) != 1 or len(selected_runs) != 1
+            or selected_runs[0].get("kind") != "execute" or selected_runs[0].get("status") != "accepted"):
         return None
     score_ids = {row.get("run_id") for row in attempts if row.get("kind") == "score"
                  and isinstance(row.get("run_id"), str)}
@@ -1560,275 +1561,33 @@ def _selected_input_output_binding(
     if (score_input.get("scored_run_id") != run_id
             or score_input.get("companies") != output.get("companies")):
         return None
-    cost = example.get("competition_cost_eligibility") or {}
-    if cost.get("status") != "available":
-        if (not allow_selected_cost_unavailable
-                or cost.get("status") != "unavailable"
-                or cost.get("reason") != "provider_cost_uncertain"
-                or cost.get("source_rpc") != "lab_arena_icp_cost_eligibility"
-                or cost.get("policy") != (example.get("configuration") or {}).get(
-                    "sourcing_cost_eligibility_policy")
-                or not isinstance(cost.get("observed_at"), str)
-                or not cost["observed_at"]):
-            return None
     return score_ids
 
 
-def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *, target_omission_proof=None,
-                                failed_delivery_proof=None, undispatched_proof=None, worker_proofs=None) -> frozenset[str] | None:
-    """Use per-run export attribution only when the selected execution is exact."""
+def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None) -> frozenset[str] | None:
+    """Bind selected source and labels without an all-attempt or billing veto.
+
+    Each candidate separately proves its exact provider input, required tool
+    history and delivered result. The eligibility gate aggregates those checks
+    into ICP coverage; one unusable target cannot erase another valid example.
+    """
+    try:
+        configuration = example.get("configuration") or {}
+        training_coverage.missing_reasoning_percent_from_configuration(configuration)
+        training_coverage.percent_from_configuration(configuration)
+        if not reasoning_capture.enabled(baseline_reasoning.for_example(example)):
+            return None
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if _selected_input_output_binding(example) is None:
+        return None
     proof = example.get("completeness") or {}
     dimensions = proof.get("dimensions") or {}
     by_dimension = proof.get("reasons_by_dimension") or {}
     if any(dimensions.get(name) is not True or by_dimension.get(name) != []
-           for name in ("context", "source_identity", "exact_inputs", "input_output_label")):
+           for name in ("context", "source_identity")):
         return None
-    if (_selected_input_output_binding(example) is None
-            or not isinstance(example.get("related_run_gap_attribution"), Mapping)):
-        return None
-    run_id = example["run_id"]
-    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
-    payload = artifact.get("payload") or {}
-    has_undispatched = undispatched_proof is not None and any(
-        call.get("run_id") == run_id and undispatched_proof(example, call)
-        for call in example.get("provider_calls") or [])
-    rows = example["related_run_gap_attribution"]
-    attempts = {row.get("run_id"): row for row in example.get("attempts") or []
-                if isinstance(row, Mapping) and isinstance(row.get("run_id"), str)}
-    if set(rows) != set(attempts) or run_id not in rows or len(attempts) != len(example.get("attempts") or []):
-        return None
-    research, costs = set(), set()
-    for source_id, row in rows.items():
-        attempt = attempts[source_id]
-        if (not isinstance(row, Mapping) or row.get("kind") != attempt.get("kind")
-                or row.get("status") != attempt.get("status")
-                or not isinstance(row.get("research_process_gaps"), list)
-                or not isinstance(row.get("cost_gaps"), list)):
-            return None
-        source_research = set(row["research_process_gaps"])
-        source_costs = set(row["cost_gaps"])
-        if (any(not isinstance(gap, str) for gap in source_research | source_costs)
-                or not source_costs <= source_research):
-            return None
-        if source_id == run_id:
-            expected = ({"worker_observations_incomplete"}
-                        if (failed_delivery_proof is not None or undispatched_proof is not None)
-                        and payload.get("complete") is False else set())
-            if undispatched_proof is not None and any(
-                    "full_response_unavailable" in (call.get("evidence_gaps") or [])
-                    and undispatched_proof(example, call) for call in example.get("provider_calls") or []):
-                expected.add("full_response_unavailable")
-            if (row["kind"] != "execute" or row["status"] != "accepted"
-                    or source_research != expected
-                    or source_costs):
-                return None
-        elif row["kind"] != "score":
-            return None
-        research.update(source_research)
-        costs.update(source_costs)
-    if (research != set(by_dimension.get("research_process") or [])
-            or costs != set(by_dimension.get("costs") or [])
-            # Complete capture can record an undispatched request without a
-            # missing artifact. Only its exact proof permits empty raw gaps.
-            or proof.get("complete") is not (not reasons)
-            or dimensions.get("research_process") is not (not research)
-            or dimensions.get("costs") is not (not costs)
-            or reasons != research | costs
-            or not reasons and not has_undispatched):
-        return None
-    if (failed_delivery_proof is None and undispatched_proof is None and not _provider_capture_complete(example, run_id, worker_proofs=worker_proofs)
-            or artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs)
-            or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
-                   for field in ("observations", "agent_observations")
-                   for row in payload.get(field) or [])):
-        return None
-    selected = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
-    if not selected:
-        return None
-    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
-    for call in example.get("provider_calls") or []:
-        call_gaps = set(call.get("evidence_gaps") or [])
-        if call.get("run_id") not in rows or not call_gaps <= set(rows[call["run_id"]]["research_process_gaps"]):
-            return None
-        if call.get("run_id") != run_id:
-            continue
-        if undispatched_proof is not None and undispatched_proof(example, call):
-            continue
-        if (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call, worker_proofs=worker_proofs)
-                or verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs)):
-            continue
-        provenance = call.get("response_provenance") or {}
-        request = call.get("request") or {}
-        response = call.get("response")
-        model = call.get("operation_id") in reasoning_capture.OPERATIONS
-        permitted_redactions = {"hidden_reasoning"} if model else set()
-        failed_delivery = (failed_delivery_proof is not None
-                           and failed_delivery_proof(example, call))
-        if (call_gaps or call.get("accounting_state") != "settlement"
-                or type(call.get("actual_microusd")) is not int
-                or (call.get("request_capture") or {}).get("redacted") is True
-                or not set(call.get("response_privacy_redactions") or []) <= permitted_redactions
-                or any(not set(row.get("privacy_redactions") or []) <= permitted_redactions
-                       for row in call.get("response_receipts") or [])
-                or not isinstance(request, Mapping)
-                or request.get("operation_id") != call.get("operation_id")
-                or request.get("request_hash") != call.get("request_hash")
-                or not isinstance(request.get("hashed_parameters"), Mapping)
-                or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
-                or not isinstance(response, Mapping)
-                or contracts.document_hash(response) != call.get("response_sha256")
-                or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
-                    and (provenance.get("agent_receipt") != "reported_exact_body_received"
-                         or provenance.get("selected_response_acknowledged") is not True))
-                or provenance.get("delivery_to_worker") != (
-                    "socket_write_failed" if failed_delivery else "socket_written")):
-            return None
-        if failed_delivery:
-            # The eligibility caller proves the undelivered request/result.
-            # It cannot become a candidate, even when the saved result is valid.
-            continue
-        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
-            try:
-                evidence = training_steps._host_result(example, call, worker_proofs=worker_proofs)
-                if evidence["response"] != response:
-                    return None
-            except (ValueError, KeyError, TypeError, AttributeError):
-                return None
-        else:
-            worker_ref = provenance.get("worker_receipt_ref") or {}
-            if (worker_ref.get("run_id") != run_id
-                    or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
-                return None
-            writes = [row for row in payload.get("response_receipts") or []
-                      if row.get("ordinal") == worker_ref.get("ordinal")
-                      and row.get("call_identity") == call.get("call_identity")
-                      and row.get("operation_id") == call.get("operation_id")
-                      and row.get("action_sequence") == call.get("action_sequence")
-                      and row.get("write_state") == "socket_written"]
-            refs = provenance.get("agent_receipt_refs") or []
-            reads = [row for row in payload.get("agent_observations") or []
-                     if row.get("kind") == "response_received"
-                     and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
-                             and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
-            receipts = [row for row in call.get("response_receipts") or []
-                        if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
-                        and row.get("response_sha256") == call.get("response_sha256")]
-            if (len(writes) != 1 or not reads or not receipts
-                    or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
-                               and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
-                               and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
-                               and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
-                               and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
-                               for read in reads for receipt in receipts)):
-                return None
-        if model:
-            if failed_delivery_proof is not None and verified_failed_attempt(example, call, worker_proofs=worker_proofs):
-                continue
-            try:
-                try:
-                    training_steps._candidate(example, call, worker_proofs=worker_proofs)
-                except ValueError:
-                    if target_omission_proof is None or not target_omission_proof(example, call):
-                        return None
-                state = attempt_coverage(call, _role(example, call), registry)
-            except (ValueError, KeyError, TypeError, AttributeError):
-                return None
-            if not state["route_reviewed"] or not state["provider_route_verified"]:
-                return None
-    return frozenset(reasons)
-
-
-def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None, worker_proofs=None) -> frozenset[str] | None:
-    """Return attributable judge-only gaps, or reject an inexact selected replay.
-
-    Raw export completeness remains an all-related-runs audit. A score worker's
-    private provider response is not part of the accepted agent's prior context
-    or target, provided the score input and published label are still bound.
-    """
-    selected_id = example.get("run_id")
-    if any(isinstance(call, Mapping) and call.get("run_id") == selected_id
-            and not (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call, worker_proofs=worker_proofs)) and (
-            "provider_cost_unresolved" in (call.get("evidence_gaps") or [])
-            or ("accounting_state" in call and call.get("accounting_state") != "settlement")
-            or ("actual_microusd" in call and type(call.get("actual_microusd")) is not int))
-            for call in example.get("provider_calls") or []):
-        return None
-    proof = example.get("completeness") or {}
-    reasons = set(proof.get("incomplete_reasons") or [])
-    if proof.get("complete") is True and not reasons:
-        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
-            try:
-                for call in example.get("provider_calls") or []:
-                    if call.get("run_id") != selected_id:
-                        continue
-                    if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
-                        continue
-                    if call.get("accounting_state") == "refusal":
-                        if not verified_failed_attempt(example, call, worker_proofs=worker_proofs):
-                            return None
-                    else:
-                        training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
-            except (KeyError, ValueError, TypeError, AttributeError):
-                return None
-        return frozenset()
-    allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
-    if reasons and not reasons <= allowed:
-        return _attributed_score_only_gaps(example, reasons, target_omission_proof=target_omission_proof, worker_proofs=worker_proofs)
-    if not reasons:
-        return None
-    dimensions = proof.get("dimensions") or {}
-    by_dimension = proof.get("reasons_by_dimension") or {}
-    for name in ("context", "source_identity", "exact_inputs", "input_output_label"):
-        if dimensions.get(name) is not True or by_dimension.get(name) != []:
-            return None
-    if (set(by_dimension.get("research_process") or []) != reasons
-            or set(by_dimension.get("costs") or []) != (reasons & {"provider_cost_unresolved"})
-            or dimensions.get("research_process") is not False
-            or dimensions.get("costs") is not ("provider_cost_unresolved" not in reasons)):
-        return None
-    score_ids = _selected_input_output_binding(example)
-    if score_ids is None:
-        return None
-    run_id = example["run_id"]
-    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
-    payload = artifact.get("payload") or {}
-    if (not _provider_capture_complete(example, run_id, worker_proofs=worker_proofs)
-            or artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs)
-            or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
-                   for field in ("observations", "agent_observations")
-                   for row in payload.get(field) or [])):
-        return None
-    attributed = set()
-    for call in example.get("provider_calls") or []:
-        call_reasons = set(call.get("evidence_gaps") or [])
-        if call.get("run_id") in score_ids:
-            if not call_reasons <= allowed:
-                return None
-            if ("request_privacy_nonexact" in call_reasons
-                    and ((call.get("request_capture") or {}).get("redacted") is not True
-                         or "credential" not in ((call.get("request_capture") or {}).get("redactions") or []))):
-                return None
-            attributed.update(call_reasons)
-        elif call_reasons:
-            return None
-        if call.get("run_id") == run_id:
-            if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
-                continue
-            if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call, worker_proofs=worker_proofs):
-                continue
-            redactions = set(call.get("response_privacy_redactions") or [])
-            model = call.get("operation_id") in reasoning_capture.OPERATIONS
-            permitted = {"hidden_reasoning"} if model else set()
-            if ((call.get("request_capture") or {}).get("redacted") is True
-                    or not redactions <= permitted
-                    or any(not set(row.get("privacy_redactions") or []) <= permitted
-                           for row in call.get("response_receipts") or [])
-                    or call.get("accounting_state") != "settlement"
-                    or type(call.get("actual_microusd")) is not int):
-                return None
-    if attributed != reasons:
-        return None
-    return frozenset(reasons)
+    return frozenset(proof.get("incomplete_reasons") or [])
 
 
 _LOCAL_WEB_DIAGNOSTICS = frozenset({"direct_web_usage_unverified", "direct_web_content_not_captured",
@@ -1971,13 +1730,13 @@ def provider_visible_view(example, *, not_dispatched_host_observations=None, wor
         return example, frozenset()  # Invalid diagnostics never grant an exception.
 
 
-def selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None, worker_proofs=None) -> frozenset[str] | None:
-    # Eligibility may prove a generation unusable without treating its exact
-    # capture as corruption. Exporters keep the strict default target check.
+def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None) -> frozenset[str] | None:
+    # Raw diagnostic capture remains visible without becoming a second
+    # admission gate for independently verified provider-visible pairs.
     view, diagnostic_gaps = provider_visible_view(example, worker_proofs=worker_proofs)
     if diagnostic_gaps and _selected_input_output_binding(view) is None:
         return None
-    result = _selected_research_evidence(view, target_omission_proof=target_omission_proof, worker_proofs=worker_proofs)
+    result = _selected_research_evidence(view, worker_proofs=worker_proofs)
     return None if result is None else result | diagnostic_gaps
 
 
@@ -2007,7 +1766,6 @@ def build(examples, rules: training_steps.Rules | None = None):
     output = {"train": [], "eval": [], "analysis": []}
     records_by_split: dict[str, dict[str, dict]] = {"train": {}, "eval": {}}
     reasons = Counter()
-    trajectory_reasons: dict[str, str | None] = {}
     diagnostic_gaps_by_source: dict[str, frozenset[str]] = {}
     projected = {}
     projected_refs = set()
@@ -2043,12 +1801,6 @@ def build(examples, rules: training_steps.Rules | None = None):
                               response_sha256=ref["delivered_response_sha256"])
         registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         source = ref["example_hash"]
-        if source not in trajectory_reasons:
-            trajectory_reasons[source] = _trajectory_reason(example)
-        reason = trajectory_reasons[source]
-        if reason is not None:
-            reasons[reason] += 1
-            return
         segments, status = full_text_segments(delivered_call, _role(example, call), registry)
         if not segments:
             reasons[status["returned"]] += 1
@@ -2117,61 +1869,3 @@ def build(examples, rules: training_steps.Rules | None = None):
                 "coverage": _combined_coverage(coverage_reports)}
     manifest["dataset_version"] = contracts.document_hash(manifest)
     return output, manifest
-
-
-def _trajectory_reason(example: Mapping[str, Any]) -> str | None:
-    """Validate the unchanged execution trajectory without candidate state."""
-    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
-    trajectory_valid = True
-    new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
-    try:
-        maximum_missing = training_coverage.missing_reasoning_percent_from_configuration(
-            example.get("configuration") or {})
-    except (TypeError, ValueError, AttributeError):
-        return "frozen_reasoning_policy_invalid"
-    total_reasoning_tokens = missing_reasoning_tokens = 0
-    for row in example.get("provider_calls") or []:
-        if not _execution_model_call(example, row):
-            continue
-        if new_policy and verified_failed_attempt(example, row):
-            continue
-        try:
-            linked = training_steps._candidate(example, row)["source_refs"][0]
-            response = _delivered_response(row, linked["delivered_response_sha256"])
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
-            if new_policy and verified_cap_truncated_target(example, row):
-                continue
-            # _candidate reaches this finish check only after exact
-            # request, agent read, response hash and privacy proof.
-            # Keep other independently reconstructable targets.
-            if (new_policy and isinstance(exc, ValueError)
-                    and str(exc) == "response_not_complete"):
-                try:
-                    state = attempt_coverage(row, _role(example, row), registry)
-                except (ValueError, TypeError, KeyError, AttributeError):
-                    trajectory_valid = False
-                    break
-                if (state["returned"] == "truncated" and state["route_reviewed"]
-                        and state["provider_route_verified"]):
-                    continue
-            trajectory_valid = False
-            break
-        checked = dict(row, response=response,
-                       response_sha256=linked["delivered_response_sha256"])
-        full, state = full_text_segments(checked, _role(example, row), registry)
-        if (state["route_reviewed"] and state["provider_route_verified"]
-                and state["tokens_reported"] is not None):
-            total_reasoning_tokens += state["tokens_reported"]
-            if not full and verified_missing_thinking(state):
-                missing_reasoning_tokens += state["tokens_reported"]
-        if (not full and not (verified_no_thinking(row, response, state) if new_policy
-                              else verified_tool_only_empty(row, response, state))
-                and not (new_policy and verified_missing_thinking(state))):
-            trajectory_valid = False
-            break
-    if (new_policy
-            and missing_reasoning_tokens * 100 > total_reasoning_tokens * maximum_missing):
-        return "missing_reasoning_share_exceeded"
-    if not trajectory_valid:
-        return "trajectory_reasoning_ineligible"
-    return None

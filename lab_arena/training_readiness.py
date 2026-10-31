@@ -120,6 +120,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
     steps, step_manifest = training_steps.build(valid, training_steps.Rules(production_rounds_only=production_rounds_only))
     thinking_splits, thinking_manifest = training_thinking.build(
         valid, training_steps.Rules(production_rounds_only=production_rounds_only))
+    # This inventory counts ICPs with at least one valid thinking pair. It
+    # does not establish complete ICP capture or champion eligibility.
     strict_runs = {ref.get("run_id") for split in ("train", "eval")
                    for record in thinking_splits[split] for ref in record.get("source_refs") or []}
     coverage_groups = defaultdict(list)
@@ -176,7 +178,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                         "manifest": step_manifest},
         "full_thinking": {"candidate_records": len(thinking_splits["train"]) + len(thinking_splits["eval"]),
                           "manifest": thinking_manifest, "coverage": coverage,
-                          "coverage_scope": "supplied_exports_only_not_champion_eligibility"},
+                          "coverage_scope": "supplied_icps_with_valid_thinking_pairs_not_complete_icps_or_champion_eligibility"},
         "readiness": {"human_label_review": "not_proved_by_storage",
                       "agent_action_quality": "unreviewed",
                       "training_permission": dict(training_dataset.TRAINING_PERMISSION),

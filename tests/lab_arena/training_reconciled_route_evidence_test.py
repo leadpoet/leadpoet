@@ -93,7 +93,9 @@ def test_repeated_receipts_do_not_hide_conflicting_or_unbound_proof(damage):
     result = training_eligibility.assess_capture(submission(), {'run': example}, ['run'], enabled=True)
     assert not result['eligible']
     splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not splits['train'] and not splits['eval']
+    records = splits['train'] + splits['eval']
+    assert len(records) == 2
+    assert all(ref['call_identity'] != call['call_identity'] for row in records for ref in row['source_refs'])
 
 
 def test_different_body_receipt_cannot_supply_the_selected_response_route():

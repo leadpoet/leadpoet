@@ -43,7 +43,25 @@ def test_full_thinking_inventory_reports_frozen_coverage_without_champion_claim(
     assert report["readiness"]["training_ready"] is False
     exports[-1]["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
     report = readiness.build([*exports[:-1], seal(exports[-1])], production_rounds_only=False)
-    assert report["full_thinking"]["coverage"][0]["strict_icps"] == 9
+    assert report["full_thinking"]["coverage"][0]["strict_icps"] == 10
+    # Other exact pairs remain in the export inventory. The eligibility gate
+    # separately rejects an ICP that has a real selected-result redaction.
+    call = exports[-1]["provider_calls"][1]
+    call["response_privacy_redactions"] = ["credential"]
+    call["response_receipts"][0]["privacy_redactions"] = ["credential"]
+    report = readiness.build([*exports[:-1], seal(exports[-1])], production_rounds_only=False)
+    assert report["full_thinking"]["coverage"][0]["strict_icps"] == 10
+    assert "not_complete_icps" in report["full_thinking"]["coverage_scope"]
+    from lab_arena import training_eligibility, training_steps, training_thinking
+    from tests.lab_arena.training_eligibility_test import submission
+    example = exports[-1]
+    gate = training_eligibility.assess_capture(
+        submission(), {example["run_id"]: example}, [example["run_id"]], enabled=True)
+    assert gate["eligible"] is False
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits["train"] + splits["eval"]
+    assert len(records) == 1
+    assert all(ref["call_identity"] != call["call_identity"] for row in records for ref in row["source_refs"])
 
 
 def test_duplicate_exports_conflicting_versions_and_bad_hash_are_not_counted_twice():

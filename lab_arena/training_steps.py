@@ -438,6 +438,21 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
                  and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'),
                  'request_identity_mismatch')
     artifact = (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    from lab_arena import training_observations
+    attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == run_id]
+    attempt = attempts[0] if len(attempts) == 1 else {}
+    kind = 'execute' if run_id == example.get('run_id') else attempt.get('kind')
+    _require(('run_id' not in artifact or artifact['run_id'] == run_id)
+             and ('kind' not in artifact or artifact['kind'] == kind)
+             and ('schema_version' not in artifact or artifact['schema_version'] in {
+                 training_observations.SCHEMA_VERSION, training_observations.LEGACY_SCHEMA_VERSION})
+             and ('lease_generation' not in artifact or type(artifact['lease_generation']) is int
+                  and artifact['lease_generation'] > 0)
+             and ('claim_request_hash' not in artifact or isinstance(artifact['claim_request_hash'], str)
+                  and contracts.SHA256_RE.fullmatch(artifact['claim_request_hash']) is not None)
+             and all(field not in artifact or field not in attempt or artifact[field] == attempt[field]
+                     for field in ('lease_generation', 'claim_request_hash')),
+             'worker_snapshot_identity_mismatch')
     payload = artifact.get('payload') or {}
     digest = training_worker_proof.payload_hash(payload, worker_proofs)
     _require(artifact.get('payload_sha256') == digest, 'worker_payload_hash_mismatch')
@@ -568,7 +583,8 @@ def _model_request(example, call, *, worker_proofs=None):
              and isinstance(request.get('hashed_parameters'), dict)
              and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'), 'request_identity_mismatch')
     _require(not set(call.get('evidence_gaps') or []) & {'full_request_unavailable', 'request_privacy_nonexact', 'worker_observation_request_mismatch', 'worker_observation_link_invalid'}, 'call_context_gap')
-    _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
+    if not training_coverage.uses_host_result_evidence(example.get('configuration') or {}):
+        _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
     outbound = request.get('outbound') or {}
     body = outbound.get('body')
     _require(isinstance(body, dict) and contracts.document_hash(body) == outbound.get('body_sha256'), 'outbound_body_hash_mismatch')
@@ -591,6 +607,9 @@ def _model_request(example, call, *, worker_proofs=None):
 def _candidate(example, call, *, host_observed=False, worker_proofs=None):
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs)
     request = call.get('request') or {}
+    _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
+             and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
+             'response_privacy_nonexact')
     provider_visible = host_observed or training_coverage.uses_host_result_evidence(
         example.get('configuration') or {})
     if provider_visible:

@@ -1,3 +1,15 @@
+## Scoped authorization: October 31 bounded launcher pipe drain
+
+The user authorized the narrow fix for the locally reproduced blocking pipe
+close after an interrupted sandbox launcher. Internal agents may change the
+runtime, focused tests and these identical instruction files, then test and
+commit only. Preserve captured bytes, completed outputs, timeout and signal
+classification, cleanup, scoring, costs and all concurrent work. The coordinator
+owns independent review and any later push, merge or canonical deployment.
+Do not add dependencies, replay providers, renew credentials, change production
+or add host process-kill workarounds. This fix does not establish the cause of
+the Yuma interruption or its missing terminal events.
+
 ## Scoped authorization: October 30 usable training eligibility
 
 The user authorized implementation, tests, merge and canonical production deployment

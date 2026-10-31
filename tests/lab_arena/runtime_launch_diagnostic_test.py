@@ -1,5 +1,7 @@
 """Real launcher pipes and exit status; mounting/runsc cleanup stay injected."""
 
+import os
+import signal
 import sys
 import time
 
@@ -13,8 +15,9 @@ from tests.lab_arena.test_lab_arena_runtime import (
 
 
 class RealLauncher:
-    def __init__(self, script):
+    def __init__(self, script, *, fail_cleanup=False):
         self.script = script
+        self.fail_cleanup = fail_cleanup
         self.calls = []
         self.process = None
 
@@ -27,7 +30,8 @@ class RealLauncher:
             )
             return self.process
         clock = FakeClock()
-        return FakeProcess(argv, clock=clock, finish_at=clock())
+        return FakeProcess(argv, clock=clock, finish_at=clock(),
+                           returncode=int(self.fail_cleanup and kind == "delete"))
 
 
 def test_real_launcher_failure_retains_redacted_diagnostic_and_cleanup(tmp_path):
@@ -106,6 +110,55 @@ def test_real_launcher_after_pidfile_keeps_normal_result(tmp_path):
     assert result.stderr == b"model diagnostic\n"
     assert runner.calls == ["mount", "run", "delete", "umount"]
     assert list(config.work_dir.iterdir()) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX launcher pipes")
+@pytest.mark.parametrize("signaled,fail_cleanup", [(True, False), (True, True), (False, False)])
+def test_descendant_held_pipes_do_not_block_failure_or_cleanup(
+    tmp_path, monkeypatch, signaled, fail_cleanup,
+):
+    monkeypatch.setattr(rt, "STOP_GRACE_SECONDS", 0.1)
+    marker = tmp_path / "descendant-finished"
+    config = make_config(tmp_path)
+    spec = make_spec(tmp_path)
+    script = (
+        "import os, pathlib, signal, sys, time\n"
+        "pidfile = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--pid-file='))\n"
+        "pathlib.Path(pidfile).write_text(str(os.getpid()))\n"
+        "print('retained launcher diagnostic', file=sys.stderr, flush=True)\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    time.sleep(1.2)\n"
+        "    pathlib.Path(%r).touch()\n"
+        "    os._exit(0)\n" % str(marker)
+    )
+    if signaled:
+        script += "signal.signal(signal.SIGINT, signal.SIG_DFL)\nos.kill(os.getpid(), signal.SIGINT)\n"
+    launcher = RealLauncher(script, fail_cleanup=fail_cleanup)
+    expected = (rt.SandboxCleanupError if fail_cleanup else
+                rt.RuntimeHostError if signaled else rt.ArenaRuntimeError)
+    started = time.monotonic()
+    try:
+        with pytest.raises(expected) as failure:
+            rt.run_sandbox(config, spec, process_runner=launcher)
+        assert time.monotonic() - started < 0.8
+        if signaled and not fail_cleanup:
+            assert failure.value.reason == "sandbox_launcher_signaled"
+            assert failure.value.launch_exit_code == -signal.SIGINT
+            assert "retained launcher diagnostic" in failure.value.launch_stderr
+            assert failure.value.launch_stderr_truncated
+        elif not signaled:
+            assert str(failure.value) == "sandbox pipes did not close"
+        assert launcher.calls == ["mount", "run", "delete", "umount"]
+        assert not spec.output_dir.exists()
+        assert list(config.work_dir.iterdir()) == []
+    finally:
+        # This test owns the short-lived descendant. Let it exit without any
+        # process lookup or kill, even when the regression fails on old code.
+        deadline = time.monotonic() + 3
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists()
 
 
 def test_launch_stderr_is_bounded_and_drops_a_truncated_partial_line():

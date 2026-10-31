@@ -815,3 +815,18 @@ byte-identical instruction files, then test and commit only. The coordinating
 task owns independent review and any later push, merge, or canonical deployment.
 No production writes, restarts, guard changes, or supervisor rewrites are
 permitted under this internal task.
+
+## Scoped authorization: October 31 prospective shim image repair
+
+The user authorized packaging the reviewed socket return-margin correction in
+an exact-source shim-only image layer through the existing compositor. Internal
+agents may change that explicit mutually exclusive build mode, its frozen-source
+converter, focused tests and these identical instruction files, then test and
+commit in a clean latest-main checkout. Preserve the base image layers, process
+configuration, all grading/runtime-package bytes, provider deadlines and retries,
+scoring rules, miner sources, capture, billing and historical outcomes. Unknown
+source generations must fail closed. Add no dependencies, image selection or
+recovery architecture, provider calls or credential renewal. The coordinator owns
+independent review, exact image build/verification and push, safe merge, prospective
+scorer-default configuration and canonical rollout for newly frozen rounds.
+Preserve current committed round configurations and existing leased images.

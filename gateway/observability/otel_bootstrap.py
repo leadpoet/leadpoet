@@ -196,6 +196,15 @@ ARENA_PROVIDERS = frozenset(
 #   failed    — the broker raised instead of returning a result
 ARENA_PROVIDER_OUTCOMES = frozenset({"ok", "refused", "uncertain", "failed"})
 
+# Which wallet paid for (or was refused for) this call. The broker already
+# settles every call against exactly one of these, and the run classifier
+# reads the same value to tell a competitor's unfunded key apart from our own
+# provider being unreachable. Without it on the span, the two are
+# indistinguishable after the fact. ``ARENA_FUNDING_UNKNOWN`` is the value for
+# a call that raised before the broker settled a funding source.
+ARENA_FUNDING_UNKNOWN = "unknown"
+ARENA_FUNDING_SOURCES = frozenset({"host", "miner_key", "unknown"})
+
 # Every error code the broker and the operation table can produce, as a frozen
 # vocabulary. A code outside this set is dropped whole.
 ARENA_PROVIDER_ERROR_CODES = frozenset(
@@ -753,6 +762,7 @@ PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.operation": (str,),
     "arena.tool": (str,),
     "arena.outcome": (str,),
+    "arena.funding_source": (str,),
     "arena.error_code": (str,),
     "arena.error_type": (str,),
     "arena.http_status": (int,),
@@ -1154,6 +1164,8 @@ def _validating_exporter(
             return "tool"
         if attributes["arena.outcome"] not in ARENA_PROVIDER_OUTCOMES:
             return "outcome"
+        if attributes["arena.funding_source"] not in ARENA_FUNDING_SOURCES:
+            return "funding_source"
         error_code = attributes["arena.error_code"]
         if (
             error_code != ARENA_NO_ERROR
@@ -1688,6 +1700,7 @@ class ArenaTelemetry:
         error_code: str = ARENA_NO_ERROR,
         error_type: str = ARENA_NO_ERROR,
         tool: str = ARENA_TOOL_NONE,
+        funding_source: str = ARENA_FUNDING_UNKNOWN,
         http_status: int = 0,
         provider_status: int = 0,
         attempts: int = 1,
@@ -1705,6 +1718,7 @@ class ArenaTelemetry:
                 error_code=error_code,
                 error_type=error_type,
                 tool=tool,
+                funding_source=funding_source,
                 http_status=http_status,
                 provider_status=provider_status,
                 attempts=attempts,
@@ -1726,6 +1740,7 @@ class ArenaTelemetry:
         error_code: str,
         error_type: str,
         tool: str,
+        funding_source: str,
         http_status: int,
         provider_status: int,
         attempts: int,
@@ -1748,6 +1763,7 @@ class ArenaTelemetry:
         span.set_attribute("arena.operation", str(operation))
         span.set_attribute("arena.tool", str(tool))
         span.set_attribute("arena.outcome", str(outcome))
+        span.set_attribute("arena.funding_source", str(funding_source))
         span.set_attribute("arena.error_code", str(error_code))
         span.set_attribute("arena.error_type", str(error_type))
         span.set_attribute("arena.http_status", int(http_status))

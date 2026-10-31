@@ -240,10 +240,16 @@ def _provider_telemetry_fields(
         provider_status = observed_status
     error_class = call.get("error_class")
     cost = call.get("actual_microusd")
+    funding_source = call.get("funding_source")
     return {
         "provider": provider,
         "operation": operation,
         "outcome": outcome,
+        "funding_source": (
+            funding_source
+            if funding_source in ("host", "miner_key")
+            else telemetry.FUNDING_UNKNOWN
+        ),
         "error_code": error_code or telemetry.NO_ERROR,
         **({"error_type": error_class} if (
             isinstance(error_class, str)

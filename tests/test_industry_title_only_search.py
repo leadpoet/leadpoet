@@ -213,6 +213,7 @@ assert namespace['_search_text_is_title_only'](doc['body'],doc['title']) is doc[
     payload = {'source': ast.unparse(ast.Module(body=nodes, type_ignores=[])),
                'marker': c._IDENTITY_LINK_CONTEXT_MARKER,
                'title': title, 'body': body, 'expected': expected}
-    result = subprocess.run([sys.executable, '-c', child], input=json.dumps(payload),
+    # The timed helper uses only stdlib; exclude image sitecustomize startup.
+    result = subprocess.run([sys.executable, '-S', '-c', child], input=json.dumps(payload),
                             text=True, capture_output=True, timeout=2)
     assert result.returncode == 0, result.stderr

@@ -191,4 +191,3 @@ def test_public_submission_and_round_paths_exclude_private_diagnostics():
     status = ArenaService.submission_status(status_service, row["submission_id"])
     assert "provider_diagnostic" not in json.dumps(status)
     assert "gen-123-abc" not in json.dumps(status)
-

@@ -1049,14 +1049,15 @@ abort_lab_arena_restart_guard_before_destructive() {
 
 drain_lab_arena_for_restart() {
   local source_root="$1" report
-  # Cover the longest supported lease (90-minute recovery plus 15 minutes)
-  # and five minutes for natural expiry and completion polling.
+  # Provider activity can renew a lease near the end of its runtime. Cover
+  # the longest supported runtime (90 minutes), its full renewable lease
+  # (105 minutes), and five minutes for natural expiry and completion polling.
   LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=" $(jobs -pr | tr '\n' ' ')"
   LAB_ARENA_RESTART_DRAIN_REPORT="$(mktemp "${GATEWAY_RESTART_TIMING_FILE%.jsonl}.drain.XXXXXX")" || return 1
   (
     run_lab_arena_restart_guard --exec-drain "$source_root" drain \
       --scope "$GATEWAY_RESTART_GUARD_SCOPE" \
-      --timeout-seconds 6600
+      --timeout-seconds 12000
   ) >"$LAB_ARENA_RESTART_DRAIN_REPORT" &
   LAB_ARENA_RESTART_DRAIN_PID=$!
   if ! wait "$LAB_ARENA_RESTART_DRAIN_PID"; then

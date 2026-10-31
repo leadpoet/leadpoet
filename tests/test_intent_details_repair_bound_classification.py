@@ -145,6 +145,8 @@ def test_native_entrypoint_returns_judge_error_without_accepting_terminal_zero(m
     # Preserve the caller's environment after the real entrypoint installs its
     # policy/placeholder provider settings. No credential or provider is used.
     monkeypatch.setattr(os, "environ", os.environ.copy())
+    for name in scoring.CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(scoring, "lab_scorer", lambda *args, **kwargs: FixtureScorer())
     result = scorer_entrypoint.score_input(document)
     assert result["failure"] == "judge_error"

@@ -161,6 +161,55 @@ def test_descendant_held_pipes_do_not_block_failure_or_cleanup(
         assert marker.exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX launcher pipes")
+@pytest.mark.parametrize("fail_cleanup", [False, True])
+def test_timed_out_checkpoint_survives_descendant_held_pipes(
+    tmp_path, monkeypatch, fail_cleanup,
+):
+    monkeypatch.setattr(rt, "STOP_GRACE_SECONDS", 0.1)
+    marker = tmp_path / "descendant-finished"
+    config = make_config(tmp_path)
+    spec = _checkpoint_spec(tmp_path, seconds=1)
+    checkpoint = b'{"companies":[]}'
+    launcher = RealLauncher(
+        "import os, pathlib, sys, time\n"
+        "pidfile = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--pid-file='))\n"
+        "pathlib.Path(pidfile).write_text(str(os.getpid()))\n"
+        "pathlib.Path(%r).write_bytes(%r)\n"
+        "print('retained stdout', flush=True)\n"
+        "print('retained stderr', file=sys.stderr, flush=True)\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    time.sleep(3)\n"
+        "    pathlib.Path(%r).touch()\n"
+        "    os._exit(0)\n"
+        "time.sleep(30)\n" % (str(spec.output_path), checkpoint, str(marker)),
+        fail_cleanup=fail_cleanup,
+    )
+    started = time.monotonic()
+    try:
+        if fail_cleanup:
+            with pytest.raises(rt.SandboxCleanupError) as failure:
+                rt.run_sandbox(config, spec, process_runner=launcher)
+            result = failure.value.result
+        else:
+            result = rt.run_sandbox(config, spec, process_runner=launcher)
+        assert time.monotonic() - started < 2
+        assert result is not None and result.timed_out and result.exit_code is None
+        assert result.output_bytes == checkpoint
+        assert result.stdout == b"retained stdout\n"
+        assert result.stderr == b"retained stderr\n"
+        assert result.stdout_truncated and result.stderr_truncated
+        assert launcher.calls == ["mount", "run", "kill", "delete", "umount"]
+        assert not spec.output_dir.exists()
+        assert list(config.work_dir.iterdir()) == []
+    finally:
+        deadline = time.monotonic() + 4
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists()
+
+
 def test_launch_stderr_is_bounded_and_drops_a_truncated_partial_line():
     error = host.RuntimeHostError(
         reason="sandbox_launch_failed", launch_stderr=b"safe line\nTOKEN=partial",

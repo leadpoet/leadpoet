@@ -1194,9 +1194,11 @@ def run_sandbox(
             raise launch_failure(
                 "sandbox_launcher_signaled", checkpoint_bytes=interrupted_checkpoint,
             )
-        if stdout_capture.incomplete or stderr_capture.incomplete:
+        if not timed_out and (stdout_capture.incomplete or stderr_capture.incomplete):
             # Retain the specific host-signal diagnostic above, but never
             # accept a normal launcher result without proving pipe EOF.
+            # Timeouts keep their already-frozen checkpoint and result, with
+            # the incomplete log streams explicitly marked truncated.
             raise ArenaRuntimeError("sandbox pipes did not close")
         cpu_seconds, max_rss = _completed_process_rusage(
             process,

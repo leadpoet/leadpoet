@@ -1,3 +1,12 @@
+## Scoped authorization: October 31 capture failure prevention
+
+The user authorized the narrow privacy, socket return-window and terminal
+journal-flush fixes, regression tests, merge and canonical paired deployment.
+Preserve the 8/10 and 1% rules, historical outcomes, privacy, scoring, budgets
+and concurrent work. Reuse existing bounded recovery. Add no provider replay,
+miner protocol, dependency or credential renewal. The coordinator owns release
+and fresh production verification; internal agents test and review only.
+
 ## Scoped authorization: October 31 capture-reader HTTP boundary
 
 The coordinating task authorized the smallest reader-only ingress correction

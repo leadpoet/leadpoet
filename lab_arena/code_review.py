@@ -388,6 +388,9 @@ def prepare_request(
         "transforms": [],
         "plugins": [{"id": "context-compression", "enabled": False}],
         "provider": {
+            # Use the provider verified to complete full-source admission review.
+            # Bedrock can refuse this audit while Vertex reviews the same input.
+            "only": ["google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",

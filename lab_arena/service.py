@@ -7947,10 +7947,16 @@ class ArenaService:
             else None
         )
         epoch = None
+        chain_start = time.monotonic()
         try:
             epoch = int(self._config.chain.current_settlement_epoch())
         except Exception:
             epoch = None
+        finally:
+            # The only live chain read on the public dashboard path (flagged
+            # in INC-859's chain-stall episode); recorded separately from
+            # store time so a rising /arena/v1/current tail can be localized.
+            telemetry.note_chain_duration((time.monotonic() - chain_start) * 1000.0)
         eligibility = None
         week = None
         governing = None

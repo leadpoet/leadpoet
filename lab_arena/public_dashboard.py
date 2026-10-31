@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, verify
+from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, telemetry, verify
 from lab_arena.store import COMPETITION_CONFIGURATION_FIELDS, PUBLIC_CONFIGURATION_COLUMN
 
 
@@ -629,6 +630,22 @@ def _is_administrative_archive(row: Mapping[str, Any]) -> bool:
     return icp_disclosure.is_administrative_archive(row)
 
 
+def _timed_list_rounds(service: Any, **kwargs: Any) -> list:
+    """``service._store.list_rounds`` with its time reported on the request span.
+
+    ``/arena/v1/current``, ``/arena/v1/competition``, and ``/arena/v1/history``
+    record only their total duration today; this is one of the two calls that
+    can make up that total without telling us which. A handler may page this
+    more than once (``_recent_competition_rounds`` below), so the recorder
+    accumulates rather than overwrites.
+    """
+    start = time.monotonic()
+    try:
+        return service._store.list_rounds(**kwargs)
+    finally:
+        telemetry.note_store_duration((time.monotonic() - start) * 1000.0)
+
+
 def _recent_competition_rounds(
     service: Any, *, network_name: str, netuid: int, limit: int
 ) -> list[Mapping[str, Any]]:
@@ -636,7 +653,8 @@ def _recent_competition_rounds(
     seen_round_ids: set[str] = set()
     offset = 0
     while len(rows) < limit:
-        page = service._store.list_rounds(
+        page = _timed_list_rounds(
+            service,
             mode=service._config.mode,
             network_name=network_name,
             netuid=netuid,
@@ -687,7 +705,8 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
         (row for row in summaries if row["status"] == "published"), None
     )
     if latest_completed is None and pinned_round_id is None:
-        published = service._store.list_rounds(
+        published = _timed_list_rounds(
+            service,
             status="published",
             mode=service._config.mode,
             network_name=network_name,
@@ -1066,13 +1085,25 @@ def evaluation_progress(
     return result
 
 
-def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict], *, scoring_generation_floor: int = 0) -> None:
+def _attach_evaluations(
+    service: Any, round_id: str, entries: Sequence[dict], *,
+    scoring_generation_floor: int = 0, record_store_time: bool = False,
+) -> None:
     if not entries:
         return
     ids = sorted({entry["submission_id"] for entry in entries})
     runs_by_submission: Dict[str, list] = {sid: [] for sid in ids}
     # Compact reads are limited to public submissions on this returned page.
-    for run in service._store.list_runs(round_id, columns=_EVALUATION_COLUMNS, submission_ids=ids):
+    # Timed only for the callers reached through /arena/v1/history — the
+    # /submissions caller below shares this function but is not one of the
+    # three routes the request span is allowed to carry timing attrs for.
+    if record_store_time:
+        start = time.monotonic()
+        runs = service._store.list_runs(round_id, columns=_EVALUATION_COLUMNS, submission_ids=ids)
+        telemetry.note_store_duration((time.monotonic() - start) * 1000.0)
+    else:
+        runs = service._store.list_runs(round_id, columns=_EVALUATION_COLUMNS, submission_ids=ids)
+    for run in runs:
         if (run.get("kind") == "score"
                 and int(run.get("scoring_generation_floor") or 0) != scoring_generation_floor):
             continue
@@ -1269,7 +1300,8 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             by_round.setdefault(entry["round_id"], []).append(entry)
         for round_id, items in by_round.items():
             _attach_evaluations(service, round_id, items,
-                                scoring_generation_floor=evaluation_floors[round_id])
+                                scoring_generation_floor=evaluation_floors[round_id],
+                                record_store_time=True)
             for item in items:
                 if item["status"] in ("provider_blocked", "evaluation_incomplete"):
                     _mark_recovery_excluded(item, item["status"])
@@ -1282,7 +1314,8 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
         if pinned is not None:
             rows = [service._round(str(pinned))] if batch == 0 and resume is None else []
         else:
-            rows = service._store.list_rounds(
+            rows = _timed_list_rounds(
+                service,
                 status="published", mode=service._config.mode,
                 network_name=network_name, netuid=netuid, limit=25,
                 columns=_ROUND_COLUMNS, history_order=True,

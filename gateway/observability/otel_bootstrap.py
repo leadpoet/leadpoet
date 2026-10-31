@@ -691,7 +691,17 @@ ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 ARENA_HTTP_ATTRIBUTE_ALLOWLIST = (
-    frozenset(ARENA_HTTP_ATTRIBUTE_TYPES) | frozenset({"arena.round_id"})
+    frozenset(ARENA_HTTP_ATTRIBUTE_TYPES)
+    | frozenset({"arena.round_id", "arena.store_duration_ms", "arena.chain_duration_ms"})
+)
+
+# The three public dashboard reads under the 2026-10 latency escalation: the
+# request span was the only signal (total duration only), so three separate
+# daily investigations could not tell store time from chain time from
+# everything else in the handler. Restricted to exactly these routes so no
+# other handler can originate the two timing attributes below.
+ARENA_READ_TIMING_ROUTES = frozenset(
+    {"/arena/v1/current", "/arena/v1/competition", "/arena/v1/history"}
 )
 
 # A registered public round route can name the requested round. The concrete
@@ -1106,9 +1116,15 @@ def _validating_exporter(
         if attributes is None:
             return "store_error"
         has_round_id = "arena.round_id" in attributes
+        has_store_ms = "arena.store_duration_ms" in attributes
+        has_chain_ms = "arena.chain_duration_ms" in attributes
         expected_types = ARENA_HTTP_ATTRIBUTE_TYPES
         if has_round_id:
             expected_types = {**expected_types, "arena.round_id": (str,)}
+        if has_store_ms:
+            expected_types = {**expected_types, "arena.store_duration_ms": (int, float)}
+        if has_chain_ms:
+            expected_types = {**expected_types, "arena.chain_duration_ms": (int, float)}
         if not _attributes_conform(attributes, expected_types):
             return "attributes"
         if has_round_id and (
@@ -1116,6 +1132,8 @@ def _validating_exporter(
             or not _canonical_http_round_id(attributes["arena.round_id"])
         ):
             return "round_id"
+        if (has_store_ms or has_chain_ms) and attributes["http.route"] not in ARENA_READ_TIMING_ROUTES:
+            return "read_timing"
         denial = attributes["arena.denial"]
         if denial != ARENA_NO_DENIAL and (
             not _ARENA_DENIAL_RE.fullmatch(denial)
@@ -1125,7 +1143,10 @@ def _validating_exporter(
         trimmed = {
             key: value
             for key, value in attributes.items()
-            if key not in ("arena.denial", "arena.round_id")
+            if key not in (
+                "arena.denial", "arena.round_id",
+                "arena.store_duration_ms", "arena.chain_duration_ms",
+            )
         }
         return _http_violation(span, trimmed)
 
@@ -1620,6 +1641,11 @@ class ArenaTelemetry:
         # A worker thread receives a copy of the request context. Sharing one
         # mutable value lets a sync route report its denial back to ASGI.
         self._denial = contextvars.ContextVar("arena_denial", default=None)
+        # Per-request store/chain call time for the three public dashboard
+        # reads (current/competition/history), read back the same way as the
+        # denial code above. Absent unless a handler actually reports it, so
+        # every other Arena route is unaffected.
+        self._read_timing = contextvars.ContextVar("arena_read_timing", default=None)
 
     def flush(self, *, timeout_millis: int = 1000) -> None:
         """Flush queued spans within a bounded graceful-shutdown window."""
@@ -1674,6 +1700,59 @@ class ArenaTelemetry:
 
             state = self._denial.get()
             return safe_store_error_metadata(state[1]) if state is not None else {}
+        except BaseException:
+            return {}
+
+    # -- read timing (current/competition/history) ------------------------
+
+    def note_store_duration(self, duration_ms: float) -> None:
+        """Accumulate store-call time for the request currently being served.
+
+        A handler may page a store call more than once (e.g. skipping
+        administrative-archive rows); durations accumulate across calls so
+        the span reports total store time for the request, not the last call.
+        """
+        try:
+            state = self._read_timing.get()
+            if state is None:
+                state = {}
+                self._read_timing.set(state)
+            state["store_ms"] = state.get("store_ms", 0.0) + float(duration_ms)
+        except BaseException:
+            pass
+
+    def note_chain_duration(self, duration_ms: float) -> None:
+        """Accumulate chain-read time for the request currently being served."""
+        try:
+            state = self._read_timing.get()
+            if state is None:
+                state = {}
+                self._read_timing.set(state)
+            state["chain_ms"] = state.get("chain_ms", 0.0) + float(duration_ms)
+        except BaseException:
+            pass
+
+    def reset_read_timing(self) -> None:
+        """Bind a fresh, empty, mutable dict for the request about to be served.
+
+        A worker thread receives a *copy* of the request context (same as
+        denial above): a ``ContextVar.set()`` performed inside that copy
+        would only be visible within the thread's own context lineage, never
+        back on the ASGI task that reads it for the span. Binding the dict
+        here, before the handler runs, means ``note_store_duration`` /
+        ``note_chain_duration`` only ever mutate this same shared object in
+        place, so their writes are visible wherever the ContextVar is read.
+        """
+        try:
+            self._read_timing.set({})
+        except BaseException:
+            pass
+
+    def take_read_timing(self) -> Mapping[str, float]:
+        """Return accumulated store/chain time, only for keys actually recorded."""
+        try:
+            state = self._read_timing.get()
+            return dict(state) if state else {}
         except BaseException:
             return {}
 
@@ -2082,6 +2161,14 @@ def configure_arena_otel(
                 if int(status_code) == 503 and denial == "arena_store_unavailable":
                     for key, value in telemetry.take_store_error().items():
                         span.set_attribute("arena.store_" + key, value)
+                if route in ARENA_READ_TIMING_ROUTES:
+                    read_timing = telemetry.take_read_timing()
+                    store_ms = read_timing.get("store_ms")
+                    if store_ms is not None:
+                        span.set_attribute("arena.store_duration_ms", float(store_ms))
+                    chain_ms = read_timing.get("chain_ms")
+                    if chain_ms is not None:
+                        span.set_attribute("arena.chain_duration_ms", float(chain_ms))
                 span.set_attribute(
                     "duration_ms", (time.monotonic() - start_mono) * 1000.0
                 )
@@ -2089,10 +2176,14 @@ def configure_arena_otel(
                     span.set_status(Status(StatusCode.ERROR))
                 span.end()
 
+            def _on_request_start() -> None:
+                telemetry.reset_denial()
+                telemetry.reset_read_timing()
+
             app.add_middleware(
                 _GatewayOtelMiddleware,
                 emit=_emit,
-                on_request_start=telemetry.reset_denial,
+                on_request_start=_on_request_start,
             )
 
         return telemetry

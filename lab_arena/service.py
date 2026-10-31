@@ -137,6 +137,11 @@ _DEEPLINE_BILLING_ABANDONED_SLOTS = 4
 _DEEPLINE_BILLING_EXECUTE_SLOTS = 1
 _DEEPLINE_BILLING_SCORE_SLOTS = 88
 _DEEPLINE_BILLING_GENERAL_SLOTS = 3
+# The closed-provider candidate scan walks historical ledger entries behind its
+# own 20s read deadline. When that deadline starts expiring it expires for
+# minutes at a time, so retrying on the very next driver tick spends another
+# full 20s for no settlement. Stand down for this long after a timeout.
+_CLOSED_PROVIDER_RECONCILIATION_BACKOFF_SECONDS = 300.0
 
 # Provider error codes that mean "the call was declined before or instead of
 # doing upstream work" versus "the call may have happened and we cannot tell"
@@ -994,6 +999,10 @@ class _PublicRunLookup(Mapping):
 
 
 class ArenaService:
+    # Class-level default: the backoff must read as "not standing down"
+    # on any instance, including ones built without __init__.
+    _closed_provider_reconciliation_retry_after = 0.0
+
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
         self._store = config.store
@@ -1017,6 +1026,7 @@ class ArenaService:
         self._active_deepline_reconciliations: set[str] = set()
         self._abandoned_billing_run_after: Dict[str, str] = {}
         self._closed_provider_reconciliation_after = 0
+        self._closed_provider_reconciliation_retry_after = 0.0
         self._completed_scores_lock = threading.Lock()
         self._completed_scores_cache: Dict[str, Dict[str, Any]] = {}
         self._completed_scores_refresh_slots = threading.BoundedSemaphore(2)
@@ -6738,12 +6748,23 @@ class ArenaService:
 
     def reconcile_closed_provider_costs(self) -> Dict[str, Any]:
         """Check a closed judge round without changing published results."""
+        if time.monotonic() < self._closed_provider_reconciliation_retry_after:
+            return {"status": "none"}
         network_name, netuid = self._chain_scope()
-        candidate = self._store.next_closed_provider_reconciliation(
-            mode=self._config.mode, network_name=network_name, netuid=netuid,
-            round_id=self._pinned_round_id() or "",
-            after_entry_id=self._closed_provider_reconciliation_after,
-        )
+        try:
+            candidate = self._store.next_closed_provider_reconciliation(
+                mode=self._config.mode, network_name=network_name, netuid=netuid,
+                round_id=self._pinned_round_id() or "",
+                after_entry_id=self._closed_provider_reconciliation_after,
+            )
+        except ArenaStoreUnavailable:
+            # The timeout still surfaces on this tick; the backoff only stops
+            # the next ticks from paying the same 20s to learn the same thing.
+            self._closed_provider_reconciliation_retry_after = (
+                time.monotonic()
+                + _CLOSED_PROVIDER_RECONCILIATION_BACKOFF_SECONDS
+            )
+            raise
         if candidate.get("status") == "none":
             return {"status": "none"}
         if candidate.get("status") != "ok" or candidate.get("provider") not in {

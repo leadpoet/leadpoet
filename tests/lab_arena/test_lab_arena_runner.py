@@ -237,8 +237,15 @@ def fake_exporter(reference, digest, target):
     (target / "rootfs").mkdir()
 
 
+class FakeExportImageCache(rn.ImageCache):
+    """The empty fake exporter downloads and extracts no physical image."""
+
+    def _reserve_export_space_locked(self):
+        pass
+
+
 def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
-    cache = rn.ImageCache(tmp_path / "images", fake_exporter)
+    cache = FakeExportImageCache(tmp_path / "images", fake_exporter)
     source_cache = rn.SourceCache(
         tmp_path / "sources", api.source, dependency_installer=lambda _requirements, _target: None
     )
@@ -248,6 +255,15 @@ def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
         evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
         claim_retry_seconds=(0.0, 0.0), completion_retry_seconds=(0.0, 0.0),
     )
+
+
+def test_fake_image_fixture_does_not_require_physical_export_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+
+    config = make_config(tmp_path, FakeApi([]), BridgingRuntime(output={}))
+    with config.image_cache.acquire(IMAGE) as rootfs:
+        assert rootfs.is_dir()
+        assert list(rootfs.iterdir()) == []
 
 
 def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path):

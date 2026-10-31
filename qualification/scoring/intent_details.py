@@ -39,7 +39,10 @@ _MAX_UNIT_EVIDENCE_BINDINGS = 3
 _MAX_SOURCE_CONTEXT_BYTES = 12_000
 _MAX_SOURCE_TITLE_BYTES = 1_024
 _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES = 4_000
-_MAX_REVIEW_DOCUMENT_CHARACTERS = 48_000
+# The native Chat contract bounds each message in characters, including JSON
+# escaping. Keep the old raw assembly ceiling separate from that wire bound.
+_MAX_RAW_REVIEW_DOCUMENT_CHARACTERS = 48_000
+_MAX_REVIEW_DOCUMENT_CHARACTERS = 32_000
 _UNIT_STATUSES = ("VERIFIED", "CONTRADICTED", "UNPROVEN")
 _CITATION_REPAIR_CATEGORIES = {
     "missing_evidence",
@@ -1223,6 +1226,43 @@ def review_evidence(
     authenticated_provider_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project verified observations and bounded text from their fetched sources."""
+    context_budget = _MAX_SOURCE_CONTEXT_BYTES
+    while True:
+        document = _review_evidence_with_context_budget(
+            company, icp, signal_results, company_fit_receipt,
+            company_source_contexts=company_source_contexts,
+            authenticated_provider_observation=authenticated_provider_observation,
+            context_budget=context_budget,
+        )
+        excess = len(_review_document_prompt(document)) - _MAX_REVIEW_DOCUMENT_CHARACTERS
+        if excess <= 0:
+            return document
+        if not context_budget:
+            raise ValueError("Intent Details mandatory review evidence exceeds its bound")
+        # Rebuild only optional context from the original observations, using
+        # the existing relevance windows and fair allocation. Projection may
+        # retain a quote's sole copy in a context row: never clip that ledger.
+        # A minimum step also bounds retries when source/quote metadata grows
+        # as a context window shrinks. No request has been sent at this point.
+        context_budget = max(0, context_budget - max(256, excess))
+
+
+def _review_document_prompt(document: Mapping[str, Any]) -> str:
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _validate_review_prompt_bounds(prompt: str, system_prompt: str) -> None:
+    if any(len(value) > _MAX_REVIEW_DOCUMENT_CHARACTERS for value in (prompt, system_prompt)):
+        raise ValueError("Intent Details review request exceeds its input bound")
+
+
+def _review_evidence_with_context_budget(
+    company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
+    company_fit_receipt: Mapping[str, Any],
+    *, company_source_contexts: Sequence[Mapping[str, str]] | None,
+    authenticated_provider_observation: Mapping[str, Any] | None,
+    context_budget: int,
+) -> dict[str, Any]:
     verified = []
     non_qualifying = []
     for result in signal_results:
@@ -1833,9 +1873,10 @@ def review_evidence(
             len(context["text"].encode("utf-8"))
             for context in company_context_candidates
         ),
-        _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES,
+        context_budget * _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES
+        // _MAX_SOURCE_CONTEXT_BYTES,
     )
-    intent_context_budget = _MAX_SOURCE_CONTEXT_BYTES - company_reservation
+    intent_context_budget = context_budget - company_reservation
     with_context = [item for item in verified if item.get("source_context")]
     context_bytes_used = 0
     for item in with_context:
@@ -1860,10 +1901,16 @@ def review_evidence(
             remaining -= used
             context_bytes_used += used
         item["source_context"] = [
-            context for context in item["source_context"] if context["text"]
+            context for context in item["source_context"]
+            if context["text"] or (
+                context_budget < _MAX_SOURCE_CONTEXT_BYTES and (
+                    context.get("source_publication_date")
+                    or context.get("source_body_dateline_dates")
+                )
+            )
         ]
     remaining_context_bytes = max(
-        0, _MAX_SOURCE_CONTEXT_BYTES - context_bytes_used,
+        0, context_budget - context_bytes_used,
     )
     remaining_company_contexts = len(company_context_candidates)
     selected_company_facts: list[dict[str, Any]] = []
@@ -1943,13 +1990,21 @@ def review_evidence(
     for context in reversed(trim_contexts):
         excess = (
             len(json.dumps(document, ensure_ascii=False))
-            - _MAX_REVIEW_DOCUMENT_CHARACTERS
+            - _MAX_RAW_REVIEW_DOCUMENT_CHARACTERS
         )
         if excess > 0:
             context["text"] = context["text"][:max(0, len(context["text"]) - excess)]
     for item in reversed(verified):
         if "source_context" in item:
-            item["source_context"] = [context for context in item["source_context"] if context["text"]]
+            item["source_context"] = [
+                context for context in item["source_context"]
+                if context["text"] or (
+                    context_budget < _MAX_SOURCE_CONTEXT_BYTES and (
+                        context.get("source_publication_date")
+                        or context.get("source_body_dateline_dates")
+                    )
+                )
+            ]
             if not item["source_context"]:
                 del item["source_context"]
     for selected_company_fact in selected_company_facts:
@@ -1957,11 +2012,6 @@ def review_evidence(
         if isinstance(company_context, Mapping) and not company_context.get("text"):
             del selected_company_fact["source_context"]
     _project_admitted_evidence(document)
-    if (
-        len(json.dumps(document, ensure_ascii=False))
-        > _MAX_REVIEW_DOCUMENT_CHARACTERS
-    ):
-        raise ValueError("Intent Details review evidence exceeds its bound")
     return document
 
 
@@ -2665,7 +2715,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 authenticated_provider_observation
             ),
         )
-        prompt = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        prompt = _review_document_prompt(document)
     except (TypeError, ValueError, AttributeError):
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_evidence_unavailable",
                 "failure_reason_code": "malformed_response"}
@@ -2692,6 +2742,11 @@ missing review into an accepted paragraph or a terminal company mismatch.
         )
         else ""
     )
+    try:
+        _validate_review_prompt_bounds(prompt, system_prompt)
+    except ValueError:
+        return {**receipt, "decision": "unavailable", "failure_class": "intent_details_evidence_unavailable",
+                "failure_reason_code": "malformed_response"}
     loop = asyncio.get_running_loop()
     deadline = loop.time() + REVIEW_TIMEOUT_SECONDS
 
@@ -2757,6 +2812,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
                     system_prompt, exc.issues, exc.held_response,
                 )
                 repair_response_format = _CITATION_REPAIR_RESPONSE_FORMAT
+            _validate_review_prompt_bounds(repair_prompt, repair_system_prompt)
         except ValueError:
             checks = None
         else:

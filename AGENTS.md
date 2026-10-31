@@ -1,3 +1,15 @@
+## Scoped authorization: October 31 private reviewer diagnostics
+
+The coordinating task authorized bounded per-attempt provider diagnostics in
+existing private review ledger entries, with focused tests and one exact
+finish-review RPC migration. Preserve verdicts, eligibility, retries, timing,
+costs, public projections, and concurrent PR833/939/942 work. Retain no raw
+review content, source, credentials or unbounded provider text. Internal agents
+may implement, test and commit only in this isolated worktree. The coordinator
+owns independent review, push, merge, migration and release. Add no dependencies,
+tables, RPCs, telemetry system, provider replay or credential renewal. This is
+a visibility fix; it does not establish historical review failure causes.
+
 ## Scoped authorization: October 31 bounded launcher pipe drain
 
 The user authorized the narrow fix for the locally reproduced blocking pipe

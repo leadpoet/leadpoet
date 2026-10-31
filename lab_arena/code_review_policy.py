@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any, Dict, Mapping, Optional
 
 
@@ -81,6 +82,85 @@ ERROR_CODES = frozenset({
     "review_response_invalid",
     "code_review_research_unverified",
 })
+
+# Private diagnostics are observations, never admission, billing or retry input.
+REVIEW_FINISH_REASONS = frozenset({
+    "stop", "length", "tool_calls", "function_call", "content_filter", "error",
+    "end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal",
+    "cancelled", "completed", "missing", "invalid", "other",
+})
+REVIEW_CONTEXT_REASONS = frozenset({
+    "not_required", "verified", "metadata_missing", "requested_model", "strategy",
+    "attempt", "pipeline", "endpoints_missing", "endpoints_available",
+    "endpoints_total", "endpoint_shape", "selected_count", "selected_model",
+    "usage_missing", "prompt_tokens", "context_budget",
+})
+REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex"})
+_GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
+
+
+def private_response_diagnostic(document: Any, prepared: Any, *, generation_id: Any = None) -> dict:
+    """Copy only bounded metadata from a credential-checked provider reply.
+
+    Unknown provider text and identifiers are omitted. No source, message,
+    reasoning, error prose, headers or arbitrary routing metadata is retained.
+    """
+    from lab_arena import code_review
+
+    response = document if isinstance(document, Mapping) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and len(choices) == 1 else None
+
+    def finish(name):
+        if not isinstance(choice, Mapping):
+            return "invalid"
+        value = choice.get(name)
+        if value is None:
+            return "missing"
+        if not isinstance(value, str):
+            return "invalid"
+        return value if len(value) <= 32 and value in REVIEW_FINISH_REASONS else "other"
+
+    context = "not_required"
+    if prepared.requires_context_integrity:
+        context = code_review.context_integrity_failure(response, prepared) or "verified"
+    result = {
+        "finish_reason": finish("finish_reason"),
+        "native_finish_reason": finish("native_finish_reason"),
+        "max_output_tokens": prepared.parameters["max_tokens"],
+        "context_integrity": context,
+    }
+    usage = response.get("usage")
+    if isinstance(usage, Mapping):
+        for name in ("prompt_tokens", "completion_tokens"):
+            value = usage.get(name)
+            if type(value) is int and 0 <= value <= 1_000_000_000:
+                result[name] = value
+        details = usage.get("completion_tokens_details")
+        value = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
+        if type(value) is int and 0 <= value <= 1_000_000_000:
+            result["reasoning_tokens"] = value
+    models = {prepared.parameters["model"]}
+    canonical = code_review._REVIEW_MODEL_CANONICAL_SLUGS.get(prepared.parameters["model"])
+    if canonical:
+        models.add(canonical)
+    model = response.get("model")
+    if isinstance(model, str) and model in models:
+        result["response_model"] = model
+    metadata = response.get("openrouter_metadata")
+    endpoints = metadata.get("endpoints") if isinstance(metadata, Mapping) else None
+    available = endpoints.get("available") if isinstance(endpoints, Mapping) else None
+    if isinstance(available, list) and len(available) <= 128:
+        selected = [row for row in available if isinstance(row, Mapping) and row.get("selected") is True]
+        if len(selected) == 1:
+            model, provider = selected[0].get("model"), selected[0].get("provider")
+            if isinstance(model, str) and model in models:
+                result["selected_model"] = model
+            if isinstance(provider, str) and provider in REVIEW_PROVIDER_NAMES:
+                result["selected_provider"] = provider
+    if isinstance(generation_id, str) and len(generation_id) <= 153 and _GENERATION_ID.fullmatch(generation_id):
+        result["generation_id"] = generation_id
+    return result
 
 
 def diagnostic(

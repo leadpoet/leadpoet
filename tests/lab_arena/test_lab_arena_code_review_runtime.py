@@ -491,6 +491,7 @@ def test_incomplete_or_unaccounted_reviews_never_pass(damage, reason):
             "file_count",
             "source_bytes",
             "retryable",
+            "provider_diagnostic",
         }
         assert store.finish_calls[0][4]["retryable"] is True
 

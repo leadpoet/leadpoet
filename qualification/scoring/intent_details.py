@@ -451,6 +451,71 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _source_evidence_text(value: str) -> str:
+    from qualification.scoring.company_evidence_investigator import _visible_quote_surface
+
+    return _visible_quote_surface(value)
+
+
+def _source_context_trace(value: Any) -> Mapping[str, Any]:
+    """Remove discovery metadata before selecting or dating retained bodies."""
+    from qualification.scoring.company_evidence_investigator import _IDENTITY_LINK_CONTEXT_MARKER
+
+    trace = _mapping(value)
+    contexts = trace.get("verified_source_context")
+    if not isinstance(contexts, list):
+        return trace
+    contexts = contexts[:5]  # Existing maximum consumed by all source-context routes.
+    cleaned = {**trace, "verified_source_context": [
+        {**context, "text": _source_evidence_text(context["text"])}
+        if isinstance(context, Mapping) and isinstance(context.get("text"), str)
+        else context for context in contexts
+    ]}
+    bodies = [context for context in contexts
+              if isinstance(context, Mapping) and isinstance(context.get("text"), str)]
+    verdict = _mapping(trace.get("intent_verdict"))
+    evaluations = verdict.get("signal_evaluations")
+    if not isinstance(evaluations, list):
+        return cleaned
+    projected = []
+    for evaluation in evaluations:
+        if not isinstance(evaluation, Mapping):
+            projected.append(evaluation)
+            continue
+        urls = set(_texts(evaluation.get("evidence_urls_used"), maximum=5, length=2_048)
+                   or _texts(evaluation.get("source_urls_supplied"), maximum=5, length=2_048))
+        item = dict(evaluation)
+        for field in ("supporting_quotes", "contradicting_quotes"):
+            quotes = evaluation.get(field)
+            if not isinstance(quotes, list):
+                continue
+            kept = []
+            for quote in quotes:
+                if not isinstance(quote, str):
+                    kept.append(quote)
+                    continue
+                metadata_sources = {
+                    context.get("url") for context in bodies
+                    if (visible := _source_evidence_text(context["text"])) != context["text"]
+                    and _quote_is_bound(quote, [
+                        context["text"][len(visible) + len(_IDENTITY_LINK_CONTEXT_MARKER):]
+                    ])
+                }
+                excluded = bool(metadata_sources) or _source_evidence_text(quote) != quote
+                # Only a body on an attributed source can rescue a matching
+                # string. Unrelated source text is not provenance for this quote.
+                if not excluded or any(
+                    isinstance(context.get("url"), str) and bool(context["url"])
+                    and context["url"] in (urls or metadata_sources)
+                    and _quote_is_bound(quote, [context["text"]]) for context in bodies
+                ):
+                    kept.append(quote)
+            item[field] = kept
+        projected.append(item)
+    cleaned["intent_verdict"] = {**verdict, "signal_evaluations": projected}
+    return cleaned
+
+
 def _verified_structured_employee_range(
     company: Any,
     icp: Any,
@@ -552,6 +617,7 @@ def _continuous_source_window(
 ) -> str:
     """Return one continuous span near paragraph facts or grounded source text."""
 
+    value = _source_evidence_text(value)
     encoded = value.encode("utf-8")
     if len(encoded) <= maximum_bytes:
         return value
@@ -701,8 +767,8 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
         source_url: str = "",
     ) -> int | None:
         text = list(dict.fromkeys(
-            value for value in admitted_text
-            if isinstance(value, str) and value.strip()
+            visible for value in admitted_text
+            if isinstance(value, str) and (visible := _source_evidence_text(value)).strip()
         ))
         dates = [
             dict(raw_date) for raw_date in observed_dates
@@ -1050,6 +1116,11 @@ def _visible_admitted_evidence_surface(value: str) -> str:
         _visible_markdown_link_label_surface,
     )
 
+    visible = _source_evidence_text(value)
+    if visible != value:
+        # A candidate quote spanning the marker must fail, not shrink to a
+        # valid body prefix. Evidence values can still ground that real prefix.
+        value = visible + _EXCLUDED_MARKDOWN_BOUNDARY
     without_images = _MARKDOWN_IMAGE_RE.sub(
         f" {_EXCLUDED_MARKDOWN_BOUNDARY} ", value,
     )
@@ -1125,7 +1196,7 @@ def _body_dateline_dates(text: str) -> list[str]:
     """Return strict publisher-style datelines near the start of a page body."""
 
     dates: list[str] = []
-    for match in _BODY_DATELINE_RE.finditer(str(text or "")[:1_000]):
+    for match in _BODY_DATELINE_RE.finditer(_source_evidence_text(str(text or ""))[:1_000]):
         try:
             parsed = date(
                 int(match.group(3)),
@@ -1278,7 +1349,7 @@ def _review_evidence_with_context_budget(
             continue
         verdict = _mapping(result.get("judge_verdict"))
         if float(result.get("after_decay") or 0) <= 0:
-            trace = _mapping(verdict.get("verification_trace"))
+            trace = _source_context_trace(verdict.get("verification_trace"))
             evaluations = _mapping(trace.get("intent_verdict")).get(
                 "signal_evaluations"
             )
@@ -1412,7 +1483,7 @@ def _review_evidence_with_context_budget(
             continue
         if verdict.get("decision") != "verified" or verdict.get("client_ready") is not True:
             raise ValueError("positive signal lacks a terminal verified receipt")
-        trace = _mapping(verdict.get("verification_trace"))
+        trace = _source_context_trace(verdict.get("verification_trace"))
         evaluations = _mapping(trace.get("intent_verdict")).get("signal_evaluations")
         index = result.get("matched_icp_signal")
         if type(index) is not int or index < 0:
@@ -1699,6 +1770,8 @@ def _review_evidence_with_context_budget(
             dimension = raw_context.get("dimension")
             source_url = raw_context.get("url")
             source_text = raw_context.get("text")
+            if isinstance(source_text, str):
+                source_text = _source_evidence_text(source_text)
             order = dimension_order.get(dimension) if isinstance(
                 dimension, str
             ) else None

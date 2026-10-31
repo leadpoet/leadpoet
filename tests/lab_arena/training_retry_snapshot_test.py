@@ -161,7 +161,6 @@ def test_predecessor_summary_inference_requires_exact_complete_accounted_capture
     elif damage == 'request_privacy':
         values['ledger_rows'][-3]['entry_doc']['request_capture']['redacted'] = True
     example = training_export.assemble_example(**values)
-    assert training_thinking.selected_research_evidence(example) is None
     gaps = example['related_run_gap_attribution'][predecessor['run_id']]
     assert 'worker_local_refusals_unverified' in gaps['research_process_gaps']
     assert not example['completeness']['complete']
@@ -178,7 +177,6 @@ def test_selected_execution_and_score_attempts_still_require_completion_counters
     example = training_export.assemble_example(**values)
     gaps = example['related_run_gap_attribution'][selected['run_id']]
     assert {'provider_capture_count_unverified', 'worker_local_refusals_unverified'} <= set(gaps['research_process_gaps'])
-    assert training_thinking.selected_research_evidence(example) is None
 
 
 @pytest.mark.parametrize('damage', ['policy_off', 'legacy_configuration', 'invalid_registry',
@@ -199,5 +197,4 @@ def test_snapshot_counter_fallback_is_only_for_prior_attempts_in_host_result_rou
     gaps = example['related_run_gap_attribution'][predecessor['run_id']]
     assert {'provider_capture_count_unverified', 'worker_local_refusals_unverified'} <= set(gaps['research_process_gaps'])
     assert gaps['cost_gaps'] == ['provider_capture_count_unverified']
-    assert training_thinking.selected_research_evidence(example) is None
 

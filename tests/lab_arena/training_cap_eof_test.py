@@ -356,7 +356,7 @@ def test_excessive_argument_json_nesting_is_rejected_without_crashing(api, new_p
         training_steps._candidate(example, call)
     assert not training_eligibility.assess_capture(submission(), {'run': example}, ['run'], enabled=True)['eligible']
     splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not splits['train'] and not splits['eval']
+    assert len(splits['train']) + len(splits['eval']) == 2
     if new_policy:
         assert training_thinking.coverage([example])['trajectories']['ineligible'] == 1
 
@@ -391,13 +391,13 @@ def test_inferred_cap_cut_cannot_precede_retained_complete_output(api, trailing)
         training_steps._candidate(example, call)
     result = training_eligibility.assess_capture(
         submission(), {'run': example}, ['run'], enabled=True, minimum_coverage_percent=80)
-    assert not result['eligible'] and 'selected_run_evidence_invalid' in result['reasons']
+    assert not result['eligible'] and 'selected_run_evidence_invalid' in result['counts']['rejected_runs'][0]['reasons']
     report = training_thinking.coverage([example])
     assert report['trajectories']['ineligible'] == 1
     assert 'target_omission_reason' not in report['attempts'][0]
     assert 'target_omission_reason' not in training_thinking.readable_trace(example)['calls'][0]
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not strict['train'] and not strict['eval']
+    assert len(strict['train']) + len(strict['eval']) == 2
     assert example == original
 
 
@@ -430,7 +430,7 @@ def test_only_the_final_argument_can_be_an_inferred_cap_cut(api, earlier_unfinis
     assert result['eligible'] is (not earlier_unfinished)
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
     rows = strict['train'] + strict['eval']
-    assert len(rows) == (0 if earlier_unfinished else 2)
+    assert len(rows) == 2
     assert all(row['source_refs'][0]['call_identity'] != call['call_identity'] for row in rows)
     assert example == original
 

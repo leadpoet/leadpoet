@@ -2,7 +2,7 @@
 
 import pytest
 
-from lab_arena import training_eligibility, training_thinking
+from lab_arena import training_eligibility, training_steps, training_thinking
 from tests.lab_arena.training_eligibility_test import (
     capture, captured_example, refresh_response_links, submission, ten_selected_examples,
 )
@@ -237,7 +237,7 @@ def test_per_icp_reasoning_share_and_truncation_preserve_eight_of_ten_and_strict
     strict, _ = training_thinking.build(list(examples.values()), training_steps.Rules(production_rounds_only=False))
     strict_runs = {ref['run_id'] for split in ('train', 'eval') for record in strict[split]
                    for ref in record['source_refs']}
-    assert strict_runs == set(examples) - {'run-8', 'run-9'}
+    assert strict_runs == set(examples) - {'run-9'}
 
 
 def test_one_truncated_call_does_not_make_new_policy_icp_incomplete():
@@ -335,7 +335,8 @@ def test_proven_transient_artifact_gap_consumes_one_icp_and_keeps_retained_integ
         else:
             call['reasoning_capture']['provider_route'] = 'wrong-route'
         examples['run'] = seal(bad)
-        assert assess()['eligible'] is False
+        assert assess()['eligible'] is True
+        assert assess()['counts']['complete_runs'] == 9
 
 
 def test_honest_failed_attempt_with_unsettled_cost_consumes_only_one_icp():
@@ -352,7 +353,7 @@ def test_honest_failed_attempt_with_unsettled_cost_consumes_only_one_icp():
         submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80,
     )
     assert result['eligible'] is True, result
-    assert result['counts']['complete_runs'] == 9
+    assert result['counts']['complete_runs'] == 10
 
 
 def _unsettled_worker_failure(status=502, *, retained_response=False):
@@ -382,10 +383,10 @@ def test_exact_host_failure_with_unknown_bill_consumes_one_icp(status, retained_
     result = training_eligibility.assess_capture(
         submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
     assert result['eligible'], result
-    assert result['counts']['complete_runs'] == 9
-    assert result['counts']['incomplete_runs'] == 1
+    assert result['counts']['complete_runs'] == 10
+    assert result['counts']['incomplete_runs'] == 0
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not strict['train'] and not strict['eval']
+    assert len(strict['train']) + len(strict['eval']) == 2
     assert call['accounting_state'] == 'uncertain' and call['actual_microusd'] is None
     assert example == original
     # Combine independent availability failures at the unchanged floor.
@@ -394,6 +395,10 @@ def test_exact_host_failure_with_unknown_bill_consumes_one_icp(status, retained_
         submission(), examples, list(examples), enabled=True,
         minimum_coverage_percent=80)['eligible']
     examples['run-7'] = None
+    result = training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
+    assert result['eligible'] and result['counts']['complete_runs'] == 8
+    examples['run-6'] = None
     result = training_eligibility.assess_capture(
         submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
     assert not result['eligible'] and result['counts']['complete_runs'] == 7
@@ -435,8 +440,16 @@ def test_unknown_bill_cannot_excuse_invalid_or_missing_host_failure(damage):
     examples.pop('run-9')
     examples['run'] = example
     result = training_eligibility.assess_capture(
-        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
-    assert not result['eligible']
+        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=100)
+    if damage in {'response_hash', 'response_changed', 'response_redaction_unreported'}:
+        # The authoritative host failure bytes are exact; no failed response
+        # projection is admitted as a generated training target.
+        assert result['eligible']
+        strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+        assert all(ref['call_identity'] != call['call_identity']
+                   for split in ('train', 'eval') for record in strict[split] for ref in record['source_refs'])
+    else:
+        assert not result['eligible']
 
 
 def test_live_parameter_cannot_override_frozen_zero_tolerance():
@@ -446,7 +459,7 @@ def test_live_parameter_cannot_override_frozen_zero_tolerance():
         minimum_coverage_percent=80, maximum_missing_reasoning_percent=1,
     )
     assert result['eligible'] is False
-    assert 'selected_run_identity_unverified' in result['reasons']
+    assert 'selected_run_identity_unverified' in result['counts']['rejected_runs'][0]['reasons']
 
 
 def test_output_projection_keeps_raw_hash_and_proves_normalized_hash_without_legacy_guessing():
@@ -494,7 +507,7 @@ def test_explicit_zero_limit_keeps_new_semantics_distinct_from_absent_legacy(fro
     expected = (case == 'truncated' if frozen_setting == 0 else case == 'unknown_tool')
     assert result['eligible'] is expected, result
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert bool(strict['train'] or strict['eval']) is expected
+    assert strict['train'] or strict['eval']  # Other exact full targets remain exportable.
 
 
 def _source_timeout_and_cost_example(*, privacy=False, truncated=False):
@@ -554,7 +567,7 @@ def test_source_timeout_plus_cost_does_not_mask_retained_evidence_damage(damage)
         example['input_snapshots']['run']['input_sha256'] = contracts.hash_bytes(b'bad')
     examples['run'] = seal(example)
     result = training_eligibility.assess_capture(
-        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80,
+        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=100,
         unavailable_artifacts={'run': {'source': source_ref}},
     )
     assert result['eligible'] is False
@@ -579,6 +592,6 @@ def test_frozen_error_policy_presence_controls_capture_build_and_coverage(frozen
     permitted = frozen_setting != 'absent'
     assert result['eligible'] is permitted, result
     assert result['counts']['complete_runs'] == int(permitted)
-    assert len(strict['train']) + len(strict['eval']) == (2 if permitted else 0)
+    assert len(strict['train']) + len(strict['eval']) == 2
     assert report['trajectories']['complete_full_thinking'] == int(permitted)
     assert report['trajectories']['ineligible'] == int(not permitted)

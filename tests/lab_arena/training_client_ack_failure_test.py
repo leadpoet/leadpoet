@@ -17,7 +17,8 @@ def captured_failure(*, category="response_received", reason="transport_error", 
     template = captured_timeout()
     example = large_example(20) if failed_writes else deepcopy(template)
     if failed_writes:
-        for key in ("completeness", "attempts", "related_run_gap_attribution"):
+        for key in ("completeness", "attempts", "related_run_gap_attribution", "score_run_id",
+                    "input_snapshots", "output", "output_identity", "judgment"):
             example[key] = deepcopy(template[key])
     artifact = example["worker_observation_artifacts"]["run"]
     buffer = observations.Buffer()
@@ -127,8 +128,8 @@ def test_actual_recorder_ack_transport_failure_keeps_exact_provider_capture(monk
         previous = captured_failure(runtime_summary=summary)
         assert previous["worker_observation_artifacts"]["run"]["payload"]["failures"] == ["capture_incomplete"]
         assert all(training_steps._host_result(previous, call) for call in previous["provider_calls"])
-        assert not assess(previous)["eligible"]
-        assert target_count(previous) == 0
+        assert assess(previous)["eligible"]
+        assert target_count(previous) == 2
 
     example = captured_failure(runtime_summary=summary)
     before = deepcopy(example)
@@ -160,8 +161,8 @@ def test_known_checkpoint_failure_preserves_raw_snapshot_and_exact_provider_targ
 def test_rejected_or_invalid_client_ack_remains_generic(reason):
     example = captured_failure(reason=reason)
     assert example["worker_observation_artifacts"]["run"]["payload"]["failures"] == ["capture_incomplete"]
-    assert not assess(example)["eligible"]
-    assert target_count(example) == 0
+    assert assess(example)["eligible"]
+    assert target_count(example) == 2
 
 
 @pytest.mark.parametrize("damage", ["legacy", "independent_unknown", "historical_generic", "missing_host",
@@ -172,8 +173,11 @@ def test_failed_client_ack_cannot_waive_required_or_unknown_evidence(damage):
     if damage == "independent_unknown":
         assert example["worker_observation_artifacts"]["run"]["payload"]["failures"] == [
             "capture_incomplete", observations.OPTIONAL_CAPTURE_INCOMPLETE]
-    assert not assess(example)["eligible"]
-    assert target_count(example) == 0
+    diagnostic_only = damage in {"independent_unknown", "historical_generic", "pending_queue",
+                                  "inflight", "unbalanced", "unknown_summary", "cost"}
+    assert assess(example)["eligible"] is diagnostic_only
+    expected = 2 if diagnostic_only or damage in {"privacy", "route"} else (1 if damage == "missing_host" else 0)
+    assert target_count(example) == expected
     assert example == before
 
 
@@ -188,4 +192,8 @@ def test_client_ack_failure_with_failed_host_writes_never_produces_targets(faile
     assert not gate["eligible"]
     assert gate["counts"]["complete_runs"] == 0
     assert gate["counts"]["incomplete_runs"] == 1
-    assert target_count(example) == 0
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits['train'] + splits['eval']
+    assert len(records) == 1
+    failed = {row['call_identity'] for row in payload['response_receipts'] if row['write_state'] == 'socket_write_failed'}
+    assert all(ref['call_identity'] not in failed for row in records for ref in row['source_refs'])

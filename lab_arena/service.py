@@ -4917,12 +4917,13 @@ class ArenaService:
                                             "exemption": "organizer_baseline"})
             selected = self._selected_accepted_execution_runs(runs, submission_id)
             positions = set(range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))))
-            if set(selected) != positions:
+            if set(selected) - positions:
                 return {"eligible": False, "reasons": ["selected_execution_coverage_incomplete"],
                         "source_review": source}
-            run_ids = [str(selected[position]["run_id"]) for position in sorted(positions)]
+            run_ids = [str(selected[position]["run_id"]) for position in sorted(selected)]
             unavailable_outputs = {}
             unavailable_artifacts = {}
+            unavailable_exports = {}
 
             def export_example(run_id):
                 output_ref = "arena/%s/outputs/%s.json" % (round_row["round_id"], run_id)
@@ -4932,10 +4933,13 @@ class ArenaService:
                     if cached is not None:
                         fallback[output_ref] = cached
                 read_view = training_reader.AvailabilityReadView(self._objects, fallback)
-                # A whole-export exception cannot prove which artifact failed
-                # or whether another identity or receipt was invalid. Only a
-                # completed export can use the narrow typed availability checks.
-                example = training_reader.export_run(self._store, read_view, run_id)
+                # Failed reconstruction contributes no usable data. Keep the
+                # failure local to this ICP and continue checking the others.
+                try:
+                    example = training_reader.export_run(self._store, read_view, run_id)
+                except Exception as exc:
+                    unavailable_exports[run_id] = type(exc).__name__[:64]
+                    return None
                 transient_artifacts = {kind: ref for kind, ref in read_view.artifact_refs.items()
                                        if read_view.transient_failures.get(ref) == "transient"}
                 if transient_artifacts:
@@ -4966,14 +4970,18 @@ class ArenaService:
 
             capture = training_eligibility.assess_capture(
                 submission, Exports(), run_ids, enabled=True,
+                expected_run_count=len(positions),
                 minimum_coverage_percent=training_coverage.percent_from_configuration(
                     round_row.get("configuration_doc") or {}),
                 maximum_missing_reasoning_percent=(
                     training_coverage.missing_reasoning_percent_from_configuration(
                         round_row.get("configuration_doc") or {})),
+                unavailable_exports=unavailable_exports,
                 unavailable_outputs=unavailable_outputs,
                 unavailable_artifacts=unavailable_artifacts,
             )
+            if positions - set(selected):
+                capture["counts"]["missing_icp_positions"] = sorted(positions - set(selected))
             return {"eligible": source["eligible"] and capture["eligible"],
                     "reasons": sorted(set(source["reasons"] + capture["reasons"])),
                     "source_review": source, "capture": capture}

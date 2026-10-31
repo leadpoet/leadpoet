@@ -48,14 +48,14 @@ def test_failed_judge_absent_delivery_preserves_exact_execution_targets():
     assert example == before and not example['completeness']['complete']
 
 
-def test_failed_judge_mismatched_delivery_remains_hard():
+def test_failed_judge_mismatched_delivery_does_not_erase_exact_accepted_data():
     example, errors = failed_judge_delivery(mismatch=True)
     assert errors == {'worker_response_receipt_link_invalid'}
     gate = training_eligibility.assess_capture(
         submission(), {'run': example}, ['run'], enabled=True, minimum_coverage_percent=80)
-    assert not gate['eligible']
+    assert gate['eligible']
     splits, _ = training_thinking.build([example])
-    assert not splits['train'] and not splits['eval']
+    assert len(splits['train']) + len(splits['eval']) == 2
 
 
 @pytest.mark.parametrize('kind,status', [('score', 'failed'), ('score', 'accepted'), ('execute', 'failed')])

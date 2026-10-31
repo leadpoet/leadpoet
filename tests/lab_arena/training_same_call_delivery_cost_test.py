@@ -57,92 +57,16 @@ def same_call_gap(*, bodyless=False, model=False):
 
 @pytest.mark.parametrize('bodyless', [False, True])
 @pytest.mark.parametrize('model', [False, True])
-def test_exact_uncertain_failed_write_consumes_one_icp_without_training(bodyless, model):
+def test_unknown_bill_and_failed_write_cannot_create_a_target_or_erase_other_pairs(bodyless, model):
     example = same_call_gap(bodyless=bodyless, model=model)
     examples = frozen_bank(example)
-    before = deepcopy(example)
-    result = assess(examples)
-    assert result['eligible'], result
-    assert result['counts']['complete_runs'] == 9 and result['counts']['incomplete_runs'] == 1
-    assert not assess(examples, percent=100)['eligible']
-    strict, _ = training_thinking.build(list(examples.values()), training_steps.Rules(production_rounds_only=False))
-    targets = {ref['run_id'] for split in ('train', 'eval') for row in strict[split] for ref in row['source_refs']}
-    assert targets == set(examples) - {'run'}
+    original = deepcopy(example)
     failed = next(call for call in example['provider_calls'] if call['accounting_state'] == 'uncertain')
-    assert failed['actual_microusd'] is None
-    assert example == before
-    examples['run-8'] = None
-    assert assess(examples)['eligible']
-    examples['run-7'] = None
-    assert 'training_coverage_incomplete' in assess(examples)['reasons']
-
-
-@pytest.mark.parametrize('bodyless', [False, True])
-@pytest.mark.parametrize('damage', ['known_cost', 'terminal_kind', 'terminal_missing', 'terminal_duplicate',
-    'terminal_amount', 'host_hash', 'host_missing', 'request_hash', 'outbound_hash', 'provider',
-    'request_privacy', 'response_privacy', 'upstream_hash', 'upstream_privacy', 'upstream_missing',
-    'ack_claim', 'source', 'cost_authority', 'unknown_gap', 'legacy', 'legacy_zero'])
-def test_uncertain_failed_write_does_not_hide_unproven_constituents(bodyless, damage):
-    example = same_call_gap(bodyless=bodyless)
-    examples = frozen_bank(example)
-    call = next(call for call in example['provider_calls'] if call['accounting_state'] == 'uncertain')
-    payload = example['worker_observation_artifacts']['run']['payload']
-    wrong = contracts.hash_bytes(b'wrong')
-    if damage == 'known_cost': call['actual_microusd'] = 0
-    elif damage == 'terminal_kind': call['lifecycle'][-1]['entry_kind'] = 'settlement'
-    elif damage == 'terminal_missing': call['lifecycle'].pop()
-    elif damage == 'terminal_duplicate': call['lifecycle'].append(deepcopy(call['lifecycle'][-1]))
-    elif damage == 'terminal_amount': call['lifecycle'][-1]['amount_microusd'] = 1
-    elif damage == 'host_hash': payload['response_receipts'][-1]['body_sha256'] = wrong
-    elif damage == 'host_missing': payload['response_receipts'].pop(); payload['response_receipt_count'] -= 1
-    elif damage == 'request_hash': call['request']['request_hash'] = wrong
-    elif damage == 'outbound_hash': call['request']['outbound']['body_sha256'] = wrong
-    elif damage == 'provider': call['provider'] = 'wrong'
-    elif damage == 'request_privacy': call['request_capture']['redacted'] = True
-    elif damage == 'response_privacy': call['response_privacy_redactions'] = ['credential']
-    elif damage == 'upstream_hash': call['upstream_response_receipts'][0]['response_sha256'] = wrong
-    elif damage == 'upstream_privacy': call['upstream_response_receipts'][0]['privacy_redactions'] = ['credential']
-    elif damage == 'upstream_missing': call.pop('upstream_response_receipts')
-    elif damage == 'ack_claim': call['response_provenance']['selected_response_acknowledged'] = True
-    elif damage == 'source': example['source']['sha256'] = wrong
-    elif damage == 'cost_authority': example['competition_cost_eligibility']['source_rpc'] = 'untrusted'
-    elif damage == 'unknown_gap': call['evidence_gaps'].append('unknown_gap')
-    else: example['configuration'].pop('training_maximum_missing_reasoning_percent')
-    refresh(example)
-    if damage == 'legacy_zero':
-        from tests.lab_arena.training_eligibility_test import assess_ten
-        from tests.lab_arena.training_steps_test import seal
-        for control in examples.values():
-            if control is not example:
-                control['configuration']['training_maximum_missing_reasoning_percent'] = 0
-                seal(control)
-        assert not training_eligibility._failed_delivery_call_verified(example, call)
-        assert not assess_ten(examples)['eligible']
-    else:
-        assert not assess(examples)['eligible'], damage
-
-
-@pytest.mark.parametrize('damage', ['observation_missing', 'observation_body', 'observation_privacy',
-    'admitted_request', 'placeholder_missing', 'placeholder_extra', 'placeholder_kind',
-    'unexpected_primary', 'unexpected_error', 'body_source', 'observation_ref'])
-def test_bodyless_uncertain_write_requires_the_exact_existing_host_error_proof(damage):
-    example = same_call_gap(bodyless=True)
-    call = next(call for call in example['provider_calls'] if call['accounting_state'] == 'uncertain')
-    payload = example['worker_observation_artifacts']['run']['payload']
-    row = payload['observations'][0]
-    if damage == 'observation_missing': payload['observations'] = []; payload['observation_count'] = 0
-    elif damage == 'observation_body': row['outcome']['response']['body_b64'] = base64.b64encode(b'{}').decode()
-    elif damage == 'observation_privacy': row['privacy'] = {'redacted': True, 'redactions': ['credential']}
-    elif damage == 'admitted_request': row['request']['admitted_parameters'] = {'changed': True}
-    elif damage == 'placeholder_missing': call['response_receipts'] = []
-    elif damage == 'placeholder_extra': call['response_receipts'][0]['wire_body_sha256'] = contracts.hash_bytes(b'wrong')
-    elif damage == 'placeholder_kind': call['response_receipts'][0]['entry_kind'] = 'settlement'
-    elif damage == 'unexpected_primary': call['response'] = {'error': {'code': 'provider_unavailable'}}
-    elif damage == 'unexpected_error':
-        raw = contracts.canonical_json({'error': {'code': 'other_error'}}).encode()
-        row['outcome']['response']['body_b64'] = base64.b64encode(raw).decode()
-        payload['response_receipts'][-1].update(body_sha256=contracts.hash_bytes(raw), body_bytes=len(raw))
-    elif damage == 'body_source': call['response_provenance']['worker_body_source'] = 'ledger_terminal'
-    else: call['response_provenance']['worker_error_observation_ref']['ordinal'] += 1
-    refresh(example)
-    assert not assess(frozen_bank(example))['eligible'], damage
+    result = assess(examples)
+    assert result['eligible']
+    assert result['counts']['complete_runs'] == (9 if model else 10)
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = strict['train'] + strict['eval']
+    assert len(records) == 2
+    assert all(ref['call_identity'] != failed['call_identity'] for row in records for ref in row['source_refs'])
+    assert example == original

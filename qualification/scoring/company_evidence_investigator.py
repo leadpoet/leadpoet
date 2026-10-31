@@ -1199,6 +1199,52 @@ def _passive_pdf_document_locators(raw_html: str, source_url: str) -> tuple[str,
     return tuple(locators)
 
 
+
+def _passive_archive_article_locators(raw_html: str, source_url: str) -> tuple[str, ...]:
+    """Keep literal same-host index descendants as unread discovery only."""
+    if len(raw_html) > MAX_DOCUMENT_LOCATOR_HTML_CHARACTERS or not _safe_https_url(source_url):
+        return ()
+    try:
+        source = urlsplit(public_http_url(source_url))
+    except ValueError:
+        return ()
+    prefix = source.path.rstrip('/')
+    # A non-root index can link to descendants. Related siblings on an article
+    # and root navigation do not create this structural index relationship.
+    if not prefix or not _industry_scope_path_is_unambiguous(prefix):
+        return ()
+    locators = []
+    characters = 0
+    for href, _label in visible_html_link_labels(raw_html):
+        # The link-only parser preserves semantic related/index containers,
+        # but still rejects explicit CSS, hidden ancestors and executable data.
+        # An inactive tab can supply a structural href, never visible facts.
+        try:
+            path = urlsplit(href).path
+        except ValueError:
+            continue
+        if href.startswith('//') or not _industry_scope_path_is_unambiguous(path):
+            continue
+        candidate = _safe_https_url(urljoin(source_url, href))
+        if not candidate:
+            continue
+        try:
+            candidate = public_http_url(candidate)
+        except ValueError:
+            continue
+        parts = urlsplit(candidate)
+        # Do not put embedded foreign identity URLs from queries or ambiguous
+        # paths into the existing identity-only metadata channel.
+        if (parts.netloc != source.netloc or parts.query or '//' in parts.path
+                or not parts.path.startswith(prefix + '/') or candidate in locators):
+            continue
+        if characters + len(candidate) > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS:
+            break
+        locators.append(candidate)
+        characters += len(candidate)
+    return tuple(locators)
+
+
 def _visible_stage_archive_cards(
     raw_html: str,
     archive_url: str,
@@ -3358,12 +3404,26 @@ async def _fetch_page(
         if documents:
             marker = '' if _IDENTITY_LINK_CONTEXT_MARKER in text else _IDENTITY_LINK_CONTEXT_MARKER
             text = ' '.join((text, marker, *documents)).strip()[:MAX_PAGE_CHARACTERS]
+        archive_locators = _passive_archive_article_locators(raw, safe_final_url) if text else ()
+        known_locators = set(text.split())
+        for locator in archive_locators:
+            if locator in known_locators:
+                continue
+            marker = '' if _IDENTITY_LINK_CONTEXT_MARKER in text else _IDENTITY_LINK_CONTEXT_MARKER + ' '
+            suffix = ' ' + marker + locator
+            # Optional leads must not displace old text or leave a partial URL.
+            if len(text) + len(suffix) > MAX_PAGE_CHARACTERS:
+                break
+            text += suffix
     if not text:
         return {"ok": False, "error": "empty_page"}
     source_links = []
     if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
         for href, _label in visible_html_link_labels(raw):
-            candidate = _safe_https_url(urljoin(safe_final_url, href))
+            try:
+                candidate = _safe_https_url(urljoin(safe_final_url, href))
+            except ValueError:
+                continue
             if not candidate or _registrable_domain(candidate) == _registrable_domain(safe_final_url):
                 continue
             try:

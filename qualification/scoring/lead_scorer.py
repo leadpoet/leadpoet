@@ -84,6 +84,8 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    PRIVATE_INDUSTRY_BINDINGS_KEY,
+    _validated_industry_bindings,
     _IDENTITY_LINK_CONTEXT_MARKER,
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
@@ -2951,18 +2953,33 @@ def _matched_company_result_retry_identity(
     })
 
 
+def _validated_retry_industry_bindings(value, pages, identity):
+    texts, final_urls = _validated_returned_fetched_pages(pages, submitted_source_urls=tuple(pages))
+    domain = identity.get('registrable_dns_domain', '')
+    return _validated_industry_bindings(value, texts, final_urls, domains={domain},
+        identity={'submitted_domain': domain, 'observed_domain': domain,
+                  'observed_name': identity.get('normalized_name', '')},
+        evaluation_date_value=evaluation_date().isoformat())
+
+
 def _matched_company_retry_prefetched_pages(
     retry_cache: Optional[Mapping[str, Any]],
     verified_identity: Optional[Mapping[str, Any]],
+    *, industry_bindings_out: Optional[dict[str, Any]] = None,
 ) -> dict[str, dict[str, str]]:
     """Load bounded pages only for the same complete verified identity."""
 
+    if industry_bindings_out is not None:
+        industry_bindings_out.clear()
     if (
         not isinstance(retry_cache, Mapping)
-        or set(retry_cache) != {
+        or not {
             _MATCHED_COMPANY_RETRY_IDENTITY_KEY,
             _MATCHED_COMPANY_RETRY_PAGES_KEY,
-        }
+        } <= set(retry_cache)
+        or set(retry_cache) - {_MATCHED_COMPANY_RETRY_IDENTITY_KEY, _MATCHED_COMPANY_RETRY_PAGES_KEY,
+                              *({PRIVATE_INDUSTRY_BINDINGS_KEY} if os.environ.get(
+                                  'ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip() else set())}
     ):
         return {}
     cached_identity = _matched_company_retry_identity(
@@ -2984,11 +3001,15 @@ def _matched_company_retry_prefetched_pages(
     if not isinstance(raw_pages, Mapping):
         return {}
     pages, final_urls = _validated_matched_retry_pages(raw_pages)
-    return {
+    result = {
         url: {"final_url": final_urls[url], "text": text}
         for url, text in pages.items()
         if _registrable_domain(url) == _registrable_domain(final_urls[url])
     }
+    if industry_bindings_out is not None:
+        industry_bindings_out.update(_validated_retry_industry_bindings(
+            retry_cache.get(PRIVATE_INDUSTRY_BINDINGS_KEY), result, current_identity))
+    return result
 
 
 def _retain_matched_investigator_source_contexts(
@@ -3184,6 +3205,7 @@ def _retain_matched_company_retry_sources(
 
     if retry_cache is None:
         return
+    prior_bindings = deepcopy(retry_cache.get(PRIVATE_INDUSTRY_BINDINGS_KEY))
     identity = _matched_company_result_retry_identity(result)
     if not identity or not source_cache:
         return
@@ -3235,6 +3257,10 @@ def _retain_matched_company_retry_sources(
         _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
         _MATCHED_COMPANY_RETRY_PAGES_KEY: retained,
     })
+    if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
+        bindings = _validated_retry_industry_bindings(prior_bindings, retained, identity)
+        if bindings['links'] or bindings['brands']:
+            retry_cache[PRIVATE_INDUSTRY_BINDINGS_KEY] = bindings
 
 
 def _retain_unresolved_industry_retry_sources(
@@ -3272,6 +3298,9 @@ def _retain_unresolved_industry_retry_sources(
     pages, final_urls = _validated_returned_fetched_pages(
         investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=tuple(urls),
     )
+    binding_pages = {url: {'text': text, 'final_url': final_urls[url]} for url, text in pages.items()}
+    bindings = _validated_retry_industry_bindings(
+        investigation.get(PRIVATE_INDUSTRY_BINDINGS_KEY), binding_pages, identity)
     domain = identity["registrable_dns_domain"]
     careers_locators = _validated_homepage_navigation_locators(
         homepage_navigation_locators, positive_semantic_review=False,
@@ -3285,6 +3314,7 @@ def _retain_unresolved_industry_retry_sources(
             identity={'submitted_domain': domain, 'observed_domain': domain,
                       'observed_name': identity['normalized_name']},
             careers_locators=careers_locators,
+            conditional_sources=bindings['brands'],
         )
     }
     if not admitted:
@@ -3317,6 +3347,10 @@ def _retain_unresolved_industry_retry_sources(
         _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
         _MATCHED_COMPANY_RETRY_PAGES_KEY: dict(list(retained.items())[:max_matched_retry_pages()]),
     })
+    bound = _validated_retry_industry_bindings(bindings,
+        retry_cache[_MATCHED_COMPANY_RETRY_PAGES_KEY], identity)
+    if bound['links'] or bound['brands']:
+        retry_cache[PRIVATE_INDUSTRY_BINDINGS_KEY] = bound
 
 
 def _hydrate_verified_required_attribute_recovery_source(
@@ -8901,9 +8935,11 @@ async def _run_targeted_company_evidence_investigation(
         )
         if not independently_bound_homepage:
             homepage_pages = {}
+    matched_industry_bindings = {}
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
         investigation_verified_identity,
+        industry_bindings_out=matched_industry_bindings,
     )
     retained_attribute_retry_pages = (
         _validated_retry_retained_sources(successful_required_attribute_source_sink)
@@ -9144,6 +9180,9 @@ async def _run_targeted_company_evidence_investigation(
            if "industry" in investigation_targets
            and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
            and len(matched_company_retry_pages) > MAX_PREFETCHED_PAGES else {}),
+        **({'retained_industry_bindings': matched_industry_bindings}
+           if 'industry' in investigation_targets and (matched_industry_bindings.get('links')
+                                                       or matched_industry_bindings.get('brands')) else {}),
     )
     claims = investigation.get("claims")
     if not isinstance(claims, Mapping):

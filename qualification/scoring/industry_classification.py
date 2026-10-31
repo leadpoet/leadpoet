@@ -20,6 +20,9 @@ MAX_TOTAL_CHARS = 7 * MAX_PAGE_CHARS
 SPAN_CHARS = 1_600
 MAX_SPANS = 128  # Arena's existing list limit also applies to the citation enum.
 ROLES = ("supplier_operator", "customer_user", "partner_other", "unresolved")
+CONDITIONAL_SOURCE_KEYS = ('child_source_url', 'parent_source_url', 'parent_quote', 'child_brand',
+                           'official_child_homepage', 'parent_body_sha256', 'child_body_sha256',
+                           'child_final_url', 'pointer_kind', 'printed_reference')
 CRITERION_RULES = """Preserve every required offering, capability, channel and customer role, including the scope of AND and OR. Examples introduced by 'such as' are illustrative. Do not add narrower requirements. Functional equivalents count. Concrete facts can establish a requirement by a clear inference; explain that inference. Mere industry proximity, possible applicability or an unsupported guess does not count.
 Establish every listed capability, channel and customer class within the connected offering. Do not require a documented project for every capability/customer or capability/channel pairing unless the criterion explicitly requires those pairings. A customer example establishes delivery to that customer; it does not restrict the service to that segment. Use the connected offering's stated customer positioning, and respect explicit limitations. Unrelated products or customer relationships cannot fill a gap.
 Respect the stated lifecycle: design or development evidence can establish intended use and users without completed shipments or named deployments. Commercial positioning of a real offering can establish its intended customer class; do not require a named customer or separate transaction history unless explicitly requested. A company's service offering need not use the exact requested taxonomy phrase, but generic claims cannot establish a specific missing capability.
@@ -58,10 +61,14 @@ class Packet:
     company: tuple[str, str, str]
     pages: tuple[tuple[str, str, str], ...]
     evaluation_date: str
+    conditional_sources: tuple[tuple[str, ...], ...] = ()
 
     @property
     def digest(self):
-        return hashlib.sha256(_canonical([self.criteria, self.company, self.pages, self.evaluation_date]).encode()).hexdigest()
+        values = [self.criteria, self.company, self.pages, self.evaluation_date]
+        if self.conditional_sources:
+            values.append(self.conditional_sources)
+        return hashlib.sha256(_canonical(values).encode()).hexdigest()
 
     def spans(self):
         spans = {}
@@ -84,7 +91,7 @@ class Packet:
         return spans
 
 
-def prepare(criteria, company_locator, source_pages, *, evaluation_date):
+def prepare(criteria, company_locator, source_pages, *, evaluation_date, conditional_sources=None):
     """Use already-fetched text; byte references do not attest source authority."""
     try:
         valid_date = (isinstance(evaluation_date, str)
@@ -145,7 +152,31 @@ def prepare(criteria, company_locator, source_pages, *, evaluation_date):
             else:
                 high = middle - 1
         pages = [(source_id, body[:low], url) for source_id, body, url in pages]
-    return Packet(values, tuple(company_locator.get(k, "") for k in locator_keys), tuple(pages), evaluation_date)
+    # The caller has checked provenance, not operating ownership. Keep the
+    # actual relationship passage in the bounded packet or drop the child.
+    candidates = conditional_sources or {}
+    if not isinstance(candidates, dict) or len(candidates) > 4:
+        raise ValueError('invalid conditional industry sources')
+    conditional, excluded = [], set()
+    bodies = {url: body for _, body, url in pages}
+    for url, value in candidates.items():
+        if not isinstance(value, dict) or 'child_source_url' in value:
+            raise ValueError('conditional source key cannot be overridden')
+        record = {'child_source_url': url, **value}
+        if (set(record) != set(CONDITIONAL_SOURCE_KEYS)
+                or any(not isinstance(record[key], str) or (not record[key] and key != 'printed_reference')
+                       for key in record)
+                or record['pointer_kind'] not in {'observed_href', 'printed_reference'}):
+            raise ValueError('invalid conditional industry source')
+        parent = record['parent_source_url']
+        if (url not in bodies or parent not in bodies or parent in candidates
+                or record['parent_quote'] not in bodies[parent]):
+            excluded.add(url)
+            continue
+        conditional.append(tuple(record[key] for key in CONDITIONAL_SOURCE_KEYS))
+    pages = [page for page in pages if page[2] not in excluded]
+    return Packet(values, tuple(company_locator.get(k, "") for k in locator_keys), tuple(pages),
+                  evaluation_date, tuple(conditional))
 
 
 def source_messages(packet):
@@ -174,9 +205,43 @@ def request_payload(packet, *, model, research=False):
         "criterion": dict(zip(("industry", "subindustry", "product_service"), packet.criteria)),
         "company_locator": dict(zip(("name", "website", "linkedin"), packet.company)),
     }
+    if packet.conditional_sources:
+        source_ids = {url: source_id for source_id, _, url in packet.pages}
+        bodies = {url: body for _, body, url in packet.pages}
+        metadata['conditional_industry_sources'] = []
+        for item in packet.conditional_sources:
+            record = dict(zip(CONDITIONAL_SOURCE_KEYS, item))
+            parent_body = bodies[record['parent_source_url']]
+            quote_start = parent_body.index(record['parent_quote'])
+            start = len(parent_body[:quote_start].encode('utf-8'))
+            end = start + len(record['parent_quote'].encode('utf-8'))
+            # URLs and source bytes are already in the source messages. Keep
+            # this proof view within the existing per-message content bound.
+            metadata['conditional_industry_sources'].append({
+                'child_source_id': source_ids[record['child_source_url']],
+                'parent_source_id': source_ids[record['parent_source_url']],
+                'parent_relationship_span_ids': [key for key, span in spans.items()
+                    if span['source_url'] == record['parent_source_url']
+                    and span['end_byte'] > start and span['start_byte'] < end],
+                **{key: record[key] for key in ('child_brand',
+                    'official_child_homepage', 'pointer_kind')},
+            })
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": _canonical(metadata)},
                 *source_messages(packet)]
+    if packet.conditional_sources:
+        messages[0]['content'] += (
+            '\nConditional child-source metadata proves source provenance only, never ownership. '
+            'Decide whether the parent actually supplies a connected operating-brand offering as of '
+            'evaluation_date. Mere investment ownership, partner/dealer/customer links, reversed or '
+            'negated relationships, future/pending acquisitions, and brands divested before that date '
+            'cannot supply its capabilities. Later divestiture does not erase proved earlier operation. '
+            'Read all supporting and contrary parent context. If using child facts for match, cite '
+            'both the actual parent relationship/operating context and child capability spans. '
+            'A parent-name/identity passage alone is insufficient. If the relationship or complete '
+            'criterion remains unproved, return unavailable/mismatch under the normal rules. '
+            'This grants no identity, rebrand or other-dimension inheritance.'
+        )
     # Constrain decoding to these
     # exact references so commentary cannot corrupt an otherwise valid ID.
     # resolve() still checks membership independently of provider compliance.
@@ -256,6 +321,23 @@ def resolve(packet, response, *, research=False):
         raise ValueError("conclusive decision requires bound evidence")
     if decision == "match" and role != "supplier_operator":
         raise ValueError("match requires own supplier/operator role")
+    if decision == 'match':
+        cited = [spans[i] for i in ids]
+        used_urls = {item['source_url'] for item in cited}
+        for item in packet.conditional_sources:
+            record = dict(zip(CONDITIONAL_SOURCE_KEYS, item))
+            if record['child_source_url'] not in used_urls:
+                continue
+            runs, end = [], None
+            for span in sorted((s for s in cited if s['source_url'] == record['parent_source_url']),
+                               key=lambda s: s['start_byte']):
+                if end == span['start_byte']:
+                    runs[-1] += span['text']
+                else:
+                    runs.append(span['text'])
+                end = span['end_byte']
+            if not any(record['parent_quote'] in run for run in runs):
+                raise ValueError('conditional child evidence lacks selected parent relationship')
     # This descriptive field is capped for native projection. Its display length
     # does not change the decision, unmet requirements or exact evidence bytes.
     return {**response, "evidence_span_ids": ids, "observed_activity": activity.strip()[:200], "reason": reason.strip()[:600],

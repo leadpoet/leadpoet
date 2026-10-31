@@ -107,6 +107,9 @@ MAX_PASSIVE_PDF_LOCATORS = 4
 EXA_LIVECRAWL_TIMEOUT_MILLISECONDS = 20_000
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
+PRIVATE_INDUSTRY_BINDINGS_KEY = "_server_industry_source_bindings"
+_BRAND_PROPOSAL_LIMITS = {'parent_source_url': 2000, 'parent_quote': 2000,
+                          'child_brand': 200, 'official_child_homepage': 2000}
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
 REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
 ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS = 1_500
@@ -638,9 +641,9 @@ alone does not prove headquarters. The ordinary identity, source and exact-quote
 checks still apply."""
 
 
-def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
+def _tools(targets: Sequence[str], *, industry_sources: bool = False) -> list[dict[str, Any]]:
     requested_targets = sorted(dict.fromkeys(targets))
-    return [
+    tools = [
         {
             "type": "function",
             "name": "search_web",
@@ -778,6 +781,20 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
             },
         },
     ]
+    if industry_sources:
+        parameters = tools[1]['parameters']
+        parameters['properties']['industry_brand_source'] = {
+            'type': ['object', 'null'], 'additionalProperties': False,
+            'properties': {key: {'type': 'string', 'minLength': 1, 'maxLength': limit}
+                           for key, limit in _BRAND_PROPOSAL_LIMITS.items()},
+            'required': list(_BRAND_PROPOSAL_LIMITS),
+            'description': ('Conditional industry evidence only. Cite an already loaded parent '
+                            'relationship quote and its observed official child homepage link, or '
+                            'complete literal child URL printed with the brand in that same quote. '
+                            'This does not prove operating ownership; final industry review decides it.'),
+        }
+        parameters['required'].append('industry_brand_source')
+    return tools
 
 
 def _record_failure(diagnostic: Optional[dict[str, str]], reason: str) -> None:
@@ -807,6 +824,7 @@ def _response_exhausted_output_budget(
 def _valid_multi_research_reply(
     tool_calls: list[Any], *, required_tool: str,
     required_search_locators: Optional[tuple[str, str]] = None,
+    industry_sources: bool = False,
 ) -> bool:
     """Check a rejected research batch without executing or selecting any call."""
 
@@ -836,7 +854,10 @@ def _valid_multi_research_reply(
         except (TypeError, ValueError):
             return False
         key = "query" if name == "search_web" else "url"
-        if not isinstance(arguments, Mapping) or set(arguments) != {key}:
+        allowed = {key, 'industry_brand_source'} if industry_sources and name == 'fetch_page' else {key}
+        if (not isinstance(arguments, Mapping) or key not in arguments or set(arguments) - allowed
+                or (arguments.get('industry_brand_source') is not None
+                    and not _industry_brand_proposal(arguments['industry_brand_source']))):
             return False
         value = arguments[key]
         if not isinstance(value, str) or not value.strip():
@@ -1921,6 +1942,7 @@ def _independently_bound_first_party_url(
 def _industry_source_is_bound(
     url: str, final_url: str, *, domains: set[str], identity: Mapping[str, Any],
     careers_locators: Sequence[Mapping[str, str]] = (),
+    conditional_sources: Mapping[str, Any] = (),
 ) -> bool:
     """Bind both URLs to the company or its observed, exact ATS employer.
 
@@ -1930,6 +1952,9 @@ def _industry_source_is_bound(
     """
     if not _safe_https_url(url) or not _safe_https_url(final_url):
         return False
+    candidate = conditional_sources.get(url) if isinstance(conditional_sources, Mapping) else None
+    if isinstance(candidate, Mapping) and candidate.get('child_final_url') == final_url:
+        return True  # Conditional industry evidence, not verified ownership.
     if all(_independently_bound_first_party_url(value, domains, identity)
            for value in (url, final_url)):
         return True
@@ -1953,6 +1978,134 @@ def _industry_source_is_bound(
         and _recognized_careers_board_locator(locator['url'], locator['label']) == board
         for locator in careers_locators[:MAX_HOMEPAGE_NAVIGATION_LOCATORS]
     )
+
+
+def _industry_brand_proposal(value: Any) -> bool:
+    return bool(isinstance(value, Mapping) and set(value) == set(_BRAND_PROPOSAL_LIMITS)
+                and all(isinstance(value[key], str) and value[key].strip() == value[key]
+                        and 1 <= len(value[key]) <= limit
+                        for key, limit in _BRAND_PROPOSAL_LIMITS.items()))
+
+
+def _industry_relationship_quote(quote: str, text: str) -> bool:
+    return bool(8 <= len(_normalized_span(quote)) <= 2000
+                and quote in _visible_quote_surface(text))
+
+
+def _industry_brand_scope(url: str, homepage: str) -> bool:
+    """One exact linked host/path, with only the ordinary www spelling alias."""
+    if not _safe_https_url(url) or not _safe_https_url(homepage):
+        return False
+    try:
+        if public_http_url(url) != url:
+            return False
+        homepage = public_http_url(homepage)
+    except ValueError:
+        return False
+    source, home = urlsplit(url), urlsplit(homepage)
+    prefix = home.path.rstrip('/')
+    return bool(source.hostname.removeprefix('www.') == home.hostname.removeprefix('www.')
+                and (not prefix or source.path == prefix or source.path.startswith(prefix + '/'))
+                and (not home.query or source.query == home.query))
+
+
+def _industry_brand_self_identity(text: str, brand: str, homepage: str) -> bool:
+    visible = _visible_quote_surface(text)
+    if _exact_industry_brand_name(visible, brand):
+        return True
+    home = urlsplit(homepage)
+    domain = (home.hostname or '').removeprefix('www.')
+    # A printed shared host/tenant does not identify one operating brand.
+    return bool(home.path in {'', '/'} and domain == _registrable_domain(homepage)
+                and re.search(r'(?<![A-Za-z0-9.-])(?:www\.)?' + re.escape(domain)
+                              + r'(?![A-Za-z0-9.-])', visible, re.I))
+
+
+def _exact_industry_brand_name(text, brand):
+    return bool(re.search(r'(?<![\w.-])' + re.escape(_normalized_span(brand))
+                          + r'(?![\w-]|\.[\w])', _normalized_span(text)))
+
+
+def _industry_printed_reference(proposal):
+    """A complete literal pointer in the same quote; never infer a URL/path."""
+    if not _exact_industry_brand_name(proposal['parent_quote'], proposal['child_brand']):
+        return ''
+    for match in re.finditer(r'https?://[^\s<>\"\']+', proposal['parent_quote']):
+        printed = match.group()
+        secure = 'https://' + printed[len('http://'):] if printed.startswith('http://') else printed
+        if secure != proposal['official_child_homepage'] or not _safe_https_url(secure):
+            continue
+        try:
+            public_http_url(secure)
+        except ValueError:
+            continue
+        return printed
+    return ''
+
+
+def _industry_bindings_identity(identity: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(identity.get('observed_domain') or identity.get('verified_domain') or ''),
+            _company_name(identity.get('observed_name') or identity.get('verified_name') or ''))
+
+
+def _validated_industry_bindings(value: Any, pages: Mapping[str, str], final_urls: Mapping[str, str], *,
+                                 domains: set[str], identity: Mapping[str, Any],
+                                 evaluation_date_value: str) -> dict[str, Any]:
+    """Rebind a private, host-built provenance record. Never decide ownership."""
+    domain, name = _industry_bindings_identity(identity)
+    empty = {'schema': 'industry_source_bindings_v1', 'parent_domain': domain,
+             'parent_name': name, 'evaluation_date': evaluation_date_value, 'links': {}, 'brands': {}}
+    if (not isinstance(value, Mapping) or set(value) != set(empty)
+            or any(value.get(key) != empty[key] for key in
+                   ('schema', 'parent_domain', 'parent_name', 'evaluation_date'))
+            or not domain or not name or not isinstance(value.get('links'), Mapping)
+            or not isinstance(value.get('brands'), Mapping)
+            or len(value['links']) > max_returned_fetched_pages()
+            or len(value['brands']) > MAX_FETCH_CALLS):
+        return empty
+    for url, link in value['links'].items():
+        if (url not in pages or not isinstance(link, Mapping)
+                or set(link) != {'final_url', 'body_sha256', 'hrefs'}
+                or link['final_url'] != final_urls.get(url)
+                or link['body_sha256'] != hashlib.sha256(pages[url].encode()).hexdigest()
+                or not isinstance(link['hrefs'], list)
+                or len(link['hrefs']) > MAX_HOMEPAGE_NAVIGATION_LOCATORS
+                or not all(isinstance(href, str) and _safe_https_url(href)
+                           for href in link['hrefs'])
+                or sum(len(href) for href in link['hrefs']) > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS
+                or not all(_independently_bound_first_party_url(item, domains, identity)
+                           for item in (url, link['final_url']))):
+            continue
+        empty['links'][url] = copy.deepcopy(dict(link))
+    for url, candidate in value['brands'].items():
+        if (not isinstance(candidate, Mapping)
+                or set(candidate) != set(_BRAND_PROPOSAL_LIMITS) | {
+                    'parent_body_sha256', 'child_body_sha256', 'child_final_url',
+                    'pointer_kind', 'printed_reference'}
+                or not _industry_brand_proposal({key: candidate[key] for key in _BRAND_PROPOSAL_LIMITS})):
+            continue
+        parent, home = candidate['parent_source_url'], candidate['official_child_homepage']
+        link = empty['links'].get(parent)
+        if (parent not in pages or url not in pages
+                or not all(_independently_bound_first_party_url(item, domains, identity)
+                           for item in (parent, final_urls.get(parent, '')))
+                or candidate['parent_body_sha256'] != hashlib.sha256(pages[parent].encode()).hexdigest()
+                or candidate['child_body_sha256'] != hashlib.sha256(pages[url].encode()).hexdigest()
+                or candidate['child_final_url'] != final_urls.get(url)
+                or not _industry_relationship_quote(candidate['parent_quote'], pages[parent])
+                or not all(_industry_brand_scope(item, home) for item in (url, final_urls[url]))
+                or not _industry_brand_self_identity(pages[url], candidate['child_brand'], home)):
+            continue
+        if candidate['pointer_kind'] == 'observed_href':
+            if not link or public_http_url(home) not in link['hrefs'] or candidate['printed_reference'] != '':
+                continue
+        elif candidate['pointer_kind'] == 'printed_reference':
+            if not candidate['printed_reference'] or _industry_printed_reference(candidate) != candidate['printed_reference']:
+                continue
+        else:
+            continue
+        empty['brands'][url] = copy.deepcopy(dict(candidate))
+    return empty
 
 
 def _complete_verified_first_party_identity(
@@ -2546,6 +2699,7 @@ async def _review_industry_sources(
     admitted_final_judgment=False,
     completed_review=None,
     careers_locators=(),
+    industry_bindings=None,
 ):
     """Use one reserved turn for the full criterion; retain every bound quote.
 
@@ -2572,6 +2726,8 @@ async def _review_industry_sources(
     rebrand = rebrand_finding or {}
     rebrand_domains = ({rebrand.get('old_domain'), rebrand.get('new_domain')}
                        if rebrand.get('status') == 'VERIFIED' else set()) - {None, ''}
+    conditional = _validated_industry_bindings(industry_bindings, fetched_pages, fetched_final_urls,
+        domains=first_party_domains, identity=identity_anchor, evaluation_date_value=evaluation_date_value)
 
     def bound(url):
         return bool(_safe_https_url(url) and (
@@ -2587,6 +2743,7 @@ async def _review_industry_sources(
         if text and ((bound(url) and bound(final_url)) or _industry_source_is_bound(
             url, final_url, domains=first_party_domains, identity=identity_anchor,
             careers_locators=careers_locators,
+            conditional_sources=conditional['brands'],
         )):
             pages.append({'source_id': f's{index}', 'source_url': url, 'body': text})
     if not pages:
@@ -2594,11 +2751,13 @@ async def _review_industry_sources(
         return unproven, '', 0
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
-    }, pages, evaluation_date=evaluation_date_value)
+    }, pages, evaluation_date=evaluation_date_value, conditional_sources=conditional['brands'])
     # This identifies the supplied source bytes, not a completed verdict. Keep
     # checked text available to the identity-bound retry cache if review fails.
     review['packet_sha256'] = packet.digest
-    review['source_urls'] = [page['source_url'] for page in pages]
+    review['source_urls'] = [url for _, _, url in packet.pages]
+    if conditional['links'] or conditional['brands']:
+        review['industry_source_bindings'] = conditional
     careers = [dict(locator) for locator in careers_locators
                if _recognized_careers_board_locator(locator['url'], locator['label'])]
     if careers:
@@ -2664,6 +2823,17 @@ async def _review_industry_sources(
                               and _quote_names_company(item['text'], identity_names)), None)
         if identity_span:
             evidence.insert(0, {'url': identity_span['source_url'], 'quote': identity_span['text']})
+        elif conditional['brands']:
+            # Citation order must not make the child the canonical company.
+            # The positive relation coverage was checked against model refs
+            # before this legacy attribution projection. Its ordinary complete
+            # parent-identity gate still applies to an unnamed parent passage.
+            parents = {conditional['brands'][item['url']]['parent_source_url']
+                       for item in evidence if item['url'] in conditional['brands']}
+            parent_index = next((i for i, item in enumerate(evidence)
+                                 if item['url'] in parents and bound(item['url'])), None)
+            if parent_index is not None:
+                evidence.insert(0, evidence.pop(parent_index))
     review.update(packet_sha256=packet.digest, decision=result['decision'],
                   missing_requirements=result['missing_requirements'], evidence=evidence,
                   reason=result['reason'])
@@ -2699,7 +2869,7 @@ async def _review_industry_sources(
     return finding, '', 1
 
 
-def _industry_search_scopes(domains, identity, careers_locators):
+def _industry_search_scopes(domains, identity, careers_locators, conditional_sources=()):
     """Search only domains and exact employer paths already bound by the host."""
     scopes = {domain for domain in domains if _independently_bound_first_party_url(
         f'https://{domain}/', domains, identity)}
@@ -2710,6 +2880,16 @@ def _industry_search_scopes(domains, identity, careers_locators):
                     identity=identity, careers_locators=careers_locators)):
             parsed = urlsplit(url)
             scopes.add(parsed.netloc + parsed.path.rstrip('/'))
+    if isinstance(conditional_sources, Mapping):
+        for url, candidate in conditional_sources.items():
+            home = urlsplit(candidate['official_child_homepage'])
+            if home.query:
+                continue  # Do not turn a query-scoped tenant into a whole-host search.
+            for source in (url, candidate['child_final_url'], candidate['official_child_homepage']):
+                parsed = urlsplit(source)
+                scope = parsed.hostname + (home.path.rstrip('/') or '') + '/'
+                if len(scope) <= 253:  # Existing Exa includeDomains field bound.
+                    scopes.add(scope)
     return tuple(sorted(scopes))
 
 
@@ -2724,7 +2904,7 @@ def _industry_search_scope_contains(url, scopes):
             host, path = scope.split('/', 1)
             prefix = '/' + path.rstrip('/')
             if parsed.hostname == host and (
-                parsed.path == prefix or parsed.path.startswith(prefix + '/')
+                prefix == '/' or parsed.path == prefix or parsed.path.startswith(prefix + '/')
             ):
                 return True
     return False
@@ -3120,11 +3300,28 @@ async def _fetch_page(
             text = ' '.join((text, marker, *documents)).strip()[:MAX_PAGE_CHARACTERS]
     if not text:
         return {"ok": False, "error": "empty_page"}
+    source_links = []
+    if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
+        for href, _label in visible_html_link_labels(raw):
+            candidate = _safe_https_url(urljoin(safe_final_url, href))
+            if not candidate or _registrable_domain(candidate) == _registrable_domain(safe_final_url):
+                continue
+            try:
+                candidate = public_http_url(candidate)
+            except ValueError:
+                continue
+            if candidate not in source_links:
+                if (len(source_links) >= MAX_HOMEPAGE_NAVIGATION_LOCATORS
+                        or sum(map(len, source_links)) + len(candidate)
+                        > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS):
+                    break
+                source_links.append(candidate)
     return {
         "ok": True,
         "url": canonical_url,
         "final_url": safe_final_url,
         "text": text,
+        **({'server_industry_source_links': source_links} if source_links else {}),
         **(
             {"server_visible_archive_cards": cards}
             if archive_targets and (
@@ -4411,6 +4608,7 @@ async def investigate_company_evidence(
     homepage_navigation_locators: Optional[Sequence[Mapping[str, Any]]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
     retained_industry_pages: Optional[Mapping[str, Any]] = None,
+    retained_industry_bindings: Optional[Mapping[str, Any]] = None,
     verified_navigation_identity: Optional[Mapping[str, Any]] = None,
     verified_structured_alias_slug: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
@@ -4436,6 +4634,14 @@ async def investigate_company_evidence(
             "\nFor industry source selection, apply the same criterion rules as "
             "the final industry review:\n"
             + industry_classification.CRITERION_RULES
+            + '\nExisting fetch_page accepts a nullable industry_brand_source for a specific '
+              'child page. First read a parent relationship page and its official child link, '
+              'or a complete child URL printed with its brand in that exact relationship quote. '
+              'The host checks provenance only, not ownership. A controlled operating brand may '
+              'contribute to the parent connected offering only if the final industry review '
+              'supports the directed operating relation as of evaluation_date. Investment, '
+              'partner, dealer, pending, reversed or divested relationships are not enough. '
+              'Do not use conditional child facts for any other target or company identity.'
         )
     if not requested_targets or any(value not in TARGETS for value in requested_targets):
         return {"claims": {}, "failure_reason": "invalid_targets"}
@@ -4470,6 +4676,7 @@ async def investigate_company_evidence(
     # argument. Never reuse a similarly named provider-controlled field.
     bounded_prior_observations.pop("prefetched_sources", None)
     bounded_prior_observations.pop(PRIVATE_FETCHED_PAGES_KEY, None)
+    bounded_prior_observations.pop(PRIVATE_INDUSTRY_BINDINGS_KEY, None)
     bounded_prior_observations.pop("server_verified_structured_alias_locator", None)
     raw_submitted_urls = bounded_prior_observations.get("submitted_source_urls")
     submitted_source_urls: list[str] = []
@@ -4830,11 +5037,73 @@ async def investigate_company_evidence(
             )
 
     started = time.monotonic()
+    industry_bindings = _validated_industry_bindings(None, fetched_pages, fetched_final_urls,
+        domains=first_party_domains, identity=identity_anchor,
+        evaluation_date_value=input_document['evaluation_date'])
+
+    def current_industry_bindings():
+        return _validated_industry_bindings(industry_bindings, fetched_pages, fetched_final_urls,
+            domains=first_party_domains, identity=identity_anchor,
+            evaluation_date_value=input_document['evaluation_date'])
+
+    def industry_source_bound(url, final_url):
+        return _industry_source_is_bound(url, final_url, domains=first_party_domains,
+            identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators,
+            conditional_sources=current_industry_bindings()['brands'])
+
+    def record_source_links(result):
+        links = result.pop('server_industry_source_links', None)
+        if (industry_review_model and result.get('ok') and isinstance(links, list)
+                and all(_independently_bound_first_party_url(value, first_party_domains, identity_anchor)
+                        for value in (result['url'], result.get('final_url') or result['url']))):
+            industry_bindings['links'][result['url']] = {
+                'final_url': result.get('final_url') or result['url'],
+                'body_sha256': hashlib.sha256(result['text'].encode()).hexdigest(),
+                'hrefs': list(links),
+            }
+        return result
+
     def retained_fetched_pages() -> dict[str, dict[str, str]]:
         return {
             url: {"final_url": fetched_final_urls[url], "text": text}
             for url, text in fetched_pages.items()
         }
+
+    def observed_brand_proposal(value, url):
+        if not industry_review_model or not _industry_brand_proposal(value):
+            return None
+        links = current_industry_bindings()['links'].get(value['parent_source_url'])
+        parent = value['parent_source_url']
+        if (not _industry_brand_scope(url, value['official_child_homepage'])
+                or not all(_independently_bound_first_party_url(item, first_party_domains, identity_anchor)
+                           for item in (parent, fetched_final_urls.get(parent, '')))
+                or not _industry_relationship_quote(value['parent_quote'], fetched_pages.get(parent, ''))):
+            return None
+        if links and public_http_url(value['official_child_homepage']) in links['hrefs']:
+            return 'observed_href', ''
+        printed = _industry_printed_reference(value)
+        return ('printed_reference', printed) if printed else None
+
+    def remember_brand_source(proposal, url):
+        nonlocal industry_search_scopes
+        pointer = observed_brand_proposal(proposal, url)
+        if not pointer or url not in fetched_pages:
+            return False
+        if url not in industry_bindings['brands'] and len(industry_bindings['brands']) >= MAX_FETCH_CALLS:
+            return False
+        parent = proposal['parent_source_url']
+        industry_bindings['brands'][url] = {
+            **dict(proposal), 'parent_body_sha256': hashlib.sha256(fetched_pages[parent].encode()).hexdigest(),
+            'child_body_sha256': hashlib.sha256(fetched_pages[url].encode()).hexdigest(),
+            'child_final_url': fetched_final_urls[url],
+            'pointer_kind': pointer[0], 'printed_reference': pointer[1],
+        }
+        if url not in current_industry_bindings()['brands']:
+            industry_bindings['brands'].pop(url, None)
+            return False
+        industry_search_scopes = _industry_search_scopes(first_party_domains, identity_anchor,
+            bounded_homepage_navigation_locators, current_industry_bindings()['brands'])
+        return True
 
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
@@ -4954,7 +5223,7 @@ async def investigate_company_evidence(
                         session, url, stealth_mode=True, **fetch_options,
                     )
                     fetch_outcomes.append(_fetch_outcome(url, result))
-                return result
+                return record_source_links(result)
 
             priority_source_kind = ""
             priority_source_url = ""
@@ -5250,12 +5519,19 @@ async def investigate_company_evidence(
             # Prior industry citations remain untrusted locators in the input.
             # Let the shared researcher select them against the missing facts;
             # eager reads and recovery can exhaust its budget before selection.
-            if industry_review_model and retained_industry_pages:
+            if industry_review_model:
                 retry_pages, retry_final_urls = _validated_matched_retry_pages(retained_industry_pages)
+                prior_bindings = _validated_industry_bindings(retained_industry_bindings,
+                    {**retry_pages, **fetched_pages}, {**retry_final_urls, **fetched_final_urls},
+                    domains=first_party_domains, identity=identity_anchor,
+                    evaluation_date_value=input_document['evaluation_date'])
+                industry_bindings['links'].update(prior_bindings['links'])
+                industry_bindings['brands'].update(prior_bindings['brands'])
                 for url, text in retry_pages.items():
                     if _industry_source_is_bound(
                         url, retry_final_urls[url], domains=first_party_domains,
                         identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators,
+                        conditional_sources=prior_bindings['brands'],
                     ):
                         # Keep the shared researcher's prefetch input unchanged.
                         # This exact, host-retained corpus is reclassified, never
@@ -5276,6 +5552,7 @@ async def investigate_company_evidence(
                 'first_party_domains': first_party_domains,
                 'identity_anchor': identity_anchor, 'identity_names': identity_names,
                 'careers_locators': bounded_homepage_navigation_locators,
+                'industry_bindings': industry_bindings,
             }
             if industry_review_model:
                 initial_industry, initial_failure, industry_review_calls = (
@@ -5359,6 +5636,7 @@ async def investigate_company_evidence(
             industry_discovery = None
             industry_search_scopes = _industry_search_scopes(
                 first_party_domains, identity_anchor, bounded_homepage_navigation_locators,
+                current_industry_bindings()['brands'],
             ) if industry_review_model else ()
             if industry_gap_search_needed:
                 # Keep the reviewer's most discriminative missing fact, which
@@ -5381,8 +5659,7 @@ async def investigate_company_evidence(
                 # the exact-URL reader. Keep them in existing source storage.
                 # Preserve any directly fetched body/redirect already present.
                 for url, text in industry_discovery.pop('_source_pages', {}).items():
-                    if _industry_source_is_bound(url, url, domains=first_party_domains,
-                            identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators):
+                    if industry_source_bound(url, url):
                         if url not in fetched_pages:
                             fetched_pages[url] = text
                             search_loaded_urls.add(url)
@@ -5407,9 +5684,7 @@ async def investigate_company_evidence(
                 capacity = max(0, industry_classification.MAX_TOTAL_CHARS - sum(
                     len(_visible_quote_surface(body).strip())
                     for source_url, body in fetched_pages.items()
-                    if _industry_source_is_bound(
-                        source_url, fetched_final_urls.get(source_url, ''), domains=first_party_domains,
-                        identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators)))
+                    if industry_source_bound(source_url, fetched_final_urls.get(source_url, ''))))
                 return domains, capacity
 
             def remaining_industry_research_budget():
@@ -5441,10 +5716,7 @@ async def investigate_company_evidence(
                 # the same complete bounded source packet used by the reviewer,
                 # including those pages, so research can see their remaining facts.
                 for index, (url, body) in enumerate(fetched_pages.items()):
-                    if _industry_source_is_bound(
-                        url, fetched_final_urls.get(url, ''), domains=first_party_domains,
-                        identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators,
-                    ):
+                    if industry_source_bound(url, fetched_final_urls.get(url, '')):
                         text = _visible_quote_surface(body).strip()
                         if text:
                             loaded_industry_sources.append({
@@ -5457,6 +5729,7 @@ async def investigate_company_evidence(
                          for key in ('name', 'website', 'linkedin')},
                         loaded_industry_sources,
                         evaluation_date=input_document['evaluation_date'],
+                        conditional_sources=current_industry_bindings()['brands'],
                     )
                     messages.append({'role': 'user', 'content': (
                         'The following company-bound source bodies are already loaded, '
@@ -5561,6 +5834,9 @@ async def investigate_company_evidence(
                         "fetch_outcomes": list(fetch_outcomes),
                     },
                     PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
+                    **({PRIVATE_INDUSTRY_BINDINGS_KEY: current_industry_bindings()}
+                       if industry_review_model and (current_industry_bindings()['links']
+                                                    or current_industry_bindings()['brands']) else {}),
                 }
 
             for _turn in range(reasoning_turn_limit + 1):
@@ -5709,7 +5985,7 @@ async def investigate_company_evidence(
                                     if key != "type"
                                 },
                             }
-                            for tool in _tools(active_submit_targets)
+                            for tool in _tools(active_submit_targets, industry_sources=bool(industry_review_model))
                             if (
                                 not correction_turn
                                 and not scoped_correction_active
@@ -5833,6 +6109,7 @@ async def investigate_company_evidence(
                             (_normalized_span(search_name), search_domain)
                             if forced_stage_search_call else None
                         ),
+                        industry_sources=bool(industry_review_model),
                     )
                     and not correction_turn
                     and _turn + 1 < reasoning_turn_limit
@@ -6796,6 +7073,9 @@ async def investigate_company_evidence(
                             # it as bounded source text, but never publishes it
                             # in an investigation receipt.
                             PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
+                            **({PRIVATE_INDUSTRY_BINDINGS_KEY: current_industry_bindings()}
+                               if industry_review_model and (current_industry_bindings()['links']
+                                                            or current_industry_bindings()['brands']) else {}),
                         }
                 elif name == "search_web":
                     elapsed = time.monotonic() - started
@@ -6862,10 +7142,7 @@ async def investigate_company_evidence(
                                             or exchange_text_capacity <= 0):
                                         break
                                     if (source_url not in fetched_pages
-                                            and _industry_source_is_bound(
-                                                source_url, source_url, domains=first_party_domains,
-                                                identity=identity_anchor,
-                                                careers_locators=bounded_homepage_navigation_locators)):
+                                            and industry_source_bound(source_url, source_url)):
                                         body = _visible_quote_surface(body).strip()[:exchange_text_capacity]
                                         if not body:
                                             continue
@@ -6903,7 +7180,10 @@ async def investigate_company_evidence(
                         else None
                     )
                     refresh_search_source = safe_url in search_loaded_urls
-                    if safe_url in fetched_pages and not refresh_search_source:
+                    brand_proposal = arguments.get('industry_brand_source') if isinstance(arguments, Mapping) else None
+                    if brand_proposal is not None and not observed_brand_proposal(brand_proposal, safe_url):
+                        tool_result = {'ok': False, 'error': 'unproved_industry_brand_source'}
+                    elif safe_url in fetched_pages and not refresh_search_source:
                         tool_result = {
                             "ok": True,
                             "url": safe_url,
@@ -6946,11 +7226,8 @@ async def investigate_company_evidence(
                             if len(fetch_outcomes) == prior_outcome_count:
                                 fetch_outcomes.append(_fetch_outcome(str(safe_url), tool_result))
                         if (refresh_search_source and tool_result.get('ok')
-                                and not _industry_source_is_bound(
-                                    str(tool_result['url']),
-                                    str(tool_result.get('final_url') or tool_result['url']),
-                                    domains=first_party_domains, identity=identity_anchor,
-                                    careers_locators=bounded_homepage_navigation_locators)):
+                                and not industry_source_bound(str(tool_result['url']),
+                                    str(tool_result.get('final_url') or tool_result['url']))):
                             tool_result = {'ok': False, 'error': 'source_identity_mismatch'}
                             fetch_outcomes.append(_fetch_outcome(str(safe_url), tool_result))
                         if refresh_search_source and not tool_result.get('ok'):
@@ -6972,6 +7249,11 @@ async def investigate_company_evidence(
                                 for key, value in tool_result.items()
                                 if key != "final_url"
                             }
+                    if brand_proposal is not None and tool_result.get('ok'):
+                        if remember_brand_source(brand_proposal, safe_url):
+                            tool_result['industry_source_status'] = 'conditional_provenance_not_ownership'
+                        else:
+                            tool_result = {'ok': False, 'error': 'unbound_industry_brand_source'}
                 else:
                     raise ValueError("reasoning_tool_unknown")
                 admission.tool_settled(

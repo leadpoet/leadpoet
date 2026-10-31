@@ -2942,6 +2942,18 @@ def _industry_search_scope_contains(url, scopes):
     return False
 
 
+def _search_text_is_title_only(text: str, title: Any) -> bool:
+    """A title or repeated heading remains a locator, not a source-body read."""
+    if not isinstance(title, str) or not title.strip():
+        return False
+    title = " ".join(title.split())
+    body = " ".join(_visible_quote_surface(text).split())
+    # Ignore only Markdown heading decoration and repeated copies of this
+    # exact title. Additional prose, however short, is still source text.
+    heading = rf"(?:#{{1,6}}\s+)?{re.escape(title)}(?:\s+#{{1,6}})?"
+    return bool(re.fullmatch(rf"{heading}(?:\s+{heading})*", body))
+
+
 async def _search_web(
     session: aiohttp.ClientSession,
     query: str,
@@ -3040,7 +3052,10 @@ async def _search_web(
                 and not visible_html_dialog_only(raw)):
             text = _plain_text(raw)
             if text and not _is_known_provider_diagnostic_only(text):
-                source_pages.setdefault(url, text)
+                if not _search_text_is_title_only(text, item.get('title')):
+                    source_pages.setdefault(url, text)
+                # An unread heading can still expose useful document links.
+                # Their destinations remain locators under the normal rules.
                 extras = item.get('extras')
                 links = extras.get('links') if isinstance(extras, Mapping) else None
                 for link in links[:MAX_HOMEPAGE_NAVIGATION_LOCATORS] if isinstance(links, list) else ():

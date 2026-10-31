@@ -104,7 +104,7 @@ def loop(monkeypatch, *, search_text=TITLE, raw=None, fetch_status=200,
 _NATIVE_SEARCH = c._search_web
 
 
-def test_search_title_explicit_refresh_wrapper_locator_exact_pdf_handoff(monkeypatch):
+def test_unread_search_title_normal_fetch_wrapper_locator_exact_pdf_handoff(monkeypatch):
     result, reads, documents, selected, calls, reviews = loop(monkeypatch)
     assert reads == [WRAPPER]
     assert selected == [WRAPPER, PDF]
@@ -114,7 +114,7 @@ def test_search_title_explicit_refresh_wrapper_locator_exact_pdf_handoff(monkeyp
     assert result['usage']['fetch_calls'] == 2 <= c.MAX_FETCH_CALLS
     assert result['usage']['search_calls'] == 1
     first = json.dumps(calls['model'][0]['messages'])
-    assert 'refreshed once' in first
+    assert 'locators only' in first
     assert PDF not in first
     # Locator metadata is never quote or classifier evidence.
     assert PDF not in c._visible_quote_surface(
@@ -155,7 +155,7 @@ def test_search_refresh_cannot_bypass_current_admission_limits(monkeypatch, whic
     assert documents == []
     if which == 'deadline':
         assert reads == []
-        assert result[c.PRIVATE_FETCHED_PAGES_KEY][WRAPPER]['text'] == TITLE
+        assert WRAPPER not in result[c.PRIVATE_FETCHED_PAGES_KEY]
         assert result['usage']['fetch_calls'] == 0
     else:
         assert reads == [WRAPPER]

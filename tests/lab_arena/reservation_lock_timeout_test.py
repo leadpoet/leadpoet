@@ -11,14 +11,14 @@ from lab_arena import broker as br, scoring, store as store_module
 from lab_arena.runner import HttpArenaApiClient
 from lab_arena.store import (
     ArenaStore, ArenaStoreError, ArenaStoreUnavailable, DEADLOCK_RETRIES,
-    PostgrestTransport,
+    LOCK_TIMEOUT_RETRY_RPCS, PostgrestTransport,
 )
 from tests.lab_arena.test_lab_arena_broker import (
     CHAT, CONTEXT, HOST_KEYS, FakeLedgerStore, FakeTransport, price_table,
 )
 
 RESERVATIONS = ("lab_arena_reserve_call", "lab_arena_reserve_judgment_call")
-PRE_DISPATCH = RESERVATIONS + ("lab_arena_mark_dispatched",)
+PRE_DISPATCH = tuple(sorted(LOCK_TIMEOUT_RETRY_RPCS))
 LOCK_TIMEOUT = {"code": "55P03", "message": "canceling statement due to lock timeout"}
 
 
@@ -247,3 +247,26 @@ def test_broker_never_replays_ambiguous_or_committed_dispatch_marker(failure):
     assert len(ledger.calls) == 1
     assert next(iter(ledger.calls.values()))["kind"] == (
         "reservation" if failure == "transport_before" else "dispatch")
+
+
+def test_claim_rollback_repeats_the_same_request_identity():
+    """A rolled-back claim is replayed under its own idempotency key, not a new one."""
+    requests = []
+    params = {
+        "p_round_id": "round-1", "p_runner_hotkey": "hk-1",
+        "p_request_id": "req-1", "p_request_hash": "sha256:" + "c" * 64,
+        "p_lease_token_hash": "sha256:" + "d" * 64,
+    }
+
+    def handle(request):
+        requests.append(request)
+        if len(requests) <= DEADLOCK_RETRIES:
+            return httpx.Response(500, json=LOCK_TIMEOUT)
+        return httpx.Response(200, json={"status": "claimed", "request_id": "req-1"})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        transport = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+        assert transport.rpc("lab_arena_claim_assignment", params)["request_id"] == "req-1"
+    assert len(requests) == DEADLOCK_RETRIES + 1
+    assert {json.loads(request.content)["p_request_id"] for request in requests} == {"req-1"}
+    assert {request.content for request in requests} == {requests[0].content}

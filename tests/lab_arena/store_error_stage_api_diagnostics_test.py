@@ -10,7 +10,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from gateway.observability.otel_bootstrap import configure_arena_otel, STORE_ERROR_SPAN_FIELDS
 from lab_arena import telemetry
 from lab_arena.api import create_app
-from lab_arena.store import ArenaStore, ArenaStoreError, ArenaStoreUnavailable, PostgrestTransport
+from lab_arena.store import (
+    LOCK_TIMEOUT_RETRY_RPCS, ArenaStore, ArenaStoreError, ArenaStoreUnavailable,
+    PostgrestTransport,
+)
 from tests.lab_arena.advance_round_telemetry_test import observed_service
 from tests.lab_arena.test_lab_arena_api import StubService
 
@@ -25,7 +28,9 @@ def _metadata(span):
 
 def _native_store(kind, resource):
     requests, errors = [], []
-    attempts = 4 if kind == '40P01' else 1
+    retried = kind == '40P01' or (kind == '55P03'
+                                  and resource in LOCK_TIMEOUT_RETRY_RPCS)
+    attempts = 4 if retried else 1
     def handle(request):
         requests.append(request)
         assert request.url.path == '/rest/v1/rpc/' + resource

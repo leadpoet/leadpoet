@@ -50,6 +50,29 @@ def test_closed_unused_reservation_needs_no_worker_exception_or_model_target(ope
     assert values["runs"] == before_runs and values["ledger_rows"] == before_ledger
 
 
+@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
+def test_observed_unused_model_attempt_counts_complete_without_becoming_target(operation):
+    values = undispatched_values(operation=operation, complete=True)
+    example = training_export.assemble_example(**values)
+    call = example["provider_calls"][-1]
+    payload = example["worker_observation_artifacts"][example["run_id"]]["payload"]
+    observed = next(row for row in payload["observations"]
+                    if row["action_sequence"] == call["action_sequence"])
+    assert observed["kind"] == "transport_failure" and observed["call_identity"] is None
+    assert call["worker_observation_ref"]["ordinal"] == observed["ordinal"]
+    assert training_thinking.verified_undispatched_transport(example, call)
+    assert training_thinking.verified_failed_attempt(example, call)
+    result = assess_bank(values, example)
+    assert result["counts"]["complete_runs"] == 10, result
+    assert result["counts"]["incomplete_runs"] == 0
+    baseline = deepcopy(example)
+    baseline["provider_calls"].pop()
+    seal(baseline)
+    assert len(strict_pairs(example)) == 2
+    assert strict_pairs(example) == strict_pairs(baseline)
+    assert "response" not in call and call["actual_microusd"] == 0
+
+
 @pytest.mark.parametrize("damage", ["dispatch", "reason", "amount", "reserved_amount", "request",
     "run", "response", "upstream_receipt", "host_write", "failed_host_write", "agent_receipt",
     "sequence_collision", "identity_elsewhere", "observation_ref"])

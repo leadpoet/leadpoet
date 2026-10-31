@@ -354,7 +354,11 @@ parts of one paragraph, not independent claims; read them together and do not
 change the writing or evidence standard because of a unit boundary. Set
 contains_factual_claim=true when the unit makes any concrete factual assertion.
 A clearly conditional commercial implication with no new asserted fact can be
-marked contains_factual_claim=false. An unconditional increase, effect, or
+marked contains_factual_claim=false. An uncertain outcome does not suspend
+separately asserted or presupposed company products or capabilities in the
+same unit. Mark a mixed unit factual if it contains any such claim, and ground
+that claim. The conditional outcome itself need not have occurred.
+An unconditional increase, effect, or
 performance outcome is a factual assertion even when it also explains ICP
 relevance. A directly entailed catalog or assortment expansion remains factual
 and can be supported by evidence that the products were added. For a factual
@@ -2686,7 +2690,11 @@ STRUCTURED REVIEW CORRECTION:
 The previous answer's facts_supported aggregate and unit_grounding conflict.
 That answer is invalid and is not evidence. Re-evaluate the complete unchanged
 document, including every unit's factual classification, status and evidence,
-and all required checks. Return one fresh complete schema-valid verdict. Do not
+and all required checks. If facts_supported is false, identify at least one
+UNPROVEN or CONTRADICTED factual unit in unit_grounding. Otherwise keep factual
+support separate from an uncertain commercial implication; assess the
+independent relevance and ICP checks separately.
+Return one fresh complete schema-valid verdict. Do not
 copy a conclusion from the invalid answer. No particular decision is requested.
 """
 

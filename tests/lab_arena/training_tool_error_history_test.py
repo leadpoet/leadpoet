@@ -94,6 +94,21 @@ def test_responses_current_declaration_conflicts_still_fail():
                                         allow_tool_error_history=True)
 
 
+def test_chat_current_declaration_shape_still_fails_before_cap_omission():
+    example = history_example('openrouter.chat')
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    body['tools'][0]['function'] = 'invalid'
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    call['response']['choices'][0]['finish_reason'] = 'length'
+    refresh_response_links(example, 0)
+    seal(example)
+    with pytest.raises(AttributeError):
+        training_steps._candidate(example, call)
+    assert not training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)['eligible']
+
+
 @pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
 @pytest.mark.parametrize('damage', ['missing_output', 'wrong_output', 'duplicate_output',
                                    'new_undeclared_target', 'new_malformed_target'])

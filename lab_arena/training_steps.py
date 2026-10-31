@@ -113,6 +113,10 @@ def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_
     _require(isinstance(messages, list) and messages, 'input_shape_unsupported')
     pending = set()
     seen, malformed_ids = set(), set()
+    # Keep the existing current-tool shape evaluation at this point. Only its
+    # membership test against historical failed calls is removed below.
+    declared = [(tool.get('function') or {}).get('name') for tool in tools
+                if isinstance(tool, dict) and tool.get('type') == 'function']
     for msg in messages:
         allowed = {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
         if allow_reasoning_history:

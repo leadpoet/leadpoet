@@ -440,9 +440,9 @@ def prepare_request(
     )
 
 
-def _context_integrity_verified(
+def context_integrity_failure(
     response: Mapping[str, Any], prepared: PreparedCodeReview,
-) -> bool:
+) -> str | None:
     """Require fresh router evidence that all input reached the chosen model.
 
     OpenRouter reports every materially altering plugin in pipeline. A missing
@@ -452,23 +452,23 @@ def _context_integrity_verified(
 
     metadata = response.get("openrouter_metadata")
     if not isinstance(metadata, Mapping):
-        return False
-    if (
-        metadata.get("requested") != prepared.parameters["model"]
-        or metadata.get("strategy") != "direct"
-        or type(metadata.get("attempt")) is not int
-        or metadata["attempt"] != 1
-        or ("pipeline" in metadata and metadata["pipeline"] != [])
-    ):
-        return False
+        return "metadata_missing"
+    if metadata.get("requested") != prepared.parameters["model"]:
+        return "requested_model"
+    if metadata.get("strategy") != "direct":
+        return "strategy"
+    if type(metadata.get("attempt")) is not int or metadata["attempt"] != 1:
+        return "attempt"
+    if "pipeline" in metadata and metadata["pipeline"] != []:
+        return "pipeline"
     endpoints = metadata.get("endpoints")
     if not isinstance(endpoints, Mapping):
-        return False
+        return "endpoints_missing"
     available = endpoints.get("available")
     if not isinstance(available, list) or not available:
-        return False
+        return "endpoints_available"
     if type(endpoints.get("total")) is not int or endpoints["total"] < len(available):
-        return False
+        return "endpoints_total"
     if any(
         not isinstance(endpoint, Mapping)
         or type(endpoint.get("selected")) is not bool
@@ -477,24 +477,32 @@ def _context_integrity_verified(
         or not endpoint["provider"]
         for endpoint in available
     ):
-        return False
+        return "endpoint_shape"
     selected = [endpoint for endpoint in available if endpoint["selected"]]
     requested_model = prepared.parameters["model"]
     allowed_endpoint_models = {requested_model}
     canonical_model = _REVIEW_MODEL_CANONICAL_SLUGS.get(requested_model)
     if canonical_model is not None:
         allowed_endpoint_models.add(canonical_model)
-    if len(selected) != 1 or selected[0]["model"] not in allowed_endpoint_models:
-        return False
+    if len(selected) != 1:
+        return "selected_count"
+    if selected[0]["model"] not in allowed_endpoint_models:
+        return "selected_model"
     usage = response.get("usage")
     if not isinstance(usage, Mapping):
-        return False
+        return "usage_missing"
     prompt_tokens = usage.get("prompt_tokens")
-    return (
-        type(prompt_tokens) is int
-        and prompt_tokens > 0
-        and prompt_tokens + prepared.parameters["max_tokens"] <= prepared.context_window_tokens
-    )
+    if type(prompt_tokens) is not int or prompt_tokens <= 0:
+        return "prompt_tokens"
+    if prompt_tokens + prepared.parameters["max_tokens"] > prepared.context_window_tokens:
+        return "context_budget"
+    return None
+
+
+def _context_integrity_verified(
+    response: Mapping[str, Any], prepared: PreparedCodeReview,
+) -> bool:
+    return context_integrity_failure(response, prepared) is None
 
 
 def _json_object_without_duplicates(raw: str) -> Mapping[str, Any]:

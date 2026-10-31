@@ -254,6 +254,7 @@ class SubmissionCodeReviewer:
         status = "error"
         provider_http_status = 0
         provider_observation: dict[str, Any] = {}
+        diagnostic_response: tuple[Any, Mapping[str, Any]] | None = None
         funding_route = "none"
         document: dict[str, Any] = code_review_policy.diagnostic(
             "code_review_provider_unavailable"
@@ -308,6 +309,7 @@ class SubmissionCodeReviewer:
                         parsed = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         parsed = None
+                    diagnostic_response = (parsed, response.headers)
                     if response.internal_provenance is None:
                         provider_observation = code_review_policy.provider_response_observation(
                             parsed, raw_http_status=provider_http_status,
@@ -423,6 +425,17 @@ class SubmissionCodeReviewer:
             "file_count": len(prepared.reviewed_files),
             "source_bytes": prepared.reviewed_file_bytes,
         })
+        if diagnostic_response is not None:
+            # Decide the review and cost first. Optional diagnostics cannot
+            # replace either outcome if their own projection fails.
+            try:
+                parsed, headers = diagnostic_response
+                _present, generation_id = broker._openrouter_generation_identity(parsed, headers)
+                document["provider_diagnostic"] = code_review_policy.private_response_diagnostic(
+                    parsed, prepared, generation_id=generation_id,
+                )
+            except Exception:
+                pass
         return self._finish_review(
             row, token, status, document, actual,
             attempt=claim.get("attempt"),

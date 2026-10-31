@@ -34,6 +34,105 @@ def history_example(api='openrouter.responses', arguments='{"company":'):
     return seal(example)
 
 
+def changed_tools_example(api, current_tools):
+    example = history_example(api)
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    response = call['response']
+    if current_tools == 'removed':
+        body['tools'] = []
+    elif api.endswith('responses'):
+        body['tools'][0]['name'] = 'next_step_tool'
+    else:
+        body['tools'][0]['function']['name'] = 'next_step_tool'
+    # This turn ends with text. The prior failed tool call is only input.
+    if api.endswith('responses'):
+        response['output'][1] = {'type': 'message', 'role': 'assistant', 'status': 'completed',
+                                 'content': [{'type': 'output_text', 'text': 'Final answer.'}]}
+    else:
+        choice = response['choices'][0]
+        choice['finish_reason'] = 'stop'
+        choice['message']['content'] = 'Final answer.'
+        choice['message'].pop('tool_calls')
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    refresh_response_links(example, 0)
+    seal(example)
+    return example
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('current_tools', ['removed', 'renamed'])
+def test_closed_malformed_history_survives_changed_current_tools(api, current_tools):
+    example = changed_tools_example(api, current_tools)
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    assert training_steps._candidate(example, call)['input'] == body
+    assert training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)['eligible']
+
+
+def test_namespaced_closed_malformed_history_survives_removed_current_tools():
+    example = changed_tools_example('openrouter.responses', 'removed')
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    body['input'][-2]['namespace'] = 'mcp__review'
+    body['input'][-2]['name'] = 'review'
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    seal(example)
+    assert training_steps._candidate(example, call)['input'] == body
+
+
+def test_responses_current_declaration_conflicts_still_fail():
+    example = history_example()
+    body = example['provider_calls'][0]['request']['outbound']['body']
+    conflicting = deepcopy(body['tools'][0])
+    conflicting['description'] = 'Different declaration.'
+    body['input'].insert(0, {'type': 'additional_tools', 'role': 'developer',
+                              'tools': [conflicting]})
+    with pytest.raises(ValueError, match='^tool_definition_unsupported$'):
+        training_steps._responses_input(body['input'], tools=body['tools'],
+                                        allow_tool_error_history=True)
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('damage', ['missing_output', 'wrong_output', 'duplicate_output',
+                                   'new_undeclared_target', 'new_malformed_target'])
+def test_removed_current_tools_do_not_waive_historical_pairing_or_new_target_checks(api, damage):
+    example = changed_tools_example(api, 'removed')
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    values = body['input'] if api.endswith('responses') else body['messages']
+    if damage == 'missing_output':
+        values.pop()
+    elif damage == 'wrong_output':
+        if api.endswith('responses'):
+            values[-1]['type'] = 'custom_tool_call_output'
+        else:
+            values[-1]['tool_call_id'] = 'different'
+    elif damage == 'duplicate_output':
+        values.append(deepcopy(values[-1]))
+    else:
+        if api.endswith('responses'):
+            call['response']['output'][1] = {
+                'type': 'function_call', 'id': 'fc-new', 'call_id': 'new',
+                'name': 'not_declared', 'status': 'completed',
+                'arguments': '{}' if damage == 'new_undeclared_target' else '{'}
+        else:
+            choice = call['response']['choices'][0]
+            choice['finish_reason'] = 'tool_calls'
+            choice['message']['content'] = None
+            choice['message']['tool_calls'] = [{'id': 'new', 'type': 'function', 'function': {
+                'name': 'not_declared', 'arguments': '{}' if damage == 'new_undeclared_target' else '{'}}]
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    refresh_response_links(example, 0)
+    seal(example)
+    expected = ('tool_context_unresolved' if damage in {'missing_output', 'wrong_output', 'duplicate_output'}
+                else 'undeclared_tool_call' if damage == 'new_undeclared_target'
+                else 'tool_call_shape_unsupported')
+    with pytest.raises(ValueError, match=f'^{expected}$'):
+        training_steps._candidate(example, call)
+
+
 @pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
 @pytest.mark.parametrize('arguments', ['{"company":', 'not JSON', '{"wrong": invalid}', '{"company":"' + 'x' * 51_300], ids=['eof', 'text', 'syntax', 'long_eof'])
 def test_exact_paired_tool_error_history_keeps_valid_following_target(api, arguments):
@@ -51,7 +150,7 @@ def test_exact_paired_tool_error_history_keeps_valid_following_target(api, argum
 
 @pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
 @pytest.mark.parametrize('damage', ['missing_output', 'duplicate_call', 'duplicate_output', 'reused_id',
-                                   'unregistered', 'wrong_kind', 'argument_type', 'result_type',
+                                   'new_undeclared_target', 'wrong_kind', 'argument_type', 'result_type',
                                    'request_hash', 'host_hash', 'target_json', 'legacy', 'off'])
 def test_malformed_history_does_not_waive_pairing_declaration_types_or_proof(api, damage):
     example = history_example(api)
@@ -63,8 +162,11 @@ def test_malformed_history_does_not_waive_pairing_declaration_types_or_proof(api
     elif damage == 'duplicate_call': values.insert(-1, deepcopy(prior))
     elif damage == 'duplicate_output': values.append(deepcopy(output))
     elif damage == 'reused_id': values.extend([deepcopy(prior), deepcopy(output)])
-    elif damage == 'unregistered':
-        (prior if api.endswith('responses') else prior['tool_calls'][0]['function'])['name'] = 'not_declared'
+    elif damage == 'new_undeclared_target':
+        if api.endswith('responses'):
+            call['response']['output'][1]['name'] = 'not_declared'
+        else:
+            call['response']['choices'][0]['message']['tool_calls'][0]['function']['name'] = 'not_declared'
     elif damage == 'wrong_kind':
         if api.endswith('responses'):
             output['type'] = 'custom_tool_call_output'

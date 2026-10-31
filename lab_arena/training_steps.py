@@ -113,8 +113,6 @@ def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_
     _require(isinstance(messages, list) and messages, 'input_shape_unsupported')
     pending = set()
     seen, malformed_ids = set(), set()
-    declared = [(tool.get('function') or {}).get('name') for tool in tools
-                if isinstance(tool, dict) and tool.get('type') == 'function']
     for msg in messages:
         allowed = {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
         if allow_reasoning_history:
@@ -152,8 +150,9 @@ def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_
                     if allow_tool_error_history:
                         _require(identifier not in malformed_ids, 'tool_context_unresolved')
                         if malformed:
-                            _require(identifier not in seen and function['name'] in declared,
-                                     'tool_context_unresolved')
+                            # Current declarations govern new targets, not
+                            # closed failed calls retained from earlier turns.
+                            _require(identifier not in seen, 'tool_context_unresolved')
                             malformed_ids.add(identifier)
                     seen.add(identifier)
                 pending = {item['id'] for item in msg['tool_calls']}
@@ -187,8 +186,10 @@ def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_hi
         return
     pending = {}
     seen, malformed_ids = set(), set()
-    declared = (_response_tool_definitions({'input': value, 'tools': list(tools)})
-                if allow_tool_error_history else {})
+    if allow_tool_error_history:
+        # Retain declaration conflict/shape checks even though historical
+        # failed calls no longer need a declaration in this current turn.
+        _response_tool_definitions({'input': value, 'tools': list(tools)})
     for item in value:
         kind = item.get('type', 'message')
         if kind == 'message':
@@ -210,8 +211,8 @@ def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_hi
             if kind == 'function_call' and not _arguments(item['arguments']):
                 _require(allow_tool_error_history and item['call_id'] not in seen,
                          'tool_context_unresolved')
-                declaration = declared.get((item.get('namespace'), item['name'])) or {}
-                _require(declaration.get('type') == 'function', 'tool_context_unresolved')
+                # The paired call is historical input. Its tool can be absent
+                # from this turn's declarations; new targets are checked below.
                 malformed_ids.add(item['call_id'])
             seen.add(item['call_id'])
             pending[item['call_id']] = kind

@@ -26,11 +26,12 @@ PROOF = {'parent_source_url': PARENT, 'parent_quote': RELATION,
 
 
 def native_loop(monkeypatch, *, proof=PROOF, parent_text=RELATION, href=HOME,
-                child_text=FACT, child_final=CHILD, decision='match', omit_relation=False,
+                child_text=FACT, child_final=None, decision='match', omit_relation=False,
                 child_first=False):
     monkeypatch.setenv('LEADPOET_COMPETITION_EVALUATION_DATE', '2026-10-24')
     run, _, _, _ = install(monkeypatch)
     reads, research, reviews = [], [], []
+    child_final = CHILD if child_final is None else child_final
     plan = [('fetch_page', {'url': PARENT, 'industry_brand_source': None}),
             ('fetch_page', {'url': CHILD, 'industry_brand_source': copy.deepcopy(proof)}),
             ('submit_findings', {'findings': [_finding('industry', status='VERIFIED',
@@ -70,6 +71,7 @@ def native_loop(monkeypatch, *, proof=PROOF, parent_text=RELATION, href=HOME,
                     if not omit_relation and int(span['span_id'].rsplit(':', 2)[2]) > start
                     and int(span['span_id'].rsplit(':', 2)[1]) < end]
         selected += [span['span_id'] for page in pages if page['source_url'] == CHILD for span in page['spans']]
+        selected = list(dict.fromkeys(selected))
         if child_first:
             selected = sorted(selected, key=lambda key: next(
                 page['source_url'] != CHILD for page in pages for span in page['spans']
@@ -450,3 +452,101 @@ def test_child_first_citations_keep_bound_parent_attribution_without_inventing_a
     assert finding['status'] == 'VERIFIED'
     assert finding['evidence_url'] == PARENT
     assert relation in finding['evidence_quote']
+
+
+@pytest.mark.parametrize('path', [
+    '/tenant-one/../tenant-two/page', '/tenant-one/./../tenant-two/page',
+    '/tenant-one/%2e%2e/tenant-two/page', '/tenant-one/.%2E/tenant-two/page',
+    '/tenant-one/%2e./tenant-two/page', '/tenant-one/%252e%252e/tenant-two/page',
+    '/tenant-one/%2e%2e%2ftenant-two/page', '/tenant-one/%2E%2E%5Ctenant-two/page',
+    '/tenant-one/\\..\\tenant-two/page', '/tenant-one/%5c..%5ctenant-two/page',
+    '/tenant-one/%255c%252e%252e%255ctenant-two/page',
+    '/tenant-one/%252f..%252ftenant-two/page', '/tenant-one/%2f..%2ftenant-two/page',
+    '/tenant-one/..;ignored/tenant-two/page', '/tenant-one/%2e%2e%3bignored/tenant-two/page',
+    '/tenant-one/%EF%BC%8E%EF%BC%8E%EF%BC%8Ftenant-two/page',
+])
+def test_conditional_tenant_scope_rejects_literal_encoded_and_normalized_traversal(path):
+    assert not c._industry_brand_scope('https://shared.example' + path,
+                                        'https://shared.example/tenant-one/')
+
+
+@pytest.mark.parametrize('home', [
+    'https://shared.example/tenant-one/../tenant-two/',
+    'https://shared.example/tenant-one/%252e%252e/tenant-two/',
+    'https://shared.example/tenant-one%2ftenant-two/',
+])
+def test_observed_homepage_cannot_itself_contain_ambiguous_tenant_path(home):
+    assert not c._industry_brand_scope(home + 'product', home)
+
+
+@pytest.mark.parametrize('path', [
+    '/tenant-one/spec%20sheet.pdf', '/tenant-one/caf%C3%A9.pdf',
+    '/tenant-one/v1.2/guide.pdf', '/tenant-one/..backup.pdf',
+    '/tenant-one/100%25-complete.pdf', '/tenant-one/a%2Eb.pdf',
+    '/tenant-one/sub;v=2/file.pdf', '/tenant-one/%E6%96%87%E6%A1%A3.pdf',
+])
+def test_ordinary_encoded_paths_stay_supported_without_rewriting(path):
+    url = 'https://shared.example' + path
+    assert c._industry_brand_scope(url, 'https://shared.example/tenant-one/')
+    assert path == url.split('shared.example', 1)[1]
+
+
+@pytest.mark.parametrize('proof', [None, {**PROOF, 'parent_quote': 'Unproved but irrelevant proposal.'}, PROOF])
+def test_unnecessary_conditional_proposal_cannot_block_ordinary_first_party_fetch(monkeypatch, proof):
+    own_product = 'https://www.coreworks.ai/product'
+    monkeypatch.setitem(globals(), 'CHILD', own_product)
+    result, reads, _, _ = native_loop(monkeypatch, proof=proof)
+    assert reads == [PARENT, own_product]
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert own_product not in result.get(c.PRIVATE_INDUSTRY_BINDINGS_KEY, {}).get('brands', {})
+
+
+def test_self_reference_cannot_erase_ordinary_parent_only_positive(monkeypatch):
+    monkeypatch.setitem(globals(), 'CHILD', PARENT)
+    text = 'Coreworks itself supplies analysis, reporting and account workflows. Coreworks homepage: ' + PARENT
+    proposal = {'parent_source_url': PARENT, 'parent_quote': text,
+        'child_brand': 'Coreworks', 'official_child_homepage': PARENT}
+    result, reads, _, _ = native_loop(monkeypatch, proof=proposal, parent_text=text)
+    assert reads == [PARENT]
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert result['claims']['industry']['evidence_url'] == PARENT
+    assert PARENT not in result.get(c.PRIVATE_INDUSTRY_BINDINGS_KEY, {}).get('brands', {})
+
+
+@pytest.mark.parametrize('url', [PARENT, 'https://www.coreworks.ai/product'])
+def test_retained_conditional_records_never_reclassify_bound_first_party_pages(url):
+    text = 'Coreworks itself supplies account workflows. Coreworks homepage: ' + url
+    pages = {PARENT: text, url: text}
+    binding = {'schema': 'industry_source_bindings_v1', 'parent_domain': 'coreworks.ai',
+        'parent_name': 'coreworks', 'evaluation_date': '2026-10-24', 'links': {},
+        'brands': {url: {'parent_source_url': PARENT, 'parent_quote': text,
+            'child_brand': 'Coreworks', 'official_child_homepage': url,
+            'parent_body_sha256': hashlib.sha256(text.encode()).hexdigest(),
+            'child_body_sha256': hashlib.sha256(text.encode()).hexdigest(),
+            'child_final_url': url, 'pointer_kind': 'printed_reference', 'printed_reference': url}}}
+    validated = c._validated_industry_bindings(binding, pages, {key: key for key in pages},
+        domains={'coreworks.ai'}, identity={'submitted_domain': 'coreworks.ai',
+            'observed_domain': 'coreworks.ai', 'observed_name': 'Coreworks'},
+        evaluation_date_value='2026-10-24')
+    assert validated['brands'] == {}
+    packet = industry.prepare({'industry': 'Software', 'subindustry': '', 'product_service': 'Workflows'},
+        {'name': 'Coreworks', 'website': 'https://www.coreworks.ai/'},
+        [{'source_id': f'page{i}', 'source_url': key, 'body': body}
+         for i, (key, body) in enumerate(pages.items())], evaluation_date='2026-10-24',
+        conditional_sources=validated['brands'])
+    assert {item[2] for item in packet.pages} == set(pages)
+    assert not packet.conditional_sources
+
+
+@pytest.mark.parametrize('at_final', [False, True])
+def test_actual_native_binding_rejects_tenant_traversal_even_if_provider_echoes_it(monkeypatch, at_final):
+    home = 'https://shared.example/tenant-one/'
+    unsafe = home + '%252e%252e/tenant-two/product'
+    target = home + 'product' if at_final else unsafe
+    monkeypatch.setitem(globals(), 'CHILD', target)
+    proof = {**PROOF, 'official_child_homepage': home}
+    result, reads, _, _ = native_loop(monkeypatch, proof=proof, href=home,
+        child_final=unsafe)
+    assert result['claims']['industry']['status'] != 'VERIFIED'
+    assert not result.get(c.PRIVATE_INDUSTRY_BINDINGS_KEY, {}).get('brands')
+    assert reads == [PARENT, target] if at_final else reads == [PARENT]

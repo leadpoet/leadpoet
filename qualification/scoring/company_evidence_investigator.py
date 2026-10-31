@@ -24,7 +24,7 @@ import time
 import unicodedata
 from html.parser import HTMLParser
 from typing import Any, Mapping, Optional, Sequence
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import aiohttp
 
@@ -1992,6 +1992,28 @@ def _industry_relationship_quote(quote: str, text: str) -> bool:
                 and quote in _visible_quote_surface(text))
 
 
+def _industry_scope_path_is_unambiguous(path: str) -> bool:
+    """Reject intermediary-dependent tenant paths without rewriting requests."""
+    if re.search(r'%(?![0-9a-fA-F]{2})', path):
+        return False
+    for _ in range(5):
+        normalized = unicodedata.normalize('NFKC', path)
+        if ('\\' in normalized or re.search(r'%2f|%5c', path, re.I)
+                or normalized.count('/') != path.count('/')
+                or any(ord(char) < 32 or ord(char) == 127 for char in normalized)
+                or any(segment.split(';', 1)[0] in {'.', '..'}
+                       for segment in normalized.split('/'))):
+            return False
+        try:
+            decoded = unquote(path, errors='strict')
+        except UnicodeError:
+            return False
+        if decoded == path:
+            return True
+        path = decoded
+    return False
+
+
 def _industry_brand_scope(url: str, homepage: str) -> bool:
     """One exact linked host/path, with only the ordinary www spelling alias."""
     if not _safe_https_url(url) or not _safe_https_url(homepage):
@@ -2003,6 +2025,8 @@ def _industry_brand_scope(url: str, homepage: str) -> bool:
     except ValueError:
         return False
     source, home = urlsplit(url), urlsplit(homepage)
+    if not all(_industry_scope_path_is_unambiguous(value.path) for value in (source, home)):
+        return False
     prefix = home.path.rstrip('/')
     return bool(source.hostname.removeprefix('www.') == home.hostname.removeprefix('www.')
                 and (not prefix or source.path == prefix or source.path.startswith(prefix + '/'))
@@ -2078,7 +2102,10 @@ def _validated_industry_bindings(value: Any, pages: Mapping[str, str], final_url
             continue
         empty['links'][url] = copy.deepcopy(dict(link))
     for url, candidate in value['brands'].items():
-        if (not isinstance(candidate, Mapping)
+        # Conditional bookkeeping must never demote an ordinary first-party
+        # page or make its inclusion depend on a proposed brand relationship.
+        if (_independently_bound_first_party_url(url, domains, identity)
+                or not isinstance(candidate, Mapping)
                 or set(candidate) != set(_BRAND_PROPOSAL_LIMITS) | {
                     'parent_body_sha256', 'child_body_sha256', 'child_final_url',
                     'pointer_kind', 'printed_reference'}
@@ -7181,6 +7208,8 @@ async def investigate_company_evidence(
                     )
                     refresh_search_source = safe_url in search_loaded_urls
                     brand_proposal = arguments.get('industry_brand_source') if isinstance(arguments, Mapping) else None
+                    if _independently_bound_first_party_url(safe_url, first_party_domains, identity_anchor):
+                        brand_proposal = None
                     if brand_proposal is not None and not observed_brand_proposal(brand_proposal, safe_url):
                         tool_result = {'ok': False, 'error': 'unproved_industry_brand_source'}
                     elif safe_url in fetched_pages and not refresh_search_source:

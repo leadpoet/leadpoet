@@ -2946,12 +2946,25 @@ def _search_text_is_title_only(text: str, title: Any) -> bool:
     """A title or repeated heading remains a locator, not a source-body read."""
     if not isinstance(title, str) or not title.strip():
         return False
-    title = " ".join(title.split())
-    body = " ".join(_visible_quote_surface(text).split())
-    # Ignore only Markdown heading decoration and repeated copies of this
-    # exact title. Additional prose, however short, is still source text.
-    heading = rf"(?:#{{1,6}}\s+)?{re.escape(title)}(?:\s+#{{1,6}})?"
-    return bool(re.fullmatch(rf"{heading}(?:\s+{heading})*", body))
+    title_words = title.split()
+    words = _visible_quote_surface(text).split()
+    if not words:
+        return False
+
+    def heading_marker(word: str) -> bool:
+        return 1 <= len(word) <= 6 and word == '#' * len(word)
+
+    # _plain_text has collapsed line breaks. Strip only unambiguous outer
+    # heading decoration; internal markers remain content. Never run a
+    # backtracking pattern on an untrusted source body.
+    if heading_marker(words[0]) and words[0] != title_words[0]:
+        words = words[1:]
+        if words and heading_marker(words[-1]) and words[-1] != title_words[-1]:
+            words = words[:-1]
+    return bool(words) and len(words) % len(title_words) == 0 and all(
+        word == title_words[index % len(title_words)]
+        for index, word in enumerate(words)
+    )
 
 
 async def _search_web(

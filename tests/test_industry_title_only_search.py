@@ -4,7 +4,11 @@ The 45-character title/text pair is from a retained public search result.
 All transports and model choices below are fixtures, not accuracy evidence.
 """
 import asyncio
+import ast
 import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -38,7 +42,7 @@ def test_exact_saved_45_character_result_is_locator_only(monkeypatch):
     '\n  ' + TITLE + '\t',
     '# ' + TITLE,
     '## ' + TITLE + ' ##',
-    TITLE + '\n\n# ' + TITLE,
+    TITLE + '\n\n' + TITLE,
 ])
 def test_saved_title_only_body_stays_unread_and_keeps_link_locators(monkeypatch, text):
     async def post(*args, **kwargs):
@@ -64,6 +68,9 @@ def test_saved_title_only_body_stays_unread_and_keeps_link_locators(monkeypatch,
     ('Coreworks launches account workflows.', 'Coreworks launches account workflows. Available today.'),
     ('Product documentation', 'Product documentation\n\n' + FACT),
     ('Product documentation', '# Product documentation\n\n' + FACT),
+    # _plain_text loses line breaks. Keep ambiguous internal heading tokens
+    # rather than guessing that they have no additional source content.
+    ('Product documentation', 'Product documentation\n\n# Product documentation'),
     ('', FACT),
     (None, FACT),
 ])
@@ -180,3 +187,32 @@ def test_all_target_choices_have_identical_transport_budget_before_and_after(mon
             outcomes.append((transports, usage['fetch_calls'], usage['search_calls']))
     assert outcomes[0] == outcomes[1]
     assert len([x for x in outcomes[1][0] if x[0] == 'fetch']) == 3
+
+
+@pytest.mark.parametrize('title,body,expected', [
+    ('#', ('# ' * 12000)[:-1] + 'X', False),
+    (TITLE, (('# ' + TITLE + ' ') * 500)[:23999] + 'X', False),
+    (TITLE, ((TITLE + ' ') * 521).ljust(24000), True),
+    ('A' * 23998, 'A' * 23998 + ' X', False),
+], ids=['hash-near-miss', 'ordinary-near-miss', 'ordinary-repeat', 'long-title-near-miss'])
+def test_untrusted_maximum_body_matching_is_bounded(title, body, expected):
+    """Kill only the owned offline test child if a regex regression hangs."""
+    # Compile the actual two pure functions, without importing provider code.
+    source = Path(c.__file__).read_text()
+    tree = ast.parse(source)
+    nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+             and node.name in {'_visible_quote_surface', '_search_text_is_title_only'}]
+    child = '''import ast,json,re,socket,sys,typing
+def denied(*a,**k):raise AssertionError('network forbidden')
+socket.socket.connect=socket.getaddrinfo=denied
+doc=json.loads(sys.stdin.read())
+namespace={'Any':typing.Any,'_IDENTITY_LINK_CONTEXT_MARKER':doc['marker'],'re':re}
+exec(compile(doc['source'],'actual-source-helper','exec'),namespace)
+assert namespace['_search_text_is_title_only'](doc['body'],doc['title']) is doc['expected']
+'''
+    payload = {'source': ast.unparse(ast.Module(body=nodes, type_ignores=[])),
+               'marker': c._IDENTITY_LINK_CONTEXT_MARKER,
+               'title': title, 'body': body, 'expected': expected}
+    result = subprocess.run([sys.executable, '-c', child], input=json.dumps(payload),
+                            text=True, capture_output=True, timeout=2)
+    assert result.returncode == 0, result.stderr

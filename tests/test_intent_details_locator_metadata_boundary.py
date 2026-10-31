@@ -241,7 +241,7 @@ def test_valid_body_and_unobserved_mandatory_quotes_stay_exact():
     assert trace == before
 
 
-def test_metadata_cannot_be_re_attributed_to_a_different_cited_source():
+def test_unrelated_metadata_does_not_disprove_a_different_cited_source_quote():
     a, b = 'https://source.example/contract', 'https://other.example/document'
     trace = {'verified_source_context': [
         {'url': a, 'text': 'Real body. ' + MARKER + ' ' + UNREAD},
@@ -249,7 +249,10 @@ def test_metadata_cannot_be_re_attributed_to_a_different_cited_source():
         'intent_verdict': {'signal_evaluations': [{'evidence_urls_used': [b],
                                                  'supporting_quotes': [UNREAD]}]}}
     cleaned = review._source_context_trace(trace)
-    assert cleaned['intent_verdict']['signal_evaluations'][0]['supporting_quotes'] == []
+    # B's retained window need not contain every verified mandatory quote.
+    # An unread locator on A cannot establish that a quote attributed to B
+    # came only from metadata, even when their strings happen to match.
+    assert cleaned['intent_verdict']['signal_evaluations'][0]['supporting_quotes'] == [UNREAD]
 
 
 def test_ingress_uses_only_the_existing_five_context_allowance():

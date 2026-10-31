@@ -457,7 +457,9 @@ def _source_evidence_text(value: str) -> str:
     return _visible_quote_surface(value)
 
 
-def _source_context_trace(value: Any) -> Mapping[str, Any]:
+def _source_context_trace(
+    value: Any, *, declared_urls: list[str] | None = None,
+) -> Mapping[str, Any]:
     """Remove discovery metadata before selecting or dating retained bodies."""
     from qualification.scoring.company_evidence_investigator import _IDENTITY_LINK_CONTEXT_MARKER
 
@@ -483,7 +485,8 @@ def _source_context_trace(value: Any) -> Mapping[str, Any]:
             projected.append(evaluation)
             continue
         urls = set(_texts(evaluation.get("evidence_urls_used"), maximum=5, length=2_048)
-                   or _texts(evaluation.get("source_urls_supplied"), maximum=5, length=2_048))
+                   or _texts(evaluation.get("source_urls_supplied"), maximum=5, length=2_048)
+                   or _texts(declared_urls, maximum=3, length=2_048))
         item = dict(evaluation)
         for field in ("supporting_quotes", "contradicting_quotes"):
             quotes = evaluation.get(field)
@@ -496,12 +499,15 @@ def _source_context_trace(value: Any) -> Mapping[str, Any]:
                     continue
                 metadata_sources = {
                     context.get("url") for context in bodies
-                    if (visible := _source_evidence_text(context["text"])) != context["text"]
+                    if (not urls or context.get("url") in urls)
+                    and (visible := _source_evidence_text(context["text"])) != context["text"]
                     and _quote_is_bound(quote, [
                         context["text"][len(visible) + len(_IDENTITY_LINK_CONTEXT_MARKER):]
                     ])
                 }
                 excluded = bool(metadata_sources) or _source_evidence_text(quote) != quote
+                # Metadata on a different explicitly attributed source cannot
+                # disprove a mandatory quote outside the retained body window.
                 # Only a body on an attributed source can rescue a matching
                 # string. Unrelated source text is not provenance for this quote.
                 if not excluded or any(
@@ -1348,8 +1354,11 @@ def _review_evidence_with_context_budget(
         if not isinstance(result, Mapping):
             continue
         verdict = _mapping(result.get("judge_verdict"))
+        declared_urls = _texts(result.get("evidence_urls"), maximum=3, length=2_048)
         if float(result.get("after_decay") or 0) <= 0:
-            trace = _source_context_trace(verdict.get("verification_trace"))
+            trace = _source_context_trace(
+                verdict.get("verification_trace"), declared_urls=declared_urls,
+            )
             evaluations = _mapping(trace.get("intent_verdict")).get(
                 "signal_evaluations"
             )
@@ -1358,9 +1367,6 @@ def _review_evidence_with_context_budget(
                 and isinstance(evaluations, list)
                 and len(non_qualifying) < _NON_QUALIFYING_CONTEXT_MAX_ITEMS
             ):
-                declared_urls = _texts(
-                    result.get("evidence_urls"), maximum=3, length=2_048
-                )
                 for raw_evaluation in evaluations[:2]:
                     evaluation = _mapping(raw_evaluation)
                     status = evaluation.get("signal_status")
@@ -1483,7 +1489,10 @@ def _review_evidence_with_context_budget(
             continue
         if verdict.get("decision") != "verified" or verdict.get("client_ready") is not True:
             raise ValueError("positive signal lacks a terminal verified receipt")
-        trace = _source_context_trace(verdict.get("verification_trace"))
+        trace = _mapping(verdict.get("verification_trace"))
+        if not declared_urls and isinstance(trace.get("evidence_url"), str):
+            declared_urls = [trace["evidence_url"]]
+        trace = _source_context_trace(trace, declared_urls=declared_urls)
         evaluations = _mapping(trace.get("intent_verdict")).get("signal_evaluations")
         index = result.get("matched_icp_signal")
         if type(index) is not int or index < 0:
@@ -1526,9 +1535,6 @@ def _review_evidence_with_context_budget(
                             recovered_urls.append(url)
         if not quotes:
             raise ValueError("verified signal lacks supporting source quotes")
-        declared_urls = _texts(result.get("evidence_urls"), maximum=3, length=2_048)
-        if not declared_urls and isinstance(trace.get("evidence_url"), str):
-            declared_urls = [trace["evidence_url"]]
         declared_urls.extend(recovered_urls)
         stage_urls = []
         company_context_urls = []

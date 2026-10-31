@@ -15,9 +15,11 @@ def original_source():
 
 
 def sources():
-    return {name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
+    result = {name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
                                  if name == "scorer_entrypoint.py" else name)).read_bytes()
             for name in (builder.GRADER_FILE, *builder.ENTRYPOINT_FILES)}
+    result[builder.GRADER_FILE] = frozen_source("native_industry_budget", builder.GRADER_FILE)
+    return result
 
 
 def test_exact_frozen_repair_is_reversible_and_idempotent():

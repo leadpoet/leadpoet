@@ -55,6 +55,16 @@ def _no_live_structured_profile_key(monkeypatch):
     monkeypatch.delenv("DEEPLINE_API_KEY", raising=False)
 
 
+def _frozen_integrity_policy():
+    # These saved September stage/profile cases predate the industry role.
+    # Keep their original model policy instead of opting in via today's defaults.
+    return arena_scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2",
+        judge_models={name: model for name, model in arena_scoring.DEFAULT_JUDGE_MODELS.items()
+                      if name != "industry_evidence_review"},
+    )
+
+
 def _company(*, linkedin: str = "https://linkedin.com/company/acme") -> CompanyOutput:
     return CompanyOutput(
         company_name="Acme",
@@ -3938,9 +3948,7 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_with_listi
         monkeypatch.setattr(
             lead_scorer, "_score_single_intent_signal", intent_score
         )
-        policy = arena_scoring.build_scorer_policy(
-            scoring_adapter_version="qualification_integrity_v2",
-        )
+        policy = _frozen_integrity_policy()
         assert "company_quality_policy" not in policy
         submitted = _competition_company()
         submitted.update({
@@ -4284,9 +4292,7 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
         scored_run_id="truist-structured-identity",
         icp=icp.model_dump(mode="json"),
         companies=[company],
-        policy=arena_scoring.build_scorer_policy(
-            scoring_adapter_version="qualification_integrity_v2",
-        ),
+        policy=_frozen_integrity_policy(),
         evaluation_date="2026-09-20",
     )
 
@@ -4922,9 +4928,7 @@ def test_envestnet_private_type_rejects_old_sec_under_frozen_policy(
     monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
     monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", intent_score)
 
-    policy = arena_scoring.build_scorer_policy(
-        scoring_adapter_version="qualification_integrity_v2",
-    )
+    policy = _frozen_integrity_policy()
     assert "company_quality_policy" not in policy
     icp = _icp().model_copy(update={
         "industry": "Financial Services",

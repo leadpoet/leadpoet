@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts import arena_reviewer_protocol_repair_seam as seam
 from scripts import build_arena_reviewer_runtime as composer
@@ -10,24 +11,40 @@ from scripts import build_arena_reviewer_runtime as composer
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _sources():
-    repaired = (ROOT / composer.GRADER_FILE).read_bytes()
-    assert repaired.count(seam._HELPER.encode()) == repaired.count(seam._REPAIR.encode()) == 1
-    original = repaired.replace(seam._HELPER.encode(), b"", 1).replace(seam._REPAIR.encode(), b"", 1)
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
+def _sources(*, reserved_industry_turns=True):
+    repaired = _FROZEN_GRADER
+    if not reserved_industry_turns:
+        repaired = repaired.replace(seam._NATIVE_REPAIR.encode(), seam._REPAIR.encode(), 1)
+        repaired = repaired.replace(
+            b"for _turn in range(reasoning_turn_limit + 1):",
+            b"for _turn in range(MAX_REASONING_TURNS + 1):", 1)
+    repair = seam._NATIVE_REPAIR if reserved_industry_turns else seam._REPAIR
+    assert repaired.count(seam._HELPER.encode()) == repaired.count(repair.encode()) == 1
+    original = repaired.replace(seam._HELPER.encode(), b"", 1).replace(repair.encode(), b"", 1)
     return original, repaired
 
 
-def test_exact_two_insertions_only_and_idempotent():
-    original, repaired = _sources()
+@pytest.mark.parametrize("reserved_industry_turns", [False, True])
+def test_exact_two_insertions_only_and_idempotent(reserved_industry_turns):
+    original, repaired = _sources(reserved_industry_turns=reserved_industry_turns)
+    repair = seam._NATIVE_REPAIR if reserved_industry_turns else seam._REPAIR
     assert seam.convert_protocol_repair_seam(original) == repaired
     assert seam.convert_protocol_repair_seam(repaired) == repaired
-    assert repaired.replace(seam._HELPER.encode(), b"", 1).replace(seam._REPAIR.encode(), b"", 1) == original
+    assert repaired.replace(seam._HELPER.encode(), b"", 1).replace(repair.encode(), b"", 1) == original
     assert ast.parse(repaired)
 
 
 @pytest.mark.parametrize("fault", ["helper_only", "loop_only", "helper_drift", "loop_drift",
                                    "duplicate_helper", "duplicate_loop", "missing_loop",
-                                   "renamed_investigation", "moved_loop", "crlf", "utf8"])
+                                   "renamed_investigation", "moved_loop", "wrong_repair_bound",
+                                   "unknown_turn_bound", "crlf", "utf8"])
 def test_unknown_or_partial_source_is_rejected(fault):
     original, repaired = _sources()
     source = original
@@ -53,6 +70,11 @@ def test_unknown_or_partial_source_is_rejected(fault):
         source += b"\nasync def another_loop():\n" + seam._LOOP_OLD.encode()
     elif fault == "crlf":
         source = original.replace(b"\n", b"\r\n")
+    elif fault == "wrong_repair_bound":
+        source = repaired.replace(seam._NATIVE_REPAIR.encode(), seam._REPAIR.encode(), 1)
+    elif fault == "unknown_turn_bound":
+        source = original.replace(b"for _turn in range(reasoning_turn_limit + 1):",
+                                  b"for _turn in range(arbitrary_limit + 1):", 1)
     else:
         source = b"\xff"
     with pytest.raises(seam.ProtocolRepairSeamError):
@@ -79,3 +101,10 @@ def test_builder_flag_is_explicit_and_preserves_existing_composition(prior_flags
     assert set(before) == set(after)
     assert after[composer.GRADER_FILE] == seam.convert_protocol_repair_seam(before[composer.GRADER_FILE])
     assert all(after[name] == before[name] for name in before if name != composer.GRADER_FILE)
+
+
+def test_current_unreviewed_tool_schema_is_not_silently_transplanted():
+    current = (ROOT / composer.GRADER_FILE).read_bytes()
+    assert current != _FROZEN_GRADER
+    with pytest.raises(seam.ProtocolRepairSeamError):
+        seam.convert_protocol_repair_seam(current)

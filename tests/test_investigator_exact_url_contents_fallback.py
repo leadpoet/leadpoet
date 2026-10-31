@@ -37,7 +37,8 @@ def _review(monkeypatch, *, error=None, cap=4, expired=False, timeout=False,
             calls.append(("contents", payload["ids"][0]))
             assert payload == {"ids": [URL],
                                "text": {"maxCharacters": investigator.MAX_PAGE_CHARACTERS},
-                               "maxAgeHours": 0}
+                               "maxAgeHours": 0,
+                               "livecrawlTimeout": investigator.EXA_LIVECRAWL_TIMEOUT_MILLISECONDS}
             # The same admitted call may settle after its admission deadline.
             if late_settlement:
                 clock[0] = investigator.ADMISSION_DEADLINE_SECONDS + 1

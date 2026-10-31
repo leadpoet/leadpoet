@@ -36,6 +36,7 @@ import asyncio
 import codecs
 from html.parser import HTMLParser
 import json
+import os
 import logging
 import re
 from typing import Mapping, Optional
@@ -931,13 +932,23 @@ def _commercial_terms_navigation_locator(url: str, label: str) -> bool:
     )
 
 
+def _recognized_careers_board_locator(url: str, label: str) -> tuple[str, str] | None:
+    """Identify a careers locator; callers must separately prove its source."""
+    if not re.search(r"\b(careers?|jobs?|apply|positions?|openings?|open roles|join (?:us|our team))\b", label, re.I):
+        return None
+    # Reuse the exact Greenhouse/Ashby/Lever tenant parsers used for hiring.
+    # A recognized board or matching tenant name alone is never ownership.
+    from qualification.scoring.intent_verification_three_stage import _ats_board_identity
+    return _ats_board_identity(url)
+
+
 def _homepage_navigation_locators(
     page_text: str,
     *,
     final_url: str,
     verified_domain: str,
 ) -> list[dict[str, str]]:
-    """Resolve visible same-domain homepage links as untrusted locators."""
+    """Resolve visible company navigation and scoped careers locators."""
 
     parser = _HomepageNavigationParser()
     try:
@@ -948,6 +959,7 @@ def _homepage_navigation_locators(
 
     candidates: list[tuple[int, dict[str, str]]] = []
     seen: set[str] = set()
+    industry_review = bool(os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip())
     for href, raw_label in parser.links:
         label = " ".join(str(raw_label or "").split())
         if not label or len(label) > MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH:
@@ -974,7 +986,11 @@ def _homepage_navigation_locators(
             ("https", parsed.netloc.casefold(), parsed.path, parsed.query, "")
         )
         try:
-            if _registrable_domain(canonical) != verified_domain:
+            if _registrable_domain(canonical) != verified_domain and not (
+                industry_review
+                and _registrable_domain(final_url) == verified_domain
+                and _recognized_careers_board_locator(canonical, label)
+            ):
                 continue
         except Exception:
             continue
@@ -986,14 +1002,26 @@ def _homepage_navigation_locators(
         words = set(re.findall(
             r"[a-z]+", f"{parsed.path} {label}".casefold()
         ))
+        path_parts = [part.casefold() for part in parsed.path.split("/") if part]
+        if industry_review:
+            # A news article under /about/ is not the company overview. Rank
+            # the link itself, so that a large archive cannot hide service
+            # locators inside the same existing navigation allowance.
+            words = set(re.findall(
+                r"[a-z]+", f"{path_parts[-1] if path_parts else ''} {label}".casefold()
+            ))
+        service_locator = industry_review and bool(
+            set(path_parts) & {"service", "services", "product", "products", "platform", "platforms"}
+        ) and not bool(set(path_parts) & {"news", "newsroom", "blog", "blogs", "articles"})
         priority = (
             0 if words & {
                 "pricing", "price", "prices", "plan", "plans",
                 "subscription", "subscriptions",
             } and not _commercial_terms_navigation_locator(canonical, label)
             else 1 if words & {"contact", "about", "headquarters"}
+            or (industry_review and path_parts and path_parts[-1] in {"news", "newsroom", "investors"})
             else 2 if _commercial_terms_navigation_locator(canonical, label)
-            else 3 if words & {"product", "products", "platform", "platforms"}
+            else 3 if service_locator or words & {"product", "products", "platform", "platforms"}
             else 4
         )
         candidates.append((priority, {"url": canonical, "label": label}))

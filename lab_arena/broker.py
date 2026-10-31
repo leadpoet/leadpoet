@@ -49,6 +49,7 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
 OPENROUTER_GPT6_LUNA_RESPONSES_MODEL = "openai/gpt-6-luna"
+OPENROUTER_INDUSTRY_REVIEW_MODEL = "openai/gpt-6.1-sol"
 OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS = frozenset(
     (OPENROUTER_LUNA_RESPONSES_MODEL, OPENROUTER_GPT6_LUNA_RESPONSES_MODEL)
 )
@@ -78,6 +79,14 @@ DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
 )
 PRICED_COMPONENTS = ("prompt", "completion", "request", "image", "web_search", "internal_reasoning")
+# These routes charge the catalog's search fee once per request, even without
+# a tools field (https://openrouter.ai/perplexity/sonar and /sonar-pro).
+# Do not infer this billing unit from a nonzero optional-tool price or extend
+# it to Deep Research: that route charges for multiple searches and additional
+# provider-owned citation/reasoning tokens, without a caller-controlled bound.
+OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS = frozenset({
+    "perplexity/sonar", "perplexity/sonar-pro",
+})
 MAX_PRICE_TABLE_BYTES = 8 * 1024 * 1024
 MICROUSD = Decimal(1_000_000)
 # Conservative input-token bound: no production tokenizer emits more tokens
@@ -724,7 +733,7 @@ def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, par
     if pricing is None:
         raise BrokerError("model_not_allowed")
     return _max_openrouter_cost_for_pricing(
-        pricing, parameters, max_output_tokens=max_output_tokens
+        pricing, parameters, max_output_tokens=max_output_tokens, model=model
     )
 
 
@@ -733,6 +742,7 @@ def _max_openrouter_cost_for_pricing(
     parameters: Mapping[str, Any],
     *,
     max_output_tokens: int,
+    model: Optional[str] = None,
 ) -> int:
     input_tokens = bounded_input_tokens(parameters)
     output_tokens = int(max_output_tokens)
@@ -745,12 +755,22 @@ def _max_openrouter_cost_for_pricing(
         Decimal(pricing["web_search"]),
         OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL,
     ) if web_search_enabled else Decimal("0")
+    if (model if model is not None else parameters.get("model")) in OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS:
+        # Operation validation forbids plugins/web_search_options, so these
+        # are the unchanged default native-search requests. Their search is
+        # intrinsic, not the optional bounded server tool above.
+        intrinsic_search_price = Decimal(pricing["web_search"])
+        if intrinsic_search_price <= 0:
+            raise BrokerError("broker_unavailable")
+    else:
+        intrinsic_search_price = Decimal("0")
     usd = (
         Decimal(pricing["prompt"]) * input_tokens
         + Decimal(pricing["completion"]) * output_tokens
         + Decimal(pricing["internal_reasoning"]) * output_tokens
         + Decimal(pricing["request"])
         + web_search_price * web_search_calls
+        + intrinsic_search_price
     )
     return _microusd_ceiling(usd)
 
@@ -768,6 +788,7 @@ def _openrouter_web_search_enabled(parameters: Mapping[str, Any]) -> bool:
 class OpenRouterHostRoute:
     provider_policy: Mapping[str, Any]
     reservation_pricing: Mapping[str, str]
+    industry_schema_order: bool = False
 
 
 def _json_decimal_number(value: Decimal) -> Any:
@@ -784,10 +805,15 @@ def _openrouter_host_route(
     model: str,
     pricing: Mapping[str, Any],
     parameters: Mapping[str, Any],
+    industry_review_model: Optional[str] = None,
 ) -> Optional[OpenRouterHostRoute]:
-    """Return the one source-controlled execution route that differs by model."""
+    """Return a source-controlled route for an opted-in model and run role."""
 
-    if (
+    industry_route = (
+        kind == "score" and operation_id == "openrouter.chat"
+        and model == industry_review_model == OPENROUTER_INDUSTRY_REVIEW_MODEL
+    )
+    if not industry_route and (
         kind != "execute"
         or operation_id != "openrouter.responses"
         or model not in OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS
@@ -798,7 +824,21 @@ def _openrouter_host_route(
         * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER
         for component in PRICED_COMPONENTS
     }
-    if bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS:
+    long_context = bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS
+    if industry_route:
+        # These are the published Sol Azure US/EU prices, not the cheaper
+        # Flex price that may occupy the public model catalog row. Keep a
+        # conservative cache-write ceiling and its published long-input tier.
+        regional = {
+            component: Decimal(str(pricing[component])) for component in PRICED_COMPONENTS
+        }
+        regional["prompt"] = max(
+            regional["prompt"], Decimal("0.0000044" if long_context else "0.0000022")
+        )
+        regional["completion"] = max(
+            regional["completion"], Decimal("0.0000165" if long_context else "0.000011")
+        )
+    elif long_context:
         if model == OPENROUTER_GPT6_LUNA_RESPONSES_MODEL:
             long_prompt_price = OPENROUTER_GPT6_LUNA_LONG_CONTEXT_PROMPT_PRICE
             long_completion_price = (
@@ -838,6 +878,7 @@ def _openrouter_host_route(
     }
     return OpenRouterHostRoute(
         provider_policy=provider_policy,
+        industry_schema_order=industry_route,
         reservation_pricing={
             component: format(value.normalize(), "f")
             for component, value in regional.items()
@@ -2796,6 +2837,19 @@ def _complete_declared_tool_calls(message: Mapping[str, Any], request: Mapping[s
     return True
 
 
+def _paragraph_cache_protocol_conflict(value: Mapping[str, Any], schema_name: Any) -> bool:
+    """Do not share a new paragraph verdict that its native parser must retry."""
+
+    if schema_name != "arena_intent_details_review_v3" or value.get("facts_supported") is not False:
+        return False
+    units = value.get("unit_grounding")
+    if not isinstance(units, list):
+        return False  # The declared-schema shape check owns malformed fields.
+    factual = [unit for unit in units if isinstance(unit, Mapping)
+               and unit.get("contains_factual_claim") is True]
+    return all(unit.get("status") == "VERIFIED" for unit in factual)
+
+
 def _complete_judgment_response(
     operation_id: str,
     request: Mapping[str, Any],
@@ -2803,6 +2857,7 @@ def _complete_judgment_response(
     status: int,
     body: bytes,
     call_succeeded: bool,
+    shared_cache: bool = True,
 ) -> bool:
     """Cache a complete model answer only; never freeze a retryable failure."""
 
@@ -2864,6 +2919,8 @@ def _complete_judgment_response(
                     )
                 ):
                     return False
+                if shared_cache and _paragraph_cache_protocol_conflict(parsed, declared.get("name")):
+                    return False
                 if declared.get("name") == "verification":
                     evaluations = parsed.get("signal_evaluations")
                     if (
@@ -2920,6 +2977,8 @@ def _complete_judgment_response(
                     parsed, format_doc.get("schema")
                 )
             ):
+                return False
+            if shared_cache and _paragraph_cache_protocol_conflict(parsed, format_doc.get("name")):
                 return False
         else:
             return False
@@ -3812,7 +3871,7 @@ class Broker:
         store: CallStore,
         key_for: Callable[[str], str],
         price_table: Mapping[str, Any],
-        judge_models: Sequence[str] = (),
+        judge_models: Sequence[str] | Mapping[str, str] = (),
         transport: ProviderTransport,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         lease_ttl_seconds: int = contracts.LEASE_TTL_SECONDS,
@@ -3856,7 +3915,10 @@ class Broker:
         self._price_table = validate_price_table(price_table)
         # Judge models are what scoring runs may call; they are pinned by the
         # scorer policy and priced from the same table.
-        self._judge_models = tuple(str(model) for model in judge_models)
+        self._judge_model_roles = dict(judge_models) if isinstance(judge_models, Mapping) else {}
+        self._judge_models = tuple(str(model) for model in (
+            self._judge_model_roles.values() if isinstance(judge_models, Mapping) else judge_models
+        ))
         for model in self._judge_models:
             if model not in self._price_table["models"]:
                 raise ArenaContractError("judge model %s is missing from the price table" % model)
@@ -4878,6 +4940,7 @@ class Broker:
                     model=normalized["model"],
                     pricing=pricing,
                     parameters=normalized,
+                    industry_review_model=self._judge_model_roles.get("industry_evidence_review"),
                 )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
                     # Exact tested provider only. OpenRouter must neither pick
@@ -4915,6 +4978,7 @@ class Broker:
                     ),
                     normalized,
                     max_output_tokens=max_output_tokens,
+                    model=normalized["model"],
                 )
             elif effective_operation.provider == "scrapingdog":
                 reservation_cost = provider_costs.scrapingdog_cost(
@@ -5033,6 +5097,7 @@ class Broker:
                     effective_operation_id, effective_normalized,
                     deepline_catalog=context.deepline_catalog,
                     source_html_profile=source_html_profile,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
@@ -5104,6 +5169,7 @@ class Broker:
                     effective_operation_id,
                     effective_normalized,
                     deepline_catalog=context.deepline_catalog,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
@@ -5547,13 +5613,13 @@ class Broker:
             })
             return BrokerResult(cached_status, cached_headers, cached_body, summary)
         billing_terminal = reserved.get("terminal_response")
-        delayed_error_settlement = (
+        delayed_generation_settlement = (
             status == "settled" and isinstance(billing_terminal, Mapping)
-            and billing_terminal.get("call_succeeded") is not True
+            and not _has_successful_terminal_response(billing_terminal)
             and isinstance(billing_terminal.get("provider_cost"), Mapping)
             and billing_terminal["provider_cost"].get("basis") == "openrouter_generation_cost"
         )
-        if effective_operation.provider == "openrouter" and (status == "uncertain" or delayed_error_settlement):
+        if effective_operation.provider == "openrouter" and (status == "uncertain" or delayed_generation_settlement):
             # Billing-only reconciliation changes the ledger head, not the error
             # already delivered to the worker. Reuse the existing terminal shape
             # from bound uncertainty history; raw upstream receipts have no replay
@@ -5569,6 +5635,44 @@ class Broker:
                 # observed history against the refreshed authoritative head.
                 reserved = self._store.reserve_call(**reservation_arguments)
                 status = reserved.get("status")
+            # A paid response can be structurally replayable for its own call
+            # while failing the new shared-cache paragraph protocol. SQL does
+            # not expose noneligible pending replies as shared authority.
+            own_pending_replies = [
+                entry.get("entry_doc", {}).get("call", {}).get("judgment_cache_response")
+                for entry in ledger_entries
+                if isinstance(entry, Mapping) and entry.get("entry_kind") == "uncertain"
+                and isinstance(entry.get("entry_doc"), Mapping)
+                and isinstance(entry["entry_doc"].get("call"), Mapping)
+                and isinstance(entry["entry_doc"]["call"].get("judgment_cache_response"), Mapping)
+                and entry["entry_doc"]["call"]["judgment_cache_response"].get("judgment_cache_eligible") is not True
+            ]
+            if own_pending_replies:
+                if (not judgment_cache_key or len(own_pending_replies) != 1
+                    or status not in {"uncertain", "settled"}
+                    or not _reservation_readback_matches(
+                        self._store, reservation_arguments, reserved,
+                        confirmed_cost_admission=True, ledger_entries=ledger_entries,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                own_terminal = own_pending_replies[0]
+                try:
+                    own_status, own_headers, own_body = _decode_terminal(own_terminal, secret=secret)
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                if ("judgment_cache_source_call_identity" in own_terminal
+                    or not _complete_judgment_response(
+                        effective_operation_id, effective_normalized,
+                        status=own_status, body=own_body,
+                        call_succeeded=own_terminal.get("call_succeeded") is True,
+                        shared_cache=False,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                summary.update(outcome=status, idempotent=True, status=own_status,
+                               response_hash=contracts.hash_bytes(own_body))
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                return BrokerResult(own_status, own_headers, own_body, summary)
             saved_errors = []
             for entry in ledger_entries:
                 entry_doc = entry.get("entry_doc") if isinstance(entry, Mapping) else None
@@ -5905,6 +6009,7 @@ class Broker:
                     effective_operation_id, effective_normalized,
                     status=terminal_status, body=terminal_body,
                     call_succeeded=terminal_document.get("call_succeeded") is True,
+                    shared_cache=False,
                 ):
                     return _error_result("broker_unavailable", summary)
                 summary.update({
@@ -6012,6 +6117,7 @@ class Broker:
             effective_normalized,
             deepline_catalog=context.deepline_catalog,
             source_html_profile=source_html_profile,
+            industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
             openrouter_provider_policy=(
                 openrouter_host_route.provider_policy
                 if openrouter_host_route is not None
@@ -6309,16 +6415,6 @@ class Broker:
                         deepline_async_poll_accepted = _deepline_async_response_accepted(
                             response, raw_document,
                         )
-                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
-                        effective_normalized, response.status, raw_document,
-                        catalog_entry=deepline_catalog_entry,
-                    )
-                    if deepline_known_free_cost is None:
-                        deepline_known_free_cost = (
-                            provider_costs.deepline_payment_refusal_cost(
-                                response.status, raw_document
-                            )
-                        )
                     response_request_id = _deepline_job_request_id(raw_document)
                     body_identity_present = isinstance(raw_document, Mapping) and any(
                         name in raw_document for name in ("job_id", "request_id", "requestId")
@@ -6340,6 +6436,23 @@ class Broker:
                     # The pre-dispatch ID remains on the immutable reservation
                     # and is used if the transport loses that receipt.
                     deepline_response_request_id = response_request_id
+
+                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
+                        effective_normalized, response.status, raw_document,
+                        catalog_entry=deepline_catalog_entry,
+                        request_refused=bool(
+                            response.internal_provenance is None
+                            and response_request_id is not None
+                            and _deepline_generic_http_request_refusal(effective_normalized, response)
+                            and raw_document.get("credential_owner") == "none"
+                            and raw_document.get("credential_source") == "none"
+                            and raw_document["tool_error"].get("requestId") == response_request_id
+                        ),
+                    )
+                    if deepline_known_free_cost is None:
+                        deepline_known_free_cost = provider_costs.deepline_payment_refusal_cost(
+                            response.status, raw_document
+                        )
 
                     if response_request_id is not None and isinstance(raw_document, Mapping) and (
                         (
@@ -6613,6 +6726,7 @@ class Broker:
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
+        judgment_response_replayable = False
         accounting_store_deadline = time.monotonic() + _ACCOUNTING_STORE_RECOVERY_SECONDS
         try:
             if effective_operation.provider == "openrouter":
@@ -6769,6 +6883,14 @@ class Broker:
                     call_succeeded=call_succeeded,
                 )
             )
+            judgment_response_replayable = judgment_cache_eligible or bool(
+                judgment_cache_key and not request_refused and not miner_credential_failure
+                and _complete_judgment_response(
+                    effective_operation_id, effective_normalized,
+                    status=sanitized_status, body=sanitized_body,
+                    call_succeeded=call_succeeded, shared_cache=False,
+                )
+            )
             if missing_deepline_cost or missing_openrouter_cost:
                 uncertain_doc = _missing_provider_cost_call_doc(
                     response,
@@ -6804,12 +6926,12 @@ class Broker:
                         sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
                         account_failure_evidence=account_failure_evidence,
                     )
-                if judgment_cache_eligible:
+                if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
                             sanitized_status, sanitized_headers, sanitized_body,
                             call_succeeded=True,
-                            judgment_cache_eligible=True,
+                            judgment_cache_eligible=judgment_cache_eligible,
                         )
                     )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
@@ -7196,12 +7318,12 @@ class Broker:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:
                     uncertain_doc["provider_cost"] = cost_record
-                if judgment_cache_eligible:
+                if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
                             sanitized_status, sanitized_headers, sanitized_body,
                             call_succeeded=True,
-                            judgment_cache_eligible=True,
+                            judgment_cache_eligible=judgment_cache_eligible,
                         )
                     )
             if scrapingdog_observed_success_status is not None:

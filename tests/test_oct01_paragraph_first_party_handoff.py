@@ -175,7 +175,9 @@ def test_unbound_submitted_page_never_reaches_paragraph(change):
             ABOUT_PAGE + "x" * MAX_PAGE_CHARACTERS
         )
     elif change == "too_many_fetches":
-        for index in range(MAX_RETURNED_FETCHED_PAGES - len(investigation[PRIVATE_FETCHED_PAGES_KEY]) + 1):
+        for index in range(MAX_RETURNED_FETCHED_PAGES - len(
+            investigation[PRIVATE_FETCHED_PAGES_KEY]
+        ) + 1):
             url = f"https://www.chemify.example/other-{index}"
             investigation[PRIVATE_FETCHED_PAGES_KEY][url] = {
                 "final_url": url, "text": "Other page",

@@ -44,14 +44,12 @@ from arena_reviewer_runtime.transport import post_json
         (
             """            incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
-            industry_followup_pending = False
 """,
             """            incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
             late_final_submit_pending = bool(
                 fetched_pages and (search_calls or fetch_calls)
             )
-            industry_followup_pending = False
 """,
             """            incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
@@ -61,7 +59,6 @@ from arena_reviewer_runtime.transport import post_json
                 serialization_grace_seconds=SERIALIZATION_REPAIR_GRACE_SECONDS,
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
-            industry_followup_pending = False
 """,
         ),
         """            incomplete_submit_retries = 0
@@ -72,7 +69,6 @@ from arena_reviewer_runtime.transport import post_json
                 serialization_grace_seconds=SERIALIZATION_REPAIR_GRACE_SECONDS,
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
-            industry_followup_pending = False
 """,
     ),
     (

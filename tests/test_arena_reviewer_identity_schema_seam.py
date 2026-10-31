@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from qualification.scoring import lead_scorer as scorer
 from scripts import arena_reviewer_identity_schema_seam as seam
@@ -15,6 +16,13 @@ from scripts.arena_reviewer_investigation_finality_seam import convert_investiga
 from tests import test_company_identity_schema_repair as controls
 
 ROOT = composer.ROOT
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def _sources():
@@ -92,6 +100,7 @@ def test_builder_opt_in_preserves_every_other_file():
                        if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (composer.GRADER_FILE, *composer.ENTRYPOINT_FILES)
     }
+    sources[composer.GRADER_FILE] = _FROZEN_GRADER
     default = composer.expected_overlay(sources)
     assert composer.FINALITY_FILE not in default
     with pytest.raises(composer.CompositionError):
@@ -138,6 +147,7 @@ def test_build_and_verify_preserve_prior_repair_and_emit_distinct_identity(
         sources = {name: (ROOT / ('lab_arena/scorer_entrypoint.py'
                     if name == 'scorer_entrypoint.py' else name)).read_bytes()
                    for name in (composer.GRADER_FILE, *composer.ENTRYPOINT_FILES)}
+        sources[composer.GRADER_FILE] = _FROZEN_GRADER
         if correction:
             sources[composer.FINALITY_FILE] = _sources()[0]
         return sources

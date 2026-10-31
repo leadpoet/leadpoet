@@ -39,7 +39,10 @@ _MAX_UNIT_EVIDENCE_BINDINGS = 3
 _MAX_SOURCE_CONTEXT_BYTES = 12_000
 _MAX_SOURCE_TITLE_BYTES = 1_024
 _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES = 4_000
-_MAX_REVIEW_DOCUMENT_CHARACTERS = 48_000
+# The native Chat contract bounds each message in characters, including JSON
+# escaping. Keep the old raw assembly ceiling separate from that wire bound.
+_MAX_RAW_REVIEW_DOCUMENT_CHARACTERS = 48_000
+_MAX_REVIEW_DOCUMENT_CHARACTERS = 32_000
 _UNIT_STATUSES = ("VERIFIED", "CONTRADICTED", "UNPROVEN")
 _CITATION_REPAIR_CATEGORIES = {
     "missing_evidence",
@@ -76,7 +79,7 @@ _EXCLUDED_MARKDOWN_BOUNDARY = "\x00"
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
-        "name": "arena_intent_details_review", "strict": True,
+        "name": "arena_intent_details_review_v3", "strict": True,
         "schema": {
             "type": "object", "additionalProperties": False,
             "properties": {
@@ -307,6 +310,9 @@ operations, not an imagined seller or product. For connects_icp, require a
 grounded explanation of why the verified activity is relevant to the ICP, but
 allow that explanation anywhere in the paragraph and within another sentence;
 merely repeating filters or events is insufficient.
+A supported business purpose, use or effect stated in the activity sentence
+can itself explain the connection to the company's supported ICP offering.
+Do not require a separate concluding explanation when that connection is clear.
 For example, when funding and the company's workflow platform are independently
 verified, "This funding may help the company expand its workflow platform"
 connects that activity to an ICP seeking funded workflow software companies.
@@ -331,7 +337,12 @@ Assess every Boolean
 independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
 false. Require natural prose, not headings, bullet lists, field labels or
-internal scoring commentary. A sentence that stops after naming its actors
+internal scoring commentary.
+Selection commentary describes why the company or activity matches the search
+request, its filters or the scoring rubric. Any such commentary makes
+natural_paragraph false, even when the paragraph also states a supported
+business connection.
+A sentence that stops after naming its actors
 without stating a complete assertion is an incomplete clause: return
 natural_paragraph=false. Do not repair the sentence using the source evidence.
 Assess any facts actually asserted in the fragment independently; a missing
@@ -343,7 +354,11 @@ parts of one paragraph, not independent claims; read them together and do not
 change the writing or evidence standard because of a unit boundary. Set
 contains_factual_claim=true when the unit makes any concrete factual assertion.
 A clearly conditional commercial implication with no new asserted fact can be
-marked contains_factual_claim=false. An unconditional increase, effect, or
+marked contains_factual_claim=false. An uncertain outcome does not suspend
+separately asserted or presupposed company products or capabilities in the
+same unit. Mark a mixed unit factual if it contains any such claim, and ground
+that claim. The conditional outcome itself need not have occurred.
+An unconditional increase, effect, or
 performance outcome is a factual assertion even when it also explains ICP
 relevance. A directly entailed catalog or assortment expansion remains factual
 and can be supported by evidence that the products were added. For a factual
@@ -387,9 +402,9 @@ itself. The paragraph may paraphrase its source; only the returned evidence
 quote must be an exact source span.
 
 facts_supported must equal the logical AND of all factual unit statuses being
-VERIFIED. Assess and return unit_grounding first, then signal_coverage, then the
-five aggregate checks in this order: facts_supported, verified_signals_covered,
-relevance_grounded, connects_icp, natural_paragraph. Return only those fields.
+VERIFIED. Assess unit_grounding and signal_coverage against the supplied
+evidence and apply each aggregate check independently. Return only the fields
+required by the supplied response schema.
 """
 _NON_QUALIFYING_SYSTEM_APPENDIX = """
 
@@ -917,13 +932,22 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                     if context_index is not None:
                         references.append(context_index)
             observed_pairs: set[tuple[str, str]] = set()
-            for quote_key, url_key in (
-                ("quote", "url"), ("evidence_quote", "evidence_url"),
-            ):
-                quote = raw_evidence.get(quote_key)
+            pairs = [
+                (raw_evidence.get(quote_key), raw_evidence.get(url_key))
+                for quote_key, url_key in (
+                    ("quote", "url"), ("evidence_quote", "evidence_url"),
+                )
+            ]
+            # These pairs were validated against the final matched industry
+            # receipt before projection. Keep each citation separately bound;
+            # the optional body window need not include every cited passage.
+            pairs.extend(
+                (item["quote"], item["url"])
+                for item in raw_evidence.get("supporting_evidence", [])
+            )
+            for quote, url in pairs:
                 if not isinstance(quote, str) or not quote:
                     continue
-                url = raw_evidence.get(url_key)
                 url = url if isinstance(url, str) else ""
                 context_url = (
                     company_context.get("url")
@@ -942,13 +966,16 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                 )
                 if company_index is not None:
                     references.append(company_index)
+            source_urls = [
+                raw_evidence[key][:512]
+                for key in ("url", "evidence_url")
+                if isinstance(raw_evidence.get(key), str) and raw_evidence[key]
+            ]
+            for item in raw_evidence.get("supporting_evidence", []):
+                if item["url"][:512] not in source_urls:
+                    source_urls.append(item["url"][:512])
             company_projection[str(dimension)] = {
-                "source_urls": [
-                    raw_evidence[key][:512]
-                    for key in ("url", "evidence_url")
-                    if isinstance(raw_evidence.get(key), str)
-                    and raw_evidence[key]
-                ],
+                "source_urls": source_urls,
                 "evidence_source_indexes": references,
             }
 
@@ -1203,6 +1230,47 @@ def review_evidence(
     authenticated_provider_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project verified observations and bounded text from their fetched sources."""
+    context_budget = _MAX_SOURCE_CONTEXT_BYTES
+    while True:
+        document = _review_evidence_with_context_budget(
+            company, icp, signal_results, company_fit_receipt,
+            company_source_contexts=company_source_contexts,
+            authenticated_provider_observation=authenticated_provider_observation,
+            context_budget=context_budget,
+        )
+        excess = len(_review_document_prompt(document)) - _MAX_REVIEW_DOCUMENT_CHARACTERS
+        if excess <= 0:
+            return document
+        if not context_budget:
+            raise ValueError("Intent Details mandatory review evidence exceeds its bound")
+        # Rebuild only optional context from the original observations, using
+        # the existing relevance windows and fair allocation. Projection may
+        # retain a quote's sole copy in a context row: never clip that ledger.
+        # A minimum step also bounds retries when source/quote metadata grows
+        # as a context window shrinks. No request has been sent at this point.
+        context_budget = max(0, context_budget - max(256, excess))
+
+
+def _review_document_prompt(document: Mapping[str, Any]) -> str:
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+class _ReviewRequestBoundsError(ValueError):
+    """The local request cannot fit the native message contract."""
+
+
+def _validate_review_prompt_bounds(prompt: str, system_prompt: str) -> None:
+    if any(len(value) > _MAX_REVIEW_DOCUMENT_CHARACTERS for value in (prompt, system_prompt)):
+        raise _ReviewRequestBoundsError("Intent Details review request exceeds its input bound")
+
+
+def _review_evidence_with_context_budget(
+    company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
+    company_fit_receipt: Mapping[str, Any],
+    *, company_source_contexts: Sequence[Mapping[str, str]] | None,
+    authenticated_provider_observation: Mapping[str, Any] | None,
+    context_budget: int,
+) -> dict[str, Any]:
     verified = []
     non_qualifying = []
     for result in signal_results:
@@ -1351,6 +1419,7 @@ def review_evidence(
             raise ValueError("verified signal lacks a criterion index")
         quotes: list[str] = []
         urls: list[str] = []
+        recovered_urls: list[str] = []
         if isinstance(evaluations, list):
             for evaluation in evaluations:
                 item = _mapping(evaluation)
@@ -1362,11 +1431,34 @@ def review_evidence(
                     maximum=5 if result.get("evidence_type") == "FUNDING" else 3,
                     length=2_048,
                 ))
+                # Same-event recovery can verify a fetched replacement URL.
+                # Bind it to this evaluation and its actual source body, not
+                # the submitted URL or another evaluation's quotations.
+                resolution = _mapping(trace.get("source_resolution"))
+                if (item.get("verification_mode") == "source_grounded"
+                    and resolution.get("status") == "verified"):
+                    from qualification.scoring.company_evidence_investigator import _safe_https_url
+
+                    cited = _texts(item.get("evidence_urls_used"), maximum=3, length=2_048)
+                    supplied = _texts(item.get("source_urls_supplied"), maximum=3, length=2_048)
+                    selected = _texts(resolution.get("selected_urls"), maximum=3, length=2_048)
+                    for raw in (trace.get("verified_source_context") or [])[:3]:
+                        context = _mapping(raw)
+                        url, text = context.get("url"), context.get("text")
+                        if (url in cited and url in supplied and url in selected
+                            and _safe_https_url(url) == url
+                            and not context.get("source_role")
+                            and isinstance(text, str) and text
+                            and any(_quote_is_bound(quote, [text]) for quote in _texts(
+                                item.get("supporting_quotes"), maximum=6, length=2_000,
+                            ))):
+                            recovered_urls.append(url)
         if not quotes:
             raise ValueError("verified signal lacks supporting source quotes")
         declared_urls = _texts(result.get("evidence_urls"), maximum=3, length=2_048)
         if not declared_urls and isinstance(trace.get("evidence_url"), str):
             declared_urls = [trace["evidence_url"]]
+        declared_urls.extend(recovered_urls)
         stage_urls = []
         company_context_urls = []
         if result.get("evidence_type") == "FUNDING" and company_fit_receipt.get("decision") == "match":
@@ -1527,6 +1619,39 @@ def review_evidence(
             if key in {"url", "quote", "evidence_url", "evidence_quote"}
             and isinstance(value, str) and value
         }
+    identity = _mapping(
+        _mapping(dimensions.get("identity")).get("web_identity_receipt")
+    )
+    if (
+        company_fit_receipt.get("decision") == "match"
+        and identity.get("decision") == "match"
+        and all(isinstance(identity.get(key), str) and identity[key].strip()
+                for key in (
+                    "observed_name", "observed_domain",
+                ))
+        and "industry" in company_facts
+    ):
+        from qualification.scoring.lead_scorer import _industry_supporting_pairs
+
+        support = _industry_supporting_pairs(dimensions)
+        if not (isinstance(identity.get("observed_linkedin_slug"), str)
+                and identity["observed_linkedin_slug"].strip()):
+            # The fit gate can verify name/domain without a LinkedIn slug.
+            # Keep its already checked own-domain citations under the same
+            # domain binding used by the industry reviewer. This grants no
+            # authority to ATS, partner or other external-domain citations.
+            from qualification.scoring.company_evidence_investigator import (
+                _independently_bound_first_party_url,
+            )
+            domains = {identity["observed_domain"]}
+            support = [(url, quote) for url, quote in support
+                       if _independently_bound_first_party_url(url, domains, identity)
+                       and _independently_bound_first_party_url(
+                           company_facts["industry"].get("url", ""), domains, identity)]
+        if support:
+            company_facts["industry"]["supporting_evidence"] = [
+                {"url": url, "quote": quote} for url, quote in support
+            ]
     paragraph = validate_intent_details_text(company.intent_details)
     paragraph_terms = {
         word[:6] for word in re.findall(r"[\w%$]+", paragraph.casefold())
@@ -1540,7 +1665,9 @@ def review_evidence(
             _registrable_domain,
             _safe_https_url,
         )
-        from qualification.scoring.lead_scorer import _compact_company_name
+        from qualification.scoring.lead_scorer import (
+            _compact_company_name, _industry_supporting_pairs,
+        )
 
         if (
             not isinstance(company_source_contexts, Sequence)
@@ -1576,6 +1703,34 @@ def review_evidence(
                 dimension, str
             ) else None
             company_fact = company_facts.get(str(dimension))
+            support_identity = _mapping(
+                _mapping(dimensions.get("identity")).get("web_identity_receipt")
+            )
+            if (
+                dimension == "industry"
+                and company_fit_receipt.get("decision") == "match"
+                and isinstance(company_fact, Mapping)
+                and source_url != company_fact.get("url")
+                and support_identity.get("decision") == "match"
+                and all(isinstance(support_identity.get(key), str)
+                        and support_identity[key].strip() for key in (
+                            "observed_name", "observed_domain", "observed_linkedin_slug",
+                        ))
+            ):
+                # This is a host-verified citation from the final fit receipt,
+                # not a new source or a model-supplied ownership claim. Bind
+                # the selected body back to that exact URL and exact quote.
+                support = next((quote for url, quote in
+                    _industry_supporting_pairs(dimensions)
+                    if url == source_url and isinstance(source_text, str)
+                    and _quote_occurs(quote, source_text)), None)
+                if support:
+                    company_fact = {
+                        **company_fact,
+                        "evidence_url": source_url,
+                        "evidence_quote": support,
+                    }
+                    company_facts["industry"] = company_fact
             if dimension == "first_party_company":
                 identity = _mapping(
                     _mapping(
@@ -1726,9 +1881,10 @@ def review_evidence(
             len(context["text"].encode("utf-8"))
             for context in company_context_candidates
         ),
-        _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES,
+        context_budget * _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES
+        // _MAX_SOURCE_CONTEXT_BYTES,
     )
-    intent_context_budget = _MAX_SOURCE_CONTEXT_BYTES - company_reservation
+    intent_context_budget = context_budget - company_reservation
     with_context = [item for item in verified if item.get("source_context")]
     context_bytes_used = 0
     for item in with_context:
@@ -1753,10 +1909,16 @@ def review_evidence(
             remaining -= used
             context_bytes_used += used
         item["source_context"] = [
-            context for context in item["source_context"] if context["text"]
+            context for context in item["source_context"]
+            if context["text"] or (
+                context_budget < _MAX_SOURCE_CONTEXT_BYTES and (
+                    context.get("source_publication_date")
+                    or context.get("source_body_dateline_dates")
+                )
+            )
         ]
     remaining_context_bytes = max(
-        0, _MAX_SOURCE_CONTEXT_BYTES - context_bytes_used,
+        0, context_budget - context_bytes_used,
     )
     remaining_company_contexts = len(company_context_candidates)
     selected_company_facts: list[dict[str, Any]] = []
@@ -1836,13 +1998,21 @@ def review_evidence(
     for context in reversed(trim_contexts):
         excess = (
             len(json.dumps(document, ensure_ascii=False))
-            - _MAX_REVIEW_DOCUMENT_CHARACTERS
+            - _MAX_RAW_REVIEW_DOCUMENT_CHARACTERS
         )
         if excess > 0:
             context["text"] = context["text"][:max(0, len(context["text"]) - excess)]
     for item in reversed(verified):
         if "source_context" in item:
-            item["source_context"] = [context for context in item["source_context"] if context["text"]]
+            item["source_context"] = [
+                context for context in item["source_context"]
+                if context["text"] or (
+                    context_budget < _MAX_SOURCE_CONTEXT_BYTES and (
+                        context.get("source_publication_date")
+                        or context.get("source_body_dateline_dates")
+                    )
+                )
+            ]
             if not item["source_context"]:
                 del item["source_context"]
     for selected_company_fact in selected_company_facts:
@@ -1850,11 +2020,6 @@ def review_evidence(
         if isinstance(company_context, Mapping) and not company_context.get("text"):
             del selected_company_fact["source_context"]
     _project_admitted_evidence(document)
-    if (
-        len(json.dumps(document, ensure_ascii=False))
-        > _MAX_REVIEW_DOCUMENT_CHARACTERS
-    ):
-        raise ValueError("Intent Details review evidence exceeds its bound")
     return document
 
 
@@ -2051,6 +2216,8 @@ class _BoundedReviewRepairNeeded(ValueError):
         held_response: Mapping[str, Any],
         semantic_unit_ids: set[int],
         relative_time_targets: Mapping[int, Mapping[str, Any]] | None = None,
+        *,
+        complete_response_correction: bool = False,
     ):
         if any(
             category not in _CITATION_REPAIR_CATEGORIES
@@ -2067,6 +2234,7 @@ class _BoundedReviewRepairNeeded(ValueError):
         self.relative_time_targets = copy.deepcopy(
             dict(relative_time_targets or {})
         )
+        self.complete_response_correction = complete_response_correction
         super().__init__("Intent Details requires one bounded local review")
 
 
@@ -2100,8 +2268,6 @@ def _validate_review_response(
     # A negative unit verdict is the detailed, fail-closed result.  It can
     # safely correct a conflicting positive aggregate, but a negative
     # aggregate must never be promoted from the unit summaries.
-    if facts_aggregate_conflict and unit_facts_supported:
-        raise ValueError("factual aggregate conflicts with unit grounding")
     coverage = checks.pop("signal_coverage")
     if not isinstance(coverage, list) or any(
         not isinstance(item, dict)
@@ -2131,6 +2297,15 @@ def _validate_review_response(
         raise ValueError("coverage aggregate conflicts during citation repair")
     if citation_issues and facts_aggregate_conflict:
         raise ValueError("factual aggregate conflicts during citation repair")
+    if facts_aggregate_conflict and unit_facts_supported:
+        if initial_review and any_factual_claim and coverage_aggregate_consistent:
+            # The complete answer is internally invalid, not a valid negative
+            # verdict. One fresh full answer may correct it; no initial field
+            # becomes an acceptance value or a permanent negative veto.
+            raise _BoundedReviewRepairNeeded(
+                {}, raw_checks, set(), complete_response_correction=True,
+            )
+        raise ValueError("factual aggregate conflicts with unit grounding")
     relative_time_targets = (
         _relative_time_recheck_targets(unit_grounding, document)
         if initial_review else {}
@@ -2270,7 +2445,7 @@ def _citation_repair_user_prompt(
         },
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if len(prompt) > _MAX_REVIEW_DOCUMENT_CHARACTERS:
-        raise ValueError("Intent Details citation repair exceeds its input bound")
+        raise _ReviewRequestBoundsError("Intent Details citation repair exceeds its input bound")
     return prompt
 
 
@@ -2393,7 +2568,7 @@ def _semantic_repair_user_prompt(
         },
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if len(prompt) > _MAX_REVIEW_DOCUMENT_CHARACTERS:
-        raise ValueError("Intent Details bounded unit repair exceeds its input bound")
+        raise _ReviewRequestBoundsError("Intent Details bounded unit repair exceeds its input bound")
     return prompt
 
 
@@ -2509,6 +2684,21 @@ def _merge_semantic_repairs(
     return merged
 
 
+_COMPLETE_RESPONSE_CORRECTION = """
+
+STRUCTURED REVIEW CORRECTION:
+The previous answer's facts_supported aggregate and unit_grounding conflict.
+That answer is invalid and is not evidence. Re-evaluate the complete unchanged
+document, including every unit's factual classification, status and evidence,
+and all required checks. If facts_supported is false, identify at least one
+UNPROVEN or CONTRADICTED factual unit in unit_grounding. Otherwise keep factual
+support separate from an uncertain commercial implication; assess the
+independent relevance and ICP checks separately.
+Return one fresh complete schema-valid verdict. Do not
+copy a conclusion from the invalid answer. No particular decision is requested.
+"""
+
+
 async def review_intent_details(
     company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
     company_fit_receipt: Mapping[str, Any],
@@ -2537,7 +2727,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 authenticated_provider_observation
             ),
         )
-        prompt = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        prompt = _review_document_prompt(document)
     except (TypeError, ValueError, AttributeError):
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_evidence_unavailable",
                 "failure_reason_code": "malformed_response"}
@@ -2564,6 +2754,11 @@ missing review into an accepted paragraph or a terminal company mismatch.
         )
         else ""
     )
+    try:
+        _validate_review_prompt_bounds(prompt, system_prompt)
+    except ValueError:
+        return {**receipt, "decision": "unavailable", "failure_class": "intent_details_evidence_unavailable",
+                "failure_reason_code": "malformed_response"}
     loop = asyncio.get_running_loop()
     deadline = loop.time() + REVIEW_TIMEOUT_SECONDS
 
@@ -2602,13 +2797,16 @@ missing review into an accepted paragraph or a terminal company mismatch.
     try:
         checks = _validate_review_response(response, document)
     except _BoundedReviewRepairNeeded as exc:
-        # The original response structure was valid. Recheck exact
-        # contradicted units and repair any citations in the same final call.
-        # Provider failures below remain infrastructure errors.
+        # Use the one remaining call for the identified structural or factual
+        # review issue. Provider failures remain infrastructure errors.
         citation_failure = any(exc.issues.values())
         semantic_unit_ids = exc.semantic_unit_ids
         try:
-            if semantic_unit_ids:
+            if exc.complete_response_correction:
+                repair_prompt = prompt
+                repair_system_prompt = system_prompt + _COMPLETE_RESPONSE_CORRECTION
+                repair_response_format = _RESPONSE_FORMAT
+            elif semantic_unit_ids:
                 repair_prompt = _semantic_repair_user_prompt(
                     document, exc.issues, exc.held_response,
                     semantic_unit_ids, exc.relative_time_targets,
@@ -2626,6 +2824,13 @@ missing review into an accepted paragraph or a terminal company mismatch.
                     system_prompt, exc.issues, exc.held_response,
                 )
                 repair_response_format = _CITATION_REPAIR_RESPONSE_FORMAT
+            _validate_review_prompt_bounds(repair_prompt, repair_system_prompt)
+        except _ReviewRequestBoundsError:
+            return {
+                **receipt, "decision": "unavailable",
+                "failure_class": "intent_details_evidence_unavailable",
+                "failure_reason_code": "malformed_response",
+            }
         except ValueError:
             checks = None
         else:
@@ -2643,7 +2848,21 @@ missing review into an accepted paragraph or a terminal company mismatch.
                     "failure_reason_code": "provider_error",
                 }
             try:
-                if semantic_unit_ids:
+                if exc.complete_response_correction:
+                    # Discard every field of the invalid first verdict. The
+                    # fresh complete response must pass the native contract;
+                    # a new repair request cannot dispatch a third call.
+                    _validate_review_response(
+                        repair_response, document, initial_review=False,
+                    )
+                    merged = json.loads(repair_response)
+                    grounding = merged["unit_grounding"]
+                    _validate_unit_grounding(grounding, document)
+                    _validate_relative_time_repair_date_proof(
+                        json.dumps({"repairs": grounding}), document,
+                        _relative_time_recheck_targets(grounding, document),
+                    )
+                elif semantic_unit_ids:
                     _validate_relative_time_repair_date_proof(
                         repair_response, document, exc.relative_time_targets,
                     )

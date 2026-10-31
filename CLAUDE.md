@@ -74,6 +74,57 @@ The coordinator owns production deployment; internal agents may test and commit.
 Use fixed cached AWS credentials without refresh. This authority ends after the
 deployed gate and exports are verified against saved production trajectories.
 
+## Scoped authorization: October 26 native industry integration
+
+The user explicitly renewed implementation, testing, review, safe merge,
+canonical deployment, and fresh OnePatch/Sentry plus production verification.
+Integrate the stronger industry classifier and all source evidence into the
+existing Arena judging flow. Review and include PR793 PDF/HTML recovery.
+Preserve frozen round policies, baseline/miner fairness, billing, accepted
+results, source and identity guards, unrelated scoring, and concurrent work.
+Additional reasonable test spending is authorized; the initial task cap is
+$30 additional total ($20 OpenRouter and $10 retrieval). Preserve all previous
+charges and reservations. Do not change production judgments or rewards for
+testing; use isolated historical replays and reward-disabled shadow validation.
+Do not deploy a regression. This supersedes the earlier final-$15 restriction
+for new-phase testing only. No permission to send incident/chat messages or
+create recurring monitors is granted. Keep both instruction files identical.
+
+## Scoped authorization: October 26 final industry repair continuation
+
+The user renewed this task on October 26. Continue researching and implementing
+an industry-fit improvement, compare all 167 fixed cases and independent
+controls, and preserve correct prior verdicts wherever possible. Do not stop
+because a candidate fails. Merge and deploy only after a rigorous improvement
+in accuracy and consistency is shown. The new, final OpenRouter allowance is
+at most $15 additional, including failed calls and reservations. Its immutable
+baseline and absolute limits are in the local approved budget artifact dated
+October 26. Do not spend other-provider credits in this phase. Preserve all
+previous evidence, labels, approvals, and concurrent work. This supersedes the
+previous $12 phase cap for new calls only; no old charge is forgiven. Existing
+source, identity, supplier, billing, scoring, release and production-verification
+guards remain required. Keep these two instruction files byte-identical.
+
+## Scoped authorization: October 25 industry precision and recall repair
+
+On 2026-10-25 the user renewed the permanent industry-fit repair. Compare the
+full 98 formerly unavailable and 69 prior-pass representative cases against
+original scoring and all coherent previous attempts. Use a simple general
+mechanism; no company exceptions, altered ICPs, fabricated evidence or release
+regressions. The user authorized implementation, safe merge and canonical
+deployment only after meaningful improvement in both error types is proven,
+with independent review and deployed-output verification. Preserve unrelated
+qualification, identity, supplier-role, billing, credentials, historical scores,
+published results, rewards, weights and concurrent work. Tests use isolated
+state and must not write judgments into production. The additional test grant
+is $12 OpenRouter; other providers retain only $1.79237559 of the previous
+approved budget. Count all previous charges and reservations. The new phase
+has cumulative ceilings of $29.22562441 OpenRouter and $77 across providers.
+Do not merge the unsuccessful draft PR 764 as a prerequisite or claim that a
+recorded-evidence diagnostic proves fresh production retrieval. Authority ends
+when the requested repair and production verification are complete. Keep
+AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped authorization: PR936 aggregate capture reader
 
 The user authorized review, narrow fixes, merge and deployment of PR936's

@@ -417,6 +417,9 @@ def test_actual_intent_details_schema_checks_bounds():
 
     response_format = intent_details._RESPONSE_FORMAT
     verdict = _sample_for_schema(response_format["json_schema"]["schema"])
+    # The schema's generic sample has a false aggregate and no factual units.
+    # Use a consistent negative before testing the independent array bounds.
+    verdict["unit_grounding"][0].update(contains_factual_claim=True, status="UNPROVEN")
     complete = _answer()
     complete["choices"][0]["message"]["content"] = json.dumps(verdict)
     request = {**_REQUEST, "response_format": response_format}

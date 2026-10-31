@@ -78,10 +78,14 @@ from qualification.scoring.company_fit_decision import (
 from qualification.scoring.company_evidence_investigator import (
     ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
     MAX_PREFETCHED_PAGES,
-    MAX_RETURNED_FETCHED_PAGES,
+    max_returned_fetched_pages,
+    max_matched_retry_pages,
+    _validated_matched_retry_pages,
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    PRIVATE_INDUSTRY_BINDINGS_KEY,
+    _validated_industry_bindings,
     _IDENTITY_LINK_CONTEXT_MARKER,
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
@@ -90,6 +94,7 @@ from qualification.scoring.company_evidence_investigator import (
     _bound_structured_headquarters_finding,
     _linkedin_about_headquarters_field,
     _complete_verified_first_party_identity,
+    _industry_source_is_bound,
     _plain_text,
     _priority_headquarters_navigation_source,
     _quote_occurs,
@@ -423,7 +428,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(
         r"(?:(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+){1,8}"
-        r"|(?<=[a-z])\s+"
+        r"|(?<=[a-z0-9])\s+"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*(?<!\.)|(?:[A-Z]\.)+|[&+])\s+){0,7}"
         r"(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+)"
         + _PUBLIC_EXCHANGE_TICKER_LOCATOR,
@@ -568,7 +573,7 @@ _ACQUIRED_STAGE_PROOF_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:completed|completes)\s+"
+        r"\b(?:completed|completes|closed)\s+"
         r"(?:(?:the|its|an?)\s+)?(?:previously\s+announced\s+)?"
         r"acquisition\s+of\b",
         re.I,
@@ -638,6 +643,22 @@ def _has_affirmed_stage_proof(
                 if supersession_patterns
                 else suffix_clause
             )
+            if pattern is _PUBLIC_STAGE_PROOF_PATTERNS[2]:
+                # The issuer/ticker is a complete listing statement. A separate
+                # business announcement does not make that listing prospective.
+                # Keep listing/ownership announcements and later supersession
+                # subject to the normal guards below.
+                announcement = re.split(r"[.!?;\n]", text[match.end():], maxsplit=1)[0]
+                if re.match(
+                    r"\s+(?:today\s+)?announc(?:ed|es)\s+(?:today\s+)?that\s+",
+                    announcement, re.I,
+                ) and not re.search(
+                    r"\b(?:list(?:ed|ing)?|trad(?:e|ed|es|ing)|ipo|public|private|"
+                    r"shares?|stock|securities|exchange|ticker|ownership|acqui\w*|"
+                    r"merger|delist\w*|status)\b", announcement, re.I,
+                ):
+                    proof_suffix_clause = ""
+                    suffix = ""
             context = text[max(0, match.start() - 40):match.end() + 60]
             if (
                 _has_stage_proof_uncertainty(prefix)
@@ -1152,9 +1173,11 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:completed|completes)\s+(?:(?:the|its|an?)\s+)?"
+        r"\b(?:completed|completes|closed)\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r'(?:\s+\((?P<alias>"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)'
+        r'(?:(?:\s*,?\s*or\s+|\s*,\s*)(?:the\s+)?(?:"Company"|“Company”))?\))?'
         r"(?=\s+(?:on|for|after|from|in)\b|[,;.!?\n]|$)",
         re.I,
     ),
@@ -1450,6 +1473,19 @@ def _acquired_stage_quote_supports_names(
             subject = tuple(re.findall(
                 r"[a-z0-9]+", match.group("subject").casefold()
             ))
+            # A quoted name immediately after the acquired entity names that
+            # same target. Do not use mentions of another party or a label for
+            # acquired assets/partial interests as a company-identity alias.
+            alias = tuple(re.findall(r"[a-z0-9]+", str(
+                match.groupdict().get("alias") or ""
+            ).casefold()))
+            if (alias and alias not in {("company",), ("we",), ("us",)}
+                    and not set(subject) & {
+                        "assets", "business", "division", "unit", "brand",
+                        "portfolio", "stake", "interest", "shares",
+                    }
+                    and any("".join(alias) == "".join(name) for name in normalized_names)):
+                return True
             legal_suffixes = {
                 "co", "company", "corp", "corporation", "inc",
                 "incorporated", "limited", "llc", "ltd", "plc",
@@ -2370,7 +2406,10 @@ def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[
     # Linked PE proof remains auditable through projection and fit calculation.
     # These receipts prove nothing without the internally validated finding.
     support = nested_value.get("supporting_evidence")
-    if dimension == "stage" and isinstance(support, list) and 0 < len(support) <= 2:
+    # Industry retains up to eight model citations plus one host-selected
+    # company identity passage as the primary quote.
+    support_limit = {"stage": 2, "industry": 8}.get(dimension, 0)
+    if isinstance(support, list) and 0 < len(support) <= support_limit:
         if all(
             isinstance(item, Mapping)
             and _valid_web_evidence_url(item.get("url")) == item.get("url")
@@ -2707,7 +2746,7 @@ def _hydrate_required_attribute_source_cache(
     """Replace one exact-URL negative with a trusted investigator fetch."""
 
     fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
-    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > MAX_RETURNED_FETCHED_PAGES:
+    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > max_returned_fetched_pages():
         return
     for raw_url, raw_page in fetched_pages.items():
         if not isinstance(raw_page, Mapping):
@@ -2806,6 +2845,45 @@ _MATCHED_COMPANY_RETRY_IDENTITY_KEY = "verified_identity"
 _MATCHED_COMPANY_RETRY_PAGES_KEY = "pages"
 
 
+def _max_retained_investigator_contexts() -> int:
+    return _MAX_RETAINED_INVESTIGATOR_CONTEXTS + (
+        8 if os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip() else 0
+    )
+
+
+def _industry_supporting_pairs(dimensions: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Keep cited support available for reuse under the new industry policy."""
+
+    if not os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
+        return []
+    evidence = dimensions.get("industry")
+    if not isinstance(evidence, Mapping) or evidence.get("decision") != COMPANY_FIT_MATCH:
+        return []
+    web = evidence.get("web_evidence")
+    if (
+        not isinstance(web, Mapping)
+        or not _valid_web_evidence_url(web.get("url"))
+        or not isinstance(web.get("quote"), str)
+        or not web["quote"]
+    ):
+        return []
+    support = web.get("supporting_evidence")
+    if not isinstance(support, list) or not 0 < len(support) <= 8:
+        return []
+    pairs = []
+    for item in support:
+        if not isinstance(item, Mapping):
+            return []
+        url, quote = _valid_web_evidence_url(item.get("url")), item.get("quote")
+        if (
+            not url or url != item.get("url")
+            or not isinstance(quote, str) or not 0 < len(quote) <= 2000
+        ):
+            return []
+        pairs.append((url, quote))
+    return pairs
+
+
 def _complete_company_identity(
     result: CompanyFitDecisionResult,
 ) -> bool:
@@ -2875,18 +2953,33 @@ def _matched_company_result_retry_identity(
     })
 
 
+def _validated_retry_industry_bindings(value, pages, identity):
+    texts, final_urls = _validated_returned_fetched_pages(pages, submitted_source_urls=tuple(pages))
+    domain = identity.get('registrable_dns_domain', '')
+    return _validated_industry_bindings(value, texts, final_urls, domains={domain},
+        identity={'submitted_domain': domain, 'observed_domain': domain,
+                  'observed_name': identity.get('normalized_name', '')},
+        evaluation_date_value=evaluation_date().isoformat())
+
+
 def _matched_company_retry_prefetched_pages(
     retry_cache: Optional[Mapping[str, Any]],
     verified_identity: Optional[Mapping[str, Any]],
+    *, industry_bindings_out: Optional[dict[str, Any]] = None,
 ) -> dict[str, dict[str, str]]:
     """Load bounded pages only for the same complete verified identity."""
 
+    if industry_bindings_out is not None:
+        industry_bindings_out.clear()
     if (
         not isinstance(retry_cache, Mapping)
-        or set(retry_cache) != {
+        or not {
             _MATCHED_COMPANY_RETRY_IDENTITY_KEY,
             _MATCHED_COMPANY_RETRY_PAGES_KEY,
-        }
+        } <= set(retry_cache)
+        or set(retry_cache) - {_MATCHED_COMPANY_RETRY_IDENTITY_KEY, _MATCHED_COMPANY_RETRY_PAGES_KEY,
+                              *({PRIVATE_INDUSTRY_BINDINGS_KEY} if os.environ.get(
+                                  'ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip() else set())}
     ):
         return {}
     cached_identity = _matched_company_retry_identity(
@@ -2907,15 +3000,16 @@ def _matched_company_retry_prefetched_pages(
     raw_pages = retry_cache.get(_MATCHED_COMPANY_RETRY_PAGES_KEY)
     if not isinstance(raw_pages, Mapping):
         return {}
-    pages, final_urls = _validated_prefetched_pages(
-        raw_pages,
-        submitted_source_urls=tuple(raw_pages),
-    )
-    return {
+    pages, final_urls = _validated_matched_retry_pages(raw_pages)
+    result = {
         url: {"final_url": final_urls[url], "text": text}
         for url, text in pages.items()
         if _registrable_domain(url) == _registrable_domain(final_urls[url])
     }
+    if industry_bindings_out is not None:
+        industry_bindings_out.update(_validated_retry_industry_bindings(
+            retry_cache.get(PRIVATE_INDUSTRY_BINDINGS_KEY), result, current_identity))
+    return result
 
 
 def _retain_matched_investigator_source_contexts(
@@ -2977,7 +3071,7 @@ def _retain_matched_investigator_source_contexts(
     if (
         first_party_url
         and first_party_url not in evidence_by_url
-        and len(evidence_by_url) < _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        and len(evidence_by_url) < _max_retained_investigator_contexts()
     ):
         evidence_by_url[first_party_url] = submitted_quote
     raw_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
@@ -3021,8 +3115,15 @@ def _retain_matched_investigator_source_contexts(
                 candidates.append((phrase_overlap, term_overlap, url))
         for _phrases, _terms, url in sorted(
             candidates, key=lambda item: (-item[0], -item[1], item[2]),
-        )[:min(1, max(0, _MAX_RETAINED_INVESTIGATOR_CONTEXTS - len(evidence_by_url)))]:
+        )[:min(1, max(0, _max_retained_investigator_contexts() - len(evidence_by_url)))]:
             auxiliary_urls.add(url)
+    # Preserve the prior primary/attribute/auxiliary priorities. Supporting
+    # pages use only remaining storage and still pass the source checks below.
+    for url, quote in _industry_supporting_pairs(dimensions):
+        if url not in evidence_by_url and (
+            len(set(evidence_by_url) | auxiliary_urls) < _max_retained_investigator_contexts()
+        ):
+            evidence_by_url[url] = quote
     for stale_url in set(source_sink) - set(evidence_by_url) - auxiliary_urls:
         source_sink.pop(stale_url, None)
     for source_url, quote in evidence_by_url.items():
@@ -3104,6 +3205,7 @@ def _retain_matched_company_retry_sources(
 
     if retry_cache is None:
         return
+    prior_bindings = deepcopy(retry_cache.get(PRIVATE_INDUSTRY_BINDINGS_KEY))
     identity = _matched_company_result_retry_identity(result)
     if not identity or not source_cache:
         return
@@ -3111,6 +3213,7 @@ def _retain_matched_company_retry_sources(
         result,
         source_cache,
         matched_dimensions_only=True,
+        include_industry_support=True,
     )
     admitted = {
         context["url"]: {
@@ -3123,7 +3226,7 @@ def _retain_matched_company_retry_sources(
         return
     retained = _matched_company_retry_prefetched_pages(retry_cache, identity)
     # A funding retry must keep the already fetched counterevidence alongside
-    # its stage source, within the unchanged three-page prefetch allowance.
+    # its stage source, within the frozen policy's bounded retry allowance.
     auxiliary = next((context for context in funding_contexts
                       if context.get("dimension") == "first_party_context"), None)
     if auxiliary is not None:
@@ -3134,13 +3237,19 @@ def _retain_matched_company_retry_sources(
             "text": context["text"],
         } for context in preferred if context["url"] in source_cache}
         retained = dict(list({**priority, **{url: page for url, page in retained.items()
-                                            if url not in priority}}.items())[:MAX_PREFETCHED_PAGES])
+                                            if url not in priority}}.items())[:max_matched_retry_pages()])
         admitted = {**priority, **admitted}
+    if os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
+        # Current matched citations must fit before older optional pages. Do
+        # not let a full earlier cache discard the sources of the new verdict.
+        retained = dict(list({
+            **admitted, **{url: page for url, page in retained.items() if url not in admitted},
+        }.items())[:max_matched_retry_pages()])
     for url, page in admitted.items():
         if url in retained:
             retained[url] = page
             continue
-        if len(retained) >= MAX_PREFETCHED_PAGES:
+        if len(retained) >= max_matched_retry_pages():
             continue
         retained[url] = page
     retry_cache.clear()
@@ -3148,6 +3257,100 @@ def _retain_matched_company_retry_sources(
         _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
         _MATCHED_COMPANY_RETRY_PAGES_KEY: retained,
     })
+    if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip():
+        bindings = _validated_retry_industry_bindings(prior_bindings, retained, identity)
+        if bindings['links'] or bindings['brands']:
+            retry_cache[PRIVATE_INDUSTRY_BINDINGS_KEY] = bindings
+
+
+def _retain_unresolved_industry_retry_sources(
+    retry_cache: Optional[Mapping[str, Any]],
+    result: CompanyFitDecisionResult,
+    investigation: Mapping[str, Any],
+    *, homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+) -> None:
+    """Keep checked industry text for another review, never a fit verdict."""
+
+    model = os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+    if not model or not isinstance(retry_cache, MutableMapping):
+        return
+    claims = investigation.get("claims")
+    finding = claims.get("industry") if isinstance(claims, Mapping) else None
+    review = finding.get("_industry_review") if isinstance(finding, Mapping) else None
+    if (
+        not isinstance(review, Mapping)
+        or review.get("schema") != "industry_evidence_review_v1"
+        or review.get("model") != model
+        or finding.get("status") not in {"VERIFIED", "CONTRADICTED", "UNPROVEN"}
+        or review.get("decision") not in {"match", "mismatch", "unavailable"}
+        or not isinstance(review.get("packet_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", review["packet_sha256"])
+    ):
+        return
+    identity = _matched_company_result_retry_identity(result)
+    urls = review.get("source_urls")
+    if (
+        not identity or not isinstance(urls, list)
+        or not 0 < len(urls) <= max_returned_fetched_pages()
+        or any(not isinstance(url, str) or not url or _valid_web_evidence_url(url) != url for url in urls)
+    ):
+        return
+    pages, final_urls = _validated_returned_fetched_pages(
+        investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=tuple(urls),
+    )
+    binding_pages = {url: {'text': text, 'final_url': final_urls[url]} for url, text in pages.items()}
+    bindings = _validated_retry_industry_bindings(
+        investigation.get(PRIVATE_INDUSTRY_BINDINGS_KEY), binding_pages, identity)
+    domain = identity["registrable_dns_domain"]
+    careers_locators = _validated_homepage_navigation_locators(
+        homepage_navigation_locators, positive_semantic_review=False,
+        industry_review=True, verified_homepage_identity=identity,
+    )
+    admitted = {
+        url: {"final_url": final_urls[url], "text": pages[url]}
+        for url in urls if url in pages
+        and _industry_source_is_bound(
+            url, final_urls[url], domains={domain},
+            identity={'submitted_domain': domain, 'observed_domain': domain,
+                      'observed_name': identity['normalized_name']},
+            careers_locators=careers_locators,
+            conditional_sources=bindings['brands'],
+        )
+    }
+    if not admitted:
+        return
+    prior = _matched_company_retry_prefetched_pages(retry_cache, identity)
+    protected = {
+        context["url"]: prior[context["url"]]
+        for context in _matched_investigator_source_contexts(
+            result, prior, matched_dimensions_only=True, include_industry_support=True,
+        )
+    }
+    citations = review.get("evidence")
+    cited = {
+        item["url"]: admitted[item["url"]]
+        for item in (citations if isinstance(citations, list) else [])
+        if isinstance(item, Mapping) and isinstance(item.get("url"), str)
+        and item["url"] in admitted and isinstance(item.get("quote"), str)
+        and item["quote"] and _quote_occurs(item["quote"], admitted[item["url"]]["text"])
+    }
+    # A completed industry review can coexist with a failed unrelated finding.
+    # Its checked pages remain source facts, including uncited contrary facts.
+    # Keep them regardless of the proposal or whole-investigation outcome;
+    # neither a verdict nor failure finality is copied into the source cache.
+    # Preserve matched dimensions, then partial facts and fresh sources.
+    # The next invocation independently binds and reclassifies this text.
+    retained = {**protected, **cited, **{url: page for url, page in admitted.items() if url not in prior},
+                **admitted, **{url: page for url, page in prior.items() if url not in admitted}}
+    retry_cache.clear()
+    retry_cache.update({
+        _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
+        _MATCHED_COMPANY_RETRY_PAGES_KEY: dict(list(retained.items())[:max_matched_retry_pages()]),
+    })
+    bound = _validated_retry_industry_bindings(bindings,
+        retry_cache[_MATCHED_COMPANY_RETRY_PAGES_KEY], identity)
+    if bound['links'] or bound['brands']:
+        retry_cache[PRIVATE_INDUSTRY_BINDINGS_KEY] = bound
 
 
 def _hydrate_verified_required_attribute_recovery_source(
@@ -3174,7 +3377,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         or not isinstance(quote, str)
         or not quote
         or not isinstance(fetched_pages, Mapping)
-        or len(fetched_pages) > MAX_RETURNED_FETCHED_PAGES
+        or len(fetched_pages) > max_returned_fetched_pages()
     ):
         return False
     raw_page = fetched_pages.get(raw_url)
@@ -3353,11 +3556,10 @@ def _investigator_prefetched_pages(
         url: {"final_url": homepage_final_urls[url], "text": text}
         for url, text in homepage_pages.items()
     })
-    retry_pages, retry_final_urls = _validated_prefetched_pages(
-        matched_company_retry_pages,
-        submitted_source_urls=submitted_source_urls,
-    )
+    retry_pages, retry_final_urls = _validated_matched_retry_pages(matched_company_retry_pages)
     for url, text in retry_pages.items():
+        if url not in submitted_source_urls:
+            continue
         if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         candidates.setdefault(
@@ -4044,6 +4246,17 @@ def _web_identity_receipt(
         verified_homepage_transport_domain,
         company_quality=company_quality,
         homepage_navigation_locators=verified_homepage_navigation_locators,
+        allow_unverified_profile_conflict=(
+            not verified_homepage_identity
+            or (
+                _company_name(verified_homepage_identity.get("normalized_name"))
+                == receipt.get("submitted_name")
+                and verified_homepage_identity.get("registrable_dns_domain")
+                == receipt.get("submitted_domain")
+                and verified_homepage_identity.get("linkedin_company_slug")
+                == receipt.get("submitted_linkedin_slug")
+            )
+        ),
     )
     if structured_receipt:
         if structured_receipt.get("reason_code") == "structured_official_child_identity_verified":
@@ -6072,6 +6285,37 @@ def _structured_profile_identity_anchor(
             }
         if not numeric_alias_recovery_needed:
             return homepage_identity
+    # A recovered exact profile is also the identity for its size, company
+    # type and headquarters fields. Keep those existing checks bound to the
+    # same independent proof instead of losing them with the failed homepage.
+    if (
+        not transport_domain
+        and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        and web_identity.get("decision") == COMPANY_FIT_MATCH
+        and web_identity.get("evidence_source") == "company_web_reverification"
+        and web_identity.get("reason_code") == "structured_exact_profile_identity_verified"
+    ):
+        evidence = web_identity.get("structured_profile_identity")
+        if (
+            isinstance(evidence, Mapping)
+            and set(evidence) == {"name", "provider", "source_field", "url", "website"}
+            and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+            and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+            and _strict_linkedin_company_profile_url(evidence.get("url"))
+            and _company_name(evidence.get("name"))
+            and _canonical_company_domain(evidence.get("website"))
+            and _company_name(evidence.get("name"))
+            == web_identity.get("submitted_name") == web_identity.get("observed_name")
+            and _canonical_company_domain(evidence.get("website"))
+            == web_identity.get("submitted_domain") == web_identity.get("observed_domain")
+            and linkedin_company_page_slug(evidence.get("url"))
+            == web_identity.get("submitted_linkedin_slug") == web_identity.get("observed_linkedin_slug")
+        ):
+            return {
+                "normalized_name": str(evidence["name"]),
+                "registrable_dns_domain": str(web_identity["observed_domain"]),
+                "linkedin_company_slug": str(web_identity["observed_linkedin_slug"]),
+            }
     if (
         web_identity.get("decision") != COMPANY_FIT_MATCH
         or web_identity.get("evidence_source") != "company_web_reverification"
@@ -6341,6 +6585,36 @@ def _alias_unresolved_structured_profile_lookup(
     }
 
 
+def _unverified_profile_conflict_lookup(
+    web_identity: Mapping[str, Any],
+) -> Mapping[str, str]:
+    """Locate independent proof; a model's conflicting profile is not proof."""
+
+    submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "")
+    observed_slug = str(web_identity.get("observed_linkedin_slug") or "")
+    submitted_name = _company_name(web_identity.get("submitted_name"))
+    submitted_domain = str(web_identity.get("submitted_domain") or "")
+    if (
+        not os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        or web_identity.get("evidence_source") != "company_web_reverification"
+        or web_identity.get("decision") != COMPANY_FIT_MISMATCH
+        or web_identity.get("reason_code") != "identity_mismatch"
+        or not submitted_name
+        or submitted_name != _company_name(web_identity.get("observed_name"))
+        or not submitted_domain
+        or submitted_domain != web_identity.get("observed_domain")
+        or not submitted_slug or not observed_slug
+        or submitted_slug == observed_slug
+        or submitted_slug.isdigit() or observed_slug.isdigit()
+    ):
+        return {}
+    return {
+        "normalized_name": submitted_name,
+        "registrable_dns_domain": submitted_domain,
+        "linkedin_company_slug": submitted_slug,
+    }
+
+
 def _structured_profile_alias_identity_receipt(
     company: CompanyOutput,
     web_identity: Mapping[str, Any],
@@ -6350,6 +6624,7 @@ def _structured_profile_alias_identity_receipt(
     company_quality: bool,
     server_verified_homepage_receipt: bool = False,
     homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+    allow_unverified_profile_conflict: bool = False,
 ) -> dict[str, Any]:
     """Bind a common submitted name to one exact structured company profile."""
 
@@ -6366,6 +6641,16 @@ def _structured_profile_alias_identity_receipt(
         else "company_web_reverification"
     )
     base_keys = {"name", "provider", "source_field", "url", "website"}
+    profile_conflict = (
+        _unverified_profile_conflict_lookup(web_identity)
+        if allow_unverified_profile_conflict
+        and not server_verified_homepage_receipt and not transport_domain
+        else {}
+    )
+    identity_domain = (
+        profile_conflict["registrable_dns_domain"]
+        if profile_conflict else transport_domain
+    )
     numeric_alias = web_identity.get("reason_code") == (
         "identity_linkedin_alias_unresolved"
     )
@@ -6391,20 +6676,24 @@ def _structured_profile_alias_identity_receipt(
         or evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
         or evidence.get("source_field") != STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
         or (
-            not official_child
+            not official_child and not profile_conflict
             and web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
         )
         or (
-            not numeric_alias and not official_child
+            not numeric_alias and not official_child and not profile_conflict
             and web_identity.get("reason_code")
             not in {"identity_name_alias_unresolved", "identity_not_proven"}
         )
         or web_identity.get("evidence_source") != expected_source
-        or not transport_domain
-        or web_identity.get("submitted_domain") != transport_domain
+        or not identity_domain
+        or web_identity.get("submitted_domain") != identity_domain
         or (
             not official_child
-            and web_identity.get("observed_domain") != transport_domain
+            and web_identity.get("observed_domain") != identity_domain
+        )
+        or (
+            profile_conflict
+            and not _strict_linkedin_company_profile_url(evidence.get("url"))
         )
         or (
             official_child
@@ -6491,9 +6780,11 @@ def _structured_profile_alias_identity_receipt(
         structured_receipt.get("decision") != COMPANY_FIT_MATCH
         or structured_receipt.get("submitted_name")
         != structured_receipt.get("observed_name")
-        or structured_receipt.get("observed_domain") != transport_domain
+        or structured_receipt.get("observed_domain") != identity_domain
         or structured_receipt.get("observed_linkedin_slug")
-        != web_identity.get("observed_linkedin_slug")
+        != web_identity.get(
+            "submitted_linkedin_slug" if profile_conflict else "observed_linkedin_slug"
+        )
         or (
             web_identity.get("submitted_linkedin_slug")
             and web_identity.get("submitted_linkedin_slug")
@@ -6507,6 +6798,12 @@ def _structured_profile_alias_identity_receipt(
         reason_code="structured_profile_alias_verified",
         structured_profile_identity=dict(evidence),
     )
+    if profile_conflict:
+        resolved.update(
+            reason_code="structured_exact_profile_identity_verified",
+            raw_observed_linkedin_slug=web_identity["observed_linkedin_slug"],
+            observed_linkedin_slug=structured_receipt["observed_linkedin_slug"],
+        )
     if official_child:
         resolved.update(
             reason_code="structured_official_child_identity_verified",
@@ -7779,15 +8076,29 @@ def _positive_semantic_review_needed(
     active_attribute = str(
         getattr(icp, "required_attribute", "") or ""
     ).strip()
-    if not active_attribute:
+    if not active_attribute and not os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
         return False
     details = result.details if isinstance(result.details, Mapping) else {}
     raw_dimensions = details.get("dimension_decisions")
     dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
     if dimensions.get("industry") != COMPANY_FIT_MATCH:
         return False
+    if (
+        os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        and result.decision == COMPANY_FIT_MISMATCH
+        and "rebrand" not in investigation_targets
+        and "identity" in _incomplete_company_reverify_dimensions(
+            result,
+            icp_attribute=active_attribute,
+            icp_stage=_normalize_company_stage(getattr(icp, "company_stage", "")),
+        )
+    ):
+        # A recognized homepage identity conflict still permits the full
+        # schema repair to replace this mismatch. Share the already planned
+        # investigation; its industry finding must survive that later repair.
+        return True
     attribute_decision = details.get("required_attribute_decision")
-    if attribute_decision not in {
+    if active_attribute and attribute_decision not in {
         COMPANY_FIT_MATCH,
         COMPANY_FIT_UNAVAILABLE,
     }:
@@ -8111,6 +8422,16 @@ def _project_investigator_industry(
 
     projected = dict(verdict)
     value = finding or {}
+    review = value.get("_industry_review")
+    if isinstance(review, Mapping) and review.get("schema") == "industry_evidence_review_v1":
+        # This field is built by the host, never accepted from model output.
+        # A completed review that lacks proof cannot retain an older positive.
+        projected.update(industry_matches=None, industry_activity_role="unresolved",
+                         observed_industry="", observed_subindustry="",
+                         industry_evidence_url="", industry_evidence_quote="")
+        dimensions = dict(projected.get("dimension_evidence") or {})
+        dimensions["industry"] = {"url": "", "quote": ""}
+        projected["dimension_evidence"] = dimensions
     status = value.get("status")
     role = _strict_industry_activity_role(value.get("activity_role"))
     observed_industry = str(value.get("observed_industry") or "").strip()[:200]
@@ -8136,10 +8457,14 @@ def _project_investigator_industry(
         industry_evidence_url=url,
         industry_evidence_quote=quote,
     )
-    nested = verdict.get("dimension_evidence")
-    if isinstance(nested, Mapping):
-        nested_copy = dict(nested)
+    nested = projected.get("dimension_evidence")
+    if isinstance(nested, Mapping) or review:
+        nested_copy = dict(nested or {})
         nested_copy["industry"] = {"url": url, "quote": quote}
+        if review and value.get("supporting_evidence"):
+            nested_copy["industry"]["supporting_evidence"] = [
+                dict(item) for item in value["supporting_evidence"]
+            ]
         projected["dimension_evidence"] = nested_copy
     return projected
 
@@ -8535,6 +8860,12 @@ async def _run_targeted_company_evidence_investigation(
         )
     )
     investigation_observed_linkedin = verdict.get("observed_company_linkedin")
+    if investigation_web_identity.get("reason_code") == "structured_exact_profile_identity_verified":
+        # Carry the fetched profile into research without rewriting the raw
+        # model observation retained with the identity receipt.
+        investigation_observed_linkedin = investigation_web_identity[
+            "structured_profile_identity"
+        ]["url"]
     if (
         investigation_observed_linkedin == ""
         and investigation_web_identity.get("decision") == COMPANY_FIT_MATCH
@@ -8618,9 +8949,11 @@ async def _run_targeted_company_evidence_investigation(
         )
         if not independently_bound_homepage:
             homepage_pages = {}
+    matched_industry_bindings = {}
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
         investigation_verified_identity,
+        industry_bindings_out=matched_industry_bindings,
     )
     retained_attribute_retry_pages = (
         _validated_retry_retained_sources(successful_required_attribute_source_sink)
@@ -8829,6 +9162,8 @@ async def _run_targeted_company_evidence_investigation(
                 review_positive_semantics
                 or "geography" in investigation_targets
                 or "stage" in investigation_targets
+                or ("industry" in investigation_targets
+                    and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip())
             )
             else ()
         ),
@@ -8855,6 +9190,13 @@ async def _run_targeted_company_evidence_investigation(
             include_structured_headquarters="geography" in investigation_targets,
         ),
         diagnostic=investigation_diagnostic,
+        **({"retained_industry_pages": matched_company_retry_pages}
+           if "industry" in investigation_targets
+           and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+           and len(matched_company_retry_pages) > MAX_PREFETCHED_PAGES else {}),
+        **({'retained_industry_bindings': matched_industry_bindings}
+           if 'industry' in investigation_targets and (matched_industry_bindings.get('links')
+                                                       or matched_industry_bindings.get('brands')) else {}),
     )
     claims = investigation.get("claims")
     if not isinstance(claims, Mapping):
@@ -9257,6 +9599,10 @@ async def _run_targeted_company_evidence_investigation(
             retention_projection,
             investigation,
             company=company,
+        )
+        _retain_unresolved_industry_retry_sources(
+            matched_company_retry_source_cache, retention_projection, investigation,
+            homepage_navigation_locators=homepage_navigation_locators,
         )
     return (
         projected,
@@ -9780,11 +10126,23 @@ async def _llm_reverify_company(
     if not profile_identity:
         lookup_receipt: Mapping[str, Any] = web_identity_receipt
         server_verified_homepage_receipt = False
+        unverified_profile_conflict = False
         lookup_identity = _alias_unresolved_structured_profile_lookup(
             web_identity_receipt,
             verified_transport_domain,
             homepage_navigation_locators=verified_homepage_navigation_locators,
         )
+        if (
+            not lookup_identity and not verified_identity
+            and not verified_transport_domain
+            and verified_homepage_identity is not None
+            and _homepage_identity_has_retryable_failure(verified_homepage_identity)
+            and not details.get("actual_final_url")
+        ):
+            # The submitted URL locates an independent profile; it cannot
+            # itself override the model's conflicting identity observation.
+            lookup_identity = _unverified_profile_conflict_lookup(web_identity_receipt)
+            unverified_profile_conflict = bool(lookup_identity)
         if not lookup_identity:
             lookup_receipt = unresolved_homepage_identity
             server_verified_homepage_receipt = True
@@ -9820,12 +10178,13 @@ async def _llm_reverify_company(
                     server_verified_homepage_receipt
                 ),
                 homepage_navigation_locators=verified_homepage_navigation_locators,
+                allow_unverified_profile_conflict=unverified_profile_conflict,
             )
             if resolved_identity:
                 current_profile_cache["structured_employee_size_applicable"] = True
                 profile_identity = {
                     "normalized_name": str(structured_identity["name"]),
-                    "registrable_dns_domain": verified_transport_domain,
+                    "registrable_dns_domain": str(resolved_identity["observed_domain"]),
                     "linkedin_company_slug": str(
                         resolved_identity["observed_linkedin_slug"]
                     ),
@@ -11594,6 +11953,7 @@ def _matched_investigator_source_contexts(
     source_cache: Optional[Mapping[str, Any]],
     *,
     matched_dimensions_only: bool = False,
+    include_industry_support: bool = False,
 ) -> list[dict[str, str]]:
     """Bind retained fetched pages back to exact final dimension evidence."""
 
@@ -11604,7 +11964,7 @@ def _matched_investigator_source_contexts(
         )
         or not _complete_company_identity(company_fit)
         or not isinstance(source_cache, Mapping)
-        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        or len(source_cache) > _max_retained_investigator_contexts()
     ):
         return []
     details = company_fit.details if isinstance(company_fit.details, Mapping) else {}
@@ -11615,6 +11975,7 @@ def _matched_investigator_source_contexts(
     # This retained map can contain prefetched pages, which do not consume the
     # investigator's fresh-fetch allowance. The fixed dimension loop and the
     # final two-context cap bound the handoff without conflating those budgets.
+    evidence_pairs = []
     for dimension in ("industry", "employee_size", "geography", "stage"):
         evidence = dimensions.get(dimension)
         if (
@@ -11627,6 +11988,14 @@ def _matched_investigator_source_contexts(
             continue
         source_url = _valid_web_evidence_url(web_evidence.get("url"))
         quote = str(web_evidence.get("quote") or "")
+        evidence_pairs.append((dimension, source_url, quote))
+    # Retry storage retains every bound industry citation. The paragraph
+    # handoff can select one cited source per dimension within its existing
+    # two-context cap; uncited first-party pages use the auxiliary binding.
+    if include_industry_support:
+        evidence_pairs.extend(("industry", url, quote)
+                              for url, quote in _industry_supporting_pairs(dimensions))
+    for dimension, source_url, quote in evidence_pairs:
         entry = source_cache.get(source_url) if source_url else None
         if not isinstance(entry, Mapping) or set(entry) != {"final_url", "text"}:
             continue
@@ -11694,7 +12063,7 @@ def _matched_first_party_source_context(
     if (company is None or company_fit.decision != COMPANY_FIT_MATCH
         or not _complete_company_identity(company_fit)
         or not isinstance(source_cache, Mapping)
-        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS):
+        or len(source_cache) > _max_retained_investigator_contexts()):
         return None
     from qualification.scoring.intent_details import _source_overlap_score, _source_term_overlap
 
@@ -11756,6 +12125,7 @@ def _matched_company_source_contexts(
     contexts.extend(_matched_investigator_source_contexts(
         company_fit,
         matched_company_source_cache,
+        include_industry_support=True,
     ))
     submitted_attribute = (
         getattr(company, "required_attribute", None)
@@ -11774,7 +12144,7 @@ def _matched_company_source_contexts(
         matched_company_source_cache.get(submitted_url)
         if isinstance(matched_company_source_cache, Mapping)
         and len(matched_company_source_cache)
-        <= _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        <= _max_retained_investigator_contexts()
         else None
     )
     if (
@@ -11828,10 +12198,19 @@ def _matched_company_source_contexts(
             item[0],
         ),
     )
-    selected = [
-        context for _index, context in ranked
-        if context["url"] not in verified_signal_source_urls
-    ][:_MAX_PARAGRAPH_COMPANY_CONTEXTS]
+    # The paragraph contract accepts one context per dimension. Choose the
+    # most relevant cited industry source within the existing total allowance.
+    # Older policies expose no supporting industry sources.
+    selected: list[dict[str, str]] = []
+    for _index, context in ranked:
+        if context["url"] in verified_signal_source_urls or (
+            context["dimension"] == "industry"
+            and any(prior["dimension"] == "industry" for prior in selected)
+        ):
+            continue
+        selected.append(context)
+        if len(selected) == _MAX_PARAGRAPH_COMPANY_CONTEXTS:
+            break
     selected.sort(
         key=lambda item: _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS.index(
             item["dimension"]

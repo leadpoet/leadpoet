@@ -42,6 +42,40 @@ def test_current_issuer_ticker_quotes_are_public_stage_proof(quote):
     assert _stage_quote_supports_observation("public", quote) is True
 
 
+@pytest.mark.parametrize("announcement", [
+    "announced today that it will host a webcast conference call",
+    "announced that it expects to publish quarterly results",
+    "announces that the company may change its product prices",
+])
+def test_current_ticker_is_not_invalidated_by_separate_business_announcement(announcement):
+    quote = f"Acme Corporation (Nasdaq: ACM) {announcement}."
+    assert _stage_quote_supports_observation("public", quote)
+    assert _validated_public(quote)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("announcement", [
+    "announced today that it will list its shares next year",
+    "announced that its listing is planned for next year",
+    "announced that it expects its IPO next year",
+    "announced that it was taken private",
+    "announced today that it has ceased trading",
+])
+def test_ticker_announcement_cannot_hide_listing_uncertainty_or_supersession(announcement):
+    quote = f"Acme Corporation (Nasdaq: ACM) {announcement}."
+    assert _validated_public(quote)["status"] == "UNPROVEN"
+
+
+def test_newsroom_date_before_issuer_does_not_hide_its_ticker():
+    quote = (
+        "MEDIA ALERT: Acme Sets Conference Call for Third-Quarter Results "
+        "Oct 1, 2026 Acme, Inc. (Nasdaq: ACM), the world's infrastructure "
+        "company, today announced that it will hold its quarterly conference call."
+    )
+    assert _validated_public(quote)["status"] == "VERIFIED"
+    assert _validated_public(quote.replace("Acme, Inc.", "Other, Inc."))["status"] == "UNPROVEN"
+    assert _validated_public(quote + " Acme was taken private.")["status"] == "UNPROVEN"
+
+
 @pytest.mark.parametrize(
     "separator",
     ["--", "–", "—"],

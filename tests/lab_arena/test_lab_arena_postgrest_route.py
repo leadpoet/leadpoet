@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import shutil
 import socket
@@ -16,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -128,6 +130,15 @@ def stack(tmp_path_factory):
                     END $$;
                     REVOKE ALL ON FUNCTION public.api_test_sqlstate() FROM PUBLIC;
                     GRANT EXECUTE ON FUNCTION public.api_test_sqlstate() TO lab_arena_service;
+                    -- Retained legacy PUBLIC grants must not widen the reader's
+                    -- opaque-key API surface, even for SECURITY DEFINER RPCs.
+                    CREATE FUNCTION public.api_test_legacy_public() RETURNS text
+                    LANGUAGE sql STABLE SECURITY DEFINER
+                    SET search_path=pg_catalog AS $$ SELECT 'legacy-public'::text $$;
+                    GRANT EXECUTE ON FUNCTION public.api_test_legacy_public() TO PUBLIC;
+                    CREATE TABLE public.api_test_public_table (id integer);
+                    INSERT INTO public.api_test_public_table VALUES (1);
+                    GRANT SELECT ON public.api_test_public_table TO PUBLIC;
                     CREATE SCHEMA IF NOT EXISTS auth;
                     CREATE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $$
                       SELECT coalesce(nullif(current_setting('request.jwt.claim.role',true),''),
@@ -495,19 +506,103 @@ def test_capture_reader_opaque_key_returns_only_aggregates_and_cannot_escalate(s
             headers={**headers, "X-JWT-Claims": '{"role":"service_role"}'}).status_code == 403
 
 
-def test_capture_reader_request_timeout_is_applied_by_postgrest(stack):
-    # Temporary fixture-only introspection; the production reader still has one RPC.
+def test_capture_reader_cannot_reach_retained_public_privileges(stack):
     with stack["connection"].cursor() as cursor:
-        cursor.execute("GRANT EXECUTE ON FUNCTION public.api_test_identity() TO leadpoet_capture_reader")
+        cursor.execute("SELECT has_function_privilege('leadpoet_capture_reader',"
+                       "'public.api_test_legacy_public()','EXECUTE'),"
+                       "has_table_privilege('leadpoet_capture_reader',"
+                       "'public.api_test_public_table','SELECT')")
+        assert cursor.fetchone() == (True, True)
+    with httpx.Client(base_url=stack["base_url"], timeout=10, trust_env=False) as client:
+        for name in ("arena_key", "gateway_key", "public_key"):
+            response = client.post("/rest/v1/rpc/api_test_legacy_public",
+                                   headers={"apikey": stack["values"][name]}, json={})
+            assert response.status_code == 200 and response.json() == "legacy-public"
+        headers = {"apikey": stack["values"]["capture_reader_key"]}
+        assert client.post("/rest/v1/rpc/api_test_legacy_public", headers=headers, json={}).status_code == 403
+        assert client.get("/rest/v1/api_test_public_table", headers=headers).status_code == 403
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def test_capture_reader_rejects_other_methods(stack, method):
+    response = httpx.request(method, stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_v1",
+        headers={"apikey": stack["values"]["capture_reader_key"]}, timeout=10, trust_env=False)
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("path", [
+    "/rest/v1/rpc/%6cab_arena_capture_summary_v1",
+    "/rest%2fv1/rpc/lab_arena_capture_summary_v1",
+    "/rest/v1//rpc/lab_arena_capture_summary_v1",
+    "/rest/v1/rpc/./lab_arena_capture_summary_v1",
+    "/rest/v1/other/../rpc/lab_arena_capture_summary_v1",
+    "/rest/v1/rpc/lab_arena_capture_summary_v1/",
+    "/rest/v1/rpc/LAB_ARENA_CAPTURE_SUMMARY_V1",
+    "/rest/v1/rpc/lab_arena_capture_summary_v1?select=*",
+])
+def test_capture_reader_rejects_noncanonical_request_targets(stack, path):
+    # Keep the original target verbatim; HTTP client URL normalization must
+    # not remove dot segments before nginx sees this regression input.
+    address = urlsplit(stack["base_url"])
+    connection = http.client.HTTPConnection(address.hostname, address.port, timeout=10)
     try:
-        response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_identity",
-            headers={"apikey": stack["values"]["capture_reader_key"]}, json={}, timeout=10, trust_env=False)
+        connection.request("POST", path, body=json.dumps({"p_round_id": "route", "p_submission_id": "route"}),
+            headers={"apikey": stack["values"]["capture_reader_key"], "Content-Type": "application/json"})
+        response = connection.getresponse()
+        assert response.status == 403
+        response.read()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("header,value", [
+    ("Accept-Profile", "extensions"), ("Content-Profile", "extensions"),
+    ("X-HTTP-Method-Override", "GET"), ("X-HTTP-Method", "DELETE"),
+    ("X-Method-Override", "PATCH"),
+    ("X-Original-URL", "/rest/v1/rpc/api_test_legacy_public"),
+    ("X-Rewrite-URL", "/rest/v1/rpc/api_test_legacy_public"),
+])
+def test_capture_reader_rejects_schema_method_and_path_override_headers(stack, header, value):
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_v1",
+        headers={"apikey": stack["values"]["capture_reader_key"], header: value},
+        json={"p_round_id": "route", "p_submission_id": "route"}, timeout=10, trust_env=False)
+    assert response.status_code == 403
+
+
+def test_capture_reader_accepts_explicit_public_profiles(stack):
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_v1",
+        headers={"apikey": stack["values"]["capture_reader_key"],
+                 "Accept-Profile": "public", "Content-Profile": "public"},
+        json={"p_round_id": "route", "p_submission_id": "route"}, timeout=10, trust_env=False)
+    assert response.status_code == 200
+
+
+def test_capture_reader_request_timeout_is_applied_by_postgrest(stack):
+    # Fixture-only introspection at the sole allowed RPC name. Granting another
+    # function must no longer make it reachable through the opaque reader key.
+    with stack["connection"].cursor() as cursor:
+        cursor.execute("SELECT pg_get_functiondef('public.lab_arena_capture_summary_v1(text,text)'::regprocedure)")
+        original = cursor.fetchone()[0]
+        cursor.execute("""
+            CREATE OR REPLACE FUNCTION public.lab_arena_capture_summary_v1(p_round_id text,p_submission_id text)
+            RETURNS TABLE (round_id text,submission_id text,execute_runs integer,icp_positions integer[],
+                model_calls integer,usage_calls integer,reasoning_tokens bigint,
+                first_call_at timestamptz,last_call_at timestamptz)
+            LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+                SELECT current_setting('role'),current_setting('statement_timeout'),
+                    0,'{}'::integer[],0,0,NULL::bigint,NULL::timestamptz,NULL::timestamptz
+            $$
+        """)
+    try:
+        response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_v1",
+            headers={"apikey": stack["values"]["capture_reader_key"]},
+            json={"p_round_id": "route", "p_submission_id": "route"}, timeout=10, trust_env=False)
         assert response.status_code == 200, response.text
-        assert response.json()["role"] == "leadpoet_capture_reader"
-        assert response.json()["statement_timeout"] == "1min"
+        assert response.json()[0]["round_id"] == "leadpoet_capture_reader"
+        assert response.json()[0]["submission_id"] == "1min"
     finally:
         with stack["connection"].cursor() as cursor:
-            cursor.execute("REVOKE EXECUTE ON FUNCTION public.api_test_identity() FROM leadpoet_capture_reader")
+            cursor.execute(original)
 
 
 def test_capture_reader_baseline_and_miner_usage_reaches_http_without_private_bodies(stack):

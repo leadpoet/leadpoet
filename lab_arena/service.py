@@ -7417,18 +7417,19 @@ class ArenaService:
             raise ServiceError("lease_token_invalid", 403)
         return token
 
-    def _sweep_expired_leases(self, round_id: str) -> Dict[str, Any]:
+    def _sweep_expired_leases(self, round_id: str) -> None:
         """Run the lease sweep and report how many runs it reclaimed.
 
         A run whose lease expires never reaches the completion RPC, so it
         never contributes a ``arena.run.<kind>`` outcome — the loss is only
         visible as the absence of a span. Carrying the sweep's own ``expired``
         count onto the stage record makes that population directly countable.
+        A store that reports nothing leaves the count at its zero default.
         """
         with telemetry.stage("advance_expire_leases") as observed:
             swept = self._store.expire_leases(round_id)
-            observed.count = int(swept.get("expired") or 0)
-        return swept
+            if isinstance(swept, Mapping):
+                observed.count = int(swept.get("expired") or 0)
 
     # -- daily driver (section 14.4) -------------------------------------------
 

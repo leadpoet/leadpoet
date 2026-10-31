@@ -61,6 +61,65 @@ validator can lose its final buffered runtime output; provider events already
 stored by the gateway remain available. This first version adds no log viewer
 or automatic retention deletion.
 
+## Capture summary reader
+
+Leadpoet's admin Data capture tab reads captured competition model usage for
+one submission. Public round data shows verified reasoning only for runs that
+pass the training check, so the site needs this private aggregate.
+
+Migration `593-lab-arena-capture-summary-reader.sql` adds the NOLOGIN role
+`leadpoet_capture_reader` with a 60 s role statement timeout and no table
+privileges. It may execute one SECURITY DEFINER function,
+`lab_arena_capture_summary_v1(p_round_id, p_submission_id)`. The function
+returns one row of counts for the submission's execute runs: runs, ICP
+positions, completed OpenRouter calls, calls whose saved body reports reasoning
+tokens, the token sum, and the first and last call times. It returns no hotkeys,
+credentials, prompts, bodies or model output. Score runs and other submissions
+are excluded. Counting uses the training export's terminal and token rules:
+the latest terminal must be a saved 2xx success, and the reasoning count is the
+largest non-negative integer with 1 to 19 digits at `usage.reasoning_tokens`,
+`usage.completion_tokens_details.reasoning_tokens`
+or `usage.output_tokens_details.reasoning_tokens`. A body that cannot be decoded
+counts as a call without reported usage. If the token sum exceeds BIGINT's
+maximum, the sum is NULL (unknown); the usage call count remains available.
+These provider-reported counts do not prove export completeness or training
+eligibility. The reader does not run the exporter's privacy or structure
+sanitizer.
+
+To enable it:
+
+1. Apply 593 through the configured repository migration helper. It is
+   idempotent and changes no stored row, table ACL or existing function. It
+   grants the role to a role named `authenticator` only if one exists.
+2. Grant the role to the exact reviewed RDS authenticator, then rerun the
+   read-only review queries in `deploy/aws/subnet-api/README.md`:
+
+   ```sql
+   GRANT leadpoet_capture_reader TO <reviewed_authenticator>
+     WITH INHERIT FALSE, SET TRUE;
+   ```
+
+3. Generate a new random `sb_secret_` key for the site only. Add it as
+   `capture_reader_key` to the private renderer input, render both files and
+   restart the pair as an explicit key rotation (README, "Private
+   configuration"). The other keys stay unchanged.
+4. Store the key as the site's `LEADPOET_ARENA_CAPTURE_KEY` (leadpoet-site
+   `docs/runbooks/aws-ecs-cutover.md`, "Read the arena call ledger"). Never
+   reuse the Arena, gateway or public key.
+5. Verify with the new key: `POST /rest/v1/rpc/lab_arena_capture_summary_v1`
+   with `{"p_round_id": ..., "p_submission_id": ...}` returns one row, and a
+   table read such as `GET /rest/v1/lab_arena_ledger?limit=1` returns 403.
+
+Rollback: remove `capture_reader_key` from the renderer input and restart the
+pair, which revokes the key. To also close the database path, run
+`REVOKE leadpoet_capture_reader FROM <reviewed_authenticator>` or
+`REVOKE EXECUTE ON FUNCTION public.lab_arena_capture_summary_v1(text, text)
+FROM leadpoet_capture_reader`. Neither step touches Arena data.
+
+A call reads each completed call's saved body, so cost grows with the
+submission's total response size. Local timing was about 2 ms per 20 KB body.
+The role timeout ends an unusually large request instead of letting it run on.
+
 ## Competition boundary
 
 A miner submits one local source directory. The helper:

@@ -12,6 +12,19 @@ The coordinator owns production deployment; internal agents may test and commit.
 Use fixed cached AWS credentials without refresh. This authority ends after the
 deployed gate and exports are verified against saved production trajectories.
 
+## Scoped authorization: PR936 aggregate capture reader
+
+The user authorized review, narrow fixes, merge and deployment of PR936's
+aggregate-only Arena capture reader. Apply only exact committed migration593,
+configure its distinct reader key and minimum database permissions, and roll out
+the existing nginx/PostgREST pair through canonical controls. Preserve raw data,
+privacy, exports, scoring, billing, eligibility, rewards and concurrent work.
+Internal agents may implement, test and commit only; the coordinator owns push,
+merge, credentials, production permission changes, migration and pair rollout.
+Do not renew credentials, replay provider calls, add dependencies or alter other
+production services. Verify aggregate output and denied access to raw data.
+This authority ends after the scoped deployment and verification complete.
+
 ## Scoped authorization: October 29 exact champion exception
 
 The user explicitly authorized manually crowning the highest-scoring October 29

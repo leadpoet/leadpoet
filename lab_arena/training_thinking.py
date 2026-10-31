@@ -1584,8 +1584,23 @@ def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=Non
     proof = example.get("completeness") or {}
     dimensions = proof.get("dimensions") or {}
     by_dimension = proof.get("reasons_by_dimension") or {}
-    if any(dimensions.get(name) is not True or by_dimension.get(name) != []
-           for name in ("context", "source_identity")):
+    source_verified = (dimensions.get("source_identity") is True
+                       and by_dimension.get("source_identity") == [])
+    # The validator checkout marker is best-effort operational metadata, not
+    # proof of the miner archive or captured bytes. Retain its warning while
+    # requiring every other source, scorer, input/output and privacy check.
+    checkout_diagnostic_only = (
+        dimensions.get("source_identity") is False
+        and by_dimension.get("source_identity") == ["runtime_source_unverified"]
+        and proof.get("complete") is False
+        and isinstance(proof.get("incomplete_reasons"), list)
+        and all(isinstance(reason, str) for reason in proof["incomplete_reasons"])
+        and all(isinstance(value, list) and all(isinstance(reason, str) for reason in value)
+                for value in by_dimension.values())
+        and set(proof["incomplete_reasons"]) == set().union(*(set(value) for value in by_dimension.values()))
+        and all(dimensions.get(name) is (not value) for name, value in by_dimension.items()))
+    if (dimensions.get("context") is not True or by_dimension.get("context") != []
+            or not (source_verified or checkout_diagnostic_only)):
         return None
     return frozenset(proof.get("incomplete_reasons") or [])
 

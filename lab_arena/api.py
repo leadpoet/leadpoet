@@ -127,7 +127,16 @@ def create_app(service: ArenaService) -> FastAPI:
                 "even if upload or validation fails. This hotkey has already used its attempt. "
                 "The last accepted submission is unchanged."
             )
-        headers = {"Retry-After": "2"} if exc.code == "round_opening" else None
+        admission_route = getattr(request.scope.get("route"), "path", None) in {
+            "/arena/v1/submissions/presign",
+            "/arena/v1/submissions/{submission_id}/finalize",
+        }
+        headers = None
+        if exc.code == "round_opening":
+            headers = {"Retry-After": "2"}
+        elif exc.status == 503 and admission_route:
+            # Pace the existing signed retry below the six-per-minute intake limit.
+            headers = {"Retry-After": "15"}
         return JSONResponse(status_code=exc.status, content=content, headers=headers)
 
     @app.exception_handler(ArenaContractError)

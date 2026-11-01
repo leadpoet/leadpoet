@@ -16,6 +16,10 @@ from tests.lab_arena.test_miner_submit import (
 )
 
 
+BUDGET = miner_submit.SUBMISSION_RETRY_BUDGET_SECONDS
+OVER_BUDGET = str(BUDGET + 1)
+
+
 class Response(_Response):
     def __init__(self, status=503, *, retry_after=None, document=None):
         super().__init__(status, document or {"detail": "Gateway at capacity - retry shortly"})
@@ -73,7 +77,7 @@ def test_server_retry_after_repeats_exact_signed_operation(clock, finalize, head
     assert calls[0][1]["timeout"] == 60 and calls[0][1]["allow_redirects"] is False
 
 
-@pytest.mark.parametrize("header", [None, "", "-1", "1.5", "nan", "181", "9" * 129, True,
+@pytest.mark.parametrize("header", [None, "", "-1", "1.5", "nan", OVER_BUDGET, "9" * 129, True,
                                    "Sat, 17 Oct 2026 00:00:15"])
 @pytest.mark.parametrize("finalize", [False, True])
 def test_missing_invalid_or_over_budget_retry_after_stays_terminal(clock, header, finalize):
@@ -117,8 +121,8 @@ def test_capacity_retry_cannot_extend_existing_elapsed_budget(clock):
             return Response(retry_after="15")
 
     assert miner_submit._post_submission_with_retry(Session(), "https://arena.example", {}).status_code == 503
-    assert attempts == list(range(0, 181, 15))
-    assert clock.elapsed == 180
+    assert attempts == list(range(0, BUDGET + 1, 15))
+    assert clock.elapsed == BUDGET
 
 
 def test_retry_after_is_never_shortened_to_fit_remaining_budget(clock):
@@ -127,7 +131,7 @@ def test_retry_after_is_never_shortened_to_fit_remaining_budget(clock):
 
         def post(self, *args, **kwargs):
             self.calls += 1
-            clock.elapsed += 170
+            clock.elapsed += BUDGET - 10
             return Response(retry_after="15")
 
     session = Session()

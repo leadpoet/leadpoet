@@ -321,19 +321,23 @@ def _retry_after_delay(value: Any) -> float | None:
     return max(1.0, seconds)
 
 
+# Cover the server's whole bounded opening window: 90 seconds before the
+# opening (service.OPENING_EARLY_GRACE_SECONDS) plus 180 seconds after it
+# (service.OPENING_CREATION_GRACE_SECONDS, long enough for one failed
+# round-creation attempt plus the driver's retry). A miner racing the cutoff
+# starts in the first half and must still be retrying through the second.
+# This must stay below contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS (300),
+# because every retry re-sends the same signed envelope.
+SUBMISSION_RETRY_BUDGET_SECONDS = 270
+
+
 def _post_submission_with_retry(
     session: Any, base: str, envelope: Mapping[str, Any],
     *, submission_id: str | None = None,
 ) -> Any:
     """Bound retries of these idempotent signed POSTs to the same round."""
 
-    # The server's bounded opening window allows 90 seconds before opening
-    # (service.OPENING_EARLY_GRACE_SECONDS) and 180 seconds after it
-    # (service.OPENING_CREATION_GRACE_SECONDS, long enough for one failed
-    # round-creation attempt plus the driver's retry). An early request must
-    # cover both halves, and the total stays inside the 300-second signed
-    # request window because every retry re-sends the same envelope.
-    deadline = time.monotonic() + 270
+    deadline = time.monotonic() + SUBMISSION_RETRY_BUDGET_SECONDS
     path = ("/arena/v1/submissions/presign" if submission_id is None
             else "/arena/v1/submissions/%s/finalize" % submission_id)
     while True:

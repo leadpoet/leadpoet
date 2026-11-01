@@ -360,6 +360,7 @@ def test_arena_deep_capture_vocabularies_are_frozen_and_literal() -> None:
         "ARENA_REVIEW_STATUSES",
         "ARENA_REVIEW_FUNDING_ROUTES",
         "ARENA_REVIEW_ERROR_CODES",
+        "ARENA_REVIEW_ERROR_REASONS",
         "ARENA_REVIEW_CATEGORIES",
     ):
         assert _frozen_literal(source, name), f"{name} must not be empty"
@@ -384,6 +385,9 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     )
     assert set(_frozen_literal(source, "ARENA_REVIEW_ERROR_CODES")) == set(
         code_review_policy.ERROR_CODES
+    ) | {"-"}
+    assert set(_frozen_literal(source, "ARENA_REVIEW_ERROR_REASONS")) == set(
+        code_review_policy.RESPONSE_ERROR_REASONS
     ) | {"-"}
     assert set(_frozen_literal(source, "ARENA_REVIEW_CATEGORIES")) == set(
         code_review.REVIEW_CATEGORIES

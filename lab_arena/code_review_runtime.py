@@ -50,6 +50,15 @@ class SubmissionCodeReviewer:
                 return result
             committed_attempt = int(result.get("attempt") or attempt)
             error_code = document.get("error_code", telemetry.NO_ERROR)
+            # Already sanitized to a bounded vocabulary and already persisted
+            # on the review row; carrying it on the span adds no new value,
+            # only the attribution the decision lane was missing.
+            raw_reason = document.get("error_reason")
+            error_reason = (
+                raw_reason
+                if raw_reason in code_review_policy.RESPONSE_ERROR_REASONS
+                else telemetry.NO_ERROR
+            )
             retryable = False
             if committed == "error":
                 retryable = code_review_policy.review_retry_available({
@@ -86,6 +95,7 @@ class SubmissionCodeReviewer:
                 submission_id=str(row["submission_id"]),
                 miner_hotkey=str(row["miner_hotkey"]),
                 attempt=committed_attempt,
+                error_reason=error_reason,
             )
         except BaseException:
             # Observability cannot turn a persisted review into a worker error.

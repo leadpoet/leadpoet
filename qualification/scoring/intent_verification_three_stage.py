@@ -2377,7 +2377,11 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                         **({"archive_failure": bound_failure} if bound_failure else {})}
             snapshot_url = str(r.url)
             ownership_meta = {}
+            source_publication_date = ""
             if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):
+                source_publication_date = _published_date_from_html(
+                    body, url, archive_url=snapshot_url,
+                )
                 ownership_meta = {
                     "observed_ownership_links": _observed_ownership_links(
                         body, url, archive_url=snapshot_url
@@ -2390,6 +2394,7 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                 from qualification.scoring.verification_helpers import extract_article_body
                 body = extract_article_body(body)
             return {"ok": True, "stage": "wayback",
+                    "source_publication_date": source_publication_date,
                     "content": body[:MAX_SCRAPED_CHARS], "meta": ownership_meta, "error": None}
     except Exception as e:
         return {"ok": False, "stage": "wayback_exception",
@@ -2625,6 +2630,7 @@ async def _scrape_sd_hardened(
         if wb["ok"]:
             return {"ok": True, "stage": "wayback",
                     "content": wb["content"], "error": None,
+                    "source_publication_date": wb.get("source_publication_date") or "",
                     "meta": wb.get("meta") or {}, "stage_history": history}
 
     # A target 404/410 alone cannot prove semantic absence. The caller compares it
@@ -3296,6 +3302,7 @@ def _source_publication_date(value: Any) -> str:
 
 def _unaddressed_article_matches_page(
     node: Mapping[str, Any], document: Optional[_HTMLShellParser], source_url: str,
+    *, archive_url: str = "",
 ) -> bool:
     """Bind an article without a page ID to this page's canonical URL and H1."""
 
@@ -3312,6 +3319,13 @@ def _unaddressed_article_matches_page(
     if not canonical:
         return False
     try:
+        if archive_url:
+            # Only an actual source-bound archive fetch may unwrap its
+            # rewritten canonical. Direct pages retain exact URL binding.
+            archived_canonical = urljoin(archive_url, canonical)
+            wrapper = urlsplit(archived_canonical)
+            if wrapper.netloc == "web.archive.org" and not wrapper.fragment:
+                canonical = _wayback_original_url(archived_canonical) or canonical
         source = urlsplit(_normalize_url(source_url))
         target = urlsplit(_normalize_url(urljoin(source_url, canonical)))
         # A page may declare its www alias canonical. No other host, scheme,
@@ -3328,9 +3342,17 @@ def _unaddressed_article_matches_page(
         return False
 
 
-def _published_date_from_html(html: str, source_url: str) -> str:
+def _published_date_from_html(
+    html: str, source_url: str, *, archive_url: str = "",
+) -> str:
     """Read first-party publication metadata before body extraction drops it."""
 
+    if archive_url:
+        wrapper = urlsplit(archive_url)
+        original = _wayback_original_url(archive_url)
+        if (wrapper.netloc != "web.archive.org" or wrapper.fragment or not original
+                or _normalize_url(original) != _normalize_url(source_url)):
+            return ""
     candidates: set[str] = set()
     head_document = _parse_html_shell(html)
     if head_document is not None and head_document.head_closed:
@@ -3387,7 +3409,9 @@ def _published_date_from_html(html: str, source_url: str) -> str:
                 if not parsed_document:
                     document = _parse_html_shell(html)
                     parsed_document = True
-                if not _unaddressed_article_matches_page(node, document, source_url):
+                if not _unaddressed_article_matches_page(
+                    node, document, source_url, archive_url=archive_url,
+                ):
                     continue
             normalized = _source_publication_date(node.get("datePublished"))
             if normalized:

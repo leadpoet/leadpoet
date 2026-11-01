@@ -103,7 +103,7 @@ def test_only_due_canonical_presign_gets_retryable_refusal():
             service._request_round({"round_id": round_id}, scope=scope)
         assert (other.value.code, other.value.status) == ("round_unknown", 404)
 
-    service.now = lambda: moment(14) + timedelta(seconds=90)
+    service.now = lambda: moment(14) + timedelta(seconds=180)
     with pytest.raises(ServiceError) as late:
         service._request_round({"round_id": "arena-2026-10-15"},
                                scope=contracts.SCOPE_SUBMISSION_PRESIGN)
@@ -249,7 +249,7 @@ def test_presign_does_not_retry_after_opening_budget(monkeypatch):
             self.calls += 1
             return Response()
 
-    observed = iter((0.0, 181.0))
+    observed = iter((0.0, 271.0))
     monkeypatch.setattr(miner_submit.time, "monotonic", lambda: next(observed))
     session = Session()
     response = miner_submit._post_submission_with_retry(
@@ -383,11 +383,41 @@ def test_presign_retry_crosses_opening_and_waits_for_creation(
 
 @pytest.mark.parametrize("offset,expected", [
     (-90.001, False), (-90, True), (-0.001, True),
-    (0, True), (89.999, True), (90, False),
+    (0, True), (89.999, True), (90, True),
+    (179.999, True), (180, False),
 ])
 def test_opening_retry_window_exact_edges(offset, expected):
     service = bare_service(moment(15) + timedelta(seconds=offset))
     assert service._due_daily_round_opening("arena-2026-10-16") is expected
+
+
+def test_slow_round_creation_still_reports_opening_not_unknown():
+    """A failed creation attempt plus its retry must not become a 404.
+
+    Production 2026-11-01: creation failed at the 00:00:00 opening and the
+    round was first usable at 00:02:24. Under the old symmetric 90s window
+    every presign after 00:01:30 was a terminal round_unknown.
+    """
+
+    service = bare_service(moment(15) + timedelta(seconds=144))
+    service._store = SimpleNamespace(get_round=lambda _round_id: None)
+    envelope = {"round_id": "arena-2026-10-16"}
+    with pytest.raises(ServiceError) as refusal:
+        service._request_round(
+            envelope, scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+        )
+    assert (refusal.value.code, refusal.value.status) == ("round_opening", 503)
+
+
+def test_a_non_canonical_round_is_still_unknown_inside_the_window():
+    service = bare_service(moment(15) + timedelta(seconds=144))
+    service._store = SimpleNamespace(get_round=lambda _round_id: None)
+    with pytest.raises(ServiceError) as refusal:
+        service._request_round(
+            {"round_id": "arena-2026-09-01"},
+            scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+        )
+    assert (refusal.value.code, refusal.value.status) == ("round_unknown", 404)
 
 
 def test_current_round_keeps_exact_cutoff_and_future_round_cannot_open_early():

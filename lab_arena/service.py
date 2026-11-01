@@ -308,6 +308,22 @@ ACTIVE_ROUND_STATUSES = tuple(
     status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
 )
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
+
+# The bounded window in which a missing canonical daily round is reported as
+# "opening shortly" (retryable 503) rather than "unknown" (terminal 404).
+# Asymmetric on purpose. Before the opening, only miners racing the cutoff are
+# early, and a long window there would mask a genuinely wrong round id.
+# After the opening the round is EXPECTED to exist and has simply not been
+# created yet, and creation is slow (21-43s per attempt in production) and can
+# fail and be retried by the driver on its next tick. 90s after the opening
+# left no room for a single failed attempt: on 2026-11-01 creation failed at
+# 00:00:00, succeeded on the 00:01:48 retry, and the round was first usable at
+# 00:02:24 - 54s after the window lapsed. Every presign in that gap turned into
+# a terminal round_unknown and the miner stopped submitting for the day.
+# Both halves must stay inside contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS (300),
+# because a retrying miner re-sends the same signed envelope.
+OPENING_EARLY_GRACE_SECONDS = 90
+OPENING_CREATION_GRACE_SECONDS = 180
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/leadpoet-sales-agent/archive/refs/heads/lab.tar.gz"
 FULL_THINKING_BASELINE_URL_RE = re.compile(
     r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz"
@@ -1962,12 +1978,15 @@ class ArenaService:
         # the opening in both directions: miners racing the cutoff name the
         # next canonical round moments before it is created, and a terminal
         # 404 there loses a submission that a short retry would have placed.
+        # The half after the opening is longer because creation is slow and may
+        # need a retry; see OPENING_CREATION_GRACE_SECONDS.
         next_opening = opening + timedelta(days=1)
-        grace = timedelta(seconds=90)
+        early = timedelta(seconds=OPENING_EARLY_GRACE_SECONDS)
+        late = timedelta(seconds=OPENING_CREATION_GRACE_SECONDS)
         return (
-            (opening <= now < opening + grace
+            (opening <= now < opening + late
              and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
-            or (next_opening - grace <= now < next_opening
+            or (next_opening - early <= now < next_opening
                 and round_id == round_id_for_cutoff(next_opening + timedelta(days=1)))
         )
 

@@ -328,8 +328,12 @@ def _post_submission_with_retry(
     """Bound retries of these idempotent signed POSTs to the same round."""
 
     # The server's bounded opening window allows 90 seconds before opening
-    # and 90 seconds after it. An early request must cover both halves.
-    deadline = time.monotonic() + 180
+    # (service.OPENING_EARLY_GRACE_SECONDS) and 180 seconds after it
+    # (service.OPENING_CREATION_GRACE_SECONDS, long enough for one failed
+    # round-creation attempt plus the driver's retry). An early request must
+    # cover both halves, and the total stays inside the 300-second signed
+    # request window because every retry re-sends the same envelope.
+    deadline = time.monotonic() + 270
     path = ("/arena/v1/submissions/presign" if submission_id is None
             else "/arena/v1/submissions/%s/finalize" % submission_id)
     while True:

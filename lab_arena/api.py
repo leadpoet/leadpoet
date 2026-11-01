@@ -29,7 +29,18 @@ MAX_JSON_BODY_BYTES = 1_048_576
 # reads that do no run work, so a burst of slow model calls occupies the pool
 # and stalls `/signing-key`, `/current` and the round reads behind it. Give the
 # provider leg its own pool so run work and reads cannot starve each other.
-PROVIDER_THREAD_LIMIT = max(1, int(os.getenv("ARENA_PROVIDER_THREAD_LIMIT", "32")))
+#
+# The default is sized ABOVE what the provider leg achieves today, not below
+# it. Measured mean threads held by this route per 5-minute bucket reached
+# 41.9 on 2026-11-01, 42.0 on 10-31, 42.7 on 10-30 and 49.7 on 10-29, and
+# exceeded 32 in 69 separate buckets across those four days. A dedicated
+# limiter REPLACES the default one for this call rather than carving a slice
+# out of it, so the remaining routes keep the full default pool either way; a
+# limit below the observed ceiling would therefore buy nothing for reads and
+# would simply slow paid run work during exactly the busiest minutes. 48
+# leaves headroom over the highest bucket observed. Tune down with
+# ARENA_PROVIDER_THREAD_LIMIT if the upstream providers or the store need it.
+PROVIDER_THREAD_LIMIT = max(1, int(os.getenv("ARENA_PROVIDER_THREAD_LIMIT", "48")))
 _PROVIDER_LIMITER = anyio.CapacityLimiter(PROVIDER_THREAD_LIMIT)
 
 

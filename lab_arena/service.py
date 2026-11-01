@@ -7612,8 +7612,20 @@ class ArenaService:
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}
                 try:
-                    with telemetry.stage("advance_publish"):
-                        return self.publish(round_id)
+                    with telemetry.stage("advance_publish") as published:
+                        attempt = self.publish(round_id)
+                        # Most publish attempts do no work: a stale round, a
+                        # `retry` while judgment or execution is still
+                        # incomplete, and both incomplete-evaluation holds all
+                        # leave the round in `scored` and run again next tick.
+                        # Only the publishing return carries `king_outcome`.
+                        # Recording the rest as `idle` keeps
+                        # `arena.outcome = "ok"` meaning "this round
+                        # published", which is otherwise unreadable from
+                        # outside: on 2026-10-31 the stage recorded 400+ `ok`
+                        # spans for a round that published exactly once.
+                        published.idle = "king_outcome" not in attempt
+                        return attempt
                 except ServiceError as exc:
                     if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["publication"])

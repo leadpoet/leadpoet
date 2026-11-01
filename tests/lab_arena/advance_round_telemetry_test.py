@@ -132,3 +132,25 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+def test_publish_retry_is_recorded_idle_so_ok_means_the_round_published(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "scored"
+    service.publish = lambda _: {
+        "status": "retry", "round_status": "scored", "reason": "judge_incomplete",
+    }
+    assert service.advance_round("round")["status"] == "retry"
+    spans = {s.attributes["arena.stage"]: s for s in exporter.get_finished_spans()}
+    assert spans["advance_publish"].attributes["arena.outcome"] == "idle"
+
+
+def test_a_round_that_actually_publishes_is_recorded_ok(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "scored"
+    service.publish = lambda _: {
+        "status": "published", "king_outcome": "crowned", "king_hotkey": "hotkey",
+    }
+    assert service.advance_round("round")["king_outcome"] == "crowned"
+    spans = {s.attributes["arena.stage"]: s for s in exporter.get_finished_spans()}
+    assert spans["advance_publish"].attributes["arena.outcome"] == "ok"

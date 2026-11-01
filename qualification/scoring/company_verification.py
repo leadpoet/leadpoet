@@ -745,6 +745,8 @@ class _HomepageIdentityParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._in_title = False
+        self._title_seen = False
+        self._foreign_depth = 0
         self._title_parts: list[str] = []
         self.metadata_names: list[str] = []
         self.copyright_legal_names: list[str] = []
@@ -763,8 +765,15 @@ class _HomepageIdentityParser(HTMLParser):
         }
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth += 1
+        if tag_name in {"svg", "math"}:
+            self._foreign_depth += 1
         if tag_name == "title":
-            self._in_title = True
+            # The document has one title. SVG/MathML accessibility labels and
+            # inert template titles are not additional company-name metadata.
+            self._in_title = not (
+                self._title_seen or self._foreign_depth or self._nonvisible_depth
+            )
+            self._title_seen |= self._in_title
             return
         if tag_name in {"a", "link"}:
             href = attributes.get("href", "")
@@ -811,6 +820,8 @@ class _HomepageIdentityParser(HTMLParser):
             self._json_ld_parts = None
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth = max(0, self._nonvisible_depth - 1)
+        if tag_name in {"svg", "math"}:
+            self._foreign_depth = max(0, self._foreign_depth - 1)
 
     def handle_data(self, data: str) -> None:
         if self._in_title and data.strip():

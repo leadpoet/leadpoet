@@ -85,13 +85,12 @@ class _VisibleHTMLTextParser(HTMLParser):
         classes = frozenset(values.get("class", "").casefold().split())
         element_id = values.get("id", "").casefold()
         style = re.sub(r"\s+", "", values.get("style", "").casefold())
-        # WOW.js hides ordinary paragraphs until they enter the viewport.
+        # WOW.js hides ordinary elements until they enter the viewport.
         # A rendered scrape can retain that initial state below the fold.
         # Recognize only its narrow entrance-animation state; explicit hidden
         # attributes, hidden ancestors, CSS selectors and display:none still win.
         scroll_reveal = bool(
             self._include_scroll_reveal
-            and tag == "p"
             and "wow" in classes
             and any(
                 re.fullmatch(r"(?:fade|slide)in(?:up|down|left|right)?(?:big)?", name)

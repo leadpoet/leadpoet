@@ -50,11 +50,10 @@ def test_hidden_ancestor_still_wins(wrapper):
     assert CLAIM not in _plain_text(wrapper.format(f"<p {REVEAL}>{CLAIM}</p>"))
 
 
-def test_explicit_hidden_css_and_nonparagraph_elements_still_fail():
+def test_explicit_hidden_css_and_script_content_still_fail():
     for raw in (
         f'<style>.secret {{visibility:hidden}}</style><p {REVEAL.replace("wp-block-paragraph", "secret")}>{CLAIM}</p>',
         f'<style>#secret {{display:none}}</style><p id="secret" {REVEAL}>{CLAIM}</p>',
-        f'<div {REVEAL}>{CLAIM}</div>',
         f'<script {REVEAL}>{CLAIM}</script>',
     ):
         assert CLAIM not in _plain_text(raw)

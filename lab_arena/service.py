@@ -1946,7 +1946,7 @@ class ArenaService:
             return False
 
     def _due_daily_round_opening(self, round_id: str) -> bool:
-        """Identify only the missing canonical round near its UTC opening."""
+        """Identify the due canonical intake round, including its early grace."""
 
         if self._pinned_round_id() is not None:
             return False
@@ -1957,17 +1957,18 @@ class ArenaService:
         opening = now.replace(hour=int(hour), minute=0, second=0, microsecond=0)
         if now < opening:
             opening -= timedelta(days=1)
-        # This only describes the bounded scheduler cutover, not a permanent
-        # alternative admission path if daily creation fails. The window spans
-        # the opening in both directions: miners racing the cutoff name the
-        # next canonical round moments before it is created, and a terminal
-        # 404 there loses a submission that a short retry would have placed.
+        # A missing due round is unavailable while daily creation can still
+        # give it the configured minimum submission window. A brief creation
+        # delay cannot make its canonical identity unknown.
+        # Keep the early grace only for miners racing the next opening. This
+        # classifies the refusal; the driver still owns round creation.
         next_opening = opening + timedelta(days=1)
+        earliest = now + timedelta(hours=max(0, int(self._config.defaults.min_submission_hours)))
         grace = timedelta(seconds=90)
         return (
-            (opening <= now < opening + grace
-             and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
+            (next_opening >= earliest and round_id == round_id_for_cutoff(next_opening))
             or (next_opening - grace <= now < next_opening
+                and next_opening + timedelta(days=1) >= earliest
                 and round_id == round_id_for_cutoff(next_opening + timedelta(days=1)))
         )
 

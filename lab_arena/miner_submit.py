@@ -21,6 +21,9 @@ import requests
 
 from lab_arena import contracts, source_bundle
 
+# Discovery and signed POSTs each keep the existing admission wait bound.
+ADMISSION_RETRY_SECONDS = 180
+
 
 class MinerSubmissionError(RuntimeError):
     """A local archive or Arena submission failed with one stable reason."""
@@ -245,8 +248,10 @@ def find_open_round(api_base_url: str, *, session: Any = requests) -> str:
     """Return the one round that currently accepts submissions."""
 
     base = _api_base_url(api_base_url)
+    deadline = time.monotonic() + ADMISSION_RETRY_SECONDS
     response = None
     transport_failures = 0
+    opening_wait = False
     while True:
         try:
             response = session.get(base + "/arena/v1/current", timeout=30)
@@ -282,9 +287,16 @@ def find_open_round(api_base_url: str, *, session: Any = requests) -> str:
         if cutoff.tzinfo is None:
             raise MinerSubmissionError("submission_window_closed")
         now = datetime.now(timezone.utc)
-        if not cutoff <= now < cutoff + timedelta(seconds=90):
+        remaining = deadline - time.monotonic()
+        cutover_end = cutoff + timedelta(seconds=ADMISSION_RETRY_SECONDS)
+        if not cutoff <= now < cutover_end:
+            if opening_wait:
+                raise MinerSubmissionError("arena_request_failed", "current_round")
             raise MinerSubmissionError("submission_window_closed")
-        time.sleep(min(2.0, (cutoff + timedelta(seconds=90) - now).total_seconds()))
+        if remaining <= 0:
+            raise MinerSubmissionError("arena_request_failed", "current_round")
+        opening_wait = True
+        time.sleep(min(2.0, remaining, (cutover_end - now).total_seconds()))
 
 
 def _signed_request(
@@ -327,9 +339,8 @@ def _post_submission_with_retry(
 ) -> Any:
     """Bound retries of these idempotent signed POSTs to the same round."""
 
-    # The server's bounded opening window allows 90 seconds before opening
-    # and 90 seconds after it. An early request must cover both halves.
-    deadline = time.monotonic() + 180
+    # A due round can stay unavailable longer than this per-stage wait budget.
+    deadline = time.monotonic() + ADMISSION_RETRY_SECONDS
     path = ("/arena/v1/submissions/presign" if submission_id is None
             else "/arena/v1/submissions/%s/finalize" % submission_id)
     while True:

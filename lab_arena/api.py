@@ -6,10 +6,12 @@ document validated by the service; bodies are size-bounded here.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from typing import Any, Optional
 
 import anyio
+from anyio import to_thread
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -20,6 +22,26 @@ from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
 
 MAX_JSON_BODY_BYTES = 1_048_576
+
+# The provider leg blocks its worker thread for the whole upstream model call,
+# so it is the only route on this app whose hold time is set by a third party.
+# It shares anyio's default 40-thread pool with every other route, including
+# reads that do no run work, so a burst of slow model calls occupies the pool
+# and stalls `/signing-key`, `/current` and the round reads behind it. Give the
+# provider leg its own pool so run work and reads cannot starve each other.
+#
+# The default is sized ABOVE what the provider leg achieves today, not below
+# it. Measured mean threads held by this route per 5-minute bucket reached
+# 41.9 on 2026-11-01, 42.0 on 10-31, 42.7 on 10-30 and 49.7 on 10-29, and
+# exceeded 32 in 69 separate buckets across those four days. A dedicated
+# limiter REPLACES the default one for this call rather than carving a slice
+# out of it, so the remaining routes keep the full default pool either way; a
+# limit below the observed ceiling would therefore buy nothing for reads and
+# would simply slow paid run work during exactly the busiest minutes. 48
+# leaves headroom over the highest bucket observed. Tune down with
+# ARENA_PROVIDER_THREAD_LIMIT if the upstream providers or the store need it.
+PROVIDER_THREAD_LIMIT = max(1, int(os.getenv("ARENA_PROVIDER_THREAD_LIMIT", "48")))
+_PROVIDER_LIMITER = anyio.CapacityLimiter(PROVIDER_THREAD_LIMIT)
 
 
 def _refuse_declared_oversize(request: Request, limit: int) -> None:
@@ -265,12 +287,13 @@ def create_app(service: ArenaService) -> FastAPI:
         def disconnected() -> bool:
             return bool(anyio.from_thread.run(request.is_disconnected))
 
-        return await run_in_threadpool(
+        return await to_thread.run_sync(
             service.handle_provider,
             run_id,
             lease_token,
             frame,
             disconnected,
+            limiter=_PROVIDER_LIMITER,
         )
 
     @app.post("/arena/v1/runs/{run_id}/signal-judgment")

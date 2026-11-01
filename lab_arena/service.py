@@ -364,6 +364,15 @@ class ServiceError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+# A publication reads one saved output per run, so a single object call that
+# never answers wedges the whole round. These bounds cap one call at roughly
+# three minutes, well inside the ten-minute worst case a publication has ever
+# needed, and leave the failure recoverable on the next driver tick.
+OBJECT_CONNECT_TIMEOUT_SECONDS = 10
+OBJECT_READ_TIMEOUT_SECONDS = 30
+OBJECT_MAX_ATTEMPTS = 3
+
+
 class ObjectStore(Protocol):
     def put(self, ref: str, data: bytes) -> None: ...
 
@@ -481,7 +490,20 @@ class S3ObjectStore:
             import boto3  # noqa: WPS433
             from botocore.config import Config
 
-            client = boto3.client("s3", region_name=region_name, config=Config(signature_version="s3v4"))
+            # Bound every object call. An unbounded read inside publication
+            # holds the round lock for as long as the bucket stays silent,
+            # which stops the driver entirely and records nothing; a refusal
+            # is recoverable on the next tick, an indefinite wait is not.
+            client = boto3.client(
+                "s3",
+                region_name=region_name,
+                config=Config(
+                    signature_version="s3v4",
+                    connect_timeout=OBJECT_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=OBJECT_READ_TIMEOUT_SECONDS,
+                    retries={"max_attempts": OBJECT_MAX_ATTEMPTS, "mode": "standard"},
+                ),
+            )
         self._client = client
         self._bucket = bucket
 
@@ -5021,7 +5043,9 @@ class ArenaService:
             self, round_row, self._store.list_runs(round_id, kind="execute")
         )
         try:
-            infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
+            with telemetry.stage("publication_read_outputs") as observed:
+                infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
+                observed.count = len(publication_reads.outputs_by_ref)
         except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
                 TypeError, ValueError, UnicodeDecodeError):
             return self._hold_incomplete_evaluation(

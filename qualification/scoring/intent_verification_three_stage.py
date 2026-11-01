@@ -3356,6 +3356,22 @@ def _published_date_from_html(
         if (wrapper.netloc != "web.archive.org" or wrapper.fragment or not original
                 or _normalize_url(original) != _normalize_url(source_url)):
             return ""
+        # Archive navigation can contain expanded iframe documents. Its H1
+        # and JSON-LD belong to that interface, not the archived article.
+        # Reuse the existing archive parser and remove only recognized chrome
+        # after the actual snapshot is bound to this exact source URL.
+        archive_document = _WaybackErrorParser(html)
+        try:
+            archive_document.feed(html)
+            archive_document.close()
+        except (ValueError, TypeError, RecursionError):
+            return ""
+        remaining, offset = [], 0
+        for start, end in sorted(archive_document.toolbars):
+            if start > offset:
+                remaining.append(html[offset:start])
+            offset = max(offset, end)
+        html = "".join([*remaining, html[offset:]])
     candidates: set[str] = set()
     head_document = _parse_html_shell(html)
     if head_document is not None and head_document.head_closed:

@@ -69,6 +69,37 @@ def test_retries_count_latest_assignment_and_preserve_each_recorded_code_version
     assert public_dashboard.evaluation_progress([failed], NOW)['state'] == 'failed'
 
 
+def test_published_incomplete_closes_only_unfinished_counts_and_keeps_accepted_runs():
+    accepted = [run(
+        run_id=f"accepted:{index}", assignment_id=f"accepted:{index}",
+        kind="execute" if index < 10 else "score", status="accepted",
+    ) for index in range(19)]
+    pending_judge = run(
+        run_id="judge:retry", assignment_id="judge:retry", attempt=2,
+        runner_hotkey=None, status="pending",
+    )
+    entry = {"status": "scoring_failed", "evaluation": public_dashboard.evaluation_progress(
+        [*accepted, pending_judge], NOW,
+    )}
+    assert entry["evaluation"]["counts"] == {
+        "queued": 0, "active": 0, "completed": 19, "failed": 0, "retrying": 1,
+    }
+
+    public_dashboard._mark_recovery_excluded(entry, "evaluation_incomplete")
+
+    assert entry["evaluation"]["state"] == "evaluation_incomplete"
+    assert entry["evaluation"]["counts"] == {
+        "queued": 0, "active": 0, "completed": 19, "failed": 1, "retrying": 0,
+    }
+    assert entry["evaluation"]["active_count"] == 0
+    assert entry["evaluation"]["validators"] == []
+
+    # The terminal published outcome does not change a live round's leases.
+    active = public_dashboard.evaluation_progress([run()], NOW)
+    assert active["state"] == "evaluating"
+    assert active["counts"]["active"] == 1
+
+
 @pytest.mark.parametrize('overrides', [
     {'start_lease_generation': '1'}, {'start_lease_generation': None},
     {'start_lease_generation': True}, {'runner_hotkey': AUDITOR},

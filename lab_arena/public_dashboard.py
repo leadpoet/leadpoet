@@ -512,6 +512,15 @@ def _mark_recovery_excluded(entry: dict, status: str, *, reason: Optional[str] =
         entry["evaluation_reason"] = reason
     if "evaluation" in entry:
         entry["evaluation"]["state"] = status
+        if status == "evaluation_incomplete":
+            evaluation = entry["evaluation"]
+            counts = evaluation.get("counts")
+            if isinstance(counts, dict):
+                unfinished = sum(counts.get(key, 0) for key in ("queued", "active", "retrying"))
+                counts["failed"] = counts.get("failed", 0) + unfinished
+                counts["queued"] = counts["active"] = counts["retrying"] = 0
+                evaluation["active_count"] = 0
+                evaluation["validators"] = []
         if entry.get("evaluation_reason") == "openrouter_zdr_route_unavailable":
             reasons = set(entry["evaluation"].get("failure_reasons") or ())
             entry["evaluation"]["failure_reasons"] = sorted(

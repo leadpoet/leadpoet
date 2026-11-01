@@ -109,8 +109,14 @@ def test_industry_research_uses_the_final_review_criterion_rules(monkeypatch):
                                if message['role'] == 'system')
         assert criterion_rules in instructions
         assert 'judge other targets normally' in instructions
+        submit_only = request['tool_choice'] == {
+            'type': 'function', 'function': {'name': 'submit_findings'}}
+        assert request['reasoning']['effort'] == ('low' if submit_only else 'medium')
+        assert request['max_tokens'] == c.REASONING_MAX_TOKENS
     assert all(criterion_rules in request['messages'][0]['content']
                for request in reviews)
+    assert all(request['reasoning']['effort'] == 'medium' for request in reviews)
+    assert all(request['max_tokens'] == 2000 for request in reviews)
 
 
 @pytest.mark.parametrize('positive_review', [False, True])
@@ -228,7 +234,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     assert calls['model'][0]['tool_choice'] == 'required'
     assert calls['model'][0]['model'] == MODEL
     assert calls['model'][1]['model'] == MODEL
-    assert all(request['reasoning']['effort'] == 'low' for request in calls['model'][:2])
+    assert all(request['reasoning']['effort'] == 'medium' for request in calls['model'][:2])
     # Selecting the next source is still industry research. Do not hand it
     # back to the weaker general reviewer after just one page was fetched.
     assert len(calls['model']) == 3  # Two fetches and final judgment; no query-only model call.

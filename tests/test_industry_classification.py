@@ -60,7 +60,7 @@ def test_request_has_no_prior_verdict_and_uses_frozen_role():
     request = industry.request_payload(packet(), model='openai/gpt-6.1-sol')
     assert request['model'] == 'openai/gpt-6.1-sol'
     assert request['max_tokens'] == 2000
-    assert request['reasoning']['effort'] == 'low'
+    assert request['reasoning']['effort'] == 'medium'
     data = json.loads(request['messages'][1]['content'])
     assert set(data) == {'criterion', 'company_locator', 'evaluation_date'}
     assert data['evaluation_date'] == '2026-10-24'

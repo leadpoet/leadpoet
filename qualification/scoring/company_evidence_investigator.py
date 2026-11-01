@@ -5649,51 +5649,54 @@ async def investigate_company_evidence(
                     **({"server_prefetch_fetch_calls": fetch_calls}
                        if not overview_cached else {}),
                 )
-            if (
-                requested_venture_stage
-                or requested_private_equity_stage
-                or requested_public_stage
-            ):
-                stage_discovery: dict[str, Any] = {
-                    "query": required_current_stage_query,
-                    "notice": "server_search_results_are_discovery_only_not_evidence",
-                }
-                if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
-                    stage_discovery.update(ok=False, error="admission_budget_exhausted")
-                    required_stage_discovery_failure_reason = (
-                        ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-                    )
-                elif search_calls >= MAX_SEARCH_CALLS:
-                    stage_discovery.update(ok=False, error="search_budget_exhausted")
-                    required_stage_discovery_failure_reason = (
-                        ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-                    )
-                else:
-                    search_calls += 1
-                    try:
-                        discovery = await _search_web(
-                            session, required_current_stage_query, key=exa_key
-                        )
-                    except (
-                        aiohttp.ClientError,
-                        RuntimeError,
-                        TimeoutError,
-                        asyncio.TimeoutError,
-                        ValueError,
-                    ) as exc:
-                        stage_discovery.update(ok=False, error="search_failed")
+            async def discover_current_stage():
+                nonlocal search_calls, current_stage_search_succeeded
+                nonlocal required_stage_discovery_failure_reason
+                if (
+                    requested_venture_stage
+                    or requested_private_equity_stage
+                    or requested_public_stage
+                ):
+                    stage_discovery: dict[str, Any] = {
+                        "query": required_current_stage_query,
+                        "notice": "server_search_results_are_discovery_only_not_evidence",
+                    }
+                    if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
+                        stage_discovery.update(ok=False, error="admission_budget_exhausted")
                         required_stage_discovery_failure_reason = (
-                            MALFORMED_RESPONSE_FAILURE_REASON
-                            if isinstance(exc, ValueError)
-                            else PROVIDER_ERROR_FAILURE_REASON
+                            ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                        )
+                    elif search_calls >= MAX_SEARCH_CALLS:
+                        stage_discovery.update(ok=False, error="search_budget_exhausted")
+                        required_stage_discovery_failure_reason = (
+                            ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                         )
                     else:
-                        current_stage_search_succeeded = True
-                        stage_discovery.update(ok=True, discovery=discovery)
-                input_document["server_current_stage_discovery"] = stage_discovery
-                input_document["investigation_limits"]["remaining_search_calls"] = (
-                    MAX_SEARCH_CALLS - search_calls
-                )
+                        search_calls += 1
+                        try:
+                            discovery = await _search_web(
+                                session, required_current_stage_query, key=exa_key
+                            )
+                        except (
+                            aiohttp.ClientError,
+                            RuntimeError,
+                            TimeoutError,
+                            asyncio.TimeoutError,
+                            ValueError,
+                        ) as exc:
+                            stage_discovery.update(ok=False, error="search_failed")
+                            required_stage_discovery_failure_reason = (
+                                MALFORMED_RESPONSE_FAILURE_REASON
+                                if isinstance(exc, ValueError)
+                                else PROVIDER_ERROR_FAILURE_REASON
+                            )
+                        else:
+                            current_stage_search_succeeded = True
+                            stage_discovery.update(ok=True, discovery=discovery)
+                    input_document["server_current_stage_discovery"] = stage_discovery
+                    input_document["investigation_limits"]["remaining_search_calls"] = (
+                        MAX_SEARCH_CALLS - search_calls
+                    )
             # Prior industry citations remain untrusted locators in the input.
             # Let the shared researcher select them against the missing facts;
             # eager reads and recovery can exhaust its budget before selection.
@@ -5732,10 +5735,36 @@ async def investigate_company_evidence(
                 'careers_locators': bounded_homepage_navigation_locators,
                 'industry_bindings': industry_bindings,
             }
-            if industry_review_model:
-                initial_industry, initial_failure, industry_review_calls = (
-                    await _review_industry_sources(session, research=True, **industry_review_arguments)
+            if industry_review_model and (
+                requested_venture_stage or requested_private_equity_stage or requested_public_stage
+            ):
+                # Stage discovery returns locators only. It neither reads nor
+                # changes the bound pages used by the initial industry review.
+                # Admit these existing independent calls together; keep both
+                # results and wait for settlement even if either one fails.
+                pending_discovery = asyncio.gather(
+                    discover_current_stage(),
+                    _review_industry_sources(session, research=True, **industry_review_arguments),
+                    return_exceptions=True,
                 )
+                try:
+                    stage_result, initial_result = await asyncio.shield(pending_discovery)
+                except asyncio.CancelledError:
+                    # Do not abandon already admitted paid requests when the
+                    # caller cancels. Broker timeouts still bound settlement.
+                    await asyncio.shield(pending_discovery)
+                    raise
+                for result in (stage_result, initial_result):
+                    if isinstance(result, BaseException):
+                        raise result
+            else:
+                await discover_current_stage()
+                if industry_review_model:
+                    initial_result = await _review_industry_sources(
+                        session, research=True, **industry_review_arguments
+                    )
+            if industry_review_model:
+                initial_industry, initial_failure, industry_review_calls = initial_result
                 if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
                     _record_failure(diagnostic, initial_failure)
                     return {'claims': {}, 'failure_reason': initial_failure}
@@ -6188,7 +6217,12 @@ async def investigate_company_evidence(
                         "temperature": 0.0,
                         "max_tokens": REASONING_MAX_TOKENS,
                         **(
-                            {"reasoning": {"effort": "low"}}
+                            {"reasoning": {"effort": (
+                                "medium" if industry_investigation_model
+                                and not (serialization_retry_request or force_submit
+                                         or required_tool == "submit_findings")
+                                else "low"
+                            )}}
                             if (
                                 industry_investigation_model
                                 or (positive_semantic_review and (

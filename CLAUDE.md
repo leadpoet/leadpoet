@@ -9,6 +9,19 @@ billing uncertainty, frozen coverage rules, historical exports and concurrent
 work. Add no provider calls, recovery path, dependency or credential renewal.
 The coordinator owns independent review, push, merge and production release.
 
+## Scoped authorization: due daily-round refusal classification
+
+The coordinating task authorized the smallest correction to classify a missing
+canonical intake round as retryable while the existing daily creation policy
+can still create it. Reuse the existing 180-second admission wait duration in
+both discovery and signed POSTs, with a monotonic bound and no new retry loop.
+Internal agents may change that classification, existing client retry, focused tests and these identical instruction files in a clean
+latest-main worktree, then test and commit only. Preserve the early grace,
+minimum submission window, bounded client retry, signatures, ownership,
+schedule, scoring, provider behavior and concurrent PR954. Add no creation
+path, dependency, provider calls, credential renewal or production action.
+The coordinator owns independent review and any push, merge or deployment.
+
 ## Scoped authorization: October 31 aggregate capture accuracy
 
 The user authorized the smallest tested correction to admin capture totals,

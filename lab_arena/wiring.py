@@ -573,7 +573,9 @@ def build_service_from_environment(mode: str):
 
     # The catalog is organizer-held runtime state. It is not published in a
     # round and the baseline model never becomes an allowlist for miners.
-    price_table = broker_module.fetch_openrouter_price_table()
+    price_table = broker_module.fetch_openrouter_price_table(
+        api_key=provider_keys["openrouter"]
+    )
     openrouter_shared_gate = broker_module.OpenRouterSharedGate(
         _openrouter_shared_concurrency_from_environment()
     )

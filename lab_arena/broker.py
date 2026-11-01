@@ -46,6 +46,12 @@ PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 JUDGMENT_CACHE_SCHEMA_VERSION = "leadpoet.lab_arena.verifier_provider_request.v1"
 JUDGMENT_CACHE_BUSY_POLL_SECONDS = 1.0
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+# The account-scoped catalog. OpenRouter narrows it to the models the calling
+# key is actually allowed to route to, including under the zero-data-retention
+# policy every Arena call must meet. The public list above does not: it prices
+# models we cannot reach, and a miner that picks one loses its whole round
+# (INC-964). We prefer this route and fall back to the public one, never fail.
+OPENROUTER_USER_MODELS_URL = "https://openrouter.ai/api/v1/models/user"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
 OPENROUTER_GPT6_LUNA_RESPONSES_MODEL = "openai/gpt-6-luna"
@@ -636,7 +642,13 @@ def validate_price_table(document: Any) -> Dict[str, Any]:
     return table
 
 
-def price_table_from_models_response(response: Mapping[str, Any], model_ids: Optional[Sequence[str]] = None, *, fetched_at: str) -> Dict[str, Any]:
+def price_table_from_models_response(
+    response: Mapping[str, Any],
+    model_ids: Optional[Sequence[str]] = None,
+    *,
+    fetched_at: str,
+    source: str = OPENROUTER_MODELS_URL,
+) -> Dict[str, Any]:
     """Build a catalog of models with usable prompt and completion prices."""
 
     if not isinstance(response, Mapping) or not isinstance(response.get("data"), list):
@@ -671,20 +683,24 @@ def price_table_from_models_response(response: Mapping[str, Any], model_ids: Opt
     return validate_price_table({
         "schema_version": PRICE_TABLE_SCHEMA_VERSION,
         "fetched_at": fetched_at,
-        "source": OPENROUTER_MODELS_URL,
+        "source": source,
         "models": found,
     })
 
 
-def fetch_openrouter_price_table(
-    model_ids: Optional[Sequence[str]] = None,
+def _read_models_document(
+    url: str,
     *,
-    urlopen: Optional[Callable[..., Any]] = None,
-    timeout_seconds: int = 20,
-    now: Optional[Callable[[], datetime]] = None,
-) -> Dict[str, Any]:
-    urlopen = urlopen or _DIRECT_URLOPEN
-    request = urlrequest.Request(OPENROUTER_MODELS_URL, headers={"Accept": "application/json"}, method="GET")
+    urlopen: Callable[..., Any],
+    timeout_seconds: int,
+    api_key: Optional[str] = None,
+) -> Any:
+    """GET one models document, raising ArenaContractError on any refusal."""
+
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    request = urlrequest.Request(url, headers=headers, method="GET")
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read(MAX_PRICE_TABLE_BYTES + 1)
@@ -695,11 +711,43 @@ def fetch_openrouter_price_table(
     if len(raw) > MAX_PRICE_TABLE_BYTES:
         raise ArenaContractError("models endpoint response exceeds the size cap")
     try:
-        decoded = json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ArenaContractError("models endpoint returned invalid JSON") from exc
+
+
+def fetch_openrouter_price_table(
+    model_ids: Optional[Sequence[str]] = None,
+    *,
+    urlopen: Optional[Callable[..., Any]] = None,
+    timeout_seconds: int = 20,
+    now: Optional[Callable[[], datetime]] = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    urlopen = urlopen or _DIRECT_URLOPEN
     moment = (now or (lambda: datetime.now(timezone.utc)))()
-    return price_table_from_models_response(decoded, model_ids, fetched_at=moment.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    fetched_at = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if api_key:
+        # Narrowing is an improvement, never a new way to fail the round: any
+        # refusal from the account-scoped route falls through to the public one.
+        try:
+            document = _read_models_document(
+                OPENROUTER_USER_MODELS_URL,
+                urlopen=urlopen,
+                timeout_seconds=timeout_seconds,
+                api_key=api_key,
+            )
+            return price_table_from_models_response(
+                document, model_ids, fetched_at=fetched_at, source=OPENROUTER_USER_MODELS_URL
+            )
+        except ArenaContractError:
+            pass
+    document = _read_models_document(
+        OPENROUTER_MODELS_URL, urlopen=urlopen, timeout_seconds=timeout_seconds
+    )
+    return price_table_from_models_response(
+        document, model_ids, fetched_at=fetched_at, source=OPENROUTER_MODELS_URL
+    )
 
 
 def _microusd_ceiling(usd: Decimal) -> int:

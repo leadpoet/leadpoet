@@ -1,3 +1,14 @@
+## Scoped authorization: October 31 hidden provider retry capture
+
+The coordinating task authorized the smallest extension of the existing hidden
+retry proof for broker-internal OpenRouter attempts, with exact saved request,
+lineage, failed upstream bytes and successful host write. Internal agents may
+change that helper, focused tests and these identical instruction files in an
+isolated latest-main worktree, then test and commit. Preserve scoring, privacy,
+billing uncertainty, frozen coverage rules, historical exports and concurrent
+work. Add no provider calls, recovery path, dependency or credential renewal.
+The coordinator owns independent review, push, merge and production release.
+
 ## Scoped authorization: due daily-round refusal classification
 
 The coordinating task authorized the smallest correction to classify a missing

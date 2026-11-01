@@ -355,6 +355,8 @@ def test_arena_deep_capture_vocabularies_are_frozen_and_literal() -> None:
         "ARENA_PROVIDER_OUTCOMES",
         "ARENA_PROVIDER_ERROR_CODES",
         "ARENA_TERMINAL_CAUSES",
+        "ARENA_FAILURE_STAGES",
+        "ARENA_FAILURE_ERROR_CLASSES",
         "ARENA_RUN_KINDS",
         "ARENA_GATE_OUTCOMES",
         "ARENA_REVIEW_STATUSES",
@@ -382,6 +384,12 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     assert set(_frozen_literal(source, "ARENA_TERMINAL_CAUSES")) == set(
         contracts.TERMINAL_CAUSES
     )
+    assert set(_frozen_literal(source, "ARENA_FAILURE_STAGES")) == set(
+        contracts.FAILURE_DIAGNOSTIC_STAGES
+    ) | {"-"}
+    assert set(_frozen_literal(source, "ARENA_FAILURE_ERROR_CLASSES")) == set(
+        contracts.FAILURE_DIAGNOSTIC_ERROR_CLASSES
+    ) | {"-"}
     assert set(_frozen_literal(source, "ARENA_REVIEW_ERROR_CODES")) == set(
         code_review_policy.ERROR_CODES
     ) | {"-"}

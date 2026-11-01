@@ -779,7 +779,12 @@ class Harness:
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
         kp = keypair("svc-runner-" + ["alpha", "beta", "gamma"][index])
-        cache = rn.ImageCache(self.tmp / ("images-%d" % index), lambda reference, digest, target: (target / "rootfs").mkdir())
+        cache = rn.ImageCache(
+            self.tmp / ("images-%d" % index),
+            lambda reference, digest, target: (target / "rootfs").mkdir(),
+            # This fixture exports empty roots, not production-sized images.
+            max_bytes=1024 * 1024,
+        )
         api = self.api_factory() if self.api_factory else InProcessApi(self.service)
         source_cache = rn.SourceCache(
             self.tmp / ("sources-%d" % index),

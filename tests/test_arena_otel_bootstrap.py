@@ -821,7 +821,57 @@ def test_run_span_names_the_kind_and_the_terminal_cause():
         "arena.run_kind": "execute",
         "arena.terminal_cause": "budget_exhausted",
         "arena.outcome": "failed",
+        "arena.failure_stage": "-",
+        "arena.failure_error_class": "-",
     }
+
+
+def test_run_span_carries_the_runner_failure_diagnostic():
+    """A repeated judge failure must say which stage raised and why."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="provider_call",
+        failure_error_class="provider_unavailable",
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert dict(span.attributes) == {
+        "arena.run_kind": "score",
+        "arena.terminal_cause": "judge_error",
+        "arena.outcome": "failed",
+        "arena.failure_stage": "provider_call",
+        "arena.failure_error_class": "provider_unavailable",
+    }
+
+
+def test_run_span_with_a_diagnostic_outside_the_vocabulary_is_dropped_whole():
+    """The envelope stays frozen: a computed diagnostic never escapes."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error", failure_stage="scrapingdog timed out",
+    )
+    assert exp.get_finished_spans() == ()
+
+
+def test_every_contract_failure_diagnostic_value_is_admitted():
+    """A diagnostic the contract can produce must be one the validator admits."""
+    from lab_arena import contracts
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    for stage in contracts.FAILURE_DIAGNOSTIC_STAGES:
+        for error_class in contracts.FAILURE_DIAGNOSTIC_ERROR_CLASSES:
+            recorder.record_run(
+                "score", "judge_error",
+                failure_stage=stage, failure_error_class=error_class,
+            )
+    assert len(exp.get_finished_spans()) == (
+        len(contracts.FAILURE_DIAGNOSTIC_STAGES)
+        * len(contracts.FAILURE_DIAGNOSTIC_ERROR_CLASSES)
+    )
 
 
 def test_every_contract_terminal_cause_is_admitted():

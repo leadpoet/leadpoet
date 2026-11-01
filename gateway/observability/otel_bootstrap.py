@@ -230,6 +230,34 @@ ARENA_PROVIDER_ERROR_CODES = frozenset(
     }
 )
 
+# ``lab_arena.contracts.FAILURE_DIAGNOSTIC_STAGES`` /
+# ``FAILURE_DIAGNOSTIC_ERROR_CLASSES`` — why a run failed, one step finer than
+# the terminal cause. "-" is the fixed label for a run that carries no
+# diagnostic (every accepted run, and any failure recorded before the runner
+# produced one); it is not a value the sidecar can compute from a request.
+ARENA_FAILURE_STAGES = frozenset(
+    {
+        "sandbox",
+        "sandbox_output",
+        "scoring_output",
+        "scorer",
+        "provider_call",
+        "-",
+    }
+)
+ARENA_FAILURE_ERROR_CLASSES = frozenset(
+    {
+        "judge_timeout",
+        "sandbox_output_error",
+        "missing_output",
+        "execution_output_invalid",
+        "scoring_output_invalid",
+        "judge_error",
+        "provider_unavailable",
+        "-",
+    }
+)
+
 # ``lab_arena.contracts.TERMINAL_CAUSES`` — how one evaluation run ended.
 ARENA_TERMINAL_CAUSES = frozenset(
     {
@@ -776,6 +804,8 @@ RUN_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.run_kind": (str,),
     "arena.terminal_cause": (str,),
     "arena.outcome": (str,),
+    "arena.failure_stage": (str,),
+    "arena.failure_error_class": (str,),
 }
 
 RUN_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(RUN_SPAN_ATTRIBUTE_TYPES)
@@ -1189,6 +1219,10 @@ def _validating_exporter(
             return "terminal_cause"
         if attributes["arena.outcome"] not in ARENA_TASK_OUTCOMES:
             return "outcome"
+        if attributes["arena.failure_stage"] not in ARENA_FAILURE_STAGES:
+            return "failure_stage"
+        if attributes["arena.failure_error_class"] not in ARENA_FAILURE_ERROR_CLASSES:
+            return "failure_error_class"
         if span.name != "arena.run.%s" % run_kind:
             return "name"
         return None
@@ -1771,6 +1805,8 @@ class ArenaTelemetry:
     def record_run(
         self, run_kind: str, terminal_cause: str,
         *, run_identity: Optional[Mapping[str, Any]] = None,
+        failure_stage: str = ARENA_NO_ERROR,
+        failure_error_class: str = ARENA_NO_ERROR,
     ) -> None:
         try:
             if self._run_tracer is None:
@@ -1786,6 +1822,12 @@ class ArenaTelemetry:
             span.set_attribute("arena.run_kind", str(run_kind))
             span.set_attribute("arena.terminal_cause", str(terminal_cause))
             span.set_attribute("arena.outcome", outcome)
+            # Always set, "-" when absent: the run allowlist is set equality,
+            # so an omitted key would drop the whole span.
+            span.set_attribute("arena.failure_stage", str(failure_stage))
+            span.set_attribute(
+                "arena.failure_error_class", str(failure_error_class)
+            )
             if run_identity is not None:
                 for key, value in run_identity.items():
                     span.set_attribute(key, value)

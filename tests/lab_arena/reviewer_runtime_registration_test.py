@@ -146,7 +146,7 @@ def test_apply_uses_real_postgrest_rpc_and_closes_transport(
         )
 
     client = httpx.Client(transport=httpx.MockTransport(reply))
-    monkeypatch.setattr(store, "create_http1_client", lambda _: client)
+    monkeypatch.setattr(store, "create_http1_client", lambda _timeout, **_kwargs: client)
     assert command.PostgrestTransport is store.PostgrestTransport
     try:
         if http_status == 200:

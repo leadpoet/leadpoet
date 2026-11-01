@@ -76,6 +76,19 @@ def _lease_header(value: Optional[str]) -> str:
 def create_app(service: ArenaService) -> FastAPI:
     app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
+    def _public(call: Any) -> Any:
+        """Run a public read on the store pool reserved for public pages."""
+
+        reserve = getattr(service, "public_reads", None)
+        if reserve is None:
+            return call
+
+        def run(*args: Any, **kwargs: Any) -> Any:
+            with reserve():
+                return call(*args, **kwargs)
+
+        return run
+
     async def no_store_public_call(
         call: Any, *args: Any, **kwargs: Any
     ) -> JSONResponse:
@@ -84,7 +97,7 @@ def create_app(service: ArenaService) -> FastAPI:
             "X-Content-Type-Options": "nosniff",
         }
         try:
-            content = await run_in_threadpool(call, *args, **kwargs)
+            content = await run_in_threadpool(_public(call), *args, **kwargs)
         except ServiceError as exc:
             telemetry.note_denial(exc.code)
             if exc.code == "validator_events_rate_limited":
@@ -190,7 +203,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/chain-outcomes")
     async def chain_outcomes(epoch: int) -> Any:
-        return await run_in_threadpool(service.public_chain_outcomes, int(epoch))
+        return await run_in_threadpool(_public(service.public_chain_outcomes), int(epoch))
 
     @app.get("/arena/v1/rounds/{round_id}")
     async def round_view(round_id: str) -> Any:
@@ -202,7 +215,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/rounds/{round_id}/submissions")
     async def round_submissions(round_id: str) -> Any:
-        return await run_in_threadpool(service.public_submissions, round_id)
+        return await run_in_threadpool(_public(service.public_submissions), round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/results/{submission_id}")
     async def round_results(round_id: str, submission_id: str) -> JSONResponse:

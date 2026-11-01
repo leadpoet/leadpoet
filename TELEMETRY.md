@@ -85,6 +85,7 @@ throttled provider looked the same.
 | `arena.provider` | `openrouter` (`ARENA_PROVIDERS`; `unknown` when the operation is not in the table) |
 | `arena.operation` | `openrouter.responses` (registered operation/provider pair; Exa compatibility operations belong to Deepline) |
 | `arena.tool` | `hunter_email_finder` (`ARENA_DEEPLINE_TOOLS`, a copy of `operations.DEEPLINE_TOOLS`; `-` for any call with no Deepline tool) |
+| `arena.model` | `anthropic/claude-3.5-sonnet` (the model the call named, in the price table's own `model_id` format; `-` for any call with no model) |
 | `arena.outcome` | `ok` \| `refused` \| `uncertain` \| `failed` |
 | `arena.error_code` | `budget_refused` (`ARENA_PROVIDER_ERROR_CODES`; `-` when none) |
 | `arena.error_type` | `HTTPError` (exception CLASS only; `-` when none) |
@@ -100,6 +101,13 @@ Every Deepline call leaves as the single operation `deepline.execute`, so
 `hunter_email_finder` rather than to "Deepline". It is only ever set on a
 Deepline span, and a tool outside the frozen table drops the span whole like
 any other out-of-vocabulary value.
+
+`arena.model` is the same missing half on the OpenRouter side. Every chat call
+leaves as the single operation `openrouter.chat`, so without it a refusal can
+only be attributed to "OpenRouter" — which is never the answer when the model
+itself is the fault, as in an unroutable catalogue entry. It is only ever set
+on an OpenRouter span, and bounded by the same `model_id` format the round's
+price table admits a model under, so a value outside it drops the span whole.
 
 Span name is `arena.provider.<provider>`. `uncertain` means the ledger could
 not be settled and the cost is reconciled later; `failed` means the broker

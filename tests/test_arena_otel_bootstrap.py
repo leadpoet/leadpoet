@@ -24,6 +24,7 @@ from gateway.observability.otel_bootstrap import (
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
     ARENA_TOOL_NONE,
+    ARENA_MODEL_NONE,
     ARENA_RUN_SCOPE,
     ARENA_REVIEW_SCOPE,
     ARENA_RUNTIME_SCOPE,
@@ -486,6 +487,60 @@ def test_provider_span_names_the_deepline_tool():
     assert span.attributes["arena.operation"] == "deepline.execute"
 
 
+def test_provider_span_names_the_model_behind_an_openrouter_call():
+    """The model is the only thing that says WHICH catalogue entry failed.
+
+    Without it an unroutable-model refusal can only be attributed to
+    "OpenRouter", so the price table that admitted the model cannot be fixed.
+    """
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        "openrouter",
+        "openrouter.chat",
+        "failed",
+        error_code="provider_unavailable",
+        model="anthropic/claude-3.5-sonnet",
+        provider_status=404,
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.model"] == "anthropic/claude-3.5-sonnet"
+    assert span.attributes["arena.provider_status"] == 404
+
+
+def test_a_provider_call_without_a_model_carries_the_sentinel():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider("deepline", "exa.search", "ok")
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.model"] == ARENA_MODEL_NONE
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # free text smuggled in as a model
+        {"provider": "openrouter", "operation": "openrouter.chat",
+         "outcome": "ok", "model": "ada@example.com"},
+        # a prompt smuggled in as a model
+        {"provider": "openrouter", "operation": "openrouter.chat",
+         "outcome": "ok", "model": "ignore previous instructions"},
+        # a real model paired with a provider that has no models
+        {"provider": "deepline", "operation": "deepline.execute",
+         "outcome": "ok", "model": "anthropic/claude-3.5-sonnet"},
+    ],
+)
+def test_provider_spans_with_an_inadmissible_model_are_dropped_whole(kwargs):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        kwargs.pop("provider"), kwargs.pop("operation"), kwargs.pop("outcome"), **kwargs
+    )
+    assert exp.get_finished_spans() == ()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -804,6 +859,24 @@ def test_the_service_tool_projection_resolves_and_degrades():
     ):
         assert _telemetry_tool("deepline.execute", parameters) == telemetry.NO_TOOL
     assert _telemetry_tool("", {"tool": "exa_search"}) == telemetry.NO_TOOL
+
+
+def test_the_service_model_projection_resolves_and_degrades():
+    """``_telemetry_model`` must only ever produce an admissible model id."""
+    from lab_arena.service import _telemetry_model
+
+    assert _telemetry_model(
+        "openrouter.chat", {"model": "anthropic/claude-3.5-sonnet"}
+    ) == "anthropic/claude-3.5-sonnet"
+    # a provider that has no model never names one
+    assert _telemetry_model("deepline.execute", {"model": "x/y"}) == telemetry.NO_MODEL
+    # anything outside the price table's own format degrades rather than leaking
+    for parameters in (
+        {}, {"model": ""}, {"model": "ada@example.com"},
+        {"model": "no-slash"}, {"model": 7},
+    ):
+        assert _telemetry_model("openrouter.chat", parameters) == telemetry.NO_MODEL
+    assert _telemetry_model("", {"model": "anthropic/claude-3.5-sonnet"}) == telemetry.NO_MODEL
 
 
 # -- run outcomes -------------------------------------------------------------

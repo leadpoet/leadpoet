@@ -54,6 +54,9 @@ NO_ERROR = "-"
 # A provider call that names no Deepline tool: any non-Deepline provider, and
 # a Deepline operation whose tool could not be resolved from the frame.
 NO_TOOL = "-"
+# Which wallet the broker settled this call against. "unknown" covers a call
+# that raised before a funding source was chosen.
+FUNDING_UNKNOWN = "unknown"
 
 _recorder: Optional[Any] = None
 
@@ -141,6 +144,7 @@ def record_provider(
     error_code: str = NO_ERROR,
     error_type: str = NO_ERROR,
     tool: str = NO_TOOL,
+    funding_source: str = FUNDING_UNKNOWN,
     http_status: int = 0,
     provider_status: int = 0,
     attempts: int = 1,
@@ -162,6 +166,7 @@ def record_provider(
             error_code=error_code,
             error_type=error_type,
             tool=tool,
+            funding_source=funding_source,
             http_status=http_status,
             provider_status=provider_status,
             attempts=attempts,

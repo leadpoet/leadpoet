@@ -24,6 +24,7 @@ from gateway.observability.otel_bootstrap import (
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
     ARENA_TOOL_NONE,
+    ARENA_FUNDING_UNKNOWN,
     ARENA_RUN_SCOPE,
     ARENA_REVIEW_SCOPE,
     ARENA_RUNTIME_SCOPE,
@@ -462,6 +463,43 @@ def test_provider_span_carries_only_the_approved_attributes():
     assert span.attributes["arena.cost_microusd"] == 1375
     assert span.attributes["arena.attempts"] == 2
     assert span.attributes["arena.tool"] == ARENA_TOOL_NONE
+    assert span.attributes["arena.funding_source"] == ARENA_FUNDING_UNKNOWN
+
+
+def test_provider_span_names_the_funding_source():
+    """A credential refusal says nothing until you know whose wallet it was.
+
+    The run classifier already branches on this value to tell an entrant's
+    unfunded key apart from our own provider being unreachable. Exporting it
+    is what makes that branch checkable from the outside.
+    """
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        "deepline",
+        "deepline.execute",
+        "refused",
+        error_code="miner_credentials_unavailable",
+        funding_source="miner_key",
+        tool="hunter_email_finder",
+        provider_status=402,
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert set(span.attributes) == PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST
+    assert span.attributes["arena.funding_source"] == "miner_key"
+
+
+def test_provider_span_outside_the_funding_vocabulary_is_dropped():
+    """The value is a closed two-member enum, never a free-form label."""
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        "openrouter", "openrouter.responses", "ok",
+        funding_source="hotkey-5FNVgRnrxM",
+    )
+    assert exp.get_finished_spans() == ()
 
 
 def test_provider_span_names_the_deepline_tool():

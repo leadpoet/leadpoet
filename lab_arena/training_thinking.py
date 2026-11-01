@@ -520,6 +520,30 @@ def _captured_reasoning_controls_match(call, registry) -> bool:
         return False
 
 
+def _error_body_has_no_generation(value: Any) -> bool:
+    """Keep reported generated work out of the no-generation exception."""
+    if (not isinstance(value, Mapping) or not value.get("error")
+            or value.get("choices") or value.get("output")):
+        return False
+    usage = value.get("usage")
+    if usage is None:
+        return True
+    if not isinstance(usage, Mapping):
+        return False
+    # Input tokens can be charged before generation. Only output counters
+    # contradict this exception; malformed reported counters prove nothing.
+    for field in ("output_tokens", "completion_tokens", "reasoning_tokens"):
+        if field in usage and (type(usage[field]) is not int or usage[field] != 0):
+            return False
+    for field in ("output_tokens_details", "completion_tokens_details"):
+        if field in usage:
+            details = usage[field]
+            if (not isinstance(details, Mapping)
+                    or any(type(count) is not int or count != 0 for count in details.values())):
+                return False
+    return True
+
+
 def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
     """Prove a hidden throttle recovered by the same request's host write.
 
@@ -632,7 +656,7 @@ def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[
             if (receipt.get("status") != 429 or not isinstance(response, Mapping)
                     or type(receipt.get("entry_id")) is not int or not 0 < receipt["entry_id"] <= response_id
                     or not isinstance(response.get("error"), Mapping) or response["error"].get("code") != 429
-                    or response.get("choices") or response.get("output")
+                    or not _error_body_has_no_generation(response)
                     or receipt.get("provenance") != "private_upstream_response_receipt"
                     or receipt.get("delivery_to_worker") != "not_proved"
                     or receipt.get("privacy_redactions") or not training_steps._exact(response, response=True)
@@ -1033,8 +1057,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                 return (provenance.get("worker_body_source") == "worker_error_observation"
                         and bool(failure_bodies)
                         and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
-        return all(isinstance(value, Mapping) and bool(value.get("error"))
-                   and not value.get("choices") and not value.get("output")
+        return all(_error_body_has_no_generation(value)
                    and (status != 404 or _ignored_provider_failure(
                        value, body, call.get("reasoning_capture") or {}))
                    for value in failure_bodies)

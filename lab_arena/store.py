@@ -415,6 +415,12 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
+# RPCs whose 55P03 lock timeout is a proved rollback: nothing committed and
+# nothing was sent to a provider, so repeating the exact identity is safe.
+LOCK_TIMEOUT_RETRY_RPCS = frozenset({
+    "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
+    "lab_arena_mark_dispatched", "lab_arena_claim_assignment",
+})
 # Stage creation, lease recovery, stage/round closure, and score batches can
 # take longer than an ordinary RPC. Let their bounded database work return a
 # result before giving up on the response.
@@ -704,14 +710,14 @@ class PostgrestTransport(StoreTransport):
                 if code == DEADLOCK_SQLSTATE or (
                     response.status_code == 500
                     and code == "55P03"
-                    and function in {
-                        "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
-                        "lab_arena_mark_dispatched",
-                    }
+                    and function in LOCK_TIMEOUT_RETRY_RPCS
                 ):
                     # A proved lock timeout rolls back these pre-dispatch RPCs.
                     # Repeat the exact identity; an existing dispatch marker
                     # returns idempotent into the broker's uncertain branch.
+                    # The claim is keyed by (p_request_id, p_request_hash) and
+                    # spends nothing, so repeating it either takes the lock or
+                    # returns the claim the runner already holds.
                     # Settlement and ambiguous failures stay outside this bound.
                     self.deadlock_retries += 1
                     deadlock_attempts += 1

@@ -6217,7 +6217,12 @@ async def investigate_company_evidence(
                         "temperature": 0.0,
                         "max_tokens": REASONING_MAX_TOKENS,
                         **(
-                            {"reasoning": {"effort": "low"}}
+                            {"reasoning": {"effort": (
+                                "medium" if industry_investigation_model
+                                and not (serialization_retry_request or force_submit
+                                         or required_tool == "submit_findings")
+                                else "low"
+                            )}}
                             if (
                                 industry_investigation_model
                                 or (positive_semantic_review and (

@@ -12394,6 +12394,7 @@ async def score_company_competition_intent(
     matched_company_retry_source_cache: Optional[
         MutableMapping[str, Any]
     ] = None,
+    verified_company_fit_retry_cache: Optional[MutableMapping[str, Any]] = None,
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     provider_observation: Optional[Mapping[str, Any]] = None,
@@ -12410,24 +12411,44 @@ async def score_company_competition_intent(
 
     linkedin_profile_source_candidate: dict[str, str] = {}
     matched_company_source_cache: dict[str, dict[str, str]] = {}
-    company_fit = await _verify_company_fit(
-        company,
-        icp,
-        run_cost_usd,
-        run_time_seconds,
-        seen_companies,
-        require_https_transport=True,
-        company_quality=company_quality,
-        evidence_investigator=evidence_investigator,
-        required_attribute_retry_source_cache=(
-            required_attribute_retry_source_cache
-        ),
-        linkedin_profile_source_sink=linkedin_profile_source_candidate,
-        matched_company_source_sink=matched_company_source_cache,
-        matched_company_retry_source_cache=(
-            matched_company_retry_source_cache
-        ),
+    # The adapter binds this private map to the complete frozen company, ICP,
+    # policy and evaluation date. It lasts for one score_work_item invocation.
+    # Retrying intent or paragraph verification must not replace a completed
+    # fit and change the evidence already bound to its signal-cache claims.
+    fit_cache = (
+        verified_company_fit_retry_cache
+        if integrity_policy
+        and isinstance(verified_company_fit_retry_cache, MutableMapping)
+        else None
     )
+    retained_fit = fit_cache.get("verified_fit") if fit_cache is not None else None
+    if retained_fit is not None:
+        (company_fit, linkedin_profile_source_candidate,
+         matched_company_source_cache) = deepcopy(retained_fit)
+    else:
+        company_fit = await _verify_company_fit(
+            company,
+            icp,
+            run_cost_usd,
+            run_time_seconds,
+            seen_companies,
+            require_https_transport=True,
+            company_quality=company_quality,
+            evidence_investigator=evidence_investigator,
+            required_attribute_retry_source_cache=(
+                required_attribute_retry_source_cache
+            ),
+            linkedin_profile_source_sink=linkedin_profile_source_candidate,
+            matched_company_source_sink=matched_company_source_cache,
+            matched_company_retry_source_cache=(
+                matched_company_retry_source_cache
+            ),
+        )
+        if fit_cache is not None and company_fit.decision == COMPANY_FIT_MATCH:
+            fit_cache["verified_fit"] = deepcopy((
+                company_fit, linkedin_profile_source_candidate,
+                matched_company_source_cache,
+            ))
     _retain_matched_company_retry_sources(
         matched_company_retry_source_cache, matched_company_source_cache, company_fit,
     )

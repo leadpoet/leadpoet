@@ -90,7 +90,8 @@ Existing database `PUBLIC` grants also apply to this role. `NOINHERIT` does not
 remove them, and revoking a grant from the reader cannot override `PUBLIC`.
 Review and record that effective surface; do not revoke unrelated shared grants
 as part of this rollout. The distinct opaque reader key is restricted at nginx
-to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1`, with JSON
+to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 after
+the additive rollout below), with JSON
 arguments in the body. Other methods, paths, query strings, non-public schema
 profiles and method/path override headers return 403. Explicit `public` profiles
 are allowed. Both the normalized URI and original request target must match.
@@ -98,7 +99,38 @@ This is an HTTP boundary, not a claim of database-level one-function isolation.
 The backend must remain loopback-only and its internal role JWT must remain
 private (`deploy/aws/subnet-api/README.md`).
 
-To enable it:
+### Additive v2 usage and model mix
+
+Migration `597-lab-arena-capture-summary-v2.sql` adds
+`lab_arena_capture_summary_v2(p_round_id TEXT, p_submission_id TEXT)`.
+It leaves v1 (including migration 595's called-ICP selection) unchanged and
+uses the same reader role and key. Deploy the renderer's exact v2 POST allowlist
+along with the migration; v1 remains available while the website migrates.
+No new authenticator membership, environment setting or credential is needed.
+
+The response retains every v1 column and adds `input_tokens BIGINT`,
+`output_tokens BIGINT`, `cached_input_tokens BIGINT`, `token_calls INTEGER`,
+and `models JSONB`. Token totals use nonnegative whole numbers only, with up to
+19 digits. Missing totals and BIGINT overflow return NULL; reported zero remains
+zero. `token_calls` counts calls with both input and output usage. Prefer the
+first valid value in prompt/input, completion/output, and prompt/input cached
+field order. Output tokens include reported reasoning; nothing is subtracted.
+
+`models` contains only `model`, `calls`, `input_tokens`, `output_tokens`, and
+`reasoning_tokens`, sorted by call count descending and model name for ties.
+Names come only from the response's model field and must match
+`^[A-Za-z0-9.\_:/@+-]{1,200}$`; invalid or absent names become `unknown`.
+The array has at most 50 entries, with excess models combined into `other`.
+No cost attribution, request/response body, output, hotkey or credential is returned.
+
+Apply the exact committed migration through the same owner path as 593/595,
+read back the definition and permissions, and verify v1/v2 parity on retained
+baseline and miner submissions. Preserve PUBLIC privileges; verify the opaque
+key denies all routes except the two canonical POSTs. To roll back v2, remove
+only its allowlist route and revoke its EXECUTE from `leadpoet_capture_reader`;
+v1 and the existing reader key remain unchanged.
+
+To enable the original v1 reader:
 
 1. Apply 593 through the configured repository migration helper. It is
    idempotent and changes no stored row, table ACL or existing function. It

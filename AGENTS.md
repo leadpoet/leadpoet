@@ -1,3 +1,14 @@
+## Scoped authorization: November 1 capture summary v2
+
+The user authorized an additive aggregate-only capture v2 reader, exact committed
+migration597, focused tests, merge and production verification. Preserve v1 after
+595, raw ledger data, scoring, judging, capture, keys, role memberships and all
+other behavior. The coordinator may apply the reviewed owner migration and add
+only the exact v2 POST route to the existing reader HTTP allowlist, then safely
+reload the existing nginx configuration. No site change, new role, key, dependency
+or unrelated restart is authorized. Internal agents implement, test and review
+only; the coordinator owns production operations and credential use.
+
 ## Scoped authorization: November 1 judge retry incident
 
 The user explicitly authorized the coordinator to investigate and safely stop

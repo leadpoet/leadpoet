@@ -154,7 +154,7 @@ def test_initial_research_query_does_not_change_final_evidence_contract(decision
     from lab_arena.operations import validate_operation_request
     value = packet()
     request = industry.request_payload(value, model=industry.DEFAULT_MODEL, research=True)
-    assert request['reasoning']['effort'] == 'low'
+    assert request['reasoning']['effort'] == 'medium'
     validate_operation_request('openrouter.chat', request)
     assert 'research_query' in request['response_format']['json_schema']['schema']['required']
     response = proposal(value, decision=decision, missing_requirements=['Account workflows'],

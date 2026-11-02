@@ -24,6 +24,8 @@ def test_same_packet_completed_match_is_not_sampled_again(monkeypatch):
     assert result['_completed_submit'] is True
     assert result['claims']['industry']['status'] == 'VERIFIED'
     assert len(reviews) == result['usage']['industry_review_calls'] == 1
+    assert reviews[0]['reasoning']['effort'] == 'medium'
+    assert 'research_query' in reviews[0]['response_format']['json_schema']['schema']['properties']
     assert result['claims']['industry']['_industry_review']['reused_completed_packet'] is True
     assert not calls['search'] and not calls['primary']
 
@@ -83,6 +85,8 @@ def test_same_packet_completed_mismatch_is_preserved_without_mutating_initial(mo
         result = await original_review(*args, **kwargs)
         if kwargs.get('research'):
             before = len(reviews)
+            assert reviews[-1]['reasoning']['effort'] == 'medium'
+            assert 'research_query' in reviews[-1]['response_format']['json_schema']['schema']['properties']
             final, error, calls = await original_review(*args, **{
                 **kwargs, 'research': False, 'admitted_final_judgment': True,
                 'completed_review': result[0],

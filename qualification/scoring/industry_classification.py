@@ -266,8 +266,10 @@ def request_payload(packet, *, model, research=False):
         citations['items']['enum'] = list(spans)
     else:
         citations['maxItems'] = 0
+    # A conclusive initial assessment can become the final decision when its
+    # source packet is unchanged. Both assessments need the same reasoning.
     return {"model": model, "max_tokens": 2000,
-            "reasoning": {"effort": "low" if research else "medium", "exclude": True}, "messages": messages,
+            "reasoning": {"effort": "medium", "exclude": True}, "messages": messages,
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "industry_proposal", "strict": True, "schema": schema}}}
 

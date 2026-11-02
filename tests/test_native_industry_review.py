@@ -113,9 +113,7 @@ def test_industry_research_uses_the_final_review_criterion_rules(monkeypatch):
         assert request['max_tokens'] == c.REASONING_MAX_TOKENS
     assert all(criterion_rules in request['messages'][0]['content']
                for request in reviews)
-    for request in reviews:
-        research = 'research_query' in request['response_format']['json_schema']['schema']['properties']
-        assert request['reasoning']['effort'] == ('low' if research else 'medium')
+    assert all(request['reasoning']['effort'] == 'medium' for request in reviews)
     assert all(request['max_tokens'] == 2000 for request in reviews)
 
 

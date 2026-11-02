@@ -190,3 +190,42 @@ def test_host_receipt_fields_survive_actual_caller_and_json_round_trip(monkeypat
     assert lead_scorer._has_explicitly_unproven_fit_dimensions(
         _complete_verdict(),('industry',),investigation_receipt=restored)
     assert outputs[1].decision!='match'
+
+
+@pytest.mark.parametrize('integrity_policy',[False,True])
+@pytest.mark.parametrize('company_quality',[False,True])
+@pytest.mark.parametrize('extra_fit_field',['fit_evidence_urls','fit_summary'])
+def test_v5_ingress_rejects_explicit_legacy_fit_fields_even_with_stage_urls(
+    integrity_policy,company_quality,extra_fit_field,
+):
+    from pydantic import ValidationError
+    from qualification.competition_models import CompetitionCompanyV5
+    from qualification.scoring.competition import _normalized_company, CompetitionScorerInputError
+    raw=copy.deepcopy(SAVED['company'])
+    derived=[x['url']for x in raw['company_stage_evidence']]
+    healthy=_normalized_company(raw,integrity_policy=integrity_policy,company_quality=company_quality)
+    assert healthy['intent_details'] is not None
+    assert healthy['fit_evidence_urls']==derived
+    raw[extra_fit_field]=derived if extra_fit_field=='fit_evidence_urls' else 'Explicit general fit claim.'
+    with pytest.raises(ValidationError,match='extra_forbidden'):
+        CompetitionCompanyV5.model_validate(raw)
+    with pytest.raises(CompetitionScorerInputError,match='competition output schema'):
+        _normalized_company(raw,integrity_policy=integrity_policy,company_quality=company_quality)
+
+
+def test_legacy_ingress_cannot_smuggle_intent_details_into_explicit_fit_provenance():
+    from qualification.scoring.competition import _normalized_company, CompetitionScorerInputError
+    raw=copy.deepcopy(SAVED['company'])
+    raw.pop('intent_details')
+    raw.pop('company_stage_evidence')
+    raw['fit_summary']='A company fit summary.'
+    raw['fit_evidence_urls']=[SAVED['failed_url']]
+    for signal in raw['intent_signals']:
+        signal['snippet']='A supplied evidence excerpt.'
+        signal['why_now']='A recent company announcement.'
+    legacy=_normalized_company(raw,integrity_policy=True,company_quality=True)
+    assert 'intent_details' not in legacy
+    assert legacy['fit_evidence_urls']==[SAVED['failed_url']]
+    raw['intent_details']=SAVED['company']['intent_details']
+    with pytest.raises(CompetitionScorerInputError):
+        _normalized_company(raw,integrity_policy=True,company_quality=True)

@@ -9,8 +9,14 @@ import anyio
 import httpx
 import pytest
 
-from lab_arena.api import create_app
+from lab_arena.api import (
+    NON_PROVIDER_WORKER_RESERVE,
+    PROVIDER_WORKER_LIMIT,
+    create_app,
+)
 from lab_arena.service import ServiceError
+
+POOL = PROVIDER_WORKER_LIMIT + NON_PROVIDER_WORKER_RESERVE
 
 
 FRAME = {"operation_id": "openrouter.chat", "parameters": {},
@@ -96,20 +102,24 @@ def test_provider_saturation_leaves_public_claim_and_completion_workers():
                     client.post("/arena/v1/runs/done/complete", json={"body": {"run_id": "done"}}),
                 ), 1)
                 assert all(r.status_code == 200 for r in probes)
-                assert len(service.calls) == service.active == 32
-                assert default.borrowed_tokens == 32
-                # Other work can use the remaining eight, without increasing
-                # the process-wide default worker budget.
-                others = [asyncio.create_task(client.get("/arena/v1/competition")) for _ in range(16)]
-                await wait_until(lambda: service.other_started >= 8)
-                assert service.other_started == 8
-                assert default.borrowed_tokens == default.total_tokens == 40
+                assert len(service.calls) == service.active == PROVIDER_WORKER_LIMIT
+                assert default.borrowed_tokens == PROVIDER_WORKER_LIMIT
+                # The pool was widened so the reserve left to other routes is
+                # NON_PROVIDER_WORKER_RESERVE, not whatever 40 happened to
+                # leave over.
+                assert default.total_tokens == POOL
+                others = [asyncio.create_task(client.get("/arena/v1/competition"))
+                          for _ in range(NON_PROVIDER_WORKER_RESERVE * 2)]
+                await wait_until(lambda: service.other_started >= NON_PROVIDER_WORKER_RESERVE)
+                assert service.other_started == NON_PROVIDER_WORKER_RESERVE
+                assert default.borrowed_tokens == default.total_tokens == POOL
             finally:
                 service.release.set()
                 responses = await asyncio.wait_for(asyncio.gather(*providers, *others), 3)
             assert all(r.status_code == 200 for r in responses)
             assert len(service.calls) == 40
-            assert service.maximum == 32 and service.maximum_default <= 40
+            assert service.maximum == PROVIDER_WORKER_LIMIT
+            assert service.maximum_default <= POOL
             assert all(token == "a" * 64 and frame == FRAME and cancelled is False
                        for _, token, frame, cancelled in service.calls)
             assert service.active == default.borrowed_tokens == 0
@@ -162,7 +172,7 @@ def test_provider_limit_is_per_app_and_under_capacity_arguments_are_unchanged():
             tasks = [post_provider(clients[i], str(j)) for i in range(2) for j in range(20)]
             await wait_until(lambda: sum(s.active for s in services) == 40)
             assert [s.active for s in services] == [20, 20]
-            assert default.borrowed_tokens == default.total_tokens == 40
+            assert default.borrowed_tokens == 40 and default.total_tokens == POOL
         finally:
             for service in services:
                 service.release.set()
@@ -184,13 +194,18 @@ def test_queued_provider_disconnect_or_cancellation_never_enters_service(queue, 
         default = anyio.to_thread.current_default_thread_limiter()
         service = BlockingService(default)
         app = create_app(service)
+        # ASGITransport does not run lifespan; uvicorn does. Run the registered
+        # startup handlers so the pool is sized before the queue fills.
+        for handler in app.router.on_startup:
+            handler()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             if queue == "provider":
                 blockers = [post_provider(client, str(i)) for i in range(32)]
                 await wait_until(lambda: service.active == 32)
             else:
-                blockers = [asyncio.create_task(client.get("/arena/v1/competition")) for _ in range(40)]
-                await wait_until(lambda: service.other_started == 40)
+                blockers = [asyncio.create_task(client.get("/arena/v1/competition"))
+                            for _ in range(POOL)]
+                await wait_until(lambda: service.other_started == POOL)
             body_read = asyncio.Event()
             messages = asyncio.Queue()
             sent = []

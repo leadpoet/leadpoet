@@ -1,3 +1,19 @@
+## Scoped authorization: November 2 admission-review refusal recovery
+
+The user authorized investigation of the three Ponie submissions rejected during
+November 2 admission review. After a genuine infrastructure failure is verified,
+the coordinator may make the smallest refusal-handling correction, test it,
+push and merge, deploy through canonical controls, and recover the exact frozen
+submissions through normal review and evaluation. Preserve source hashes,
+original attempts, ledger entries, costs, other miners, scoring rules, reward
+integrity, and concurrent work. Do not fabricate an approval, bypass review,
+modify frozen miner code, replay completed calls, or reopen a published round
+without an evidence-backed recovery decision within this authorization. Prefer
+existing bounded recovery controls and exact audited migrations if required.
+Internal agents may trace, implement focused changes and tests, and review in
+isolated worktrees; the coordinator owns production mutations and release.
+Use the normal AWS profile first. No credential refresh by internal agents.
+
 ## Scoped authorization: November 1 capture summary v2
 
 The user authorized an additive aggregate-only capture v2 reader, exact committed

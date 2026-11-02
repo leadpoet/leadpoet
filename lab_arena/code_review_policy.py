@@ -99,6 +99,31 @@ REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Goo
 _GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
 
 
+def explicit_provider_refusal(document: Any) -> bool:
+    """Recognize typed refusal fields in one provider choice, without prose matching.
+
+    This reads the credential-checked response itself. The private diagnostic
+    projection is never an authority for review or retry decisions.
+    """
+    if not isinstance(document, Mapping):
+        return False
+    choices = document.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        return False
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        return False
+    for name in ("finish_reason", "native_finish_reason"):
+        value = choice.get(name)
+        if isinstance(value, str) and value in {"content_filter", "refusal"}:
+            return True
+    message = choice.get("message")
+    if not isinstance(message, Mapping):
+        return False
+    refusal = message.get("refusal")
+    return isinstance(refusal, str) and bool(refusal.strip())
+
+
 def private_response_diagnostic(document: Any, prepared: Any, *, generation_id: Any = None) -> dict:
     """Copy only bounded metadata from a credential-checked provider reply.
 

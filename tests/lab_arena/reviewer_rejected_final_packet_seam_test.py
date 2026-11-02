@@ -51,6 +51,10 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    if builder.FINALITY_FILE in result:
+        result[builder.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", builder.FINALITY_FILE,
+        )
     result[builder.GRADER_FILE] = corrected_grader()
     assert result[builder.GRADER_FILE].count(NEW.encode()) == 1
     result[builder.GRADER_FILE] = result[builder.GRADER_FILE].replace(

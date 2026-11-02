@@ -57,6 +57,8 @@ class SubmissionCodeReviewer:
                     "code_review_attempts": committed_attempt,
                     "code_review_doc": document,
                 })
+            if result.get("refusal_recovery") is True and type(result.get("retryable")) is bool:
+                retryable = result["retryable"]
             if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
                 error_code = {
                     "deadline": "code_review_deadline_exceeded",
@@ -105,6 +107,10 @@ class SubmissionCodeReviewer:
     def review(
         self, row: Mapping[str, Any], *, _frozen_round: Any = _ROUND_NOT_PROVIDED,
     ) -> Mapping[str, Any]:
+        if code_review_policy.legacy_refusal_candidate(row):
+            hydrate = getattr(self._store, "_hydrate_legacy_review", None)
+            if callable(hydrate):
+                row = hydrate(row)
         state = row.get("code_review_status")
         if state in ("passed", "rejected"):
             return {"status": "existing", "code_review_status": state}
@@ -444,17 +450,27 @@ class SubmissionCodeReviewer:
         if actual is None and status == "passed":
             status = "error"
             # Missing accounting can mean a completed paid generation. Keep
-            # its conservative uncertain charge and the legacy retry cap.
+            # its conservative uncertain charge; never replay a valid verdict for billing.
             document = code_review_policy.diagnostic(
-                "code_review_cost_unavailable"
+                "code_review_cost_unavailable", retryable=False
             )
         if status == "error" and any(
             provider_observation.get(name, 0) >= 400
             for name in ("provider_raw_http_status", "provider_effective_http_status")
         ):
             document.update(provider_observation)
+        previous = row.get("code_review_doc") or {}
+        if code_review_policy.refusal_recovery(previous) or document.get("error_code") == "code_review_provider_refused":
+            primary_before = int(previous.get("review_primary_attempts") or 0) if code_review_policy.refusal_recovery(previous) else 0
+            alternate_before = int(previous.get("review_alternate_attempts") or 0)
+            document.update({"refusal_recovery": True,
+                "refusal_episode_start": int(previous.get("refusal_episode_start") or claim.get("attempt") or 1),
+                "review_primary_attempts": primary_before + (review_model == code_review.DEFAULT_REVIEW_MODEL),
+                "review_alternate_attempts": alternate_before + (review_model == code_review.FALLBACK_REVIEW_MODEL)})
         if status == "error" and review_model == code_review.FALLBACK_REVIEW_MODEL:
-            document["retryable"] = False
+            previous = row.get("code_review_doc") or {}
+            document["retryable"] = (int(previous.get("review_alternate_attempts") or 0) + 1 < 2
+                and code_review_policy.recovery_retryable(document))
         document.update({
             "model": review_model,
             "file_count": len(prepared.reviewed_files),

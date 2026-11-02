@@ -24,7 +24,8 @@ def fallback_row(payload):
         'code_review_attempts': 7,
         'code_review_started_at': (datetime.now(timezone.utc)-timedelta(hours=1)).isoformat(),
         'code_review_doc': {'model': code_review.DEFAULT_REVIEW_MODEL,
-                            'error_code': 'code_review_provider_refused', 'retryable': True},
+                            'error_code': 'code_review_provider_refused', 'retryable': True,
+                            'refusal_recovery': True, 'review_primary_attempts': 2, 'review_alternate_attempts': 0},
     }
 
 
@@ -90,12 +91,17 @@ def test_typed_refusal_selects_next_claim_without_inline_dispatch(unknown_primar
     original_doc = store.finish_calls[-1][4]
     assert original_doc['error_code'] == 'code_review_provider_refused'
     store.terminal = None
-    assert reviewer.review({**fallback_row(payload), 'code_review_doc': original_doc})['status'] == 'passed'
-    assert len(transport.sent) == 2
-    assert [call[4] for call in store.begin_calls] == [code_review.DEFAULT_REVIEW_MODEL, code_review.FALLBACK_REVIEW_MODEL]
+    retry = {**fallback_row(payload), 'code_review_doc': original_doc}
+    assert reviewer.review(retry)['status'] == 'error'
+    second_doc = store.finish_calls[-1][4]
+    store.terminal = None
+    assert reviewer.review({**fallback_row(payload), 'code_review_doc': second_doc})['status'] == 'passed'
+    assert len(transport.sent) == 3
+    assert [call[4] for call in store.begin_calls] == [code_review.DEFAULT_REVIEW_MODEL, code_review.DEFAULT_REVIEW_MODEL, code_review.FALLBACK_REVIEW_MODEL]
     assert store.finish_calls[0][5] == (None if unknown_primary_cost else 1234)
-    assert store.finish_calls[1][5] == 1234
-    first, second = [json.loads(call['body']) for call in transport.sent]
+    assert store.finish_calls[1][5] == (None if unknown_primary_cost else 1234)
+    assert store.finish_calls[2][5] == 1234
+    first, _retry, second = [json.loads(call['body']) for call in transport.sent]
     assert first['messages'] == second['messages']
     assert code_review_policy.review_model_for({'code_review_doc': {'error_code': 'code_review_provider_request_rejected'}}) == code_review.DEFAULT_REVIEW_MODEL
 
@@ -143,12 +149,18 @@ def test_failed_alternate_is_terminal_without_fabricated_verdict(failure):
     assert reviewer.review(fallback_row(payload))['status'] == 'error'
     doc = store.finish_calls[-1][4]
     assert doc['model'] == code_review.FALLBACK_REVIEW_MODEL
-    assert doc['retryable'] is False
+    can_retry = failure not in {'unknown_cost', 'authentication', 'credit'}
+    assert doc['retryable'] is can_retry
     assert doc.get('passed') is not True
     terminal = {**fallback_row(payload), 'code_review_doc': doc}
     store.terminal = None
+    if can_retry:
+        assert reviewer.review(terminal)['status'] == 'error'
+        doc = store.finish_calls[-1][4]
+        terminal['code_review_doc'] = doc
+        store.terminal = None
     assert reviewer.review(terminal)['status'] == 'exhausted'
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == (2 if can_retry else 1)
     assert not code_review_policy.review_retry_available(terminal)
 
 
@@ -202,11 +214,14 @@ def test_runtime_preserves_research_and_similarity_contexts_on_alternate():
     assert reviewer.review(row)['status'] == 'error'
     primary_doc = store.finish_calls[0][4]
     store.terminal = None
-    assert reviewer.review({**fallback_row(payload), 'code_review_doc': primary_doc})['status'] == 'passed'
-    first, alternate = [json.loads(call['body']) for call in transport.sent]
+    assert reviewer.review({**fallback_row(payload), 'code_review_doc': primary_doc})['status'] == 'error'
+    second_doc = store.finish_calls[-1][4]
+    store.terminal = None
+    assert reviewer.review({**fallback_row(payload), 'code_review_doc': second_doc})['status'] == 'passed'
+    first, _retry, alternate = [json.loads(call['body']) for call in transport.sent]
     assert first['messages'] == alternate['messages']
     submitted = json.loads(alternate['messages'][1]['content'])
-    stored = store.finish_calls[1][4]['research_control']
+    stored = store.finish_calls[2][4]['research_control']
     assert stored['source_archive_sha256'] == submitted['research_control']['source_archive_sha256']
     assert stored['source_manifest_sha256'] == submitted['research_control']['source_manifest_sha256']
     assert stored['policy_hash'] == code_review.RESEARCH_POLICY_HASH

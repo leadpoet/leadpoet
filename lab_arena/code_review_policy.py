@@ -318,13 +318,8 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
 
     attempts = max(0, int(row.get("code_review_attempts") or 0))
     document = row.get("code_review_doc")
-    # An alternate is one independent full-source attempt, including after a
-    # crash. Its failure must not inherit the primary's transient retry loop.
-    if isinstance(document, Mapping):
-        if document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
-            return attempts
-        if document.get("error_code") == "code_review_provider_refused":
-            return None
+    if refusal_recovery(document):
+        return None if recovery_retryable(document) else attempts
     if transient_failure(document):
         return None
     retryable = document.get("retryable") if isinstance(document, Mapping) else None
@@ -333,16 +328,91 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
     return LEGACY_MAX_ATTEMPTS
 
 
-def review_model_for(row: Mapping[str, Any]) -> str:
-    """Select only from committed authoritative state, never diagnostics."""
-
-    document = row.get("code_review_doc")
-    if isinstance(document, Mapping) and (
-        document.get("model") == code_review.FALLBACK_REVIEW_MODEL
+def refusal_recovery(document: Any) -> bool:
+    return isinstance(document, Mapping) and (
+        document.get("refusal_recovery") is True
         or document.get("error_code") == "code_review_provider_refused"
-    ):
-        return code_review.FALLBACK_REVIEW_MODEL
+        or document.get("model") == code_review.FALLBACK_REVIEW_MODEL
+    )
+
+
+def recovery_retryable(document: Mapping[str, Any]) -> bool:
+    code = document.get("error_code")
+    allowed = (code in TRANSIENT_ERROR_CODES
+               or code in {"code_review_provider_refused"}
+               or (code == "code_review_provider_request_rejected"
+                   and document.get("legacy_refusal_proven") is True))
+    return allowed and int(document.get("review_alternate_attempts") or 0) < 2
+
+
+def review_model_for(row: Mapping[str, Any]) -> str:
+    """Follow committed chain counts; SQL rechecks every paid claim."""
+    document = row.get("code_review_doc")
+    if refusal_recovery(document):
+        primary = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
+        alternate = int(document.get("review_alternate_attempts") or 0)
+        if primary >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
+            return code_review.FALLBACK_REVIEW_MODEL
     return code_review.DEFAULT_REVIEW_MODEL
+
+
+def legacy_refusal_candidate(row: Mapping[str, Any]) -> bool:
+    doc = row.get("code_review_doc")
+    return (row.get("status") in {"accepted", "frozen"}
+            and row.get("code_review_status") == "error"
+            and isinstance(doc, Mapping)
+            and doc.get("error_code") == "code_review_provider_request_rejected"
+            and doc.get("provider_http_status") == 200
+            and doc.get("model") == code_review.DEFAULT_REVIEW_MODEL)
+
+
+def legacy_refusal_from_ledger(row: Mapping[str, Any], entries: list) -> Mapping[str, Any]:
+    """Prove the latest exact claim's authoritative HTTP200 refusal error pair."""
+    import hashlib
+    if not legacy_refusal_candidate(row) or not entries or len(entries) >= 1000:
+        return row
+    attempt = int(row.get("code_review_attempts") or 0)
+    identity = "sha256:" + hashlib.sha256(
+        f"lab_arena.code_review:{row['submission_id']}:{attempt}".encode()
+    ).hexdigest()
+    rows = [entry for entry in entries
+            if entry.get("submission_id") == row["submission_id"]
+            and entry.get("operation_id") == "openrouter.code_review"]
+    current = [entry for entry in rows if entry.get("call_identity") == identity]
+    reservations = [entry for entry in current if entry.get("entry_kind") == "reservation"]
+    if len(reservations) != 1 or not current:
+        return row
+    reservation = reservations[0].get("entry_doc") or {}
+    head = max(current, key=lambda entry: int(entry["entry_id"]))
+    doc = head.get("entry_doc") or {}
+    if not (head.get("entry_kind") in {"settlement", "uncertain"}
+            and reservation.get("attempt") == attempt
+            and reservation.get("review_model") == code_review.DEFAULT_REVIEW_MODEL
+            and doc.get("error_code") == "code_review_provider_request_rejected"
+            and doc.get("provider_http_status") == 200):
+        return row
+    # Old runtime emitted this authoritative HTTP200 pair only for an explicit
+    # refusal. Optional diagnostics never determine admission or retry rights.
+    origins = []
+    reservations = [entry for entry in rows if entry.get("entry_kind") == "reservation"]
+    for saved in reservations:
+        binding = saved.get("entry_doc") or {}
+        if binding.get("review_model") != code_review.DEFAULT_REVIEW_MODEL:
+            continue
+        bound = [entry for entry in rows if entry.get("call_identity") == saved.get("call_identity")
+                 and entry.get("entry_kind") in {"settlement", "uncertain"}]
+        if any((entry.get("entry_doc") or {}).get("error_code") == "code_review_provider_refused"
+               or ((entry.get("entry_doc") or {}).get("error_code") == "code_review_provider_request_rejected"
+                   and (entry.get("entry_doc") or {}).get("provider_http_status") == 200)
+               for entry in bound):
+            origins.append(int(binding["attempt"]))
+    origin = min(origins) if origins else attempt
+    counts = [entry.get("entry_doc") or {} for entry in reservations
+              if int((entry.get("entry_doc") or {}).get("attempt") or 0) >= origin]
+    return {**row, "code_review_doc": {**row["code_review_doc"],
+        "refusal_recovery": True, "legacy_refusal_proven": True, "refusal_episode_start": origin,
+        "review_primary_attempts": sum(doc.get("review_model") == code_review.DEFAULT_REVIEW_MODEL for doc in counts),
+        "review_alternate_attempts": sum(doc.get("review_model") == code_review.FALLBACK_REVIEW_MODEL for doc in counts)}}
 
 
 def review_retry_available(row: Mapping[str, Any]) -> bool:

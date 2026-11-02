@@ -12,7 +12,7 @@ exercises the production function contract.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import secrets
@@ -1405,7 +1405,9 @@ class ArenaStore:
         if require_refusal_fallback and result.get("refusal_fallback") != {
             "primary_model": "anthropic/claude-sonnet-5.5",
             "alternate_model": "openai/gpt-6.1-sol",
-            "max_alternate_claims": 1,
+            "max_primary_refusal_claims": 2,
+            "max_alternate_claims": 2,
+            "legacy_structured_refusal_recovery": True,
         }:
             raise ArenaStoreError("code review fallback schema mismatch")
         return result
@@ -2106,7 +2108,23 @@ class ArenaStore:
 
     def get_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)
-        return rows[0] if rows else None
+        return self._hydrate_legacy_review(rows[0]) if rows else None
+
+    def _hydrate_legacy_review(self, row):
+        from lab_arena import code_review_policy
+        if not code_review_policy.legacy_refusal_candidate(row):
+            return row
+        round_row = self.get_round(str(row["round_id"]))
+        if not round_row or round_row.get("status") != "open":
+            return row
+        schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
+        deadline = schedule.get("benchmark_deadline")
+        if not deadline and schedule.get("submission_cutoff"):
+            deadline = datetime.fromisoformat(str(schedule["submission_cutoff"]).replace("Z", "+00:00")) + timedelta(minutes=30)
+        if not deadline or datetime.fromisoformat(str(deadline).replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+            return row
+        entries = self.list_ledger(submission_id=row["submission_id"], operation_id="openrouter.code_review", limit=1000)
+        return dict(code_review_policy.legacy_refusal_from_ledger(row, entries))
 
     def list_submissions(
         self,
@@ -2118,12 +2136,13 @@ class ArenaStore:
         filters: Dict[str, Any] = {"round_id": round_id}
         if status:
             filters["status"] = status
-        return self._transport.select(
+        rows = self._transport.select(
             "lab_arena_submissions",
             filters=filters,
             order="created_at",
             columns=columns,
         )
+        return [self._hydrate_legacy_review(row) for row in rows]
 
     # -- stages and assignments -------------------------------------------
 

@@ -87,132 +87,169 @@ def refused(store, connection, suffix, actual=1234):
     return submission, miner
 
 
-@pytest.mark.parametrize('actual', [1234, None])
-def test_primary_cost_and_one_new_identity_settle_without_replay(recovery_store, recovery_superuser, actual):
-    submission, miner = refused(recovery_store, recovery_superuser, 'a599settle' + str(actual), actual)
-    first = recovery_store.list_ledger(submission_id=submission)
-    assert begin(recovery_store, submission, miner)['status'] == 'fallback_required'
+
+def finish_error(store, submission, miner, token, error='code_review_provider_refused', model=PRIMARY, actual=1234):
+    return store.finish_submission_review(submission, miner, token, 'error', failure(model, error), actual)
+
+
+def next_error(store, connection, submission, miner, model, error='code_review_provider_refused', actual=1234):
+    _age_review_error(connection, submission)
     token = new_lease_token()
-    alternate = begin(recovery_store, submission, miner, ALTERNATE, token)
-    assert alternate['status'] == 'claimed' and alternate['attempt'] == 2
-    assert alternate['call_identity'] != first[0]['call_identity']
-    replay = begin(recovery_store, submission, miner, ALTERNATE, token)
+    claimed = begin(store, submission, miner, model, token)
+    assert claimed['status'] == 'claimed'
+    before = store.list_ledger(submission_id=submission)
+    replay = begin(store, submission, miner, model, token)
     assert replay['idempotent'] is True
-    assert replay['call_identity'] == alternate['call_identity']
-    assert recovery_store.finish_submission_review(submission, miner, token, 'passed', verdict(), 2000)['status'] == 'passed'
-    ledger = recovery_store.list_ledger(submission_id=submission)
-    assert [item['entry_kind'] for item in ledger] == [
-        'reservation', 'dispatch', 'settlement' if actual is not None else 'uncertain',
-        'reservation', 'dispatch', 'settlement',
-    ]
-    assert ledger[:3] == first
-    doc = recovery_store.get_submission(submission)['code_review_doc']
-    assert doc['model'] == ALTERNATE
-    assert doc['review_cost_microusd'] == (actual if actual is not None else 50_000) + 2000
-    assert recovery_store.finish_submission_review(submission, miner, token, 'passed', verdict(), 2000)['status'] == 'existing'
-    assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == 'existing'
-    assert recovery_store.list_ledger(submission_id=submission) == ledger
+    assert store.list_ledger(submission_id=submission) == before
+    assert finish_error(store, submission, miner, token, error, model, actual)['status'] == 'error'
+    return token
 
 
-def test_concurrent_stale_workers_make_one_alternate_reservation(recovery_store, recovery_superuser):
-    submission, miner = refused(recovery_store, recovery_superuser, 'a599race')
-    # Both workers prepared the alternate from the same committed refusal row.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: begin(recovery_store, submission, miner, ALTERNATE), range(2)))
-    assert sorted(item['status'] for item in results) == ['busy', 'claimed']
-    assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'busy'
-    ledger = recovery_store.list_ledger(submission_id=submission)
-    assert len(ledger) == 5
-    assert sum(item['entry_kind'] == 'reservation' and item['entry_doc'].get('review_model') == ALTERNATE for item in ledger) == 1
-
-
-@pytest.mark.parametrize('error', [
-    'code_review_provider_refused', 'review_response_invalid', 'code_review_transport_error',
-    'code_review_provider_timeout', 'code_review_provider_rate_limited',
-    'code_review_preparation_unavailable', 'code_review_cost_unavailable',
-])
-def test_every_alternate_failure_is_terminal_in_sql_and_public_retry_policy(recovery_store, recovery_superuser, error):
-    suffix = 'a599fail' + str(sorted(code_review_policy.ERROR_CODES).index(error))
-    submission, miner = refused(recovery_store, recovery_superuser, suffix)
-    token = new_lease_token()
-    assert begin(recovery_store, submission, miner, ALTERNATE, token)['status'] == 'claimed'
-    assert recovery_store.finish_submission_review(submission, miner, token, 'error', failure(ALTERNATE, error), None)['status'] == 'error'
+def test_two_primary_two_alternate_chain_with_mixed_failures(recovery_store, recovery_superuser):
+    submission, miner = refused(recovery_store, recovery_superuser, 'sequence4')
+    assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == 'route_required'
+    next_error(recovery_store, recovery_superuser, submission, miner, PRIMARY, 'code_review_transport_error', None)
+    _age_review_error(recovery_superuser, submission)
+    assert begin(recovery_store, submission, miner, PRIMARY)['review_model'] == ALTERNATE
+    next_error(recovery_store, recovery_superuser, submission, miner, ALTERNATE, 'code_review_provider_timeout')
+    assert code_review_policy.review_retry_available(recovery_store.get_submission(submission))
+    next_error(recovery_store, recovery_superuser, submission, miner, ALTERNATE)
     row = recovery_store.get_submission(submission)
+    assert row['code_review_doc']['review_primary_attempts'] == 2
+    assert row['code_review_doc']['review_alternate_attempts'] == 2
     assert row['code_review_doc']['retryable'] is False
     assert not code_review_policy.review_retry_available(row)
-    _age_review_error(recovery_superuser, submission)
     before = recovery_store.list_ledger(submission_id=submission)
-    assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == 'exhausted'
-    assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'exhausted'
+    assert len(before) == 12
+    assert [e['entry_doc']['review_model'] for e in before if e['entry_kind']=='reservation'] == [PRIMARY,PRIMARY,ALTERNATE,ALTERNATE]
+    assert [e['amount_microusd'] for e in before if e['entry_kind'] in ('settlement','uncertain')] == [1234,50000,1234,1234]
+    for model in (PRIMARY,ALTERNATE):
+        assert begin(recovery_store, submission, miner, model)['status'] == 'exhausted'
     assert recovery_store.list_ledger(submission_id=submission) == before
 
 
-def test_expired_alternate_is_uncertain_and_cannot_dispatch_again(recovery_store, recovery_superuser):
-    submission, miner = refused(recovery_store, recovery_superuser, 'a599crash')
-    token = new_lease_token()
-    assert begin(recovery_store, submission, miner, ALTERNATE, token)['status'] == 'claimed'
-    with recovery_superuser.cursor() as cursor:
-        cursor.execute("UPDATE public.lab_arena_submissions SET code_review_started_at=clock_timestamp()-interval '602 seconds',code_review_expires_at=clock_timestamp()-interval '1 second' WHERE submission_id=%s", (submission,))
-    assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'recovered'
-    row = recovery_store.get_submission(submission)
-    assert row['code_review_doc']['model'] == ALTERNATE
-    assert row['code_review_doc']['retryable'] is False
+@pytest.mark.parametrize('result', ['passed','rejected'])
+def test_valid_primary_retry_never_calls_alternate(recovery_store,recovery_superuser,result):
+    submission,miner=refused(recovery_store,recovery_superuser,'valid'+result)
+    _age_review_error(recovery_superuser,submission)
+    token=new_lease_token()
+    assert begin(recovery_store,submission,miner,PRIMARY,token)['status']=='claimed'
+    doc=verdict(PRIMARY)
+    if result=='rejected': doc.update(passed=False,verdict='reject')
+    assert recovery_store.finish_submission_review(submission,miner,token,result,doc,100)['status']==result
+    before=recovery_store.list_ledger(submission_id=submission)
+    assert begin(recovery_store,submission,miner,ALTERNATE)['status']=='existing'
+    assert recovery_store.list_ledger(submission_id=submission)==before
+
+
+@pytest.mark.parametrize('crash_position',[2,3,4])
+def test_each_chain_crash_consumes_attempt_and_keeps_route(recovery_store,recovery_superuser,crash_position):
+    submission,miner=refused(recovery_store,recovery_superuser,'crash'+str(crash_position))
+    for position in range(2,crash_position):
+        next_error(recovery_store,recovery_superuser,submission,miner,PRIMARY if position==2 else ALTERNATE)
+    _age_review_error(recovery_superuser,submission)
+    token=new_lease_token();model=PRIMARY if crash_position==2 else ALTERNATE
+    assert begin(recovery_store,submission,miner,model,token)['status']=='claimed'
+    with recovery_superuser.cursor() as c:
+        c.execute("UPDATE public.lab_arena_submissions SET code_review_started_at=clock_timestamp()-interval '602 seconds',code_review_expires_at=clock_timestamp()-interval '1 second' WHERE submission_id=%s",(submission,))
+    assert begin(recovery_store,submission,miner,model)['status']=='recovered'
+    row=recovery_store.get_submission(submission)
+    assert row['code_review_doc']['refusal_recovery'] is True
+    assert row['code_review_doc']['review_alternate_attempts']==max(0,crash_position-2)
+    assert row['code_review_doc']['retryable'] is (crash_position<4)
+    assert code_review_policy.review_retry_available(row) is (crash_position<4)
+    assert code_review_policy.review_model_for(row)==ALTERNATE
+    before=recovery_store.list_ledger(submission_id=submission)
+    assert before[-1]['entry_kind']=='uncertain'
+    _age_review_error(recovery_superuser,submission)
+    assert begin(recovery_store,submission,miner,ALTERNATE)['status']==('claimed' if crash_position<4 else 'exhausted')
+
+
+DIAGNOSTIC={'finish_reason':'content_filter','native_finish_reason':'refusal','max_output_tokens':16384,
+    'context_integrity':'verified','response_model':PRIMARY,
+    'selected_model':'anthropic/claude-sonnet-5.5-20260928','selected_provider':'Google'}
+
+
+@pytest.mark.parametrize('damage',[None,'untyped','no_diagnostic','http403','wrong_model','older','closed','deadline'])
+def test_legacy_recovery_requires_latest_bound_authoritative_pair(recovery_store,recovery_superuser,damage):
+    _,submission,miner=accepted_recovery_submission(recovery_store,'legacy'+str(damage))
+    seed_model='anthropic/claude-sonnet-5' if damage=='wrong_model' else PRIMARY
+    token=new_lease_token();assert begin(recovery_store,submission,miner,seed_model,token)['status']=='claimed'
+    diagnostic=dict(DIAGNOSTIC)
+    if damage=='untyped': diagnostic.update(finish_reason='stop',native_finish_reason='end_turn')
+    if damage=='wrong_model': diagnostic['response_model']='anthropic/claude-sonnet-5'
+    doc={**failure(seed_model,'code_review_provider_request_rejected',False),'provider_http_status':403 if damage=='http403' else 200,'provider_diagnostic':diagnostic}
+    if damage=='no_diagnostic':doc.pop('provider_diagnostic')
+    recovery_store.finish_submission_review(submission,miner,token,'error',doc,1226326)
+    if damage=='older':
+        # A real newer generic error must not inherit older refusal proof.
+        _age_review_error(recovery_superuser,submission)
+        token=new_lease_token();assert begin(recovery_store,submission,miner,PRIMARY,token)['status']=='claimed'
+        recovery_store.finish_submission_review(submission,miner,token,'error',{**failure(PRIMARY,'code_review_provider_request_rejected',False),'provider_http_status':400},0)
+    if damage in ('closed','deadline'):
+        with recovery_superuser.cursor() as c:
+            c.execute("SET session_replication_role='replica'")
+            try:
+                if damage=='closed':c.execute("UPDATE public.lab_arena_rounds SET status='committed' WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)",(submission,))
+                else:c.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,benchmark_deadline}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)",(submission,))
+            finally:c.execute("SET session_replication_role='origin'")
+    _age_review_error(recovery_superuser,submission)
+    row=recovery_store.get_submission(submission)
+    assert code_review_policy.review_retry_available(row) is (damage in (None,'untyped','no_diagnostic'))
+    listed=recovery_store.list_submissions(row['round_id'],status='accepted')[0]
+    assert code_review_policy.review_retry_available(listed) is (damage in (None,'untyped','no_diagnostic'))
+    before=recovery_store.list_ledger(submission_id=submission)
+    result=begin(recovery_store,submission,miner,PRIMARY)
+    assert result['status']==({None:'claimed','untyped':'claimed','no_diagnostic':'claimed','closed':'round_closed','deadline':'deadline'}.get(damage,'exhausted'))
+    if damage not in (None,'untyped','no_diagnostic'): assert recovery_store.list_ledger(submission_id=submission)==before
+
+
+@pytest.mark.parametrize('failure_code',['source_archive_invalid','code_review_provider_authentication','code_review_provider_credit'])
+def test_genuine_terminal_failures_stop_chain(recovery_store,recovery_superuser,failure_code):
+    submission,miner=refused(recovery_store,recovery_superuser,'terminal'+str(sorted(code_review_policy.ERROR_CODES).index(failure_code)))
+    _age_review_error(recovery_superuser,submission)
+    token=new_lease_token();assert begin(recovery_store,submission,miner,PRIMARY,token)['status']=='claimed'
+    recovery_store.finish_submission_review(submission,miner,token,'error',failure(PRIMARY,failure_code,False),0)
+    row=recovery_store.get_submission(submission)
     assert not code_review_policy.review_retry_available(row)
-    assert code_review_policy.review_model_for(row) == ALTERNATE
-    before = recovery_store.list_ledger(submission_id=submission)
-    assert before[-1]['entry_kind'] == 'uncertain'
-    assert before[-1]['amount_microusd'] == 50_000
-    assert before[-1]['entry_doc']['retryable'] is False
-    _age_review_error(recovery_superuser, submission)
-    assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == 'exhausted'
-    assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'exhausted'
-    assert recovery_store.finish_submission_review(submission, miner, token, 'passed', verdict(), 1234)['status'] == 'stale'
-    assert recovery_store.list_ledger(submission_id=submission) == before
+    assert begin(recovery_store,submission,miner,PRIMARY)['status']=='exhausted'
+    assert begin(recovery_store,submission,miner,ALTERNATE)['status']=='fallback_not_authorized'
 
 
-@pytest.mark.parametrize('error', ['code_review_provider_request_rejected', 'code_review_provider_authentication', 'code_review_provider_credit', 'review_response_invalid'])
-def test_generic_failures_cannot_select_alternate(recovery_store, recovery_superuser, error):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'a599generic' + str(sorted(code_review_policy.ERROR_CODES).index(error)))
-    token = new_lease_token()
-    assert begin(recovery_store, submission, miner, token=token)['status'] == 'claimed'
-    recovery_store.finish_submission_review(submission, miner, token, 'error', failure(PRIMARY, error, retryable=False), 0)
-    _age_review_error(recovery_superuser, submission)
-    before = recovery_store.list_ledger(submission_id=submission)
-    assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == 'fallback_not_authorized'
-    assert recovery_store.list_ledger(submission_id=submission) == before
+def test_runtime_sequence_and_other_rows_remain_unchanged(recovery_store,recovery_superuser):
+    _,other,_=accepted_recovery_submission(recovery_store,'other-control')
+    original=recovery_store.get_submission(other)
+    _,submission,_=accepted_recovery_submission(recovery_store,'runtime-sequence')
+    payload=_archive(_source())
+    def respond(parameters):
+        body=_review_body(parameters)
+        if parameters['model']==PRIMARY:body['choices'][0]['finish_reason']='content_filter'
+        else:router_receipt(body,parameters)
+        return {'body':body}
+    transport=ReviewTransport(respond);reviewer,_=reviewer_for(payload,transport,recovery_store)
+    for expected in ('error','error','passed'):
+        row={**recovery_store.get_submission(submission),'source_size_bytes':len(payload)}
+        assert reviewer.review(row)['status']==expected
+        if expected=='error':_age_review_error(recovery_superuser,submission)
+    assert [__import__('json').loads(r['body'])['model'] for r in transport.sent]==[PRIMARY,PRIMARY,ALTERNATE]
+    before=recovery_store.list_ledger(submission_id=submission)
+    assert reviewer.review(recovery_store.get_submission(submission))['status']=='existing'
+    assert len(transport.sent)==3
+    assert recovery_store.get_submission(other)==original
+    assert recovery_store.list_ledger(submission_id=submission)==before
 
 
-def test_runtime_uses_real_claim_and_ledger_for_refusal_then_complete_review(recovery_store, recovery_superuser):
-    _, submission, _miner = accepted_recovery_submission(recovery_store, 'a599runtime')
-    payload = _archive(_source())
-    def response(parameters):
-        body = _review_body(parameters)
-        if parameters['model'] == PRIMARY:
-            body['choices'][0]['finish_reason'] = 'content_filter'
-        else:
-            router_receipt(body, parameters)
-        return {'body': body}
-    transport = ReviewTransport(response)
-    reviewer, _ = reviewer_for(payload, transport, recovery_store)
-    row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(payload)}
-    assert reviewer.review(row)['status'] == 'error'
-    assert len(transport.sent) == 1
-    assert reviewer.review(recovery_store.get_submission(submission))['status'] == 'backoff'
-    _age_review_error(recovery_superuser, submission)
-    row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(payload)}
-    assert reviewer.review(row)['status'] == 'passed'
-    assert len(transport.sent) == 2
-    before = recovery_store.list_ledger(submission_id=submission)
-    assert reviewer.review(recovery_store.get_submission(submission))['status'] == 'existing'
-    assert len(transport.sent) == 2
-    assert recovery_store.list_ledger(submission_id=submission) == before
-    assert before[0]['entry_doc']['review_model'] == PRIMARY
-    assert before[3]['entry_doc']['review_model'] == ALTERNATE
-    assert before[-1]['entry_doc']['provider_diagnostic']['selected_provider'] == 'Azure'
+def test_current_capability_and_reapply_preserve_rows(recovery_store,recovery_superuser):
+    marker=recovery_store.code_review_schema(require_refusal_fallback=True)['refusal_fallback']
+    assert marker['max_primary_refusal_claims']==marker['max_alternate_claims']==2
+    with recovery_superuser.cursor() as c:
+        c.execute('SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM public.lab_arena_submissions s');before=c.fetchone()[0]
+        c.execute(MIGRATION.read_text())
+        c.execute('SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM public.lab_arena_submissions s');assert c.fetchone()[0]==before
 
 
 def test_migration_reapply_preserves_rows_security_and_fails_closed_on_unknown_body(recovery_store, recovery_superuser):
-    assert recovery_store.code_review_schema(require_refusal_fallback=True)['refusal_fallback']['max_alternate_claims'] == 1
+    assert recovery_store.code_review_schema(require_refusal_fallback=True)['refusal_fallback']['max_alternate_claims'] == 2
     with recovery_superuser.cursor() as cursor:
         cursor.execute('SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM public.lab_arena_submissions s')
         rows_before = cursor.fetchone()[0]
@@ -244,55 +281,6 @@ def test_migration_reapply_preserves_rows_security_and_fails_closed_on_unknown_b
             cursor.execute('ROLLBACK')
             cursor.execute(original)
 
-
-def test_primary_transient_recovery_remains_deadline_bounded(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'a599primarytransient')
-    for attempt in range(1, 8):
-        token = new_lease_token()
-        assert begin(recovery_store, submission, miner, token=token)['attempt'] == attempt
-        doc = failure(PRIMARY, 'review_response_invalid', retryable=False)
-        assert recovery_store.finish_submission_review(submission, miner, token, 'error', doc, 10)['status'] == 'error'
-        _age_review_error(recovery_superuser, submission)
-    token = new_lease_token()
-    assert begin(recovery_store, submission, miner, token=token)['attempt'] == 8
-    recovery_store.finish_submission_review(submission, miner, token, 'error', failure(), 10)
-    _age_review_error(recovery_superuser, submission)
-    assert begin(recovery_store, submission, miner, ALTERNATE)['attempt'] == 9
-
-
-@pytest.mark.parametrize('gate', ['guard', 'deadline', 'closed', 'freeze'])
-def test_alternate_retains_existing_admission_gates(recovery_store, recovery_superuser, gate):
-    from tests.lab_arena.atomic_review_restart_guard587_postgres_test import acquire
-    submission, miner = refused(recovery_store, recovery_superuser, 'a599gate' + gate)
-    before = recovery_store.list_ledger(submission_id=submission)
-    try:
-        if gate == 'guard':
-            acquire(recovery_superuser)
-        else:
-            with recovery_superuser.cursor() as cursor:
-                cursor.execute("SET session_replication_role='replica'")
-                try:
-                    if gate == 'deadline':
-                        cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,benchmark_deadline}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)", (submission,))
-                    elif gate == 'freeze':
-                        cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{schedule,submission_cutoff}',to_jsonb((clock_timestamp()+interval '2 hours')::text)),'{schedule,benchmark_deadline}',to_jsonb((clock_timestamp()+interval '3 hours')::text)) WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)", (submission,))
-                    else:
-                        cursor.execute("UPDATE public.lab_arena_rounds SET status='committed' WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)", (submission,))
-                finally:
-                    cursor.execute("SET session_replication_role='origin'")
-        expected = {'guard': 'paused', 'deadline': 'deadline', 'closed': 'round_closed', 'freeze': 'deferred'}[gate]
-        assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == expected
-        payload = _archive(_source())
-        transport = ReviewTransport(lambda _parameters: pytest.fail('admission gate must prevent provider dispatch'))
-        reviewer, _ = reviewer_for(payload, transport, recovery_store)
-        row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(payload)}
-        assert reviewer.review(row)['status'] == expected
-        assert transport.sent == []
-        assert recovery_store.list_ledger(submission_id=submission) == before
-    finally:
-        if gate == 'guard':
-            with recovery_superuser.cursor() as cursor:
-                cursor.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=FALSE,guard_commitment='',owner_commitment='',guard_expires_at=NULL,candidate_commit='',restart_scope='',restart_phase='',captured_leases='[]'::jsonb WHERE singleton")
 
 
 def test_exact_upgrade_enables_refusal_without_replaying_or_changing_existing_rows():
@@ -335,13 +323,105 @@ def test_exact_upgrade_enables_refusal_without_replaying_or_changing_existing_ro
             cursor.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE')")
             assert cursor.fetchone()[0] is False
         assert store.list_ledger(submission_id=submission) == before
-        assert store.code_review_schema(require_refusal_fallback=True)['refusal_fallback']['max_alternate_claims'] == 1
+        assert store.code_review_schema(require_refusal_fallback=True)['refusal_fallback']['max_alternate_claims'] == 2
         assert store.finish_submission_review(submission, miner, token, 'error', failure(), 1234)['status'] == 'error'
         _age_review_error(connection, submission)
-        assert begin(store, submission, miner, ALTERNATE)['status'] == 'claimed'
+        assert begin(store, submission, miner, PRIMARY)['status'] == 'claimed'
         assert store.list_ledger(submission_id=submission)[:2] == before
         connection.close()
     finally:
         if store:
             store.close()
         database.close()
+
+
+def test_primary_allowance_starts_at_first_refusal_after_seven_transients(recovery_store,recovery_superuser):
+    _,submission,miner=accepted_recovery_submission(recovery_store,'episode-after7')
+    for attempt in range(1,8):
+        token=new_lease_token();assert begin(recovery_store,submission,miner,PRIMARY,token)['attempt']==attempt
+        finish_error(recovery_store,submission,miner,token,'review_response_invalid')
+        _age_review_error(recovery_superuser,submission)
+    token=new_lease_token();assert begin(recovery_store,submission,miner,PRIMARY,token)['attempt']==8
+    finish_error(recovery_store,submission,miner,token)
+    row=recovery_store.get_submission(submission)
+    assert row['code_review_doc']['refusal_episode_start']==8
+    assert row['code_review_doc']['review_primary_attempts']==1
+    assert code_review_policy.review_model_for(row)==PRIMARY
+    next_error(recovery_store,recovery_superuser,submission,miner,PRIMARY,'code_review_transport_error',None)
+    row=recovery_store.get_submission(submission)
+    assert row['code_review_doc']['refusal_episode_start']==8
+    assert row['code_review_doc']['review_primary_attempts']==2
+    assert code_review_policy.review_model_for(row)==ALTERNATE
+
+
+@pytest.mark.parametrize('unknown_at',[1,2,3])
+def test_valid_unknown_cost_clears_lease_and_stops_recovery(recovery_store,recovery_superuser,unknown_at):
+    _,submission,_=accepted_recovery_submission(recovery_store,'unknown-cost'+str(unknown_at))
+    payload=_archive(_source())
+    def respond(parameters):
+        body=_review_body(parameters,cost=None if len(transport.sent)==unknown_at else '0.001234')
+        if len(transport.sent)<unknown_at:body['choices'][0]['finish_reason']='content_filter'
+        elif parameters['model']==ALTERNATE:router_receipt(body,parameters)
+        return {'body':body}
+    transport=ReviewTransport(respond);reviewer,_=reviewer_for(payload,transport,recovery_store)
+    for _ in range(unknown_at):
+        row={**recovery_store.get_submission(submission),'source_size_bytes':len(payload)}
+        assert reviewer.review(row)['status']=='error'
+        _age_review_error(recovery_superuser,submission)
+    row=recovery_store.get_submission(submission)
+    assert row['code_review_status']=='error'
+    assert row['code_review_expires_at'] is None
+    assert row['code_review_doc']['error_code']=='code_review_cost_unavailable'
+    assert row['code_review_doc']['retryable'] is False
+    before=recovery_store.list_ledger(submission_id=submission)
+    assert before[-1]['entry_kind']=='uncertain'
+    assert reviewer.review(row)['status']=='exhausted'
+    assert len(transport.sent)==unknown_at
+    assert recovery_store.list_ledger(submission_id=submission)==before
+
+
+@pytest.mark.parametrize('gate', ['guard', 'deadline', 'closed', 'freeze'])
+def test_alternate_retains_existing_admission_gates(recovery_store, recovery_superuser, gate):
+    from tests.lab_arena.atomic_review_restart_guard587_postgres_test import acquire
+    submission, miner = refused(recovery_store, recovery_superuser, 'a599gate' + gate)
+    before = recovery_store.list_ledger(submission_id=submission)
+    try:
+        if gate == 'guard':
+            acquire(recovery_superuser)
+        else:
+            with recovery_superuser.cursor() as cursor:
+                cursor.execute("SET session_replication_role='replica'")
+                try:
+                    if gate == 'deadline':
+                        cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,benchmark_deadline}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)", (submission,))
+                    elif gate == 'freeze':
+                        cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{schedule,submission_cutoff}',to_jsonb((clock_timestamp()+interval '2 hours')::text)),'{schedule,benchmark_deadline}',to_jsonb((clock_timestamp()+interval '3 hours')::text)) WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)", (submission,))
+                    else:
+                        cursor.execute("UPDATE public.lab_arena_rounds SET status='committed' WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions WHERE submission_id=%s)", (submission,))
+                finally:
+                    cursor.execute("SET session_replication_role='origin'")
+        expected = {'guard': 'paused', 'deadline': 'deadline', 'closed': 'round_closed', 'freeze': 'deferred'}[gate]
+        assert begin(recovery_store, submission, miner, ALTERNATE)['status'] == expected
+        payload = _archive(_source())
+        transport = ReviewTransport(lambda _parameters: pytest.fail('admission gate must prevent provider dispatch'))
+        reviewer, _ = reviewer_for(payload, transport, recovery_store)
+        row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(payload)}
+        assert reviewer.review(row)['status'] == expected
+        assert transport.sent == []
+        assert recovery_store.list_ledger(submission_id=submission) == before
+    finally:
+        if gate == 'guard':
+            with recovery_superuser.cursor() as cursor:
+                cursor.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=FALSE,guard_commitment='',owner_commitment='',guard_expires_at=NULL,candidate_commit='',restart_scope='',restart_phase='',captured_leases='[]'::jsonb WHERE singleton")
+
+
+def test_concurrent_workers_share_last_alternate_slot(recovery_store,recovery_superuser):
+    submission,miner=refused(recovery_store,recovery_superuser,'last-alternate-race')
+    next_error(recovery_store,recovery_superuser,submission,miner,PRIMARY)
+    next_error(recovery_store,recovery_superuser,submission,miner,ALTERNATE)
+    _age_review_error(recovery_superuser,submission)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(lambda _:begin(recovery_store,submission,miner,ALTERNATE),range(2)))
+    assert sorted(result['status'] for result in results)==['busy','claimed']
+    ledger=recovery_store.list_ledger(submission_id=submission)
+    assert sum(entry['entry_kind']=='reservation' and entry['entry_doc'].get('review_model')==ALTERNATE for entry in ledger)==2

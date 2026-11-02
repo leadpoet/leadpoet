@@ -56,7 +56,7 @@ def test_http_200_explicit_refusal_permits_one_alternate_claim(finish, native, r
         "code_review_status": "error", "code_review_attempts": 1,
         "code_review_doc": document,
     })
-    assert code_review_policy.review_model_for({"code_review_doc": document}) == code_review.FALLBACK_REVIEW_MODEL
+    assert code_review_policy.review_model_for({"code_review_doc": document}) == code_review.DEFAULT_REVIEW_MODEL
 
 
 @pytest.mark.parametrize("change", [
@@ -98,7 +98,7 @@ def test_typed_finish_refusal_without_message_selects_alternate(finish, native, 
     document = store.finish_calls[0][4]
     assert document["error_code"] == "code_review_provider_refused"
     assert document["retryable"] is True
-    assert code_review_policy.review_model_for({"code_review_doc": document}) == code_review.FALLBACK_REVIEW_MODEL
+    assert code_review_policy.review_model_for({"code_review_doc": document}) == code_review.DEFAULT_REVIEW_MODEL
     assert "passed" not in document and "categories" not in document
     assert store.finish_calls[0][5] == actual
     assert len(transport.sent) == 1
@@ -199,19 +199,22 @@ def test_real_ledger_refusal_keeps_charge_and_allows_one_alternate(recovery_stor
     assert ledger[-1]["entry_doc"]["provider_diagnostic"]["finish_reason"] == "content_filter"
     _age_review_error(recovery_superuser, submission)
     assert recovery_store.begin_submission_review(
-        submission, miner, "b" * 64, 50_000, code_review.DEFAULT_REVIEW_MODEL, 3, 1200,
-    )["status"] == "fallback_required"
+        submission, miner, "b" * 64, 50_000, code_review.FALLBACK_REVIEW_MODEL, 3, 1200,
+    )["status"] == "route_required"
     assert recovery_store.list_ledger(submission_id=submission) == ledger
     assert len(transport.sent) == 1
+    row = {**recovery_store.get_submission(submission), "source_size_bytes": len(payload)}
+    assert reviewer.review(row)["status"] == "error"
+    _age_review_error(recovery_superuser, submission)
     row = {**recovery_store.get_submission(submission), "source_size_bytes": len(payload)}
     assert reviewer.review(row)["status"] == "passed"
     completed = recovery_store.list_ledger(submission_id=submission)
     assert completed[:3] == ledger
-    assert [entry["entry_kind"] for entry in completed[3:]] == ["reservation", "dispatch", "settlement"]
-    assert completed[3]["entry_doc"]["review_model"] == code_review.FALLBACK_REVIEW_MODEL
+    assert [entry["entry_kind"] for entry in completed[3:]] == ["reservation", "dispatch", kind, "reservation", "dispatch", "settlement"]
+    assert completed[6]["entry_doc"]["review_model"] == code_review.FALLBACK_REVIEW_MODEL
     assert reviewer.review(recovery_store.get_submission(submission))["status"] == "existing"
     assert recovery_store.list_ledger(submission_id=submission) == completed
-    assert len(transport.sent) == 2
+    assert len(transport.sent) == 3
 
 
 def test_legacy_generic_request_rejection_remains_terminal():

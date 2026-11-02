@@ -2,8 +2,14 @@
 
 The user authorized the coordinator to resolve explicit provider-refusal review
 failures and audit inconsistent decisions across the exact named frozen miner
-archives. Implement one bounded full-source alternate review through existing
-claim, settlement and admission infrastructure, preserving the same security
+archives. Explicit refusal recovery permits at most two total primary-model
+reservations per refusal episode and two alternate-model reservations. The
+primary allowance starts at the first refusal; earlier ordinary transient
+attempts do not consume it. Recover existing HTTP200
+generic request errors only from the latest bound authoritative HTTP200
+refusal error pair in the claim ledger. Optional diagnostics are observational.
+Recover only while admission is open. Use existing claim, settlement and admission
+infrastructure, preserving the same security
 criteria and truthful evidence rules. Trace reachable output behavior rather
 than reject isolated fallback text. Internal agents may implement and test
 assigned files in this isolated worktree. The coordinator owns controlled

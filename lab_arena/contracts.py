@@ -404,7 +404,19 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def sha256_json(value: Any) -> str:
-    return sha256_bytes(canonical_json(value).encode("utf-8"))
+    # Joined training histories can be much larger than an individual request.
+    # Hash the same canonical bytes without materializing the whole document.
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False, allow_nan=False)
+    try:
+        for chunk in encoder.iterencode(value):
+            digest.update(chunk.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ArenaContractError("value is not canonical JSON: %s" % exc) from exc
+    return "sha256:" + digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------

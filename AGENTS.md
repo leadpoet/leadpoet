@@ -1,3 +1,13 @@
+## Scoped authorization: November 2 training export memory
+
+The user authorized the smallest general fix for confirmed November 2 capture
+and training eligibility bugs, with tests, merge, canonical deployment and live
+verification. Stream existing canonical hashes and avoid redundant whole-example
+JSON copies. Preserve exact hashes and data, strict privacy, identity checks,
+8/10 coverage, 1% missing reasoning, scoring, billing and published outcomes.
+Use read-only retained data for validation; do not replay providers or overlap
+another task's release. The coordinator owns production actions.
+
 ## Scoped authorization: November 2 admission-review refusal recovery
 
 The user authorized investigation of the three Ponie submissions rejected during

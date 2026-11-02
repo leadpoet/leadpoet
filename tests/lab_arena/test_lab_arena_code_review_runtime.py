@@ -455,8 +455,9 @@ def test_selected_review_provider_still_fails_closed_without_fallback(outcome):
         assert document["retryable"] is True
         assert store.finish_calls[0][5] is None
     elif outcome == "refusal":
-        assert document["error_reason"] == "not_finished"
-        assert document["retryable"] is True
+        assert document["error_code"] == "code_review_provider_request_rejected"
+        assert document["provider_http_status"] == 200
+        assert document["retryable"] is False
         assert store.finish_calls[0][5] == 1_234
         assert "private provider refusal" not in repr(document)
     else:

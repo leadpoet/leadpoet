@@ -96,6 +96,7 @@ from qualification.scoring.company_evidence_investigator import (
     _linkedin_about_headquarters_field,
     _complete_verified_first_party_identity,
     _industry_source_is_bound,
+    _has_unresolved_source_fetch_faults,
     _plain_text,
     _priority_headquarters_navigation_source,
     _quote_occurs,
@@ -7455,42 +7456,19 @@ def _has_explicitly_unproven_fit_dimensions(
     fetch_outcomes = (
         usage.get("fetch_outcomes") if isinstance(usage, Mapping) else None
     )
-    # Outcomes belong to this company's investigation. A later evidenced fetch
-    # can recover the same source; another source cannot clear its failure.
-    latest_source_outcomes = {}
-    unbound_transport_fault = False
-    for outcome in fetch_outcomes if isinstance(fetch_outcomes, list) else ():
-        if not isinstance(outcome, Mapping):
-            continue
-        transport_fault = (
-            outcome.get("ok") is False
-            and outcome.get("error_class") not in {
-                "provider_request_refused", "source_not_found", "source_gone",
-                "source_access_denied",
-            }
-        )
-        source_hash = outcome.get("url_sha256")
-        if (
-            not isinstance(source_hash, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
-        ):
-            unbound_transport_fault |= transport_fault
-            continue
-        if outcome.get("ok") is False:
-            latest_source_outcomes[source_hash] = transport_fault
-        elif (
-            outcome.get("ok") is True
-            and type(outcome.get("loaded_text_length")) is int
-            and outcome["loaded_text_length"] > 0
-        ):
-            latest_source_outcomes[source_hash] = False
-    review_has_transport_fault = (
-        unbound_transport_fault or any(latest_source_outcomes.values())
-    )
     investigation_claims = (
         investigation_receipt.get("claims")
         if isinstance(investigation_receipt, Mapping)
         else None
+    )
+    review_has_transport_fault = _has_unresolved_source_fetch_faults(
+        fetch_outcomes,
+        stage_finding=(investigation_claims.get("stage")
+                       if isinstance(investigation_claims, Mapping) else None),
+        current_stage_search_succeeded=(
+            usage.get("current_stage_search_succeeded") is True
+            if isinstance(usage, Mapping) else False
+        ),
     )
     completed_investigation = bool(
         isinstance(investigation_receipt, Mapping)
@@ -9035,16 +9013,42 @@ async def _run_targeted_company_evidence_investigation(
             if review_positive_semantics
             else []
         ),
-        *(item.get("url") for item in stage_evidence),
-        *(signal.url for signal in company.intent_signals),
+    ]
+    attribute_source_candidates = [
         *(
             [company.required_attribute.evidence_url]
             if company.required_attribute is not None
             else []
         ),
+    ]
+    # V5 normalization derives its generic fit URLs only from stage evidence;
+    # legacy generic URLs have no such single-target provenance.
+    generic_nonstage_fit_urls = (
+        company.fit_evidence_urls if company.intent_details is None else ()
+    )
+    nonstage_fit_source_urls = {
+        _valid_web_evidence_url(url)
+        for url in (*source_candidates, *attribute_source_candidates,
+                    *generic_nonstage_fit_urls, company.company_website, *(
+            verdict.get(key) for key in (
+                "industry_evidence_url", "required_attribute_evidence_url",
+                "employee_size_evidence_url", "geography_evidence_url",
+            )
+        ))
+    }
+    stage_only_source_urls = tuple(
+        url for item in stage_evidence
+        if (url := _valid_web_evidence_url(item.get("url")))
+        and url not in nonstage_fit_source_urls
+    )
+    # Intent has its own later source check. It does not add a fit obligation.
+    source_candidates.extend([
+        *(item.get("url") for item in stage_evidence),
+        *(signal.url for signal in company.intent_signals),
+        *attribute_source_candidates,
         *company.fit_evidence_urls,
         company.company_website,
-    ]
+    ])
     for candidate in source_candidates:
         safe_url = _valid_web_evidence_url(candidate)
         if not safe_url:
@@ -9126,6 +9130,7 @@ async def _run_targeted_company_evidence_investigation(
         requested_attribute=str(icp.required_attribute or ""),
         requested_geography=_investigator_requested_geography(icp),
         positive_semantic_review=review_positive_semantics,
+        stage_only_source_urls=stage_only_source_urls,
         prior_observations={
             **{
                 key: verdict.get(key)

@@ -3651,6 +3651,54 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _has_unresolved_source_fetch_faults(
+    outcomes: Any,
+    *,
+    stage_finding: Any = None,
+    current_stage_search_succeeded: bool = False,
+) -> bool:
+    """Keep transport faults local only to a resolved host stage obligation.
+
+    A source selected by the model or shared across targets is unscoped. A
+    later usable read of the exact source retains the existing recovery rule.
+    """
+    stage = stage_finding if isinstance(stage_finding, Mapping) else {}
+    stage_source = _safe_https_url(stage.get("evidence_url"))
+    stage_hash = hashlib.sha256(stage_source.encode()).hexdigest() if stage_source else ""
+    stage_resolved = bool(
+        current_stage_search_succeeded is True
+        and stage.get("status") in {"VERIFIED", "CONTRADICTED"}
+        and stage.get("target") == "stage"
+        and stage_source and str(stage.get("evidence_quote") or "").strip()
+    )
+    unresolved: dict[str, list[Mapping[str, Any]]] = {}
+    unbound_fault = False
+    for outcome in outcomes if isinstance(outcomes, list) else ():
+        if not isinstance(outcome, Mapping):
+            continue
+        fault = outcome.get("ok") is False and outcome.get("error_class") not in {
+            "provider_request_refused", "source_not_found", "source_gone", "source_access_denied",
+        }
+        source_hash = outcome.get("url_sha256")
+        if not isinstance(source_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", source_hash):
+            unbound_fault |= fault
+            continue
+        if fault:
+            unresolved.setdefault(source_hash, []).append(outcome)
+        elif outcome.get("ok") is False or (
+            outcome.get("ok") is True
+            and type(outcome.get("loaded_text_length")) is int
+            and outcome["loaded_text_length"] > 0
+        ):
+            unresolved.pop(source_hash, None)
+    return unbound_fault or any(
+        not (stage_resolved and source_hash != stage_hash
+             and all(outcome.get("target") == "stage" for outcome in faults))
+        for source_hash, faults in unresolved.items()
+    )
+
+
 def _bound_linkedin_headquarters_source(
     url: str,
     final_url: str,
@@ -4778,6 +4826,7 @@ async def investigate_company_evidence(
     requested_attribute: str = "",
     requested_geography: str = "",
     positive_semantic_review: bool = False,
+    stage_only_source_urls: Sequence[str] = (),
     prior_observations: Optional[Mapping[str, Any]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
     verified_homepage_rebrand_redirect: Optional[Mapping[str, Any]] = None,
@@ -5538,7 +5587,25 @@ async def investigate_company_evidence(
                         "text": fetched_pages[priority_source_url],
                     }
                 else:
+                    prior_fetch_outcomes = len(fetch_outcomes)
                     source_result = await fetch_fresh_page(priority_source_url)
+                    # Only this host-selected, explicitly submitted stage source
+                    # has a single known purpose. Shared or model-selected reads
+                    # retain their unscoped transport fault.
+                    if (
+                        priority_source_kind == "public"
+                        and priority_source_url in submitted_stage_source_urls
+                        and priority_source_url in stage_only_source_urls
+                        and all(
+                            _safe_https_url(bounded_prior_observations.get(key)) != priority_source_url
+                            for key in (
+                                "industry_evidence_url", "required_attribute_evidence_url",
+                                "employee_size_evidence_url", "geography_evidence_url",
+                            )
+                        )
+                    ):
+                        for outcome in fetch_outcomes[prior_fetch_outcomes:]:
+                            outcome["target"] = "stage"
                 marker_key = (
                     "server_public_stage_source_fetch"
                     if priority_source_kind == "public"
@@ -7209,19 +7276,11 @@ async def investigate_company_evidence(
                             and (claims.get("stage") or {}).get("status")
                             == "UNPROVEN"
                         )
-                        # Only a later outcome for the same source can recover
-                        # its transport failure; other pages cannot clear it.
-                        latest_source_faults: dict[str, bool] = {}
-                        for outcome in fetch_outcomes:
-                            latest_source_faults[outcome["url_sha256"]] = (
-                                outcome["ok"] is False
-                                and outcome["error_class"] not in {
-                                    "provider_request_refused", "source_not_found",
-                                    "source_gone", "source_access_denied",
-                                }
-                            )
                         unresolved_source = bool(
-                            any(latest_source_faults.values())
+                            _has_unresolved_source_fetch_faults(
+                                fetch_outcomes, stage_finding=stage_finding,
+                                current_stage_search_succeeded=current_stage_search_succeeded,
+                            )
                             and any(
                                 finding.get("status") == "UNPROVEN"
                                 for finding in claims.values()
@@ -7274,6 +7333,7 @@ async def investigate_company_evidence(
                                 "prefetched_pages": prefetched_count,
                                 "total_loaded_pages": len(fetched_pages),
                                 "fetch_outcomes": list(fetch_outcomes),
+                                "current_stage_search_succeeded": current_stage_search_succeeded,
                             },
                             # Private transport output constructed only from
                             # pages fetched by this loop. The caller may reuse

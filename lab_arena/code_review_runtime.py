@@ -348,7 +348,15 @@ class SubmissionCodeReviewer:
                             parsed, raw_http_status=provider_http_status,
                             effective_http_status=response.status,
                         )
-                    if response.status == 200:
+                    if response.status == 200 and code_review_policy.explicit_provider_refusal(parsed):
+                        # Refusal is a provider request failure, never evidence
+                        # of source misconduct. Account this call, then stop
+                        # repeating the same paid review on this route.
+                        document = code_review_policy.diagnostic(
+                            "code_review_provider_request_rejected",
+                            provider_http_status=200, retryable=False,
+                        )
+                    elif response.status == 200:
                         if not isinstance(parsed, Mapping):
                             raise code_review.CodeReviewError(
                                 "review_response_invalid", response_reason="envelope"

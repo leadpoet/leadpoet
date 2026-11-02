@@ -43,7 +43,7 @@ def _run(change=lambda body: None):
 
 @pytest.mark.parametrize("finish,status,reason", [
     ("stop", "passed", None), ("length", "error", "not_finished"),
-    ("content_filter", "error", "not_finished"), (None, "error", "not_finished"),
+    ("content_filter", "error", None), (None, "error", "not_finished"),
 ])
 def test_runtime_retains_private_provider_outcome_without_changing_decision(finish, status, reason):
     outcome, document, cost = _run(

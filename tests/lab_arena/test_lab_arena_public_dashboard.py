@@ -647,7 +647,10 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
 
         @staticmethod
         def list_runs(_round_id, **filters):
-            assert filters == {"stage": 1, "kind": "execute"} or filters == {
+            assert filters == {
+                "stage": 1, "kind": "execute",
+                "columns": public_dashboard._STAGE1_SCORE_COLUMNS,
+            } or filters == {
                 "columns": public_dashboard._EVALUATION_COLUMNS,
                 "submission_ids": ["baseline-1", "sub-miner"],
             }

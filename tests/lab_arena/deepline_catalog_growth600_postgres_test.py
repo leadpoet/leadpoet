@@ -11,7 +11,7 @@ from tests.lab_arena import full_thinking_catalog_commit568_postgres_test as pri
 from tests.lab_arena.deepline_catalog_growth_test import growth_rows
 
 
-MIGRATION = Path(__file__).parents[2] / "scripts/599-lab-arena-deepline-catalog-growth.sql"
+MIGRATION = Path(__file__).parents[2] / "scripts/600-lab-arena-deepline-catalog-growth.sql"
 SIGNATURES = (
     "public.lab_arena_commit_round_v3(text,jsonb,text,text,date,text,text,jsonb)",
     "public.lab_arena_commit_round_v4(text,jsonb,text,text,date,text,text,jsonb,text)",

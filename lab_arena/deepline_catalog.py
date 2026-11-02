@@ -22,7 +22,7 @@ SCHEMA_VERSION = "leadpoet.lab_arena.deepline_catalog.v1"
 POLICY_VERSION = "leadpoet.lab_arena.deepline_company_research.v1"
 CATALOG_URL = "https://code.deepline.com/api/v2/tools?compact=false"
 # Allow provider growth without relaxing the independent byte/schema/policy
-# limits. Keep the commit-RPC count bound in migration599 aligned with this.
+# limits. Keep the commit-RPC count bound in migration600 aligned with this.
 MAX_CATALOG_TOOLS = 16_384
 MAX_METADATA_READ_WORKERS = 4
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,79}$")

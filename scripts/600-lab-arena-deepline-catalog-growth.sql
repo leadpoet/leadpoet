@@ -6,7 +6,7 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
-DO $deepline_catalog_growth599$
+DO $deepline_catalog_growth600$
 DECLARE
   item RECORD;
   target OID;
@@ -69,6 +69,6 @@ BEGIN
     END IF;
   END LOOP;
 END;
-$deepline_catalog_growth599$;
+$deepline_catalog_growth600$;
 NOTIFY pgrst, 'reload schema';
 COMMIT;

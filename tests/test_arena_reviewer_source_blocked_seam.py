@@ -27,7 +27,7 @@ _FROZEN_GRADER = frozen_source(
 
 def _sources(corrected=None):
     if corrected is None:
-        corrected = (composer.ROOT / composer.GRADER_FILE).read_bytes()
+        corrected = _FROZEN_GRADER
     assert corrected.count(seam.NEW.encode()) == 1
     original = corrected.replace(seam.NEW.encode(), seam.OLD.encode(), 1)
     return original, corrected

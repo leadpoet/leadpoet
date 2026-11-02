@@ -24,6 +24,7 @@ from gateway.observability.otel_bootstrap import (
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
     ARENA_TOOL_NONE,
+    ARENA_MODEL_NONE,
     ARENA_RUN_SCOPE,
     ARENA_REVIEW_SCOPE,
     ARENA_RUNTIME_SCOPE,
@@ -484,6 +485,44 @@ def test_provider_span_names_the_deepline_tool():
     (span,) = exp.get_finished_spans()
     assert span.attributes["arena.tool"] == "hunter_email_finder"
     assert span.attributes["arena.operation"] == "deepline.execute"
+
+
+def test_provider_model_attribute_uses_the_exact_export_envelope():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider("openrouter", "openrouter.chat", "ok",
+                             model="deepseek/deepseek-v4.1-flash-1017")
+    recorder.record_provider("deepline", "exa.search", "ok")
+    model_span, other_span = exp.get_finished_spans()
+    assert set(model_span.attributes) == PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST
+    assert model_span.attributes["arena.model"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert other_span.attributes["arena.model"] == ARENA_MODEL_NONE
+
+
+@pytest.mark.parametrize("provider,operation,model", [
+    ("openrouter", "openrouter.chat", "ada@example.com"),
+    ("openrouter", "openrouter.chat", "private prompt text"),
+    ("deepline", "exa.search", "deepseek/deepseek-v4.1-flash-1017"),
+])
+def test_invalid_provider_model_attributes_are_dropped(provider, operation, model):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(provider, operation, "ok", model=model)
+    assert exp.get_finished_spans() == ()
+
+
+def test_service_model_projection_requires_trusted_membership_and_matching_api():
+    from lab_arena.service import _telemetry_model
+
+    model = "deepseek/deepseek-v4.1-flash-1017"
+    registry = {"approved_routes": [{"model_id": model, "api": "openrouter.chat"}]}
+    assert _telemetry_model("openrouter.chat", {"model": model}, registry=registry) == model
+    assert _telemetry_model("openrouter.responses", {"model": model}, registry=registry) == telemetry.NO_MODEL
+    assert _telemetry_model("openrouter.chat", {"model": model}) == telemetry.NO_MODEL
+    assert _telemetry_model("deepline.execute", {"model": model},
+                            price_table={"models": {model: {}}}) == telemetry.NO_MODEL
+    assert _telemetry_model("unknown", {"model": model},
+                            price_table={"models": {model: {}}}) == telemetry.NO_MODEL
 
 
 @pytest.mark.parametrize(

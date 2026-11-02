@@ -192,6 +192,33 @@ def _telemetry_tool(operation_id: str, parameters: Mapping[str, Any]) -> str:
     return tool if tool in operations.DEEPLINE_TOOLS else telemetry.NO_TOOL
 
 
+def _telemetry_model(operation_id: str, parameters: Any, *,
+                     price_table: Any = None, registry: Any = None) -> str:
+    """Name a requested OpenRouter model only from host-owned model IDs.
+
+    A syntactically valid caller string is not evidence of a model identity.
+    The broker validates its catalog; run context holds the frozen registry.
+    Neither source establishes that this request reached a provider endpoint.
+    """
+    operation = operations.get_operation(operation_id)
+    if (operation is None or operation.provider != "openrouter"
+            or not isinstance(parameters, Mapping)):
+        return telemetry.NO_MODEL
+    model = parameters.get("model")
+    if (not isinstance(model, str)
+            or operations._MODEL_ID_RE.fullmatch(model) is None):
+        return telemetry.NO_MODEL
+    models = price_table.get("models") if isinstance(price_table, Mapping) else None
+    if isinstance(models, Mapping) and model in models:
+        return model
+    routes = registry.get("approved_routes") if isinstance(registry, Mapping) else None
+    if isinstance(routes, list) and any(
+            isinstance(route, Mapping) and route.get("model_id") == model
+            and route.get("api") == operation_id for route in routes):
+        return model
+    return telemetry.NO_MODEL
+
+
 def _provider_telemetry_fields(
     call: Mapping[str, Any], http_status: Any, attempts: int
 ) -> Dict[str, Any]:
@@ -7045,6 +7072,11 @@ class ArenaService:
                 error_type=type(exc).__name__,
                 store_error=store_error or None,
                 tool=_telemetry_tool(operation_id, frame["parameters"]),
+                model=_telemetry_model(
+                    operation_id, frame["parameters"],
+                    price_table=getattr(broker, "_price_table", None),
+                    registry=getattr(context, "reasoning_route_registry", None),
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 start_ns=provider_start_ns,
                 run_identity=run_identity,
@@ -7072,6 +7104,12 @@ class ArenaService:
                 tool=_telemetry_tool(
                     call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
                     frame["parameters"],
+                ),
+                model=_telemetry_model(
+                    call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
+                    frame["parameters"],
+                    price_table=getattr(broker, "_price_table", None),
+                    registry=getattr(context, "reasoning_route_registry", None),
                 ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 start_ns=provider_start_ns,

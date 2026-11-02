@@ -25,7 +25,7 @@ _FROZEN_GRADER = frozen_source(
 def _sources(investigator=None):
     verifier = (ROOT / composer.VERIFICATION_FILE).read_bytes()
     if investigator is None:
-        investigator = (ROOT / composer.GRADER_FILE).read_bytes()
+        investigator = _FROZEN_GRADER
     old_verifier = verifier
     old_investigator = investigator
     for old, new in (

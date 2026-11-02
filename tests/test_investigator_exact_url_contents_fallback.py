@@ -24,6 +24,7 @@ def _review(monkeypatch, *, error=None, cap=4, expired=False, timeout=False,
     monkeypatch.setattr(investigator.time, "monotonic", lambda: clock[0])
 
     async def fetch(_session, url, **_kwargs):
+        url = _kwargs.get("params", {}).get("url", url)
         calls.append(("primary", url))
         if expired:
             clock[0] = investigator.ADMISSION_DEADLINE_SECONDS
@@ -62,7 +63,17 @@ def _review(monkeypatch, *, error=None, cap=4, expired=False, timeout=False,
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    if timeout:
+        # Inject transport failures below the native page reader. It owns
+        # URL-local timeout classification before exact-source fallback.
+        monkeypatch.setattr(investigator, "_fetch_bounded_html", fetch)
+
+        async def profile_timeout(url, **_kwargs):
+            return await fetch(None, url)
+
+        monkeypatch.setattr(investigator, "fetch_current_linkedin_company_size", profile_timeout)
+    else:
+        monkeypatch.setattr(investigator, "_fetch_page", fetch)
     monkeypatch.setattr(investigator, "_post_json", post)
     monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={"results": []}))
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -101,8 +112,9 @@ def test_admitted_contents_may_settle_without_a_new_cancellation_deadline(monkey
 
 
 @pytest.mark.parametrize("cap,expired", [(1, False), (4, True)])
-def test_recovery_never_adds_admission_time_or_fetch_slots(monkeypatch, cap, expired):
-    result, calls = _review(monkeypatch, error="http_502", cap=cap, expired=expired)
+@pytest.mark.parametrize("error,timeout", [("http_502", False), ("timeout", True)])
+def test_recovery_never_adds_admission_time_or_fetch_slots(monkeypatch, cap, expired, error, timeout):
+    result, calls = _review(monkeypatch, error=error, timeout=timeout, cap=cap, expired=expired)
     assert calls == [("primary", URL)]
     assert result["usage"]["fetch_calls"] == 1
 
@@ -156,5 +168,8 @@ def test_linkedin_timeout_cannot_admit_contents_fallback(monkeypatch):
     monkeypatch.setattr(__import__(__name__, fromlist=["URL"]), "URL",
                         "https://www.linkedin.com/company/acme/")
     result, calls = _review(monkeypatch, timeout=True)
-    assert calls == [("primary", "https://www.linkedin.com/company/acme/")]
-    assert "usage" not in result  # Existing timeout result stays unchanged.
+    assert calls == [("primary", "https://www.linkedin.com/company/acme")]
+    assert result["usage"]["fetch_calls"] == 1
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["failure_reason"] == "provider_error"
+    assert result["_completed_submit"] is False

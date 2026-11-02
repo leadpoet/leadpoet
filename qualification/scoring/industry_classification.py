@@ -267,7 +267,7 @@ def request_payload(packet, *, model, research=False):
     else:
         citations['maxItems'] = 0
     return {"model": model, "max_tokens": 2000,
-            "reasoning": {"effort": "medium", "exclude": True}, "messages": messages,
+            "reasoning": {"effort": "low" if research else "medium", "exclude": True}, "messages": messages,
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "industry_proposal", "strict": True, "schema": schema}}}
 

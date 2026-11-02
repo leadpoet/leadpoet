@@ -10,6 +10,7 @@ from datetime import date
 from typing import Any, Optional
 
 import anyio
+from anyio import to_thread
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -20,6 +21,30 @@ from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
 
 MAX_JSON_BODY_BYTES = 1_048_576
+
+# Provider calls hold their worker for the whole upstream model call, so they
+# are bounded separately from every other route.
+PROVIDER_WORKER_LIMIT = 32
+# Workers that must stay available to the non-provider routes while the
+# provider leg is at its limit. AnyIO's default pool is 40, which would leave
+# a reserve of 8; measured non-provider demand during a provider burst reaches
+# 10-20 concurrent workers, so the reserve is sized explicitly instead of
+# being whatever the default pool happens to leave over.
+NON_PROVIDER_WORKER_RESERVE = 32
+
+
+def _ensure_worker_pool() -> None:
+    """Widen the shared worker pool so the non-provider reserve is real.
+
+    Must be called from an async context (AnyIO 3 and 4 both require one to
+    resolve the default limiter). Never shrinks a pool that is already large
+    enough.
+    """
+
+    limiter = to_thread.current_default_thread_limiter()
+    wanted = PROVIDER_WORKER_LIMIT + NON_PROVIDER_WORKER_RESERVE
+    if limiter.total_tokens < wanted:
+        limiter.total_tokens = wanted
 
 
 def _refuse_declared_oversize(request: Request, limit: int) -> None:
@@ -77,7 +102,8 @@ def create_app(service: ArenaService) -> FastAPI:
     app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
     # Create this in an async context for AnyIO 3 as well as AnyIO 4. Each app
-    # reserves at most 32 of the shared default 40 workers for provider calls.
+    # admits at most PROVIDER_WORKER_LIMIT provider calls and keeps
+    # NON_PROVIDER_WORKER_RESERVE workers for every other route.
     provider_limiter: Optional[anyio.CapacityLimiter] = None
 
     async def no_store_public_call(
@@ -287,9 +313,10 @@ def create_app(service: ArenaService) -> FastAPI:
             return service.handle_provider(run_id, lease_token, frame, disconnected)
 
         if provider_limiter is None:
-            provider_limiter = anyio.CapacityLimiter(32)
+            _ensure_worker_pool()
+            provider_limiter = anyio.CapacityLimiter(PROVIDER_WORKER_LIMIT)
         # Acquire before the shared worker token: queued providers consume no
-        # workers, and these calls still count against the default total of 40.
+        # workers, and these calls still count against the shared pool total.
         async with provider_limiter:
             return await run_in_threadpool(call_provider)
 
@@ -457,5 +484,9 @@ def create_app(service: ArenaService) -> FastAPI:
         if not isinstance(body, dict) or str(body.get("run_id") or "") != run_id:
             raise HTTPException(status_code=400, detail="path run id does not match body")
         return await run_in_threadpool(service.handle_complete, envelope)
+
+    # Size the pool at startup where the host runs lifespan events; the
+    # provider route repeats it for hosts and test transports that do not.
+    app.router.add_event_handler("startup", _ensure_worker_pool)
 
     return app

@@ -175,6 +175,31 @@ def judge_reply(normalized: Mapping[str, Any]) -> str:
     return json.dumps(verdict)
 
 
+def industry_reply(normalized: Mapping[str, Any]) -> str:
+    """Answer the current industry contract from the fixture's supplied spans."""
+    schema = normalized["response_format"]["json_schema"]["schema"]
+    evidence = []
+    for message in normalized["messages"]:
+        if message.get("role") != "user":
+            continue
+        document = json.loads(message["content"])
+        for page in document.get("untrusted_source_pages", []):
+            for span in page["spans"]:
+                if "sells a robotics fleet-management platform to logistics operators" in span["text"]:
+                    evidence.append(span["span_id"])
+    reply = {
+        "observed_activity": "Supplies robotics fleet-management software to logistics operators",
+        "reason": "The supplied company source states its software offering and customers.",
+        "missing_requirements": [] if evidence else ["No supplied offering evidence"],
+        "role": "supplier_operator" if evidence else "unresolved",
+        "evidence_span_ids": evidence[:1],
+        "decision": "match" if evidence else "unavailable",
+    }
+    if "research_query" in schema["required"]:
+        reply["research_query"] = "" if evidence else "robotics fleet-management software"
+    return json.dumps(reply)
+
+
 def investigator_completion(normalized: Mapping[str, Any]) -> Dict[str, Any]:
     """Honor the current investigator's required tools and quoted-source schema."""
     prompt = json.dumps(normalized.get("messages") or [])
@@ -222,8 +247,11 @@ def investigator_completion(normalized: Mapping[str, Any]) -> Dict[str, Any]:
 def respond(operation_id: str, normalized: Mapping[str, Any]) -> Tuple[int, Dict[str, str], bytes]:
     json_headers = {"content-type": "application/json"}
     if operation_id == "openrouter.chat":
+        schema_name = ((normalized.get("response_format") or {}).get("json_schema") or {}).get("name")
         reply = (investigator_completion(normalized) if normalized.get("tools") else
-                 chat_completion(str(normalized.get("model")), judge_reply(normalized)))
+                 chat_completion(str(normalized.get("model")),
+                                 industry_reply(normalized) if schema_name == "industry_proposal"
+                                 else judge_reply(normalized)))
         return 200, json_headers, json.dumps(reply).encode()
     company = company_for_prompt(json.dumps(normalized))
     page_text = PAGE_TEXT.replace(COMPANY, company["company_name"])

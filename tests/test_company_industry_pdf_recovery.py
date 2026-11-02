@@ -64,6 +64,27 @@ def test_broker_pdf_refusal_preserves_bill_and_native_exact_url_recovery(
     assert result[c.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
 
 
+
+@pytest.mark.parametrize("suffix", ["/specification.pdf", "/products"])
+def test_exact_source_recovery_sets_bounded_live_crawl_timeout(monkeypatch, suffix):
+    """A ten-second provider default must not silently govern a longer read."""
+    url = "https://www.coreworks.ai" + suffix
+    calls = []
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+
+    async def post(_session, endpoint, **kwargs):
+        calls.append((endpoint, kwargs["payload"]))
+        return 200, {"results": [{"url": url, "text": QUOTE}]}
+
+    monkeypatch.setattr(c, "_post_json", post)
+    result = asyncio.run(c._fetch_exa_exact_page(None, url))
+    assert result["ok"] is True
+    assert calls == [("https://api.exa.ai/contents", {
+        "ids": [url], "text": {"maxCharacters": c.MAX_PAGE_CHARACTERS},
+        "maxAgeHours": 0, "livecrawlTimeout": 20_000,
+    })]
+
+
 def test_pdf_locator_uses_existing_text_provider_without_html_rendering(monkeypatch):
     url = 'https://www.coreworks.ai/brochure.PDF'
     finding = _finding('industry', status='VERIFIED', evidence_url=url,
@@ -76,6 +97,7 @@ def test_pdf_locator_uses_existing_text_provider_without_html_rendering(monkeypa
     assert calls['primary'] == []
     assert len(calls['contents']) == result['usage']['fetch_calls'] == 1
     assert result['claims']['industry']['status'] == 'VERIFIED'
+
 
 
 @pytest.mark.parametrize('case', ['recover', 'cap', 'deadline', 'denied'])

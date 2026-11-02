@@ -20,6 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 _FROZEN_POSTIMAGE = frozen_source("attribute_source", composer.FINALITY_FILE)
 
 
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
 def _sources():
     # Preserve the exact reviewed frozen function hashes as current grading
     # evolves. The converter must still change only its two owned blocks.
@@ -48,7 +55,11 @@ def test_historical_fixture_rejects_changed_source_bytes(monkeypatch, tmp_path):
 
 
 def test_exact_frozen847_function_hashes_and_only_approved_bytes_change():
-    original, current = _sources()
+    original = (ROOT / 'tests/fixtures/arena_reviewer/frozen847_functions.py.txt').read_bytes()
+    current = original
+    for _, old, new in DELTAS:
+        assert current.count(old.encode()) == 1
+        current = current.replace(old.encode(), new.encode(), 1)
     expected_hashes = (
         "5a209cd382326ec3179ba2ba775dedee395ac741a25c90f33726c0b6df4d2698",
         "90a3903cfa59be5792e491610ad36672b92b5c83666c8c2458b90a579263a393",
@@ -94,6 +105,7 @@ def test_unknown_ambiguous_and_partially_corrected_source_fails_closed(fault):
 def _base_sources():
     files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py" if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in (composer.GRADER_FILE, *composer.ENTRYPOINT_FILES)}
+    files[composer.GRADER_FILE] = _FROZEN_GRADER
     files[composer.FINALITY_FILE] = _sources()[0]
     return files
 

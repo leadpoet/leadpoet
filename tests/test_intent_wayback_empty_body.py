@@ -268,3 +268,36 @@ def test_archive_error_plus_failed_exact_fallback_remains_unavailable(monkeypatc
     fallback.assert_awaited_once_with(SOURCE)
     judge.assert_not_awaited()
     assert result['decision']=='unavailable' and result['scrape']['result_count']==0
+
+
+def test_archive_navigation_without_article_continues_exact_source_fallback(monkeypatch):
+    # Production Paysend capture 7298243 had only a site title and the
+    # archive toolbar. Neither is evidence for the submitted announcement.
+    body = (
+        '<html><head><title>Fintech News Network</title></head><body>'
+        '<div id="wm-ipp-base">1 capture 10 Oct 2026 About this capture</div>'
+        '<div id="wm-ipp-print">The Wayback Machine snapshot</div>'
+        '<script>' + 'empty-app-state;' * 40 + '</script></body></html>'
+    )
+    install_source_responses(monkeypatch, archive=body)
+    fallback = AsyncMock(return_value={
+        'ok': True, 'stage': 'exa_scraped', 'content': ARTICLE_TEXT, 'error': None,
+    })
+    monkeypatch.setattr(intent, '_scrape_exa', fallback)
+    fetched = asyncio.run(intent._fetch_sd_then_exa([SOURCE]))
+    fallback.assert_awaited_once_with(SOURCE)
+    assert fetched['results'][0]['text'] == ARTICLE_TEXT
+
+
+@pytest.mark.parametrize('tag', ['p', 'div', 'span'])
+def test_archive_navigation_does_not_hide_concise_source_body(monkeypatch, tag):
+    body = (
+        '<html><head><title>Announcement</title></head><body>'
+        '<div id="wm-ipp-base">1 capture About this capture</div>'
+        '<' + tag + '>' + QUOTE + '</' + tag + '>'
+        '<script>' + 'empty-app-state;' * 40 + '</script></body></html>'
+    )
+    install_source_responses(monkeypatch, archive=body)
+    result = asyncio.run(intent._try_wayback(SOURCE))
+    assert result['ok'] is True
+    assert QUOTE in result['content']

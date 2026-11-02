@@ -533,17 +533,40 @@ def deepline_billing_ledger_cost(
     )
 
 
+def _deepline_no_charge_metadata(document: Mapping[str, Any]) -> bool:
+    """Do not infer zero when a bounded receipt carries accounting metadata."""
+    pending = [(document, 0)]
+    visited = 0
+    while pending:
+        value, depth = pending.pop()
+        visited += 1
+        if depth > 12 or visited > 256:
+            return False
+        if isinstance(value, Mapping):
+            if any(any(part in str(key).lower() for part in
+                       ("bill", "credit", "charge", "cost", "price", "usage")) for key in value):
+                return False
+            pending.extend((item, depth + 1) for item in value.values()
+                           if isinstance(item, (Mapping, list)))
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value
+                           if isinstance(item, (Mapping, list)))
+    return True
+
+
 def deepline_free_completed_cost(
     parameters: Mapping[str, Any], response_status: Any, response_json: Any,
     *, catalog_entry: Optional[Mapping[str, Any]] = None,
+    request_refused: bool = False,
 ) -> Optional[ProviderCost]:
     """Prove a verified Deepline no-bill operation used zero credits.
 
     A present billing object remains authoritative, including when malformed:
     callers must not replace invalid provider accounting with this fixed zero.
-    Only Hunter's authenticated per-call ``no_bill`` contract also proves a
-    structured HTTP error costs zero.  Other tools still require a valid
-    completed response or exact provider billing. Generic HTTP's native
+    Hunter's authenticated per-call ``no_bill`` contract also proves a
+    structured HTTP error costs zero. A generic HTTP target refusal requires
+    the broker's bound typed receipt and a frozen free per-call catalog price.
+    Other errors still require exact provider billing. Generic HTTP's native
     rawV2 receipt is the same completed tool result under its newer contract;
     it does not change which tools or frozen prices qualify as free.
     """
@@ -560,7 +583,17 @@ def deepline_free_completed_cost(
             catalog_entry.get("tool_id") == tool
             and isinstance(pricing, Mapping)
             and pricing.get("unit") in ("call", "request")
-            and pricing.get("billing_source") == "free"
+            and (
+                pricing.get("billing_source") == "free"
+                # The catalog listing omits billingSource for generic HTTP,
+                # unlike its authenticated detail's fixed no_bill contract.
+                # Accept only its explicit frozen Free/zero per-call price
+                # for the broker-bound target refusal; never infer a price.
+                or (request_refused is True and response_status in (401, 403)
+                    and tool == "generic_http_request"
+                    and pricing.get("billing_source") is None
+                    and pricing.get("displayText") == "Free")
+            )
             and _decimal(pricing.get("usd_per_unit")) == 0
             and _decimal(pricing.get("credits_per_unit")) == 0
         ):
@@ -577,6 +610,17 @@ def deepline_free_completed_cost(
         return None
     if response_status != 200:
         error_basis = _DEEPLINE_ERROR_NO_BILL_BASIS.get(tool)
+        if (
+            tool == "generic_http_request"
+            and request_refused is True
+            and response_status in (401, 403)
+            and basis == "deepline_frozen_catalog_completed_zero"
+            and response_json.get("status") == "failed"
+            and isinstance(response_json.get("job_id"), str)
+            and 0 < len(response_json["job_id"].strip()) <= _DEEPLINE_MAX_REQUEST_ID_LENGTH
+            and _deepline_no_charge_metadata(response_json)
+        ):
+            error_basis = "deepline_frozen_catalog_refusal_zero"
         if error_basis is None or not 400 <= response_status < 600:
             return None
         basis = error_basis

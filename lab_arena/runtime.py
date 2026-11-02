@@ -617,13 +617,21 @@ class SandboxResult:
     automatic_capture_handoff_invalid: bool = False
 
 
-def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Optional[bytes]:
+def read_output(spec: SandboxSpec, *, max_bytes: Optional[int] = None) -> Optional[bytes]:
     """Read ``companies.json``: ``None`` when absent, error when unbounded.
 
     Symlinks, directories, and files above the cap fail closed; the size is
     enforced while reading, not from a stat the model could race.
     """
 
+    if max_bytes is None:
+        # The host chooses the entrypoint. Judge evidence already has a larger
+        # scoring contract; submitted miner output retains its original cap.
+        if spec.entry_command == SCORER_ENTRY_COMMAND:
+            from lab_arena.scoring import MAX_SCORING_OUTPUT_BYTES
+            max_bytes = MAX_SCORING_OUTPUT_BYTES
+        else:
+            max_bytes = MAX_OUTPUT_BYTES
     return _read_bounded_output(spec.output_path, max_bytes=max_bytes)
 
 

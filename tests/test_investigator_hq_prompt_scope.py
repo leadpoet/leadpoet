@@ -199,3 +199,43 @@ def test_bound_literal_hq_target_shrink_retains_original_prompt(monkeypatch):
     assert all(request['messages'][0]['content']==expected for request in requests)
     assert result['claims']['geography']['status']=='VERIFIED'
     assert result['claims']['industry']['activity_role']=='supplier_operator'
+
+
+def test_bound_hq_instruction_composes_with_enabled_industry_review(monkeypatch):
+    source, options = literal_context()
+    requests = []
+    monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', 'openai/gpt-6.1-sol')
+
+    async def review(*args, **kwargs):
+        finding = inv._unproven_findings(('industry',), 'Insufficient source text')['industry']
+        finding['_industry_review'] = {
+            'decision': 'unavailable', 'missing_requirements': [],
+            'reason': 'Insufficient source text', 'source_urls': [], 'research_query': '',
+        }
+        return finding, '', 1
+
+    async def post(_session, _url, *, headers, payload):
+        requests.append(deepcopy(payload))
+        if payload.get('tool_choice') == {'type': 'function', 'function': {'name': 'search_web'}}:
+            return 200, {'choices': [{'message': {'tool_calls': [{
+                'id': str(len(requests)), 'type': 'function', 'function': {
+                    'name': 'search_web', 'arguments': json.dumps({'query': 'Baringa supplied consulting'})
+                }}]}}]}
+        return 200, response([
+            _finding('industry', status='UNPROVEN', observed_value=None,
+                     evidence_url='', evidence_quote=''),
+            _finding('geography', observed_country='United Kingdom', observed_state='London',
+                     evidence_url=source['url'], evidence_quote=source['text']),
+        ])
+
+    monkeypatch.setattr(inv, '_review_industry_sources', review)
+    result = invoke(monkeypatch, ('industry', 'geography'), post, **options)
+    assert result.get('_completed_submit') and requests
+    assert result['claims']['geography']['status'] == 'VERIFIED'
+    assert result['claims']['industry']['status'] == 'UNPROVEN'
+    for request in requests:
+        from lab_arena.operations import validate_operation_request
+        validate_operation_request('openrouter.chat', request)
+        prompt = ''.join(m['content'] for m in request['messages'] if m['role'] == 'system')
+        assert inv._LITERAL_HEADQUARTERS_INSTRUCTION in prompt
+        assert 'Submit industry UNPROVEN with empty citations; judge other targets normally.' in prompt

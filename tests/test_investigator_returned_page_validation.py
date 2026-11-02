@@ -294,10 +294,6 @@ def test_native_integrity_adapter_reuses_returned_source_after_intent_timeout(mo
 
     async def investigate(**kwargs):
         investigations.append(kwargs)
-        if len(investigations) == 2:
-            assert kwargs["prefetched_pages"] == {
-                PLATFORM_URL: {"final_url": PLATFORM_URL, "text": PLATFORM_TEXT},
-            }
         return {
             "claims": {"industry": _industry_finding(
                 status="VERIFIED", role="supplier_operator",
@@ -360,6 +356,9 @@ def test_native_integrity_adapter_reuses_returned_source_after_intent_timeout(mo
         companies=[company],
         scorer=scorer, max_retries=2,
     )
-    assert len(investigations) == len(intent_calls) == 2
+    # Fit and its exact source evidence completed before the intent timeout.
+    # Only the unfinished intent stage is retried.
+    assert len(investigations) == 1
+    assert len(intent_calls) == 2
     assert rows[0]["company_qualified"] is True
     assert rows[0]["final_score"] == 54

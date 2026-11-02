@@ -175,7 +175,9 @@ def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch,
             json.loads(returned_text),
             output_path=Path(environment["LAB_ARENA_OUTPUT_PATH"]),
         )
-        host_bytes = arena_runtime.read_output(SimpleNamespace(output_path=output_path))
+        host_bytes = arena_runtime.read_output(SimpleNamespace(
+            output_path=output_path, entry_command=arena_runtime.AGENT_ENTRY_COMMAND,
+        ))
         assert host_bytes == b'{"companies":[]}'
         assert arena_output.output_document_from_bytes(host_bytes)["companies"] == []
         assert list(output_dir.iterdir()) == [output_path]
@@ -538,6 +540,7 @@ def test_client_disconnect_during_guard_releases_gate_without_dispatch(monkeypat
     gate = threading.BoundedSemaphore(1)
     guard_started = threading.Event()
     release_guard = threading.Event()
+    client_disconnected = threading.Event()
     dispatches = []
 
     def guard():
@@ -552,10 +555,24 @@ def test_client_disconnect_during_guard_releases_gate_without_dispatch(monkeypat
     with codex.ResponsesBridge(
             "/fixture-worker.sock", request_gate=gate,
             request_guard=guard) as bridge:
+        # Test the post-guard cancellation check, not how quickly a platform
+        # delivers TCP FIN. The real interrupted-request test above covers
+        # transport cancellation and settlement without this observation seam.
+        native_select = codex.select.select
+        bridge_port = urlsplit(bridge.base_url).port
+
+        def select_after_disconnect(readers, writers, errors, timeout):
+            if client_disconnected.is_set() and len(readers) == 1:
+                if readers[0].getsockname()[1] == bridge_port:
+                    return list(readers), [], []
+            return native_select(readers, writers, errors, timeout)
+
+        monkeypatch.setattr(codex.select, "select", select_after_disconnect)
         abandoned = _abandoned_post(bridge.base_url, bridge.token)
         assert guard_started.wait(2)
         abandoned.shutdown(socket.SHUT_RDWR)
         abandoned.close()
+        client_disconnected.set()
         release_guard.set()
         assert bridge.wait_idle(2) is True
 

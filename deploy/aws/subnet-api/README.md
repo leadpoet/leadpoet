@@ -127,6 +127,18 @@ host network, UID/GID, read-only mounts and selected private configuration hashe
 cold private HTTP identity/ACL checks before public routing or client changes.
 Rendering or a local syntax check does not start either service.
 
+For an allowlist-only nginx change with unchanged keys and signing secret,
+the owner may use a graceful nginx reload instead of replacing the pair. Render
+from the same private input outside the live directory. Verify that PostgREST
+configuration is byte-identical and the nginx difference contains only the
+reviewed route. Hold an operator lock, check the live file's expected hash,
+preserve its inode and permissions when updating the bound file, then run
+`nginx -t` and `nginx -s reload` with the existing `-c` path inside the container.
+Keep all command output private because configuration errors may contain keys.
+Restore the prior file on validation failure. Verify both allowed and denied
+HTTP routes after reload; restore and reload the previous configuration if
+verification fails. This does not apply to key or signing-secret rotation.
+
 Starting the pair, routing TLS and changing endpoint/key documents remain
 separate owner actions. An explicit API key/signing-secret rotation requires
 stopping admission, rendering both private configs and restarting the pair as
@@ -144,7 +156,8 @@ carry that same apikey. Unknown, changed-case, duplicate and mismatched
 credentials fail closed. Incoming role/JWT headers cannot select a role.
 
 When the optional capture key is configured, its role is allowed only the exact
-`POST /rest/v1/rpc/lab_arena_capture_summary_v1` request target, with no query
+`POST /rest/v1/rpc/lab_arena_capture_summary_v1` or
+`POST /rest/v1/rpc/lab_arena_capture_summary_v2` request target, with no query
 string. nginx checks both `$uri` and `$request_uri`; encoded paths, dot segments,
 repeated/trailing slashes and case variants do not provide alternate routes.
 The only accepted explicit schema profile is `public`. Method and path override

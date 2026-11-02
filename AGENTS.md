@@ -632,7 +632,7 @@ security review and production deployment. Do not change PR 825 scorer behavior
 or unrelated runtime work. This authority ends after deployment and native
 validation complete.
 
-AWS access: use the existing `leadpoet-lab` (SSO `LabOperator`) profile for routine work in account `493765492819`, region `us-east-1`. Use the `leadpoet-admin` profile with Identity Center `pranav-admin` only for explicitly authorized administrative changes. Never use a root session. Verify the caller identity before any write. For Admin, use cache-only `gateway_iam_session` or `python3 -m scripts.aws_admin_cached`; checks and subagents must never renew credentials, and one designated coordinator may renew once after expiry.
+AWS access: start with the existing `leadpoet-lab` (SSO `LabOperator`, normal `pranav` user) profile for authorized work in account `493765492819`, region `us-east-1`, including administrative work its permissions allow. Verify the caller identity and test the specific required permission before requesting `leadpoet-admin` / `pranav-admin`; an expired normal SSO session is not evidence that Admin is required. Use Admin only for an explicitly authorized operation that the normal account cannot perform, and state the exact permission denial or verified privilege requirement. Never use a root session. Verify the caller identity before any write. For Admin, use cache-only `gateway_iam_session` or `python3 -m scripts.aws_admin_cached`; checks and subagents must never renew credentials, and one designated coordinator may renew once after expiry.
 
 ## Scoped authorization: October 27 SSM access hardening
 

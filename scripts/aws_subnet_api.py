@@ -110,10 +110,14 @@ def render_nginx(values: Mapping[str, str], *, upstream: str = "127.0.0.1:3000",
         # Explicit public profiles remain compatible; other schemas and
         # method/path override headers cannot widen the opaque key's surface.
         # Regex keys are case-sensitive; literal nginx map keys are not.
-        path = "/rest/v1/rpc/lab_arena_capture_summary_v1"
+        reader_routes = "\n".join(
+            f'        "~^leadpoet_capture_reader:POST:{path}:{path}:(?:public)?:(?:public)?:::::$" 1;'
+            for path in ("/rest/v1/rpc/lab_arena_capture_summary_v1",
+                         "/rest/v1/rpc/lab_arena_capture_summary_v2")
+        )
         reader_map = f'''    map "$request_role:$request_method:$uri:$request_uri:$http_accept_profile:$http_content_profile:$http_x_http_method_override:$http_x_http_method:$http_x_method_override:$http_x_original_url:$http_x_rewrite_url" $capture_reader_route_allowed {{
         default 1;
-        "~^leadpoet_capture_reader:POST:{path}:{path}:(?:public)?:(?:public)?:::::$" 1;
+{reader_routes}
         ~^leadpoet_capture_reader: 0;
     }}
 '''

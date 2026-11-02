@@ -92,6 +92,10 @@ def test_builder_flag_is_explicit_and_preserves_existing_composition(prior_flags
                        if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    if composer.FINALITY_FILE in sources:
+        sources[composer.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", composer.FINALITY_FILE,
+        )
     sources[composer.GRADER_FILE] = original
     flags = dict.fromkeys(("complete_negative_finality", "source_access_denied",
                            "pending_final_correction", "failed_attribute_source_recovery",

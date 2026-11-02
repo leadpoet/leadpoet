@@ -25,6 +25,7 @@ from tests.lab_arena.reviewer_runtime_composition_test import layer
 _FROZEN_GRADER = frozen_source(
     "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
 )
+_FROZEN_FINALITY = frozen_source("native_industry_budget", builder.FINALITY_FILE)
 
 
 def corrected_finality(source=None):
@@ -32,7 +33,7 @@ def corrected_finality(source=None):
     # native scorer can evolve without changing a frozen image's repair.
     frozen = (builder.ROOT / 'tests/fixtures/arena_reviewer/frozen_auxiliary_source_context.py.txt').read_bytes()
     assert hashlib.sha256(frozen).hexdigest() == REPAIRED_SHA256
-    text = (source if source is not None else (builder.ROOT / builder.FINALITY_FILE).read_bytes()).decode()
+    text = (source if source is not None else _FROZEN_FINALITY).decode()
     node = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == FUNCTION)
     lines = text.splitlines(keepends=True)
     return ''.join(lines[:node.lineno - 1]).encode() + frozen + ''.join(lines[node.end_lineno:]).encode()
@@ -50,6 +51,7 @@ def sources(**options):
         for name in names
     }
     result[builder.GRADER_FILE] = _FROZEN_GRADER
+    result[builder.FINALITY_FILE] = _FROZEN_FINALITY
     if options.get("archive_snapshot_https"):
         # This seam accepts its exact historical function, not today's source.
         from tests.test_arena_archive_snapshot_https import original_source

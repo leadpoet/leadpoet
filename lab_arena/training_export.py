@@ -1837,4 +1837,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
         for row in related}
     clean["example_hash"] = contracts.document_hash(clean)
-    return json.loads(contracts.canonical_json(clean))
+    # The privacy pass normalized context, and worker artifacts came from
+    # validated JSON. Keep caller isolation without expanding shared history
+    # strings into a second serialized document and then parsing it again.
+    return copy.deepcopy(clean)

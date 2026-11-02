@@ -234,13 +234,15 @@ def _insert_rows(connection, rows):
                 cursor.execute("INSERT INTO public.lab_arena_rounds "
                                "(round_id,status,configuration_doc,participants,publication_doc,created_at,"
                                "published_at,cancel_reason,promotion_required,baseline_promoted_at,"
-                               "evaluation_date,icp_set_date) VALUES "
-                               "(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)",
+                               "evaluation_date,icp_set_date,champion_funding_frozen,"
+                               "champion_submission_id,champion_hotkey) VALUES "
+                               "(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,TRUE,%s,%s)",
                                (row["round_id"], row["status"], json.dumps(row["configuration_doc"]),
                                 json.dumps(row["participants"]), json.dumps(row["publication_doc"]),
                                 row["created_at"], row["published_at"], row["cancel_reason"],
                                 row["promotion_required"], row["baseline_promoted_at"],
-                                row["evaluation_date"], row["icp_set_date"]))
+                                row["evaluation_date"], row["icp_set_date"],
+                                row.get("champion_submission_id"), row.get("champion_hotkey")))
         finally:
             cursor.execute("SET session_replication_role=origin")
 
@@ -255,6 +257,9 @@ def _response_controls(store, rows, monkeypatch):
         monkeypatch.setattr(dashboard, "_COMPETITION_ROUND_COLUMNS", columns)
         assert dashboard.competition_snapshot(service, limit=limit) == expected
     assert expected["rounds"][-1]["promotion_status"] == "superseded"
+    assert expected["rounds"][-1]["defending_champion"] == {
+        "submission_id": "prior-champion", "miner_hotkey": "5Prior",
+    }
     # Generic reads, results, miner history and pinned reads retain full docs.
     full = store.get_round(rows[-1]["round_id"])
     assert len(full["publication_doc"]["final_ranking"]) == 145

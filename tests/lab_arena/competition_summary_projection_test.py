@@ -29,6 +29,9 @@ def _project(row, columns):
                 key: deepcopy(configuration[key])
                 for key in PUBLIC_CONFIGURATION_FIELDS if key in configuration
             }
+        elif column.startswith("baseline_reasoning_policy:"):
+            contract = (row.get("configuration_doc") or {}).get("baseline_reasoning_configuration") or {}
+            projected["baseline_reasoning_policy"] = contract.get("reasoning_capture_policy")
         elif ":configuration_doc->" in column:
             alias, path = column.split(":", 1)
             key = path.removeprefix("configuration_doc->").removesuffix("::text")
@@ -91,12 +94,18 @@ def _row(day="2026-10-09", **configuration):
         "evaluation_date": day, "icp_set_date": None, "published_at": day + "T15:00:00Z",
         "arena_network_name": "finney", "arena_netuid": 71,
         "promotion_required": True, "baseline_promoted_at": None, "cancel_reason": None,
+        "champion_submission_id": "prior-champion", "champion_hotkey": "5Prior",
         "configuration_doc": {
             "mode": "live", "network_name": "finney", "netuid": 71,
             "schedule": {"submission_open": "2026-10-08T00:00:00Z",
                          "submission_cutoff": "2026-10-09T00:00:00Z"},
             "deepline_catalog": {"private_frozen_catalog": "x" * 100_000},
-            "runner_hotkeys": ["private-runner"], **configuration,
+            "runner_hotkeys": ["private-runner"],
+            "baseline_reasoning_configuration": {
+                "reasoning_capture_policy": "full_generated_thinking_v1",
+                "reasoning_route_registry": {"private_routes": "x" * 10_000},
+            },
+            **configuration,
         },
         "participants": participants,
         "publication_doc": {
@@ -144,6 +153,9 @@ def test_145_model_competition_response_matches_full_configuration(monkeypatch, 
     assert expected["rounds"][0]["baseline"]["final_score"] == 0
     assert len(transport.returned[0]["publication_doc"]["final_ranking"]) == 2
     assert expected["rounds"][1]["promotion_status"] == "superseded"
+    assert expected["rounds"][0]["defending_champion"] == {
+        "submission_id": "prior-champion", "miner_hotkey": "5Prior",
+    }
     assert transport.returned[0]["configuration_doc"] == {
         key: value for key, value in rows[0]["configuration_doc"].items()
         if key in PUBLIC_CONFIGURATION_FIELDS

@@ -158,10 +158,12 @@ _SUCCESSFUL_CALL_COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation"
+    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation,"
+    "champion_submission_id,champion_hotkey,"
+    "baseline_reasoning_policy:configuration_doc->baseline_reasoning_configuration->>reasoning_capture_policy"
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
-    "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
+    ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
 ).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1") + ",status_generation"
 
 
@@ -591,6 +593,24 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
+def _defending_champion(row: Mapping[str, Any]) -> Optional[dict]:
+    # Name the defender only when the baseline provably ran its code. The
+    # champion-baseline freeze (migration 585) runs the frozen champion's
+    # promoted source and copies that champion's reasoning contract. Older
+    # freezes could fund a legacy champion while the baseline ran another
+    # source. A legacy champion's contract is empty, which the compact read
+    # cannot tell from no contract, so those rounds name no defender either.
+    submission_id = str(row.get("champion_submission_id") or "")
+    miner_hotkey = str(row.get("champion_hotkey") or "")
+    # Compact reads select the policy alone; complete rows carry the contract.
+    contract = (row.get("configuration_doc") or {}).get("baseline_reasoning_configuration")
+    policy = row.get("baseline_reasoning_policy") or (
+        contract.get("reasoning_capture_policy") if isinstance(contract, Mapping) else None)
+    if not submission_id or not miner_hotkey or not policy:
+        return None
+    return {"submission_id": submission_id, "miner_hotkey": miner_hotkey}
+
+
 def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[str, Any]] = None) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
@@ -630,6 +650,7 @@ def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[
         "baseline": baseline,
         "champion": champion,
         "promotion_status": promotion_status,
+        "defending_champion": _defending_champion(row),
     }
 
 

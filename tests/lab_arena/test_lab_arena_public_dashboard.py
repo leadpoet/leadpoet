@@ -108,6 +108,24 @@ def test_round_summary_does_not_mistake_ranked_baseline_for_champion():
     assert "runner_hotkeys" not in serialized
 
 
+def test_round_summary_names_the_frozen_defending_champion():
+    row = _published_round()
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+    row.update(champion_submission_id="sub-prior", champion_hotkey=MINER_HOTKEY)
+    # A freeze that kept another baseline source (e.g. October 28) names no one.
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+    row.update(baseline_reasoning_policy="full_generated_thinking_v1")
+    summary = public_dashboard.round_summary(row)
+    assert summary["defending_champion"] == {
+        "submission_id": "sub-prior",
+        "miner_hotkey": MINER_HOTKEY,
+    }
+    # The baseline participant still names the organizer that ran it.
+    assert summary["baseline"]["miner_hotkey"] == BASELINE_HOTKEY
+    row.update(champion_hotkey=None)
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+
+
 def test_round_summary_names_submission_bank_and_evaluation_days():
     row = _published_round()
     row.update(icp_set_date="2026-09-08", evaluation_date="2026-09-09")

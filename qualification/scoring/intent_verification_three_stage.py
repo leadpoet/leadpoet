@@ -264,7 +264,7 @@ def _visible_page_links(body: str) -> list[tuple[str, str]]:
     return list(visible_html_link_labels(body))
 
 
-def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
+def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, Any]]:
     """Return a bounded set of visible links on the submitted source host.
 
     These are discovery candidates only. A later source-grounded judge must
@@ -280,7 +280,10 @@ def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
     if not source_host:
         return []
     source_key = _normalize_url(source_url)
-    rows: list[Dict[str, str]] = []
+    from qualification.scoring.verification_helpers import visible_html_link_labels
+
+    article_links = set(visible_html_link_labels(body, exclude_navigation=True))
+    rows: list[Dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for href, label in _visible_page_links(body):
         title = " ".join(str(label or "").split())[:300]
@@ -306,7 +309,8 @@ def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
         if key == source_key or label_key in seen:
             continue
         seen.add(label_key)
-        rows.append({"url": canonical, "label": title})
+        rows.append({"url": canonical, "label": title,
+                     **({"navigation": True} if (href, label) not in article_links else {})})
         if len(rows) >= 80:
             break
     return rows
@@ -4714,7 +4718,8 @@ def _same_event_link_candidates(
                 continue
             url = _prompt_exact_url_or_empty(link.get("url"))
             label = " ".join(str(link.get("label") or "").split())[:300]
-            if not url or not label or label.casefold() in _NAV_LINK_LABELS:
+            if (not url or not label or label.casefold() in _NAV_LINK_LABELS
+                    or link.get("navigation") is True):
                 continue
             key = _normalize_url(url)
             if key in seen:

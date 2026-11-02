@@ -245,10 +245,22 @@ class _VisibleHTMLLinkParser(_VisibleHTMLTextParser):
     _NON_ARTICLE_PREFIXES = ()
     _HIDE_RELATED_ARTICLE_COMPONENTS = False
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, exclude_navigation: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._exclude_navigation = exclude_navigation
         self.link_labels: list[tuple[str, str]] = []
         self._active_link: Optional[tuple[str, int, str]] = None
+
+    def _is_hidden(self, tag: str, attrs: Any) -> bool:
+        return super()._is_hidden(tag, attrs) or bool(
+            self._exclude_navigation and (
+                tag == "nav"
+                or (tag in {"header", "footer"}
+                    and self._main_depth is None and self._article_depth is None)
+                or self._attribute_map(attrs).get("role", "").casefold()
+                in {"navigation", "menu", "menubar", "banner", "contentinfo"}
+            )
+        )
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
         super().handle_starttag(tag, attrs)
@@ -450,8 +462,14 @@ def visible_html_links(content: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(parser.links))
 
 
-def visible_html_link_labels(content: str) -> tuple[tuple[str, str], ...]:
-    """Return raw-page anchor pairs after the shared visibility checks."""
+def visible_html_link_labels(
+    content: str, *, exclude_navigation: bool = False,
+) -> tuple[tuple[str, str], ...]:
+    """Return visible anchors, optionally excluding site navigation/controls.
+
+    Article/main headers remain content. The default retains all visible links,
+    including navigation used by the separate explicit-parent archive resolver.
+    """
 
     if not content:
         return ()
@@ -459,6 +477,7 @@ def visible_html_link_labels(content: str) -> tuple[tuple[str, str], ...]:
     parser = _VisibleHTMLLinkParser(
         hidden_classes=hidden_classes,
         hidden_ids=hidden_ids,
+        exclude_navigation=exclude_navigation,
     )
     try:
         parser.feed(content)

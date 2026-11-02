@@ -31,6 +31,10 @@ PROVIDER_WORKER_LIMIT = 32
 # 10-20 concurrent workers, so the reserve is sized explicitly instead of
 # being whatever the default pool happens to leave over.
 NON_PROVIDER_WORKER_RESERVE = 32
+# Full input snapshots do CPU-heavy privacy, hashing and compression work.
+# Two captures can progress when one storage call is slow, without starting
+# every judge's snapshot work at once.
+TRAINING_INPUT_WORKER_LIMIT = 2
 
 
 def _ensure_worker_pool() -> None:
@@ -105,6 +109,7 @@ def create_app(service: ArenaService) -> FastAPI:
     # admits at most PROVIDER_WORKER_LIMIT provider calls and keeps
     # NON_PROVIDER_WORKER_RESERVE workers for every other route.
     provider_limiter: Optional[anyio.CapacityLimiter] = None
+    training_input_limiter: Optional[anyio.CapacityLimiter] = None
 
     async def no_store_public_call(
         call: Any, *args: Any, **kwargs: Any
@@ -361,6 +366,7 @@ def create_app(service: ArenaService) -> FastAPI:
         run_id: str, request: Request,
         x_lab_arena_lease: Optional[str] = Header(default=None),
     ) -> JSONResponse:
+        nonlocal training_input_limiter
         lease_token = _lease_header(x_lab_arena_lease)
         document = await _read_json(request, limits=contracts.StrictLimits(
             max_depth=64, max_list_items=250_000, max_object_keys=250_000,
@@ -371,9 +377,35 @@ def create_app(service: ArenaService) -> FastAPI:
             # as competition amounts; all structural/finite limits still apply.
             max_abs_int=None,
         ))
-        return await no_store_public_call(
-            service.handle_training_input, run_id, lease_token, document,
-        )
+        if training_input_limiter is None:
+            _ensure_worker_pool()
+            training_input_limiter = anyio.CapacityLimiter(TRAINING_INPUT_WORKER_LIMIT)
+        # Acquire before dispatching to the shared worker pool. Queued input
+        # captures consume no workers; service authorization stays unchanged.
+        async with training_input_limiter:
+            response: Optional[JSONResponse] = None
+            error: Optional[BaseException] = None
+
+            async def capture() -> None:
+                nonlocal response, error
+                try:
+                    response = await no_store_public_call(
+                        service.handle_training_input, run_id, lease_token, document,
+                    )
+                except BaseException as exc:
+                    # Keep the original exception, rather than replacing it
+                    # with a task-group exception envelope.
+                    error = exc
+
+            # The group retains the permit until an admitted synchronous
+            # capture finishes, even if the ASGI request task is cancelled.
+            # A capture still waiting for a shared worker remains cancellable.
+            async with anyio.create_task_group() as group:
+                group.start_soon(capture)
+            if error is not None:
+                raise error
+            assert response is not None
+            return response
 
     @app.head("/arena/v1/runs/{run_id}/training-observations")
     async def authorize_training_observations(

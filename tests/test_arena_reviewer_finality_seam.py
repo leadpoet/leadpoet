@@ -32,6 +32,13 @@ _FROZEN_POSTIMAGE = _FROZEN_ORIGINAL.replace(
     _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1)
 
 
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
 def _current_source():
     # The seam targets frozen847, not the evolving current implementation.
     # Keep its original predicate golden bound to the reviewed postimage.
@@ -59,12 +66,15 @@ def _predicate(source):
 
 
 def test_exact_frozen847_predicate_gets_only_the_reviewed_pr483_delta():
-    original = _original_source()
+    original = (ROOT / 'tests/fixtures/arena_reviewer/frozen847_functions.py.txt').read_bytes()
     # Source-segment hash from frozen847 revision77db393b, including one LF.
     assert hashlib.sha256(_predicate_source(original).encode()).hexdigest() == (
         "73a270140e1bd228d3088a15f42cfe3cf1073b3609867120063880604041dd54"
     )
-    assert convert_finality_seam(original) == _current_source()
+    assert original.count(_ORIGINAL_GUARD.encode()) == 1
+    assert convert_finality_seam(original) == original.replace(
+        _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1,
+    )
     before = ast.parse(original)
     after = ast.parse(convert_finality_seam(original))
     for tree in (before, after):
@@ -106,9 +116,11 @@ def test_unknown_partial_and_ambiguous_shapes_fail_closed(fault):
 
 
 def _base_sources():
-    return {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
+    files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
                           if name == "scorer_entrypoint.py" else name)).read_bytes()
             for name in (GRADER_FILE, *ENTRYPOINT_FILES)}
+    files[GRADER_FILE] = _FROZEN_GRADER
+    return files
 
 
 def test_composition_requires_explicit_opt_in_and_exact_frozen_input():

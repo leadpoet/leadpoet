@@ -1,0 +1,11 @@
+{
+  "scope": "Unauthenticated public HTML actually returned to native P8 action1; no provider credentials/hidden reasoning. Test fixture only, not company exception.",
+  "url": "https://www.weareroku.com/",
+  "source_commit": "f46b22a372ac07d206caa482b8f6efeb96def57a",
+  "call_identity": "sha256:ac85a719a825fa011a7fa84f6e02f1395514f821d96ced1428884de5737dc37d",
+  "request_hash": "sha256:72d503bf4f2d944e7258b6372a6005c7c1792629450c9309eb3745e620bd9508",
+  "settlement_entry_id": 5972,
+  "body_bytes": 109020,
+  "body_sha256": "7664cca41ccc6a74177fe064e510bd5bd702f487b5995cd959efa6d70ab393aa",
+  "gzip_sha256": "6e2a632f8dabf50a728e7b7d9efb09d5108c3fedbe20dc724c4f5d704473c767"
+}

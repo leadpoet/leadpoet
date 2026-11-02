@@ -1288,6 +1288,7 @@ class CompetitionCompanyScorer:
                 continue
             required_attribute_retry_source_cache = None
             matched_company_retry_source_cache = None
+            verified_company_fit_retry_cache = None
             intent_terminal_retry_cache = None
             retry_evidence_context_key = ""
             if isinstance(retry_evidence_scope, MutableMapping):
@@ -1308,6 +1309,11 @@ class CompetitionCompanyScorer:
                 )
                 if isinstance(matched_source_cache, MutableMapping):
                     matched_company_retry_source_cache = matched_source_cache
+                verified_fit_cache = retry_evidence_scope.setdefault(
+                    f"verified-company-fit-v1:{source_scope_key}", {},
+                )
+                if isinstance(verified_fit_cache, MutableMapping):
+                    verified_company_fit_retry_cache = verified_fit_cache
                 intent_cache = retry_evidence_scope.setdefault(
                     f"intent-terminal-v1:{source_scope_key}",
                     {},
@@ -1334,6 +1340,7 @@ class CompetitionCompanyScorer:
                 matched_company_retry_source_cache=(
                     matched_company_retry_source_cache
                 ),
+                verified_company_fit_retry_cache=verified_company_fit_retry_cache,
                 intent_terminal_retry_cache=intent_terminal_retry_cache,
                 retry_evidence_context_key=retry_evidence_context_key,
                 **(

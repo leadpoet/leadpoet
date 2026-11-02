@@ -4815,7 +4815,7 @@ class AssignmentExecutor:
                 and exc.launch_exit_code < 0
                 and not exc.launch_timed_out
                 and isinstance(exc.checkpoint_bytes, bytes)
-                and len(exc.checkpoint_bytes) <= runtime.MAX_OUTPUT_BYTES
+                and len(exc.checkpoint_bytes) <= scoring.MAX_SCORING_OUTPUT_BYTES
             ):
                 try:
                     checkpoint = scoring.scoring_output_from_bytes(exc.checkpoint_bytes)

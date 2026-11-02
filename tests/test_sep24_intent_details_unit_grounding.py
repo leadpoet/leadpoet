@@ -2099,7 +2099,7 @@ def test_repair_metadata_preserves_evidence_and_the_existing_input_bound():
     "defect",
     [
         "invalid_json", "incomplete_units", "duplicate_units", "invalid_status",
-        "aggregate_conflict", "invalid_coverage", "invalid_boolean",
+        "invalid_coverage", "invalid_boolean",
         "nonscalar_index",
     ],
 )
@@ -2128,8 +2128,6 @@ def test_non_citation_contract_defects_do_not_trigger_local_repair(
             response["unit_grounding"][-1]["unit_id"] = 0
         elif defect == "invalid_status":
             response["unit_grounding"][0]["status"] = "MAYBE"
-        elif defect == "aggregate_conflict":
-            response["facts_supported"] = False
         elif defect == "invalid_coverage":
             response["signal_coverage"] = []
         elif defect == "nonscalar_index":
@@ -2329,7 +2327,9 @@ def test_negative_flat_boolean_cannot_be_promoted_by_verified_units(monkeypatch)
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs))
 
-    assert calls == 1
+    # One complete correction may resolve the protocol conflict. Repeating the
+    # same inconsistent negative still cannot be promoted by unit summaries.
+    assert calls == 2
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_reason_code"] == "malformed_response"
 

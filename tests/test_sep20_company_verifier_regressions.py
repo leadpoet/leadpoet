@@ -617,7 +617,8 @@ def test_lab_scorer_retry_reuses_grounded_body_for_final_paragraph(
     )
 
     assert result[0]["final_score"] == 60.0
-    assert provider_calls == ["lead_scorer_reverify"] * 2
+    # The positive fit is complete; only unfinished intent is retried.
+    assert provider_calls == ["lead_scorer_reverify"]
     assert intent_calls == 2
     assert fetch_calls == [source_url]
     assert paragraph_contexts == [[{

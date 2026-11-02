@@ -343,6 +343,28 @@ SCORE_TERMINAL_CAUSES = ("accepted", "credential_error", "judge_error", "judge_t
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
 INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "result_rejected", "provider_error", "judge_error", "judge_timeout"})
 
+# Why a run failed, one step finer than the terminal cause: which stage of the
+# run raised, and which class of error it was. Both already travel on the
+# completion request as ``failure_diagnostic`` (below) and are stored in the
+# result document; naming them here lets the telemetry boundary export them
+# too, so a repeated judge failure can be read without the database.
+FAILURE_DIAGNOSTIC_STAGES = (
+    "sandbox",
+    "sandbox_output",
+    "scoring_output",
+    "scorer",
+    "provider_call",
+)
+FAILURE_DIAGNOSTIC_ERROR_CLASSES = (
+    "judge_timeout",
+    "sandbox_output_error",
+    "missing_output",
+    "execution_output_invalid",
+    "scoring_output_invalid",
+    "judge_error",
+    "provider_unavailable",
+)
+
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
     "reservation",
@@ -1613,30 +1635,8 @@ RUN_RESULT_FIELDS = (
         "object",
         required=False,
         fields=(
-            F(
-                "stage",
-                "str",
-                choices=(
-                    "sandbox",
-                    "sandbox_output",
-                    "scoring_output",
-                    "scorer",
-                    "provider_call",
-                ),
-            ),
-            F(
-                "error_class",
-                "str",
-                choices=(
-                    "judge_timeout",
-                    "sandbox_output_error",
-                    "missing_output",
-                    "execution_output_invalid",
-                    "scoring_output_invalid",
-                    "judge_error",
-                    "provider_unavailable",
-                ),
-            ),
+            F("stage", "str", choices=FAILURE_DIAGNOSTIC_STAGES),
+            F("error_class", "str", choices=FAILURE_DIAGNOSTIC_ERROR_CLASSES),
             F(
                 "reason",
                 "str",

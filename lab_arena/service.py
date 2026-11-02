@@ -7407,8 +7407,16 @@ class ArenaService:
         # one run outcome to telemetry.
         expected_status = "accepted" if terminal_status == "accepted" else "failed"
         if result.get("status") == expected_status and result.get("idempotent") is False:
+            # The runner's own diagnostic, already validated against the
+            # frozen vocabularies by the completion contract. Without it a
+            # repeated judge_error says only that scoring failed, never why.
+            diagnostic = run_result.get("failure_diagnostic")
+            if not isinstance(diagnostic, Mapping):
+                diagnostic = {}
             telemetry.record_run(
-                kind, terminal_status, run_identity=_telemetry_run_identity(run)
+                kind, terminal_status, run_identity=_telemetry_run_identity(run),
+                failure_stage=str(diagnostic.get("stage") or "-"),
+                failure_error_class=str(diagnostic.get("error_class") or "-"),
             )
         return result
 

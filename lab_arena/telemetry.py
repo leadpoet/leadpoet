@@ -178,17 +178,27 @@ def record_provider(
 def record_run(
     run_kind: str, terminal_cause: str,
     *, run_identity: Optional[Mapping[str, Any]] = None,
+    failure_stage: str = "-",
+    failure_error_class: str = "-",
 ) -> None:
     """Record one finished evaluation run. Never raises.
 
     No duration: the run row carries no start time, so the sidecar can only
     honestly report that a run ended and which cause ended it.
+
+    ``failure_stage`` / ``failure_error_class`` carry the runner's
+    ``failure_diagnostic`` when the completion reported one, so a repeated
+    failure says which stage raised and why. "-" when there is none.
     """
     recorder = _recorder
     if recorder is None:
         return
     try:
-        recorder.record_run(run_kind, terminal_cause, run_identity=run_identity)
+        recorder.record_run(
+            run_kind, terminal_cause, run_identity=run_identity,
+            failure_stage=failure_stage,
+            failure_error_class=failure_error_class,
+        )
     except BaseException:
         pass
 

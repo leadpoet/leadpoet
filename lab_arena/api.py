@@ -76,6 +76,10 @@ def _lease_header(value: Optional[str]) -> str:
 def create_app(service: ArenaService) -> FastAPI:
     app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
+    # Create this in an async context for AnyIO 3 as well as AnyIO 4. Each app
+    # reserves at most 32 of the shared default 40 workers for provider calls.
+    provider_limiter: Optional[anyio.CapacityLimiter] = None
+
     async def no_store_public_call(
         call: Any, *args: Any, **kwargs: Any
     ) -> JSONResponse:
@@ -127,7 +131,16 @@ def create_app(service: ArenaService) -> FastAPI:
                 "even if upload or validation fails. This hotkey has already used its attempt. "
                 "The last accepted submission is unchanged."
             )
-        headers = {"Retry-After": "2"} if exc.code == "round_opening" else None
+        admission_route = getattr(request.scope.get("route"), "path", None) in {
+            "/arena/v1/submissions/presign",
+            "/arena/v1/submissions/{submission_id}/finalize",
+        }
+        headers = None
+        if exc.code == "round_opening":
+            headers = {"Retry-After": "2"}
+        elif exc.status == 503 and admission_route:
+            # Pace the existing signed retry below the six-per-minute intake limit.
+            headers = {"Retry-After": "15"}
         return JSONResponse(status_code=exc.status, content=content, headers=headers)
 
     @app.exception_handler(ArenaContractError)
@@ -257,6 +270,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.post("/arena/v1/runs/{run_id}/provider")
     async def provider(run_id: str, request: Request, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
+        nonlocal provider_limiter
         lease_token = _lease_header(x_lab_arena_lease)
         # Decode within the largest admitted provider frame. The service then
         # applies the operation-specific and frozen-policy bounds before spend.
@@ -265,13 +279,19 @@ def create_app(service: ArenaService) -> FastAPI:
         def disconnected() -> bool:
             return bool(anyio.from_thread.run(request.is_disconnected))
 
-        return await run_in_threadpool(
-            service.handle_provider,
-            run_id,
-            lease_token,
-            frame,
-            disconnected,
-        )
+        def call_provider() -> Any:
+            # A request can disconnect while waiting for either limiter. Check
+            # before entering any service/provider reservation path.
+            if disconnected():
+                raise HTTPException(status_code=499, detail="client disconnected")
+            return service.handle_provider(run_id, lease_token, frame, disconnected)
+
+        if provider_limiter is None:
+            provider_limiter = anyio.CapacityLimiter(32)
+        # Acquire before the shared worker token: queued providers consume no
+        # workers, and these calls still count against the default total of 40.
+        async with provider_limiter:
+            return await run_in_threadpool(call_provider)
 
     @app.post("/arena/v1/runs/{run_id}/signal-judgment")
     async def signal_judgment(

@@ -7,7 +7,7 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
-DO $capture_reader_guard597$
+DO $capture_reader_guard598$
 BEGIN
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended('leadpoet.lab-arena-roles.v1', 0));
@@ -17,26 +17,26 @@ BEGIN
             OR rolcreaterole OR rolinherit))
      OR EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m
        WHERE m.member='leadpoet_capture_reader'::regrole) THEN
-    RAISE EXCEPTION 'capture reader597 role attributes differ' USING ERRCODE='55000';
+    RAISE EXCEPTION 'capture reader598 role attributes differ' USING ERRCODE='55000';
   END IF;
   IF pg_catalog.encode(extensions.digest(pg_catalog.pg_get_functiondef(
        'public.lab_arena_capture_summary_v1(text,text)'::regprocedure),'sha256'),'hex')
        IS DISTINCT FROM '10c9ee3a9543bf65fb95c198efdbf14bf6ece7b340f9fceccc4e1637de5cb2c4' THEN
-    RAISE EXCEPTION 'capture reader597 v1 preimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'capture reader598 v1 preimage differs' USING ERRCODE='55000';
   END IF;
   IF (SELECT pg_catalog.jsonb_build_array(pg_catalog.pg_get_userbyid(p.proowner), p.proacl::TEXT,
        p.prosecdef, p.provolatile, p.proconfig, l.lanname)
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid=p.prolang
       WHERE p.oid='public.lab_arena_capture_summary_v1(text,text)'::regprocedure)
       IS DISTINCT FROM '["lab_arena_owner","{lab_arena_owner=X/lab_arena_owner,leadpoet_capture_reader=X/lab_arena_owner}",true,"s",["search_path=pg_catalog, public"],"plpgsql"]'::JSONB THEN
-    RAISE EXCEPTION 'capture reader597 v1 security differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'capture reader598 v1 security differs' USING ERRCODE='55000';
   END IF;
 END;
-$capture_reader_guard597$;
-CREATE TEMP TABLE capture_reader597_schema ON COMMIT DROP AS
+$capture_reader_guard598$;
+CREATE TEMP TABLE capture_reader598_schema ON COMMIT DROP AS
   SELECT nspacl, pg_catalog.has_schema_privilege('lab_arena_owner','public','CREATE') AS had_create
   FROM pg_catalog.pg_namespace WHERE nspname='public';
-CREATE TEMP TABLE capture_reader597_v1 ON COMMIT DROP AS
+CREATE TEMP TABLE capture_reader598_v1 ON COMMIT DROP AS
   SELECT pg_catalog.to_jsonb(p) AS catalog FROM pg_catalog.pg_proc p
   WHERE p.oid='public.lab_arena_capture_summary_v1(text,text)'::regprocedure;
 GRANT CREATE ON SCHEMA public TO lab_arena_owner;
@@ -50,7 +50,7 @@ RETURNS TABLE (
   token_calls INTEGER, models JSONB)
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public
-AS $summary597$
+AS $summary598$
 DECLARE
   head RECORD;
   run_ids TEXT[];
@@ -268,10 +268,10 @@ BEGIN
   END IF;
   RETURN NEXT;
 END;
-$summary597$;
+$summary598$;
 ALTER FUNCTION public.lab_arena_capture_summary_v2(TEXT, TEXT) OWNER TO lab_arena_owner;
 
-DO $capture_reader_acl597$
+DO $capture_reader_acl598$
 DECLARE
   target CONSTANT REGPROCEDURE := 'public.lab_arena_capture_summary_v2(text,text)'::regprocedure;
   grantee TEXT;
@@ -292,7 +292,7 @@ BEGIN
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid = p.prolang
       WHERE p.oid = target) IS DISTINCT FROM
      '["lab_arena_owner","{lab_arena_owner=X/lab_arena_owner,leadpoet_capture_reader=X/lab_arena_owner}",true,"s",["search_path=pg_catalog, public"],"plpgsql"]'::JSONB THEN
-    RAISE EXCEPTION 'capture reader597 function security differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'capture reader598 function security differs' USING ERRCODE='55000';
   END IF;
   -- The reader reaches Arena data only through the two aggregate functions.
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c, aclexplode(c.relacl) AS a
@@ -301,21 +301,21 @@ BEGIN
                 WHERE a.grantee = 'leadpoet_capture_reader'::regrole)
      OR EXISTS (SELECT 1 FROM pg_catalog.pg_proc p, aclexplode(p.proacl) AS a
                 WHERE a.grantee = 'leadpoet_capture_reader'::regrole AND p.oid NOT IN (target, 'public.lab_arena_capture_summary_v1(text,text)'::regprocedure)) THEN
-    RAISE EXCEPTION 'capture reader597 holds other privileges' USING ERRCODE='55000';
+    RAISE EXCEPTION 'capture reader598 holds other privileges' USING ERRCODE='55000';
   END IF;
   IF (SELECT pg_catalog.to_jsonb(p) FROM pg_catalog.pg_proc p
       WHERE p.oid='public.lab_arena_capture_summary_v1(text,text)'::regprocedure)
-      IS DISTINCT FROM (SELECT catalog FROM pg_temp.capture_reader597_v1) THEN
-    RAISE EXCEPTION 'capture reader597 v1 catalog changed' USING ERRCODE='55000';
+      IS DISTINCT FROM (SELECT catalog FROM pg_temp.capture_reader598_v1) THEN
+    RAISE EXCEPTION 'capture reader598 v1 catalog changed' USING ERRCODE='55000';
   END IF;
-  IF NOT (SELECT had_create FROM pg_temp.capture_reader597_schema) THEN
+  IF NOT (SELECT had_create FROM pg_temp.capture_reader598_schema) THEN
     REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
   END IF;
   IF (SELECT nspacl FROM pg_catalog.pg_namespace WHERE nspname = 'public')
-     IS DISTINCT FROM (SELECT nspacl FROM pg_temp.capture_reader597_schema) THEN
-    RAISE EXCEPTION 'capture reader597 schema ACL changed' USING ERRCODE='55000';
+     IS DISTINCT FROM (SELECT nspacl FROM pg_temp.capture_reader598_schema) THEN
+    RAISE EXCEPTION 'capture reader598 schema ACL changed' USING ERRCODE='55000';
   END IF;
 END;
-$capture_reader_acl597$;
+$capture_reader_acl598$;
 NOTIFY pgrst, 'reload schema';
 COMMIT;

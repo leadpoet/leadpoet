@@ -1,7 +1,7 @@
 ## Scoped authorization: November 1 capture summary v2
 
 The user authorized an additive aggregate-only capture v2 reader, exact committed
-migration597, focused tests, merge and production verification. Preserve v1 after
+migration598, focused tests, merge and production verification. Preserve v1 after
 595, raw ledger data, scoring, judging, capture, keys, role memberships and all
 other behavior. The coordinator may apply the reviewed owner migration and add
 only the exact v2 POST route to the existing reader HTTP allowlist, then safely

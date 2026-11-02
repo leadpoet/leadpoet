@@ -153,7 +153,7 @@ def stack(tmp_path_factory):
                 cursor.execute((Path(__file__).resolve().parents[2] /
                     "scripts/593-lab-arena-capture-summary-reader.sql").read_text())
                 for migration in ("595-lab-arena-capture-called-icps.sql",
-                                  "597-lab-arena-capture-summary-v2.sql"):
+                                  "598-lab-arena-capture-summary-v2.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             directory = tmp_path_factory.mktemp("private-api-" + suffix)
             directory.chmod(0o700)

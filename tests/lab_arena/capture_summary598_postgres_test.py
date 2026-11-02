@@ -13,7 +13,7 @@ from tests.lab_arena.capture_called_icps595_postgres_test import _seed as _seed5
 
 ROOT = Path(__file__).resolve().parents[2]
 SQL595 = ROOT / "scripts/595-lab-arena-capture-called-icps.sql"
-SQL = ROOT / "scripts/597-lab-arena-capture-summary-v2.sql"
+SQL = ROOT / "scripts/598-lab-arena-capture-summary-v2.sql"
 V1 = "lab_arena_capture_summary_v1(text,text)"
 V2 = "lab_arena_capture_summary_v2(text,text)"
 MAX_BIGINT = 9223372036854775807
@@ -61,20 +61,20 @@ def _summary(database, submission_id=SUBMISSION, round_id=ROUND, role=READER):
 def _seed_bodies(database, bodies=None, *, terminals=None):
     """Keep raw bodies private; return only submission identity for the reader RPC."""
     psycopg2, dsn = database
-    submission, run = "sub597-" + uuid4().hex, "run597-" + uuid4().hex
+    submission, run = "sub598-" + uuid4().hex, "run598-" + uuid4().hex
     if terminals is None:
         terminals = [_ok(_body(body)) for body in bodies]
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cur:
         cur.execute("SET session_replication_role=replica")
         cur.execute("INSERT INTO public.lab_arena_runs (run_id,assignment_id,round_id,submission_id,"
                     "miner_hotkey,stage,icp_position,attempt,kind,scoring_generation_floor) "
-                    "VALUES (%s,%s,%s,%s,'hk597',1,2,1,'execute',0)",
+                    "VALUES (%s,%s,%s,%s,'hk598',1,2,1,'execute',0)",
                     (run, run, ROUND, submission))
         for index, terminal in enumerate(terminals):
             for kind, value in (("reservation", None), ("settlement", terminal)):
                 cur.execute("INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,round_id,submission_id,"
                             "run_id,stage,call_identity,provider,operation_id,amount_microusd,terminal_response) "
-                            "VALUES (%s,'hk597',%s,%s,%s,1,%s,'openrouter','openrouter.chat',0,%s)",
+                            "VALUES (%s,'hk598',%s,%s,%s,1,%s,'openrouter','openrouter.chat',0,%s)",
                             (kind, ROUND, submission, run, _identity(submission + str(index)),
                              None if value is None else json.dumps(value)))
         cur.execute("SET session_replication_role=origin")
@@ -113,7 +113,7 @@ def test_v1_fixture_parity_includes_latest_heads_scope_timestamps_and_invalid_bo
     assert summary["input_tokens"] == 5 and summary["output_tokens"] == 9
     assert summary["cached_input_tokens"] is None and summary["token_calls"] == 1
     assert summary["models"] == [_model("unknown", 12, 5, 9, 157)]
-    empty = _summary(database, round_id="missing-round597")
+    empty = _summary(database, round_id="missing-round598")
     assert empty["model_calls"] == empty["token_calls"] == 0
     assert all(empty[key] is None for key in ("input_tokens", "output_tokens", "cached_input_tokens"))
     assert empty["models"] == []
@@ -201,9 +201,9 @@ def test_aggregate_and_model_bigint_bounds_never_raise(database, upgraded, value
 ])
 def test_model_identifier_privacy_boundary(database, upgraded, model, expected):
     summary = _for_bodies(database, [{"model": model, "usage": {"prompt_tokens": 1, "completion_tokens": 2},
-                                      "choices": [{"message": {"content": "private-output597"}}]}])
+                                      "choices": [{"message": {"content": "private-output598"}}]}])
     assert summary["models"] == [_model(expected, 1, 1, 2)]
-    assert "private-output597" not in json.dumps(summary)
+    assert "private-output598" not in json.dumps(summary)
 
 
 def test_no_model_no_usage_and_invalid_body_still_count_unknown_calls(database, upgraded):
@@ -264,7 +264,7 @@ def test_reader_acl_allows_only_both_aggregate_functions_and_no_raw_data(databas
         assert cur.fetchone() == (False,)
     for statement in ("SELECT * FROM public.lab_arena_ledger", "SELECT * FROM public.lab_arena_runs",
                       "SELECT * FROM public.lab_arena_submissions", "UPDATE public.lab_arena_runs SET status='failed'",
-                      "SELECT public.lab_arena_create_round('round597', '{}'::jsonb)"):
+                      "SELECT public.lab_arena_create_round('round598', '{}'::jsonb)"):
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cur:
             cur.execute("SET ROLE " + READER)
             with pytest.raises(psycopg2.errors.InsufficientPrivilege):

@@ -101,7 +101,7 @@ private (`deploy/aws/subnet-api/README.md`).
 
 ### Additive v2 usage and model mix
 
-Migration `597-lab-arena-capture-summary-v2.sql` adds
+Migration `598-lab-arena-capture-summary-v2.sql` adds
 `lab_arena_capture_summary_v2(p_round_id TEXT, p_submission_id TEXT)`.
 It leaves v1 (including migration 595's called-ICP selection) unchanged and
 uses the same reader role and key. Deploy the renderer's exact v2 POST allowlist

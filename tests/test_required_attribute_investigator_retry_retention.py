@@ -203,8 +203,8 @@ def test_required_attribute_retry_cache_scope_isolates_company_icp_and_date(
     assert len({id(cache) for cache in observed}) == 4
 
 
-def test_captured_origis_page_enters_next_investigator_after_intent_retry(monkeypatch):
-    """The real Arena retry scope carries the first reviewed source body forward."""
+def test_captured_origis_fit_and_page_survive_intent_retry(monkeypatch):
+    """Intent retries retain the checked fit and its exact captured source."""
 
     page = CAPTURED_PAGE.read_text()
     assert hashlib.sha256(page.encode()).hexdigest() == (
@@ -240,6 +240,7 @@ def test_captured_origis_page_enters_next_investigator_after_intent_retry(monkey
     }
     investigations = []
     intent_calls = []
+    retained_attribute_sources = []
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("independent prechecks passed")
@@ -270,6 +271,7 @@ def test_captured_origis_page_enters_next_investigator_after_intent_retry(monkey
         }
 
     async def web_boundary(company, actual_icp, **kwargs):
+        retained_attribute_sources.append(kwargs["required_attribute_retry_source_cache"])
         projected, _result, claims, *_ = await (
             lead_scorer._run_targeted_company_evidence_investigation(
                 company=company, icp=actual_icp,
@@ -332,6 +334,7 @@ def test_captured_origis_page_enters_next_investigator_after_intent_retry(monkey
         })
 
     async def intent_boundary(*_args, **_kwargs):
+        assert retained_attribute_sources[0][SOURCE_URL]["text"] == page
         intent_calls.append(True)
         raise TimeoutError("fixture intent provider timeout")
 
@@ -349,11 +352,10 @@ def test_captured_origis_page_enters_next_investigator_after_intent_retry(monkey
             icp=icp.model_dump(mode="json"), companies=[submitted],
             scorer=scorer, max_retries=2,
         )
-    assert len(investigations) == len(intent_calls) == 2
+    assert len(investigations) == len(retained_attribute_sources) == 1
+    assert len(intent_calls) == 2
     assert SOURCE_URL not in investigations[0]["prefetched_pages"]
-    assert investigations[1]["prefetched_pages"][SOURCE_URL] == {
-        "final_url": SOURCE_URL, "text": page,
-    }
+    assert retained_attribute_sources[0][SOURCE_URL]["final_url"] == SOURCE_URL
 
 
 @pytest.mark.parametrize("current_fetched", [False, True])

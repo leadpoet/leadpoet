@@ -66,6 +66,9 @@ class _VisibleHTMLTextParser(HTMLParser):
         self.heading_prefix_parts: list[str] = []
         self.links: list[str] = []
         self.archive_article_spans: list[tuple[int, int]] = []
+        self.main_spans: list[tuple[int, int]] = []
+        self._main_depth: Optional[int] = None
+        self._main_start = 0
         self._article_depth: Optional[int] = None
         self._article_start = 0
         self._article_linked_heading = False
@@ -82,13 +85,12 @@ class _VisibleHTMLTextParser(HTMLParser):
         classes = frozenset(values.get("class", "").casefold().split())
         element_id = values.get("id", "").casefold()
         style = re.sub(r"\s+", "", values.get("style", "").casefold())
-        # WOW.js hides ordinary paragraphs until they enter the viewport.
+        # WOW.js hides ordinary elements until they enter the viewport.
         # A rendered scrape can retain that initial state below the fold.
         # Recognize only its narrow entrance-animation state; explicit hidden
         # attributes, hidden ancestors, CSS selectors and display:none still win.
         scroll_reveal = bool(
             self._include_scroll_reveal
-            and tag == "p"
             and "wow" in classes
             and any(
                 re.fullmatch(r"(?:fade|slide)in(?:up|down|left|right)?(?:big)?", name)
@@ -137,6 +139,12 @@ class _VisibleHTMLTextParser(HTMLParser):
         self._stack.append((lowered, hidden, len(self.parts)))
         if hidden:
             self._hidden_depth += 1
+        if (
+            not self._hidden_depth and self._main_depth is None
+            and (lowered == "main" or self._attribute_map(attrs).get("role", "").casefold() == "main")
+        ):
+            self._main_depth = len(self._stack)
+            self._main_start = len(self.parts)
         if (
             lowered == "article" and not self._hidden_depth
             and self._article_depth is None
@@ -195,6 +203,9 @@ class _VisibleHTMLTextParser(HTMLParser):
         del self._stack[match:]
         self._hidden_depth -= sum(hidden for _tag, hidden, _start in popped)
         self._hidden_depth = max(0, self._hidden_depth)
+        if self._main_depth is not None and len(self._stack) < self._main_depth:
+            self.main_spans.append((self._main_start, len(self.parts)))
+            self._main_depth = None
         if (
             self._article_depth is not None
             and len(self._stack) < self._article_depth
@@ -206,6 +217,19 @@ class _VisibleHTMLTextParser(HTMLParser):
             self._article_depth = None
         if self._heading_depth is not None and len(self._stack) < self._heading_depth:
             self._heading_depth = None
+
+    def close(self) -> None:
+        # A bounded fetch can end inside a tag/attribute/comment. HTMLParser's
+        # EOF flush otherwise emits that unfinished markup as visible text,
+        # including large base64 image bodies. Preserve literal text such as
+        # "price < 5"; only discard a pending markup token.
+        if re.match(r"<(?:/?[A-Za-z]|!|\?)", self.rawdata):
+            self.rawdata = ""
+        super().close()
+        if self._main_depth is not None:
+            self.main_spans.append((self._main_start, len(self.parts)))
+            self._main_depth = None
+
 
     def handle_data(self, data: str) -> None:
         if not self._hidden_depth:
@@ -300,6 +324,7 @@ def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]
 
 def _visible_html_document(
     content: str, *, include_scroll_reveal: bool = False,
+    prefer_main: bool = False,
     heading_context_sink: Optional[list[str]] = None,
     archive_articles_sink: Optional[list[str]] = None,
 ) -> tuple[str, str, str]:
@@ -317,6 +342,12 @@ def _visible_html_document(
     except Exception:
         return "", "", ""
     text = " ".join(" ".join(parser.parts).split())
+    if prefer_main:
+        main = " ".join(" ".join(
+            part for start, end in parser.main_spans for part in parser.parts[start:end]
+        ).split())
+        if main:
+            text = main
     heading = " ".join(" ".join(parser.heading_parts).split())
     heading_prefix = " ".join(" ".join(parser.heading_prefix_parts).split())
     if archive_articles_sink is not None and len(parser.archive_article_spans) > 1:
@@ -351,12 +382,54 @@ def _visible_html_document(
     return text, heading, heading_prefix
 
 
-def visible_html_text(content: str, *, include_scroll_reveal: bool = False) -> str:
+def visible_html_text(
+    content: str, *, include_scroll_reveal: bool = False, prefer_main: bool = False,
+) -> str:
     """Return page text; company review can include known scroll-reveal copy."""
 
     return _visible_html_document(
-        content, include_scroll_reveal=include_scroll_reveal,
+        content, include_scroll_reveal=include_scroll_reveal, prefer_main=prefer_main,
     )[0]
+
+
+def visible_html_body_empty(content: str) -> bool:
+    """Detect HTML metadata without visible body content, without a length rule."""
+    class BodyParser(_VisibleHTMLTextParser):
+        _HIDDEN_ELEMENTS = _VisibleHTMLTextParser._HIDDEN_ELEMENTS | {'head', 'title'}
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = BodyParser(hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+                        include_scroll_reveal=True)
+    parser.feed(content)
+    parser.close()
+    return not any(part.strip() for part in parser.parts)
+
+
+def visible_html_dialog_only(content: str) -> bool:
+    """Detect a rendered dialog with no visible body text outside it.
+
+    This is a retrieval diagnostic. It never makes hidden page content usable.
+    Short substantive pages and pages without a visible dialog are unaffected.
+    """
+    class BodyParser(_VisibleHTMLTextParser):
+        _HIDDEN_ELEMENTS = _VisibleHTMLTextParser._HIDDEN_ELEMENTS | {'head', 'title'}
+        saw_dialog = False
+
+        def _is_hidden(self, tag, attrs):
+            hidden = super()._is_hidden(tag, attrs)
+            values = self._attribute_map(attrs)
+            dialog = (values.get('role', '').casefold() in {'dialog', 'alertdialog'}
+                      or (tag == 'dialog' and 'open' in values))
+            if dialog and not hidden and not self._hidden_depth:
+                self.saw_dialog = True
+            return hidden or dialog
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = BodyParser(hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+                        include_scroll_reveal=True)
+    parser.feed(content)
+    parser.close()
+    return parser.saw_dialog and not any(part.strip() for part in parser.parts)
 
 
 def visible_html_links(content: str) -> tuple[str, ...]:

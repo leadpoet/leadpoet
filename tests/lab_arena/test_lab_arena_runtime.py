@@ -904,7 +904,8 @@ def test_signaled_scorer_keeps_only_bounded_private_checkpoint(tmp_path, checkpo
 
     def launch(argv):
         if checkpoint_kind == "oversized":
-            spec.output_path.write_bytes(b"x" * (rt.MAX_OUTPUT_BYTES + 1))
+            from lab_arena.scoring import MAX_SCORING_OUTPUT_BYTES
+            spec.output_path.write_bytes(b"x" * (MAX_SCORING_OUTPUT_BYTES + 1))
         elif checkpoint_kind == "symlink":
             spec.output_path.symlink_to(spec.input_dir / rt.INPUT_FILE_NAME)
         elif checkpoint_kind != "absent":

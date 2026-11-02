@@ -1,10 +1,12 @@
 """The frozen reviewer receives only the rejected-final-packet correction."""
 import ast
 from copy import deepcopy
+import hashlib
 import json
 import sys
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from qualification.scoring import company_evidence_investigator as investigator
 from scripts import build_arena_reviewer_runtime as builder
@@ -13,6 +15,25 @@ from scripts.arena_reviewer_rejected_final_packet_seam import (
     convert_rejected_final_packet_seam as convert,
 )
 from tests import test_final_unproven_normalization as controls
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
+def corrected_grader():
+    # Reuse the exact upstream197048255 investigator already pinned for the
+    # frozen brand overlay. Do not loosen the release converter's source guard.
+    frozen = (builder.ROOT / 'tests/fixtures/arena_reviewer/frozen_brand_investigator.py.txt').read_bytes()
+    assert hashlib.sha256(frozen).hexdigest() == '4ee4e5c966a6f1815c860a3b43e7cb151712eadf7ac7912e90e271cf06c19005'
+    text = _FROZEN_GRADER.decode()
+    node = next(n for n in ast.parse(text).body
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == 'investigate_company_evidence')
+    lines = text.splitlines(keepends=True)
+    return ''.join(lines[:node.lineno - 1]).encode() + frozen + ''.join(lines[node.end_lineno:]).encode()
 
 
 def sources(**options):
@@ -30,6 +51,7 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    result[builder.GRADER_FILE] = corrected_grader()
     assert result[builder.GRADER_FILE].count(NEW.encode()) == 1
     result[builder.GRADER_FILE] = result[builder.GRADER_FILE].replace(
         NEW.encode(), OLD.encode(), 1,
@@ -40,9 +62,14 @@ def sources(**options):
 def test_exact_guard_is_the_only_changed_frozen_byte_and_is_idempotent():
     original = sources()[builder.GRADER_FILE]
     corrected = convert(original)
-    assert corrected == (builder.ROOT / builder.GRADER_FILE).read_bytes()
+    assert corrected == corrected_grader()
     assert corrected.replace(GUARD.encode(), b"", 1) == original
     assert convert(corrected) == corrected
+
+
+def test_current_industry_source_is_not_the_frozen_final_packet_preimage():
+    with pytest.raises(RejectedFinalPacketSeamError):
+        convert((builder.ROOT / builder.GRADER_FILE).read_bytes())
 
 
 @pytest.mark.parametrize("fault", [

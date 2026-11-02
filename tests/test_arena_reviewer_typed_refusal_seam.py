@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts import build_arena_reviewer_runtime as composer
 from scripts import arena_reviewer_typed_refusal_seam as seam
@@ -14,9 +15,17 @@ from scripts import arena_reviewer_typed_refusal_seam as seam
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _sources():
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
+def _sources(investigator=None):
     verifier = (ROOT / composer.VERIFICATION_FILE).read_bytes()
-    investigator = (ROOT / composer.GRADER_FILE).read_bytes()
+    if investigator is None:
+        investigator = _FROZEN_GRADER
     old_verifier = verifier
     old_investigator = investigator
     for old, new in (
@@ -80,7 +89,7 @@ def test_prior_verifier_correction_only_adds_reviewed_homepage_catch():
     ("investigator", "crlf"), ("investigator", "utf8"),
 ])
 def test_unknown_or_partial_frozen_shape_fails_closed(file, fault):
-    (old_v, _), (old_i, _) = _sources()
+    (old_v, _), (old_i, _) = _sources(_FROZEN_GRADER)
     original = old_v if file == "verifier" else old_i
     old = (seam._VERIFIER_CLASS_OLD if file == "verifier"
            else seam._INVESTIGATOR_PREFIX_OLD).encode()
@@ -131,7 +140,7 @@ def test_homepage_catch_must_match_frozen_helper_and_full_correction():
 
 
 def _base_sources():
-    (old_v, _), (old_i, _) = _sources()
+    (old_v, _), (old_i, _) = _sources(_FROZEN_GRADER)
     paths = (composer.GRADER_FILE, *composer.ENTRYPOINT_FILES)
     files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
                            if name == "scorer_entrypoint.py" else name)).read_bytes()

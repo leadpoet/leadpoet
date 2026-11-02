@@ -4,12 +4,21 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import subprocess
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts import build_arena_reviewer_runtime as builder
 from scripts import arena_reviewer_observed_linkedin_ampersand_seam as seam
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def sources():
@@ -115,8 +124,12 @@ def originals(with_prior):
     files = {name: (builder.ROOT / ('lab_arena/scorer_entrypoint.py'
                                    if name == 'scorer_entrypoint.py' else name)).read_bytes()
              for name in (builder.GRADER_FILE, *builder.ENTRYPOINT_FILES)}
+    files[builder.GRADER_FILE] = _FROZEN_GRADER
     if with_prior:
-        files[builder.FINALITY_FILE] = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+        # Prior repair flags apply to the exact historical body they reviewed.
+        files[builder.FINALITY_FILE] = subprocess.check_output([
+            "git", "show", "dbe8a014d2488a25f53649c4f61a48248147c54e:" + builder.FINALITY_FILE,
+        ], cwd=builder.ROOT)
     return files
 
 

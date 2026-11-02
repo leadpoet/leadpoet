@@ -145,6 +145,7 @@ def test_composer_requires_explicit_archive_source_and_retains_every_other_byte(
                               if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (builder.GRADER_FILE, *builder.ENTRYPOINT_FILES)
     }
+    sources[builder.GRADER_FILE] = frozen_source("native_industry_budget", builder.GRADER_FILE)
     prior = builder.expected_overlay(sources)
     assert builder.ARCHIVE_FILE not in prior
     with pytest.raises(builder.CompositionError):
@@ -167,6 +168,7 @@ def test_archive_composer_flag_extracts_and_reports_exact_overlay(monkeypatch, c
                               if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (builder.GRADER_FILE, *builder.ENTRYPOINT_FILES)
     }
+    sources[builder.GRADER_FILE] = frozen_source("native_industry_budget", builder.GRADER_FILE)
     sources[builder.ARCHIVE_FILE] = original_source()
     base = {'Architecture': 'amd64', 'Os': 'linux', 'Config': {}, 'RootFS': {'Layers': ['sha256:base']}}
     candidate = deepcopy(base)

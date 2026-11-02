@@ -142,6 +142,10 @@ def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, j
     model = next(iter(policy["judge_models"].values()))
     table = price_table()
     table["models"][model] = dict(table["models"][CHAT["model"]])
+    # Native-search judges need their fee before this fixture can reach the
+    # reservation/dispatch RPC boundary being tested.
+    if model in {"perplexity/sonar", "perplexity/sonar-pro"}:
+        table["models"][model]["web_search"] = "0.005"
     context = replace(CONTEXT, kind="score" if judgment else "execute", round_id="round",
         judgment_cache_scope={
             "round_id": "round", "evaluation_date": "2026-10-12",

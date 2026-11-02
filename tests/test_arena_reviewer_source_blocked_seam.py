@@ -10,6 +10,7 @@ import sys
 from types import ModuleType
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts import arena_reviewer_source_blocked_seam as seam
 from scripts import build_arena_reviewer_runtime as composer
@@ -17,8 +18,16 @@ from scripts.arena_reviewer_source_access_seam import INVESTIGATOR_DELTAS
 from tests import test_company_evidence_source_blocked as controls
 
 
-def _sources():
-    corrected = (composer.ROOT / composer.GRADER_FILE).read_bytes()
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
+
+
+def _sources(corrected=None):
+    if corrected is None:
+        corrected = _FROZEN_GRADER
     assert corrected.count(seam.NEW.encode()) == 1
     original = corrected.replace(seam.NEW.encode(), seam.OLD.encode(), 1)
     return original, corrected
@@ -31,7 +40,7 @@ def _original_files(prior_flags=False):
     files = {name: (composer.ROOT / ("lab_arena/scorer_entrypoint.py"
                                    if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in names}
-    files[composer.GRADER_FILE] = _sources()[0]
+    files[composer.GRADER_FILE] = _sources(_FROZEN_GRADER)[0]
     return files
 
 

@@ -1084,7 +1084,6 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
     assert "Equivalent supporting\nwording is sufficient" in intent_details._SYSTEM
     assert "Review\nevery unit exactly once" in intent_details._SYSTEM
     assert "failed ICP event\nmatch is not a factual contradiction" in intent_details._SYSTEM
-    assert "Assess and return unit_grounding first" in intent_details._SYSTEM
     assert "standalone enrollment in a partner, perks, accelerator" in intent_details._SYSTEM
     assert "do not support that recategorization" in intent_details._SYSTEM
     assert (
@@ -1109,6 +1108,27 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
         assert kwargs["response_format"] == intent_details._RESPONSE_FORMAT
         assert kwargs["max_retries"] == 0
         assert kwargs["max_tokens"] == 800
+        # The native shim and builder canonicalize schema properties. Preserve
+        # the exact schema contract without assuming its wire order controls
+        # how the provider assesses evidence.
+        from lab_arena import contracts, operations, shim
+
+        request = {
+            "model": kwargs["model"],
+            "messages": [
+                {"role": "system", "content": kwargs["system_prompt"]},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": kwargs["max_tokens"],
+            "response_format": kwargs["response_format"],
+        }
+        _, normalized, _ = shim.decode_operation_frame(
+            shim.build_operation_frame("openrouter.chat", request, 45000)
+        )
+        outbound = operations.build_outbound_request("openrouter.chat", normalized)
+        wire = json.loads(outbound.body)
+        assert outbound.body == contracts.canonical_json(wire).encode("utf-8")
+        assert wire["response_format"] == kwargs["response_format"]
         return json.dumps(_review_response(
             {name: True for name in intent_details._CHECKS},
             [

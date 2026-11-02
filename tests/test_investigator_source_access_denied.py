@@ -162,11 +162,18 @@ def _full_review(monkeypatch, *, response=(200, FLIGHTPATH_401), positive=False,
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter")
     monkeypatch.setenv("EXA_API_KEY", "test-exa")
     requests, fetches, searches = [], [], []
+    native_fetch = investigator._fetch_page
+
+    async def timed_out_transport(*args, **kwargs):
+        raise asyncio.TimeoutError
+
+    if timeout:
+        monkeypatch.setattr(investigator, "_fetch_bounded_html", timed_out_transport)
 
     async def fetch(_session, url, **kwargs):
         fetches.append(url)
         if timeout and url == URL:
-            raise asyncio.TimeoutError
+            return await native_fetch(_session, url, **kwargs)
         if url == URL or unrelated_fault:
             return {"ok": False, "error": "http_502"}
         return {"ok": True, "url": url, "final_url": url, "text": QUOTE}

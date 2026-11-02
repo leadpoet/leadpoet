@@ -292,6 +292,11 @@ PRICED_MODELS = (
 
 def price_table(models=PRICED_MODELS):
     rows = {model: {"prompt": "0.00000015", "completion": "0.0000006", "request": "0", "image": "0", "web_search": "0", "internal_reasoning": "0"} for model in models}
+    # Native Sonar search is charged without an explicit web-search tool.
+    # Keep this controlled catalog admissible for the real broker boundary.
+    for model in ("perplexity/sonar", "perplexity/sonar-pro"):
+        if model in rows:
+            rows[model]["web_search"] = "0.005"
     return br.validate_price_table({"schema_version": br.PRICE_TABLE_SCHEMA_VERSION, "fetched_at": "2026-09-02T00:00:00Z", "source": br.OPENROUTER_MODELS_URL, "models": rows})
 
 
@@ -774,7 +779,12 @@ class Harness:
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
         kp = keypair("svc-runner-" + ["alpha", "beta", "gamma"][index])
-        cache = rn.ImageCache(self.tmp / ("images-%d" % index), lambda reference, digest, target: (target / "rootfs").mkdir())
+        cache = rn.ImageCache(
+            self.tmp / ("images-%d" % index),
+            lambda reference, digest, target: (target / "rootfs").mkdir(),
+            # This fixture exports empty roots, not production-sized images.
+            max_bytes=1024 * 1024,
+        )
         api = self.api_factory() if self.api_factory else InProcessApi(self.service)
         source_cache = rn.SourceCache(
             self.tmp / ("sources-%d" % index),

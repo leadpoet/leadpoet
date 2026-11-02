@@ -36,6 +36,7 @@ import asyncio
 import codecs
 from html.parser import HTMLParser
 import json
+import os
 import logging
 import re
 from typing import Mapping, Optional
@@ -744,6 +745,8 @@ class _HomepageIdentityParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._in_title = False
+        self._title_seen = False
+        self._foreign_depth = 0
         self._title_parts: list[str] = []
         self.metadata_names: list[str] = []
         self.copyright_legal_names: list[str] = []
@@ -762,8 +765,15 @@ class _HomepageIdentityParser(HTMLParser):
         }
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth += 1
+        if tag_name in {"svg", "math"}:
+            self._foreign_depth += 1
         if tag_name == "title":
-            self._in_title = True
+            # The document has one title. SVG/MathML accessibility labels and
+            # inert template titles are not additional company-name metadata.
+            self._in_title = not (
+                self._title_seen or self._foreign_depth or self._nonvisible_depth
+            )
+            self._title_seen |= self._in_title
             return
         if tag_name in {"a", "link"}:
             href = attributes.get("href", "")
@@ -810,6 +820,8 @@ class _HomepageIdentityParser(HTMLParser):
             self._json_ld_parts = None
         if tag_name in {"script", "style", "template"}:
             self._nonvisible_depth = max(0, self._nonvisible_depth - 1)
+        if tag_name in {"svg", "math"}:
+            self._foreign_depth = max(0, self._foreign_depth - 1)
 
     def handle_data(self, data: str) -> None:
         if self._in_title and data.strip():
@@ -931,13 +943,23 @@ def _commercial_terms_navigation_locator(url: str, label: str) -> bool:
     )
 
 
+def _recognized_careers_board_locator(url: str, label: str) -> tuple[str, str] | None:
+    """Identify a careers locator; callers must separately prove its source."""
+    if not re.search(r"\b(careers?|jobs?|apply|positions?|openings?|open roles|join (?:us|our team))\b", label, re.I):
+        return None
+    # Reuse the exact Greenhouse/Ashby/Lever tenant parsers used for hiring.
+    # A recognized board or matching tenant name alone is never ownership.
+    from qualification.scoring.intent_verification_three_stage import _ats_board_identity
+    return _ats_board_identity(url)
+
+
 def _homepage_navigation_locators(
     page_text: str,
     *,
     final_url: str,
     verified_domain: str,
 ) -> list[dict[str, str]]:
-    """Resolve visible same-domain homepage links as untrusted locators."""
+    """Resolve visible company navigation and scoped careers locators."""
 
     parser = _HomepageNavigationParser()
     try:
@@ -948,6 +970,7 @@ def _homepage_navigation_locators(
 
     candidates: list[tuple[int, dict[str, str]]] = []
     seen: set[str] = set()
+    industry_review = bool(os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip())
     for href, raw_label in parser.links:
         label = " ".join(str(raw_label or "").split())
         if not label or len(label) > MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH:
@@ -974,7 +997,11 @@ def _homepage_navigation_locators(
             ("https", parsed.netloc.casefold(), parsed.path, parsed.query, "")
         )
         try:
-            if _registrable_domain(canonical) != verified_domain:
+            if _registrable_domain(canonical) != verified_domain and not (
+                industry_review
+                and _registrable_domain(final_url) == verified_domain
+                and _recognized_careers_board_locator(canonical, label)
+            ):
                 continue
         except Exception:
             continue
@@ -986,14 +1013,26 @@ def _homepage_navigation_locators(
         words = set(re.findall(
             r"[a-z]+", f"{parsed.path} {label}".casefold()
         ))
+        path_parts = [part.casefold() for part in parsed.path.split("/") if part]
+        if industry_review:
+            # A news article under /about/ is not the company overview. Rank
+            # the link itself, so that a large archive cannot hide service
+            # locators inside the same existing navigation allowance.
+            words = set(re.findall(
+                r"[a-z]+", f"{path_parts[-1] if path_parts else ''} {label}".casefold()
+            ))
+        service_locator = industry_review and bool(
+            set(path_parts) & {"service", "services", "product", "products", "platform", "platforms"}
+        ) and not bool(set(path_parts) & {"news", "newsroom", "blog", "blogs", "articles"})
         priority = (
             0 if words & {
                 "pricing", "price", "prices", "plan", "plans",
                 "subscription", "subscriptions",
             } and not _commercial_terms_navigation_locator(canonical, label)
             else 1 if words & {"contact", "about", "headquarters"}
+            or (industry_review and path_parts and path_parts[-1] in {"news", "newsroom", "investors"})
             else 2 if _commercial_terms_navigation_locator(canonical, label)
-            else 3 if words & {"product", "products", "platform", "platforms"}
+            else 3 if service_locator or words & {"product", "products", "platform", "platforms"}
             else 4
         )
         candidates.append((priority, {"url": canonical, "label": label}))
@@ -1356,7 +1395,7 @@ async def verify_company_exists(
     require_https_transport: bool = False,
     company_quality: bool = False,
     homepage_navigation_locator_sink: Optional[list[dict[str, str]]] = None,
-    homepage_evidence_sink: Optional[dict[str, dict[str, str]]] = None,
+    homepage_evidence_sink: Optional[dict[str, dict[str, Any]]] = None,
 ) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
@@ -1544,7 +1583,7 @@ async def verify_company_exists(
                 }
                 if homepage_evidence_sink is not None:
                     from qualification.scoring.company_evidence_investigator import (
-                        _plain_text,
+                        _plain_text, _homepage_industry_link_metadata,
                     )
 
                     evidence_text = _plain_text(text)
@@ -1552,6 +1591,9 @@ async def verify_company_exists(
                         homepage_evidence_sink[canonical_request_url] = {
                             "final_url": canonical_final_url,
                             "text": evidence_text,
+                            **_homepage_industry_link_metadata(
+                                text, canonical_request_url, canonical_final_url, evidence_text,
+                                company_name),
                         }
         return _identity_result(
             redirect_receipt,
@@ -1648,7 +1690,7 @@ async def verify_company_exists(
                     for name in observed_names)
         ):
             from qualification.scoring.company_evidence_investigator import (
-                _plain_text,
+                _plain_text, _homepage_industry_link_metadata,
             )
 
             try:
@@ -1679,6 +1721,9 @@ async def verify_company_exists(
                 homepage_evidence_sink[canonical_request_url] = {
                     "final_url": canonical_final_url,
                     "text": evidence_text,
+                    **_homepage_industry_link_metadata(
+                        text, canonical_request_url, canonical_final_url, evidence_text,
+                        company_name),
                 }
                 if homepage_navigation_locator_sink is not None:
                     homepage_navigation_locator_sink.extend(
@@ -1758,7 +1803,7 @@ async def verify_company_exists(
             # The investigator owns the exact visible-text and binary guards.
             # Import here to avoid a module cycle during initialization.
             from qualification.scoring.company_evidence_investigator import (
-                _plain_text,
+                _plain_text, _homepage_industry_link_metadata,
             )
 
             try:
@@ -1796,6 +1841,9 @@ async def verify_company_exists(
                 homepage_evidence_sink[canonical_request_url] = {
                     "final_url": canonical_final_url,
                     "text": evidence_text,
+                    **_homepage_industry_link_metadata(
+                        text, canonical_request_url, canonical_final_url, evidence_text,
+                        company_name),
                 }
         return _identity_result(
             matched_receipt,
@@ -1807,7 +1855,9 @@ async def verify_company_exists(
         # An incomplete homepage identity can still supply untrusted source
         # text. Carry its observed LinkedIn slug so the later independent web
         # identity gate can reject a different company on the same domain.
-        from qualification.scoring.company_evidence_investigator import _plain_text
+        from qualification.scoring.company_evidence_investigator import (
+            _plain_text, _homepage_industry_link_metadata,
+        )
 
         evidence_text = _plain_text(text)
         visible_text = evidence_text.partition(
@@ -1851,6 +1901,9 @@ async def verify_company_exists(
             homepage_evidence_sink[canonical_request_url] = {
                 "final_url": canonical_final_url,
                 "text": evidence_text,
+                **_homepage_industry_link_metadata(
+                    text, canonical_request_url, canonical_final_url, evidence_text,
+                    company_name),
                 "observed_linkedin_slug": urlsplit(
                     observed_linkedins[0]
                 ).path.rstrip("/").rsplit("/", 1)[-1].casefold(),

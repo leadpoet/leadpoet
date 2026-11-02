@@ -1,0 +1,33 @@
+def _matched_first_party_source_context(
+    company_fit: CompanyFitDecisionResult, source_cache: Optional[Mapping[str, Any]],
+    company: Optional["CompanyOutput"], *, paragraph: str, excluded_urls: Sequence[str] = (),
+) -> Optional[dict[str, str]]:
+    """Reuse the existing one relevant first-party auxiliary, before ranking."""
+
+    if (company is None or company_fit.decision != COMPANY_FIT_MATCH
+        or not _complete_company_identity(company_fit)
+        or not isinstance(source_cache, Mapping)
+        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS):
+        return None
+    from qualification.scoring.intent_details import _source_overlap_score, _source_term_overlap
+
+    identity = verified_identity_receipt([company_fit.receipt("company_fit")])
+    # The paragraph reviewer requires this exact name binding for auxiliaries.
+    if (
+        not isinstance(identity, Mapping)
+        or _compact_company_name(company.company_name)
+        != _compact_company_name(identity.get("observed_name"))
+    ):
+        return None
+    matched_urls = {context["url"] for context in
+                    _matched_investigator_source_contexts(company_fit, source_cache)}
+    for url, entry in source_cache.items():
+        if url in matched_urls or url in excluded_urls:
+            continue
+        context = _validated_first_party_source_context(
+            url, entry, identity, company_name=company.company_name,
+        )
+        if context and (_source_overlap_score(paragraph, context["text"])
+                        or _source_term_overlap(paragraph, context["text"]) >= 3):
+            return context
+    return None

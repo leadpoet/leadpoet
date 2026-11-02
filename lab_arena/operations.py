@@ -2340,6 +2340,7 @@ def build_outbound_request(
     deepline_catalog: Optional[Mapping[str, Any]] = None,
     allow_full_thinking: bool = False,
     source_html_profile: bool = False,
+    industry_schema_order: bool = False,
 ) -> OutboundRequest:
     """Build the credential-free outbound request from validated parameters.
 
@@ -2354,6 +2355,12 @@ def build_outbound_request(
     operation = _operation(operation_id)
     normalized = validate_operation_request(operation_id, parameters, deepline_catalog=deepline_catalog,
                                             allow_full_thinking=allow_full_thinking)
+    if type(industry_schema_order) is not bool or industry_schema_order and (
+        operation_id != "openrouter.chat"
+        or normalized.get("model") != "openai/gpt-6.1-sol"
+        or openrouter_provider_policy is None
+    ):
+        raise OperationRequestError("invalid_request")
     if type(source_html_profile) is not bool or source_html_profile and (
         operation_id != "deepline.execute"
         or normalized.get("tool") != "generic_http_request"
@@ -2422,6 +2429,15 @@ def build_outbound_request(
                 and policy.get("allow_fallbacks") is False
                 and policy.get("require_parameters") is True
             )
+            industry_region_route = (
+                not allow_full_thinking
+                and operation_id == "openrouter.chat"
+                and normalized.get("model") == "openai/gpt-6.1-sol"
+                and isinstance(policy, dict)
+                and set(policy) == policy_fields | {"only"}
+                and policy.get("only") == ["azure/us", "azure/eu"]
+                and policy.get("allow_fallbacks") is True
+            )
             if (
                 not isinstance(policy, dict)
                 or (set(policy) not in policy_shapes and not exact_full_route)
@@ -2429,6 +2445,7 @@ def build_outbound_request(
                 or (
                     set(policy) != policy_fields
                     and not exact_full_route
+                    and not industry_region_route
                     and (
                         normalized.get("model") not in {
                             "openai/gpt-5.6-luna",
@@ -2443,7 +2460,7 @@ def build_outbound_request(
                 )
                 or policy.get("data_collection") != "deny"
                 or policy.get("zdr") is not True
-                or (operation_id == "openrouter.chat" and not exact_full_route)
+                or (operation_id == "openrouter.chat" and not exact_full_route and not industry_region_route)
                 or type(policy.get("allow_fallbacks")) is not bool
                 or not isinstance(policy.get("max_price"), dict)
                 or set(policy["max_price"]) != price_fields
@@ -2471,6 +2488,25 @@ def build_outbound_request(
                 if not Draft202012Validator(schema).is_valid(document["payload"]):
                     raise OperationRequestError("invalid_request")
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if industry_schema_order:
+            # Structured outputs follow property order. Canonical storage sorts
+            # maps, but preserves the industry's facts-before-verdict sequence
+            # in `required`. Restore only that top-level sequence on the wire.
+            ordered = json.loads(body)
+            response_format = ordered.get("response_format", {})
+            declaration = response_format.get("json_schema", {})
+            schema = declaration.get("schema", {})
+            schema = schema if isinstance(schema, dict) else {}
+            properties, required = schema.get("properties"), schema.get("required")
+            if (response_format.get("type") == "json_schema"
+                    and declaration.get("name") == "industry_proposal"
+                    and declaration.get("strict") is True
+                    and isinstance(properties, dict) and isinstance(required, list)
+                    and all(isinstance(key, str) for key in required)
+                    and len(required) == len(properties) and set(required) == set(properties)):
+                schema["properties"] = {key: properties[key] for key in required}
+                body = json.dumps(ordered, separators=(",", ":"), ensure_ascii=False,
+                                  allow_nan=False).encode("utf-8")
         if schema_expanded:
             try:
                 contracts.check_strict_document(document, _request_structure_limits(operation_id, allow_full_thinking))

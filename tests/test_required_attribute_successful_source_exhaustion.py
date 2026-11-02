@@ -315,7 +315,15 @@ def test_scoring_completes_with_unavailable_company_and_resumes_checkpoint(
                             "date": "2026-10-02", "url": ARTICLE, "why_now": "A recent expansion.",
                             "snippet": "Voortman announced an office opening."}],
     }
-    policy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2")
+    # This October14 fixture models the frozen policy before industry review.
+    # Record the environment binding before score_input writes policy fields,
+    # so its process-wide application cannot leak into the next test.
+    monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "")
+    models = {k: v for k, v in scoring.DEFAULT_JUDGE_MODELS.items()
+              if k != "industry_evidence_review"}
+    policy = scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2", judge_models=models,
+    )
     companies = [company]
     prior = []
     if with_accepted_checkpoint:

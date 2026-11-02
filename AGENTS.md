@@ -1,3 +1,17 @@
+## Scoped authorization: November 1 judge retry incident
+
+The user explicitly authorized the coordinator to investigate and safely stop
+only the broken November 1 judge continuation, preserve accepted results and
+cost records, cap new judge attempts at five per assignment/scoring generation,
+correct terminal public progress, implement focused regression tests, merge,
+and deploy through existing canonical paths. Preserve other miners, frozen
+judging rules, normal publication, reward and weight integrity. An unfinished
+judgment must remain explicitly incomplete; never fabricate or bypass judging.
+Internal agents may analyze, implement focused changes and test in this isolated
+worktree; the coordinator owns independent review and production operations.
+Do not reopen an already published round, replay completed provider calls, add
+new retry layers, or renew credentials from an internal agent.
+
 ## Scoped authorization: October 31 hidden provider retry capture
 
 The coordinating task authorized the smallest extension of the existing hidden

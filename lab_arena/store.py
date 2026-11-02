@@ -1375,7 +1375,7 @@ class ArenaStore:
             "current_daily_icp_set",
         )
 
-    def code_review_schema(self) -> Dict[str, Any]:
+    def code_review_schema(self, *, require_refusal_fallback: bool = False) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
         result = _require_mapping(
@@ -1402,6 +1402,12 @@ class ArenaStore:
                 != "replacement_freeze_to_benchmark_deadline"
         ):
             raise ArenaStoreError("code review schema mismatch")
+        if require_refusal_fallback and result.get("refusal_fallback") != {
+            "primary_model": "anthropic/claude-sonnet-5.5",
+            "alternate_model": "openai/gpt-6.1-sol",
+            "max_alternate_claims": 1,
+        }:
+            raise ArenaStoreError("code review fallback schema mismatch")
         return result
 
     def validator_scoring_authority_schema(self) -> Dict[str, Any]:

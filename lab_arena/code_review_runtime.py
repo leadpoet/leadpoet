@@ -123,6 +123,12 @@ class SubmissionCodeReviewer:
                 return {"status": "busy" if state == "reviewing" else "backoff", "code_review_status": state}
         submission_id = str(row["submission_id"])
         hotkey = str(row["miner_hotkey"])
+        review_model = code_review_policy.review_model_for(row)
+        review_context = (
+            code_review.FALLBACK_CONTEXT_WINDOW_TOKENS
+            if review_model == code_review.FALLBACK_REVIEW_MODEL
+            else code_review.DEFAULT_CONTEXT_WINDOW_TOKENS
+        )
         prepared = None
         preparation_error = None
         exact_duplicate = False
@@ -151,7 +157,10 @@ class SubmissionCodeReviewer:
                 raise code_review.CodeReviewError("code_review_source_size_mismatch")
             # First validate the full archive, even when a local duplicate can
             # skip the paid review. Persisted digests bind rows to object bytes.
-            prepared = code_review.prepare_request(payload, research_control=research_control)
+            prepared = code_review.prepare_request(
+                payload, model=review_model, context_window_tokens=review_context,
+                research_control=research_control,
+            )
             if (self._similarity_references_for is not None or row.get("source_archive_sha256")
                     or row.get("source_normalized_sha256")):
                 candidate = submission_similarity.inspect_archive(payload)
@@ -205,13 +214,28 @@ class SubmissionCodeReviewer:
                 if contexts and not exact_duplicate:
                     prepared = code_review.prepare_request(
                         payload, similarity_contexts=tuple(contexts),
+                        model=review_model, context_window_tokens=review_context,
                         research_control=research_control,
                     )
             if not exact_duplicate:
-                reservation = broker.max_openrouter_cost_microusd(
-                    self._prices, prepared.parameters["model"], prepared.parameters,
-                    max_output_tokens=prepared.parameters["max_tokens"],
-                )
+                if review_model == code_review.FALLBACK_REVIEW_MODEL:
+                    # Reuse the existing conservative Sol Azure price ceiling,
+                    # including the long-input tier and regional/cache premium.
+                    # Admission keeps its own single pinned endpoint policy.
+                    route = broker._openrouter_host_route(
+                        kind="score", operation_id="openrouter.chat",
+                        model=review_model, pricing=self._prices["models"][review_model],
+                        parameters=prepared.parameters, industry_review_model=review_model,
+                    )
+                    reservation = broker._max_openrouter_cost_for_pricing(
+                        route.reservation_pricing, prepared.parameters,
+                        max_output_tokens=prepared.parameters["max_tokens"], model=review_model,
+                    )
+                else:
+                    reservation = broker.max_openrouter_cost_microusd(
+                        self._prices, prepared.parameters["model"], prepared.parameters,
+                        max_output_tokens=prepared.parameters["max_tokens"],
+                    )
         except code_review.CodeReviewError as exc:
             preparation_error = code_review_policy.source_diagnostic(exc.code)
         except Exception:
@@ -222,7 +246,7 @@ class SubmissionCodeReviewer:
         token = secrets.token_hex(32)
         claim = self._store.begin_submission_review(
             submission_id, hotkey, token, reservation,
-            code_review.DEFAULT_REVIEW_MODEL,
+            review_model,
             len(prepared.reviewed_files) if prepared else 0,
             prepared.reviewed_file_bytes if prepared else 0,
         )
@@ -235,7 +259,7 @@ class SubmissionCodeReviewer:
         if preparation_error:
             return self._finish_review(
                 row, token, "error",
-                {**preparation_error, "model": code_review.DEFAULT_REVIEW_MODEL,
+                {**preparation_error, "model": review_model,
                  "file_count": len(prepared.reviewed_files) if prepared else 0,
                  "source_bytes": prepared.reviewed_file_bytes if prepared else 0}, 0,
                 attempt=claim.get("attempt"),
@@ -245,7 +269,7 @@ class SubmissionCodeReviewer:
                 row, token, "rejected",
                 {"passed": False, "verdict": "reject",
                  "categories": ["duplicate_submission"],
-                 "model": code_review.DEFAULT_REVIEW_MODEL,
+                 "model": review_model,
                  "file_count": len(prepared.reviewed_files),
                  "source_bytes": prepared.reviewed_file_bytes}, 0,
                 attempt=claim.get("attempt"),
@@ -350,11 +374,12 @@ class SubmissionCodeReviewer:
                         )
                     if response.status == 200 and code_review_policy.explicit_provider_refusal(parsed):
                         # Refusal is a provider request failure, never evidence
-                        # of source misconduct. Account this call, then stop
-                        # repeating the same paid review on this route.
+                        # of source misconduct. Account this call before a new
+                        # durable claim can select the one full-source alternate.
                         document = code_review_policy.diagnostic(
-                            "code_review_provider_request_rejected",
-                            provider_http_status=200, retryable=False,
+                            "code_review_provider_refused",
+                            provider_http_status=200,
+                            retryable=review_model != code_review.FALLBACK_REVIEW_MODEL,
                         )
                     elif response.status == 200:
                         if not isinstance(parsed, Mapping):
@@ -386,9 +411,9 @@ class SubmissionCodeReviewer:
                         and broker._openrouter_request_policy_refusal(response)
                     ):
                         document = code_review_policy.diagnostic(
-                            "code_review_provider_request_rejected",
+                            "code_review_provider_refused",
                             provider_http_status=403,
-                            retryable=False,
+                            retryable=review_model != code_review.FALLBACK_REVIEW_MODEL,
                         )
                     else:
                         document = code_review_policy.provider_http_diagnostic(
@@ -428,8 +453,10 @@ class SubmissionCodeReviewer:
             for name in ("provider_raw_http_status", "provider_effective_http_status")
         ):
             document.update(provider_observation)
+        if status == "error" and review_model == code_review.FALLBACK_REVIEW_MODEL:
+            document["retryable"] = False
         document.update({
-            "model": code_review.DEFAULT_REVIEW_MODEL,
+            "model": review_model,
             "file_count": len(prepared.reviewed_files),
             "source_bytes": prepared.reviewed_file_bytes,
         })

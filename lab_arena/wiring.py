@@ -662,6 +662,9 @@ def build_service_from_environment(mode: str):
         del active_at  # the database function uses its own UTC statement time
         return store.current_daily_icp_set(set_id)
 
+    # The current paid reviewer must not start against a database that lacks
+    # atomic route selection and the single-alternate reservation boundary.
+    store.code_review_schema(require_refusal_fallback=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,

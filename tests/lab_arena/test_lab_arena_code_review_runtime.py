@@ -455,9 +455,9 @@ def test_selected_review_provider_still_fails_closed_without_fallback(outcome):
         assert document["retryable"] is True
         assert store.finish_calls[0][5] is None
     elif outcome == "refusal":
-        assert document["error_code"] == "code_review_provider_request_rejected"
+        assert document["error_code"] == "code_review_provider_refused"
         assert document["provider_http_status"] == 200
-        assert document["retryable"] is False
+        assert document["retryable"] is True
         assert store.finish_calls[0][5] == 1_234
         assert "private provider refusal" not in repr(document)
     else:
@@ -665,9 +665,9 @@ def test_review_content_refusal_is_not_a_credential_failure(error_type, http_sta
 
     assert reviewer.review(row)["status"] == "error"
     document = store.finish_calls[0][4]
-    assert document["error_code"] == "code_review_provider_request_rejected"
+    assert document["error_code"] == "code_review_provider_refused"
     assert document["provider_http_status"] == 403
-    assert document["retryable"] is False
+    assert document["retryable"] is True
     assert private_text not in repr(store.finish_calls)
     assert store.finish_calls[0][5] is None  # Preserve uncertain accounting.
     assert len(transport.sent) == 1

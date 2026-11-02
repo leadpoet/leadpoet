@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Dict, Mapping, Optional
 
+from lab_arena import code_review
+
 
 LEGACY_MAX_ATTEMPTS = 3
 TRANSIENT_BACKOFF_SECONDS = (60, 120, 240, 480, 900)
@@ -71,6 +73,7 @@ ERROR_CODES = frozenset({
     "code_review_provider_credit",
     "code_review_provider_rate_limited",
     "code_review_provider_request_rejected",
+    "code_review_provider_refused",
     "code_review_provider_timeout",
     "code_review_provider_unavailable",
     "code_review_transport_error",
@@ -92,10 +95,10 @@ REVIEW_FINISH_REASONS = frozenset({
 REVIEW_CONTEXT_REASONS = frozenset({
     "not_required", "verified", "metadata_missing", "requested_model", "strategy",
     "attempt", "pipeline", "endpoints_missing", "endpoints_available",
-    "endpoints_total", "endpoint_shape", "selected_count", "selected_model",
+    "endpoints_total", "endpoint_shape", "selected_count", "selected_model", "selected_provider",
     "usage_missing", "prompt_tokens", "context_budget",
 })
-REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex"})
+REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure"})
 _GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
 
 
@@ -315,12 +318,31 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
 
     attempts = max(0, int(row.get("code_review_attempts") or 0))
     document = row.get("code_review_doc")
+    # An alternate is one independent full-source attempt, including after a
+    # crash. Its failure must not inherit the primary's transient retry loop.
+    if isinstance(document, Mapping):
+        if document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
+            return attempts
+        if document.get("error_code") == "code_review_provider_refused":
+            return None
     if transient_failure(document):
         return None
     retryable = document.get("retryable") if isinstance(document, Mapping) else None
     if retryable is False:
         return attempts
     return LEGACY_MAX_ATTEMPTS
+
+
+def review_model_for(row: Mapping[str, Any]) -> str:
+    """Select only from committed authoritative state, never diagnostics."""
+
+    document = row.get("code_review_doc")
+    if isinstance(document, Mapping) and (
+        document.get("model") == code_review.FALLBACK_REVIEW_MODEL
+        or document.get("error_code") == "code_review_provider_refused"
+    ):
+        return code_review.FALLBACK_REVIEW_MODEL
+    return code_review.DEFAULT_REVIEW_MODEL
 
 
 def review_retry_available(row: Mapping[str, Any]) -> bool:

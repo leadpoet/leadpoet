@@ -3417,6 +3417,15 @@ async def _fetch_page(
         ):
             return {"ok": False, "error": "provider_request_refused"}
         raise
+    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+        # An ordinary source read failure is evidence about this URL only.
+        # Let the existing investigation finish from other grounded pages;
+        # final validation still marks missing proof plus a transport fault
+        # incomplete. Typed broker errors above and cancellation remain fatal.
+        return {"ok": False, "error": (
+            "timeout" if isinstance(exc, asyncio.TimeoutError)
+            else "source_transport_failed"
+        )}
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid_url"}
     if status != 200:
@@ -5332,12 +5341,8 @@ async def investigate_company_evidence(
                     }
                     if archive_targets else {}
                 )
-                primary_timeout = None
                 try:
                     result = await _fetch_page(session, url, **fetch_options)
-                except asyncio.TimeoutError as exc:
-                    primary_timeout = exc
-                    result = {"ok": False, "error": "timeout"}
                 except _ArenaProviderFetchError as exc:
                     if exc.broker_status not in (404, 502, 503):
                         raise
@@ -5381,11 +5386,6 @@ async def investigate_company_evidence(
                     fetch_calls += 1
                     result = await _fetch_exa_exact_page(session, url)
                     fetch_outcomes.append(_fetch_outcome(url, result))
-                if (
-                    primary_timeout is not None and not result.get("ok")
-                    and result.get("error") != "source_access_denied"
-                ):
-                    raise primary_timeout
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
                     retry_with_stealth

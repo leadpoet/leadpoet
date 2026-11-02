@@ -1,3 +1,18 @@
+## Scoped authorization: November 1 judge evidence audit
+
+The user authorized the coordinator to check the supplied judge audit against
+current deployed code and stored production verdicts, then implement and test
+only confirmed accuracy, consistency, and retrieval fixes. Merge and deploy
+through the existing canonical release flow after verification. Preserve
+historical scores, rewards, champions, published rounds, frozen policies,
+provider billing, cache authority, and genuine rejection rules. Apply changes
+prospectively. The current additional OpenRouter testing cap is $15 total,
+including failures and reservations; it supersedes older testing allowances
+for this continuation. Preserve every prior charge and reservation. Use the
+existing Pranav AWS access; no administrator renewal is needed. Fresh read-only
+OnePatch/Sentry checks are authorized. Add no new judging system, retry layer,
+dependency, recurring monitor, or unrelated production action.
+
 ## Scoped authorization: November 1 judge retry incident
 
 The user explicitly authorized the coordinator to investigate and safely stop

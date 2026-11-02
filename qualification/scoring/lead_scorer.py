@@ -13900,7 +13900,10 @@ async def _score_single_intent_signal(
         r"\b(page|posting|position)\s+(not\s+found|no\s+longer\s+exists|expired|removed)\b",
         r"\bunable\s+to\s+(verify|find|access|locate)\b",
         r"\bno\s+evidence\b",
-        r"\b404\b",
+        # A numeric amount/count is not an unavailable page. Require an
+        # HTTP/error context; fetched evidence still decides claim support.
+        r"\b(?:http(?:\s+status)?|(?:error|status)(?:\s+code)?)\s*[:=-]?\s*404\b",
+        r"\b404\s+(?:not\s+found|error)\b",
     )
     _negation_re = re.compile("|".join(_NEGATION_PATTERNS), re.IGNORECASE)
     _evidence_text = " ".join(filter(None, [

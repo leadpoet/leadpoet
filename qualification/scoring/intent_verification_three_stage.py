@@ -2286,7 +2286,7 @@ def _has_wayback_error_body(body: str) -> bool:
         document.close()
     except (ValueError, TypeError, RecursionError):
         return False
-    if not document.errors:
+    if not (document.errors or document.toolbars):
         return False
     remaining, offset = [], 0
     for start, end in sorted([*document.errors, *document.toolbars]):
@@ -2296,7 +2296,14 @@ def _has_wayback_error_body(body: str) -> bool:
     cleaned = "".join([*remaining, body[offset:]])
     if not _HTML_DOCUMENT_RE.search(cleaned):
         cleaned = "<html><body>" + cleaned + "</body></html>"
-    return _has_empty_html_body(cleaned)
+    if _has_empty_html_body(cleaned):
+        return True
+    # Archive navigation can make an unloaded source look substantial. Use
+    # the same visible-body check as direct retrieval after removing only
+    # the archive's own UI; preserve even a concise independent source body.
+    from qualification.scoring.verification_helpers import extract_article_body
+    visible = extract_article_body(cleaned)
+    return not visible.strip() or _is_title_only_html_shell(cleaned, visible)
 
 
 

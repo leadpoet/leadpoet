@@ -2477,6 +2477,33 @@ class ArenaService:
             ) from exc
         return payload
 
+    _CREDENTIAL_PROBE_DEPENDENCIES = frozenset(
+        credentials_module.RUNTIME_PROVIDERS + ("kms",)
+    )
+
+    def _record_credential_probe_failure(
+        self, exc: "credentials_module.CredentialError", started: float
+    ) -> None:
+        """Name the dependency behind a retryable admission refusal.
+
+        A retryable credential error is the one admission outcome a miner can
+        do nothing about and cannot diagnose: three providers and five failure
+        shapes all surface as ``credential_validation_unavailable``. The stage
+        vocabulary carries the dependency, the exception detail carries the
+        bounded failure shape, and nothing else is admitted.
+        """
+
+        dependency = getattr(exc, "dependency", "")
+        if dependency not in self._CREDENTIAL_PROBE_DEPENDENCIES:
+            return
+        detail = getattr(exc, "detail", "") or telemetry.NO_ERROR
+        telemetry.record(
+            "credential_probe_%s" % dependency,
+            "failed",
+            error_type=detail,
+            duration_ms=(time.monotonic() - started) * 1000.0,
+        )
+
     def handle_submission_finalize(
         self, submission_id: str, envelope: Any
     ) -> Dict[str, Any]:
@@ -2550,6 +2577,7 @@ class ArenaService:
         manager = self._config.credential_manager
         if manager is None:
             raise ServiceError("credential_validation_unavailable", 503)
+        credential_start = time.monotonic()
         try:
             encrypted_credentials = manager.validate_and_encrypt(
                 body["credentials"],
@@ -2558,6 +2586,7 @@ class ArenaService:
             )
         except credentials_module.CredentialError as exc:
             if exc.retryable:
+                self._record_credential_probe_failure(exc, credential_start)
                 raise ServiceError(exc.code, 503) from exc
             self._store.update_submission(
                 str(round_row["round_id"]),

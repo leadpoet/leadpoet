@@ -195,3 +195,105 @@ def test_malformed_ciphertext_is_a_nonretryable_miner_credential_error():
         manager.runtime_key(row, "deepline")
     assert caught.value.code == "miner_credentials_unavailable"
     assert caught.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("failing_url", "dependency"),
+    [
+        (cr.OPENROUTER_CURRENT_KEY_URL, "openrouter"),
+        (cr.DEEPLINE_BALANCE_URL, "deepline"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [(502, "probe_http_502"), (429, "probe_http_429"), (None, "probe_no_response")],
+)
+def test_retryable_probe_failure_names_the_dependency_that_refused(
+    failing_url, dependency, status, detail
+):
+    """A retryable admission refusal must say WHICH dependency refused.
+
+    Three providers and five failure shapes otherwise share one opaque
+    `credential_validation_unavailable`, which is all a locked-out miner and
+    the admission span ever see.
+    """
+
+    def refusing_probe(url, bearer_token, timeout_seconds):
+        if url == failing_url:
+            raise cr._ProbeError(status)
+        return valid_probe(url, bearer_token, timeout_seconds)
+
+    manager = cr.CredentialManager(
+        kms_key_id="alias/key",
+        kms_client=FakeKms(),
+        http_get=refusing_probe,
+        timeout_seconds=7,
+    )
+    with pytest.raises(cr.CredentialError) as raised:
+        manager.validate_and_encrypt(
+            submitted_credentials(),
+            submission_id=SUBMISSION_ID,
+            miner_hotkey=MINER_HOTKEY,
+        )
+    assert raised.value.code == "credential_validation_unavailable"
+    assert raised.value.retryable is True
+    assert raised.value.dependency == dependency
+    assert raised.value.detail == detail
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_rejecting_probe_stays_terminal_and_carries_no_dependency(status):
+    def refusing_probe(url, bearer_token, timeout_seconds):
+        if url == cr.DEEPLINE_BALANCE_URL:
+            raise cr._ProbeError(status)
+        return valid_probe(url, bearer_token, timeout_seconds)
+
+    manager = cr.CredentialManager(
+        kms_key_id="alias/key",
+        kms_client=FakeKms(),
+        http_get=refusing_probe,
+        timeout_seconds=7,
+    )
+    with pytest.raises(cr.CredentialError) as raised:
+        manager.validate_and_encrypt(
+            submitted_credentials(),
+            submission_id=SUBMISSION_ID,
+            miner_hotkey=MINER_HOTKEY,
+        )
+    assert raised.value.code == "deepline_api_key_invalid"
+    assert raised.value.retryable is False
+    assert raised.value.dependency == ""
+
+
+def test_a_kms_outage_is_attributed_to_kms():
+    kms = FakeKms()
+    kms.encrypt = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("down"))
+    manager = cr.CredentialManager(
+        kms_key_id="alias/key", kms_client=kms, http_get=valid_probe, timeout_seconds=7
+    )
+    with pytest.raises(cr.CredentialError) as raised:
+        manager.validate_and_encrypt(
+            submitted_credentials(),
+            submission_id=SUBMISSION_ID,
+            miner_hotkey=MINER_HOTKEY,
+        )
+    assert raised.value.code == "credential_kms_unavailable"
+    assert raised.value.retryable is True
+    assert raised.value.dependency == "kms"
+    assert raised.value.detail == "kms_encrypt_failed"
+
+
+def test_every_credential_probe_stage_is_in_the_frozen_task_vocabulary():
+    """The stage label must be admitted by the fail-closed span validator."""
+
+    from gateway.observability.otel_bootstrap import (
+        ARENA_TASK_STAGES,
+        _ERROR_TYPE_RE,
+    )
+
+    for dependency in cr.RUNTIME_PROVIDERS + ("kms",):
+        assert "credential_probe_%s" % dependency in ARENA_TASK_STAGES
+    for detail in ("probe_http_502", "probe_no_response", "probe_status_invalid",
+                   "probe_unexpected_error", "kms_encrypt_failed",
+                   "kms_ciphertext_invalid"):
+        assert _ERROR_TYPE_RE.fullmatch(detail)

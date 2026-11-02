@@ -56,9 +56,21 @@ SUBMITTED_CREDENTIAL_FIELDS = (
 class CredentialError(RuntimeError):
     """A safe credential admission/runtime error with no secret in its text."""
 
-    def __init__(self, code: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool = False,
+        dependency: str = "",
+        detail: str = "",
+    ) -> None:
         self.code = str(code)
         self.retryable = bool(retryable)
+        # Which third-party dependency refused, and in what shape. Both are
+        # code-controlled constants: never a URL, body, header, or secret.
+        # They exist only so a retryable admission refusal is attributable.
+        self.dependency = str(dependency)
+        self.detail = str(detail)
         super().__init__(self.code)
 
 
@@ -148,6 +160,20 @@ def kms_encryption_context(
     }
 
 
+def _probe_detail(status: Optional[int]) -> str:
+    """A fixed, code-controlled shape for one failed dependency probe.
+
+    The admission span vocabulary admits an identifier only, so this is a
+    constant plus a bounded HTTP status and can never carry a response body.
+    """
+
+    if status is None:
+        return "probe_no_response"
+    if not 100 <= int(status) <= 599:
+        return "probe_status_invalid"
+    return "probe_http_%d" % int(status)
+
+
 class CredentialManager:
     """Admission validation and narrowly scoped runtime decryption."""
 
@@ -174,23 +200,36 @@ class CredentialManager:
         self._http_get = http_get
         self._timeout_seconds = int(timeout_seconds)
 
-    def _probe(self, url: str, secret: str, invalid_code: str) -> Mapping[str, Any]:
+    def _probe(
+        self, url: str, secret: str, invalid_code: str, *, dependency: str
+    ) -> Mapping[str, Any]:
         try:
             return self._http_get(url, secret, self._timeout_seconds)
         except _ProbeError as exc:
             if exc.status in (401, 403, 404):
                 raise CredentialError(invalid_code) from None
-            raise CredentialError("credential_validation_unavailable", retryable=True) from None
+            raise CredentialError(
+                "credential_validation_unavailable",
+                retryable=True,
+                dependency=dependency,
+                detail=_probe_detail(exc.status),
+            ) from None
         except CredentialError:
             raise
         except Exception:
-            raise CredentialError("credential_validation_unavailable", retryable=True) from None
+            raise CredentialError(
+                "credential_validation_unavailable",
+                retryable=True,
+                dependency=dependency,
+                detail="probe_unexpected_error",
+            ) from None
 
     def _validate_openrouter(self, runtime_key: str, management_key: str) -> None:
         current = self._probe(
             OPENROUTER_CURRENT_KEY_URL,
             runtime_key,
             "openrouter_api_key_invalid",
+            dependency="openrouter",
         )
         current_data = current.get("data")
         if not isinstance(current_data, Mapping):
@@ -206,6 +245,7 @@ class CredentialManager:
             OPENROUTER_KEY_URL.format(key_hash=runtime_hash),
             management_key,
             "openrouter_management_key_invalid",
+            dependency="openrouter",
         )
         managed_data = managed.get("data")
         if (
@@ -216,13 +256,19 @@ class CredentialManager:
             raise CredentialError("openrouter_management_key_invalid")
 
     def _validate_deepline(self, deepline_key: str) -> None:
-        self._probe(DEEPLINE_BALANCE_URL, deepline_key, "deepline_api_key_invalid")
+        self._probe(
+            DEEPLINE_BALANCE_URL,
+            deepline_key,
+            "deepline_api_key_invalid",
+            dependency="deepline",
+        )
 
     def _validate_scrapingdog(self, scrapingdog_key: str) -> None:
         account = self._probe(
             SCRAPINGDOG_ACCOUNT_URL,
             scrapingdog_key,
             "scrapingdog_api_key_invalid",
+            dependency="scrapingdog",
         )
         request_limit = account.get("requestLimit")
         request_used = account.get("requestUsed")
@@ -253,10 +299,20 @@ class CredentialManager:
         except CredentialError:
             raise
         except Exception:
-            raise CredentialError("credential_kms_unavailable", retryable=True) from None
+            raise CredentialError(
+                "credential_kms_unavailable",
+                retryable=True,
+                dependency="kms",
+                detail="kms_encrypt_failed",
+            ) from None
         ciphertext = response.get("CiphertextBlob") if isinstance(response, Mapping) else None
         if not isinstance(ciphertext, (bytes, bytearray)) or not ciphertext:
-            raise CredentialError("credential_kms_unavailable", retryable=True)
+            raise CredentialError(
+                "credential_kms_unavailable",
+                retryable=True,
+                dependency="kms",
+                detail="kms_ciphertext_invalid",
+            )
         return base64.b64encode(bytes(ciphertext)).decode("ascii")
 
     def validate_and_encrypt(

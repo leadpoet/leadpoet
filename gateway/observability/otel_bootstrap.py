@@ -131,6 +131,14 @@ ARENA_TASK_STAGES = frozenset(
         "reconcile_deepline_billing_lookup",
         "review_submissions",
         "review_guard",
+        # One failed admission credential probe, named by the dependency that
+        # refused. A retryable 503 on finalize is otherwise reported as one
+        # opaque code for three providers and five failure shapes, so a miner
+        # locked out of a round cannot be told which dependency to chase.
+        "credential_probe_openrouter",
+        "credential_probe_deepline",
+        "credential_probe_scrapingdog",
+        "credential_probe_kms",
         "service_startup",
         "service_shutdown",
         "service_preflight",

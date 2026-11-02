@@ -6998,6 +6998,7 @@ class ArenaService:
             # or the result returned to the worker.
             _warn_trajectory_failure("provider_request", exc)
         started = time.monotonic()
+        provider_start_ns = time.time_ns()
         try:
             result = broker.execute(
                 context,
@@ -7045,6 +7046,7 @@ class ArenaService:
                 store_error=store_error or None,
                 tool=_telemetry_tool(operation_id, frame["parameters"]),
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                start_ns=provider_start_ns,
                 run_identity=run_identity,
             )
             raise
@@ -7072,6 +7074,7 @@ class ArenaService:
                     frame["parameters"],
                 ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                start_ns=provider_start_ns,
                 run_identity=run_identity,
                 **provider_fields,
             )

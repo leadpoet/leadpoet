@@ -6,27 +6,12 @@ import json
 import hashlib
 import secrets
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any, Callable, Mapping
 
 from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_coverage
 
 
 _ROUND_NOT_PROVIDED = object()
-
-
-def _review_reservation_prices(prices: Mapping[str, Any], model: str) -> Mapping[str, Any]:
-    # The catalog exposes base rates but omits Sol's >272k-input tier. Reserve
-    # at its higher rates plus Azure's regional 10% uplift for full-source
-    # review, retaining any higher catalog rates and every other priced
-    # component. Actual settlement uses the
-    # unmodified catalog and the provider's existing usage.cost authority.
-    if model != "openai/gpt-6.1-sol" or model not in prices["models"]:
-        return prices
-    pricing = dict(prices["models"][model])
-    for component, floor in (("prompt", "0.0000044"), ("completion", "0.0000165")):
-        pricing[component] = str(max(Decimal(pricing[component]), Decimal(floor)))
-    return {**prices, "models": {**prices["models"], model: pricing}}
 
 
 class SubmissionCodeReviewer:
@@ -224,8 +209,7 @@ class SubmissionCodeReviewer:
                     )
             if not exact_duplicate:
                 reservation = broker.max_openrouter_cost_microusd(
-                    _review_reservation_prices(self._prices, prepared.parameters["model"]),
-                    prepared.parameters["model"], prepared.parameters,
+                    self._prices, prepared.parameters["model"], prepared.parameters,
                     max_output_tokens=prepared.parameters["max_tokens"],
                 )
         except code_review.CodeReviewError as exc:

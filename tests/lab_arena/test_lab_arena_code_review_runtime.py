@@ -443,7 +443,7 @@ def test_selected_review_provider_still_fails_closed_without_fallback(outcome):
     assert len(transport.sent) == 1
     parameters = json.loads(transport.sent[0]["body"])
     assert parameters["provider"] == {
-        "only": ["azure"], "allow_fallbacks": False,
+        "only": ["google-vertex"], "allow_fallbacks": False,
         "require_parameters": True, "data_collection": "deny", "zdr": True,
     }
     supplied = json.loads(parameters["messages"][1]["content"])
@@ -478,7 +478,7 @@ def test_large_review_preserves_runtime_integrity_and_actual_cost(case):
             body["openrouter_metadata"] = {
                 "requested": parameters["model"], "strategy": "direct", "attempt": 1,
                 "endpoints": {"total": 1, "available": [{
-                    "provider": "Azure", "model": "openai/gpt-6.1-sol-20260929", "selected": True,
+                    "provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5.5-20260928", "selected": True,
                 }]},
                 "pipeline": [],
             }

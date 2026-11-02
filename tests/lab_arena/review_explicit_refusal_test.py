@@ -4,7 +4,6 @@ import json
 import pytest
 
 from lab_arena import broker, code_review, code_review_policy
-from lab_arena.code_review_runtime import _review_reservation_prices
 from tests.lab_arena.test_lab_arena_code_review_runtime import (
     MINER_KEY, ReviewTransport, _archive, _review_body, _reviewer, _source,
 )
@@ -137,41 +136,6 @@ def test_private_diagnostic_refusal_label_cannot_change_a_complete_review(monkey
     assert reviewer.review(row)["status"] == "passed"
     assert store.finish_calls[0][4]["passed"] is True
     assert store.finish_calls[0][5] == 1234
-
-
-@pytest.mark.parametrize("prompt,completion", [
-    ("0.000002", "0.00001"), ("0.000009", "0.00002"),
-])
-@pytest.mark.parametrize("cost", ["0.001234", None])
-def test_sol_review_reserves_long_context_rates_without_changing_settlement(prompt, completion, cost):
-    transport = ReviewTransport(lambda parameters: {"body": refusal_body(parameters, cost=cost)})
-    reviewer, row, store, _ = _reviewer(_archive(_source()), transport)
-    model = code_review.DEFAULT_REVIEW_MODEL
-    assert model == "openai/gpt-6.1-sol"
-    reviewer._prices["models"][model].update(prompt=prompt, completion=completion, request="0.02")
-    original = json.loads(json.dumps(reviewer._prices))
-    assert reviewer.review(row)["status"] == "error"
-    parameters = json.loads(transport.sent[0]["body"])
-    conservative = _review_reservation_prices(original, model)
-    assert conservative["models"][model]["prompt"] == ("0.0000044" if prompt == "0.000002" else prompt)
-    assert conservative["models"][model]["completion"] == ("0.0000165" if completion == "0.00001" else completion)
-    assert conservative["models"][model]["request"] == "0.02"
-    assert store.begin_calls[0][3] == broker.max_openrouter_cost_microusd(
-        conservative, model, parameters, max_output_tokens=parameters["max_tokens"],
-    )
-    assert store.finish_calls[0][5] == (1234 if cost else None)
-    assert reviewer._prices == original
-    # The same conservative rates cover an input above the catalog tier boundary.
-    large = {**parameters, "messages": [{"role": "user", "content": "x" * 280_000}]}
-    assert broker.bounded_input_tokens(large) > 272_000
-    assert broker.max_openrouter_cost_microusd(
-        conservative, model, large, max_output_tokens=parameters["max_tokens"],
-    ) >= store.begin_calls[0][3]
-
-
-def test_sol_reservation_floor_does_not_change_other_models():
-    prices = {"models": {"other/model": {"prompt": "0.000001", "completion": "0.000001"}}}
-    assert _review_reservation_prices(prices, "other/model") is prices
 
 
 @pytest.mark.parametrize("cost,kind", [("0.001234", "settlement"), (None, "uncertain")])

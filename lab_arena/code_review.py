@@ -19,14 +19,13 @@ from typing import Any, Dict, Mapping, NoReturn, Tuple
 from lab_arena import contracts, source_bundle
 
 
-DEFAULT_REVIEW_MODEL = "openai/gpt-6.1-sol"
-# Exact public catalog id -> canonical_slug, verified 2026-11-02:
-# https://openrouter.ai/api/v1/models/openai/gpt-6.1-sol/endpoints
+DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5.5"
+# Exact public catalog id -> canonical_slug, verified 2026-10-19:
+# https://openrouter.ai/api/v1/models?q=claude-sonnet-5.5
 # Router endpoint metadata may report this canonical identity rather than the
 # requested id. No other dates, suffixes, or model families are interchangeable.
 _REVIEW_MODEL_CANONICAL_SLUGS = {
-    DEFAULT_REVIEW_MODEL: "openai/gpt-6.1-sol-20260929",
-    "anthropic/claude-sonnet-5.5": "anthropic/claude-sonnet-5.5-20260928",
+    DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5.5-20260928",
     # Preserve validation for prepared reviews that selected the old model.
     "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
@@ -389,9 +388,9 @@ def prepare_request(
         "transforms": [],
         "plugins": [{"id": "context-compression", "enabled": False}],
         "provider": {
-            # Keep one full-source review with no hidden provider/model fallback.
-            # Retain the original route for explicitly prepared historical reviews.
-            "only": ["azure" if model == DEFAULT_REVIEW_MODEL else "google-vertex"],
+            # Use the provider verified to complete full-source admission review.
+            # Bedrock can refuse this audit while Vertex reviews the same input.
+            "only": ["google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",

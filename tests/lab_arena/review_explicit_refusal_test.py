@@ -1,4 +1,4 @@
-"""Typed provider refusals stop repeat dispatch without becoming code verdicts."""
+"""Typed refusals permit one alternate without becoming code verdicts."""
 import json
 
 import pytest
@@ -7,12 +7,14 @@ from lab_arena import broker, code_review, code_review_policy
 from tests.lab_arena.test_lab_arena_code_review_runtime import (
     MINER_KEY, ReviewTransport, _archive, _review_body, _reviewer, _source,
 )
-from tests.lab_arena.review_private_diagnostics594_postgres_test import (
+from tests.lab_arena.refusal_review_fallback599_postgres_test import (
     recovery_database, recovery_connect, recovery_store, recovery_superuser,
+    accepted_recovery_submission,
 )
 from tests.lab_arena.test_lab_arena_code_review_postgres import (
-    _age_review_error, accepted_recovery_submission,
+    _age_review_error,
 )
+from tests.lab_arena.refusal_review_fallback_test import reviewer_for, router_receipt
 
 
 REFUSALS = (
@@ -35,25 +37,26 @@ def refusal_body(parameters, *, finish="content_filter", native="refusal", refus
 
 @pytest.mark.parametrize("finish,native,refusal", REFUSALS)
 @pytest.mark.parametrize("cost,actual", [("0.001234", 1234), (None, None)])
-def test_http_200_explicit_refusal_is_permanent_infrastructure_error(finish, native, refusal, cost, actual):
+def test_http_200_explicit_refusal_permits_one_alternate_claim(finish, native, refusal, cost, actual):
     transport = ReviewTransport(lambda parameters: {"body": refusal_body(
         parameters, finish=finish, native=native, refusal=refusal, cost=cost,
     )})
     reviewer, row, store, _ = _reviewer(_archive(_source()), transport)
     assert reviewer.review(row)["status"] == "error"
     document = store.finish_calls[0][4]
-    assert document["error_code"] == "code_review_provider_request_rejected"
+    assert document["error_code"] == "code_review_provider_refused"
     assert document["provider_http_status"] == 200
-    assert document["retryable"] is False
+    assert document["retryable"] is True
     assert "categories" not in document and "passed" not in document
     assert "private provider refusal prose" not in json.dumps(document)
     assert store.finish_calls[0][5] == actual
     assert len(transport.sent) == 1
     # This is the actual admission read-time policy, independent of telemetry.
-    assert not code_review_policy.review_retry_available({
+    assert code_review_policy.review_retry_available({
         "code_review_status": "error", "code_review_attempts": 1,
         "code_review_doc": document,
     })
+    assert code_review_policy.review_model_for({"code_review_doc": document}) == code_review.FALLBACK_REVIEW_MODEL
 
 
 @pytest.mark.parametrize("change", [
@@ -80,7 +83,7 @@ def test_malformed_or_nonrefusal_metadata_is_not_a_typed_refusal(change):
 ])
 @pytest.mark.parametrize("message_shape", ["missing", "null", "invalid"])
 @pytest.mark.parametrize("cost,actual", [("0.001234", 1234), (None, None)])
-def test_typed_finish_refusal_without_message_still_stops_paid_retry(finish, native, message_shape, cost, actual):
+def test_typed_finish_refusal_without_message_selects_alternate(finish, native, message_shape, cost, actual):
     def respond(parameters):
         body = refusal_body(parameters, finish=finish, native=native, cost=cost)
         choice = body["choices"][0]
@@ -93,8 +96,9 @@ def test_typed_finish_refusal_without_message_still_stops_paid_retry(finish, nat
     reviewer, row, store, _ = _reviewer(_archive(_source()), transport)
     assert reviewer.review(row)["status"] == "error"
     document = store.finish_calls[0][4]
-    assert document["error_code"] == "code_review_provider_request_rejected"
-    assert document["retryable"] is False
+    assert document["error_code"] == "code_review_provider_refused"
+    assert document["retryable"] is True
+    assert code_review_policy.review_model_for({"code_review_doc": document}) == code_review.FALLBACK_REVIEW_MODEL
     assert "passed" not in document and "categories" not in document
     assert store.finish_calls[0][5] == actual
     assert len(transport.sent) == 1
@@ -168,10 +172,13 @@ def test_private_diagnostic_refusal_label_cannot_change_a_complete_review(monkey
     ("0.001234", "settlement", "normal"), (None, "uncertain", "normal"),
     ("0.001234", "settlement", "null"), (None, "uncertain", "missing"),
 ])
-def test_real_ledger_refusal_keeps_charge_and_stops_next_paid_claim(recovery_store, recovery_superuser, cost, kind, message_shape):
-    _, submission, miner = accepted_recovery_submission(recovery_store, "f71" if cost else "f72")
+def test_real_ledger_refusal_keeps_charge_and_allows_one_alternate(recovery_store, recovery_superuser, cost, kind, message_shape):
+    suffix = ("f71" if cost else "f72") + message_shape
+    _, submission, miner = accepted_recovery_submission(recovery_store, suffix)
     payload = _archive(_source())
     def respond(parameters):
+        if parameters["model"] == code_review.FALLBACK_REVIEW_MODEL:
+            return {"body": router_receipt(_review_body(parameters), parameters)}
         body = refusal_body(parameters, cost=cost)
         if message_shape == "null":
             body["choices"][0]["message"] = None
@@ -179,21 +186,43 @@ def test_real_ledger_refusal_keeps_charge_and_stops_next_paid_claim(recovery_sto
             body["choices"][0].pop("message")
         return {"body": body}
     transport = ReviewTransport(respond)
-    reviewer, _, _, _ = _reviewer(payload, transport, store=recovery_store)
+    reviewer, _ = reviewer_for(payload, transport, recovery_store)
     row = {**recovery_store.get_submission(submission), "source_size_bytes": len(payload)}
     assert reviewer.review(row)["status"] == "error"
     stored = recovery_store.get_submission(submission)
-    assert stored["code_review_doc"]["error_code"] == "code_review_provider_request_rejected"
-    assert stored["code_review_doc"]["retryable"] is False
+    assert stored["code_review_doc"]["error_code"] == "code_review_provider_refused"
+    assert stored["code_review_doc"]["retryable"] is True
     assert "provider_diagnostic" not in stored["code_review_doc"]
     ledger = recovery_store.list_ledger(submission_id=submission)
     assert [entry["entry_kind"] for entry in ledger] == ["reservation", "dispatch", kind]
     assert ledger[-1]["amount_microusd"] == (1234 if cost else ledger[0]["amount_microusd"])
     assert ledger[-1]["entry_doc"]["provider_diagnostic"]["finish_reason"] == "content_filter"
     _age_review_error(recovery_superuser, submission)
-    assert reviewer.review(recovery_store.get_submission(submission))["status"] == "exhausted"
     assert recovery_store.begin_submission_review(
         submission, miner, "b" * 64, 50_000, code_review.DEFAULT_REVIEW_MODEL, 3, 1200,
-    )["status"] == "exhausted"
+    )["status"] == "fallback_required"
     assert recovery_store.list_ledger(submission_id=submission) == ledger
     assert len(transport.sent) == 1
+    row = {**recovery_store.get_submission(submission), "source_size_bytes": len(payload)}
+    assert reviewer.review(row)["status"] == "passed"
+    completed = recovery_store.list_ledger(submission_id=submission)
+    assert completed[:3] == ledger
+    assert [entry["entry_kind"] for entry in completed[3:]] == ["reservation", "dispatch", "settlement"]
+    assert completed[3]["entry_doc"]["review_model"] == code_review.FALLBACK_REVIEW_MODEL
+    assert reviewer.review(recovery_store.get_submission(submission))["status"] == "existing"
+    assert recovery_store.list_ledger(submission_id=submission) == completed
+    assert len(transport.sent) == 2
+
+
+def test_legacy_generic_request_rejection_remains_terminal():
+    transport = ReviewTransport(lambda _parameters: pytest.fail("legacy terminal error must not dispatch"))
+    reviewer, row, store, _ = _reviewer(_archive(_source()), transport)
+    document = {"model": code_review.DEFAULT_REVIEW_MODEL,
+                "error_code": "code_review_provider_request_rejected", "retryable": False}
+    row.update(code_review_status="error", code_review_attempts=1, code_review_doc=document)
+    assert not code_review_policy.review_retry_available(row)
+    assert code_review_policy.review_model_for(row) == code_review.DEFAULT_REVIEW_MODEL
+    assert reviewer.review(row)["status"] == "exhausted"
+    assert store.begin_calls == []
+    assert store.finish_calls == []
+    assert transport.sent == []

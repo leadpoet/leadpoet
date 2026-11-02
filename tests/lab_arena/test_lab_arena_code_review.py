@@ -97,7 +97,7 @@ def test_prepare_request_contains_every_file_in_full_and_pydantic_style_passes()
         {"id": "context-compression", "enabled": False}
     ]
     assert prepared.parameters["provider"] == {
-        "only": ["openai"],
+        "only": ["azure"],
         "allow_fallbacks": False,
         "require_parameters": True,
         "data_collection": "deny",
@@ -225,7 +225,7 @@ def test_large_full_source_review_passes_with_fresh_unmodified_router_proof(pipe
 def test_large_review_accepts_verified_catalog_canonical_endpoint():
     prepared, response = _large_complete_review()
     selected = response["openrouter_metadata"]["endpoints"]["available"][0]
-    selected.update({"provider": "OpenAI", "model": "openai/gpt-6.1-sol-20260929"})
+    selected.update({"provider": "Azure", "model": "openai/gpt-6.1-sol-20260929"})
     assert code_review.parse_response(response, prepared).passed
 
 

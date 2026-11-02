@@ -6,12 +6,27 @@ import json
 import hashlib
 import secrets
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Mapping
 
 from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_coverage
 
 
 _ROUND_NOT_PROVIDED = object()
+
+
+def _review_reservation_prices(prices: Mapping[str, Any], model: str) -> Mapping[str, Any]:
+    # The catalog exposes base rates but omits Sol's >272k-input tier. Reserve
+    # at its higher rates plus Azure's regional 10% uplift for full-source
+    # review, retaining any higher catalog rates and every other priced
+    # component. Actual settlement uses the
+    # unmodified catalog and the provider's existing usage.cost authority.
+    if model != "openai/gpt-6.1-sol" or model not in prices["models"]:
+        return prices
+    pricing = dict(prices["models"][model])
+    for component, floor in (("prompt", "0.0000044"), ("completion", "0.0000165")):
+        pricing[component] = str(max(Decimal(pricing[component]), Decimal(floor)))
+    return {**prices, "models": {**prices["models"], model: pricing}}
 
 
 class SubmissionCodeReviewer:
@@ -209,7 +224,8 @@ class SubmissionCodeReviewer:
                     )
             if not exact_duplicate:
                 reservation = broker.max_openrouter_cost_microusd(
-                    self._prices, prepared.parameters["model"], prepared.parameters,
+                    _review_reservation_prices(self._prices, prepared.parameters["model"]),
+                    prepared.parameters["model"], prepared.parameters,
                     max_output_tokens=prepared.parameters["max_tokens"],
                 )
         except code_review.CodeReviewError as exc:
@@ -348,7 +364,15 @@ class SubmissionCodeReviewer:
                             parsed, raw_http_status=provider_http_status,
                             effective_http_status=response.status,
                         )
-                    if response.status == 200:
+                    if response.status == 200 and code_review_policy.explicit_provider_refusal(parsed):
+                        # Refusal is a provider request failure, never evidence
+                        # of source misconduct. Account this call, then stop
+                        # repeating the same paid review on this route.
+                        document = code_review_policy.diagnostic(
+                            "code_review_provider_request_rejected",
+                            provider_http_status=200, retryable=False,
+                        )
+                    elif response.status == 200:
                         if not isinstance(parsed, Mapping):
                             raise code_review.CodeReviewError(
                                 "review_response_invalid", response_reason="envelope"

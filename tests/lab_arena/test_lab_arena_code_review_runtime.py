@@ -443,7 +443,7 @@ def test_selected_review_provider_still_fails_closed_without_fallback(outcome):
     assert len(transport.sent) == 1
     parameters = json.loads(transport.sent[0]["body"])
     assert parameters["provider"] == {
-        "only": ["google-vertex"], "allow_fallbacks": False,
+        "only": ["azure"], "allow_fallbacks": False,
         "require_parameters": True, "data_collection": "deny", "zdr": True,
     }
     supplied = json.loads(parameters["messages"][1]["content"])
@@ -455,8 +455,9 @@ def test_selected_review_provider_still_fails_closed_without_fallback(outcome):
         assert document["retryable"] is True
         assert store.finish_calls[0][5] is None
     elif outcome == "refusal":
-        assert document["error_reason"] == "not_finished"
-        assert document["retryable"] is True
+        assert document["error_code"] == "code_review_provider_request_rejected"
+        assert document["provider_http_status"] == 200
+        assert document["retryable"] is False
         assert store.finish_calls[0][5] == 1_234
         assert "private provider refusal" not in repr(document)
     else:
@@ -477,7 +478,7 @@ def test_large_review_preserves_runtime_integrity_and_actual_cost(case):
             body["openrouter_metadata"] = {
                 "requested": parameters["model"], "strategy": "direct", "attempt": 1,
                 "endpoints": {"total": 1, "available": [{
-                    "provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5.5-20260928", "selected": True,
+                    "provider": "Azure", "model": "openai/gpt-6.1-sol-20260929", "selected": True,
                 }]},
                 "pipeline": [],
             }

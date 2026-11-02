@@ -391,7 +391,7 @@ def prepare_request(
         "provider": {
             # Keep one full-source review with no hidden provider/model fallback.
             # Retain the original route for explicitly prepared historical reviews.
-            "only": ["openai" if model == DEFAULT_REVIEW_MODEL else "google-vertex"],
+            "only": ["azure" if model == DEFAULT_REVIEW_MODEL else "google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",

@@ -16,14 +16,14 @@ from tests.lab_arena.test_lab_arena_code_review_runtime import (
 
 def _response(parameters):
     body = _review_body(parameters)
-    body.update(id="gen-123-abc", provider="Anthropic")
+    body.update(id="gen-123-abc", provider="Azure")
     body["choices"][0]["native_finish_reason"] = "end_turn"
     body["usage"].update(prompt_tokens=200, completion_tokens=33,
                          completion_tokens_details={"reasoning_tokens": 9})
     body["openrouter_metadata"] = {
         "requested": parameters["model"], "strategy": "direct", "attempt": 1,
         "endpoints": {"total": 1, "available": [{
-            "selected": True, "model": parameters["model"], "provider": "Anthropic",
+            "selected": True, "model": parameters["model"], "provider": "Azure",
         }]},
     }
     return body
@@ -43,7 +43,7 @@ def _run(change=lambda body: None):
 
 @pytest.mark.parametrize("finish,status,reason", [
     ("stop", "passed", None), ("length", "error", "not_finished"),
-    ("content_filter", "error", "not_finished"), (None, "error", "not_finished"),
+    ("content_filter", "error", None), (None, "error", "not_finished"),
 ])
 def test_runtime_retains_private_provider_outcome_without_changing_decision(finish, status, reason):
     outcome, document, cost = _run(
@@ -59,7 +59,7 @@ def test_runtime_retains_private_provider_outcome_without_changing_decision(fini
         "context_integrity": "not_required",
         "response_model": code_review.DEFAULT_REVIEW_MODEL,
         "selected_model": code_review.DEFAULT_REVIEW_MODEL,
-        "selected_provider": "Anthropic", "generation_id": "gen-123-abc",
+        "selected_provider": "Azure", "generation_id": "gen-123-abc",
     }
 
 

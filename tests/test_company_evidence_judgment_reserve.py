@@ -526,6 +526,7 @@ def test_inner_deadline_final_submit_retains_usage(monkeypatch, late_tool):
         "prefetched_pages": 1,
         "total_loaded_pages": 1,
         "fetch_outcomes": [],
+        "current_stage_search_succeeded": False,
     }
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""

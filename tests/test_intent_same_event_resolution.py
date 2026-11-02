@@ -1,4 +1,7 @@
 from datetime import date
+import hashlib
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -39,6 +42,104 @@ SOKIN_CARD = (
     "platform enhancement and cross-border payments innovation. "
     "Company news Dec 1, 2025"
 )
+
+
+def _p17_navigation_fixture():
+    fixture = json.loads((Path(__file__).parent / 'fixtures' /
+        'p17_marketscreener_navigation.json').read_text())
+    assert hashlib.sha256(fixture['html_fragment'].encode()).hexdigest() == fixture['fragment_sha256']
+    return fixture
+
+
+def test_p17_observed_navigation_is_not_a_same_event_article_candidate():
+    fixture = _p17_navigation_fixture()
+    links = verifier._same_host_event_links(fixture['html_fragment'], fixture['source_url'])
+    assert any(link['url'] == 'https://www.marketscreener.com/' for link in links)
+    contents = verifier._project_contents_for_prompt(json.loads(json.dumps({'results': [{
+        'url': fixture['source_url'], 'meta': {'same_host_event_links': links},
+    }]})))
+    row = {'claim': fixture['claim'], '_target_signal_text': fixture['target_signal_text']}
+    assert verifier._same_event_link_candidates(contents, row) == []
+
+
+@pytest.mark.parametrize('wrapper', [
+    '<main>{link}</main>', '<article><header>{link}</header></article>',
+    '<div role="main"><header>{link}</header></div>',
+    '<form id="aspnetForm"><main><article>{link}</article></main></form>',
+])
+def test_zero_overlap_article_links_survive_navigation_filter(wrapper):
+    url = 'https://example.com/news/phoenix'
+    links = verifier._same_host_event_links(wrapper.format(
+        link='<a href="/news/phoenix">A brighter tomorrow</a>'), 'https://example.com/news/original')
+    assert links == [{'url': url, 'label': 'A brighter tomorrow'}]
+    assert verifier._same_event_link_candidates({'results': [{'meta': {
+        'same_host_event_links': links}}]}, {'claim': 'Acme acquired Beta',
+        '_target_signal_text': 'Closed a financing round'}) == links
+
+
+@pytest.mark.parametrize('wrapper', [
+    '<nav>{link}</nav>', '<div role="navigation">{link}</div>',
+    '<div role="menu">{link}</div>', '<header>{link}</header>',
+    '<footer>{link}</footer>',
+])
+def test_structural_site_controls_remain_visible_locators_without_event_authority(wrapper):
+    links = verifier._same_host_event_links(wrapper.format(
+        link='<a href="/news/phoenix">A brighter tomorrow</a>'), 'https://example.com/news/original')
+    assert links == [{'url': 'https://example.com/news/phoenix',
+        'label': 'A brighter tomorrow', 'navigation': True}]
+    projected = verifier._project_contents_for_prompt(json.loads(json.dumps(
+        {'results': [{'meta': {'same_host_event_links': links}}]})))
+    assert verifier._same_event_link_candidates(projected, {'claim': 'Phoenix'}) == []
+
+
+def test_explicit_parent_archive_survives_navigation_marker():
+    links = verifier._same_host_event_links(
+        '<nav><a href="/news">News</a></nav>', SOKIN_ARTICLE)
+    contents = {'results': [{'url': SOKIN_ARTICLE, 'meta': {'same_host_event_links': links}}]}
+    assert links[0]['navigation'] is True
+    assert verifier._article_archive_locator(contents, {'claimed_source_urls': [SOKIN_ARTICLE]}) == SOKIN_INDEX
+
+
+def test_old_unmarked_context_remains_compatible_and_hidden_article_link_stays_hidden():
+    link = {'url': 'https://example.com/news/phoenix', 'label': 'A brighter tomorrow'}
+    contents = {'results': [{'meta': {'same_host_event_links': [link]}}]}
+    assert verifier._same_event_link_candidates(contents, {'claim': 'Acme'}) == [link]
+    assert verifier._same_host_event_links(
+        '<article hidden><a href="/news/phoenix">A brighter tomorrow</a></article>',
+        'https://example.com/news/original') == []
+
+
+@pytest.mark.asyncio
+async def test_p17_navigation_only_source_does_not_spend_a_followup_or_clear_date_gate(monkeypatch):
+    fixture = _p17_navigation_fixture()
+    url, claim = fixture['source_url'], fixture['claim']
+    links = verifier._same_host_event_links(fixture['html_fragment'], url)
+    fetched = AsyncMock(return_value={'results': [{
+        'url': url, 'text': claim, 'source_publication_date': '2024-06-05',
+        'meta': {'same_host_event_links': links},
+    }], 'statuses': []})
+    calls = AsyncMock(return_value=_verdict(claim=claim, url=url, quote=claim,
+        risk_notes=['source_publication_date:2024-06-05']))
+    monkeypatch.setattr(verifier, '_fetch_sd_then_exa', fetched)
+    monkeypatch.setattr(verifier, '_call_openrouter', calls)
+    result = await verifier.verify_three_stage(
+        object(), company_name='Grid Dynamics', company_linkedin='',
+        company_website='https://www.griddynamics.com/', source_url=url,
+        miner_claim=claim, miner_signal_date='2026-10-15',
+        target_signal_text=fixture['target_signal_text'], evidence_type='PRODUCT_LAUNCH',
+        stage1_soft_reject=True, integrity_policy=True, buyer_max_age_days=365,
+    )
+    assert fetched.await_count == calls.await_count == 1
+    assert fetched.await_args.args[0] == [url]
+    assert result['source_publication_dates'] == ['2024-06-05']
+    event, publications = source_dates_from_verdict(
+        result['verdict']['signal_evaluations'][0], result['source_publication_dates'])
+    freshness = source_grounded_date_verdict(event_date=event,
+        publication_dates=publications, buyer_cap_days=365,
+        evaluated_on=date(2026, 10, 24))
+    assert freshness.verdict == 'out_of_window'
+    assert freshness.authoritative_date == '2024-06-05'
+    assert result.get('source_resolution') is None
 
 
 def _sokin_archive_result(*, card=SOKIN_CARD, href=SOKIN_ARTICLE,
@@ -103,7 +204,7 @@ def test_visible_archive_index_and_navigation_links_remain_available():
         '</section>'
     )
     links = verifier._same_host_event_links(html, SOKIN_ARTICLE)
-    assert [link["url"] for link in links] == [SOKIN_INDEX]
+    assert links == [{"url": SOKIN_INDEX, "label": "News", "navigation": True}]
     assert verifier._same_host_event_links(html, SOKIN_INDEX) == [{
         "url": SOKIN_ARTICLE, "label": SOKIN_CARD,
     }]

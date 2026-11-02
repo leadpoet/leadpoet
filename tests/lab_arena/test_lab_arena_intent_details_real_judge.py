@@ -242,7 +242,9 @@ def _local_responder(
             response_format = normalized.get("response_format") or {}
             schema = response_format.get("json_schema") or {}
             schema_name = schema.get("name")
-            if schema_name == "arena_intent_details_review":
+            if schema_name == "industry_proposal":
+                content = real_judge.industry_reply(normalized)
+            elif schema_name == intent_details._RESPONSE_FORMAT["json_schema"]["name"]:
                 assert schema.get("strict") is True
                 declared = schema.get("schema") or {}
                 assert declared.get("additionalProperties") is False

@@ -65,3 +65,39 @@ def test_metadata_still_supplies_name_and_title_fragments_remain_supported():
     assert verification._homepage_company_names(
         '<meta property="og:site_name" content="Acme"><title>Acme: Products</title>'
         '<svg><title>Decorative icon</title></svg>') == ['Acme', 'Acme: Products', 'Products']
+
+
+@pytest.mark.parametrize('source,quote_present,expected', [
+    ('https://acme.example/pricing', True, 'VERIFIED'),
+    ('https://other.example/pricing', True, 'UNPROVEN'),
+    ('https://acme.example/pricing', False, 'UNPROVEN'),
+])
+def test_document_identity_binds_only_fetched_first_party_quote(
+    monkeypatch, source, quote_present, expected,
+):
+    from qualification.scoring import company_evidence_investigator as investigator
+    from qualification.scoring.lead_scorer import _verified_homepage_identity_anchor
+
+    identity = _verify(monkeypatch, extra='<svg><title>Privacy opt-out icon</title></svg>')
+    verified = _verified_homepage_identity_anchor(identity)
+    quote = 'Business password manager. $9 per user per month, billed yearly.'
+    anchor = {
+        'submitted_name': 'Acme', 'observed_name': 'Acme',
+        'verified_name': verified['normalized_name'],
+        'submitted_domain': 'acme.example', 'observed_domain': 'acme.example',
+        'verified_domain': verified['registrable_dns_domain'],
+        'submitted_linkedin_slug': 'acme', 'observed_linkedin_slug': 'acme',
+        'verified_linkedin_slug': verified['linkedin_company_slug'],
+    }
+    findings = investigator._validated_findings(
+        {'findings': [{
+            'target': 'required_attribute', 'status': 'VERIFIED',
+            'activity_role': 'supplier_operator',
+            'evidence_url': source, 'evidence_quote': quote,
+        }]},
+        targets=('required_attribute',),
+        fetched_pages={source: quote if quote_present else 'Contact sales.'},
+        fetched_final_urls={source: source}, first_party_domains={'acme.example'},
+        identity_names={'acme'}, identity_anchor=anchor,
+    )
+    assert findings['required_attribute']['status'] == expected

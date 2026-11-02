@@ -111,13 +111,16 @@ def explicit_provider_refusal(document: Any) -> bool:
     if not isinstance(choices, list) or len(choices) != 1:
         return False
     choice = choices[0]
-    if not isinstance(choice, Mapping) or not isinstance(choice.get("message"), Mapping):
+    if not isinstance(choice, Mapping):
         return False
     for name in ("finish_reason", "native_finish_reason"):
         value = choice.get(name)
         if isinstance(value, str) and value in {"content_filter", "refusal"}:
             return True
-    refusal = choice["message"].get("refusal")
+    message = choice.get("message")
+    if not isinstance(message, Mapping):
+        return False
+    refusal = message.get("refusal")
     return isinstance(refusal, str) and bool(refusal.strip())
 
 

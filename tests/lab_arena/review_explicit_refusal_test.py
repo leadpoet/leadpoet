@@ -60,7 +60,7 @@ def test_http_200_explicit_refusal_is_permanent_infrastructure_error(finish, nat
     lambda body: body.update(choices=[]),
     lambda body: body.update(choices=body["choices"] * 2),
     lambda body: body.update(choices=[None]),
-    lambda body: body["choices"][0].update(message=None),
+    lambda body: body["choices"][0].update(finish_reason="stop", native_finish_reason=None, message=None),
     lambda body: body["choices"][0].update(finish_reason=["content_filter"], native_finish_reason=None),
     lambda body: body["choices"][0].update(finish_reason="length", native_finish_reason="max_tokens"),
     lambda body: body["choices"][0].update(finish_reason="stop", native_finish_reason="unknown_refusal"),
@@ -72,6 +72,32 @@ def test_malformed_or_nonrefusal_metadata_is_not_a_typed_refusal(change):
     change(body)
     assert code_review_policy.explicit_provider_refusal(body) is False
     assert code_review_policy.explicit_provider_refusal({"error": {"code": 400, "message": "refusal"}}) is False
+
+
+@pytest.mark.parametrize("finish,native", [
+    ("content_filter", None), ("refusal", None),
+    ("stop", "refusal"), ("stop", "content_filter"),
+])
+@pytest.mark.parametrize("message_shape", ["missing", "null", "invalid"])
+@pytest.mark.parametrize("cost,actual", [("0.001234", 1234), (None, None)])
+def test_typed_finish_refusal_without_message_still_stops_paid_retry(finish, native, message_shape, cost, actual):
+    def respond(parameters):
+        body = refusal_body(parameters, finish=finish, native=native, cost=cost)
+        choice = body["choices"][0]
+        if message_shape == "missing":
+            choice.pop("message")
+        else:
+            choice["message"] = None if message_shape == "null" else []
+        return {"body": body}
+    transport = ReviewTransport(respond)
+    reviewer, row, store, _ = _reviewer(_archive(_source()), transport)
+    assert reviewer.review(row)["status"] == "error"
+    document = store.finish_calls[0][4]
+    assert document["error_code"] == "code_review_provider_request_rejected"
+    assert document["retryable"] is False
+    assert "passed" not in document and "categories" not in document
+    assert store.finish_calls[0][5] == actual
+    assert len(transport.sent) == 1
 
 
 @pytest.mark.parametrize("verdict", ["pass", "reject"])
@@ -138,11 +164,21 @@ def test_private_diagnostic_refusal_label_cannot_change_a_complete_review(monkey
     assert store.finish_calls[0][5] == 1234
 
 
-@pytest.mark.parametrize("cost,kind", [("0.001234", "settlement"), (None, "uncertain")])
-def test_real_ledger_refusal_keeps_charge_and_stops_next_paid_claim(recovery_store, recovery_superuser, cost, kind):
+@pytest.mark.parametrize("cost,kind,message_shape", [
+    ("0.001234", "settlement", "normal"), (None, "uncertain", "normal"),
+    ("0.001234", "settlement", "null"), (None, "uncertain", "missing"),
+])
+def test_real_ledger_refusal_keeps_charge_and_stops_next_paid_claim(recovery_store, recovery_superuser, cost, kind, message_shape):
     _, submission, miner = accepted_recovery_submission(recovery_store, "f71" if cost else "f72")
     payload = _archive(_source())
-    transport = ReviewTransport(lambda parameters: {"body": refusal_body(parameters, cost=cost)})
+    def respond(parameters):
+        body = refusal_body(parameters, cost=cost)
+        if message_shape == "null":
+            body["choices"][0]["message"] = None
+        elif message_shape == "missing":
+            body["choices"][0].pop("message")
+        return {"body": body}
+    transport = ReviewTransport(respond)
     reviewer, _, _, _ = _reviewer(payload, transport, store=recovery_store)
     row = {**recovery_store.get_submission(submission), "source_size_bytes": len(payload)}
     assert reviewer.review(row)["status"] == "error"

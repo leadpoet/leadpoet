@@ -144,6 +144,10 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
     original[composer.GRADER_FILE] = _FROZEN_GRADER
+    if composer.FINALITY_FILE in original:
+        original[composer.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", composer.FINALITY_FILE,
+        )
     # Model a frozen pre-correction image without depending on Git history.
     for name, deltas in ((builder.GRADER_FILE, INVESTIGATOR_DELTAS),
                          (builder.FINALITY_FILE, FINALITY_DELTAS)):
@@ -188,6 +192,10 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
         for name in names
     }
     original[composer.GRADER_FILE] = _FROZEN_GRADER
+    if composer.FINALITY_FILE in original:
+        original[composer.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", composer.FINALITY_FILE,
+        )
     if reserved_industry_turns:
         _OLD, _NEW = _NATIVE_OLD, _NATIVE_NEW
     else:

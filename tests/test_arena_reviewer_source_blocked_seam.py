@@ -41,6 +41,10 @@ def _original_files(prior_flags=False):
                                    if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in names}
     files[composer.GRADER_FILE] = _sources(_FROZEN_GRADER)[0]
+    if composer.FINALITY_FILE in files:
+        files[composer.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", composer.FINALITY_FILE,
+        )
     return files
 
 

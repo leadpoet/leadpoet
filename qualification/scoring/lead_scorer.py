@@ -429,10 +429,13 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+listed\s+(?:shares?|stock)\b", re.I),
     re.compile(
         r"(?:(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
-        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+){1,8}"
+        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®™℠-]*|[&+])\s+){1,8}"
         r"|(?<=[a-z0-9])\s+"
-        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*(?<!\.)|(?:[A-Z]\.)+|[&+])\s+){0,7}"
-        r"(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+)"
+        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®™℠-]*(?<!\.)|(?:[A-Z]\.)+|[&+])\s+){0,7}"
+        r"(?:[A-Z][A-Za-z0-9&,.'’+®™℠-]*|[&+])\s+)"
+        # A display mark may be separated from the issuer by extracted spaces.
+        # Keep it inside this named-issuer match; retain the exact source quote.
+        r"(?:[®™℠]\s*)?"
         + _PUBLIC_EXCHANGE_TICKER_LOCATOR,
     ),
     re.compile(

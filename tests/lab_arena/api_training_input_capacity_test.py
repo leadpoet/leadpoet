@@ -163,6 +163,124 @@ def test_cancelled_active_capture_retains_permit_until_its_worker_finishes(cance
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("queue", ["capture", "shared_worker"])
+@pytest.mark.parametrize("large_body", [False, True])
+def test_disconnected_queued_capture_never_enters_service(queue, large_body):
+    async def scenario():
+        default = anyio.to_thread.current_default_thread_limiter()
+        service = CaptureService(default)
+        app = create_app(service)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                if queue == "capture":
+                    blockers = [post_input(client, str(i)) for i in range(CAPTURE_LIMIT)]
+                    await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
+                else:
+                    blockers = [asyncio.create_task(client.get("/arena/v1/competition")) for _ in range(POOL)]
+                    await wait_until(lambda: service.other_started == POOL)
+                body_read = asyncio.Event()
+                messages = asyncio.Queue()
+                sent = []
+                raw = json.dumps({"input": "x" * 2_204_160 if large_body else "disconnected"}).encode()
+
+                async def receive():
+                    if not body_read.is_set():
+                        body_read.set()
+                        return {"type": "http.request", "body": raw, "more_body": False}
+                    return await messages.get()
+
+                async def send(message):
+                    sent.append(message)
+
+                path = "/arena/v1/runs/disconnected/training-input"
+                scope = {
+                    "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                    "method": "POST", "scheme": "http", "path": path,
+                    "raw_path": path.encode(), "query_string": b"",
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"x-lab-arena-lease", TOKEN.encode())],
+                    "client": ("127.0.0.1", 1234), "server": ("test", 80),
+                }
+                request = asyncio.create_task(app(scope, receive, send))
+                try:
+                    await body_read.wait()
+                    await anyio.sleep(0.02)
+                    assert not request.done()
+                    messages.put_nowait({"type": "http.disconnect"})
+                    # A listener must remove disconnected work while capacity
+                    # is still held, rather than waiting to poll at dispatch.
+                    await asyncio.wait_for(asyncio.shield(request), 0.5)
+                finally:
+                    service.capture_release.set()
+                    service.release.set()
+                    await asyncio.wait_for(asyncio.gather(*blockers, request), 3)
+                assert all(row[0] != "disconnected" for row in service.input_calls)
+                assert next(m["status"] for m in sent if m["type"] == "http.response.start") == 499
+                assert service.capture_active == default.borrowed_tokens == 0
+                service.capture_release.clear()
+                next_wave = [post_input(client, "after-" + str(i)) for i in range(CAPTURE_LIMIT)]
+                try:
+                    await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
+                finally:
+                    service.capture_release.set()
+                    assert all(r.status_code == 200 for r in await asyncio.gather(*next_wave))
+                assert default.borrowed_tokens == 0
+    asyncio.run(scenario())
+
+
+def test_http_disconnect_keeps_active_worker_and_permit_until_finished():
+    async def scenario():
+        default = anyio.to_thread.current_default_thread_limiter()
+        service = CaptureService(default)
+        app = create_app(service)
+        messages = asyncio.Queue()
+        body_read = False
+        disconnect_read = asyncio.Event()
+        sent = []
+
+        async def receive():
+            nonlocal body_read
+            if not body_read:
+                body_read = True
+                return {"type": "http.request", "body": b'{"input":"active"}', "more_body": False}
+            message = await messages.get()
+            disconnect_read.set()
+            return message
+
+        async def send(message):
+            sent.append(message)
+
+        path = "/arena/v1/runs/active/training-input"
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": path,
+            "raw_path": path.encode(), "query_string": b"",
+            "headers": [(b"content-type", b"application/json"),
+                        (b"x-lab-arena-lease", TOKEN.encode())],
+            "client": ("127.0.0.1", 1234), "server": ("test", 80),
+        }
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            active = asyncio.create_task(app(scope, receive, send))
+            await wait_until(lambda: service.capture_active == 1)
+            others = [post_input(client, str(i)) for i in range(CAPTURE_LIMIT)]
+            try:
+                await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
+                messages.put_nowait({"type": "http.disconnect"})
+                await asyncio.wait_for(disconnect_read.wait(), 1)
+                assert not active.done()
+                assert service.capture_active == len(service.input_calls) == CAPTURE_LIMIT
+                assert default.borrowed_tokens == CAPTURE_LIMIT
+            finally:
+                service.capture_release.set()
+                responses = await asyncio.wait_for(asyncio.gather(*others, active), 3)
+            assert all(response.status_code == 200 for response in responses[:-1])
+            assert next(m["status"] for m in sent if m["type"] == "http.response.start") == 499
+            assert service.capture_maximum == CAPTURE_LIMIT
+            assert len(service.input_calls) == CAPTURE_LIMIT + 1
+            assert service.capture_active == default.borrowed_tokens == 0
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("failure", [ServiceError("training_input_unavailable", 503), RuntimeError("synthetic storage failure")])
 def test_capture_exception_returns_both_permits(failure):
     async def scenario():

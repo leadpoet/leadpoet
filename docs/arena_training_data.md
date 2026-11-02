@@ -134,8 +134,11 @@ worker. Waiting captures use no worker. This bounds simultaneous privacy scans,
 hashing and compression while a second capture can progress if one storage call
 is slow. An admitted capture retains its permit until its worker finishes, even
 if its request task is cancelled. Provider calls retain their separate limit of
-32 within the shared 64-worker pool. Authorization, schema checks, stored bytes,
-privacy rules, client deadlines and existing retries stay unchanged.
+32 within the shared 64-worker pool. After the body is read, a disconnect
+listener cancels capture work still waiting for either worker queue. Active
+capture workers finish before their permits return. Authorization, schema
+checks, stored bytes, privacy rules, client deadlines and existing retries stay
+unchanged.
 Request objects record a **planned** outbound request; dispatch receipts determine
 whether the provider was called. A `referenced` pointer is not proof of storage.
 The exporter must read and hash-check its object before it accepts it.

@@ -377,35 +377,51 @@ def create_app(service: ArenaService) -> FastAPI:
             # as competition amounts; all structural/finite limits still apply.
             max_abs_int=None,
         ))
+
         if training_input_limiter is None:
             _ensure_worker_pool()
             training_input_limiter = anyio.CapacityLimiter(TRAINING_INPUT_WORKER_LIMIT)
-        # Acquire before dispatching to the shared worker pool. Queued input
-        # captures consume no workers; service authorization stays unchanged.
-        async with training_input_limiter:
-            response: Optional[JSONResponse] = None
-            error: Optional[BaseException] = None
+        response: Optional[JSONResponse] = None
+        error: Optional[BaseException] = None
+        disconnected = False
 
-            async def capture() -> None:
-                nonlocal response, error
-                try:
+        async def capture() -> None:
+            nonlocal response, error
+            try:
+                # Acquire before dispatching to the shared worker pool.
+                # Waiting input captures consume no shared workers.
+                async with training_input_limiter:
                     response = await no_store_public_call(
                         service.handle_training_input, run_id, lease_token, document,
                     )
-                except BaseException as exc:
-                    # Keep the original exception, rather than replacing it
-                    # with a task-group exception envelope.
-                    error = exc
+            except BaseException as exc:
+                # Preserve the original exception without a group envelope.
+                error = exc
+            finally:
+                group.cancel_scope.cancel()
 
-            # The group retains the permit until an admitted synchronous
-            # capture finishes, even if the ASGI request task is cancelled.
-            # A capture still waiting for a shared worker remains cancellable.
-            async with anyio.create_task_group() as group:
-                group.start_soon(capture)
-            if error is not None:
-                raise error
-            assert response is not None
-            return response
+        async def watch_disconnect() -> None:
+            nonlocal disconnected
+            # The body is fully consumed. Keep receiving while queued so a
+            # paused HTTP transport can observe disconnect, without polling.
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    disconnected = True
+                    group.cancel_scope.cancel()
+                    return
+
+        # Cancellation removes queued work. An admitted synchronous capture
+        # remains shielded by the thread pool and retains its permit to finish.
+        async with anyio.create_task_group() as group:
+            group.start_soon(watch_disconnect)
+            group.start_soon(capture)
+        if disconnected:
+            raise HTTPException(status_code=499, detail="client disconnected")
+        if error is not None:
+            raise error
+        assert response is not None
+        return response
 
     @app.head("/arena/v1/runs/{run_id}/training-observations")
     async def authorize_training_observations(

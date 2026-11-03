@@ -194,6 +194,8 @@ def test_result_projection_uses_fixed_json_aliases_in_both_transports():
     assert params["status"] == "eq.published"
     assert "configuration_doc" not in params["select"].split(",")
     assert "stage2_scoring_plan_doc" not in params["select"]
+    for key in ("scorer_image_digest", "scorer_image_reference"):
+        assert "cfg_%s:configuration_doc->%s::text" % (key, key) in params["select"].split(",")
     assert {column for column in params["select"].split(",") if ":configuration_doc" in column} == {
         "cfg_%s:configuration_doc->%s::text" % (key, key)
         for key in PUBLIC_RESULTS_CONFIGURATION_FIELDS
@@ -216,4 +218,6 @@ def test_result_projection_uses_fixed_json_aliases_in_both_transports():
     assert "status = %s" in sql and values == [ROUND_ID, "published"]
     assert ":configuration_doc" not in sql
     for key in PUBLIC_RESULTS_CONFIGURATION_FIELDS:
+        assert "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key) in sql
+    for key in ("scorer_image_digest", "scorer_image_reference"):
         assert "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key) in sql

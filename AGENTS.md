@@ -1,18 +1,13 @@
-## Scoped authorization: November 3 prospective verifier accuracy
+## Scoped authorization: November 3 MyCHN checkpoint sixth
 
-The user authorized narrow prospective verifier accuracy fixes and bounded
-organizer-funded tests. The current task budget is $16 total across all
-providers, including failed calls and unresolved reservations; the $0.50
-retrieval subcap is part of that total, not a new allowance. Preserve every
-previous charge and use the shared guarded task ledger. Preserve historical
-inputs, judgments, scores, rewards, frozen model policies and rejection rules.
-Keep PR981 numeric identity checks and the production release owner's work.
-Do not include the unproven PR929 wider-context experiment. Internal agents may
-implement, test and commit in this isolated checkout only; they must not push,
-merge, deploy, change production or renew credentials. The coordinator owns
-independent review and any later release after full native positive improvement,
-negative controls and the existing production owner's release handoff. Add no
-new judging system, dependency or unrelated architecture.
+The coordinator authorized exact migration612 to append one sixth judgment for
+sub-0df2d0295c950d907e094e258bf98905, stage2 ICP7, using the reviewed four-file
+runtime sha256:1b871e1c80e6d3c4095b14d73166dc5d37dde5f5002aa622583d4350b198fa4b.
+Keep the five failed attempts, completed company and signal judgments, costs,
+source, grading/cache identity, original deadlines and all other work unchanged.
+No automatic seventh, count reset, replay of completed work or new retry system is allowed.
+Internal agents implement and test only; the coordinator owns independent review,
+push, merge, exact committed migration application and live verification.
 
 ## Scoped authorization: November 3 remaining-work recovery
 
@@ -1040,3 +1035,19 @@ recovery architecture, provider calls or credential renewal. The coordinator own
 independent review, exact image build/verification and push, safe merge, prospective
 scorer-default configuration and canonical rollout for newly frozen rounds.
 Preserve current committed round configurations and existing leased images.
+
+## Scoped authorization: November 3 prospective verifier accuracy
+
+The user authorized narrow prospective verifier accuracy fixes and bounded
+organizer-funded tests. The current task budget is $16 total across all
+providers, including failed calls and unresolved reservations; the $0.50
+retrieval subcap is part of that total, not a new allowance. Preserve every
+previous charge and use the shared guarded task ledger. Preserve historical
+inputs, judgments, scores, rewards, frozen model policies and rejection rules.
+Keep PR981 numeric identity checks and the production release owner's work.
+Do not include the unproven PR929 wider-context experiment. Internal agents may
+implement, test and commit in this isolated checkout only; they must not push,
+merge, deploy, change production or renew credentials. The coordinator owns
+independent review and any later release after full native positive improvement,
+negative controls and the existing production owner's release handoff. Add no
+new judging system, dependency or unrelated architecture.

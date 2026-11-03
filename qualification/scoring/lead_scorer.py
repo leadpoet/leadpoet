@@ -1441,17 +1441,14 @@ def _bound_public_supersession_supports_company(
     return False
 
 
-# Anonymous references cannot supply a company's named acquisition identity.
-_ACQUISITION_ANONYMOUS_REFERENCE_NAMES = {
-    ("company",), ("we",), ("us",), ("it",),
-}
-
-
 def _acquired_stage_quote_supports_names(
     company_names: Sequence[Any],
     quote: str,
 ) -> bool:
-    """Require completed acquisition/current-parent proof for named entities."""
+    """Require completed acquisition/current-parent proof for named entities.
+
+    Callers must bind short identities to submitted/verified or proven aliases.
+    """
 
     if not isinstance(quote, str) or not quote.strip():
         return False
@@ -1462,8 +1459,7 @@ def _acquired_stage_quote_supports_names(
         for name in company_names
     }
     normalized_names = {
-        name for name in normalized_names
-        if name and name not in _ACQUISITION_ANONYMOUS_REFERENCE_NAMES
+        name for name in normalized_names if name
     }
     if not normalized_names:
         return False
@@ -1491,7 +1487,7 @@ def _acquired_stage_quote_supports_names(
             alias = tuple(re.findall(r"[a-z0-9]+", str(
                 match.groupdict().get("alias") or ""
             ).casefold()))
-            if (alias and alias not in _ACQUISITION_ANONYMOUS_REFERENCE_NAMES
+            if (alias and alias not in {("company",), ("we",), ("us",)}
                     and not set(subject) & {
                         "assets", "business", "division", "unit", "brand",
                         "portfolio", "stake", "interest", "shares",
@@ -1541,8 +1537,12 @@ def _acquired_stage_quote_supports_company(
 
     if company is None:
         return False
+    # The submitted identity can be short; an unverified observed alias cannot
+    # introduce a new short company identity into saved-stage proof.
     return _acquired_stage_quote_supports_names(
-        (company.company_name, observed_company_name),
+        (company.company_name, observed_company_name)
+        if len(_compact_company_name(observed_company_name)) >= 4
+        else (company.company_name,),
         quote,
     )
 

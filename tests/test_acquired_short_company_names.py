@@ -144,19 +144,6 @@ def test_untrusted_short_pronoun_alias_cannot_replace_verified_company():
     assert actual["stage"]["status"] == "UNPROVEN"
 
 
-@pytest.mark.parametrize("reference", ["company", "we", "us", "it"])
-@pytest.mark.parametrize("case", [str.lower, str.upper, str.title])
-def test_anonymous_references_cannot_be_company_names_or_target_aliases(reference, case):
-    token = case(reference)
-    for quote in (
-        f"{token} was acquired by Parent.",
-        f"{token} is a wholly owned subsidiary of Parent.",
-        f"Parent completed its acquisition of {token}.",
-        f'Parent completed its acquisition of Example Corporation ("{token}").',
-    ):
-        assert not lead_scorer._acquired_stage_quote_supports_names(("Wiz", token), quote)
-
-
 @pytest.mark.parametrize("quote", [
     "Parent completed its acquisition of Boxwood.",
     "Parent completed its acquisition of Sandbox.",
@@ -187,7 +174,8 @@ def test_synthetic_short_current_parent_survives_saved_stage_json():
     finding = investigator._validated_findings(
         {"findings": [raw]}, targets=("stage",), fetched_pages={url: quote},
         fetched_final_urls={url: url}, first_party_domains={"box.com"},
-        identity_names={"box"}, requested_stage="series c+",
+        identity_names={"box"}, identity_anchor={"submitted_name": "Box"},
+        requested_stage="series c+",
     )["stage"]
     assert finding["status"] == "CONTRADICTED"
     projected = lead_scorer._project_investigator_stage({}, finding, icp_stage="series c+")
@@ -217,5 +205,99 @@ def test_untrusted_pronoun_alias_does_not_survive_saved_stage_decision():
     retained = json.loads(json.dumps(verdict))
     assert lead_scorer._decision_from_observed_stage(
         retained, "series c+", company=_company(name="Wiz", website="https://www.wiz.io"),
+        evidence_attributed=True,
+    ) == "unavailable"
+
+
+@pytest.mark.parametrize("alias", ["he", "she", "you", "our", "its", "Arm"])
+def test_untrusted_short_observed_alias_is_not_acquisition_identity(alias):
+    quote = f"{alias} was acquired by Parent."
+    url = "https://parent.example/news/acquisition"
+    raw = dict(target="stage", status="VERIFIED", observed_value="Acquired",
+        evidence_url=url, evidence_quote=quote, reason="Synthetic unrelated observed alias.")
+    findings = investigator._validated_findings(
+        {"findings": [raw]}, targets=("stage",), fetched_pages={url: quote},
+        fetched_final_urls={url: url}, first_party_domains={"wiz.io"},
+        identity_names={"wiz", alias.casefold()}, identity_anchor={
+            "submitted_name": "Wiz", "verified_name": "Wiz", "observed_name": alias,
+        }, requested_stage="acquired",
+    )
+    assert findings["stage"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("alias", ["Arm", "he", "she", "you", "our", "its", "it"])
+@pytest.mark.parametrize("wrong_buyer", [False, True])
+def test_forged_stage_finding_cannot_authorize_short_observed_identity(alias, wrong_buyer):
+    from tests.test_company_evidence_investigator import _company
+
+    quote = f"Wiz completed its acquisition of {alias}." if wrong_buyer else f"{alias} was acquired by Parent."
+    url = "https://parent.example/news/acquisition"
+    finding = dict(target="stage", status="VERIFIED", observed_value="Acquired",
+        evidence_url=url, evidence_quote=quote, reason="Synthetic forged validated finding.")
+    verdict = lead_scorer._project_investigator_stage(
+        {"observed_company_name": alias}, finding, icp_stage="acquired",
+    )
+    assert lead_scorer._decision_from_observed_stage(
+        json.loads(json.dumps(verdict)), "acquired", validated_stage_finding=finding,
+        company=_company(name="Wiz", website="https://www.wiz.io"),
+        evidence_attributed=True,
+    ) == "unavailable"
+
+
+@pytest.mark.parametrize("name", ["Wiz", "Box", "Arm", "ADT"])
+@pytest.mark.parametrize("authority_key", ["submitted_name", "verified_name"])
+def test_short_acquisition_names_require_submitted_or_verified_authority(name, authority_key):
+    quote = f"Parent completed its acquisition of {name}."
+    url = "https://parent.example/news/acquisition"
+    finding = dict(target="stage", status="VERIFIED", observed_value="Acquired",
+        evidence_url=url, evidence_quote=quote, reason="Synthetic explicit identity authority.")
+    accepted = investigator._validated_findings(
+        {"findings": [finding]}, targets=("stage",), fetched_pages={url: quote},
+        fetched_final_urls={url: url}, first_party_domains={"wiz.io"},
+        identity_names={name.casefold()}, identity_anchor={authority_key: name},
+        requested_stage="acquired",
+    )
+    assert accepted["stage"]["status"] == "VERIFIED"
+    rejected = investigator._validated_findings(
+        {"findings": [finding]}, targets=("stage",), fetched_pages={url: quote},
+        fetched_final_urls={url: url}, first_party_domains={"wiz.io"},
+        identity_names={name.casefold()}, identity_anchor={"observed_name": name},
+        requested_stage="acquired",
+    )
+    assert rejected["stage"]["status"] == "UNPROVEN"
+
+
+def test_synthetic_validated_rebrand_authorizes_short_stage_name_without_saved_bypass():
+    from tests.test_company_evidence_investigator import _company
+
+    rebrand_url = "https://www.wiz.io/rebrand"
+    stage_url = "https://parent.example/news/acquisition"
+    rebrand_quote = "Arm is now Wiz following our rebrand. The domain changed from arm.com to wiz.io."
+    stage_quote = "Arm was acquired by Parent."
+    rebrand = dict(target="rebrand", status="VERIFIED", observed_value="Wiz",
+        evidence_url=rebrand_url, evidence_quote=rebrand_quote,
+        old_name="Arm", new_name="Wiz", old_domain="arm.com", new_domain="wiz.io",
+        shared_linkedin_slug="arm", reason="Synthetic completed rebrand.")
+    stage = dict(target="stage", status="VERIFIED", observed_value="Acquired",
+        evidence_url=stage_url, evidence_quote=stage_quote, reason="Synthetic acquired alias.")
+    findings = investigator._validated_findings(
+        {"findings": [stage, rebrand]}, targets=("stage", "rebrand"),
+        fetched_pages={rebrand_url: rebrand_quote, stage_url: stage_quote},
+        fetched_final_urls={rebrand_url: rebrand_url, stage_url: stage_url},
+        first_party_domains={"arm.com", "wiz.io"}, identity_names={"wiz"},
+        identity_anchor={"submitted_name": "Wiz", "verified_name": "Wiz"},
+        requested_stage="acquired",
+    )
+    assert findings["rebrand"]["status"] == "VERIFIED"
+    assert findings["stage"]["status"] == "VERIFIED"
+    projected = lead_scorer._project_investigator_stage(
+        {"observed_company_name": "Arm"}, findings["stage"], icp_stage="acquired",
+    )
+    # No new saved receipt is introduced. The short observed alias alone does
+    # not transfer identity authority through an arbitrary finding dictionary.
+    assert lead_scorer._decision_from_observed_stage(
+        json.loads(json.dumps(projected)), "acquired",
+        validated_stage_finding=json.loads(json.dumps(findings["stage"])),
+        company=_company(name="Wiz", website="https://www.wiz.io"),
         evidence_attributed=True,
     ) == "unavailable"

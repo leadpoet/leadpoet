@@ -231,3 +231,63 @@ def test_replay_ledger_proof_checks_effective_route_without_request_data():
         "host_compat_reservations": 0,
         "mismatched_reservations": 1,
     }
+
+
+def _source_http_reservation():
+    route = scoring_provider_compat.route_for(
+        kind="score", funding_source="host", round_id=ROUND_ID,
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://www.unisys.com/news/partnership.pdf"},
+        timeout_ms=60_000, allow_host_shadow_score=True,
+        source_content_fallback=True,
+    )
+    assert route is not None
+    assert route.compatibility_version == (
+        scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+    )
+    return {
+        "entry_kind": "reservation", "operation_id": "scrapingdog.scrape",
+        "provider": "deepline", "funding_source": "host",
+        "entry_doc": route.summary(),
+    }
+
+
+def _source_http_ledger_proof(row):
+    service = SimpleNamespace(
+        store=SimpleNamespace(list_ledger=lambda *, run_id: [row]),
+    )
+    return _replay_score_route_ledger(
+        service, [{"kind": "score", "run_id": "score-run"}],
+    )
+
+
+def test_replay_ledger_proof_accepts_current_native_source_http_fallback():
+    assert _source_http_ledger_proof(_source_http_reservation()) == {
+        "eligible_reservations": 1,
+        "host_compat_reservations": 1,
+        "mismatched_reservations": 0,
+    }
+
+
+@pytest.mark.parametrize(("row_change", "document_change"), [
+    ({"provider": "scrapingdog"}, {}),
+    ({"funding_source": "miner_key"}, {}),
+    ({"operation_id": "scrapingdog.x_post"}, {}),
+    ({"operation_id": "scrapingdog.linkedinjobs"}, {}),
+    ({"operation_id": "scrapingdog.profile_post"}, {}),
+    ({}, {"effective_operation_id": "scrapingdog.scrape"}),
+    ({}, {"compatibility_version": "miner-score-deepline-source-http:v3"}),
+    ({}, {"adapter": "firecrawl_raw_html"}),
+    ({}, {"adapter": "generic_ats_json:lever"}),
+    ({}, {"adapter": ""}),
+    ({}, {"adapter": None}),
+])
+def test_source_http_ledger_proof_rejects_wrong_route(row_change, document_change):
+    row = _source_http_reservation()
+    row.update(row_change)
+    row["entry_doc"].update(document_change)
+    assert _source_http_ledger_proof(row) == {
+        "eligible_reservations": 1,
+        "host_compat_reservations": 0,
+        "mismatched_reservations": 1,
+    }

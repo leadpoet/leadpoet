@@ -1382,6 +1382,7 @@ def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, mo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     cache.rootfs_for(digests[0])
     cache.rootfs_for(digests[1])
@@ -1413,6 +1414,7 @@ def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_expo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     with cache.acquire(first) as active_rootfs:
         cache.rootfs_for(second)

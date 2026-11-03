@@ -1,3 +1,16 @@
+## Scoped authorization: November 3 baseline judgment correction
+
+The user authorized superseding exactly the nine old-verifier November 3
+baseline judgments, positions 0-7 and 9. Migration618 retains each full original
+judgment in append-only supersession history, marks that comparison authority
+superseded, and queues native judging of the same saved executions. Preserve
+baseline ICP8, all miner judgments, executions, source, model/scorer policy,
+provider records, costs and signed historical reward authority. Clear only the
+nine source score projections and the current publication decision, and extend
+only judge/publication deadlines to the approved November 3 cutoff. Internal
+agents implement and test only. The coordinator owns independent review, merge,
+exact migration application, canonical release and deployed verification.
+
 ## Scoped authorization: November 3 active Deepline filter pushdown
 
 The coordinator authorized exact migration616 to push only the implied round,

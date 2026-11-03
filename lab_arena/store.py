@@ -384,6 +384,8 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
 )
 # Fixed computed projections for direct SQL and PostgREST transports.
 _RUNTIME_JSON_COLUMNS = {
+    "training_recovered_response:lab_arena_training_deepline_response_v1":
+        "public.lab_arena_training_deepline_response_v1(lab_arena_ledger) AS training_recovered_response",
     "execution_attempt:lab_arena_execution_attempt_count":
         "public.lab_arena_execution_attempt_count(lab_arena_runs) AS execution_attempt",
     PUBLIC_CONFIGURATION_COLUMN:
@@ -2990,6 +2992,7 @@ class ArenaStore:
         operation_id: Optional[str] = None,
         after_entry_id: Optional[int] = None,
         limit: Optional[int] = None,
+        training_responses: bool = False,
     ) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {}
         if run_id:
@@ -3014,6 +3017,8 @@ class ArenaStore:
             "filters": filters or None,
             "order": "entry_id",
         }
+        if training_responses:
+            arguments["columns"] = "*,training_recovered_response:lab_arena_training_deepline_response_v1"
         if limit is not None:
             arguments["limit"] = limit
         if after_entry_id is not None:

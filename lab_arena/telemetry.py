@@ -46,6 +46,7 @@ candidate query. They never carry a run ID or provider payload.
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Optional
@@ -284,6 +285,29 @@ def record_gate(
         pass
 
 
+# The export boundary accepts an error type only if it matches this pattern
+# (``gateway.observability.otel_bootstrap._ERROR_TYPE_RE``), and it drops the
+# whole span when an attribute is rejected. Checking here keeps a bad label
+# from costing us the observation itself.
+_ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _error_type(exc: BaseException) -> str:
+    """The machine label for a failed stage.
+
+    The class name says a stage raised ``CatalogError``; it cannot say which
+    rule rejected the catalog, and an operator looking at an Arena that opened
+    no round needs the second answer. An exception may therefore name its own
+    label through ``arena_error_type`` — a bounded identifier the raising code
+    chose from a closed set, never a message and never anything derived from a
+    provider response. Anything else falls back to the class name.
+    """
+    label = getattr(exc, "arena_error_type", None)
+    if isinstance(label, str) and _ERROR_TYPE_RE.fullmatch(label):
+        return label
+    return type(exc).__name__
+
+
 class StageResult:
     """Mutable handle a stage body uses to report magnitude and idleness."""
 
@@ -311,7 +335,7 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
         record(
             name,
             "failed",
-            error_type=type(exc).__name__,
+            error_type=_error_type(exc),
             duration_ms=(time.monotonic() - start_mono) * 1000.0,
             start_ns=start_ns,
             store_error=_store_error_metadata(exc),

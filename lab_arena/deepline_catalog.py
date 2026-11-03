@@ -50,7 +50,17 @@ _COMPANY_SQL_PAREN_KEYWORDS = frozenset({"SELECT", "DISTINCT", "ON", "CASE", "WH
 
 
 class CatalogError(ValueError):
-    """Bounded error; provider metadata and request values are never echoed."""
+    """Bounded error; provider metadata and request values are never echoed.
+
+    Every reason below is a literal this module chose, so it is safe to carry
+    into telemetry as the stage's error type: ``CatalogError`` alone cannot
+    tell an operator which rule rejected the catalog, and round creation fails
+    closed on this error.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.arena_error_type = "deepline_catalog_%s" % reason
 
 
 def _encoded(value: Any) -> str:

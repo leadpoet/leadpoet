@@ -1,6 +1,6 @@
 """Funding proof semantics stay strict with wide retained provider responses."""
 from pathlib import Path
-import time
+import json
 import pytest
 from tests.lab_arena import proven_funding_recovery524_postgres_test as prior
 from tests.lab_arena.quiescence_recovery_gate522_postgres_test import reset
@@ -41,14 +41,51 @@ def test_wide_native_responses_parse_once_without_changing_proof(database):
         import re
         text=SQL.read_text();old=re.search(r'\$old_funding_scalar526\$(.*?)\$old_funding_scalar526\$',text,re.S).group(1);replacement=re.search(r'\$new_funding_scalar526\$(.*?)\$new_funding_scalar526\$',text,re.S).group(1)
         assert new.count(replacement)==1
-        q.execute(new.replace(replacement,old))
-        started=time.monotonic();assert prior.proof(q,run['run_id']) is False;old_seconds=time.monotonic()-started
-        q.execute(new)
-        started=time.monotonic();assert prior.proof(q,run['run_id']) is False;new_seconds=time.monotonic()-started
+        keys=json.dumps([{'provider':'deepline','fingerprint':prior.FINGERPRINT,'denied_at':denial.isoformat()}])
+        parameters=(run['round_id'],run['submission_id'],run['miner_hotkey'],run['scoring_generation_floor'],keys)
+
+        def assert_parse_once(nodes):
+            projections=[node for node in nodes if node.get('Function Name')=='jsonb_to_record']
+            assert len(projections)==2, 'expected two materialized JSON projections'
+            # 501 paid calls plus the original credit denial, each parsed once
+            # for its reservation and once for its terminal response.
+            assert all(node['Actual Rows']==1 and node['Actual Loops']==502 for node in projections)
+            for name in ('scoped','outcomes'):
+                producers=[node for node in nodes if node.get('Subplan Name')=='CTE '+name]
+                assert len(producers)==1
+                assert producers[0]['Actual Rows']==502 and producers[0]['Actual Loops']==1
+            scans=[node for node in nodes if node.get('CTE Name')=='outcomes']
+            assert len(scans)>=2
+            assert any('native_request_id' in node.get('Filter','') for node in scans)
+            assert not any(re.search(r'\.(response|head_doc|entry_doc)$',field)
+                           for node in scans for field in node.get('Output',[]))
+
+        # Measure bounded work, not a single noisy wall-clock speed ratio.
+        # Keep the actual proof calls and a timeout for runaway SQL execution.
+        q.execute("SET LOCAL statement_timeout='5s'")
+        for source,optimized in ((new.replace(replacement,old),False),(new,True)):
+            q.execute(source)
+            assert prior.proof(q,run['run_id']) is False
+            q.execute('SELECT pg_get_functiondef(%s::regprocedure)',(prior.SIG,))
+            installed=q.fetchone()[0]
+            start=installed.index('    WITH required AS MATERIALIZED (')
+            end=installed.index('    )) FROM required k',start)+len('    )) FROM required k')
+            query=installed[start:end]
+            for index,name in enumerate(('round_id','submission_id','miner_hotkey','scoring_generation_floor'),1):
+                query=query.replace('requested_run.'+name,'$'+str(index))
+            query=query.replace('jsonb_array_elements(credit_keys)','jsonb_array_elements($5)')
+            q.execute('PREPARE scalar526(text,text,text,bigint,jsonb) AS '+query)
+            q.execute('EXPLAIN(ANALYZE,VERBOSE,FORMAT JSON,TIMING FALSE) EXECUTE scalar526(%s,%s,%s,%s,%s)',parameters)
+            pending=[q.fetchone()[0][0]['Plan']];nodes=[]
+            while pending:
+                node=pending.pop();nodes.append(node);pending.extend(node.get('Plans',[]))
+            q.execute('DEALLOCATE scalar526')
+            if optimized:
+                assert_parse_once(nodes)
+            else:
+                with pytest.raises(AssertionError,match='two materialized JSON projections'):
+                    assert_parse_once(nodes)
         assert prior.snapshot(q)==before
-        print('526 wide responses=501 old_seconds=%.6f new_seconds=%.6f'%(old_seconds,new_seconds))
-        assert new_seconds<old_seconds*.8
-        assert new_seconds<1.0
 
 
 @pytest.mark.parametrize('installed',[False,True])

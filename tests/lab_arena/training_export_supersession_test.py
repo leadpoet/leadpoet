@@ -79,11 +79,45 @@ def test_missing_or_inconsistent_protected_policy_history_fails_closed(mutation)
 
 def test_old_input_must_match_recorded_old_policy_not_current_policy():
     values = regraded_example()
+    current = assemble_example(**values)
+    revisions = values["scoring_policy_history"]["revisions"][0]
     wrong = training_input.read_input(values["objects"], "judge:2", "score", 1, CLAIM_HASH)["input"]
+    assert wrong["scorer_policy"] == revisions["new_scorer_policy"]
+    assert wrong["scorer_policy"] != revisions["old_scorer_policy"]
     save_input(values["objects"], "judge:1", "score", wrong)
     result = assemble_example(**values)
     assert not result["completeness"]["complete"]
-    assert "judge_input_context_mismatch" in result["completeness"]["incomplete_reasons"]
+    code = "prior_attempt_judge_input_context_mismatch"
+    assert result["completeness"]["incomplete_reasons"] == [code]
+    assert result["completeness"]["reasons_by_dimension"]["research_process"] == [code]
+    assert result["related_run_gap_attribution"]["judge:1"]["research_process_gaps"] == [code]
+    assert result["related_run_gap_attribution"]["judge:2"]["research_process_gaps"] == []
+    assert result["completeness"]["dimensions"]["exact_inputs"]
+    assert result["completeness"]["dimensions"]["source_identity"]
+    assert result["completeness"]["dimensions"]["input_output_label"]
+    assert result["score_run_id"] == "judge:2"
+    assert result["judgment"] == current["judgment"]
+    assert result["companies"] == current["companies"]
+    assert result["input_snapshots"]["judge:1"]["input"] == wrong
+    attempts = {item["run_id"]: item for item in result["attempts"]}
+    assert attempts["judge:1"]["scoring_policy_hash"] == contracts.document_hash(revisions["old_scorer_policy"])
+    assert attempts["judge:2"]["scoring_policy_hash"] == contracts.document_hash(revisions["new_scorer_policy"])
+
+
+def test_selected_regrade_input_policy_mismatch_remains_a_hard_conflict():
+    values = regraded_example()
+    old = training_input.read_input(values["objects"], "judge:1", "score", 1, CLAIM_HASH)["input"]
+    save_input(values["objects"], "judge:2", "score", old)
+    result = assemble_example(**values)
+    code = "judge_input_context_mismatch"
+    assert result["score_run_id"] == "judge:2"
+    assert result["completeness"]["complete"] is False
+    assert result["completeness"]["incomplete_reasons"] == [code]
+    assert result["completeness"]["reasons_by_dimension"]["exact_inputs"] == [code]
+    assert result["completeness"]["dimensions"]["exact_inputs"] is False
+    assert result["completeness"]["reasons_by_dimension"]["research_process"] == [code]
+    assert result["related_run_gap_attribution"]["judge:1"]["research_process_gaps"] == []
+    assert result["privacy"]["exact_replay"] is False
 
 
 def test_multiple_revisions_preserve_the_intermediate_attempt_policy():

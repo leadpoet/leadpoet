@@ -138,8 +138,7 @@ BEGIN
  FROM public.lab_arena_ledger WHERE round_id=rid;
  n:=r; n.status:='scored'; n.status_generation:=r.status_generation+1;
  n.publication_doc:=NULL; n.published_at:=NULL; n.king_outcome:=NULL; n.king_hotkey:=NULL;
- n.configuration_doc:=jsonb_set(jsonb_set(jsonb_set(r.configuration_doc,
-  '{schedule,stage_1_scoring_close}','"2026-11-03T23:45:00Z"'),
+ n.configuration_doc:=jsonb_set(jsonb_set(r.configuration_doc,
   '{schedule,final_scoring_close}','"2026-11-03T23:45:00Z"'),
   '{schedule,publication_deadline}','"2026-11-03T23:59:00Z"');
  FOR item IN SELECT value FROM jsonb_array_elements(manifest->'work_items') LOOP

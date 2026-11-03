@@ -3,11 +3,13 @@ from copy import deepcopy
 import json
 import re
 from types import SimpleNamespace
+from datetime import datetime, timezone
+from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
 
 import pytest
 
 from lab_arena.service import ArenaService
-from lab_arena import contracts, scoring
+from lab_arena import contracts, scoring, company_judgments
 from lab_arena.store import hash_lease_token
 from tests.lab_arena import nov03_corrected_judge607_postgres_test as prior
 
@@ -18,7 +20,7 @@ scalar=prior.scalar
 
 
 @pytest.fixture
-def prepared():
+def prepared(request):
     generator=prior.database.__wrapped__(); pg,dsn=next(generator)
     store=None
     try:
@@ -44,8 +46,16 @@ def prepared():
                 cur.execute("UPDATE public.lab_arena_runs SET per_icp_score=42 WHERE round_id=%s AND kind='execute'",(ROUND,))
                 cur.execute("UPDATE public.lab_arena_rounds SET status='published',status_generation=10,stage_generation=7,participants=%s::jsonb,publication_doc='{\"original\":true}',king_outcome='no_king',published_at=now(),reward_basis_hash='sha256:'||repeat('a',64),reward_basis_doc='{\"original_reward\":true}',signing_key_doc='{\"original_key\":true}',effective_reward_epoch=26177,reward_activated_at=now() WHERE round_id=%s",(json.dumps(participants),ROUND))
                 cur.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=false,guard_generation=759,guard_commitment='',owner_commitment='',guard_expires_at=NULL,candidate_commit='',restart_scope='',restart_phase='',captured_leases='[]' WHERE singleton")
+                configuration=base_round_configuration()
+                configuration.update(scalar(cur,'SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s',(ROUND,)))
+                configuration.update(round_id=ROUND,cost_per_company_microusd=800000,execution_icp_cap_microusd=4000000)
+                configuration['schedule']={key:value.replace('2026-09-01','2026-11-02').replace('2026-09-02','2026-11-03') for key,value in base_round_configuration()['schedule'].items()}
+                configuration=contracts.validate_round_configuration(configuration)
+                cur.execute('UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s',(json.dumps(configuration),ROUND))
                 cur.execute('SET LOCAL session_replication_role=origin')
             conn.commit()
+            if getattr(request,'param',False):
+                objects['output0.json']=json.dumps({'schema_version':contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,'companies':prior._input()['companies']}).encode()
             row=store.get_round(ROUND)
             sources=store.list_runs(ROUND,stage=1,kind='execute')
             items=[dict(scored_run_id=s['run_id'],submission_id=s['submission_id'],icp_position=s['icp_position'],output_ref=s['output_ref']) for s in sources if s['icp_position']!=8]
@@ -86,6 +96,8 @@ def test_supersession_requires_receipt_then_preserves_all_payloads_and_replays(p
     assert after['status']=='scored' and after['scoring_generation_floor']==0
     assert after['publication_doc'] is None and after['published_at'] is None
     assert after['king_outcome'] is None and after['king_hotkey'] is None
+    assert contracts.validate_round_configuration(after['configuration_doc'])==after['configuration_doc']
+    assert after['configuration_doc']['schedule']['stage_1_scoring_close']==p.row['configuration_doc']['schedule']['stage_1_scoring_close']
     for key in ('reward_basis_doc','reward_basis_hash','signing_key_doc','effective_reward_epoch','reward_activated_at'):
         assert after[key]==p.row[key]
     with p.conn.cursor() as cur:
@@ -202,3 +214,26 @@ def test_wrong_authority_rolls_back_every_change(prepared,fault):
         assert all_rows(cur)==p.before
         assert scalar(cur,'SELECT count(*) FROM public.lab_arena_scoring_supersessions WHERE round_id=%s AND request_id=%s',(ROUND,REQUEST))==0
     assert p.store.get_round(ROUND)==p.row
+
+
+@pytest.mark.parametrize('prepared',[True],indirect=True)
+def test_nonempty_native_lease_uses_valid_configuration_after_expired_stage_one(prepared):
+    p=prepared
+    assert datetime.fromisoformat(p.row['configuration_doc']['schedule']['stage_1_scoring_close'].replace('Z','+00:00'))<datetime.now(timezone.utc)
+    with p.conn.cursor() as cur: cur.execute(p.sql)
+    p.conn.commit()
+    current=p.store.get_round(ROUND)
+    assert contracts.validate_round_configuration(current['configuration_doc'])==current['configuration_doc']
+    invalid=deepcopy(current['configuration_doc'])
+    invalid['schedule']['stage_1_scoring_close']=invalid['schedule']['final_scoring_close']
+    with pytest.raises(contracts.ArenaContractError,match='strictly increasing'):
+        contracts.validate_round_configuration(invalid)
+    with p.conn.cursor() as cur:
+        cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("UPDATE public.lab_arena_runs SET created_at=now()-interval '30 minutes' WHERE round_id=%s AND status='pending'",(ROUND,))
+        cur.execute('SET LOCAL session_replication_role=origin')
+    p.conn.commit()
+    lease=prior.claim(p.conn)
+    assert lease['status']=='leased' and lease['icp_position']==0
+    context=company_judgments.validate_lease_context(lease['company_judgment_cache'])
+    assert context['misses']

@@ -4476,7 +4476,9 @@ def _validated_findings(
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
                         tuple(name for name in stage_attribution_names
-                              if len(name) >= 4 or name in acquisition_short_identity_names),
+                              if len(acquisition_name := re.sub(
+                                  r"[^a-z0-9]+", "", _normalized_span(name),
+                              )) >= 4 or acquisition_name in acquisition_short_identity_names),
                         finding["evidence_quote"],
                     )
                 ):

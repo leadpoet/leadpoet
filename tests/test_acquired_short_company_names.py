@@ -301,3 +301,33 @@ def test_synthetic_validated_rebrand_authorizes_short_stage_name_without_saved_b
         company=_company(name="Wiz", website="https://www.wiz.io"),
         evidence_attributed=True,
     ) == "unavailable"
+
+
+@pytest.mark.parametrize(("identity_names", "quote", "expected_status"), [
+    ({"Wiz"}, "Wiz was acquired by Parent.", "VERIFIED"),
+    ({"wiz", "A B C"}, "ABC was acquired by Parent.", "UNPROVEN"),
+])
+def test_synthetic_acquisition_authority_uses_normalized_candidate_names(
+    monkeypatch, identity_names, quote, expected_status,
+):
+    matcher_names = []
+    original_matcher = lead_scorer._acquired_stage_quote_supports_names
+
+    def capture_matcher(names, source_quote):
+        matcher_names.append(names)
+        return original_matcher(names, source_quote)
+
+    monkeypatch.setattr(lead_scorer, "_acquired_stage_quote_supports_names", capture_matcher)
+    url = "https://www.wiz.io/news/acquisition"
+    finding = dict(target="stage", status="VERIFIED", observed_value="Acquired",
+        evidence_url=url, evidence_quote=quote, reason="Synthetic raw identity normalization.")
+    result = investigator._validated_findings(
+        {"findings": [finding]}, targets=("stage",), fetched_pages={url: quote},
+        fetched_final_urls={url: url}, first_party_domains={"wiz.io"},
+        identity_names=identity_names, identity_anchor={
+            "submitted_name": "Wiz", "observed_name": "Wiz", "verified_name": "Wiz",
+            "submitted_domain": "wiz.io", "observed_domain": "wiz.io", "verified_domain": "wiz.io",
+        }, requested_stage="acquired",
+    )
+    assert result["stage"]["status"] == expected_status
+    assert set(matcher_names[0]) == identity_names & {"Wiz", "wiz"}

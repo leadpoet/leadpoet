@@ -1260,6 +1260,22 @@ __all__ = [
 ]
 
 
+def _history_participants(row: Mapping[str, Any], rankings: Mapping[str, Mapping[str, Any]],
+                          exclusions: Mapping[str, Mapping[str, Any]]) -> list:
+    """A published round's public entrants, highest final score first.
+
+    Unscored and recovery-excluded entrants follow; the submission id breaks
+    ties. Published rankings never change, so pages resume at a stable place.
+    """
+    def order(item: Mapping[str, Any]) -> tuple:
+        submission_id = str(item.get("submission_id") or "")
+        score = None if submission_id in exclusions else _score(
+            (rankings.get(submission_id) or {}).get("final_score"))
+        return (score is None, -(score or 0.0), submission_id)
+    return sorted((item for item in (*_participants(row), *exclusions.values())
+                   if item.get("submission_id")), key=order)
+
+
 def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int = 25,
                      day: Optional[str] = None, hotkey: str = "") -> dict:
     """Bounded keyset pagination over immutable, published score records."""
@@ -1271,6 +1287,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
     entries, summaries, evaluation_floors = [], {}, {}
     before = None
     resume = None
+    resume_round = None
     if cursor:
         try:
             state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
@@ -1286,6 +1303,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             if resume.get("status") != "published" or _timestamp(resume.get("created_at")) != created:
                 raise ValueError()
             before = (str(resume["created_at"]), round_id)
+            resume_round = round_id
         except (ValueError, TypeError, KeyError):
             raise ServiceError("history_cursor_invalid", 400)
     else:
@@ -1335,14 +1353,19 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             champion_id = _champion_submission_id(row)
             exclusions = _recovery_exclusions(service, row)
             evaluation_floors[str(row["round_id"])] = int(row.get("scoring_generation_floor") or 0)
-            last_submission = after_submission
-            public_participants = (*_participants(row), *exclusions.values())
-            for participant in sorted(public_participants, key=lambda item: str(item.get("submission_id") or "")):
+            participants = _history_participants(row, rankings, exclusions)
+            # A cursor resumes only its own round, just after its last entrant.
+            last_submission = after_submission if str(row["round_id"]) == resume_round else ""
+            start = 0
+            if last_submission:
+                ids = [str(item["submission_id"]) for item in participants]
+                if last_submission not in ids:
+                    raise ServiceError("history_cursor_invalid", 400)
+                start = ids.index(last_submission) + 1
+            for participant in participants[start:]:
                 submission_id = str(participant.get("submission_id") or "")
                 miner_hotkey = str(participant.get("miner_hotkey") or "")
-                if submission_id <= after_submission:
-                    continue
-                if not submission_id or not miner_hotkey or (needle and needle not in miner_hotkey.lower()):
+                if not miner_hotkey or (needle and needle not in miner_hotkey.lower()):
                     last_submission = submission_id
                     continue
                 if len(entries) == limit:
@@ -1366,10 +1389,10 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
                     exclusion = exclusions[submission_id]
                     _mark_recovery_excluded(entries[-1], exclusion["status"], reason=exclusion.get("reason"))
                 last_submission = submission_id
-            after_submission = ""
         if fetched < 25 or pinned is not None:
             return page()
         last = rows[-1]
         before = (str(last["created_at"]), str(last["round_id"]))
-    public_participants = (*_participants(last), *_recovery_exclusions(service, last).values())
-    return page(last, max((str(p.get("submission_id") or "") for p in public_participants), default=""))
+    participants = _history_participants(last, _rankings(last, "final_ranking"),
+                                         _recovery_exclusions(service, last))
+    return page(last, str(participants[-1]["submission_id"]) if participants else "")

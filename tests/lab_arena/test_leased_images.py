@@ -7,6 +7,7 @@ import copy
 import json
 import traceback
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict
 from urllib.parse import quote
 
@@ -106,7 +107,16 @@ def _client_factory(transport: BlobTransport):
     return build
 
 
-def test_cache_miss_materializes_lease_image_and_hit_never_refetches_access(tmp_path):
+@pytest.fixture
+def image_export_space(monkeypatch):
+    # The mock exporters write tiny fixtures. Isolate host disk metadata while
+    # keeping ImageCache's real cold-export space guard enabled.
+    monkeypatch.setattr(
+        runner.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3)
+    )
+
+
+def test_cache_miss_materializes_lease_image_and_hit_never_refetches_access(tmp_path, image_export_space):
     image = simple_image()
     reference, document, payloads = _access_document(image)
     api = AccessApi([document])
@@ -273,7 +283,7 @@ def test_image_access_http_failure_keeps_status_without_response_body(tmp_path):
     assert caught.value.__context__ is None
 
 
-def test_failed_transfer_is_not_cached_and_retry_refetches_access(tmp_path):
+def test_failed_transfer_is_not_cached_and_retry_refetches_access(tmp_path, image_export_space):
     image = simple_image()
     reference, first, payloads = _access_document(image)
     second = copy.deepcopy(first)
@@ -319,7 +329,7 @@ def test_failed_transfer_is_not_cached_and_retry_refetches_access(tmp_path):
     assert len(api.requests) == 2
 
 
-def test_public_registry_cache_miss_keeps_generic_exporter(tmp_path):
+def test_public_registry_cache_miss_keeps_generic_exporter(tmp_path, image_export_space):
     digest = "sha256:" + "a" * 64
     reference = "ghcr.io/leadpoet/arena-scorer@" + digest
     calls = []

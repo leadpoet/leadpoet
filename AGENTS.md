@@ -1045,6 +1045,7 @@ recovery architecture, provider calls or credential renewal. The coordinator own
 independent review, exact image build/verification and push, safe merge, prospective
 scorer-default configuration and canonical rollout for newly frozen rounds.
 Preserve current committed round configurations and existing leased images.
+
 ## Scoped authorization: November 3 closed-cost lookup performance
 
 The user authorized permanent fixes and deployment during the full November 3
@@ -1055,3 +1056,19 @@ Preserve selector definitions, billing records, accepted work, scoring, deadline
 privacy and rewards. Add no retry layer, dependency or service. Internal agents
 may test and review; the coordinator owns merge and production application and
 must preserve the other active task's runtime release ownership.
+
+## Scoped authorization: November 3 prospective verifier accuracy
+
+The user authorized narrow prospective verifier accuracy fixes and bounded
+organizer-funded tests. The current task budget is $16 total across all
+providers, including failed calls and unresolved reservations; the $0.50
+retrieval subcap is part of that total, not a new allowance. Preserve every
+previous charge and use the shared guarded task ledger. Preserve historical
+inputs, judgments, scores, rewards, frozen model policies and rejection rules.
+Keep PR981 numeric identity checks and the production release owner's work.
+Do not include the unproven PR929 wider-context experiment. Internal agents may
+implement, test and commit in this isolated checkout only; they must not push,
+merge, deploy, change production or renew credentials. The coordinator owns
+independent review and any later release after full native positive improvement,
+negative controls and the existing production owner's release handoff. Add no
+new judging system, dependency or unrelated architecture.

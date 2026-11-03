@@ -19,6 +19,16 @@ WIZ_QUOTE = (
 )
 
 
+WIZ_ANNOUNCEMENT_URL = "https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/wiz-acquisition/"
+# Exact Google source paragraph returned in the independent provider controls.
+WIZ_ANNOUNCED_COMPLETION_QUOTE = (
+    "MOUNTAIN VIEW, Calif. & NEW YORK, N.Y. — March 11, 2026 — Google LLC today "
+    "announced the completion of its acquisition of Wiz, a leading cloud and "
+    "AI security platform headquartered in New York."
+)
+
+
+
 def test_real_wiz_completed_acquisition_binds_short_target():
     assert lead_scorer._acquired_stage_quote_supports_names(("Wiz",), WIZ_QUOTE)
     assert not lead_scorer._acquired_stage_quote_supports_names(("Google",), WIZ_QUOTE)
@@ -68,17 +78,22 @@ def test_synthetic_short_name_preserves_adverse_controls(quote):
     assert not lead_scorer._acquired_stage_quote_supports_names(("Wiz",), quote)
 
 
+@pytest.mark.parametrize(("evidence_url", "evidence_quote"), [
+    (WIZ_URL, WIZ_QUOTE),
+    (WIZ_ANNOUNCEMENT_URL, WIZ_ANNOUNCED_COMPLETION_QUOTE),
+])
 @pytest.mark.parametrize(("requested_stage", "expected_status", "expected_decision"), [
     ("Acquired", "VERIFIED", "match"),
     ("Series C+", "CONTRADICTED", "mismatch"),
 ])
 def test_real_wiz_investigator_does_not_enter_false_citation_correction(
     monkeypatch, requested_stage, expected_status, expected_decision,
+    evidence_url, evidence_quote,
 ):
     """The real investigator protocol with supplied model output, not model accuracy."""
     finding = dict(
         target="stage", status=expected_status, observed_value="Acquired",
-        evidence_url=WIZ_URL, evidence_quote=WIZ_QUOTE,
+        evidence_url=evidence_url, evidence_quote=evidence_quote,
         reason="Google completed its acquisition of Wiz after its venture rounds.",
     )
     requests = []
@@ -102,14 +117,14 @@ def test_real_wiz_investigator_does_not_enter_false_citation_correction(
         company_locator={"name": "Wiz", "website": "https://www.wiz.io"},
         targets=("stage",), requested_stage=requested_stage,
         positive_semantic_review=True,
-        prior_observations={"submitted_source_urls": [WIZ_URL]},
-        prefetched_pages={WIZ_URL: {"final_url": WIZ_URL, "text": WIZ_QUOTE}},
+        prior_observations={"submitted_source_urls": [evidence_url]},
+        prefetched_pages={evidence_url: {"final_url": evidence_url, "text": evidence_quote}},
         verified_homepage_identity={"normalized_name": "wiz", "registrable_dns_domain": "wiz.io"},
     ))
     assert len(requests) == 1
     validated = result["_validated_stage_finding"]
     assert validated["status"] == expected_status
-    assert validated["evidence_quote"] == WIZ_QUOTE
+    assert validated["evidence_quote"] == evidence_quote
     normalized_stage = lead_scorer._normalize_company_stage(requested_stage)
     projected = lead_scorer._project_investigator_stage({}, validated, icp_stage=normalized_stage)
     retained = json.loads(json.dumps(projected))
@@ -331,3 +346,188 @@ def test_synthetic_acquisition_authority_uses_normalized_candidate_names(
     )
     assert result["stage"]["status"] == expected_status
     assert set(matcher_names[0]) == identity_names & {"Wiz", "wiz"}
+
+
+
+
+@pytest.mark.parametrize("quote", [
+    WIZ_ANNOUNCED_COMPLETION_QUOTE,
+    "Parent announced the completion of its acquisition of Wiz.",
+    "Parent announced today the completion of its acquisition of Wiz.",
+])
+def test_asserted_completion_announcement_binds_exact_target(quote):
+    assert lead_scorer._acquired_stage_quote_supports_names(("Wiz",), quote)
+    assert not lead_scorer._acquired_stage_quote_supports_names(("Google", "Parent"), quote)
+
+
+@pytest.mark.parametrize("quote", [
+    "Parent scheduled completion of its acquisition of Wiz.",
+    "Parent expects completion of its acquisition of Wiz.",
+    "Parent will announce the completion of its acquisition of Wiz.",
+    "Parent announced the planned completion of its acquisition of Wiz.",
+    "Parent announced the expected completion of its acquisition of Wiz.",
+    "Parent has not announced the completion of its acquisition of Wiz.",
+    "If Parent announced the completion of its acquisition of Wiz, ownership would change.",
+    "Parent announced the completion of its acquisition of Wiz, subject to regulatory approval.",
+    "Parent announced the completion of its acquisition of Wiz, but the deal was cancelled.",
+    "Parent announced the completion of its acquisition of Wiz. Wiz later relisted on Nasdaq.",
+    "Parent announced the completion of its acquisition of Wiz assets.",
+    "Parent announced the completion of its acquisition of assets of Wiz.",
+    "Parent announced the completion of its acquisition of a minority stake in Wiz.",
+    "Parent announced the completion of its acquisition of Wiz minority shares.",
+    "Wiz announced the completion of its acquisition of Parent.",
+    "Parent announced the completion of its acquisition of Wiz Systems.",
+])
+def test_asserted_completion_announcement_preserves_adverse_controls(quote):
+    assert not lead_scorer._acquired_stage_quote_supports_names(("Wiz",), quote)
+
+
+@pytest.mark.parametrize(("requested_stage", "excluded", "duplicate"), [
+    ("Acquired", False, True),
+    ("Series C+", False, False),
+    ("Acquired", True, False),
+])
+def test_native_acquisition_evidence_reaches_final_arena_score(
+    monkeypatch, requested_stage, excluded, duplicate,
+):
+    """Real scoring/investigator; unrelated fit, intent and transports are mocked.
+
+    This is an integration contract, not whole-company truth or billing proof.
+    """
+    from copy import deepcopy
+    from lab_arena import scoring as arena_scoring
+    from tests.test_company_evidence_investigator import (
+        _complete_verdict, _competition_company, _finding, _icp,
+    )
+
+    calls = dict(broad=0, investigator=0, model=0, fetch=0, intent=0, search=0)
+    runtimes = []
+    original_prechecks = lead_scorer.run_company_zero_checks
+    real_investigate = investigator.investigate_company_evidence
+    about_url = "https://www.wiz.io/about"
+    unrelated_text = (
+        "Wiz has 11-50 employees. Wiz supplies SaaS software. "
+        "Wiz is headquartered in California, United States."
+    )
+
+    async def prechecks(company, runtime, seen, **kwargs):
+        runtimes.append(runtime)
+        return await original_prechecks(company, runtime, seen, **kwargs)
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("Mocked unrelated homepage identity", details={
+            "identity": {"decision": "match", "evidence_source": "company_homepage",
+                "observed_name": "wiz", "observed_domain": "wiz.io", "observed_linkedin_slug": "wiz"},
+            "verified_homepage_transport_domain": "wiz.io",
+        })
+
+    async def broad(**_kwargs):
+        calls["broad"] += 1
+        return _complete_verdict(
+            observed_company_name="Wiz", observed_company_website="https://www.wiz.io",
+            observed_company_linkedin="https://www.linkedin.com/company/wiz",
+            employee_size_evidence_url=about_url, employee_size_evidence_quote="Wiz has 11-50 employees.",
+            industry_evidence_url=about_url, industry_evidence_quote="Wiz supplies SaaS software.",
+            geography_evidence_url=about_url,
+            geography_evidence_quote="Wiz is headquartered in California, United States.",
+            observed_company_stage=requested_stage, stage_matches=True,
+            stage_evidence_url=WIZ_ANNOUNCEMENT_URL,
+            stage_evidence_quote="Wiz profile lists its funding stage.",
+        ), ""
+
+    async def preserve_size(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def no_profile(*_args, **_kwargs):
+        return None
+
+    async def grounding(_session, url, **_kwargs):
+        assert url in {about_url, WIZ_ANNOUNCEMENT_URL}
+        return 200, url, unrelated_text if url == about_url else WIZ_ANNOUNCED_COMPLETION_QUOTE
+
+    async def investigate(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("stage",)
+        return await real_investigate(**kwargs)
+
+    async def fetch(_session, url, **_kwargs):
+        assert url == WIZ_ANNOUNCEMENT_URL
+        calls["fetch"] += 1
+        return {"ok": True, "url": url, "final_url": url, "text": WIZ_ANNOUNCED_COMPLETION_QUOTE}
+
+    async def search(*_args, **_kwargs):
+        calls["search"] += 1
+        return {"results": []}
+
+    async def model(_session, _url, *, headers, payload):
+        validate_operation_request("openrouter.chat", payload)
+        calls["model"] += 1
+        if calls["model"] == 1:
+            name, arguments = "fetch_page", {"url": WIZ_ANNOUNCEMENT_URL}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage", status="VERIFIED" if requested_stage == "Acquired" else "CONTRADICTED",
+                observed_value="Acquired", evidence_url=WIZ_ANNOUNCEMENT_URL,
+                evidence_quote=WIZ_ANNOUNCED_COMPLETION_QUOTE,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"score-stage-{calls['model']}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def intent(*_args, **_kwargs):
+        calls["intent"] += 1
+        return 54, 54, 1.0, 1.0, False, [{
+            "raw": 54, "after_decay": 54, "matched_icp_signal": 0,
+            "judge_verdict": {"decision": "verified", "pipeline_decision": "accept",
+                "verification_trace": {"intent_verdict": {
+                    "signal_evaluations": [{"signal_status": "supported"}],
+                }}},
+        }]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.delenv("ARENA_INDUSTRY_EVIDENCE_MODEL", raising=False)
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", broad)
+    monkeypatch.setattr(lead_scorer, "_refresh_linkedin_employee_size_observation", preserve_size)
+    monkeypatch.setattr(lead_scorer, "_fetch_structured_linkedin_profile_once", no_profile)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", grounding)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", intent)
+    monkeypatch.setattr(investigator, "_post_json", model)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    company = {**_competition_company(), "company_name": "Wiz",
+        "company_website": "https://www.wiz.io", "company_linkedin": "https://www.linkedin.com/company/wiz",
+        "company_stage": requested_stage}
+    rows = arena_scoring.score_work_item(
+        {"scored_run_id": f"native-acquisition-{requested_stage}-{excluded}"},
+        icp=_icp(company_stage=requested_stage, excluded_companies=["Wiz"] if excluded else [],
+            max_companies=2, intent_signals=["Announced a completed funding event"]).model_dump(mode="json"),
+        companies=[company, deepcopy(company)] if duplicate else [company],
+        scorer=arena_scoring.lab_scorer(arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2")), max_retries=1,
+    )
+    matched = requested_stage == "Acquired" and not excluded
+    assert rows[0]["final_score"] == (54 if matched else 0)
+    assert rows[0]["company_qualified"] is matched
+    assert all(row["cost_penalty"] == row["time_penalty"] == 0 for row in rows)
+    assert runtimes == [0.0]
+    if excluded:
+        assert calls == dict(broad=0, investigator=0, model=0, fetch=0, intent=0, search=0)
+    else:
+        assert calls == dict(broad=1, investigator=1, model=2, fetch=1,
+            intent=int(matched), search=int(requested_stage == "Series C+"))
+        receipt = rows[0]["verifier_gate_receipts"][0]
+        assert receipt["company_fit_dimensions"]["stage"] == ("match" if matched else "mismatch")
+        assert receipt["dimension_evidence"]["stage"]["web_evidence"] == {
+            "url": WIZ_ANNOUNCEMENT_URL, "quote": WIZ_ANNOUNCED_COMPLETION_QUOTE,
+        }
+        assert all(receipt["company_fit_dimensions"][key] == "match"
+            for key in ("identity", "employee_size", "industry", "geography"))
+    if duplicate:
+        assert len(rows) == 2
+        assert rows[1]["duplicate_company"] is True
+        assert rows[1]["final_score"] == 0

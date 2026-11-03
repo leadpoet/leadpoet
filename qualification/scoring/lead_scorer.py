@@ -1178,7 +1178,8 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:completed|completes|closed)\s+(?:(?:the|its|an?)\s+)?"
+        r"\b(?:completed|completes|closed|announced\s+(?:today\s+)?the\s+completion\s+of)"
+        r"\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
         r'(?:\s+\((?P<alias>"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)'

@@ -21,6 +21,9 @@ from jsonschema import Draft202012Validator
 SCHEMA_VERSION = "leadpoet.lab_arena.deepline_catalog.v1"
 POLICY_VERSION = "leadpoet.lab_arena.deepline_company_research.v1"
 CATALOG_URL = "https://code.deepline.com/api/v2/tools?compact=false"
+# Allow provider growth without relaxing the independent byte/schema/policy
+# limits. Keep the commit-RPC count bound in migration600 aligned with this.
+MAX_CATALOG_TOOLS = 16_384
 MAX_METADATA_READ_WORKERS = 4
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 # Reviewed direct model-product invocation family, across model and output
@@ -379,7 +382,7 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
     if not isinstance(document, dict):
         raise CatalogError("invalid_catalog")
     rows = document.get("tools")
-    if not isinstance(rows, list) or not rows or len(rows) > 4096 or type(allow_people) is not bool:
+    if not isinstance(rows, list) or not rows or len(rows) > MAX_CATALOG_TOOLS or type(allow_people) is not bool:
         raise CatalogError("invalid_catalog")
     seen = set()
     tools = []
@@ -685,7 +688,7 @@ def fetch_catalog(*, read_json: Callable[[str, Mapping[str, str]], Mapping[str, 
     if not isinstance(document, dict):
         raise CatalogError("invalid_catalog")
     rows = document.get("tools")
-    if not isinstance(rows, list) or len(rows) > 4096:
+    if not isinstance(rows, list) or len(rows) > MAX_CATALOG_TOOLS:
         raise CatalogError("invalid_catalog")
     detail_requests = []
     planned_rows = []

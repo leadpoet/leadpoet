@@ -114,7 +114,8 @@ def test_round_summary_names_the_frozen_defending_champion():
     row.update(champion_submission_id="sub-prior", champion_hotkey=MINER_HOTKEY)
     # A freeze that kept another baseline source (e.g. October 28) names no one.
     assert public_dashboard.round_summary(row)["defending_champion"] is None
-    row.update(baseline_reasoning_policy="full_generated_thinking_v1")
+    row.update(champion_funding_frozen=True)
+    row["configuration_doc"]["baseline_reasoning_configuration"] = {}
     summary = public_dashboard.round_summary(row)
     assert summary["defending_champion"] == {
         "submission_id": "sub-prior",
@@ -123,6 +124,31 @@ def test_round_summary_names_the_frozen_defending_champion():
     # The baseline participant still names the organizer that ran it.
     assert summary["baseline"]["miner_hotkey"] == BASELINE_HOTKEY
     row.update(champion_hotkey=None)
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+
+
+@pytest.mark.parametrize("contract,verified", [
+    (None, False), ("legacy", False), (False, False), ([], False),
+    ({}, True), ({"reasoning_capture_policy": "full_generated_thinking_v1"}, True),
+])
+def test_defender_source_proof_includes_empty_legacy_contract(contract, verified):
+    row = _published_round()
+    row.update(champion_funding_frozen=True, champion_submission_id="sub-prior",
+               champion_hotkey=MINER_HOTKEY)
+    row["configuration_doc"]["baseline_reasoning_configuration"] = contract
+    # A derived marker cannot override a malformed complete-row contract.
+    row["configuration_doc"]["baseline_champion_source_frozen"] = True
+    expected = {"submission_id": "sub-prior", "miner_hotkey": MINER_HOTKEY} if verified else None
+    assert public_dashboard.round_summary(row)["defending_champion"] == expected
+
+
+@pytest.mark.parametrize("funding", [None, False, 1, "true"])
+def test_defender_requires_strictly_frozen_funding(funding):
+    row = _published_round()
+    row.update(champion_funding_frozen=funding, champion_submission_id="sub-prior",
+               champion_hotkey=MINER_HOTKEY)
+    row["configuration_doc"].update(baseline_reasoning_configuration={},
+                                    baseline_champion_source_frozen=True)
     assert public_dashboard.round_summary(row)["defending_champion"] is None
 
 

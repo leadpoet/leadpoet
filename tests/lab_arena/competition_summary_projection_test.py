@@ -29,9 +29,9 @@ def _project(row, columns):
                 key: deepcopy(configuration[key])
                 for key in PUBLIC_CONFIGURATION_FIELDS if key in configuration
             }
-        elif column.startswith("baseline_reasoning_policy:"):
-            contract = (row.get("configuration_doc") or {}).get("baseline_reasoning_configuration") or {}
-            projected["baseline_reasoning_policy"] = contract.get("reasoning_capture_policy")
+            projected["configuration_doc"]["baseline_champion_source_frozen"] = (
+                row.get("champion_funding_frozen") is True
+                and isinstance(configuration.get("baseline_reasoning_configuration"), dict))
         elif ":configuration_doc->" in column:
             alias, path = column.split(":", 1)
             key = path.removeprefix("configuration_doc->").removesuffix("::text")
@@ -94,6 +94,7 @@ def _row(day="2026-10-09", **configuration):
         "evaluation_date": day, "icp_set_date": None, "published_at": day + "T15:00:00Z",
         "arena_network_name": "finney", "arena_netuid": 71,
         "promotion_required": True, "baseline_promoted_at": None, "cancel_reason": None,
+        "champion_funding_frozen": True,
         "champion_submission_id": "prior-champion", "champion_hotkey": "5Prior",
         "configuration_doc": {
             "mode": "live", "network_name": "finney", "netuid": 71,
@@ -156,10 +157,10 @@ def test_145_model_competition_response_matches_full_configuration(monkeypatch, 
     assert expected["rounds"][0]["defending_champion"] == {
         "submission_id": "prior-champion", "miner_hotkey": "5Prior",
     }
-    assert transport.returned[0]["configuration_doc"] == {
+    assert transport.returned[0]["configuration_doc"] == {**{
         key: value for key, value in rows[0]["configuration_doc"].items()
         if key in PUBLIC_CONFIGURATION_FIELDS
-    }
+    }, "baseline_champion_source_frozen": True}
     assert "private_frozen_catalog" not in json.dumps(transport.returned)
     assert len(json.dumps(transport.returned)) < len(json.dumps(rows)) / 2
     assert transport.calls[-1]["columns"] == "round_id,evaluation_date"
@@ -170,8 +171,9 @@ def test_145_model_competition_response_matches_full_configuration(monkeypatch, 
 def test_configuration_projection_preserves_json_types_and_missing_keys(key, value):
     row = {"configuration_doc": {key: value}}
     projected = _project(row, dashboard._COMPETITION_ROUND_COLUMNS)
-    assert dashboard._competition_round(projected)["configuration_doc"] == {key: value}
-    assert dashboard._competition_round(_project({"configuration_doc": {}}, dashboard._COMPETITION_ROUND_COLUMNS))["configuration_doc"] == {}
+    assert dashboard._competition_round(projected)["configuration_doc"] == {
+        key: value, "baseline_champion_source_frozen": False}
+    assert dashboard._competition_round(_project({"configuration_doc": {}}, dashboard._COMPETITION_ROUND_COLUMNS))["configuration_doc"] == {"baseline_champion_source_frozen": False}
 
 
 def test_public_configuration_projection_excludes_private_configuration():
@@ -179,7 +181,8 @@ def test_public_configuration_projection_excludes_private_configuration():
         "mode": "live", "baseline_hotkey": "baseline", "scorer_policy": {"private": True},
         "deepline_catalog": {"private": True},
     }}, dashboard._COMPETITION_ROUND_COLUMNS)
-    assert projected["configuration_doc"] == {"mode": "live", "baseline_hotkey": "baseline"}
+    assert projected["configuration_doc"] == {"mode": "live", "baseline_hotkey": "baseline",
+                                               "baseline_champion_source_frozen": False}
 
 
 @pytest.mark.parametrize("configuration", [

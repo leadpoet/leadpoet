@@ -4903,6 +4903,38 @@ def _unresolved_homepage_web_identity_conflict(
     name = str(organization.get("normalized_name") or "")
     domain = str(organization.get("registrable_dns_domain") or "")
     slug = str(organization.get("linkedin_company_slug") or "")
+    proof = web_receipt.get("structured_profile_identity")
+    if (
+        slug.isascii() and slug.isdigit()
+        and observed.get("reason_code") == "identity_linkedin_alias_unresolved"
+        and isinstance(proof, Mapping)
+        and set(proof) == {
+            "name", "provider", "source_field", "url", "website",
+            "company_id", "requested_url",
+        }
+        and all(isinstance(value, str) for value in proof.values())
+        and proof.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and proof.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and proof.get("company_id") == slug
+        and linkedin_company_page_slug(proof.get("requested_url")) == slug
+        and _strict_linkedin_company_profile_url(proof.get("requested_url"))
+        and _strict_linkedin_company_profile_url(proof.get("url"))
+        and linkedin_company_page_slug(proof.get("url"))
+        == web_receipt.get("submitted_linkedin_slug")
+        == web_receipt.get("observed_linkedin_slug")
+        and not str(web_receipt.get("observed_linkedin_slug") or "").isdigit()
+        and _company_name(proof.get("name"))
+        == web_receipt.get("submitted_name") == web_receipt.get("observed_name")
+        and _canonical_company_domain(proof.get("website"))
+        == domain == observed.get("observed_domain")
+        == web_receipt.get("submitted_domain") == web_receipt.get("observed_domain")
+        and slug == observed.get("observed_linkedin_slug")
+        and name == observed.get("observed_name")
+    ):
+        # The exact fetched main profile proves the numeric ID and the web
+        # identity belong to one entity. A short homepage brand name cannot
+        # turn that independently bound alias into an unresolved conflict.
+        return False
     return bool(
         name and domain and slug
         and name == observed.get("observed_name")
@@ -4913,6 +4945,32 @@ def _unresolved_homepage_web_identity_conflict(
         and name != web_receipt.get("observed_name")
         and slug != web_receipt.get("observed_linkedin_slug")
     )
+
+
+def _conflicting_homepage_numeric_profile_lookup(
+    homepage: Optional[CompanyFitDecisionResult], web_receipt: Mapping[str, Any],
+) -> dict[str, str]:
+    """Locate existing structured proof; the lookup itself grants no match."""
+    if homepage is None or not _unresolved_homepage_web_identity_conflict(homepage, web_receipt):
+        return {}
+    observed = homepage.details.get("identity") or {}
+    slug = str(observed.get("observed_linkedin_slug") or "")
+    vanity = str(web_receipt.get("observed_linkedin_slug") or "")
+    if (
+        observed.get("reason_code") != "identity_linkedin_alias_unresolved"
+        or not slug.isascii() or not slug.isdigit()
+        or not vanity or vanity.isdigit()
+        or vanity != web_receipt.get("submitted_linkedin_slug")
+        or web_receipt.get("submitted_name") != web_receipt.get("observed_name")
+    ):
+        return {}
+    return {
+        "normalized_name": str(web_receipt["observed_name"]),
+        "registrable_dns_domain": str(web_receipt["observed_domain"]),
+        "linkedin_company_slug": vanity,
+        "requested_profile_url": f"https://www.linkedin.com/company/{slug}",
+        "observed_profile_url": f"https://www.linkedin.com/company/{vanity}",
+    }
 
 
 def _schema_repair_changes_grounded_identity(
@@ -6921,6 +6979,20 @@ def _reverify_decision(
             COMPANY_FIT_UNAVAILABLE,
         }:
             identity_decision = COMPANY_FIT_UNAVAILABLE
+        if (
+            isinstance(structured_profile_identity_evidence, Mapping)
+            and set(structured_profile_identity_evidence) == {
+                "name", "provider", "source_field", "url", "website",
+                "company_id", "requested_url",
+            }
+            and all(isinstance(value, str) and len(value) <= 2048
+                    for value in structured_profile_identity_evidence.values())
+        ):
+            # Keep the fetched numeric alias proof with the identity receipt;
+            # the final homepage-conflict gate revalidates every binding.
+            identity_receipt["structured_profile_identity"] = dict(
+                structured_profile_identity_evidence
+            )
 
     entity_attribution_conflicts: list[str] = []
     if icp is None:
@@ -10167,6 +10239,19 @@ async def _llm_reverify_company(
         web_identity_receipt,
         verified_transport_domain,
     )
+    numeric_conflict_lookup = (
+        _conflicting_homepage_numeric_profile_lookup(
+            verified_homepage_identity, web_identity_receipt,
+        ) if require_company_fit_dimensions else {}
+    )
+    if numeric_conflict_lookup:
+        # Reuse the invocation's one structured profile request, addressing
+        # the homepage's numeric locator so its returned ID must prove the
+        # observed vanity URL. No model-authored alias can satisfy this.
+        profile_identity = numeric_conflict_lookup
+        await _fetch_structured_linkedin_profile_once(
+            profile_identity, current_profile_cache, collect_identity=True,
+        )
     investigation_identity = verified_identity
     if not profile_identity:
         lookup_receipt: Mapping[str, Any] = web_identity_receipt

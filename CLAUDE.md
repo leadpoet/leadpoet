@@ -1,3 +1,16 @@
+## Scoped authorization: November 3 remaining-work recovery
+
+The user authorized one mixed-verifier exception: preserve completed November 3
+judgments, scores and costs; use the improved verifier only for unscored work.
+Review frozen originals 28594d902080fb5213f4344c09ffb531 and
+ba551886a9379aa4e00b6238567f211a with the bounded reviewer; admit only real passes.
+Recover baseline ICP 8 once after the confirmed identity-alias fix, preserving
+its five failed attempts and bills. Do not create an automatic seventh attempt.
+Keep sources, completed executions, deadlines, other rounds and published
+outcomes unchanged. The coordinator owns reviewed migrations, canonical release,
+resume and full dashboard verification. Internal agents implement and test only.
+No automatic approval, duplicate paid completed work or unrelated architecture.
+
 ## Scoped authorization: November 2 recovered Deepline training reader
 
 The user authorized the smallest fix for the confirmed omission of an existing

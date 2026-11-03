@@ -158,6 +158,7 @@ def export_run(store, objects, run_id):
                             signal_judgment_rows=[row for row in signal_rows.values() if row is not None],
                             signal_source_ledger_rows=signal_source_ledger,
                             scoring_policy_history=policy_history,
+                            preserved_judgment_policy_reader=getattr(store, "preserved_judgment_policy", None),
                             cost_eligibility_reader=cost_eligibility_reader)
 
 

@@ -3,7 +3,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from lab_arena.public_dashboard import history_snapshot
+import base64
+import json
+from lab_arena.public_dashboard import _history_participants, _timestamp, history_snapshot
 from lab_arena.store import ArenaStore, PostgrestTransport, PsycopgTransport
 from lab_arena.service import ServiceError
 from lab_arena.api import create_app
@@ -43,7 +45,7 @@ def test_history_pages_preserve_zero_and_filter_across_rounds():
         if cursor is None: break
     assert len(pages) == 90
     assert len({s['submission_id'] for s in pages}) == 90
-    assert pages[0]['final_score'] == 0
+    assert [s['final_score'] for s in pages[:3]] == [2, 1, 0]
     miner = history_snapshot(service, hotkey='miner2')
     assert len(miner['submissions']) == 25 and all(s['miner_hotkey'] == '5Miner2' for s in miner['submissions'])
     day = history_snapshot(service, hotkey='Miner1', day='2026-01-03')
@@ -166,3 +168,47 @@ def test_history_code_versions_use_stored_round_runs_and_only_returned_submissio
     assert all(item['evaluation']['validators'] == [] for item in page['submissions'])
     for private in ['private-assignment', 'private_payload', 'round-2-execution', 'must-not-leak']:
         assert private not in str(page)
+
+
+def test_history_ranks_each_round_by_score_across_split_pages():
+    service, _calls, rows = fixture(3)
+    newest, middle = rows[0]['publication_doc']['final_ranking'], rows[1]['publication_doc']['final_ranking']
+    # The defending champion ranks by its score; zero beats no score.
+    newest[0]['final_score'], newest[1]['final_score'], newest[2]['final_score'] = 5.5, None, 0
+    for item in middle:
+        item['final_score'] = 1
+    pages, cursor = [], None
+    while True:
+        page = history_snapshot(service, cursor=cursor, limit=2)
+        pages += [s['submission_id'] for s in page['submissions']]
+        cursor = page['next_cursor']
+        if cursor is None: break
+    assert pages == ['day3-miner0', 'day3-miner2', 'day3-miner1',
+                     'day2-miner0', 'day2-miner1', 'day2-miner2',
+                     'day1-miner2', 'day1-miner1', 'day1-miner0']
+    filtered = history_snapshot(service, hotkey='5Miner2', limit=1)
+    assert [s['submission_id'] for s in filtered['submissions']] == ['day3-miner2']
+    resumed = history_snapshot(service, hotkey='5Miner2', limit=1, cursor=filtered['next_cursor'])
+    assert [s['submission_id'] for s in resumed['submissions']] == ['day2-miner2']
+
+
+def test_history_excluded_entrants_rank_after_scored_entrants():
+    row = {'status': 'published', 'publication_doc': {'participants': [
+        {'submission_id': 'b', 'miner_hotkey': '5B'}, {'submission_id': 'a', 'miner_hotkey': '5A'},
+        {'submission_id': '', 'miner_hotkey': '5Blank'}]}}
+    rankings = {'a': {'final_score': 3}, 'b': {'final_score': 9}, 'x': {'final_score': 50}}
+    exclusions = {'x': {'submission_id': 'x', 'miner_hotkey': '5X', 'status': 'provider_blocked'}}
+    assert [item['submission_id'] for item in _history_participants(row, rankings, exclusions)] == ['b', 'a', 'x']
+
+
+def test_history_cursor_must_name_an_entrant_of_its_round():
+    service, _calls, rows = fixture(2)
+    def cursor_after(submission_id):
+        state = [_timestamp(rows[0]['created_at']), rows[0]['round_id'], submission_id, '', '']
+        return base64.urlsafe_b64encode(json.dumps(state).encode()).decode().rstrip('=')
+    resumed = history_snapshot(service, cursor=cursor_after('day2-miner2'))
+    assert [s['submission_id'] for s in resumed['submissions']][:2] == ['day2-miner1', 'day2-miner0']
+    cursor = cursor_after('day9-miner9')
+    with pytest.raises(ServiceError) as exc:
+        history_snapshot(service, cursor=cursor)
+    assert exc.value.code == 'history_cursor_invalid'

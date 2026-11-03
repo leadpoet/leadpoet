@@ -216,3 +216,21 @@ def test_tampered_preimage_rolls_back_and_tampered_authority_is_rejected(databas
             conn.commit()
             assert store.preserved_judgment_policy(ROUND,judges[0],sources[0],[]) is None
         finally:store._transport.close()
+
+
+def test_history_separates_nov03_receipt_serial_from_actual_scoring_floor(database):
+    pg,dsn=database
+    with pg.connect(**dsn) as conn:
+        old,new,*_=seed(conn)
+        with conn.cursor() as cur:
+            rendered,_=render(cur,old,new);cur.execute(rendered)
+        conn.commit()
+        with conn.cursor() as cur:
+            for serial,operation in enumerate(('nov03_admission_review605_v1',
+                    'nov03_admit_reviewed_originals606_v1','nov03_baseline8_corrected_judge607_v1'),start=2):
+                cur.execute("INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc) SELECT round_id,%s,%s,%s,'history-fixture',txid_current(),pg_backend_pid(),to_jsonb(r)-'updated_at',to_jsonb(r)-'updated_at','{}',jsonb_build_object('operation',%s::text) FROM public.lab_arena_rounds r WHERE round_id=%s",(serial,operation,'sha256:'+'e'*64,operation,ROUND))
+            # A normal scoring revision retains its existing generation value.
+            cur.execute("INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections) SELECT round_id,5,'normal-revision',%s,'history-fixture',txid_current(),pg_backend_pid(),to_jsonb(r)-'updated_at',jsonb_set(to_jsonb(r)-'updated_at','{scoring_generation_floor}','5'),'{}' FROM public.lab_arena_rounds r WHERE round_id=%s",('sha256:'+'f'*64,ROUND))
+            history=scalar(cur,'SELECT public.lab_arena_scoring_policy_history_v1(%s)',(ROUND,))
+            assert [x['receipt_generation'] for x in history['revisions']]==[1,2,3,4,5]
+            assert [x['generation_floor'] for x in history['revisions']]==[0,0,0,0,5]

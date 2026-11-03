@@ -42,14 +42,15 @@ def database():
             cur.execute("SELECT string_agg(pg_get_functiondef(oid),E';\\n') FROM pg_proc WHERE oid IN "
                 "('public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)'::regprocedure,"
                 "'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)'::regprocedure,"
-                "'public.lab_arena_submissions_frozen_v1()'::regprocedure)")
+                "'public.lab_arena_submissions_frozen_v1()'::regprocedure,"
+                "'public.lab_arena_close_stage(text,smallint)'::regprocedure)")
             originals=cur.fetchone()[0]
         yield psycopg,dsn,originals
     finally:db.close()
 
 
 @pytest.fixture()
-def context(database):
+def context(database,request):
     psycopg,dsn,originals=database
     conn=psycopg.connect(**dsn);conn.autocommit=True
     store=ArenaStore(PsycopgTransport(lambda:psycopg.connect(**dsn)))
@@ -66,7 +67,7 @@ def context(database):
     config['schedule'].update(submission_open=(now-timedelta(hours=2)).isoformat(),
         submission_cutoff=(now+timedelta(minutes=30)).isoformat(),
         benchmark_deadline=(now+timedelta(hours=1)).isoformat(),
-        stage_2_close=(now+timedelta(hours=3)).isoformat(),final_scoring_close=deadline)
+        stage_2_close=(now+timedelta(seconds=getattr(request,'param',10800))).isoformat(),final_scoring_close=deadline)
     assert store.create_round(ROUND,config)['status']=='created'
     payload=_archive(SOURCE)
     inspected=submission_similarity.inspect_archive(payload)
@@ -292,3 +293,85 @@ def test_exact_function_security_and_unknown_body_fail_closed(context):
     before=snapshot(conn)
     with pytest.raises(Exception,match='preimage differs'):apply(conn,m605)
     assert snapshot(conn)==before
+
+
+def close_service(store):
+    from unittest.mock import Mock
+    from lab_arena.service import ArenaService
+    service=ArenaService.__new__(ArenaService)
+    service._store=store
+    service._round=lambda round_id:store.get_round(round_id)
+    # Exercise the actual service close controls and real SQL transition. The
+    # next scoring-plan phase is independent of this admission-window guard.
+    service.commit_scoring_plan=Mock(return_value={'status':'scoring_plan_reached'})
+    return service
+
+
+def completed_existing_execution(conn,parts):
+    with conn.cursor() as cur:
+        cur.execute("SET session_replication_role='replica'")
+        cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation,scoring_generation_floor,terminal_cause,output_ref,result_doc) VALUES('complete605','complete605',%s,%s,%s,2,0,1,'execute','accepted',4,0,'accepted','arena/complete605.json','{\"terminal_status\":\"accepted\"}')",
+                    (ROUND,parts[1]['submission_id'],parts[1]['miner_hotkey']))
+        cur.execute("SET session_replication_role='origin'")
+        cur.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=FALSE,pause_reason=''")
+
+
+def test_service_cannot_close_complete_stage_while_reviews_or_finalization_remain(context):
+    store,conn,m605,m606,parts=context;apply(conn,m605)
+    completed_existing_execution(conn,parts)
+    service=close_service(store)
+    assert service.stage_is_complete(ROUND,2) is True
+    before=snapshot(conn)
+    waiting=service.close_stage(ROUND,2)
+    assert waiting['status']=='waiting'
+    assert waiting['reason']=='admission_recovery_pending'
+    service.commit_scoring_plan.assert_not_called()
+    assert snapshot(conn)==before
+    # A finished review still needs explicit passed-only owner finalization.
+    finish(store,conn,TARGETS[0]);finish(store,conn,TARGETS[1],'rejected')
+    before=snapshot(conn)
+    assert service.close_stage(ROUND,2)['status']=='waiting'
+    assert snapshot(conn)==before
+    apply(conn,m606)
+    assert service.stage_is_complete(ROUND,2) is False  # Newly admitted work runs.
+    with conn.cursor() as cur:
+        cur.execute("SET session_replication_role='replica'")
+        cur.execute("UPDATE public.lab_arena_runs SET status='accepted',terminal_cause='accepted',output_ref='arena/new605.json',result_doc='{\"terminal_status\":\"accepted\"}' WHERE status='pending'")
+        cur.execute("SET session_replication_role='origin'")
+    assert service.stage_is_complete(ROUND,2) is True
+    assert service.close_stage(ROUND,2)=={'status':'scoring_plan_reached'}
+    assert store.get_round(ROUND)['status']=='stage2_closed'
+    service.commit_scoring_plan.assert_called_once_with(ROUND,2)
+
+
+@pytest.mark.parametrize('context',[2],indirect=True)
+def test_recovery_close_guard_expires_at_unchanged_stage2_deadline(context):
+    import time
+    store,conn,m605,_,parts=context;apply(conn,m605)
+    completed_existing_execution(conn,parts)
+    service=close_service(store)
+    assert service.close_stage(ROUND,2)['status']=='waiting'
+    deadline=datetime.fromisoformat(store.get_round(ROUND)['configuration_doc']['schedule']['stage_2_close'])
+    time.sleep(max(0,(deadline-datetime.now(timezone.utc)).total_seconds())+0.02)
+    assert service.close_stage(ROUND,2)=={'status':'scoring_plan_reached'}
+    assert store.get_round(ROUND)['status']=='stage2_closed'
+
+
+@pytest.mark.parametrize('damage',['source','unrelated_round'])
+def test_recovery_close_guard_does_not_cover_unbound_source_or_other_round(context,damage):
+    store,conn,m605,_,parts=context;apply(conn,m605)
+    completed_existing_execution(conn,parts)
+    service=close_service(store);round_id=ROUND
+    with conn.cursor() as cur:
+        if damage=='source':
+            cur.execute("SET session_replication_role='replica'")
+            cur.execute("UPDATE public.lab_arena_submissions SET source_archive_sha256='sha256:'||repeat('f',64) WHERE submission_id=%s",(TARGETS[0],))
+            cur.execute("SET session_replication_role='origin'")
+        else:
+            round_id='arena-2099-03-01-unrelated605'
+            assert store.create_round(round_id,round_config(round_id,[hotkey('other-runner605')]))['status']=='created'
+            cur.execute("SET session_replication_role='replica'")
+            cur.execute("UPDATE public.lab_arena_rounds SET status='stage2' WHERE round_id=%s",(round_id,))
+            cur.execute("SET session_replication_role='origin'")
+    assert service.close_stage(round_id,2)=={'status':'scoring_plan_reached'}
+    assert store.get_round(round_id)['status']=='stage2_closed'

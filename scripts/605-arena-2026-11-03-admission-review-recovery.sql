@@ -361,6 +361,47 @@ $new605_2_0$);
 END;
 $patch605_2$;
 
+
+-- Serialize the exact recovery window with normal stage closure. No new pause,
+-- run mutation or deadline extension is introduced by this narrow predicate.
+DO $close605$
+DECLARE d TEXT; updated TEXT; m JSONB; p RECORD;
+ target OID:=to_regprocedure('public.lab_arena_close_stage(text,smallint)');
+BEGIN
+ SELECT proc.*,l.lanname INTO p FROM pg_proc proc JOIN pg_language l ON l.oid=proc.prolang WHERE proc.oid=target;
+ IF NOT FOUND OR pg_get_userbyid(p.proowner)<>'lab_arena_owner' OR NOT p.prosecdef
+  OR p.proacl::TEXT IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}'
+  OR p.provolatile<>'v' OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::TEXT[]
+  OR p.lanname<>'plpgsql' THEN RAISE EXCEPTION 'Nov03 admission605 close security differs'; END IF;
+ SELECT pg_get_functiondef(target),to_jsonb(proc)-'prosrc' INTO d,m FROM pg_proc proc WHERE proc.oid=target;
+ IF encode(extensions.digest(d,'sha256'),'hex')='96db06408278ccad9cca9566457518c2951c944d33149c8efe2336c8cca164aa' THEN RETURN; END IF;
+ IF encode(extensions.digest(d,'sha256'),'hex')<>'dc50c521f73ff996c28437ce3321d62cecbf4a5adfb69126f94a35708ecde481'
+  OR length(d)-length(replace(d,$close_anchor605$  -- lab_arena_stage_cutoff_drain_v1: stop admission at the frozen cutoff,$close_anchor605$,''))<>length($close_anchor605$  -- lab_arena_stage_cutoff_drain_v1: stop admission at the frozen cutoff,$close_anchor605$) THEN
+  RAISE EXCEPTION 'Nov03 admission605 close preimage differs'; END IF;
+ updated:=replace(d,$close_anchor605$  -- lab_arena_stage_cutoff_drain_v1: stop admission at the frozen cutoff,$close_anchor605$,$close_new605$  -- The two authorized originals have no runs until their bounded reviews
+  -- and owner finalization finish. Existing runs alone cannot close their
+  -- admission window early. Execution and judging continue at the same clock.
+  IF p_stage=2 AND v_round.round_id='arena-2026-11-03'
+    AND clock_timestamp()<(v_round.configuration_doc#>>'{schedule,stage_2_close}')::TIMESTAMPTZ
+    AND NOT EXISTS(SELECT 1 FROM public.lab_arena_scoring_supersessions h
+      WHERE h.round_id=v_round.round_id AND h.request_id='nov03-admit-reviewed-originals606-v1')
+    AND (SELECT count(*)=2 FROM public.lab_arena_submissions s
+      WHERE s.submission_id IN('sub-28594d902080fb5213f4344c09ffb531','sub-ba551886a9379aa4e00b6238567f211a')
+       AND public.lab_arena__nov03_review605_v1(v_round,s)) THEN
+    RETURN jsonb_build_object('status','waiting','round_status',v_round.status,
+      'stage_generation',v_round.stage_generation,'reason','admission_recovery_pending');
+  END IF;
+
+  -- lab_arena_stage_cutoff_drain_v1: stop admission at the frozen cutoff,$close_new605$);
+ IF encode(extensions.digest(updated,'sha256'),'hex')<>'96db06408278ccad9cca9566457518c2951c944d33149c8efe2336c8cca164aa' THEN
+  RAISE EXCEPTION 'Nov03 admission605 close postimage differs'; END IF;
+ EXECUTE updated;
+ IF (SELECT to_jsonb(proc)-'prosrc' FROM pg_proc proc WHERE proc.oid=target) IS DISTINCT FROM m
+  OR encode(extensions.digest(pg_get_functiondef(target),'sha256'),'hex')<>'96db06408278ccad9cca9566457518c2951c944d33149c8efe2336c8cca164aa' THEN
+  RAISE EXCEPTION 'Nov03 admission605 close readback differs'; END IF;
+END;
+$close605$;
+
 DO $recover605$
 DECLARE r public.lab_arena_rounds; s public.lab_arena_submissions;
  h public.lab_arena_scoring_supersessions; c public.lab_arena_restart_claim_control;

@@ -7,6 +7,7 @@ import json
 import threading
 import sys
 import time
+from array import array
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -269,6 +270,202 @@ def test_readinto_iteration_and_zero_reads(endpoint):
         summary = finish(recorder, checkpoint)
     assert len(checkpoint.web) == 1, summary
     assert_web(checkpoint.web[0], BODY)
+
+
+@pytest.mark.parametrize("buffer_kind", ["bytearray", "array", "typed_memoryview"])
+@pytest.mark.parametrize("read_mode", ["full", "continued", "partial"])
+def test_readinto_captures_only_returned_bytes_from_typed_buffers(endpoint, buffer_kind, read_mode):
+    class ValidatingCheckpoint(Checkpoint):
+        def record_web_fetch(self, **kwargs):
+            lab_arena_checkpoint.validate_web_capture_metadata(kwargs["capture"], kwargs["body"])
+            return super().record_web_fetch(**kwargs)
+
+    url, server = endpoint
+    checkpoint = ValidatingCheckpoint()
+    recorder = install(checkpoint)
+    capacity = 40 if read_mode == "full" else 8
+    initial = b"Z" * capacity
+    if buffer_kind == "bytearray":
+        buffer = bytearray(initial)
+    else:
+        buffer = array("I")
+        buffer.frombytes(initial)
+        if buffer_kind == "typed_memoryview":
+            buffer = memoryview(buffer)
+    connection = None
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        # The stdlib's own readinto length cap counts typed elements. Close
+        # after this one local response so a short read cannot wait on reuse.
+        connection.request("GET", "/text", headers={"Connection": "close"})
+        response = connection.getresponse()
+        count = response.readinto(buffer)
+        assert count == min(capacity, len(BODY))
+        stored = bytes(memoryview(buffer).cast("B"))
+        assert stored[:count] == BODY[:count]
+        # A short final read must not expose the untouched non-zero tail.
+        assert stored[count:] == initial[count:]
+        if read_mode == "continued":
+            assert stored[:count] + response.read() == BODY
+        elif read_mode == "full":
+            assert response.read() == b""
+        response.close()
+    finally:
+        if connection is not None:
+            connection.close()
+        summary = recorder.close()
+    assert not recorder.worker.is_alive(), summary
+    assert len(checkpoint.web) == 1, summary
+    expected = BODY[:count] if read_mode == "partial" else BODY
+    assert_web(checkpoint.web[0], expected, complete=read_mode != "partial")
+    assert recorder.retained == 0
+    assert checkpoint.binary == checkpoint.metadata == checkpoint.acks == []
+    assert summary["counts"].get("checkpoint_failure", 0) == 0
+    assert summary["counts"].get("adapter_failure", 0) == 0
+    assert summary["complete"] is (read_mode != "partial")
+    assert server.paths == ["/text"]
+
+
+@pytest.mark.parametrize("client", ["stdlib", "urllib3"])
+@pytest.mark.parametrize("path", ["/text", "/empty"])
+@pytest.mark.parametrize("keyword", [False, True])
+def test_zero_capacity_readinto_does_not_claim_eof(endpoint, client, path, keyword):
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    url, server = endpoint
+    connection = None
+    try:
+        if client == "stdlib":
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request("GET", path)
+            response = connection.getresponse()
+        else:
+            urllib3 = pytest.importorskip("urllib3")
+            connection = urllib3.PoolManager()
+            response = connection.request("GET", url + path, preload_content=False)
+        empty = bytearray()
+        assert (response.readinto(b=empty) if keyword else response.readinto(empty)) == 0
+        expected = b"" if path == "/empty" else BODY
+        assert response.read() == expected
+        assert response.readinto(bytearray(4)) == 0
+        response.close()
+    finally:
+        if connection is not None:
+            connection.close() if client == "stdlib" else connection.clear()
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    event = checkpoint.web[0]
+    assert_web(event, expected)
+    lab_arena_checkpoint.validate_web_capture_metadata(event["capture"], event["body"])
+    assert summary["complete"] is True
+    assert server.paths == [path]
+
+
+@pytest.mark.parametrize("step", [2, -2])
+@pytest.mark.parametrize("read_mode", ["full", "continued", "partial"])
+def test_urllib3_strided_readinto_retains_exact_logical_prefix(endpoint, step, read_mode):
+    urllib3 = pytest.importorskip("urllib3")
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    url, server = endpoint
+    capacity = 40 if read_mode == "full" else 8
+    backing = bytearray(b"Z" * (capacity * 2))
+    buffer = memoryview(backing)[::step]
+    connection = urllib3.PoolManager()
+    try:
+        response = connection.request("GET", url + "/text", preload_content=False)
+        count = response.readinto(buffer)
+        assert count == min(capacity, len(BODY))
+        assert buffer[:count].tobytes() == BODY[:count]
+        assert buffer[count:].tobytes() == b"Z" * (capacity - count)
+        # Both the gaps and logical tail must stay outside retained bytes.
+        assert (backing[1::2] if step > 0 else backing[::2]) == b"Z" * capacity
+        if read_mode == "continued":
+            assert buffer[:count].tobytes() + response.read() == BODY
+        elif read_mode == "full":
+            assert response.read() == b""
+        response.close()
+    finally:
+        connection.clear()
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    event = checkpoint.web[0]
+    assert_web(event, BODY[:count] if read_mode == "partial" else BODY,
+               complete=read_mode != "partial")
+    lab_arena_checkpoint.validate_web_capture_metadata(event["capture"], event["body"])
+    assert summary["counts"].get("adapter_failure", 0) == 0
+    assert summary["complete"] is (read_mode != "partial")
+    assert server.paths == ["/text"]
+
+
+def test_unsupported_readinto_layout_is_explicitly_incomplete():
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    try:
+        body = recorder._new("test", "https://example.com/readinto", 200, {})
+        buffer = memoryview(array("I", range(8)))[::2]
+        assert recorder._readinto_bytes(body, (buffer,), {}, 1) is None
+        body.finish(True)
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert summary["complete"] is False
+    assert summary["counts"]["adapter_failure"] == 1
+    assert summary["counts"]["responses_partial"] == 1
+    assert checkpoint.web == checkpoint.binary == checkpoint.metadata == []
+
+
+@pytest.mark.parametrize("retain", [True, False])
+def test_strided_readinto_uses_bounded_chunks_without_losing_bytes(endpoint, monkeypatch, retain):
+    urllib3 = pytest.importorskip("urllib3")
+    # Split a multibyte character at the first 64 KiB boundary.
+    payload = (b"a" * 65_535 + "€".encode() + b"b" * 65_536 + b"tail"
+               if retain else b"a" * (8 * 1024 * 1024))
+    monkeypatch.setattr(sys.modules[__name__], "BODY", payload)
+    chunks = []
+    original_add = automatic_capture._Body.add
+
+    def add(body, value):
+        if value:
+            chunks.append(memoryview(value).nbytes)
+        return original_add(body, value)
+
+    monkeypatch.setattr(automatic_capture._Body, "add", add)
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint, memory_limit=4 * 1024 * 1024 if retain else 0)
+    url, server = endpoint
+    capacity = len(payload) + 17
+    backing = bytearray(b"Z" * (2 * capacity))
+    buffer = memoryview(backing)[::2]
+    connection = urllib3.PoolManager()
+    try:
+        response = connection.request("GET", url + "/text", preload_content=False)
+        count = response.readinto(buffer)
+        assert count == len(payload)
+        assert buffer[:count].tobytes() == payload
+        assert buffer[count:].tobytes() == b"Z" * 17
+        assert backing[1::2] == b"Z" * capacity
+        assert response.read() == b""
+        body = response._arena_http_capture_body
+        response.close()
+    finally:
+        connection.clear()
+        summary = finish(recorder, checkpoint)
+    assert chunks and max(chunks) <= 64 * 1024
+    assert sum(chunks) == len(payload)
+    assert body.size == len(payload)
+    assert body.digest.hexdigest() == hashlib.sha256(payload).hexdigest()
+    if retain:
+        assert len(checkpoint.web) == 1, summary
+        event = checkpoint.web[0]
+        assert_web(event, payload)
+        lab_arena_checkpoint.validate_web_capture_metadata(event["capture"], event["body"])
+        assert summary["complete"] is True
+    else:
+        assert checkpoint.web == checkpoint.binary == checkpoint.metadata == []
+        assert summary["counts"]["body_buffer_overflow"] == 1
+        assert summary["complete"] is False
+    assert summary["counts"].get("adapter_failure", 0) == 0
+    assert server.paths == ["/text"]
 
 
 @pytest.mark.parametrize("path,expected", [("/latin", "caf\xe9".encode("latin-1")), ("/error", BODY)])

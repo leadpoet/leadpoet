@@ -1,3 +1,25 @@
+## Scoped authorization: November 2 reliable and consistent admission review
+
+The user authorized the coordinator to resolve explicit provider-refusal review
+failures and audit inconsistent decisions across the exact named frozen miner
+archives. Explicit refusal recovery permits at most two total primary-model
+reservations per refusal episode and two alternate-model reservations. The
+primary allowance starts at the first refusal; earlier ordinary transient
+attempts do not consume it. Recover existing HTTP200
+generic request errors only from the latest bound authoritative HTTP200
+refusal error pair in the claim ledger. Optional diagnostics are observational.
+Recover only while admission is open. Use existing claim, settlement and admission
+infrastructure, preserving the same security
+criteria and truthful evidence rules. Trace reachable output behavior rather
+than reject isolated fallback text. Internal agents may implement and test
+assigned files in this isolated worktree. The coordinator owns controlled
+organizer-funded provider validation, independent review, merge, exact committed
+migration, canonical paired deployment, and fresh OnePatch/Sentry verification.
+Preserve original attempts, costs, artifacts, finalized rounds, scores, champions
+and rewards. No historical correction is authorized without explicit review.
+Do not create an automatic approval, hidden replay, unbounded retry, new service,
+new dependency, or unrelated change. No credential renewal by internal agents.
+
 ## Scoped authorization: November 2 training export memory
 
 The user authorized the smallest general fix for confirmed November 2 capture

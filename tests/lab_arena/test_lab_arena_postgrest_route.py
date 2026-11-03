@@ -155,6 +155,27 @@ def stack(tmp_path_factory):
                 for migration in ("595-lab-arena-capture-called-icps.sql",
                                   "598-lab-arena-capture-summary-v2.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
+                # Current Store probes include these receipt-bound readers.
+                # Install their real definitions and grants, but never the
+                # dated recovery writes or changes to ordinary write RPCs.
+                cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') "
+                               "FROM pg_namespace WHERE nspname='public'")
+                schema_acl, had_create = cursor.fetchone()
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                for migration, start, end in (
+                    ("604-arena-2026-11-03-forward-only-verifier.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_preserved_judge_v1",
+                     "DO $helpers_verify604$"),
+                    ("605-arena-2026-11-03-admission-review-recovery.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_review605_v1",
+                     "DO $patch605_0$"),
+                ):
+                    source = (Path(__file__).resolve().parents[2] / "scripts" / migration).read_text()
+                    cursor.execute(source[source.index(start):source.index(end)])
+                if not had_create:
+                    cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
+                cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+                assert cursor.fetchone()[0] == schema_acl
             directory = tmp_path_factory.mktemp("private-api-" + suffix)
             directory.chmod(0o700)
             values = {

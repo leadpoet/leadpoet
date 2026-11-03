@@ -3962,6 +3962,19 @@ class ArenaService:
         evidence_reads: Optional[_CompanyEvidenceReads] = None,
         round_context: Optional[Mapping[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        preserved = self._preserved_judgment_configuration(run, round_context)
+        if preserved is not None:
+            policy = contracts.validate_scorer_policy(preserved["scorer_policy"])
+        elif (run.get("round_id") == "arena-2026-11-03"
+              and run.get("status") == "accepted"
+              and isinstance(run.get("company_judgment_refs"), list)):
+            current = self._round_from_context(str(run["round_id"]), round_context)
+            configuration = (current or {}).get("configuration_doc") or {}
+            if any(not isinstance(ref, Mapping) or any(
+                (ref.get("scope_doc") or {}).get(key) != configuration.get(key)
+                for key in ("scorer_image_digest", "scorer_image_reference"))
+                for ref in run["company_judgment_refs"]):
+                raise scoring.ScoringError("preserved judgment authority is missing")
         if run.get("company_judgment_refs") is not None:
             return self._company_quality_breakdowns(
                 run, icp=icp, companies=companies, policy=policy,
@@ -4721,6 +4734,32 @@ class ArenaService:
             "eligibility_reason": reason,
         }
 
+    def _preserved_judgment_configuration(self, judge, round_row=None):
+        """Use original policy only for the audited completed November 3 rows."""
+        if (judge.get("round_id") != "arena-2026-11-03"
+            or judge.get("status") != "accepted"
+            or judge.get("terminal_cause") != "accepted"
+            or not isinstance(judge.get("company_judgment_refs"), list)):
+            return None
+        row = self._round_from_context(str(judge["round_id"]), round_row)
+        configuration = (row or {}).get("configuration_doc") or {}
+        refs = judge["company_judgment_refs"]
+        if refs and all(isinstance(ref, Mapping) and all((ref.get("scope_doc") or {}).get(key) == configuration.get(key)
+                   for key in ("scorer_image_digest", "scorer_image_reference"))
+               for ref in refs):
+            return None
+        preserved = self._store.preserved_judgment_policy(
+            str(judge["round_id"]), str(judge["run_id"]),
+            str(judge.get("scored_run_id") or ""), refs)
+        if preserved is None:
+            return None
+        if (preserved.get("operation") != "nov03_forward_only_verifier_v1"
+            or preserved.get("scoring_generation_floor") != self._score_generation_floor(row)
+            or any(preserved.get("current_" + key) != configuration.get(key)
+                   for key in ("scorer_image_digest", "scorer_image_reference"))):
+            raise ServiceError("preserved_judgment_policy_invalid", 500)
+        return preserved
+
     def _judgment_matches_execution(
         self, row: Mapping[str, Any], judge: Mapping[str, Any],
         source: Mapping[str, Any],
@@ -4762,10 +4801,14 @@ class ArenaService:
             # Legacy scoring assignments have no judgment-cache scope. Their
             # accepted output and execution membership are the final authority.
             return True
-        return all(scope.get("round_id") == round_id and all(
+        matches = lambda configuration: all(scope.get("round_id") == round_id and all(
             scope.get(key) == configuration.get(key)
             for key in ("scorer_image_digest", "scorer_image_reference")
         ) for scope in scopes)
+        if matches(configuration):
+            return True
+        preserved = self._preserved_judgment_configuration(judge, row)
+        return preserved is not None and matches(preserved)
 
     def _terminal_miner_credit_judgment(self, source_id: str) -> bool:
         """Only the database's bound credit proof can end an unmeasured judge."""

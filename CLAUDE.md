@@ -1,3 +1,18 @@
+## Scoped authorization: November 3 remaining-work recovery
+
+The user authorized one mixed-verifier exception: preserve completed November 3
+judgments, scores and costs; use the improved verifier only for unscored work.
+Review frozen originals 28594d902080fb5213f4344c09ffb531 and
+ba551886a9379aa4e00b6238567f211a with the bounded reviewer; admit only real passes.
+Recover baseline ICP 8 once after the confirmed identity-alias fix, preserving
+its five failed attempts and bills. Do not create an automatic seventh attempt.
+Keep sources, completed executions, deadlines, other rounds and published
+outcomes unchanged. The coordinator owns reviewed migrations, canonical release,
+resume and full dashboard verification. Internal agents implement and test only.
+No automatic approval, duplicate paid completed work or unrelated architecture.
+
+The coordinator also authorized one normal third execution for exactly the unfinished stage-2 ICPs 4, 5 and 6 of sub-f013f522a7c764e18df792e094e7b820; retain both expired attempts, all costs, the original $6 per-ICP and two-attempt call quotas, and permit no fourth attempt.
+
 ## Scoped authorization: November 2 recovered Deepline training reader
 
 The user authorized the smallest fix for the confirmed omission of an existing
@@ -240,8 +255,8 @@ create recurring monitors is granted. Keep both instruction files identical.
 The user renewed this task on October 26. Continue researching and implementing
 an industry-fit improvement, compare all 167 fixed cases and independent
 controls, and preserve correct prior verdicts wherever possible. Do not stop
-because a candidate fails. Merge and deploy only after a rigorous improvement
-in accuracy and consistency is shown. The new, final OpenRouter allowance is
+because a candidate fails. Use the later October 27 net-improvement gate
+for deployment. The new, final OpenRouter allowance is
 at most $15 additional, including failed calls and reservations. Its immutable
 baseline and absolute limits are in the local approved budget artifact dated
 October 26. Do not spend other-provider credits in this phase. Preserve all
@@ -257,7 +272,7 @@ full 98 formerly unavailable and 69 prior-pass representative cases against
 original scoring and all coherent previous attempts. Use a simple general
 mechanism; no company exceptions, altered ICPs, fabricated evidence or release
 regressions. The user authorized implementation, safe merge and canonical
-deployment only after meaningful improvement in both error types is proven,
+deployment under the later October 27 net-improvement gate,
 with independent review and deployed-output verification. Preserve unrelated
 qualification, identity, supplier-role, billing, credentials, historical scores,
 published results, rewards, weights and concurrent work. Tests use isolated

@@ -90,7 +90,7 @@ class _Rows:
     """Minimal read-only store for the existing accepted-evidence validators."""
 
     def __init__(self, runs, submission, caches, companies, *, round_row,
-                 signal_uses, signal_rows):
+                 signal_uses, signal_rows, preserved_judgment_policy_reader=None):
         self.runs = runs
         self.submission = submission
         self.round_row = round_row
@@ -98,6 +98,8 @@ class _Rows:
         self.companies = {(row["cache_key"], row["authority_slot"]): row for row in companies}
         self.signal_uses = signal_uses
         self.signals = {(row["cache_key"], row["authority_slot"]): row for row in signal_rows}
+        self._preserved_policy_reader = preserved_judgment_policy_reader
+        self._preserved_policies = {}
         if len(self.caches) != len(caches) or len(self.companies) != len(companies):
             raise ExportError("ambiguous_cache_rows")
         if len(self.signals) != len(signal_rows):
@@ -117,6 +119,14 @@ class _Rows:
 
     def get_company_judgment(self, key, slot):
         return self.companies.get((key, slot))
+
+    def preserved_judgment_policy(self, round_id, judge_run_id, source_run_id, refs):
+        identity = (round_id, judge_run_id, source_run_id, contracts.document_hash(refs))
+        if identity not in self._preserved_policies:
+            self._preserved_policies[identity] = (
+                self._preserved_policy_reader(round_id, judge_run_id, source_run_id, refs)
+                if self._preserved_policy_reader is not None else None)
+        return copy.deepcopy(self._preserved_policies[identity])
 
     def signal_authority_exclusions(self, run_id):
         """Replay the immutable union in signal_authority_exclusions_v1."""
@@ -171,6 +181,8 @@ def _evidence_reader(store, objects):
         _validated_company_judgment_lease = ArenaService._validated_company_judgment_lease
         _company_judgment_evidence = ArenaService._company_judgment_evidence
         _round_from_context = ArenaService._round_from_context
+        _preserved_judgment_configuration = ArenaService._preserved_judgment_configuration
+        _score_generation_floor = staticmethod(ArenaService._score_generation_floor)
 
         def _round(self, round_id):
             # Offline assembly has one exact frozen round, with no service
@@ -1550,6 +1562,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                      signal_source_ledger_rows: Sequence[Mapping[str, Any]] = (),
                      input_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
                      scoring_policy_history: Mapping[str, Any] | None = None,
+                     preserved_judgment_policy_reader: Callable[..., Mapping[str, Any] | None] | None = None,
                      cost_eligibility_reader: Callable[..., Mapping[str, Any]] | None = None) -> dict:
     """Assemble one exact execution. Missing evidence produces explicit gaps.
 
@@ -1571,6 +1584,34 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     config = round_row.get("configuration_doc") or {}
     policy_versions = _scoring_policy_versions(round_row, scoring_policy_history)
     generation_floor = round_row.get("scoring_generation_floor", 0)
+    reader = _evidence_reader(_Rows(
+        by_id, submission_row, cache_rows, company_judgment_rows,
+        round_row=round_row, signal_uses=signal_judgment_uses,
+        signal_rows=signal_judgment_rows,
+        preserved_judgment_policy_reader=preserved_judgment_policy_reader,
+    ), objects)
+    preserved_policies = {}
+
+    def score_configuration(row):
+        preserved = reader._preserved_judgment_configuration(row, round_row)
+        if preserved is None:
+            refs = row.get("company_judgment_refs")
+            if (row.get("round_id") == "arena-2026-11-03"
+                    and row.get("status") == "accepted" and isinstance(refs, list)
+                    and any(not isinstance(ref, Mapping) or any(
+                        (ref.get("scope_doc") or {}).get(key) != config.get(key)
+                        for key in ("scorer_image_digest", "scorer_image_reference"))
+                        for ref in refs)):
+                raise ExportError("preserved_judgment_policy_missing")
+            return config
+        preserved_policies[row["run_id"]] = {
+            key: copy.deepcopy(preserved[key]) for key in (
+                "operation", "scoring_generation_floor", "scorer_policy",
+                "scorer_image_digest", "scorer_image_reference",
+                "current_scorer_image_digest", "current_scorer_image_reference")}
+        return {**config, **{key: copy.deepcopy(preserved[key]) for key in
+                            ("scorer_policy", "scorer_image_digest", "scorer_image_reference")}}
+
     reasons = {name: set() for name in ("context", "source_identity", "input_output_label", "exact_inputs", "costs", "research_process")}
     example = {"schema_version": SCHEMA_VERSION,
                "example_id": contracts.document_hash({"schema_version": SCHEMA_VERSION, "run_id": run_id}),
@@ -1647,13 +1688,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         reasons["input_output_label"].add("final_judge_unavailable")
     elif output is not None and icp is not None:
         try:
-            policy = config["scorer_policy"]
+            judge_config = score_configuration(judge)
+            policy = judge_config["scorer_policy"]
             sliced = verify.slice_first_n(output["companies"], verify.icp_company_goal(icp))
-            reader = _evidence_reader(_Rows(
-                by_id, submission_row, cache_rows, company_judgment_rows,
-                round_row=round_row, signal_uses=signal_judgment_uses,
-                signal_rows=signal_judgment_rows,
-            ), objects)
             breakdowns = reader._verified_breakdowns(judge, icp=icp, companies=sliced, policy=policy)
             result = verify.scored_row(run["submission_id"], run["icp_position"], run_id, icp, output["companies"], breakdowns, policy)
             if run.get("per_icp_score") is None or abs(Decimal(str(result["per_icp_score"])) - Decimal(str(run["per_icp_score"]))) > Decimal("0.000001"):
@@ -1663,6 +1700,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                                    "runtime": _runtime(judge),
                                    "judgment_cache_source_run_id": judge.get("judgment_cache_source_run_id"),
                                    "company_judgment_refs": judge.get("company_judgment_refs")}
+            if judge["run_id"] in preserved_policies:
+                example["judgment"]["preserved_judgment_policy"] = copy.deepcopy(preserved_policies[judge["run_id"]])
             if judge.get("company_judgment_refs") is not None:
                 needed = {(row["cache_key"], row["authority_slot"]) for row in
                           ((judge.get("claim_response") or {}).get("company_judgment_cache") or {}).get("hits", [])}
@@ -1755,7 +1794,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     scoring_generation_floor=revision,
                     scoring_policy_hash=contracts.document_hash(attempt_policy))
             try:
-                identity = _reviewer_runtime_identity(by_id[selected_id], config)
+                attempt_config = score_configuration(by_id[selected_id])
+                if selected_id in preserved_policies:
+                    attempt_policy = attempt_config["scorer_policy"]
+                    attempt_by_id[selected_id].update(
+                        stage_generation=generation, scoring_generation_floor=revision,
+                        scoring_policy_hash=contracts.document_hash(attempt_policy))
+                identity = _reviewer_runtime_identity(by_id[selected_id], attempt_config)
                 attempt_by_id[selected_id]["runtime_identity"] = identity
                 if selected_id == example.get("score_run_id"):
                     example["judgment"]["runtime_identity"] = copy.deepcopy(identity)
@@ -1801,6 +1846,15 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     or document.get("scorer_policy") != attempt_policy
                     or document.get("evaluation_date") != round_row.get("evaluation_date")):
                 reasons["exact_inputs"].add("judge_input_context_mismatch")
+                if (round_row.get("round_id") == "arena-2026-11-03"
+                        and document.get("scorer_policy") != attempt_policy):
+                    # Contradictory saved inputs cannot establish that an old
+                    # receipt ran under the current round's grading identity.
+                    attempt_by_id[selected_id].pop("runtime_identity", None)
+                    if selected_id == example.get("score_run_id"):
+                        example["judgment"].pop("runtime_identity", None)
+                    dimension = "source_identity" if selected_id in selected_ids else "research_process"
+                    reasons[dimension].add("reviewer_runtime_identity_unverified")
             if isinstance(document, dict) and icp is not None:
                 actual_icp = dict(document.get("icp") or {})
                 expected_icp = integrity.agent_visible_icp(icp, contacts_required=contact_policy.enabled(config)) if integrity.enabled(config) else dict(icp)
@@ -1827,7 +1881,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 scoring_input=snapshots[judge["run_id"]]["input"],
                 uses=signal_judgment_uses, authority_rows=signal_judgment_rows,
                 company_rows=company_judgment_rows, runs=by_id,
-                round_row=round_row,
+                round_row={**round_row, "configuration_doc": score_configuration(judge)},
             )
             example["judgment"]["signal_authority_evidence"] = evidence
             # Keep persisted actions as process evidence even when the final

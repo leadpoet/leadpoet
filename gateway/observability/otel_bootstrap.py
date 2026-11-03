@@ -513,6 +513,7 @@ ARENA_DENIAL_CODES = frozenset(
         "participant_source_missing",
         "per_icp_cost_schema_unavailable",
         "pinned_round_id_invalid",
+        "preserved_judgment_policy_invalid",
         "promotion_commit_mismatch",
         "promotion_margin_invalid",
         "promotion_plan_missing",

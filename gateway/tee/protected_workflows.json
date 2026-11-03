@@ -877,12 +877,12 @@
       "symbol": "_is_bound_homepage_name_conflict"
     },
     {
-      "ast_sha256": "sha256:d218c1345d69aa86cd031a0467aa01bd30fdb416186b47e985cb72441b5b6792",
+      "ast_sha256": "sha256:b8e99f766a0e9a009ca1f1c4abde345390ecaa0520495668ccf9e2d1337a3891",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
     {
-      "ast_sha256": "sha256:fdc629ca1b74f7be58306fe88bdfac9cb16f34d965d9805c17003593efe12415",
+      "ast_sha256": "sha256:a0d6b61672628a276e64abfaf21c8be94f2bb4180e5d12b5a10ff950bd3c9714",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_reverify_decision"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9ee542fba4e200a281d3f6ea3c52c1641b971a20e39d99699ca2017295b87f91",
+  "manifest_hash": "sha256:a4abad03704b05c402d26f28375105cb07206349b2f08b03ba565d526a767b3e",
   "protected_source_commit": "b69ea88d301091f06a895ccbb87cb475487ed68a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

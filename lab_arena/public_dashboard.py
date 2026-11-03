@@ -158,10 +158,11 @@ _SUCCESSFUL_CALL_COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation"
+    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation,"
+    "champion_funding_frozen,champion_submission_id,champion_hotkey"
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
-    "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
+    ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
 ).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1") + ",status_generation"
 
 
@@ -591,6 +592,27 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
+def _defending_champion(row: Mapping[str, Any]) -> Optional[dict]:
+    # Name the defender only when the baseline provably ran its code. The
+    # champion-baseline freeze (migration 585) runs the frozen champion's
+    # promoted source and copies that champion's reasoning contract. Older
+    # freezes could fund a legacy champion while the baseline ran another
+    # source. An empty contract still proves the legacy champion's source was
+    # frozen. Compact reads carry only the derived boolean, never its routes.
+    submission_id = str(row.get("champion_submission_id") or "")
+    miner_hotkey = str(row.get("champion_hotkey") or "")
+    configuration = row.get("configuration_doc")
+    configuration = configuration if isinstance(configuration, Mapping) else {}
+    contract = configuration.get("baseline_reasoning_configuration")
+    source_frozen = (isinstance(contract, Mapping)
+                     if "baseline_reasoning_configuration" in configuration
+                     else configuration.get("baseline_champion_source_frozen") is True)
+    if (not submission_id or not miner_hotkey
+            or row.get("champion_funding_frozen") is not True or not source_frozen):
+        return None
+    return {"submission_id": submission_id, "miner_hotkey": miner_hotkey}
+
+
 def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[str, Any]] = None) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
@@ -630,6 +652,7 @@ def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[
         "baseline": baseline,
         "champion": champion,
         "promotion_status": promotion_status,
+        "defending_champion": _defending_champion(row),
     }
 
 

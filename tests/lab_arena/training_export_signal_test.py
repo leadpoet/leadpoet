@@ -251,7 +251,8 @@ def test_export_entrypoint_fetches_original_signal_ledger_without_current_charge
         def list_runs(self, round_id):
             return values["runs"] if round_id == values["round_row"]["round_id"] else []
 
-        def list_ledger(self, *, run_id, after_entry_id=None, limit=1000):
+        def list_ledger(self, *, run_id, after_entry_id=None, limit=1000, training_responses=False):
+            assert training_responses is True
             rows = values["signal_source_ledger_rows"] if run_id == "judge:source" else []
             return [row for row in rows if after_entry_id is None or row["entry_id"] > after_entry_id]
 
@@ -439,7 +440,8 @@ class _CompanyExportStore:
     def list_runs(self, round_id):
         return [row for row in self.values["runs"] if row["round_id"] == round_id]
 
-    def list_ledger(self, *, run_id, after_entry_id=None, limit=1000):
+    def list_ledger(self, *, run_id, after_entry_id=None, limit=1000, training_responses=False):
+        assert training_responses is True
         return [row for row in self.values["signal_source_ledger_rows"]
                 if row["run_id"] == run_id and (after_entry_id is None or row["entry_id"] > after_entry_id)][:limit]
 

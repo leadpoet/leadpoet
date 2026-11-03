@@ -1,3 +1,16 @@
+## Scoped authorization: November 2 recovered Deepline training reader
+
+The user authorized the smallest fix for the confirmed omission of an existing
+private recovered Deepline reply from training evidence. Internal agents may
+implement, test and commit the training-only reader, exact migration602 and
+focused tests in this isolated checkout. The coordinator owns independent
+review, merge, exact migration application and deployed-output verification.
+The new computed function may grant EXECUTE only to lab_arena_service; preserve
+raw-table denial, original ledger receipts, charges, lifecycle, privacy, scoring,
+frozen training rules, historical outcomes and concurrent work. Add no tables,
+storage, dependencies, provider calls, credential renewal or unrelated release.
+Internal agents must not change production, push, merge or deploy.
+
 ## Scoped authorization: November 2 reliable and consistent admission review
 
 The user authorized the coordinator to resolve explicit provider-refusal review

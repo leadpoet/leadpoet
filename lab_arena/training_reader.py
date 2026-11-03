@@ -72,7 +72,8 @@ class AvailabilityReadView:
 def _ledger(store, run_id):
     rows, cursor = [], None
     while True:
-        page = store.list_ledger(run_id=run_id, after_entry_id=cursor, limit=1000)
+        page = store.list_ledger(run_id=run_id, after_entry_id=cursor, limit=1000,
+                                  training_responses=True)
         rows.extend(page)
         if len(page) < 1000:
             return rows

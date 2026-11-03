@@ -1483,6 +1483,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "response_path": prefix + ["response"], "response_sha256": call.get("response_sha256"),
                       "response_status": call.get("response_status"),
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
+                      **({"recovered_response_ref": copy.deepcopy(call["recovered_response_ref"])}
+                         if call.get("recovered_response_ref") is not None else {}),
                       "reasoning_coverage": attempt_coverage(call, _role(example, call), registry),
                       **({"target_omission_reason": "explicit_output_cap_private_response"}
                          if verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs) else {}),

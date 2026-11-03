@@ -1380,6 +1380,7 @@ def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, mo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     cache.rootfs_for(digests[0])
     cache.rootfs_for(digests[1])
@@ -1410,6 +1411,7 @@ def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_expo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     with cache.acquire(first) as active_rootfs:
         cache.rootfs_for(second)
@@ -1432,8 +1434,8 @@ def test_image_cache_export_error_is_not_retried_and_partial_target_is_removed(t
         (target / "rootfs").mkdir()
         raise ValueError("bad image layer")
 
-    cache = rn.ImageCache(tmp_path / "images", exporter)
     monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
+    cache = rn.ImageCache(tmp_path / "images", exporter)
     with pytest.raises(ValueError, match="bad image layer"):
         cache.rootfs_for(digest)
     assert exports == [digest]

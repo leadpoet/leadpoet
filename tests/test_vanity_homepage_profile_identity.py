@@ -84,6 +84,29 @@ def test_new_alias_has_no_error_wrapper_or_description_fallback(fault):
     assert canonical_response_proof(payload) is None
 
 
+@pytest.mark.parametrize('status', ['pending', 'running', 202, 201, False])
+def test_nonterminal_outer_job_cannot_prove_vanity_alias(status):
+    payload = {'status': status, 'result': deepcopy(DATA['current_profile_payload'])}
+    assert canonical_response_proof(payload) is None
+
+
+def test_job_without_status_and_competing_terminal_element_paths_fail_closed():
+    payload = deepcopy(DATA['current_profile_payload'])
+    payload['job_id'] = 'offline-job'
+    assert canonical_response_proof(payload) is None
+    element = deepcopy(DATA['current_profile_payload']['data']['element'])
+    ambiguous = {'status': 200, 'element': element,
+                 'result': {'status': 200, 'element': {**element, 'name': 'Different Parent'}}}
+    assert canonical_response_proof(ambiguous) is None
+
+
+@pytest.mark.parametrize('status', [200, 'completed', 'success'])
+def test_terminal_wrapper_preserves_exact_main_profile_proof(status):
+    payload = {'job_id': 'offline-job', 'status': status,
+               'result': deepcopy(DATA['current_profile_payload'])}
+    assert canonical_response_proof(payload) == canonical_response_proof()
+
+
 @pytest.mark.parametrize('field,value', [
     ('requested_url', CURRENT_URL), ('requested_url', 'https://www.linkedin.com/company/other'),
     ('url', OLD_URL), ('company_id', '0'), ('company_id', '١٢٣'),

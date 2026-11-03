@@ -343,8 +343,20 @@ def _structured_company_elements(value: Any, *, strict_main: bool = False) -> li
             return []
         if strict_main and _structured_provider_reported_error(current):
             return []
-        if strict_main and "element" in current and "elements" in current:
-            return []
+        if strict_main:
+            status = current.get("status")
+            if ("status" in current and not (
+                (type(status) is int and status == 200)
+                or status in ("completed", "success")
+            )) or ("job_id" in current and "status" not in current):
+                return []
+            wrapper_count = sum(isinstance(current.get(key), Mapping) for key in (
+                "toolResponse", "rawV2", "raw", "result", "data", "output",
+            ))
+            if (wrapper_count > 1
+                or (wrapper_count and ("element" in current or "elements" in current))
+                or ("element" in current and "elements" in current)):
+                return []
         element = current.get("element")
         if isinstance(element, Mapping):
             if type(current.get("status")) is not int or current["status"] != 200:
@@ -358,10 +370,6 @@ def _structured_company_elements(value: Any, *, strict_main: bool = False) -> li
                 return []
             return [item for item in elements[:10] if isinstance(item, Mapping)]
         if strict_main and ("element" in current or "elements" in current):
-            return []
-        if strict_main and sum(isinstance(current.get(key), Mapping) for key in (
-            "toolResponse", "rawV2", "raw", "result", "data", "output",
-        )) > 1:
             return []
         for key in ("toolResponse", "rawV2", "raw", "result", "data", "output"):
             child = current.get(key)

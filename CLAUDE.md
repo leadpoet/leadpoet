@@ -1,3 +1,14 @@
+## Scoped authorization: November 3 active Deepline filter pushdown
+
+The coordinator authorized exact migration616 to push only the implied round,
+provider, entry-kind and non-null call filters inside the existing V1/V2 OFFSET0
+fences, reusing validated index559. Preserve billing authority, latest-head,
+NULL/run/cursor semantics, frozen rules, scores, capture, costs and original data.
+Add no index, provider calls, timeout change, retry, dependency or unrelated work.
+Internal agents may implement, test and commit only. The coordinator owns
+independent review, push, merge, exact migration application and live verification.
+Internal agents must not change production or renew credentials.
+
 ## Scoped authorization: November 3 verified display-brand composition
 
 The coordinator authorized the exact five-file --verified-display-brand runtime

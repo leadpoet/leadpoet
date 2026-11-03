@@ -1178,7 +1178,8 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:completed|completes|closed)\s+(?:(?:the|its|an?)\s+)?"
+        r"\b(?:completed|completes|closed|announced\s+(?:today\s+)?the\s+completion\s+of)"
+        r"\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
         r'(?:\s+\((?P<alias>"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)'
@@ -1445,7 +1446,10 @@ def _acquired_stage_quote_supports_names(
     company_names: Sequence[Any],
     quote: str,
 ) -> bool:
-    """Require completed acquisition/current-parent proof for named entities."""
+    """Require completed acquisition/current-parent proof for named entities.
+
+    Callers must bind short identities to submitted/verified or proven aliases.
+    """
 
     if not isinstance(quote, str) or not quote.strip():
         return False
@@ -1456,7 +1460,7 @@ def _acquired_stage_quote_supports_names(
         for name in company_names
     }
     normalized_names = {
-        name for name in normalized_names if name and len("".join(name)) >= 4
+        name for name in normalized_names if name
     }
     if not normalized_names:
         return False
@@ -1534,8 +1538,12 @@ def _acquired_stage_quote_supports_company(
 
     if company is None:
         return False
+    # The submitted identity can be short; an unverified observed alias cannot
+    # introduce a new short company identity into saved-stage proof.
     return _acquired_stage_quote_supports_names(
-        (company.company_name, observed_company_name),
+        (company.company_name, observed_company_name)
+        if len(_compact_company_name(observed_company_name)) >= 4
+        else (company.company_name,),
         quote,
     )
 

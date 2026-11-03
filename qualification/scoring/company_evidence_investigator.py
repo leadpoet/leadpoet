@@ -4105,6 +4105,12 @@ def _validated_findings(
     findings: dict[str, dict[str, Any]] = {}
     attribution_names = set(identity_names or set())
     stage_attribution_names = set(attribution_names)
+    # Newly admitted short acquisition names need identity authority; an
+    # arbitrary prior observed name is not a submitted or verified alias.
+    acquisition_short_identity_names = {
+        re.sub(r"[^a-z0-9]+", "", _normalized_span((identity_anchor or {}).get(key)))
+        for key in ("submitted_name", "verified_name")
+    } - {""}
     proven_rebrand_domains: set[str] = set()
     # Validate rebrand continuity first so only a proven old/new identity can
     # bind stage evidence under the former name, regardless of submitted order.
@@ -4469,7 +4475,10 @@ def _validated_findings(
                     )
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
-                        tuple(stage_attribution_names),
+                        tuple(name for name in stage_attribution_names
+                              if len(acquisition_name := re.sub(
+                                  r"[^a-z0-9]+", "", _normalized_span(name),
+                              )) >= 4 or acquisition_name in acquisition_short_identity_names),
                         finding["evidence_quote"],
                     )
                 ):
@@ -4725,6 +4734,11 @@ def _validated_findings(
                 finding["supporting_evidence"] = validated_support
         findings[target] = finding
         if target == "rebrand" and finding["status"] == "VERIFIED":
+            acquisition_short_identity_names.update(
+                re.sub(r"[^a-z0-9]+", "", _normalized_span(name))
+                for name in (finding["old_name"], finding["new_name"])
+                if name
+            )
             proven_rebrand_domains.update({
                 domain
                 for domain in (

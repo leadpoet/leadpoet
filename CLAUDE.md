@@ -21,7 +21,9 @@ judgments, scores and costs; use the improved verifier only for unscored work.
 Review frozen originals 28594d902080fb5213f4344c09ffb531 and
 ba551886a9379aa4e00b6238567f211a with the bounded reviewer; admit only real passes.
 Recover baseline ICP 8 once after the confirmed identity-alias fix, preserving
-its five failed attempts and bills. Do not create an automatic seventh attempt.
+its five failed attempts and bills. After attempt six timed out, append one manual
+checkpoint-backed seventh using the two completed company judgments; permit no
+automatic eighth attempt and keep other jobs live.
 Keep sources, completed executions, deadlines, other rounds and published
 outcomes unchanged. The coordinator owns reviewed migrations, canonical release,
 resume and full dashboard verification. Internal agents implement and test only.

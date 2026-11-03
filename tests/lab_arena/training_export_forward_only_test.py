@@ -8,6 +8,7 @@ import pytest
 from lab_arena import contracts
 from lab_arena.service import ServiceError
 from lab_arena.training_reader import export_run
+from lab_arena import training_dataset, training_readiness
 from tests.lab_arena import training_export_signal_test as signal_tests
 
 
@@ -158,3 +159,51 @@ def test_wrong_current_binding_cannot_apply_original_policy(monkeypatch):
     authority["current_scorer_image_digest"] = "sha256:" + "e" * 64
     with pytest.raises(ServiceError, match="preserved_judgment_policy_invalid"):
         export_run(PreservedStore(values, authority), values["objects"], values["run_id"])
+
+
+def test_preserved_and_current_exports_keep_their_actual_label_cohorts(monkeypatch):
+    observed = []
+    for current in (False, True):
+        values, authority = preserved_fixture(monkeypatch, current=current)
+        example = export_run(PreservedStore(values, authority), values["objects"], values["run_id"])
+        original = copy.deepcopy(example)
+        expected = values["round_row"]["configuration_doc"] if current else authority
+        records = training_dataset.records_from_example(example)
+        assert records and all(row["meta"]["scorer_image_digest"] == expected["scorer_image_digest"]
+                               and row["meta"]["scorer_policy_hash"] == contracts.document_hash(expected["scorer_policy"])
+                               for row in records)
+        assert training_dataset.example_exclusion(example, training_dataset.Rules(
+            production_rounds_only=False, scorer_image_digest=expected["scorer_image_digest"],
+            scorer_policy_hash=contracts.document_hash(expected["scorer_policy"]))) is None
+        report = training_readiness.build([example], production_rounds_only=False)
+        assert {row["scorer_image_digest"] for row in report["qualification"]["cohorts"]} == {expected["scorer_image_digest"]}
+        assert example == original  # Round configuration, labels and charges stay exact.
+        observed.append((example, expected))
+    preserved, preserved_policy = observed[0]
+    assert training_dataset.example_exclusion(preserved, training_dataset.Rules(
+        production_rounds_only=False, scorer_image_digest=observed[1][1]["scorer_image_digest"])) == "outside_scorer_cohort"
+
+
+@pytest.mark.parametrize("mutation", ["operation", "round", "current_image", "grading_image", "attempt_policy", "attempt_status", "duplicate_attempt", "marker_only"])
+def test_unvalidated_preservation_cannot_override_label_cohort(monkeypatch, mutation):
+    values, authority = preserved_fixture(monkeypatch, current=mutation == "marker_only")
+    example = export_run(PreservedStore(values, authority), values["objects"], values["run_id"])
+    if mutation == "marker_only":
+        # A marker alone on an ordinary current export grants no old authority.
+        authority["scorer_image_digest"] = "sha256:" + "a" * 64
+        authority["scorer_image_reference"] = "registry.example/scorer@" + authority["scorer_image_digest"]
+        example["judgment"]["preserved_judgment_policy"] = authority
+    else:
+        proof = example["judgment"]["preserved_judgment_policy"]
+        attempt = next(row for row in example["attempts"] if row["run_id"] == example["score_run_id"])
+        if mutation == "operation": proof["operation"] = "unreviewed"
+        if mutation == "round": example["round_id"] = "arena-2026-11-04"
+        if mutation == "current_image": proof["current_scorer_image_digest"] = "sha256:" + "e" * 64
+        if mutation == "grading_image": example["judgment"]["runtime_identity"]["grading_image_digest"] = "sha256:" + "f" * 64
+        if mutation == "attempt_policy": attempt["scoring_policy_hash"] = contracts.document_hash({})
+        if mutation == "attempt_status": attempt["status"] = "failed"
+        if mutation == "duplicate_attempt": example["attempts"].append(copy.deepcopy(attempt))
+    example["example_hash"] = contracts.document_hash({key: value for key, value in example.items() if key != "example_hash"})
+    assert training_dataset.example_exclusion(example, training_dataset.Rules(production_rounds_only=False)) == "preserved_judgment_policy_invalid"
+    with pytest.raises(ValueError, match="preserved_judgment_policy_invalid"):
+        training_dataset.records_from_example(example)

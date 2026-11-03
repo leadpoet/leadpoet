@@ -101,7 +101,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                                        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
                                     "recorder_buffer_complete": recorder_complete,
                                     "response_receipts": receipts}})
-        config = example.get("configuration") or {}
+        config = training_dataset.label_scorer_configuration(example)
         cohorts[(config.get("scorer_image_digest"), contracts.document_hash(config.get("scorer_policy") or {}))].append(example)
 
     qualification, qualification_totals = [], Counter()

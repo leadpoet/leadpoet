@@ -157,7 +157,7 @@ DECLARE rid CONSTANT TEXT:='arena-2026-11-03';
  r public.lab_arena_rounds; n public.lab_arena_rounds; c public.lab_arena_restart_claim_control;
  h public.lab_arena_scoring_supersessions; revision BIGINT; actual_hashes JSONB;
  expected_policy CONSTANT JSONB:=$policy604${"company_cap_rule":"icp_max_companies","company_judgment_policy":"company_judgment_v1","employee_bucket_rule":"lab_relaxed_buckets","env_bindings":{"ARENA_FIT_FP_CLASSIFICATION":"company_fit_receipt_v1","ARENA_PROVIDER_OBSERVATION_HANDOFF":"authenticated_first_observed_v1","ARENA_SCORE_NORMALIZATION":"available_intent_cap_v1"},"fp_penalty_icp_floor":0.0,"fp_penalty_points":10.0,"fp_unverified_primary_penalty_points":10.0,"intent_details_policy":"intent_details_v1","judge_models":{"company_fit_reverification":"perplexity/sonar","industry_evidence_review":"openai/gpt-6.1-sol","intent_details_review":"anthropic/claude-sonnet-5.5","intent_fetched_evidence":"openai/gpt-6-luna","intent_signal_judge":"openai/gpt-6-luna","intent_three_stage_stage3":"perplexity/sonar-pro","role_batch_check":"google/gemini-3.5-flash-lite"},"max_scored_companies":0,"pre_slice_rule":"first_n_model_order","provider_profile":"lab_arena","schema_version":"leadpoet.lab_arena.scorer_policy.v1","scoring_adapter_version":"qualification_integrity_v2","signal_judgment_policy":"signal_judgment_v1"}$policy604$::JSONB;
- new_digest CONSTANT TEXT:='sha256:66faa88866b4a56671e478bb4143a537fb8ec7d34bbdacb3cd8d97e4904d92fc'; new_reference CONSTANT TEXT:='493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:66faa88866b4a56671e478bb4143a537fb8ec7d34bbdacb3cd8d97e4904d92fc';
+ new_digest CONSTANT TEXT:='sha256:3576adedad0e858b8a68b6760e61d0a060512ade572bc17f323f27a6e37f541b'; new_reference CONSTANT TEXT:='493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:3576adedad0e858b8a68b6760e61d0a060512ade572bc17f323f27a6e37f541b';
 BEGIN
  PERFORM pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
  SELECT * INTO STRICT c FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;
@@ -203,7 +203,7 @@ BEGIN
   '{scorer_policy,judge_models,industry_evidence_review}','"openai/gpt-6.1-sol"'::JSONB),
   '{scorer_image_digest}',to_jsonb(new_digest)),'{scorer_image_reference}',to_jsonb(new_reference));
  IF n.configuration_doc->'scorer_policy' IS DISTINCT FROM expected_policy
-  OR encode(extensions.digest(n.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM 'cc7464136d226ea840cf0e4d0f192ef3a300405dd483dfab1e974e1bf5da4cfe'
+  OR encode(extensions.digest(n.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '9c396e3565a7f9d84d636cc55537ac95968d97770f5de798b1f45b56fbfc8d57'
   OR encode(extensions.digest((n.configuration_doc->'scorer_policy')::TEXT,'sha256'),'hex') IS DISTINCT FROM 'affc53521322c343401f266b5d2861b04efc4a96db335f9cea5a7a14ad8ccb2f'
   OR (to_jsonb(n)-'configuration_doc') IS DISTINCT FROM (to_jsonb(r)-'configuration_doc') THEN
   RAISE EXCEPTION 'Nov03 forward verifier exact configuration delta differs'; END IF;

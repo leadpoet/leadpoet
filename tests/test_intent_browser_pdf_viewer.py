@@ -19,7 +19,7 @@ SOURCE = 'https://www.unisys.com/siteassets/collateral/news/nr-052010052-unisys-
 SNAPSHOT = 'https://web.archive.org/web/20260606224635/' + SOURCE
 QUOTE = 'On May 20, 2026, Unisys partnered with Rafay Systems to serve enterprise cloud workloads.'
 ARTICLE = '<article><h1>Partnership announcement</h1><p>' + QUOTE + ' The partners will jointly deliver cloud services.' * 80 + '</p></article>'
-VIEWER = ('<div data-original-tag="iframe" src="chrome-extension://browser-owned/index.html" '
+VIEWER = ('<div data-original-tag="iframe" src="chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html" '
           'type="application/pdf"><html><body><pdf-viewer>Document properties '
           'Annotations Present Extracting text from PDF… '
           + 'Page controls ' * 250 + '</pdf-viewer></body></html></div>')
@@ -87,7 +87,7 @@ def test_real_source_sibling_survives_both_ingress_paths_without_viewer_ui(monke
     '<html><body>' + ARTICLE + '<embed type="application/pdf" src="https://example.com/report.pdf"></body></html>',
     '<html><body>' + ARTICLE + '<p>Our article mentions chrome-extension://example/viewer and PDF viewers.</p></body></html>',
     '<html><body><pdf-viewer>' + ARTICLE + '</pdf-viewer></body></html>',
-    '<html><body><iframe src="chrome-extension://example/viewer" type="text/html">' + ARTICLE + '</iframe></body></html>',
+    '<html><body><iframe src="chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/viewer" type="text/html">' + ARTICLE + '</iframe></body></html>',
     '<html><body><div data-original-tag="iframe" src="https://example.com/viewer" type="application/pdf">' + ARTICLE + '</div></body></html>',
 ], ids=['plain_pdf_text', 'pdf_markdown', 'ordinary_archive', 'web_pdf_embed', 'extension_prose',
         'unowned_pdf_viewer_label', 'unsupported_mime', 'unowned_frame'])
@@ -141,9 +141,9 @@ def test_native_pdf_bytes_still_use_existing_text_extraction_fallback(monkeypatc
     assert result['results'][0]['text'] == QUOTE
 
 
-def test_browser_internal_pdf_text_layer_uses_independent_pdf_text_fallback(monkeypatch):
-    # Expanded browser DOM is not a supported PDF extraction. Even loaded
-    # internal text uses the existing exact-source text retrieval path.
+def test_builtin_viewer_label_is_not_independent_pdf_source(monkeypatch):
+    # A PDF.js-looking label in Chromium control DOM does not turn that UI
+    # into an independently extracted PDF source.
     frame = VIEWER.replace('Document properties', '<div class="textLayer">' + QUOTE + '</div>')
     body = '<html><body>' + frame + '</body></html>'
     responses(monkeypatch, direct=body, archive=body)
@@ -205,3 +205,36 @@ def test_real_sibling_source_still_survives_archive_error_and_owned_viewer(monke
     result = asyncio.run(intent._try_wayback(SOURCE))
     assert result['ok'] is True and QUOTE in result['content']
     assert 'Extracting text from PDF' not in result['content']
+
+
+@pytest.mark.parametrize('src', [
+    'moz-extension://pdfjs-viewer/web/viewer.html',
+    'chrome-extension://oemmndcbldboiebfnladdacbdfmadadm/content/web/viewer.html',
+    'chrome-extension://unknown-viewer/index.html',
+    'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai.other/index.html',
+    'chrome-extension://other/mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html',
+    'chrome-extension://other@mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html',
+    'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai@other/index.html',
+    'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai:123/index.html',
+], ids=['mozilla_extension', 'pdfjs_chrome_extension', 'unknown_chrome_extension',
+        'host_suffix', 'id_in_path', 'userinfo_before_id', 'id_as_userinfo', 'port'])
+def test_other_pdf_viewers_and_noncanonical_builtin_origins_stay_unchanged(monkeypatch, src):
+    layer = '<div class="textLayer"><span>' + QUOTE + '</span><span>' + ('Rendered PDF source text. ' * 180) + '</span></div>'
+    body = ('<html><body><div id="wm-ipp-base">Archive navigation</div>'
+            '<div data-original-tag="iframe" src="' + src + '" type="application/pdf">'
+            + layer + '</div></body></html>')
+    assert intent._without_browser_pdf_frames(body) == body
+    assert intent._has_wayback_error_body(body) is False
+    responses(monkeypatch, direct=body, archive=body)
+    direct = asyncio.run(intent._scrape_sd_hardened(SOURCE))
+    archive = asyncio.run(intent._try_wayback(SOURCE))
+    assert direct['stage'] == 'sd:baseline' and QUOTE in direct['content']
+    assert archive['ok'] is True and archive['content'] == body
+
+
+def test_standard_pdfjs_text_layer_document_is_not_chromium_ui(monkeypatch):
+    body = '<html><body><div class="textLayer"><span>' + QUOTE + '</span><span>' + ('PDF document source. ' * 200) + '</span></div></body></html>'
+    assert intent._without_browser_pdf_frames(body) == body
+    responses(monkeypatch, direct=body, archive=body)
+    assert QUOTE in asyncio.run(intent._scrape_sd_hardened(SOURCE))['content']
+    assert asyncio.run(intent._try_wayback(SOURCE))['content'] == body

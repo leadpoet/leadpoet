@@ -2233,9 +2233,15 @@ class _WaybackErrorParser(HTMLParser):
         if mime not in {"application/pdf", "application/x-google-chrome-pdf"}:
             return False
         try:
-            return urlsplit(str(attributes.get("src") or attributes.get("data") or "")).scheme in {
-                "chrome-extension", "moz-extension",
-            }
+            viewer = urlsplit(str(attributes.get("src") or attributes.get("data") or ""))
+            # Chromium's kPdfExtensionId identifies this UI producer. Other
+            # extension viewers can expose usable rendered document text.
+            return bool(
+                viewer.scheme == "chrome-extension"
+                and viewer.hostname == "mhjfbmdgcfjbbpaeojofohoefgiehjai"
+                and viewer.username is None and viewer.password is None
+                and viewer.port is None
+            )
         except ValueError:
             return False
 

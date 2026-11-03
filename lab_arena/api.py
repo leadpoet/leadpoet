@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from functools import partial
 from typing import Any, Optional
 
 import anyio
@@ -112,14 +113,20 @@ def create_app(service: ArenaService) -> FastAPI:
     training_input_limiter: Optional[anyio.CapacityLimiter] = None
 
     async def no_store_public_call(
-        call: Any, *args: Any, **kwargs: Any
+        call: Any, *args: Any, _worker_limiter: Optional[anyio.CapacityLimiter] = None,
+        **kwargs: Any,
     ) -> JSONResponse:
         headers = {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         }
         try:
-            content = await run_in_threadpool(call, *args, **kwargs)
+            if _worker_limiter is None:
+                content = await run_in_threadpool(call, *args, **kwargs)
+            else:
+                content = await to_thread.run_sync(
+                    partial(call, *args, **kwargs), limiter=_worker_limiter,
+                )
         except ServiceError as exc:
             telemetry.note_denial(exc.code)
             if exc.code == "validator_events_rate_limited":
@@ -388,12 +395,12 @@ def create_app(service: ArenaService) -> FastAPI:
         async def capture() -> None:
             nonlocal response, error
             try:
-                # Acquire before dispatching to the shared worker pool.
-                # Waiting input captures consume no shared workers.
-                async with training_input_limiter:
-                    response = await no_store_public_call(
-                        service.handle_training_input, run_id, lease_token, document,
-                    )
+                # Use the existing two-input bound directly for dispatch.
+                # Unrelated default-worker demand cannot starve this lane.
+                response = await no_store_public_call(
+                    service.handle_training_input, run_id, lease_token, document,
+                    _worker_limiter=training_input_limiter,
+                )
             except BaseException as exc:
                 # Preserve the original exception without a group envelope.
                 error = exc

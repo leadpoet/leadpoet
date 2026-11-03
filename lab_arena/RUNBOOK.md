@@ -579,6 +579,18 @@ shapes fail the build. The tool
 checks the actual added image layer and unchanged process configuration.
 For already separated graders, the grading file remains byte-identical.
 
+For the reviewed native Exa `CRAWL_HTTP_403` target-denial diagnostic, build and
+verify with `--intent-target-denial`. This exclusive mode adds only that exact
+403 alias to the two frozen intent retrieval/finality allowlists. It copies no
+current runtime package or other grader source. Unknown or partly repaired
+module pairs fail closed. Register the verified image through the existing
+reviewer-runtime command only after the gateway and each executing validator
+have the matching competition validator. Both hosts recheck retained source
+traces; an older host can reject the corrected runtime's terminal company judgment.
+New leases record the actual repair runtime separately;
+the frozen grading/cache identity, prompts, evidence criteria and score formula
+stay unchanged. Accepted work, existing leases, costs and deadlines stay unchanged.
+
 For a frozen grader whose unresolved semantic-review return bypasses its
 completed-investigation settlement, explicitly add
 `--completed-investigation-finality` during both build and `--verify-image`.

@@ -103,6 +103,7 @@ def test_unknown_shim_source_fails_closed(change):
     '--archive-snapshot-https', '--greenhouse-api-source', '--auxiliary-source-name-binding',
     '--homepage-linkedin-conflict-repair', '--observed-linkedin-ampersand',
     '--verified-homepage-brand-alias',
+    '--intent-target-denial',
 ])
 def test_shim_only_rejects_every_grading_option_before_image_access(monkeypatch, flag):
     monkeypatch.setattr(builder.sys, 'argv', ['compose', '--grading-image',

@@ -217,7 +217,7 @@ def test_capture_matches_final_runtime_boundary_without_affecting_execution(tmp_
     sandbox = BridgingRuntime(output=output, calls=0)
     (tmp_path / "work").mkdir()
     assert runner.Runner(make_config(tmp_path, api, sandbox)).run_once() == 1
-    assert len(snapshots) == (2 if capture_fails else 1)
+    assert len(snapshots) == (3 if capture_fails else 1)
     assert all(saved == sandbox.input_documents[0] for saved in snapshots)
     assert snapshots[0]["deepline_catalog"] == active["deepline_catalog"]
     assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"

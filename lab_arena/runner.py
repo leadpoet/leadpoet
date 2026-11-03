@@ -3926,28 +3926,32 @@ def _log_training_capture_failure(kind: str, exc: Exception) -> None:
 
 def _record_training_input(
     config: RunnerConfig, lease: Mapping[str, Any], lease_token: str,
-    document: Mapping[str, Any],
-) -> None:
-    """Best-effort input evidence; capture cannot change run/scoring results."""
+    document: Mapping[str, Any], *, max_attempts: int = 2,
+) -> Optional[bool]:
+    """Return True if stored, False if failed, or None if unavailable.
+
+    Input evidence cannot change run/scoring results.
+    """
     send = getattr(config.api, "training_input", None)
     if not callable(send):
         return
     try:
-        for attempt in range(2):
+        for attempt in range(max_attempts):
             try:
                 response = send(str(lease["run_id"]), lease_token, document)
             except Exception:
-                if attempt == 0:
+                if attempt + 1 < max_attempts:
                     continue
                 raise
             if not isinstance(response, Mapping) or response.get("status") != "stored":
                 raise RunnerError("training input capture rejected", http_status=getattr(response, "http_status", None))
-            break
+            return True
     except Exception as exc:
         try:
             _log_training_capture_failure("input", exc)
         except Exception:
             pass
+    return False
 
 
 def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any], lease_token: str, state: RunState) -> Dict[str, Any]:
@@ -4465,6 +4469,7 @@ class AssignmentExecutor:
         failure_detail: Any = ""
         provider_classification_ready = False
         output_document: Optional[Dict[str, Any]] = None
+        input_capture_stored: Optional[bool] = None
         result: Optional[runtime.SandboxResult] = None
         execution_diagnostic: Optional[Dict[str, Any]] = None
         checkpoint_transition: Optional[Dict[str, Any]] = None
@@ -4544,7 +4549,7 @@ class AssignmentExecutor:
                 # the authority for the same request after it crosses the socket.
                 extra_environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
-            _record_training_input(config, lease, lease_token, input_document)
+            input_capture_stored = _record_training_input(config, lease, lease_token, input_document)
             staged_agent_entrypoint = (
                 None
                 if scoring_run
@@ -4882,6 +4887,12 @@ class AssignmentExecutor:
                             },
                             "privacy": {"redacted": False, "redactions": []},
                         }, secrets=(state.lease_token,))
+            if input_capture_stored is False:
+                # Retry the exact retained runtime input once, while ordinary
+                # lease authorization still applies and before abandonment.
+                _record_training_input(
+                    config, lease, lease_token, input_document, max_attempts=1,
+                )
             if journal is not None:
                 try:
                     journal.stop()

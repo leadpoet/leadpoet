@@ -401,3 +401,35 @@ def test_projection_and_raw_table_privileges_are_closed(projected_stack):
             rpc = httpx.post(stack["base_url"] + "/rpc/lab_arena_training_deepline_response_v1",
                              headers=headers, json={"p_ledger": {"entry_id": 6020013}})
             assert rpc.status_code in (401, 403, 404)
+
+
+def test_first_apply_rejects_unexpected_default_function_grantee(projected_stack):
+    connection = projected_stack["connection"]
+    role = "training602_unexpected_executor"
+    with connection.cursor() as cur:
+        before = _security_state(cur)
+        try:
+            cur.execute("DROP FUNCTION " + SIGNATURE)
+            cur.execute("CREATE ROLE " + role + " NOLOGIN")
+            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                        "GRANT EXECUTE ON FUNCTIONS TO " + role)
+            cur.execute("SELECT defaclrole,defaclnamespace,defaclobjtype,defaclacl::text "
+                        "FROM pg_default_acl ORDER BY 1,2,3")
+            defaults = cur.fetchall()
+            with pytest.raises(Exception, match="lab_arena_training_response_postcondition_invalid"):
+                cur.execute(MIGRATION.read_text())
+            cur.execute("ROLLBACK")
+            cur.execute("SELECT to_regprocedure(%s)", (SIGNATURE,))
+            assert cur.fetchone() == (None,)
+            assert _security_state(cur) == before
+            cur.execute("SELECT defaclrole,defaclnamespace,defaclobjtype,defaclacl::text "
+                        "FROM pg_default_acl ORDER BY 1,2,3")
+            assert cur.fetchall() == defaults
+        finally:
+            cur.execute("ROLLBACK")
+            cur.execute("DROP FUNCTION IF EXISTS " + SIGNATURE)
+            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                        "REVOKE EXECUTE ON FUNCTIONS FROM " + role)
+            cur.execute("DROP ROLE " + role)
+            cur.execute(MIGRATION.read_text())
+            assert _security_state(cur) == before

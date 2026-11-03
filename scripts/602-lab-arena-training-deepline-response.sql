@@ -156,5 +156,25 @@ REVOKE ALL ON FUNCTION public.lab_arena_training_deepline_response_v1(public.lab
 GRANT EXECUTE ON FUNCTION public.lab_arena_training_deepline_response_v1(public.lab_arena_ledger)
   TO lab_arena_service;
 
+-- First creation can inherit additional default EXECUTE grants. Reject them
+-- transactionally instead of changing unrelated default privileges or roles.
+DO $function_postcondition$
+DECLARE v_function pg_catalog.pg_proc;
+BEGIN
+  SELECT p.* INTO v_function FROM pg_catalog.pg_proc AS p
+    WHERE p.oid = pg_catalog.to_regprocedure(
+      'public.lab_arena_training_deepline_response_v1(public.lab_arena_ledger)');
+  IF v_function.oid IS NULL
+     OR v_function.proowner <> 'lab_arena_owner'::pg_catalog.regrole
+     OR (SELECT count(*) FROM pg_catalog.aclexplode(v_function.proacl)) <> 2
+     OR EXISTS (SELECT 1 FROM pg_catalog.aclexplode(v_function.proacl) AS privilege
+       WHERE privilege.grantee NOT IN ('lab_arena_owner'::pg_catalog.regrole, 'lab_arena_service'::pg_catalog.regrole)
+         OR privilege.grantor <> 'lab_arena_owner'::pg_catalog.regrole
+         OR privilege.privilege_type <> 'EXECUTE' OR privilege.is_grantable) THEN
+    RAISE EXCEPTION 'lab_arena_training_response_postcondition_invalid' USING ERRCODE = '55000';
+  END IF;
+END;
+$function_postcondition$;
+
 NOTIFY pgrst, 'reload schema';
 COMMIT;

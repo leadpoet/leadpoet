@@ -1441,6 +1441,12 @@ def _bound_public_supersession_supports_company(
     return False
 
 
+# Anonymous references cannot supply a company's named acquisition identity.
+_ACQUISITION_ANONYMOUS_REFERENCE_NAMES = {
+    ("company",), ("we",), ("us",), ("it",),
+}
+
+
 def _acquired_stage_quote_supports_names(
     company_names: Sequence[Any],
     quote: str,
@@ -1456,7 +1462,8 @@ def _acquired_stage_quote_supports_names(
         for name in company_names
     }
     normalized_names = {
-        name for name in normalized_names if name and len("".join(name)) >= 4
+        name for name in normalized_names
+        if name and name not in _ACQUISITION_ANONYMOUS_REFERENCE_NAMES
     }
     if not normalized_names:
         return False
@@ -1484,7 +1491,7 @@ def _acquired_stage_quote_supports_names(
             alias = tuple(re.findall(r"[a-z0-9]+", str(
                 match.groupdict().get("alias") or ""
             ).casefold()))
-            if (alias and alias not in {("company",), ("we",), ("us",)}
+            if (alias and alias not in _ACQUISITION_ANONYMOUS_REFERENCE_NAMES
                     and not set(subject) & {
                         "assets", "business", "division", "unit", "brand",
                         "portfolio", "stake", "interest", "shares",

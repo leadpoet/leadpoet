@@ -111,7 +111,7 @@ BEGIN
   RETURN;
  END IF;
  IF current_setting('session_replication_role')<>'origin'
-  OR c.operator_paused OR c.guard_generation IS DISTINCT FROM 758
+  OR c.operator_paused OR c.guard_generation IS DISTINCT FROM 759
   OR coalesce(c.guard_commitment,'')<>'' OR coalesce(c.owner_commitment,'')<>''
   OR c.guard_expires_at IS NOT NULL OR coalesce(c.candidate_commit,'')<>''
   OR coalesce(c.restart_scope,'')<>'' OR coalesce(c.restart_phase,'')<>''

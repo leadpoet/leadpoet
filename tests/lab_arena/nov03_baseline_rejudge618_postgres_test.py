@@ -43,7 +43,7 @@ def prepared():
                             cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation,terminal_cause,output_ref,company_judgment_refs,result_doc,scored_run_id,scoring_generation_floor) VALUES (%s,%s,%s,%s,%s,2,%s,1,'score','accepted',7,'accepted',%s,'[]','{\"terminal_status\":\"accepted\"}',%s,0)",(assignment+':score:1',assignment+':score',ROUND,submission,hotkey,position,assignment+'-score.json',assignment+':1'))
                 cur.execute("UPDATE public.lab_arena_runs SET per_icp_score=42 WHERE round_id=%s AND kind='execute'",(ROUND,))
                 cur.execute("UPDATE public.lab_arena_rounds SET status='published',status_generation=10,stage_generation=7,participants=%s::jsonb,publication_doc='{\"original\":true}',king_outcome='no_king',published_at=now(),reward_basis_hash='sha256:'||repeat('a',64),reward_basis_doc='{\"original_reward\":true}',signing_key_doc='{\"original_key\":true}',effective_reward_epoch=26177,reward_activated_at=now() WHERE round_id=%s",(json.dumps(participants),ROUND))
-                cur.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=false,guard_generation=758,guard_commitment='',owner_commitment='',guard_expires_at=NULL,candidate_commit='',restart_scope='',restart_phase='',captured_leases='[]' WHERE singleton")
+                cur.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=false,guard_generation=759,guard_commitment='',owner_commitment='',guard_expires_at=NULL,candidate_commit='',restart_scope='',restart_phase='',captured_leases='[]' WHERE singleton")
                 cur.execute('SET LOCAL session_replication_role=origin')
             conn.commit()
             row=store.get_round(ROUND)
@@ -192,7 +192,7 @@ def test_wrong_authority_rolls_back_every_change(prepared,fault):
     if fault=='old_refs': manifest['work_items'][0]['company_judgment_refs']=[{'invalid':True}]
     if fault=='clock': sql=sql.replace('2099-11-03T23:45:00Z','2000-11-03T23:45:00Z')
     if fault=='guard':
-        with p.conn.cursor() as cur: cur.execute('UPDATE public.lab_arena_restart_claim_control SET guard_generation=759 WHERE singleton')
+        with p.conn.cursor() as cur: cur.execute('UPDATE public.lab_arena_restart_claim_control SET guard_generation=760 WHERE singleton')
         p.conn.commit()
     sql=re.sub(r'\$manifest618\$.*?\$manifest618\$',lambda _: '$manifest618$'+json.dumps(manifest,separators=(',',':'),sort_keys=True)+'$manifest618$',sql,flags=re.S)
     with p.conn.cursor() as cur:

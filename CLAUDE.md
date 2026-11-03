@@ -29,7 +29,7 @@ outcomes unchanged. The coordinator owns reviewed migrations, canonical release,
 resume and full dashboard verification. Internal agents implement and test only.
 No automatic approval, duplicate paid completed work or unrelated architecture.
 
-The coordinator also authorized one normal third execution for exactly the unfinished stage-2 ICPs 4, 5 and 6 of sub-f013f522a7c764e18df792e094e7b820; retain both expired attempts, all costs, the original $6 per-ICP and two-attempt call quotas, and permit no fourth attempt.
+The coordinator also authorized one normal third execution for exactly the unfinished stage-2 ICPs 4, 5 and 6 of sub-f013f522a7c764e18df792e094e7b820; retain both expired attempts, all costs, the original $6 per-ICP and two-attempt call quotas, and permit no automatic fourth attempt. After the distinct November 3 G3 loss, the coordinator authorized one manual third for a4fe ICPs 2–9 and one manual fourth for these f013 ICPs 4–6, only after natural expiry, with original costs, sources, quotas and deadlines unchanged; no further automatic attempt.
 
 ## Scoped authorization: November 2 recovered Deepline training reader
 

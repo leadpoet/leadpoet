@@ -1462,7 +1462,10 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
         return f"http_{status_code}"
     if status_code != 200:
         return f"http_{status_code}"
-    body = _without_browser_pdf_frames(body)
+    cleaned = _without_browser_pdf_frames(body)
+    if cleaned != body and _has_wayback_error_body(cleaned):
+        return "html_empty_body"
+    body = cleaned
     if not body or len(body) < 500:
         return "body_too_short"
     if _has_empty_html_body(body):

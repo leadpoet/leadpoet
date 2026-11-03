@@ -153,3 +153,25 @@ def test_browser_internal_pdf_text_layer_uses_independent_pdf_text_fallback(monk
     result = asyncio.run(intent._fetch_sd_then_exa([SOURCE]))
     fallback.assert_awaited_once_with(SOURCE)
     assert result['results'][0]['text'] == QUOTE
+
+
+def test_exact_archive_pdf_viewer_returned_directly_still_uses_text_fallback(monkeypatch):
+    responses(monkeypatch, direct=CAPTURE, archive=CAPTURE)
+    fallback = AsyncMock(return_value={'ok': True, 'stage': 'exa_scraped', 'content': QUOTE,
+                                       'error': None})
+    monkeypatch.setattr(intent, '_scrape_exa', fallback)
+    assert intent._evaluate_sd_response(200, CAPTURE) != 'ok'
+    result = asyncio.run(intent._fetch_sd_then_exa([SOURCE]))
+    fallback.assert_awaited_once_with(SOURCE)
+    assert result['results'][0]['text'] == QUOTE
+
+
+def test_direct_archive_chrome_with_pdf_frame_preserves_independent_article(monkeypatch):
+    body = ('<html><head><title>Partnership announcement</title></head><body>'
+            '<div id="wm-ipp-base">Wayback navigation</div>' + VIEWER + ARTICLE
+            + '</body></html>')
+    responses(monkeypatch, direct=body)
+    assert intent._evaluate_sd_response(200, body) == 'ok'
+    result = asyncio.run(intent._scrape_sd_hardened(SOURCE))
+    assert result['stage'] == 'sd:baseline' and QUOTE in result['content']
+    assert 'Extracting text from PDF' not in result['content']

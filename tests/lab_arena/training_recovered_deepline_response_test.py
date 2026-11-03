@@ -5,7 +5,7 @@ import copy
 
 import pytest
 
-from lab_arena import broker, contracts, training_capture, training_observations, training_steps, training_thinking
+from lab_arena import broker, contracts, training_capture, training_export, training_observations, training_steps, training_thinking
 from lab_arena.training_export import ExportError, assemble_example
 from lab_arena.training_reader import _ledger
 from lab_arena.store import ArenaStore
@@ -118,6 +118,27 @@ def test_fixed_exa_tool_binding_does_not_depend_on_optional_cost_metadata():
     call["recovered_response_ref"]["tool"] = "wrong-tool"
     with pytest.raises(ExportError, match="recovered_deepline_response_identity_invalid"):
         training_steps._host_result(exported, call)
+
+
+def test_identical_success_already_in_ledger_is_parsed_only_once(monkeypatch):
+    values = recovered_values()
+    terminal = values["ledger_rows"][-1]
+    terminal["terminal_response"] = copy.deepcopy(terminal["training_recovered_response"]["terminal_response"])
+    parse = training_export._response_value
+    parsed = []
+
+    def counted(*args):
+        parsed.append(args)
+        return parse(*args)
+
+    monkeypatch.setattr(training_export, "_response_value", counted)
+    exported = assemble_example(**values)
+    call = exported["provider_calls"][0]
+    assert len(parsed) == 1
+    assert "recovered_response_ref" not in call
+    assert call["response_provenance"]["source"] == "stored_provider_ledger_receipt"
+    assert call["response_receipts"][0]["response_ref"] == {"entry_id": 3, "field": "response"}
+    assert training_steps._host_result(exported, call)["response"] == call["response"]
 
 
 @pytest.mark.parametrize("field,value", [

@@ -639,6 +639,8 @@ def _ledger_recovered_response(entries, reserve):
         or any(recovered_cost.get(key) != ref.get(field) for key, field in
                (("request_id", "request_id"), ("operation", "tool")) if key in recovered_cost)):
         raise ExportError("recovered_deepline_response_identity_invalid")
+    if terminal == row.get("terminal_response"):
+        return None  # The ledger already retains the exact delivered reply.
     return ref
 
 

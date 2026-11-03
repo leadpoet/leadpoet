@@ -79,7 +79,7 @@ def _cached_database(migrations, *, network, setup_sql=""):
 
 @pytest.fixture(scope="module")
 def stack():
-    """Cached PG17.6/PostgREST14.16; excludes nginx and opaque-key ingress.
+    """Cached PG17.6/PostgREST14.14 (image v14.16); excludes nginx and ingress.
 
     The production transport still generates the selection and parses the
     actual HTTP result. A test hook removes /rest/v1 and supplies a local JWT
@@ -267,10 +267,10 @@ def test_actual_sql_and_postgrest_keep_original_bill_and_same_recovery(projected
         rest.close()
 
 
-@pytest.mark.parametrize("patch", ["no_recovery", "wrong_request", "wrong_reservation", "wrong_tool", "old_head", "uncertain", "wrong_run"])
+@pytest.mark.parametrize("patch", ["no_recovery", "wrong_request", "wrong_reservation", "wrong_tool", "old_head", "uncertain", "wrong_run", "identical_success"])
 def test_saved_identity_and_current_head_controls(projected_stack, patch):
     stack = projected_stack
-    index = 10 + ["no_recovery", "wrong_request", "wrong_reservation", "wrong_tool", "old_head", "uncertain", "wrong_run"].index(patch)
+    index = 10 + ["no_recovery", "wrong_request", "wrong_reservation", "wrong_tool", "old_head", "uncertain", "wrong_run", "identical_success"].index(patch)
     options = {}
     if patch == "no_recovery":
         options["no_recovery"] = True
@@ -286,6 +286,9 @@ def test_saved_identity_and_current_head_controls(projected_stack, patch):
         options["recovery_patch"] = {"terminal_response": terminal}
     elif patch == "uncertain":
         options["kind"] = "uncertain"
+    elif patch == "identical_success":
+        options["head_patch"] = {"terminal_response": copy.deepcopy(
+            recovered_values()["ledger_rows"][-1]["training_recovered_response"]["terminal_response"])}
     rows, recovered = _seed(stack, index, **options)
     if patch == "old_head":
         with stack["connection"].cursor() as cur:

@@ -18,7 +18,7 @@ BEGIN
         'public.lab_arena_training_deepline_response_v1(public.lab_arena_ledger)');
     IF v_count <> 1 OR v_function.oid IS NULL
        OR pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_function.prosrc, 'UTF8')), 'hex')
-            <> '5426e937bd3ae014c568dcb72d77fff9e6758bbce5b0cc26d33dfd6c2fdeccca'
+            <> '4e29b9b06ea814c70a3046939a1569da51efb25ec45275f729ff7e314ba97b69'
        OR v_function.proowner <> 'lab_arena_owner'::pg_catalog.regrole
        OR v_function.prolang <> (SELECT oid FROM pg_catalog.pg_language WHERE lanname = 'plpgsql')
        OR v_function.prorettype <> 'jsonb'::pg_catalog.regtype OR v_function.proretset
@@ -70,6 +70,10 @@ BEGIN
   SELECT * INTO v_response FROM public.lab_arena_deepline_call_responses
     WHERE call_identity = v_entry.call_identity;
   IF v_response.call_identity IS NULL THEN
+    RETURN NULL;
+  END IF;
+  -- The ordinary ledger receipt already contains this exact response.
+  IF v_entry.terminal_response IS NOT DISTINCT FROM v_response.terminal_response THEN
     RETURN NULL;
   END IF;
   SELECT * INTO v_reservation FROM public.lab_arena_ledger

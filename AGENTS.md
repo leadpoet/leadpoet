@@ -8,6 +8,17 @@ other source bytes, process configuration, costs, deadlines and completed work.
 Internal agents may implement, test and commit only. The coordinator owns
 independent review, push, merge, image publication and production operations.
 
+## Scoped authorization: November 3 MyCHN checkpoint sixth
+
+The coordinator authorized exact migration612 to append one sixth judgment for
+sub-0df2d0295c950d907e094e258bf98905, stage2 ICP7, using the reviewed four-file
+runtime sha256:1b871e1c80e6d3c4095b14d73166dc5d37dde5f5002aa622583d4350b198fa4b.
+Keep the five failed attempts, completed company and signal judgments, costs,
+source, grading/cache identity, original deadlines and all other work unchanged.
+No automatic seventh, count reset, replay of completed work or new retry system is allowed.
+Internal agents implement and test only; the coordinator owns independent review,
+push, merge, exact committed migration application and live verification.
+
 ## Scoped authorization: November 3 remaining-work recovery
 
 The user authorized one mixed-verifier exception: preserve completed November 3

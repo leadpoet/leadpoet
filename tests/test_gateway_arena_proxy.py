@@ -753,3 +753,76 @@ def test_sidecar_ssl_context_keeps_cookies_and_connections_per_request(monkeypat
         assert cookies == [False, False]
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/arena/v1/runs/run-1/training-input",
+        "/arena/v1/runs/run-1/training-observation-segments",
+    ],
+)
+def test_training_capture_proxy_outlasts_the_capture_queue(monkeypatch, path):
+    # Captures queue behind the Arena's two-wide limiter. At the old 150s
+    # deadline the proxy hung up mid-queue and the Arena dropped the capture.
+    observed = []
+
+    class SidecarClient:
+        def __init__(self, *, timeout, **_kwargs):
+            self.timeout = timeout
+            observed.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def request(self, *_args, **_kwargs):
+            # Model a capture that waited in the queue, without sleeping.
+            if self.timeout.read <= 150.0:
+                raise httpx.ReadTimeout("capture exceeded proxy deadline")
+            return httpx.Response(200, json={"status": "captured"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy.httpx, "AsyncClient", SidecarClient)
+    response = _app().post(path, json={}, headers={"x-lab-arena-lease": "a" * 64})
+
+    assert response.status_code == 200
+    assert observed[0].read == arena_proxy._CAPTURE_READ_TIMEOUT_SECONDS
+    assert observed[0].connect == 3.0
+    assert observed[0].write == 30.0
+    assert observed[0].pool == 3.0
+
+
+def test_observation_authority_head_keeps_the_short_deadline(monkeypatch):
+    # The read-only ownership check runs before the body is buffered; only the
+    # upload itself waits on the capture queue.
+    observed = []
+
+    class SidecarClient:
+        def __init__(self, *, timeout, **_kwargs):
+            observed.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def request(self, method, *_args, **_kwargs):
+            if method == "HEAD":
+                return httpx.Response(204)
+            return httpx.Response(200, json={"status": "captured"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy.httpx, "AsyncClient", SidecarClient)
+    response = _app().post(
+        "/arena/v1/runs/run-1/training-observations",
+        json={},
+        headers={"x-lab-arena-lease": "a" * 64},
+    )
+
+    assert response.status_code == 200
+    assert observed[0].read == 150.0
+    assert observed[1].read == arena_proxy._CAPTURE_READ_TIMEOUT_SECONDS

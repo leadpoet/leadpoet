@@ -67,6 +67,16 @@ _PROVIDER_READ_TIMEOUT_SECONDS = (
     + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
     + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
 )
+# Training captures queue behind the Arena's two-wide capture limiter, so a
+# burst of validator uploads waits far longer than it is served. The generic
+# 150s deadline cut that queue: the proxy returned 503 while the Arena logged
+# 499 and dropped the still-queued capture, losing the run's training input.
+# Give the capture routes a deadline that covers the observed queue, and keep
+# it well inside the lease TTL that makes a late capture worthless anyway.
+_CAPTURE_READ_TIMEOUT_SECONDS = 600.0
+_CAPTURE_ROUTE_SUFFIXES = frozenset(
+    {"training-input", "training-observations", "training-observation-segments"}
+)
 
 
 def _sidecar_ssl_context() -> ssl.SSLContext:
@@ -250,19 +260,21 @@ async def _request_sidecar(
     testnet: bool = False,
 ) -> httpx.Response:
     parts = path.split("/")
-    provider_call = (
-        method == "POST"
-        and len(parts) == 4
-        and parts[:2] == ["v1", "runs"]
-        and parts[3] == "provider"
-    )
+    run_route = len(parts) == 4 and parts[:2] == ["v1", "runs"]
+    provider_call = method == "POST" and run_route and parts[3] == "provider"
+    capture_call = method == "POST" and run_route and parts[3] in _CAPTURE_ROUTE_SUFFIXES
     # Match the validator's bounded admission, execution, billing and grace
-    # window from the operation table, including native Responses calls. Other
-    # routes retain their existing deadline; no paid request is retried here.
-    timeout = httpx.Timeout(
-        connect=3.0, read=_PROVIDER_READ_TIMEOUT_SECONDS if provider_call else 150.0,
-        write=30.0, pool=3.0
-    )
+    # window from the operation table, including native Responses calls.
+    # Training captures get the capture deadline so a queued upload is not
+    # discarded mid-flight. Other routes retain their existing deadline; no
+    # paid request is retried here.
+    if provider_call:
+        read_timeout = _PROVIDER_READ_TIMEOUT_SECONDS
+    elif capture_call:
+        read_timeout = _CAPTURE_READ_TIMEOUT_SECONDS
+    else:
+        read_timeout = 150.0
+    timeout = httpx.Timeout(connect=3.0, read=read_timeout, write=30.0, pool=3.0)
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,

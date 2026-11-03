@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
-from lab_arena import company_judgments, contracts, contact_policy, integrity, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
+from lab_arena import company_judgments, contracts, contact_policy, integrity, operations, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
@@ -559,6 +559,99 @@ def response_entry_id(call):
     return selected
 
 
+def recovered_response_ref(call):
+    """Validate the separate saved Deepline response; it is not a ledger row."""
+    ref = call.get("recovered_response_ref")
+    if ref is None:
+        return None
+    if not isinstance(ref, Mapping) or not isinstance(ref.get("metadata"), Mapping):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    metadata = ref["metadata"]
+    terminals = [row for row in call.get("lifecycle", [])
+                 if row.get("entry_kind") in {"settlement", "uncertain", "recovery", "refusal"}]
+    reservations = [row for row in call.get("lifecycle", []) if row.get("entry_kind") == "reservation"]
+    request = call.get("request") or {}
+    parameters = request.get("effective_parameters") or {}
+    operation = operations.get_operation(call.get("operation_id"))
+    tool = (operation.deepline_tool or parameters.get("tool")) if operation is not None else None
+    provider_cost = metadata.get("provider_cost") or {}
+    if (ref.get("table") != "lab_arena_deepline_call_responses"
+        or call.get("provider") != "deepline"
+        or operation is None or operation.provider != "deepline"
+        or any(ref.get(key) != call.get(key) for key in
+               ("call_identity", "reservation_entry_id", "run_id", "terminal_entry_id", "request_hash"))
+        or type(ref.get("reservation_entry_id")) is not int
+        or type(ref.get("terminal_entry_id")) is not int
+        or len(reservations) != 1 or reservations[0].get("entry_id") != ref["reservation_entry_id"]
+        or not terminals or max(row["entry_id"] for row in terminals) != ref["terminal_entry_id"]
+        or not any(row.get("entry_id") == ref["terminal_entry_id"]
+                   and row.get("entry_kind") in {"settlement", "uncertain"} for row in terminals)
+        or not isinstance(ref.get("created_at"), str) or not ref["created_at"]
+        or not isinstance(ref.get("request_id"), str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", ref["request_id"]) is None
+        or re.fullmatch(r"ctx-tool-[0-9a-f]{32}", ref["request_id"]) is not None
+        or not isinstance(ref.get("tool"), str) or not ref["tool"]
+        or tool != ref["tool"]
+        or request.get("request_hash") != ref["request_hash"]
+        or metadata.get("call_succeeded") is not True
+        or type(metadata.get("status")) is not int or not 200 <= metadata["status"] < 300
+        or metadata["status"] != call.get("response_status")
+        or "body_b64" in metadata
+        or any(provider_cost.get(key) != ref[field] for key, field in
+               (("request_id", "request_id"), ("operation", "tool")) if key in provider_cost)
+        or ref.get("response_ref") != {"field": "response"}
+        or ref.get("response_sha256") != call.get("response_sha256")
+        or contracts.document_hash(call.get("response")) != ref.get("response_sha256")
+        or ref.get("privacy_redactions") != call.get("response_privacy_redactions")
+        or type(ref.get("wire_body_bytes")) is not int or ref["wire_body_bytes"] < 0
+        or not isinstance(ref.get("wire_body_sha256"), str)
+        or contracts.SHA256_RE.fullmatch(ref["wire_body_sha256"]) is None):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    return ref
+
+
+def _ledger_recovered_response(entries, reserve):
+    saved = [(row, row["training_recovered_response"]) for row in entries
+             if row.get("training_recovered_response") is not None]
+    if not saved:
+        return None
+    row, ref = saved[0]
+    entry = reserve.get("entry_doc") or {}
+    if not isinstance(ref, Mapping) or not isinstance(ref.get("terminal_response"), Mapping):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    terminal = ref["terminal_response"]
+    cost = (row.get("terminal_response") or {}).get("provider_cost") or {}
+    recovered_cost = terminal.get("provider_cost") or {}
+    if (len(saved) != 1
+        or reserve.get("provider") != "deepline"
+        or row["entry_kind"] not in {"settlement", "uncertain"}
+        or row["entry_id"] != max(item["entry_id"] for item in entries)
+        or ref.get("table") != "lab_arena_deepline_call_responses"
+        or any(ref.get(key) != reserve.get(key) for key in ("call_identity", "run_id"))
+        or ref.get("reservation_entry_id") != reserve["entry_id"]
+        or ref.get("terminal_entry_id") != row["entry_id"]
+        or ref.get("request_hash") != entry.get("request_hash")
+        or ref.get("tool") != entry.get("tool")
+        or not ref.get("request_id") or not ref.get("created_at")
+        or terminal.get("call_succeeded") is not True
+        or type(terminal.get("status")) is not int or not 200 <= terminal["status"] < 300
+        or row["entry_kind"] == "settlement" and cost.get("request_id") != ref.get("request_id")
+        or any(recovered_cost.get(key) != ref.get(field) for key, field in
+               (("request_id", "request_id"), ("operation", "tool")) if key in recovered_cost)):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    return ref
+
+
+def recovered_response_for_write(call, write):
+    """Join a host receipt to the exact separately retained successful reply."""
+    ref = recovered_response_ref(call)
+    if (ref is not None and ref["wire_body_sha256"] == write.get("body_sha256")
+        and ref["wire_body_bytes"] == write.get("body_bytes")
+        and ref["metadata"]["status"] == write.get("status")):
+        return ref
+    return None
+
+
 def _calls(rows, run_ids, objects, run_order):
     from lab_arena.broker import BrokerError, _decode_terminal, broker_observations
 
@@ -648,6 +741,7 @@ def _calls(rows, run_ids, objects, run_order):
         if any(any(row.get(key) != reserve.get(key) for key in
                    ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
             raise ExportError("ledger_membership_mismatch")
+        recovered = _ledger_recovered_response(entries, reserve)
         entry = ((reserve.get("entry_doc") or {}).get("call") if standalone_refusal
                  else reserve.get("entry_doc")) or {}
         call = {"call_identity": identity, "run_id": reserve["run_id"],
@@ -767,6 +861,11 @@ def _calls(rows, run_ids, objects, run_order):
             latest_digest = contracts.document_hash(latest_response)
         except Exception:
             pass  # Missing receipt is recorded below; no failed proof is hidden.
+        recovered_value, recovered_redactions, recovered_digest = None, [], None
+        if recovered is not None:
+            recovered_terminal = recovered["terminal_response"]
+            recovered_value, recovered_redactions = _response_value(recovered_terminal, reserve.get("provider"))
+            recovered_digest = contracts.document_hash(recovered_value)
         saved_bodies = {}
         for row in sorted(response_terminals, key=lambda row: int(row["entry_id"])):
             terminal = row.get("terminal_response") or {}
@@ -790,7 +889,7 @@ def _calls(rows, run_ids, objects, run_order):
                 receipt["wire_body_bytes"] = len(wire_body)
                 digest = latest_digest if reuse_latest else contracts.document_hash(response)
                 receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
-                if digest == latest_digest:
+                if digest == (recovered_digest if recovered is not None else latest_digest):
                     receipt["response_ref"] = {"field": "response", "entry_id": latest_id}
                 elif digest in saved_bodies:
                     receipt["response_ref"] = {"entry_id": saved_bodies[digest]}
@@ -850,11 +949,29 @@ def _calls(rows, run_ids, objects, run_order):
                 call["response_status"] = latest_terminal.get("status")
                 if retained and latest_id == retained[0]["entry_id"]:
                     call["response_entry_id"] = latest_id
-            else:
+            elif recovered is None:
                 call_reasons.add("full_response_unavailable")
             for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
                 if key in terminal:
                     call[key] = terminal[key]
+            if recovered is not None:
+                wire = base64.b64decode(recovered_terminal["body_b64"], validate=True)
+                call.update(response=recovered_value, response_sha256=recovered_digest,
+                            response_status=recovered_terminal["status"],
+                            response_hidden_reasoning_removed="hidden_reasoning" in recovered_redactions,
+                            response_privacy_redactions=recovered_redactions)
+                call.pop("response_entry_id", None)
+                call["recovered_response_ref"] = {
+                    **{key: copy.deepcopy(value) for key, value in recovered.items() if key != "terminal_response"},
+                    "metadata": {key: copy.deepcopy(value) for key, value in recovered_terminal.items()
+                                 if key not in {"body_b64", "upstream_response_receipt"}},
+                    "wire_body_sha256": contracts.hash_bytes(wire), "wire_body_bytes": len(wire),
+                    "response_sha256": recovered_digest, "privacy_redactions": recovered_redactions,
+                    "response_ref": {"field": "response"}}
+                recovered_response_ref(call)
+                call["response_provenance"]["source"] = "lab_arena_deepline_call_responses"
+                if "credential" in recovered_redactions:
+                    call_reasons.add("response_privacy_nonexact")
         call["evidence_gaps"] = sorted(call_reasons)
         reasons.update(call_reasons)
         calls.append(call)
@@ -997,6 +1114,7 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                    if item.get("wire_body_sha256") == receipt["body_sha256"]
                    and item.get("wire_body_bytes") == receipt["body_bytes"]
                    and item.get("metadata", {}).get("status") == receipt["status"]]
+        recovered = recovered_response_for_write(call, receipt)
         observed = error_observations.get(receipt["ordinal"])
         worker_error_body = False
         if observed is not None:
@@ -1012,10 +1130,10 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                                       or contracts.hash_bytes(base64.b64decode(response["body_b64"], validate=True))
                                       == receipt["body_sha256"]))
         identity = receipt["call_identity"]
-        if (not matches and not worker_error_body) or identity in linked:
+        if (not matches and recovered is None and not worker_error_body) or identity in linked:
             errors.add("worker_response_receipt_link_invalid")
             continue
-        if worker_error_body and not matches and any(
+        if worker_error_body and not matches and recovered is None and any(
                 item.get("wire_body_sha256") for item in call["response_receipts"]):
             errors.add("worker_provider_response_mismatch")
         linked[identity] = receipt
@@ -1025,9 +1143,14 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                                    "payload_sha256": snapshot["payload_sha256"]},
             "agent_receipt": "not_reported",
             "worker_received_receipt_entry_ids": sorted(item["entry_id"] for item in matches),
-            "worker_body_source": "ledger_terminal" if matches else "worker_error_observation",
-            "worker_body_exact_in_artifact": bool(matches or worker_error_body and not observed["privacy"]["redacted"]),
+            "worker_body_source": ("lab_arena_deepline_call_responses" if recovered is not None
+                                   else "ledger_terminal" if matches else "worker_error_observation"),
+            "worker_body_exact_in_artifact": bool(matches or recovered is not None
+                                                   or worker_error_body and not observed["privacy"]["redacted"]),
         })
+        if recovered is not None:
+            call["response_provenance"]["worker_recovered_response_ref"] = {
+                "table": recovered["table"], "call_identity": recovered["call_identity"]}
         if worker_error_body:
             call["response_provenance"]["worker_error_observation_ref"] = {
                 "run_id": run["run_id"], "ordinal": observed["ordinal"],
@@ -1060,7 +1183,8 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
         ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
         call["response_provenance"].setdefault("agent_receipt_refs", []).append(ref)
         call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
-        latest_acknowledged = response_entry_id(call) in call["response_provenance"]["worker_received_receipt_entry_ids"]
+        latest_acknowledged = (recovered_response_for_write(call, receipt) is not None
+                               or response_entry_id(call) in call["response_provenance"]["worker_received_receipt_entry_ids"])
         call["response_provenance"]["selected_response_acknowledged"] = latest_acknowledged
         if not latest_acknowledged and call["response_provenance"].get("worker_body_source") == "worker_error_observation":
             call["response_provenance"]["worker_error_body_acknowledged"] = True

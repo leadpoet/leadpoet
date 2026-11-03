@@ -529,6 +529,17 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
         if not allow_privacy:
             _require(_exact(value, response=True, worker_proofs=worker_proofs), 'response_privacy_nonexact')
         values.append(value)
+    recovered = training_export.recovered_response_for_write(call, write)
+    if recovered is not None:
+        _require(provenance.get('worker_body_source') == 'lab_arena_deepline_call_responses'
+                 and provenance.get('worker_recovered_response_ref') == {
+                     'table': recovered['table'], 'call_identity': recovered['call_identity']},
+                 'worker_write_identity_mismatch')
+        if not allow_privacy:
+            _require(not recovered['privacy_redactions']
+                     and _exact(call.get('response'), response=True, worker_proofs=worker_proofs),
+                     'response_privacy_nonexact')
+        values.append(call['response'])
     if not values and allow_worker_error:
         error_ref = provenance.get('worker_error_observation_ref') or {}
         _require(not any(row.get('wire_body_sha256') for row in receipts)
@@ -576,7 +587,7 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
                  and provenance.get('selected_response_acknowledged') is not True
                  and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
     if provenance.get('selected_response_acknowledged') is True:
-        _require(training_export.response_entry_id(call) in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
+        _require(recovered is not None or training_export.response_entry_id(call) in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
     return {'response': values[0], 'write': write, 'receipts': matches}
 
 

@@ -1,3 +1,14 @@
+## Scoped authorization: November 3 active Deepline filter pushdown
+
+The coordinator authorized exact migration616 to push only the implied round,
+provider, entry-kind and non-null call filters inside the existing V1/V2 OFFSET0
+fences, reusing validated index559. Preserve billing authority, latest-head,
+NULL/run/cursor semantics, frozen rules, scores, capture, costs and original data.
+Add no index, provider calls, timeout change, retry, dependency or unrelated work.
+Internal agents may implement, test and commit only. The coordinator owns
+independent review, push, merge, exact migration application and live verification.
+Internal agents must not change production or renew credentials.
+
 ## Scoped authorization: November 3 verified display-brand composition
 
 The coordinator authorized the exact five-file --verified-display-brand runtime
@@ -1045,6 +1056,17 @@ recovery architecture, provider calls or credential renewal. The coordinator own
 independent review, exact image build/verification and push, safe merge, prospective
 scorer-default configuration and canonical rollout for newly frozen rounds.
 Preserve current committed round configurations and existing leased images.
+
+## Scoped authorization: November 3 closed-cost lookup performance
+
+The user authorized permanent fixes and deployment during the full November 3
+Arena watch. This scope covers one reviewed concurrent covering index for the
+unchanged closed-provider cost selectors, exact committed SQL through the existing
+verified RDS session bridge, and live query-plan and monitoring verification.
+Preserve selector definitions, billing records, accepted work, scoring, deadlines,
+privacy and rewards. Add no retry layer, dependency or service. Internal agents
+may test and review; the coordinator owns merge and production application and
+must preserve the other active task's runtime release ownership.
 
 ## Scoped authorization: November 3 prospective verifier accuracy
 

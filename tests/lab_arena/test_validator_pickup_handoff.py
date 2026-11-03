@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_PROVIDER_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.test_lab_arena_runner import FakeExportImageCache
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness,
     _run_stage_one_to_scoring,
@@ -51,7 +53,7 @@ def _http_runner(
     key = keypair(key_label)
     api = rn.HttpArenaApiClient("http://localhost", client=http)
     cache_key = key.ss58_address[:12]
-    image_cache = rn.ImageCache(
+    image_cache = FakeExportImageCache(
         tmp_path / ("pickup-images-" + cache_key),
         lambda _reference, _digest, target: (target / "rootfs").mkdir(),
     )
@@ -84,10 +86,11 @@ def _http_runner(
 
 
 def test_unplanned_validator_discovers_and_completes_work_while_primary_is_full(
-    database, tmp_path
+    database, tmp_path, monkeypatch
 ):
     """Exercise the production runner/app/service/SQL pickup path end to end."""
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     harness = HistoricalHarness(
@@ -247,10 +250,11 @@ def test_unplanned_validator_discovers_and_completes_work_while_primary_is_full(
 
 
 def test_unplanned_validator_discovers_and_completes_scoring_while_primary_is_full(
-    database, tmp_path
+    database, tmp_path, monkeypatch
 ):
     """Bind a real HTTP scoring lease to its accepted execution output."""
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     harness = HistoricalHarness(

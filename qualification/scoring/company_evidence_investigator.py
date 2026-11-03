@@ -2392,6 +2392,51 @@ def _quote_names_company(quote: str, identity_names: set[str]) -> bool:
     )
 
 
+def _quote_names_verified_display_brand(
+    quote: str, url: str, final_url: str, domains: set[str], identity: Mapping[str, Any],
+) -> bool:
+    """Recognize a named brand in a verified 'Brand (part of Parent)' label.
+
+    This is citation attribution, not a new identity or ownership verdict.
+    Keep the full identity checks for unnamed quotes and all other targets.
+    """
+    name = str(identity.get("verified_name") or "").strip()
+    match = re.fullmatch(r"([^()]+?)\s+\(part of ([^()]+)\)", name, re.I)
+    if not match or _normalized_span(name) != _normalized_span(identity.get("submitted_name")):
+        return False
+    brand = match[1].replace("®", "").replace("™", "").strip()
+    brand_key = re.sub(r"[^a-z0-9]+", "", _normalized_span(brand))
+    slug = str(identity.get("verified_linkedin_slug") or "").strip().casefold()
+    if (
+        len(brand_key) < 3
+        or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug)
+        or brand_key != slug.replace("-", "")
+        or identity.get("submitted_linkedin_slug") != slug
+        or identity.get("observed_linkedin_slug") not in (None, "", slug)
+    ):
+        return False
+    domain = identity.get("verified_domain")
+    if not domain or any(identity.get(key) != domain for key in ("submitted_domain", "observed_domain")):
+        return False
+    if not all(
+        _registrable_domain(value) == domain
+        and _independently_bound_first_party_url(value, domains, identity)
+        for value in (url, final_url)
+    ):
+        return False
+    # Require the leading named actor/product. Mentioning the parent or a
+    # related company's activity does not establish the brand's activity.
+    actor = re.match(
+        rf"^(?:through\s+)?{re.escape(_normalized_span(brand))}"
+        r"(?=\s|[,;:]|['’]s\s)(?P<rest>.*)",
+        _normalized_span(quote),
+    )
+    return bool(actor and not re.search(
+        r"\b(?:parents?|owners?|subsidiar(?:y|ies)|sisters?|affiliates?|partners?|customers?)\b",
+        actor["rest"],
+    ))
+
+
 def _quote_names_domain_styled_stage_company(
     quote: str,
     identity_anchor: Mapping[str, Any],
@@ -4029,7 +4074,12 @@ def _required_attribute_support_rejection(
             first_party_domains, identity_anchor,
         )
     )
-    if not (same_company_source or _quote_names_company(quote, identity_names)):
+    named_brand = _quote_names_verified_display_brand(
+        quote, url, str((fetched_final_urls or {}).get(url) or ""),
+        first_party_domains, identity_anchor,
+    )
+    if not (same_company_source or _quote_names_company(quote, identity_names)
+            or named_brand):
         return REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
     return None
 
@@ -4286,6 +4336,16 @@ def _validated_findings(
                     stage_attribution_names if target == "stage" else attribution_names,
                 )
                 and not (target == "stage" and semantic_pe_ownership)
+                and not (
+                    target in {"industry", "required_attribute"}
+                    and status == "VERIFIED"
+                    and (target == "required_attribute" or finding["activity_role"] == "supplier_operator")
+                    and _quote_names_verified_display_brand(
+                        finding["evidence_quote"], evidence_url,
+                        str((fetched_final_urls or {}).get(evidence_url) or ""),
+                        first_party_domains, identity_anchor or {},
+                    )
+                )
                 and not (
                     target == "stage"
                     and _quote_names_domain_styled_stage_company(

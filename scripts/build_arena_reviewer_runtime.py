@@ -22,6 +22,10 @@ target-denial alias to two exact frozen modules. It copies no runtime package.
 The exclusive --homepage-profile-alias mode retains that correction and adds
 only the reviewed exact old-profile canonicalization in two more frozen files.
 
+The exclusive --verified-display-brand mode retains that four-file repair and
+adds only exact verified ownership display-brand quote attribution in a fifth
+frozen module. It keeps the matching host-validator requirement.
+
 The mutually exclusive --shim-only mode appends only the exact-source socket
 return-margin repair. It does not import the current runtime package or grading
 converters and can be selected as a prospective scorer default after verification.
@@ -248,6 +252,7 @@ def extract_frozen_sources(
     shim_only: bool = False,
     intent_target_denial: bool = False,
     homepage_profile_alias: bool = False,
+    verified_display_brand: bool = False,
     source_access_denied: bool = False,
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
@@ -287,6 +292,9 @@ def extract_frozen_sources(
             names = FILES
         if homepage_profile_alias:
             from scripts.arena_reviewer_homepage_profile_alias_seam import FILES
+            names = FILES
+        if verified_display_brand:
+            from scripts.arena_reviewer_verified_display_brand_seam import FILES
             names = FILES
         for name in dict.fromkeys(names):
             path = destination / name
@@ -469,6 +477,10 @@ def main() -> int:
         help="compose only exact old-homepage profile canonicalization and native target denial in four frozen files; excludes other corrections",
     )
     parser.add_argument(
+        "--verified-display-brand", action="store_true",
+        help="compose only the reviewed four-file homepage/native-denial repairs plus verified display-brand attribution in five frozen files; excludes other corrections",
+    )
+    parser.add_argument(
         "--complete-negative-finality", action="store_true",
         help="apply only the approved PR483 terminal-negative correction; use the same option for --verify-image",
     )
@@ -554,6 +566,9 @@ def main() -> int:
     if args.homepage_profile_alias and any(value is True for name, value in vars(args).items()
                                          if name not in {"homepage_profile_alias", "push"}):
         raise CompositionError("homepage-profile-alias mode cannot include other corrections")
+    if args.verified_display_brand and any(value is True for name, value in vars(args).items()
+                                         if name not in {"verified_display_brand", "push"}):
+        raise CompositionError("verified-display-brand mode cannot include other corrections")
     if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
         raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
@@ -574,7 +589,13 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.homepage_profile_alias:
+        if args.verified_display_brand:
+            from scripts.arena_reviewer_verified_display_brand_seam import convert_verified_display_brand_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", verified_display_brand=True,
+            )
+            files = convert_verified_display_brand_files(original)
+        elif args.homepage_profile_alias:
             from scripts.arena_reviewer_homepage_profile_alias_seam import convert_homepage_profile_alias_files
             original = extract_frozen_sources(
                 args.grading_image, root / "original", homepage_profile_alias=True,
@@ -668,6 +689,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-shim-only" if args.shim_only else "")
             + ("-intent-target-denial" if args.intent_target_denial else "")
             + ("-homepage-profile-alias" if args.homepage_profile_alias else "")
+            + ("-verified-display-brand" if args.verified_display_brand else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -694,7 +716,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
-        if args.intent_target_denial or args.homepage_profile_alias:
+        if args.intent_target_denial or args.homepage_profile_alias or args.verified_display_brand:
             from scripts.arena_reviewer_intent_target_denial_seam import CORRECTION_ID as INTENT_TARGET_DENIAL_CORRECTION_ID
             corrections.append(INTENT_TARGET_DENIAL_CORRECTION_ID)
         if args.source_access_denied:
@@ -749,12 +771,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             from scripts.arena_reviewer_observed_linkedin_ampersand_seam import CORRECTION_ID as OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID
             corrections.append(OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID)
         host_requirements = {}
-        if args.homepage_profile_alias:
+        if args.homepage_profile_alias or args.verified_display_brand:
             from scripts.arena_reviewer_homepage_profile_alias_seam import (
                 CORRECTION_ID as PROFILE_ALIAS_CORRECTION_ID, HOST_VALIDATOR_REQUIREMENT,
             )
             corrections.append(PROFILE_ALIAS_CORRECTION_ID)
             host_requirements["host_validator_requirement"] = HOST_VALIDATOR_REQUIREMENT
+        if args.verified_display_brand:
+            from scripts.arena_reviewer_verified_display_brand_seam import CORRECTION_ID as DISPLAY_BRAND_CORRECTION_ID
+            corrections.append(DISPLAY_BRAND_CORRECTION_ID)
         if args.verified_homepage_brand_alias:
             from scripts.arena_reviewer_homepage_brand_alias_seam import (
                 CORRECTION_ID as BRAND_CORRECTION_ID, HOST_VALIDATOR_REQUIREMENT,

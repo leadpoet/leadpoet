@@ -584,9 +584,9 @@ verify with `--intent-target-denial`. This exclusive mode adds only that exact
 403 alias to the two frozen intent retrieval/finality allowlists. It copies no
 current runtime package or other grader source. Unknown or partly repaired
 module pairs fail closed. Register the verified image through the existing
-reviewer-runtime command only after the gateway's matching competition validator
-also accepts this exact native alias. The host rechecks retained source traces;
-an older host can reject the corrected runtime's terminal company judgment.
+reviewer-runtime command only after the gateway and each executing validator
+have the matching competition validator. Both hosts recheck retained source
+traces; an older host can reject the corrected runtime's terminal company judgment.
 New leases record the actual repair runtime separately;
 the frozen grading/cache identity, prompts, evidence criteria and score formula
 stay unchanged. Accepted work, existing leases, costs and deadlines stay unchanged.

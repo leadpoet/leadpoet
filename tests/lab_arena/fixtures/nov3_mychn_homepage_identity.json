@@ -1,0 +1,48 @@
+{
+  "company": {
+    "company_linkedin": "https://www.linkedin.com/company/mychn/",
+    "company_name": "MyCHN",
+    "company_website": "http://www.mychn.org/"
+  },
+  "current_profile_payload": {
+    "data": {
+      "element": {
+        "id": "6649423",
+        "linkedinUrl": "https://www.linkedin.com/company/mychn/",
+        "name": "MyCHN",
+        "universalName": "mychn",
+        "website": "http://www.mychn.org"
+      },
+      "status": 200
+    }
+  },
+  "homepage": {
+    "decision": "unavailable",
+    "details": {
+      "actual_final_url": "https://mychn.org/",
+      "identity": {
+        "decision": "unavailable",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mychn.org",
+        "observed_linkedin_slug": "community-health-network-fqhc",
+        "observed_name": "mychncommunityhealthnetwork",
+        "reason_code": "identity_not_proven",
+        "submitted_domain": "mychn.org",
+        "submitted_linkedin_slug": "mychn",
+        "submitted_name": "mychn"
+      },
+      "observed_homepage_organization_identity": {
+        "linkedin_company_slug": "community-health-network-fqhc",
+        "normalized_name": "mychncommunityhealthnetwork",
+        "registrable_dns_domain": "mychn.org"
+      },
+      "verified_homepage_transport_domain": "mychn.org"
+    }
+  },
+  "provenance": "Saved Nov3 attempt5 sequences0/1/4. Structured payload was fetched for CURRENT profile; it is not proof of an old-URL request.",
+  "web_observation": {
+    "observed_company_linkedin": "https://www.linkedin.com/company/mychn",
+    "observed_company_name": "MyCHN",
+    "observed_company_website": "https://mychn.org/"
+  }
+}

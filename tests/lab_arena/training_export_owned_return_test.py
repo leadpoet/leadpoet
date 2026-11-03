@@ -125,3 +125,64 @@ def test_supplied_snapshot_numeric_subclass_remains_isolated(base):
     assert retained.metadata == {"rows": ["original"]}
     retained.metadata["rows"].append("export")
     assert value.metadata == {"rows": ["original", "caller"]}
+
+
+@pytest.mark.parametrize("location", ["configuration", "input_snapshot"])
+def test_custom_string_keys_keep_caller_attributes_isolated(location):
+    class Key(str):
+        pass
+
+    key = Key("caller_key")
+    key.metadata = {"rows": ["original"]}
+    values = _values("complete")
+    if location == "configuration":
+        values["round_row"]["configuration_doc"][key] = "public"
+    else:
+        snapshot = values["input_snapshots"]["execute:1"]
+        snapshot["input"][key] = "public"
+        snapshot["input_sha256"] = contracts.document_hash(snapshot["input"])
+    exported = training_export.assemble_example(**values)
+    mapping = (exported["configuration"] if location == "configuration" else
+               exported["input_snapshots"]["execute:1"]["input"])
+    retained = next(item for item in mapping if item == key)
+    assert type(retained) is Key and retained is not key
+    key.metadata["rows"].append("caller")
+    assert retained.metadata == {"rows": ["original"]}
+    retained.metadata["rows"].append("export")
+    assert key.metadata == {"rows": ["original", "caller"]}
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("complete", "worker_observation_artifacts"),
+    ("partial", "partial_worker_observation_artifacts"),
+    ("unverified", "unverified_worker_observation_artifacts"),
+])
+def test_post_privacy_identity_metadata_detaches_custom_strings(kind, field):
+    class Text(str):
+        pass
+
+    values = _values(kind)
+    run = values["runs"][0]
+    for name in ("run_id", "kind", "status", "claim_request_hash"):
+        value = Text(run[name])
+        value.metadata = {"rows": [name]}
+        run[name] = value
+    exported = training_export.assemble_example(**values)
+    artifact_map = exported[field]
+    artifact_key = next(key for key in artifact_map if key == run["run_id"])
+    gap_map = exported["related_run_gap_attribution"]
+    gap_key = next(key for key in gap_map if key == run["run_id"])
+    retained = [(artifact_key, run["run_id"]), (gap_key, run["run_id"])]
+    retained.extend((gap_map[gap_key][name], run[name]) for name in ("kind", "status"))
+    if kind == "partial":
+        retained.extend((artifact_map[artifact_key][name], run[name])
+                        for name in ("run_id", "kind", "claim_request_hash"))
+    for value, original in retained:
+        assert type(value) is Text and value is not original
+        assert value.metadata == original.metadata
+    for original in (run[name] for name in ("run_id", "kind", "status", "claim_request_hash")):
+        original.metadata["rows"].append("caller")
+    for value, original in retained:
+        assert "caller" not in value.metadata["rows"]
+        value.metadata["rows"].append("export")
+        assert "export" not in original.metadata["rows"]

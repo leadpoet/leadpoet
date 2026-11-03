@@ -53,6 +53,7 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             result = {}
             kind = reasoning_kind(item)
             for key, child in item.items():
+                key = key if type(key) is str else copy.deepcopy(key)
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
                 if (normalized == "reasoning_content" and isinstance(child, str)
@@ -1245,7 +1246,11 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
         errors.add(code)
         per_run_errors.setdefault(run_id, set()).add(code)
     for run in related:
-        run_id = run["run_id"]
+        # Only these small identity fields come from caller rows. Payloads
+        # below are independently decoded; do not copy their full trees.
+        artifact_identity = copy.deepcopy({key: run.get(key) for key in
+                                           ("run_id", "kind", "lease_generation", "claim_request_hash")})
+        run_id = artifact_identity["run_id"]
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
         capture = summary.get("worker_observations")
         paid = [call for call in calls if call["run_id"] == run_id]
@@ -1273,9 +1278,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                 if partial is not None:
                     partial_artifacts[run_id] = {
                         "schema_version": training_observations.JOURNAL_SCHEMA_VERSION,
-                        "run_id": run_id, "kind": run["kind"],
-                        "lease_generation": run["lease_generation"],
-                        "claim_request_hash": run["claim_request_hash"],
+                        **artifact_identity,
                         "complete": False, "payload": partial,
                         "payload_sha256": contracts.document_hash(partial),
                         "segment_refs": [training_observations.segment_ref(
@@ -2013,11 +2016,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              "dimensions": {key: not value for key, value in reasons.items()},
                              "incomplete_reasons": sorted({reason for values in reasons.values() for reason in values}),
                              "reasons_by_dimension": {key: sorted(value) for key, value in reasons.items()}}
-    clean["related_run_gap_attribution"] = {
+    clean["related_run_gap_attribution"] = copy.deepcopy({
         row["run_id"]: {"kind": row["kind"], "status": row["status"],
                         "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
-        for row in related}
+        for row in related})
     clean["example_hash"] = contracts.document_hash(clean)
     # Both privacy walks own their context containers. Worker artifacts and
     # journal prefixes come from freshly decoded JSON, with no caller-owned

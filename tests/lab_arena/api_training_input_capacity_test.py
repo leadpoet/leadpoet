@@ -1,4 +1,4 @@
-"""Input capture queues before shared workers without changing stored evidence."""
+"""Input capture retains independent bounded dispatch without changing stored evidence."""
 from __future__ import annotations
 
 import asyncio
@@ -78,7 +78,7 @@ def test_training_input_queue_preserves_provider_and_control_workers():
                     assert all(response.status_code == 200 for response in controls)
                     assert service.capture_active == len(service.input_calls) == CAPTURE_LIMIT
                     assert default.total_tokens == POOL == 64
-                    assert default.borrowed_tokens == PROVIDER_WORKER_LIMIT + CAPTURE_LIMIT
+                    assert default.borrowed_tokens == PROVIDER_WORKER_LIMIT
                     assert service.active == service.maximum == PROVIDER_WORKER_LIMIT == 32
                 finally:
                     service.capture_release.set()
@@ -93,7 +93,7 @@ def test_training_input_queue_preserves_provider_and_control_workers():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("queue", ["capture", "shared_worker"])
+@pytest.mark.parametrize("queue", ["capture", "default_saturated"])
 def test_cancelled_queued_capture_never_enters_service_and_returns_permit(queue):
     async def scenario():
         default = anyio.to_thread.current_default_thread_limiter()
@@ -104,12 +104,11 @@ def test_cancelled_queued_capture_never_enters_service_and_returns_permit(queue)
                 blockers = []
                 cancelled = None
                 try:
-                    if queue == "capture":
-                        blockers = [post_input(client, str(i)) for i in range(CAPTURE_LIMIT)]
-                        await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
-                    else:
+                    if queue == "default_saturated":
                         blockers = [asyncio.create_task(client.get("/arena/v1/competition")) for _ in range(POOL)]
                         await wait_until(lambda: service.other_started == POOL)
+                    blockers.extend(post_input(client, str(i)) for i in range(CAPTURE_LIMIT))
+                    await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
                     cancelled = post_input(client, "cancelled")
                     await anyio.sleep(0.02)
                     assert not cancelled.done()
@@ -152,7 +151,7 @@ def test_cancelled_active_capture_retains_permit_until_its_worker_finishes(cance
                     await anyio.sleep(0.02)
                 assert not captures[0].done()
                 assert service.capture_active == len(service.input_calls) == CAPTURE_LIMIT
-                assert default.borrowed_tokens == CAPTURE_LIMIT
+                assert default.borrowed_tokens == 0
             finally:
                 service.capture_release.set()
                 responses = await asyncio.wait_for(asyncio.gather(*captures, return_exceptions=True), 3)
@@ -163,7 +162,7 @@ def test_cancelled_active_capture_retains_permit_until_its_worker_finishes(cance
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("queue", ["capture", "shared_worker"])
+@pytest.mark.parametrize("queue", ["capture", "default_saturated"])
 @pytest.mark.parametrize("large_body", [False, True])
 def test_disconnected_queued_capture_never_enters_service(queue, large_body):
     async def scenario():
@@ -172,12 +171,12 @@ def test_disconnected_queued_capture_never_enters_service(queue, large_body):
         app = create_app(service)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-                if queue == "capture":
-                    blockers = [post_input(client, str(i)) for i in range(CAPTURE_LIMIT)]
-                    await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
-                else:
+                blockers = []
+                if queue == "default_saturated":
                     blockers = [asyncio.create_task(client.get("/arena/v1/competition")) for _ in range(POOL)]
                     await wait_until(lambda: service.other_started == POOL)
+                blockers.extend(post_input(client, str(i)) for i in range(CAPTURE_LIMIT))
+                await wait_until(lambda: service.capture_active == CAPTURE_LIMIT)
                 body_read = asyncio.Event()
                 messages = asyncio.Queue()
                 sent = []
@@ -269,7 +268,7 @@ def test_http_disconnect_keeps_active_worker_and_permit_until_finished():
                 await asyncio.wait_for(disconnect_read.wait(), 1)
                 assert not active.done()
                 assert service.capture_active == len(service.input_calls) == CAPTURE_LIMIT
-                assert default.borrowed_tokens == CAPTURE_LIMIT
+                assert default.borrowed_tokens == 0
             finally:
                 service.capture_release.set()
                 responses = await asyncio.wait_for(asyncio.gather(*others, active), 3)
@@ -282,7 +281,7 @@ def test_http_disconnect_keeps_active_worker_and_permit_until_finished():
 
 
 @pytest.mark.parametrize("failure", [ServiceError("training_input_unavailable", 503), RuntimeError("synthetic storage failure")])
-def test_capture_exception_returns_both_permits(failure):
+def test_capture_exception_returns_input_permit(failure):
     async def scenario():
         default = anyio.to_thread.current_default_thread_limiter()
         service = CaptureService(default)
@@ -297,7 +296,11 @@ def test_capture_exception_returns_both_permits(failure):
         app = create_app(service)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             if isinstance(failure, ServiceError):
-                assert (await post_input(client, "fail")).status_code == 503
+                response = await post_input(client, "fail")
+                assert response.status_code == 503
+                assert response.json() == {"status": "rejected", "code": "training_input_unavailable"}
+                assert response.headers["cache-control"] == "no-store"
+                assert response.headers["x-content-type-options"] == "nosniff"
             else:
                 with pytest.raises(RuntimeError) as caught:
                     await post_input(client, "fail")
@@ -397,4 +400,37 @@ def test_input_auth_and_schema_controls_remain_unchanged(control):
             assert (await post_input(client, "r1")).status_code == 200
             assert len(stored) == 1
             assert anyio.to_thread.current_default_thread_limiter().borrowed_tokens == 0
+    asyncio.run(scenario())
+
+
+def test_input_capture_progresses_when_other_routes_hold_default_workers():
+    async def scenario():
+        default = anyio.to_thread.current_default_thread_limiter()
+        service = CaptureService(default)
+        service.capture_release.set()
+        app = create_app(service)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                providers = [post_provider(client, str(i)) for i in range(PROVIDER_WORKER_LIMIT)]
+                others = []
+                capture = None
+                try:
+                    await wait_until(lambda: service.active == PROVIDER_WORKER_LIMIT)
+                    others = [asyncio.create_task(client.get("/arena/v1/competition"))
+                              for _ in range(POOL - PROVIDER_WORKER_LIMIT)]
+                    await wait_until(lambda: service.other_started == POOL - PROVIDER_WORKER_LIMIT)
+                    assert default.borrowed_tokens == POOL
+                    capture = post_input(client, "independent-input")
+                    done, _ = await asyncio.wait([capture], timeout=0.5)
+                    assert capture in done, "input capture waits behind unrelated default-pool work"
+                    response = capture.result()
+                    assert response.status_code == 200 and response.json() == {"status": "stored"}
+                    assert response.headers["cache-control"] == "no-store"
+                    assert response.headers["x-content-type-options"] == "nosniff"
+                    assert default.borrowed_tokens == POOL
+                    assert not service.release.is_set()
+                finally:
+                    service.release.set()
+                    await asyncio.gather(*providers, *others, *([capture] if capture else []))
+                assert default.borrowed_tokens == 0
     asyncio.run(scenario())

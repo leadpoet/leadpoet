@@ -385,7 +385,7 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
     "mode", "network_name", "netuid", "schedule",
     "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
     "integrity_policy", "contact_policy", "company_quality_policy", "company_judgment_policy",
-    "intent_details_policy", "scorer_policy",
+    "intent_details_policy", "scorer_policy", "scorer_image_digest", "scorer_image_reference",
 )
 # Fixed computed projections for direct SQL and PostgREST transports.
 _RUNTIME_JSON_COLUMNS = {

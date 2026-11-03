@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from lab_arena import images, leased_images, runner
@@ -43,7 +45,9 @@ class FakeEcr:
         }
 
 
-def test_gateway_runner_ecr_lease_roundtrip_materializes_and_caches_without_secrets(tmp_path):
+def test_gateway_runner_ecr_lease_roundtrip_materializes_and_caches_without_secrets(tmp_path, monkeypatch):
+    # Exercise the real cache and leased exporter without depending on host capacity.
+    monkeypatch.setattr(runner.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     image = simple_image()
     reference = f"{REGISTRY}/{REPOSITORY}@{image['digest']}"
     service, _, _ = _service()

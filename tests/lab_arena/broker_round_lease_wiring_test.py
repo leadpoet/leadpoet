@@ -20,6 +20,10 @@ class LeaseStore(FakeLedgerStore):
         self.paid_at = datetime(2026, 9, 15, 8, tzinfo=timezone.utc)
         self.lease_expires_at = self.paid_at
 
+    def code_review_schema(self, *, require_refusal_fallback=False):
+        assert require_refusal_fallback is True
+        return {"refusal_fallback": {"max_primary_refusal_claims": 2, "max_alternate_claims": 2}}
+
     def _renew(self, kind: str, ttl: int) -> None:
         self.renewals.append((kind, ttl))
         # The store's reserve/settle/uncertain SQL writes now + passed TTL.

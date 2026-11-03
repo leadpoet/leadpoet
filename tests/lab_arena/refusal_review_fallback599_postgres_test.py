@@ -77,6 +77,27 @@ def verdict(model=ALTERNATE):
             'passed': True, 'verdict': 'pass', 'categories': []}
 
 
+@pytest.mark.parametrize('code', sorted(code_review_policy.ERROR_CODES))
+def test_current_error_codes_persist_and_clear_lease(recovery_store, recovery_superuser, code):
+    if code == 'code_review_research_unverified':
+        from tests.lab_arena.research_review_result566_postgres_test import _claim, _document
+        submission, miner, token = _claim(recovery_store, recovery_superuser, 'a599research01')
+        document = _document('unverified', status='error')
+    else:
+        _, submission, miner = accepted_recovery_submission(recovery_store, 'error599-' + code)
+        token = new_lease_token()
+        assert begin(recovery_store, submission, miner, token=token)['status'] == 'claimed'
+        document = {**code_review_policy.diagnostic(code), 'model': PRIMARY,
+                    'file_count': 2, 'source_bytes': 1000}
+    assert recovery_store.finish_submission_review(
+        submission, miner, token, 'error', document, 0,
+    )['status'] == 'error'
+    row = recovery_store.get_submission(submission)
+    assert row['code_review_doc']['error_code'] == code
+    assert row['code_review_expires_at'] is None
+    assert row['code_review_doc']['cost_microusd'] == 0
+
+
 def refused(store, connection, suffix, actual=1234):
     _, submission, miner = accepted_recovery_submission(store, suffix)
     token = new_lease_token()

@@ -207,3 +207,25 @@ def test_unvalidated_preservation_cannot_override_label_cohort(monkeypatch, muta
     assert training_dataset.example_exclusion(example, training_dataset.Rules(production_rounds_only=False)) == "preserved_judgment_policy_invalid"
     with pytest.raises(ValueError, match="preserved_judgment_policy_invalid"):
         training_dataset.records_from_example(example)
+
+
+def test_readiness_excludes_unproved_authority_and_keeps_healthy_export(monkeypatch):
+    values, authority = preserved_fixture(monkeypatch)
+    example = export_run(PreservedStore(values, authority), values["objects"], values["run_id"])
+    # Malformed/unproved saved authority must be a reported exclusion. This
+    # mutation tests the reader boundary, not a claimed live producer outcome.
+    example["judgment"].pop("runtime_identity")
+    example["completeness"]["incomplete_reasons"].append("reviewer_runtime_identity_unverified")
+    example["example_hash"] = contracts.document_hash({key: value for key, value in example.items() if key != "example_hash"})
+    healthy_values, healthy_authority = preserved_fixture(monkeypatch, current=True)
+    healthy = export_run(PreservedStore(healthy_values, healthy_authority), healthy_values["objects"], healthy_values["run_id"])
+    # The independent mock stores both use execute:1. Give the healthy corpus
+    # fixture a distinct inventory ID; its actual exporter control is above.
+    healthy["run_id"] = "healthy:execute"
+    healthy["example_hash"] = contracts.document_hash({key: value for key, value in healthy.items() if key != "example_hash"})
+    expected = training_readiness.build([healthy], production_rounds_only=False)
+    report = training_readiness.build([example, healthy], production_rounds_only=False)
+    assert report["excluded_exports"] == {"preserved_judgment_policy_invalid": 1}
+    assert report["distinct_verified_executions"] == 1
+    assert report["qualification"] == expected["qualification"]
+    assert report["capture"] == expected["capture"]

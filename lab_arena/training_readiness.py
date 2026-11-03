@@ -40,7 +40,13 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
             # versions of a run using filename or caller order.
             rejected["conflicting_export_versions"] += len(versions)
             continue
-        valid.append(next(iter(versions.values())))
+        example = next(iter(versions.values()))
+        try:
+            training_dataset.label_scorer_configuration(example)
+        except ValueError:
+            rejected["preserved_judgment_policy_invalid"] += 1
+            continue
+        valid.append(example)
 
     dimensions, gaps, call_gaps, calls, recorder_counts = Counter(), Counter(), Counter(), Counter(), Counter()
     recorder_runs, recorder_missing, complete, selected_research_complete, cohorts = 0, 0, 0, 0, defaultdict(list)

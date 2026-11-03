@@ -54,6 +54,59 @@ def test_composed_frozen_modules_pass_saved_native_fetch_to_terminal_finality(mo
     regression.test_saved_native403_reaches_terminal_zero_without_rejudging_completed_siblings(monkeypatch)
 
 
+def test_matching_host_accepts_retained_native_trace_but_exact_old_host_rejects(monkeypatch):
+    import qualification.scoring
+    from lab_arena import company_judgments, scoring
+    from tests import test_intent_native_target_denial_finality as regression
+    from tests.test_same_event_source_local_finality import _propagate_to_breakdown
+
+    originals = frozen_sources()
+    repaired = seam.convert_intent_target_denial_files(originals)
+
+    def load(name, source):
+        module = ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, module)
+        exec(compile(source, name, "exec"), module.__dict__)
+        return module
+
+    verifier = load("native_denial_runtime_verifier", repaired[seam.VERIFIER_FILE])
+    candidate = load("native_denial_matching_host", repaired[seam.COMPETITION_FILE])
+    original_host = load("native_denial_original_host", originals[seam.COMPETITION_FILE])
+    monkeypatch.setattr(regression, "intent", verifier)
+    result, _ = regression.run_native_verifier(monkeypatch, [(200, regression.native_denial())] * 2)
+    row = _propagate_to_breakdown(monkeypatch, result)
+    row["verifier_gate_receipts"] = [{"gate": "company_fit", "decision": "match"}]
+    terminal = candidate.terminal_company_verification_breakdown(row)
+    raw = {**candidate.raw_company_judgment(terminal), "company_judgment_policy": "company_judgment_v1"}
+    assert raw["intent_signals_detail"][0]["judge_verdict"]["verification_trace"]["provider_attempts"][0][
+        "exa_target_crawl_failure"
+    ]["observations"] == [{"error_tag": "CRAWL_HTTP_403", "error_http_status": 403}] * 2
+    miss = {"company_index": 0, "cache_key": "sha256:" + "a" * 64,
+            "company_input_hash": "sha256:" + "b" * 64, "authority_slot": 0}
+    new_judgment = {**miss, "raw_judgment": raw}
+    output = scoring.build_scoring_output("saved-native-denial-source", [terminal],
+                                         company_judgments=[new_judgment])
+    output = scoring.validate_scoring_output_document(output)
+    lease = {"schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+             "hits": [], "misses": [miss]}
+
+    def select_host(module):
+        monkeypatch.setitem(sys.modules, "qualification.scoring.competition", module)
+        monkeypatch.setattr(qualification.scoring, "competition", module)
+
+    select_host(candidate)
+    assert company_judgments.raw_judgment_is_cacheable(raw)
+    assert company_judgments.validate_new_company_judgments(
+        output["company_judgments"], lease_context=lease,
+    ) == [new_judgment]
+    select_host(original_host)
+    assert not company_judgments.raw_judgment_is_cacheable(raw)
+    with pytest.raises(company_judgments.CompanyJudgmentError, match="cacheable miss"):
+        company_judgments.validate_new_company_judgments(
+            output["company_judgments"], lease_context=lease,
+        )
+
+
 @pytest.mark.parametrize("fault", [
     "missing", "extra", "partial", "unknown", "shadowed", "outer_error_guard",
     "newlines", "invalid", "duplicate_alias",

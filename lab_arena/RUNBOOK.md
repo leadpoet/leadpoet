@@ -591,6 +591,16 @@ New leases record the actual repair runtime separately;
 the frozen grading/cache identity, prompts, evidence criteria and score formula
 stay unchanged. Accepted work, existing leases, costs and deadlines stay unchanged.
 
+For the reviewed old-homepage LinkedIn vanity repair, build and verify with
+`--homepage-profile-alias`. This exclusive mode overlays exactly four frozen
+modules: the two native target-denial files above and the two exact canonical
+profile lookup/validation files. It retains both target-denial corrections,
+copies no current runtime package and rejects unknown or partial source pairs.
+The old homepage URL must receive its own authoritative canonical response;
+a prior reply for the current profile cannot be relabeled. Deploy the matching
+gateway and normal-validator consumers before registering this verified runtime.
+The grading image, cache identity, prior leases and completed judgments stay fixed.
+
 For a frozen grader whose unresolved semantic-review return bypasses its
 completed-investigation settlement, explicitly add
 `--completed-investigation-finality` during both build and `--verify-image`.

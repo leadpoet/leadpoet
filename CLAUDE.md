@@ -1,3 +1,16 @@
+## Scoped authorization: November 3 investigator commercial meaning
+
+The user authorized planning, implementing and testing the smallest investigator
+prompt correction for confirmed held-out over-rejections: judge commercial
+qualifiers such as subscription, recurring or fee-based by ordinary business
+meaning, and keep a proven Series C+ after a later round of unstated series.
+Preserve every quote, identity, activity-role, chronology and listing check,
+frozen round policies, accepted results, scoring, billing and rewards. This scope
+covers a branch, offline tests, independent review and a draft PR only. A paid
+replay needs a separate explicit spending cap. Merge, scorer image selection and
+deployment need separate approval and belong to the coordinator. Do not overlap
+the in-progress industry verifier release. Keep both instruction files identical.
+
 ## Scoped authorization: November 2 recovered Deepline training reader
 
 The user authorized the smallest fix for the confirmed omission of an existing

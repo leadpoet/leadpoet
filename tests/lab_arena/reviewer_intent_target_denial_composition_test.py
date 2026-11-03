@@ -148,6 +148,7 @@ def test_unknown_or_partial_source_generation_fails_closed(fault, corrected):
     "--bound-homepage-legal-alias", "--numeric-profile-legal-self-name", "--archive-snapshot-https",
     "--greenhouse-api-source", "--auxiliary-source-name-binding", "--homepage-linkedin-conflict-repair",
     "--observed-linkedin-ampersand", "--verified-homepage-brand-alias",
+    "--homepage-profile-alias",
 ])
 def test_mode_rejects_other_corrections_before_image_access(monkeypatch, flag):
     monkeypatch.setattr(builder.sys, "argv", ["compose", "--grading-image",

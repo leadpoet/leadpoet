@@ -1784,6 +1784,17 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             launched_ids.add(row["run_id"])
     snapshot_ids = selected_ids | launched_ids
     attempt_by_id = {row["run_id"]: row for row in example["attempts"]}
+
+    def attempt_gap(attempt_id, dimension, code):
+        if attempt_id in selected_ids:
+            reasons[dimension].add(code)
+        else:
+            # Historical inputs and runtime identities remain diagnostic
+            # evidence, not authority for the selected replacement's labels.
+            prior_code = "prior_attempt_" + code
+            reasons["research_process"].add(prior_code)
+            related_gaps[attempt_id]["research_process"].add(prior_code)
+
     for selected_id in sorted(snapshot_ids):
         attempt_policy = config.get("scorer_policy")
         if by_id[selected_id]["kind"] == "score":
@@ -1810,8 +1821,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 if selected_id == example.get("score_run_id"):
                     example["judgment"]["runtime_identity"] = copy.deepcopy(identity)
             except (reviewer_runtime.ReviewerRuntimeError, KeyError, TypeError, ValueError):
-                dimension = "source_identity" if selected_id in selected_ids else "research_process"
-                reasons[dimension].add("reviewer_runtime_identity_unverified")
+                attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
         selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
         if selected_id in selected_ids and not _verified_runtime_source(selected_resource):
             reasons["source_identity"].add("runtime_source_unverified")
@@ -1835,22 +1845,22 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             if (not isinstance(privacy, dict) or type(privacy.get("redacted")) is not bool
                     or not isinstance(privacy.get("redactions"), list)
                     or privacy["redacted"] != bool(privacy["redactions"])):
-                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
             if (snapshot.get("privacy") or {}).get("redacted") is True:
-                reasons["exact_inputs"].add("runtime_input_privacy_nonexact")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_privacy_nonexact")
             if (snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
                     or snapshot.get("run_id") != selected_id or snapshot.get("kind") != by_id[selected_id]["kind"]
                     or snapshot.get("lease_generation") != by_id[selected_id].get("lease_generation")
                     or snapshot.get("claim_request_hash") != by_id[selected_id].get("claim_request_hash")
                     or not isinstance(document, dict) or snapshot.get("input_sha256") != contracts.document_hash(document)):
-                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
                 del snapshots[selected_id]
             elif by_id[selected_id]["kind"] == "score" and (
                     document.get("scored_run_id") != run_id or output is None
                     or document.get("companies") != output["companies"]
                     or document.get("scorer_policy") != attempt_policy
                     or document.get("evaluation_date") != round_row.get("evaluation_date")):
-                reasons["exact_inputs"].add("judge_input_context_mismatch")
+                attempt_gap(selected_id, "exact_inputs", "judge_input_context_mismatch")
                 if (round_row.get("round_id") == "arena-2026-11-03"
                         and document.get("scorer_policy") != attempt_policy):
                     # Contradictory saved inputs cannot establish that an old
@@ -1858,8 +1868,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     attempt_by_id[selected_id].pop("runtime_identity", None)
                     if selected_id == example.get("score_run_id"):
                         example["judgment"].pop("runtime_identity", None)
-                    dimension = "source_identity" if selected_id in selected_ids else "research_process"
-                    reasons[dimension].add("reviewer_runtime_identity_unverified")
+                    attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
             if isinstance(document, dict) and icp is not None:
                 actual_icp = dict(document.get("icp") or {})
                 expected_icp = integrity.agent_visible_icp(icp, contacts_required=contact_policy.enabled(config)) if integrity.enabled(config) else dict(icp)
@@ -1868,7 +1877,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 for key in ("output_schema_version", "company_quality_policy", "company_requirements", "intent_details_policy", "_arena_provider_observations"):
                     actual_icp.pop(key, None)
                 if actual_icp != expected_icp or document.get("evaluation_date") != round_row.get("evaluation_date"):
-                    reasons["exact_inputs"].add("runtime_input_context_mismatch")
+                    attempt_gap(selected_id, "exact_inputs", "runtime_input_context_mismatch")
     signal_policy = (config.get("scorer_policy") or {}).get("signal_judgment_policy") == signal_judgments.POLICY
     unmarked_signal_evidence = bool(signal_judgment_uses or signal_judgment_rows or signal_source_ledger_rows) or any(
         "signal_judgment_reference" in detail

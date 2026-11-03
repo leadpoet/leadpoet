@@ -105,10 +105,10 @@ def _check_company_data_quality(
         return False, "Missing company_name"
     name_lower = name.lower()
     for placeholder in PLACEHOLDER_PATTERNS:
-        # Whole-word match so a real name containing 'na' (e.g.
-        # 'Nautical Inc') isn't tripped up.  Cheaper than re.search
-        # because placeholders are simple identifiers.
-        if name_lower == placeholder or name_lower.startswith(placeholder + " "):
+        # A token can also begin a real name, such as AAA Cooper
+        # Transportation. Other names still require independent identity
+        # and company-fit evidence after this light data-quality check.
+        if name_lower == placeholder:
             return False, f"company_name looks like placeholder text: {name!r}"
     if SUSPICIOUS_CHAR_PATTERN.search(name):
         return False, f"company_name contains suspicious characters: {name!r}"

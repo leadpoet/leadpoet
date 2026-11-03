@@ -1,0 +1,244 @@
+{
+  "icps": [
+    {
+      "icp_id": "full_thinking_sourcing_01",
+      "prompt": "Find United States public software companies that sell enterprise workflow platforms and recently launched a product or major release; prioritize companies an operations or IT buyer could evaluate.",
+      "industry": "Software",
+      "sub_industry": "Enterprise workflow software",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Enterprise workflow and business process software",
+      "required_attribute": "Provides software used by business or operations teams",
+      "intent_signal": "Announced a new enterprise software product or major platform release within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new enterprise software product or major platform release within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_02",
+      "prompt": "Find United States public information technology companies that deliver infrastructure or managed technology services and recently launched a service; prioritize companies relevant to an IT or procurement buyer.",
+      "industry": "Information Technology",
+      "sub_industry": "IT infrastructure and managed services",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "IT infrastructure, cloud, or managed technology services",
+      "required_attribute": "Provides technology infrastructure or managed IT services to organizations",
+      "intent_signal": "Announced a new IT infrastructure or managed technology service within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new IT infrastructure or managed technology service within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_03",
+      "prompt": "Find United States public artificial intelligence companies with a commercial AI product or service that recently launched a new capability; prioritize companies an engineering or data leader could evaluate.",
+      "industry": "Artificial Intelligence",
+      "sub_industry": "Commercial artificial intelligence products",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Commercial artificial intelligence products and services",
+      "required_attribute": "Sells an AI product or service to business or institutional customers",
+      "intent_signal": "Announced a new artificial intelligence product or AI-enabled service capability within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new artificial intelligence product or AI-enabled service capability within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_04",
+      "prompt": "Find United States public hardware companies that sell business or industrial devices and recently launched a product; prioritize companies relevant to an engineering, operations, or procurement buyer.",
+      "industry": "Hardware",
+      "sub_industry": "Business and industrial hardware",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Business, computing, communications, or industrial hardware",
+      "required_attribute": "Designs or sells physical hardware for business or industrial use",
+      "intent_signal": "Announced a new hardware product or device within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new hardware product or device within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_05",
+      "prompt": "Find United States public data and analytics companies that sell enterprise data products and recently launched an analytics capability; prioritize companies a data or business intelligence buyer could evaluate.",
+      "industry": "Data and Analytics",
+      "sub_industry": "Enterprise data and analytics",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Enterprise data management, analytics, or intelligence products",
+      "required_attribute": "Provides data, analytics, or business intelligence products to organizations",
+      "intent_signal": "Announced a new data product or analytics service within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new data product or analytics service within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_06",
+      "prompt": "Find United States public privacy and security companies that sell cybersecurity or identity products and recently launched a capability; prioritize companies relevant to a security or risk buyer.",
+      "industry": "Privacy and Security",
+      "sub_industry": "Cybersecurity, privacy, and identity",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Cybersecurity, privacy, identity, or risk management products",
+      "required_attribute": "Provides security, privacy, identity, or risk technology to organizations",
+      "intent_signal": "Announced a new cybersecurity, privacy, or identity product within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new cybersecurity, privacy, or identity product within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_07",
+      "prompt": "Find United States public health care companies that provide health products or services and recently launched one; prioritize companies a clinical, provider, or health system buyer could evaluate.",
+      "industry": "Health Care",
+      "sub_industry": "Health care products and services",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Health care products, services, or care delivery technology",
+      "required_attribute": "Provides a health care product or service to patients, providers, or institutions",
+      "intent_signal": "Announced a new health care product or service within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new health care product or service within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_08",
+      "prompt": "Find United States public financial services companies that offer financial products and recently launched one; prioritize companies an institutional, finance, or operations buyer could evaluate.",
+      "industry": "Financial Services",
+      "sub_industry": "Financial products and services",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Banking, insurance, wealth, or other financial products and services",
+      "required_attribute": "Provides financial products or services to consumers or organizations",
+      "intent_signal": "Announced a new financial product or service within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new financial product or service within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_09",
+      "prompt": "Find United States public payments companies that provide payment infrastructure or services and recently launched a capability; prioritize companies a finance, commerce, or operations buyer could evaluate.",
+      "industry": "Payments",
+      "sub_industry": "Payment infrastructure and services",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Payment processing, payment infrastructure, or financial transaction services",
+      "required_attribute": "Provides payment products or transaction infrastructure to businesses",
+      "intent_signal": "Announced a new payments product or service within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new payments product or service within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    },
+    {
+      "icp_id": "full_thinking_sourcing_10",
+      "prompt": "Find United States public manufacturing companies that make industrial products or provide production technology and recently launched an offering; prioritize companies relevant to an operations or procurement buyer.",
+      "industry": "Manufacturing",
+      "sub_industry": "Industrial manufacturing and production technology",
+      "geography": "United States",
+      "country": "United States",
+      "employee_count": [
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+"
+      ],
+      "company_stage": "Public",
+      "product_service": "Industrial products, equipment, components, or production technology",
+      "required_attribute": "Manufactures industrial products or provides production technology",
+      "intent_signal": "Announced a new manufactured product, industrial service, or production technology within the last 365 days, per a company announcement",
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "intent_signals": [
+        "Announced a new manufactured product, industrial service, or production technology within the last 365 days, per a company announcement"
+      ],
+      "bonus_intents": [],
+      "max_companies": 1
+    }
+  ]
+}

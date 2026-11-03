@@ -53,6 +53,7 @@ def _publish(
     netuid: int | None = None,
     evaluation_date: str | None = None,
     published_at: str = "2026-09-04T00:00:00Z",
+    eligible: bool | None = None,
 ) -> str:
     constants = rewards.reward_constants_document()
     configuration = {
@@ -94,6 +95,9 @@ def _publish(
             "is_baseline": True,
         },
     ]
+    if eligible is not None:
+        for entry in ranking:
+            entry["eligible"] = eligible
     ranking.sort(key=lambda row: row["rank"])
     decision = {
         "outcome": "crowned" if crowned else "no_king",

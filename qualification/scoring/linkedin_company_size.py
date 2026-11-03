@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -13,7 +14,9 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from gateway.qualification.models import candidate_linkedin_prompt_slug
+from gateway.qualification.models import (
+    candidate_linkedin_prompt_slug, canonical_candidate_prompt_url,
+)
 from lab_arena.scoring_provider_compat import (
     CompatibilityResponseError,
     _firecrawl_response,
@@ -27,7 +30,7 @@ from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
 from qualification.company_quality import canonical_us_state
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.company_fit_decision import (
-    _company_name, verified_homepage_brand_name,
+    _company_name, observed_linkedin_ampersand_slug, verified_homepage_brand_name,
 )
 
 
@@ -205,7 +208,24 @@ def linkedin_company_page_slug(value: Any) -> str:
         )
         parsed = urlsplit(str(value))
     except (TypeError, ValueError):
-        return ""
+        # An independently observed company locator may contain an ampersand.
+        # Keep the miner prompt grammar unchanged; validate the full URL before
+        # admitting this one separately bounded, single-decoded component.
+        try:
+            canonical_candidate_prompt_url(value, "employee_size_evidence_url")
+            parsed = urlsplit(value)
+            host = str(parsed.hostname or "").casefold()
+            parts = [part for part in parsed.path.split("/") if part]
+            if (
+                not (host == "linkedin.com" or host.endswith(".linkedin.com"))
+                or len(parts) != 2 or parts[0].casefold() != "company"
+            ):
+                return ""
+            slug = observed_linkedin_ampersand_slug(parts[1])
+            if not slug:
+                return ""
+        except (TypeError, ValueError):
+            return ""
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2 or parts[0].casefold() != "company":
         return ""
@@ -797,12 +817,28 @@ def project_structured_linkedin_company_headquarters(
     ):
         return None
     state = values["parsed_state"] or values["state"]
-    city = values["parsed_city"] or values["city"]
-    text = (
-        f'{identity["name"]} headquarters: '
-        + ", ".join(value for value in (city, state, country) if value)
-        + ". (harvestapi_get_company locations.headquarter=true)"
-    )
+    # Quote literal provider fields, not a server-authored headquarters claim.
+    # The private projection retains the canonical website binding separately;
+    # that website can have been independently canonicalized before this call.
+    selected_location = {
+        key: location[key]
+        for key in ("headquarter", "country", "city", "geographicArea")
+        if key in location
+    }
+    if "parsed" in location and location["parsed"] is not None:
+        selected_location["parsed"] = {
+            key: parsed[key]
+            for key in ("country", "countryCode", "countryFull", "state", "city")
+            if key in parsed
+        }
+    profile_field = "linkedinUrl" if elements[0].get("linkedinUrl") else "linkedin_url"
+    text = json.dumps({
+        "name": elements[0]["name"],
+        profile_field: elements[0][profile_field],
+        "locations": [selected_location],
+    }, ensure_ascii=False, separators=(",", ":"))
+    if len(text) > min(PROFILE_MAX_CHARACTERS, 2_000):
+        return None
     return {
         "name": identity["name"], "text": text,
         "provider": STRUCTURED_PROFILE_PROVIDER,

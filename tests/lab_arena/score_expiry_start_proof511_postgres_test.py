@@ -13,6 +13,8 @@ import pytest
 from tests.lab_arena import claim_eligibility_fast_paths509_postgres_test as fast
 from tests.lab_arena import claim_admission_transition509_510_postgres_test as transition
 
+current_database = transition.current_database
+
 ROOT = Path(__file__).parents[2]
 SQL = ROOT / 'scripts/511-lab-arena-score-expiry-start-proof.sql'
 PRE = fast.POST
@@ -344,7 +346,7 @@ def test_after511_cached_failure_retry_keeps_completed_company_authorities(datab
     transition.test_company_failure_retry_preserves_completed_authorities_and_finishes(database)
 
 
-def test_after511_full_current_schema_completes_and_publishes_normal_round(database, tmp_path, monkeypatch):
+def test_after511_full_current_schema_completes_and_publishes_normal_round(database, current_database, tmp_path, monkeypatch):
     with database[0].connect(**database[1]) as conn:
         apply(conn)
-    transition.test_latest_schema_retains_complete_normal_round_aggregate_and_publication(database, tmp_path, monkeypatch)
+    transition._assert_complete_current_round(current_database, tmp_path, monkeypatch)

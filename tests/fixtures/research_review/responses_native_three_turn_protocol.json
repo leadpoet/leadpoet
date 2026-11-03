@@ -1,0 +1,344 @@
+{
+  "provenance": "Reduced public synthetic-company protocol from authorized responses-03 route probe; no credentials or private company research.",
+  "turns": [
+    {
+      "request": {
+        "input": [
+          {
+            "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+            "role": "user"
+          }
+        ],
+        "max_output_tokens": 32768,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider": {
+          "allow_fallbacks": false,
+          "data_collection": "deny",
+          "max_price": {
+            "completion": 1.2,
+            "prompt": 0.3,
+            "request": 0
+          },
+          "only": [
+            "fireworks"
+          ],
+          "require_parameters": true,
+          "zdr": true
+        },
+        "reasoning": {
+          "effort": "high"
+        },
+        "store": false,
+        "stream": false,
+        "tool_choice": "required",
+        "tools": [
+          {
+            "description": "Read synthetic company evidence by ID.",
+            "name": "lookup_evidence",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_id": {
+                  "enum": [
+                    "profile",
+                    "headcount"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "evidence_id"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "response": {
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "id": "rs_tmp_t7b5jx187tg",
+            "type": "reasoning",
+            "status": "completed",
+            "content": [
+              {
+                "type": "reasoning_text",
+                "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first."
+              }
+            ],
+            "summary": [],
+            "format": "unknown"
+          },
+          {
+            "id": "fc_tmp_c7jirz6k4k9",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_eac88e6c62694d91a007566a",
+            "name": "lookup_evidence",
+            "arguments": "{\"evidence_id\":\"profile\"}"
+          }
+        ]
+      },
+      "source_wire_sha256": "sha256:9c4059d90395a49461cb7cb7a31b17d625fd3beef40655bfee4b215915bb1ed7"
+    },
+    {
+      "request": {
+        "input": [
+          {
+            "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+            "role": "user"
+          },
+          {
+            "content": [
+              {
+                "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                "type": "reasoning_text"
+              }
+            ],
+            "format": "unknown",
+            "id": "rs_tmp_t7b5jx187tg",
+            "status": "completed",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"evidence_id\":\"profile\"}",
+            "call_id": "call_eac88e6c62694d91a007566a",
+            "id": "fc_tmp_c7jirz6k4k9",
+            "name": "lookup_evidence",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_eac88e6c62694d91a007566a",
+            "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+            "type": "function_call_output"
+          }
+        ],
+        "max_output_tokens": 32768,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider": {
+          "allow_fallbacks": false,
+          "data_collection": "deny",
+          "max_price": {
+            "completion": 1.2,
+            "prompt": 0.3,
+            "request": 0
+          },
+          "only": [
+            "fireworks"
+          ],
+          "require_parameters": true,
+          "zdr": true
+        },
+        "reasoning": {
+          "effort": "high"
+        },
+        "store": false,
+        "stream": false,
+        "tool_choice": "required",
+        "tools": [
+          {
+            "description": "Read synthetic company evidence by ID.",
+            "name": "lookup_evidence",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_id": {
+                  "enum": [
+                    "profile",
+                    "headcount"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "evidence_id"
+              ],
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "response": {
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "id": "rs_tmp_arsmuo4ha96",
+            "type": "reasoning",
+            "status": "completed",
+            "content": [
+              {
+                "type": "reasoning_text",
+                "text": "Now second call."
+              }
+            ],
+            "summary": [],
+            "format": "unknown"
+          },
+          {
+            "id": "fc_tmp_ii7b9xlw68",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_556fcfa4333048a39217588e",
+            "name": "lookup_evidence",
+            "arguments": "{\"evidence_id\":\"headcount\"}"
+          }
+        ]
+      },
+      "source_wire_sha256": "sha256:01f43ffbb7961ac9c0611c981a5f707cbd15a8379e1e205b751ffb45dc7a3676"
+    },
+    {
+      "request": {
+        "input": [
+          {
+            "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+            "role": "user"
+          },
+          {
+            "content": [
+              {
+                "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                "type": "reasoning_text"
+              }
+            ],
+            "format": "unknown",
+            "id": "rs_tmp_t7b5jx187tg",
+            "status": "completed",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"evidence_id\":\"profile\"}",
+            "call_id": "call_eac88e6c62694d91a007566a",
+            "id": "fc_tmp_c7jirz6k4k9",
+            "name": "lookup_evidence",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_eac88e6c62694d91a007566a",
+            "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+            "type": "function_call_output"
+          },
+          {
+            "content": [
+              {
+                "text": "Now second call.",
+                "type": "reasoning_text"
+              }
+            ],
+            "format": "unknown",
+            "id": "rs_tmp_arsmuo4ha96",
+            "status": "completed",
+            "summary": [],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"evidence_id\":\"headcount\"}",
+            "call_id": "call_556fcfa4333048a39217588e",
+            "id": "fc_tmp_ii7b9xlw68",
+            "name": "lookup_evidence",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "call_id": "call_556fcfa4333048a39217588e",
+            "output": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+            "type": "function_call_output"
+          }
+        ],
+        "max_output_tokens": 32768,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider": {
+          "allow_fallbacks": false,
+          "data_collection": "deny",
+          "max_price": {
+            "completion": 1.2,
+            "prompt": 0.3,
+            "request": 0
+          },
+          "only": [
+            "fireworks"
+          ],
+          "require_parameters": true,
+          "zdr": true
+        },
+        "reasoning": {
+          "effort": "high"
+        },
+        "store": false,
+        "stream": false,
+        "text": {
+          "format": {
+            "name": "qualification",
+            "schema": {
+              "additionalProperties": false,
+              "properties": {
+                "company": {
+                  "type": "string"
+                },
+                "evidence_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "qualified": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "company",
+                "qualified",
+                "evidence_ids"
+              ],
+              "type": "object"
+            },
+            "strict": true,
+            "type": "json_schema"
+          }
+        }
+      },
+      "response": {
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "id": "rs_tmp_d75ybkn0prh",
+            "type": "reasoning",
+            "status": "completed",
+            "content": [
+              {
+                "type": "reasoning_text",
+                "text": "Need decide qualified false because newer official headcount 12, outside 50-200. Use both sources, no infer. Evidence ids both profile and headcount. Strict JSON schema only."
+              }
+            ],
+            "summary": [],
+            "format": "unknown"
+          },
+          {
+            "id": "msg_tmp_6jhf870tlut",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "{\"company\":\"Acme Test\",\"qualified\":false,\"evidence_ids\":[\"profile\",\"headcount\"]}",
+                "annotations": [],
+                "logprobs": []
+              }
+            ]
+          }
+        ]
+      },
+      "source_wire_sha256": "sha256:4eb6430f09e5e0c1adc237f3b6354d90806ede9e2da0eb07815b1b9d2c1a20fd"
+    }
+  ]
+}

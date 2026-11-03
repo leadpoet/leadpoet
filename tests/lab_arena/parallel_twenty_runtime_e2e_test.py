@@ -27,11 +27,8 @@ from lab_arena.proxy_workers import (
     VerifiedProxyWorker,
     VerifiedProxyWorkerInventory,
 )
-from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
-)
 from tests.lab_arena.successful_call_cost_round_test import CostHarness
+from tests.lab_arena.test_integrity_round import IntegrityHarness
 from tests.lab_arena.test_lab_arena_service_round import _start_round, keypair
 
 
@@ -49,7 +46,12 @@ def bounded_socket_shutdown_poll(monkeypatch):
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    # Current full-flow coverage needs the deployed claim and scoring helpers.
+    # Reuse the descendant builder without changing historical migration tests.
+    # Providers, verified exits and the sandbox boundary remain controlled here.
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+
+    yield from current_service_database()
 
 
 def _proxy_pool(process_capacity: int) -> ProxyWorkerPool:
@@ -82,6 +84,8 @@ def _register_external_validator(harness: CostHarness, label: str):
     harness.chain.permits[key.ss58_address] = True
     harness.chain.stakes[key.ss58_address] = 100_000.0
     harness.chain.active[key.ss58_address] = False
+    if key.ss58_address not in harness.runner_keys:
+        harness.runner_keys.append(key.ss58_address)
     return key
 
 
@@ -99,6 +103,9 @@ def _http_runner(
     image_cache = rn.ImageCache(
         root / ("images-" + cache_key),
         lambda _reference, _digest, target: (target / "rootfs").mkdir(),
+        # The exporter creates an empty fixture, not a production image. Keep
+        # the real headroom guard with a cache limit sized for that fixture.
+        max_bytes=1024 * 1024,
     )
     source_cache = rn.SourceCache(
         root / ("sources-" + cache_key),
@@ -121,12 +128,61 @@ def _http_runner(
             work_dir=work_dir,
             max_parallel_runs=local_capacity,
             evaluation_date="2026-09-14",
-            clock=harness.clock,
+            # Keep the default real UTC clock for SQL leases and signed events.
+            # The harness FakeClock controls scheduling and freezes at drain entry.
             proxy_worker_pool=_proxy_pool(local_capacity),
             completion_retry_seconds=(0.0, 0.0),
             claim_retry_seconds=(),
         )
     )
+
+
+def test_http_runner_event_clock_advances_without_changing_schedule(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tests.lab_arena.test_lab_arena_service_round import FakeClock
+
+    start = datetime(2026, 10, 29, 12, 0, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 10, 29, 12, 0, 2, tzinfo=timezone.utc)
+    wall_times = iter((start, later))
+
+    class WallClock:
+        @staticmethod
+        def now(tz):
+            assert tz is timezone.utc
+            return next(wall_times)
+
+    # Exercise the real RunnerConfig clock default without allocating an image
+    # cache, running a sandbox, opening HTTP, or waiting for wall time to pass.
+    monkeypatch.setattr(rn, "datetime", WallClock)
+    monkeypatch.setattr(rn, "HttpArenaApiClient", lambda *_a, **_k: SimpleNamespace(source=lambda *_: None))
+    monkeypatch.setattr(rn, "ImageCache", lambda *_a, **_k: object())
+    monkeypatch.setattr(rn, "SourceCache", lambda *_a, **_k: object())
+    monkeypatch.setattr(rn, "Runner", lambda config: SimpleNamespace(_config=config))
+    harness = SimpleNamespace(round_id="arena-2026-10-29", sandbox=object(), clock=FakeClock(start))
+    runner = _http_runner(harness, object(), tmp_path,
+                          key_label="svc-runner-alpha", local_capacity=10)
+    assert runner._config.clock() == start
+    assert runner._config.clock() == later
+    assert harness.clock() == start
+
+
+@pytest.mark.parametrize("free_gib", [1, 3])
+def test_empty_fixture_image_cache_keeps_export_headroom_guard(tmp_path, monkeypatch, free_gib):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free_gib * 1024**3))
+    monkeypatch.setattr(rn, "HttpArenaApiClient", lambda *_a, **_k: SimpleNamespace(source=lambda *_: None))
+    monkeypatch.setattr(rn, "SourceCache", lambda *_a, **_k: object())
+    monkeypatch.setattr(rn, "Runner", lambda config: SimpleNamespace(_config=config))
+    harness = SimpleNamespace(round_id="arena-2026-10-29", sandbox=object())
+    if free_gib == 1:
+        with pytest.raises(rn.RunnerError, match="insufficient disk space for image export"):
+            _http_runner(harness, object(), tmp_path, key_label="svc-runner-alpha", local_capacity=10)
+    else:
+        runner = _http_runner(harness, object(), tmp_path, key_label="svc-runner-alpha", local_capacity=10)
+        cache = runner._config.image_cache
+        digest = "sha256:" + "a" * 64
+        assert cache.rootfs_for(digest).is_dir()
 
 
 class _ExecutionEvidence:
@@ -372,7 +428,10 @@ def _run_published_case(
     sequential: bool,
 ) -> tuple[dict, int, int, str, list[dict]]:
     root.mkdir(parents=True, exist_ok=True)
-    harness = CostHarness(
+    class IntegrityCostHarness(CostHarness, IntegrityHarness):
+        """Keep controlled paid transport with the current scoring contract."""
+
+    harness = IntegrityCostHarness(
         connect,
         root,
         challengers=["ParallelCandidate"],
@@ -382,6 +441,7 @@ def _run_published_case(
         harness.service.config.defaults,
         runner_slot_ceiling=local_capacity,
         parallel_twenty_icp_execution=True,
+        integrity_from="2000-01-01T00:00:00Z",
     )
     participants = _start_round(harness, day=day, epoch=epoch)
     assert participants == 2
@@ -494,12 +554,18 @@ def _run_published_case(
 
 
 def test_real_parallel_runtime_matches_sequential_score_publication_and_cost(
-    database, tmp_path
+    database, tmp_path, monkeypatch
 ):
     """Ten and twenty workers preserve all outputs, scores, costs, and retry isolation."""
 
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
+    from tests.lab_arena import test_lab_arena_service_round as fixtures
+    from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge
+
+    # Current publication requires scope-bound accepted judges. Keep the
+    # deterministic scorer controlled while using real integrity/cache paths.
+    monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
     sequential, sequential_high_water, calls, _expired, _runs = _run_published_case(
         connect,
         tmp_path / "sequential",

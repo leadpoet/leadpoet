@@ -199,8 +199,8 @@ def test_verified_bonus_still_requires_paragraph_coverage():
 def test_primary_bonus_context_keeps_existing_document_and_repair_bounds():
     saved, company, icp = _inputs()
     # Large buyer prose and fetched context exercise the real context trimmer.
-    # Role descriptions must remain exact and must not increase the 48k cap.
-    icp.prompt += " Buyer context." * 2100
+    # Role descriptions must remain exact under the native 32k message cap.
+    icp.prompt += " Buyer context." * 1100
     results = deepcopy(saved["signal_results"])
     context = results[0]["judge_verdict"]["verification_trace"]["verified_source_context"][0]
     context["text"] += " Background information." * 1000

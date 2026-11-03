@@ -683,9 +683,13 @@ def test_retryable_404_is_whitelisted_backed_off_and_can_pass(
 def test_recovery_caps_permanent_legacy_and_final_expired_transient_claim(
     recovery_store, recovery_superuser
 ):
-    assert recovery_store.code_review_schema()["transient_retry_backoff_seconds"] == [
+    # This fixture deliberately installs historical migration 263. Its raw v1
+    # contract remains valid, but the current service requires migration 585.
+    assert recovery_store._transport.rpc("lab_arena_code_review_schema_v1", {})["transient_retry_backoff_seconds"] == [
         60, 120, 240, 480, 900,
     ]
+    with pytest.raises(ArenaStoreError, match="code review schema mismatch"):
+        recovery_store.code_review_schema()
     _round, permanent_id, permanent_miner = accepted_recovery_submission(
         recovery_store, "a1"
     )

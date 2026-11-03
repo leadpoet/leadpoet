@@ -35,7 +35,7 @@ def _provider_rows(slots):
             "prompt": f"Find {industry} companies with {intent.lower()} in {geography}.",
             "industry": industry,
             "sub_industry": generator.SUB_INDUSTRIES[industry][occurrence % len(generator.SUB_INDUSTRIES[industry])],
-            "company_stage": generator.COMPANY_STAGES[index % len(generator.COMPANY_STAGES)],
+            "company_stage": generator.COMPANY_STAGES[index % len(generator.COMPANY_STAGES)] if index < min(3, len(slots)) else "",
             "employee_count": ["51-200"],
             "geography": geography,
             "country": geography.split(",")[0],
@@ -112,6 +112,181 @@ def test_generation_uses_bounded_sonnet_search_without_unsupported_sampling(monk
     }}]
     assert captured["max_tool_calls"] == 10
     assert not {"temperature", "top_p", "top_k"}.intersection(captured)
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 10, 20, 30])
+def test_new_banks_pin_stage_only_for_three_icps(monkeypatch, count):
+    monkeypatch.setenv("LAB_ARENA_ICP_EXCLUSIONS_ENABLED", "0")
+    _stub_provider(monkeypatch)
+    for result in (
+        generator.generate_icp_set(20261025, count, base_seed=42),
+        asyncio.run(generator.generate_icps_with_openrouter(
+            20261025, count, api_key="test-only",
+        )),
+    ):
+        assert result is not None
+        icps, distribution, digest = result
+        assert sum(bool(row["company_stage"]) for row in icps) == min(3, count)
+        assert generator.generated_bank_error(icps, count, distribution) is None
+        assert digest == generator.compute_icp_set_hash(icps)
+        for row in icps:
+            brief = row["prompt"].split("\n\nIntent qualification:\n", 1)[0]
+            assert ("Company stage:" in brief) is bool(row["company_stage"])
+
+
+def test_generation_prompt_requires_only_three_stage_filters(monkeypatch):
+    captured = _stub_provider(monkeypatch)
+    assert asyncio.run(generator.generate_icps_with_openrouter(
+        20261025, 10, api_key="test-only",
+    )) is not None
+    prompt = captured["messages"][0]["content"]
+    assert "EXACTLY 3 of the 10 ICPs" in prompt
+    assert 'remaining 7 ICPs MUST set `company_stage` to ""' in prompt
+    assert "Do not put funding/ownership-stage restrictions" in prompt
+    assert "`prompt`, `product_service`, or `required_attribute`" in prompt
+    assert "STAGE × INTENT PAIRING (only for ICPs with non-empty `company_stage`)" in prompt
+    assert "SPREAD EVENLY ACROSS STAGES" not in prompt
+    assert "Announced a funding round in the last 12 months" in prompt
+    assert "Announced a Series A or later funding round" not in prompt
+
+
+@pytest.mark.parametrize("stage", ["Series A", "Bootstrapped", True, False, [], ["Public"]])
+def test_provider_rejects_stage_quota_or_vocabulary_failure(monkeypatch, stage):
+    _stub_provider(monkeypatch, lambda rows: rows[-1].update(company_stage=stage))
+    assert asyncio.run(generator.generate_icps_with_openrouter(
+        20261025, 10, api_key="test-only",
+    )) is None
+
+
+@pytest.mark.parametrize("clear_count", [1, 3])
+def test_provider_rejects_too_few_stage_filters(monkeypatch, clear_count):
+    def clear_stages(rows):
+        for row in rows[:clear_count]:
+            row["company_stage"] = ""
+
+    _stub_provider(monkeypatch, clear_stages)
+    assert asyncio.run(generator.generate_icps_with_openrouter(
+        20261025, 10, api_key="test-only",
+    )) is None
+
+
+def test_provider_defaults_missing_stage_to_unrestricted(monkeypatch):
+    _stub_provider(monkeypatch, lambda rows: rows[-1].pop("company_stage"))
+    result = asyncio.run(generator.generate_icps_with_openrouter(
+        20261025, 10, api_key="test-only",
+    ))
+    assert result is not None
+    assert result[0][-1]["company_stage"] == ""
+
+
+def test_activation_runs_provider_to_validated_store_without_changing_other_fields(monkeypatch):
+    from gateway.qualification.models import ICPPrompt
+    from qualification.scoring.competition import _normalized_icp
+
+    _stub_provider(monkeypatch)
+    calls = []
+
+    async def no_active(*, strict=False):
+        assert strict
+        return None
+
+    async def store(*, icps, icp_set_hash, industry_distribution, **_kwargs):
+        assert len(icps) == 10
+        assert sum(bool(row["company_stage"]) for row in icps) == 3
+        assert generator.generated_bank_error(icps, 10, industry_distribution) is None
+        assert icp_set_hash == generator.compute_icp_set_hash(icps)
+        for index, row in enumerate(icps):
+            original = _provider_rows([item["industry"] for item in icps])[index]
+            for key in ("industry", "sub_industry", "company_stage", "geography", "country", "product_service", "intent_signal", "intent_category"):
+                assert row[key] == original[key]
+            assert "51-200" in row["employee_count"]
+            assert row["max_companies"] == 5
+            assert row["target_roles"]
+            assert row["contact_geography"] == {"countries": [], "regions": [], "cities": []}
+            model = ICPPrompt.model_validate(_normalized_icp(row))
+            assert ICPPrompt.model_validate_json(model.model_dump_json()) == model
+        calls.append("stored")
+        return True
+
+    async def activate(_set_id):
+        calls.append("activated")
+        return True
+
+    monkeypatch.setattr(generator, "OPENROUTER_API_KEY", "test-only")
+    monkeypatch.setattr(generator, "get_active_icp_set", no_active)
+    monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda _set_id: None)
+    monkeypatch.setattr(generator, "attach_generated_exclusions", lambda _icps: None)
+    monkeypatch.setattr(generator, "store_icp_set", store)
+    monkeypatch.setattr(generator, "activate_icp_set", activate)
+    assert asyncio.run(generator.generate_and_activate_icp_set(
+        datetime(2026, 10, 25, tzinfo=timezone.utc), contacts_required=True, total_icps=10,
+    )) == 20261025
+    assert calls == ["stored", "activated"]
+
+
+def test_template_stage_quota_preserves_existing_draws_and_fields(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_ICP_EXCLUSIONS_ENABLED", "0")
+    base_seed = 42
+    generated, _, _ = generator.generate_icp_set(20261025, 20, base_seed=base_seed, contacts_required=True)
+    by_id = {row["icp_id"]: row for row in generated}
+    for index, industry in enumerate(generator.industry_slots(20, seed=base_seed), 1):
+        original = generator.generate_single_icp(
+            f"icp_20261025_{index:03d}", industry, base_seed + index, contacts_required=True,
+        )
+        current = by_id[original["icp_id"]]
+        for key, value in original.items():
+            if key not in {"company_stage", "prompt"}:
+                assert current[key] == value, (key, original["icp_id"])
+        assert current["company_stage"] in ("", original["company_stage"])
+
+
+def test_activation_rejects_wrong_stage_quota_even_if_generator_is_bypassed(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_ICP_EXCLUSIONS_ENABLED", "0")
+    rows = _provider_rows(generator.industry_slots(10, seed=42))
+    rows[-1]["company_stage"] = "Public"
+
+    async def no_active(*, strict=False):
+        return None
+
+    async def fake_generate(*_args, **_kwargs):
+        return rows, dict(Counter(row["industry"] for row in rows)), "unused"
+
+    async def no_store(**_kwargs):
+        pytest.fail("stage-invalid bank reached storage")
+
+    monkeypatch.setattr(generator, "OPENROUTER_API_KEY", "test-only")
+    monkeypatch.setattr(generator, "get_active_icp_set", no_active)
+    monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda _set_id: None)
+    monkeypatch.setattr(generator, "generate_icps_with_openrouter", fake_generate)
+    monkeypatch.setattr(generator, "store_icp_set", no_store)
+    assert asyncio.run(generator.generate_and_activate_icp_set(
+        datetime(2026, 10, 25, tzinfo=timezone.utc), total_icps=10,
+    )) is None
+
+
+def test_existing_active_bank_keeps_all_original_stage_filters(monkeypatch):
+    from copy import deepcopy
+
+    rows = _provider_rows(generator.industry_slots(10, seed=42))
+    for row in rows:
+        row["company_stage"] = "Public"
+    active = {"set_id": 20261024, "icps": rows, "icp_set_hash": generator.compute_icp_set_hash(rows)}
+    original = deepcopy(active)
+
+    async def already_active(*, strict=False):
+        assert strict
+        return active
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("existing active bank reached a generation or mutation path")
+
+    monkeypatch.setattr(generator, "get_active_icp_set", already_active)
+    for name in ("frozen_benchmark_icp_count", "generated_bank_error", "generate_icps_with_openrouter", "store_icp_set", "activate_icp_set"):
+        monkeypatch.setattr(generator, name, forbidden)
+    assert asyncio.run(generator.generate_and_activate_icp_set(
+        datetime(2026, 10, 24, tzinfo=timezone.utc), total_icps=10,
+    )) == 20261024
+    assert active == original
 
 
 @pytest.mark.parametrize("failure", [429, 502, "timeout", "malformed", "empty"])

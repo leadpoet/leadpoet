@@ -1,0 +1,1346 @@
+{
+  "schema_version": 1,
+  "kind": "live_broker_postgres_capture_probe",
+  "model": "google/gemma-4-31b-it",
+  "provider": "coreweave/fp4",
+  "verified_at": "2026-10-24T00:50:28.360839Z",
+  "semantic_source": "https://ai.google.dev/gemma/docs/capabilities/thinking",
+  "qualification": "provider-exposed generated text; not a claim about all internal computation",
+  "proof_limit": "Synthetic local PostgreSQL, object-store, and worker socket/SDK receipt calls; no deployed gateway, full ICP quality, or complete labeled trajectory claim.",
+  "checks": {
+    "raw_and_readable_readback": true,
+    "two_tool_continuations": true,
+    "strict_json": true,
+    "positive_and_negative_qualification": true,
+    "evidence_id_order_not_significant": true,
+    "worker_socket_and_agent_acknowledgement": true
+  },
+  "runs": [
+    {
+      "scenario": "live",
+      "original_report_sha256": "c030a5165ab2aa60517e1a86cab069f0d813b767ff6e4684d15ba3285b58851b",
+      "export_sha256": "ee9620104eb0432c72124e820bff092c2c640f9ae16275453ebf5b429dfc560a",
+      "thinking_chars": [
+        596,
+        228,
+        342
+      ],
+      "validated_final_json": {
+        "company": "Acme Test",
+        "evidence_ids": [
+          "profile",
+          "headcount"
+        ],
+        "qualified": true
+      },
+      "calls": [
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "google/gemma-4-31b-it",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.34,
+                "prompt": 0.1,
+                "request": 0
+              },
+              "only": [
+                "coreweave/fp4"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "enabled": true,
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "The user wants to qualify a company called \"Acme Test\" based on specific criteria:\n1. Must be a US company.\n2. Must be a B2B software company.\n3. Must have between 50 and 200 employees.\n\nThe instructions explicitly state:\n- Call `lookup_evidence` with `evidence_id='profile'` first.\n- Then call `lookup_evidence` with `evidence_id='headcount'`.\n- Make one call per turn.\n- After both calls, return a JSON object with `company`, `qualified`, and `evidence_ids`.\n- Use only supplied tool evidence.\n- Do not infer missing facts.\n\nCurrent Step:\n1. Call `lookup_evidence` with `evidence_id='profile'`.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "The user wants to qualify a company called \"Acme Test\" based on specific criteria:\n1. Must be a US company.\n2. Must be a B2B software company.\n3. Must have between 50 and 200 employees.\n\nThe instructions explicitly state:\n- Call `lookup_evidence` with `evidence_id='profile'` first.\n- Then call `lookup_evidence` with `evidence_id='headcount'`.\n- Make one call per turn.\n- After both calls, return a JSON object with `company`, `qualified`, and `evidence_ids`.\n- Use only supplied tool evidence.\n- Do not infer missing facts.\n\nCurrent Step:\n1. Call `lookup_evidence` with `evidence_id='profile'`.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\n  \"evidence_id\": \"profile\"\n}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call-40244f38-0cfd-4ed0-b75f-88117e0a2f58",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792801496,
+            "id": "gen-1792801496-qlbNJHATOVYW7HCRPMQW",
+            "model": "google/gemma-4-31b-it",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "google/gemma-4-31b-it-20260402",
+                    "provider": "CoreWeave",
+                    "selected": true
+                  }
+                ],
+                "total": 16
+              },
+              "generation_time": 7208,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "google/gemma-4-31b-it",
+              "strategy": "direct",
+              "summary": "available=1, selected=CoreWeave"
+            },
+            "provider": "CoreWeave",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 185,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 170
+              },
+              "cost": 7.93e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 6.29e-05,
+                "upstream_inference_cost": 7.93e-05,
+                "upstream_inference_prompt_cost": 1.64e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 164,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 349
+            }
+          },
+          "response_sha256": "sha256:78acce00b01b9b8f06c0e8b4a376ffa9d708562a793e303f6e9c1916cf8c2a08",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:25:03.355698+00:00",
+              "entry_id": 3,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2650",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.0000793"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "google/gemma-4-31b-it-20260402",
+                  "expected_provider_name": "CoreWeave",
+                  "requested_model": "google/gemma-4-31b-it",
+                  "requested_provider_route": "coreweave/fp4",
+                  "response_model": "google/gemma-4-31b-it",
+                  "response_provider_name": "CoreWeave",
+                  "selected_endpoint_model": "google/gemma-4-31b-it-20260402",
+                  "selected_endpoint_provider_name": "CoreWeave",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 7364
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 3,
+                "field": "response"
+              },
+              "response_sha256": "sha256:78acce00b01b9b8f06c0e8b4a376ffa9d708562a793e303f6e9c1916cf8c2a08",
+              "wire_body_bytes": 2650,
+              "wire_body_sha256": "sha256:5657fba711f8fef23cd9433ea861f2fe9bdf3b08c900b08624c61e3424d8397d"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants to qualify a company called \"Acme Test\" based on specific criteria:\n1. Must be a US company.\n2. Must be a B2B software company.\n3. Must have between 50 and 200 employees.\n\nThe instructions explicitly state:\n- Call `lookup_evidence` with `evidence_id='profile'` first.\n- Then call `lookup_evidence` with `evidence_id='headcount'`.\n- Make one call per turn.\n- After both calls, return a JSON object with `company`, `qualified`, and `evidence_ids`.\n- Use only supplied tool evidence.\n- Do not infer missing facts.\n\nCurrent Step:\n1. Call `lookup_evidence` with `evidence_id='profile'`.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants to qualify a company called \"Acme Test\" based on specific criteria:\n1. Must be a US company.\n2. Must be a B2B software company.\n3. Must have between 50 and 200 employees.\n\nThe instructions explicitly state:\n- Call `lookup_evidence` with `evidence_id='profile'` first.\n- Then call `lookup_evidence` with `evidence_id='headcount'`.\n- Make one call per turn.\n- After both calls, return a JSON object with `company`, `qualified`, and `evidence_ids`.\n- Use only supplied tool evidence.\n- Do not infer missing facts.\n\nCurrent Step:\n1. Call `lookup_evidence` with `evidence_id='profile'`.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\n  \"evidence_id\": \"profile\"\n}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call-40244f38-0cfd-4ed0-b75f-88117e0a2f58",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\"}",
+                "role": "tool",
+                "tool_call_id": "call-40244f38-0cfd-4ed0-b75f-88117e0a2f58"
+              }
+            ],
+            "model": "google/gemma-4-31b-it",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.34,
+                "prompt": 0.1,
+                "request": 0
+              },
+              "only": [
+                "coreweave/fp4"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "enabled": true,
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "The first call `lookup_evidence` with `evidence_id='profile'` returned:\n- Company: Acme Test\n- Country: US\n- Business: B2B software\n\nNow, I need to perform the second step: call `lookup_evidence` with `evidence_id='headcount'`.\n",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "The first call `lookup_evidence` with `evidence_id='profile'` returned:\n- Company: Acme Test\n- Country: US\n- Business: B2B software\n\nNow, I need to perform the second step: call `lookup_evidence` with `evidence_id='headcount'`.\n",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\n  \"evidence_id\": \"headcount\"\n}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call-005ba17f-be21-40a4-a59e-816a541d6654",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792801503,
+            "id": "gen-1792801503-mBUGtyqNHRxqlefkoqLd",
+            "model": "google/gemma-4-31b-it",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "google/gemma-4-31b-it-20260402",
+                    "provider": "CoreWeave",
+                    "selected": true
+                  }
+                ],
+                "total": 16
+              },
+              "generation_time": 2735,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "google/gemma-4-31b-it",
+              "strategy": "direct",
+              "summary": "available=1, selected=CoreWeave"
+            },
+            "provider": "CoreWeave",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 84,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 69
+              },
+              "cost": 6.746e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 2.856e-05,
+                "upstream_inference_cost": 6.746e-05,
+                "upstream_inference_prompt_cost": 3.89e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 389,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 473
+            }
+          },
+          "response_sha256": "sha256:cac09ff063b0e2617d0f2ede927089e9fc8c1bf4b78dccfecda66ce8e8b4ab71",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:25:06.313561+00:00",
+              "entry_id": 6,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "1875",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00006746"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "google/gemma-4-31b-it-20260402",
+                  "expected_provider_name": "CoreWeave",
+                  "requested_model": "google/gemma-4-31b-it",
+                  "requested_provider_route": "coreweave/fp4",
+                  "response_model": "google/gemma-4-31b-it",
+                  "response_provider_name": "CoreWeave",
+                  "selected_endpoint_model": "google/gemma-4-31b-it-20260402",
+                  "selected_endpoint_provider_name": "CoreWeave",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 2907
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 6,
+                "field": "response"
+              },
+              "response_sha256": "sha256:cac09ff063b0e2617d0f2ede927089e9fc8c1bf4b78dccfecda66ce8e8b4ab71",
+              "wire_body_bytes": 1875,
+              "wire_body_sha256": "sha256:c2a0ad7e4836cde1eb4422795cc93e80a964631b9d5c1c3556b2053df008ddef"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants to qualify a company called \"Acme Test\" based on specific criteria:\n1. Must be a US company.\n2. Must be a B2B software company.\n3. Must have between 50 and 200 employees.\n\nThe instructions explicitly state:\n- Call `lookup_evidence` with `evidence_id='profile'` first.\n- Then call `lookup_evidence` with `evidence_id='headcount'`.\n- Make one call per turn.\n- After both calls, return a JSON object with `company`, `qualified`, and `evidence_ids`.\n- Use only supplied tool evidence.\n- Do not infer missing facts.\n\nCurrent Step:\n1. Call `lookup_evidence` with `evidence_id='profile'`.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants to qualify a company called \"Acme Test\" based on specific criteria:\n1. Must be a US company.\n2. Must be a B2B software company.\n3. Must have between 50 and 200 employees.\n\nThe instructions explicitly state:\n- Call `lookup_evidence` with `evidence_id='profile'` first.\n- Then call `lookup_evidence` with `evidence_id='headcount'`.\n- Make one call per turn.\n- After both calls, return a JSON object with `company`, `qualified`, and `evidence_ids`.\n- Use only supplied tool evidence.\n- Do not infer missing facts.\n\nCurrent Step:\n1. Call `lookup_evidence` with `evidence_id='profile'`.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\n  \"evidence_id\": \"profile\"\n}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call-40244f38-0cfd-4ed0-b75f-88117e0a2f58",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\"}",
+                "role": "tool",
+                "tool_call_id": "call-40244f38-0cfd-4ed0-b75f-88117e0a2f58"
+              },
+              {
+                "content": null,
+                "reasoning": "The first call `lookup_evidence` with `evidence_id='profile'` returned:\n- Company: Acme Test\n- Country: US\n- Business: B2B software\n\nNow, I need to perform the second step: call `lookup_evidence` with `evidence_id='headcount'`.\n",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The first call `lookup_evidence` with `evidence_id='profile'` returned:\n- Company: Acme Test\n- Country: US\n- Business: B2B software\n\nNow, I need to perform the second step: call `lookup_evidence` with `evidence_id='headcount'`.\n",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\n  \"evidence_id\": \"headcount\"\n}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call-005ba17f-be21-40a4-a59e-816a541d6654",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"headcount\",\"employees\":80}",
+                "role": "tool",
+                "tool_call_id": "call-005ba17f-be21-40a4-a59e-816a541d6654"
+              }
+            ],
+            "model": "google/gemma-4-31b-it",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.34,
+                "prompt": 0.1,
+                "request": 0
+              },
+              "only": [
+                "coreweave/fp4"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "enabled": true,
+              "exclude": false
+            },
+            "response_format": {
+              "json_schema": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "stream": false
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": "{\"company\": \"Acme Test\", \"evidence_ids\": [\"profile\", \"headcount\"], \"qualified\": true}",
+                  "reasoning": "Now I have all the information:\n1. Country: US (Matches)\n2. Business: B2B software (Matches)\n3. Employees: 80 (Matches 50-200 range)\n\nThe company \"Acme Test\" meets all the criteria.\n\nFinal Response format: JSON with `company`, `qualified`, and `evidence_ids`.\n`company`: \"Acme Test\"\n`qualified`: true\n`evidence_ids`: [\"profile\", \"headcount\"]\n",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now I have all the information:\n1. Country: US (Matches)\n2. Business: B2B software (Matches)\n3. Employees: 80 (Matches 50-200 range)\n\nThe company \"Acme Test\" meets all the criteria.\n\nFinal Response format: JSON with `company`, `qualified`, and `evidence_ids`.\n`company`: \"Acme Test\"\n`qualified`: true\n`evidence_ids`: [\"profile\", \"headcount\"]\n",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant"
+                },
+                "native_finish_reason": "stop"
+              }
+            ],
+            "created": 1792801506,
+            "id": "gen-1792801506-hE7pVL4A1FJR5VturGnK",
+            "model": "google/gemma-4-31b-it",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "google/gemma-4-31b-it-20260402",
+                    "provider": "CoreWeave",
+                    "selected": true
+                  }
+                ],
+                "total": 16
+              },
+              "generation_time": 4644,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "google/gemma-4-31b-it",
+              "strategy": "direct",
+              "summary": "available=1, selected=CoreWeave"
+            },
+            "provider": "CoreWeave",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 137,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 111
+              },
+              "cost": 9.078e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 4.658e-05,
+                "upstream_inference_cost": 9.078e-05,
+                "upstream_inference_prompt_cost": 4.42e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 442,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 579
+            }
+          },
+          "response_sha256": "sha256:bb7b4ba34cfcefda316c51f64c2266fdac4bcc14a07eadc360eb23f98239ebe6",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:25:11.143111+00:00",
+              "entry_id": 9,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2040",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00009078"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "google/gemma-4-31b-it-20260402",
+                  "expected_provider_name": "CoreWeave",
+                  "requested_model": "google/gemma-4-31b-it",
+                  "requested_provider_route": "coreweave/fp4",
+                  "response_model": "google/gemma-4-31b-it",
+                  "response_provider_name": "CoreWeave",
+                  "selected_endpoint_model": "google/gemma-4-31b-it-20260402",
+                  "selected_endpoint_provider_name": "CoreWeave",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 4780
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 9,
+                "field": "response"
+              },
+              "response_sha256": "sha256:bb7b4ba34cfcefda316c51f64c2266fdac4bcc14a07eadc360eb23f98239ebe6",
+              "wire_body_bytes": 2040,
+              "wire_body_sha256": "sha256:75c44ca65b468c32477370e7ac7c26c00d8da4f18e322b462f120fdd1504cbaf"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "complex",
+      "artifact_name": "worker-final-google--gemma-4-31b-it",
+      "original_report_sha256": "f618456f205aaea60cc5d76715b2f38572862307e9db4e76acaa1987be157ef8",
+      "export_sha256": "f1cdbb9df73aabfd779299cc1135b1b35843d40050ebdf122c58b3dbdd9ac7f1",
+      "worker_receipts_proved": true,
+      "thinking_chars": [
+        484,
+        48,
+        657
+      ],
+      "validated_final_json": {
+        "company": "Acme Test",
+        "evidence_ids": [
+          "profile",
+          "headcount"
+        ],
+        "qualified": false
+      },
+      "calls": [
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "google/gemma-4-31b-it",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.34,
+                "prompt": 0.1,
+                "request": 0
+              },
+              "only": [
+                "coreweave/fp4"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "enabled": true,
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "The user wants to determine if \"Acme Test\" is a US-based B2B software company with 50-200 employees.\nI need to follow a specific sequence of tool calls:\n1. Call `lookup_evidence` for 'profile'.\n2. Call `lookup_evidence` for 'headcount'.\n3. One call per turn.\n4. The final output must be strict JSON with `company`, `qualified`, and `evidence_ids`.\n5. Use the newer official headcount if there's a conflict.\n6. Do not infer missing facts.\n\nStep 1: Call `lookup_evidence` for 'profile'.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "The user wants to determine if \"Acme Test\" is a US-based B2B software company with 50-200 employees.\nI need to follow a specific sequence of tool calls:\n1. Call `lookup_evidence` for 'profile'.\n2. Call `lookup_evidence` for 'headcount'.\n3. One call per turn.\n4. The final output must be strict JSON with `company`, `qualified`, and `evidence_ids`.\n5. Use the newer official headcount if there's a conflict.\n6. Do not infer missing facts.\n\nStep 1: Call `lookup_evidence` for 'profile'.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\n  \"evidence_id\": \"profile\"\n}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call-a8e6bab6-7a58-4c86-8344-e3492bfa4731",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792802478,
+            "id": "gen-1792802478-oE6KxaQ8PQc9fiO2MzAq",
+            "model": "google/gemma-4-31b-it",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "google/gemma-4-31b-it-20260402",
+                    "provider": "CoreWeave",
+                    "selected": true
+                  }
+                ],
+                "total": 15
+              },
+              "generation_time": 6296,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "google/gemma-4-31b-it",
+              "strategy": "direct",
+              "summary": "available=1, selected=CoreWeave"
+            },
+            "provider": "CoreWeave",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 158,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 142
+              },
+              "cost": 7.042e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 5.372e-05,
+                "upstream_inference_cost": 7.042e-05,
+                "upstream_inference_prompt_cost": 1.67e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 167,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 325
+            }
+          },
+          "response_sha256": "sha256:8361063033023d7f395e6e29ab690da3fb986eca1a3db9c996ccf47853fca9e1",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:41:24.855209+00:00",
+              "entry_id": 3,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2408",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00007042"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "google/gemma-4-31b-it-20260402",
+                  "expected_provider_name": "CoreWeave",
+                  "requested_model": "google/gemma-4-31b-it",
+                  "requested_provider_route": "coreweave/fp4",
+                  "response_model": "google/gemma-4-31b-it",
+                  "response_provider_name": "CoreWeave",
+                  "selected_endpoint_model": "google/gemma-4-31b-it-20260402",
+                  "selected_endpoint_provider_name": "CoreWeave",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 6449
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 3,
+                "field": "response"
+              },
+              "response_sha256": "sha256:8361063033023d7f395e6e29ab690da3fb986eca1a3db9c996ccf47853fca9e1",
+              "wire_body_bytes": 2408,
+              "wire_body_sha256": "sha256:03e6a96ca5136e0cad750230a275c6b0d7a4a851cd6c237bdccfebdc27189cee"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants to determine if \"Acme Test\" is a US-based B2B software company with 50-200 employees.\nI need to follow a specific sequence of tool calls:\n1. Call `lookup_evidence` for 'profile'.\n2. Call `lookup_evidence` for 'headcount'.\n3. One call per turn.\n4. The final output must be strict JSON with `company`, `qualified`, and `evidence_ids`.\n5. Use the newer official headcount if there's a conflict.\n6. Do not infer missing facts.\n\nStep 1: Call `lookup_evidence` for 'profile'.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants to determine if \"Acme Test\" is a US-based B2B software company with 50-200 employees.\nI need to follow a specific sequence of tool calls:\n1. Call `lookup_evidence` for 'profile'.\n2. Call `lookup_evidence` for 'headcount'.\n3. One call per turn.\n4. The final output must be strict JSON with `company`, `qualified`, and `evidence_ids`.\n5. Use the newer official headcount if there's a conflict.\n6. Do not infer missing facts.\n\nStep 1: Call `lookup_evidence` for 'profile'.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\n  \"evidence_id\": \"profile\"\n}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call-a8e6bab6-7a58-4c86-8344-e3492bfa4731",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "role": "tool",
+                "tool_call_id": "call-a8e6bab6-7a58-4c86-8344-e3492bfa4731"
+              }
+            ],
+            "model": "google/gemma-4-31b-it",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.34,
+                "prompt": 0.1,
+                "request": 0
+              },
+              "only": [
+                "coreweave/fp4"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "enabled": true,
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "Step 2: Call `lookup_evidence` for 'headcount'.\n",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Step 2: Call `lookup_evidence` for 'headcount'.\n",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\n  \"evidence_id\": \"headcount\"\n}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call-0b89ace4-ee2d-46f6-8383-cde5dd9ff54f",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792802484,
+            "id": "gen-1792802484-G3nFDPnaA5WU4xpHRjfH",
+            "model": "google/gemma-4-31b-it",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "google/gemma-4-31b-it-20260402",
+                    "provider": "CoreWeave",
+                    "selected": true
+                  }
+                ],
+                "total": 16
+              },
+              "generation_time": 1076,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "google/gemma-4-31b-it",
+              "strategy": "direct",
+              "summary": "available=1, selected=CoreWeave"
+            },
+            "provider": "CoreWeave",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 35,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 20
+              },
+              "cost": 5.04e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 1.19e-05,
+                "upstream_inference_cost": 5.04e-05,
+                "upstream_inference_prompt_cost": 3.85e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 385,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 420
+            }
+          },
+          "response_sha256": "sha256:c9efb00984f47acda53237cf43f2553dd1b55db918aec9948eedda7e25b1470b",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:41:26.144239+00:00",
+              "entry_id": 6,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "1502",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.0000504"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "google/gemma-4-31b-it-20260402",
+                  "expected_provider_name": "CoreWeave",
+                  "requested_model": "google/gemma-4-31b-it",
+                  "requested_provider_route": "coreweave/fp4",
+                  "response_model": "google/gemma-4-31b-it",
+                  "response_provider_name": "CoreWeave",
+                  "selected_endpoint_model": "google/gemma-4-31b-it-20260402",
+                  "selected_endpoint_provider_name": "CoreWeave",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 1235
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 6,
+                "field": "response"
+              },
+              "response_sha256": "sha256:c9efb00984f47acda53237cf43f2553dd1b55db918aec9948eedda7e25b1470b",
+              "wire_body_bytes": 1502,
+              "wire_body_sha256": "sha256:d746013014b00452da1bb9c0961130fb2968effccb229cc102fbd714a5cf400d"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants to determine if \"Acme Test\" is a US-based B2B software company with 50-200 employees.\nI need to follow a specific sequence of tool calls:\n1. Call `lookup_evidence` for 'profile'.\n2. Call `lookup_evidence` for 'headcount'.\n3. One call per turn.\n4. The final output must be strict JSON with `company`, `qualified`, and `evidence_ids`.\n5. Use the newer official headcount if there's a conflict.\n6. Do not infer missing facts.\n\nStep 1: Call `lookup_evidence` for 'profile'.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants to determine if \"Acme Test\" is a US-based B2B software company with 50-200 employees.\nI need to follow a specific sequence of tool calls:\n1. Call `lookup_evidence` for 'profile'.\n2. Call `lookup_evidence` for 'headcount'.\n3. One call per turn.\n4. The final output must be strict JSON with `company`, `qualified`, and `evidence_ids`.\n5. Use the newer official headcount if there's a conflict.\n6. Do not infer missing facts.\n\nStep 1: Call `lookup_evidence` for 'profile'.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\n  \"evidence_id\": \"profile\"\n}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call-a8e6bab6-7a58-4c86-8344-e3492bfa4731",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "role": "tool",
+                "tool_call_id": "call-a8e6bab6-7a58-4c86-8344-e3492bfa4731"
+              },
+              {
+                "content": null,
+                "reasoning": "Step 2: Call `lookup_evidence` for 'headcount'.\n",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "Step 2: Call `lookup_evidence` for 'headcount'.\n",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\n  \"evidence_id\": \"headcount\"\n}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call-0b89ace4-ee2d-46f6-8383-cde5dd9ff54f",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "role": "tool",
+                "tool_call_id": "call-0b89ace4-ee2d-46f6-8383-cde5dd9ff54f"
+              }
+            ],
+            "model": "google/gemma-4-31b-it",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.34,
+                "prompt": 0.1,
+                "request": 0
+              },
+              "only": [
+                "coreweave/fp4"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "enabled": true,
+              "exclude": false
+            },
+            "response_format": {
+              "json_schema": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "stream": false
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": "{\"company\": \"Acme Test\", \"evidence_ids\": [\"profile\", \"headcount\"], \"qualified\": false}",
+                  "reasoning": "Now I have both pieces of evidence.\n\nProfile (2024-01-01):\n- Country: US\n- Business: B2B software\n- Employees: 80\n\nHeadcount (2026-10-23):\n- Employees: 12\n\nConstraint check:\n- US B2B software company: Yes (from profile).\n- 50-200 employees:\n    - Profile says 80.\n    - Headcount says 12.\n    - Instructions say: \"The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion.\"\n    - Newer headcount = 12.\n    - 12 is not in the range [50, 200].\n\nConclusion: Not qualified.\n\nFinal output must be strict JSON.\n`{\"company\": \"Acme Test\", \"qualified\": false, \"evidence_ids\": [\"profile\", \"headcount\"]}`\n",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now I have both pieces of evidence.\n\nProfile (2024-01-01):\n- Country: US\n- Business: B2B software\n- Employees: 80\n\nHeadcount (2026-10-23):\n- Employees: 12\n\nConstraint check:\n- US B2B software company: Yes (from profile).\n- 50-200 employees:\n    - Profile says 80.\n    - Headcount says 12.\n    - Instructions say: \"The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion.\"\n    - Newer headcount = 12.\n    - 12 is not in the range [50, 200].\n\nConclusion: Not qualified.\n\nFinal output must be strict JSON.\n`{\"company\": \"Acme Test\", \"qualified\": false, \"evidence_ids\": [\"profile\", \"headcount\"]}`\n",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant"
+                },
+                "native_finish_reason": "stop"
+              }
+            ],
+            "created": 1792802486,
+            "id": "gen-1792802486-PVePI9ohdpuZVjLEixYC",
+            "model": "google/gemma-4-31b-it",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "google/gemma-4-31b-it-20260402",
+                    "provider": "CoreWeave",
+                    "selected": true
+                  }
+                ],
+                "total": 15
+              },
+              "generation_time": 4073,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "google/gemma-4-31b-it",
+              "strategy": "direct",
+              "summary": "available=1, selected=CoreWeave"
+            },
+            "provider": "CoreWeave",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 242,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 214
+              },
+              "cost": 0.00012328,
+              "cost_details": {
+                "upstream_inference_completions_cost": 8.228e-05,
+                "upstream_inference_cost": 0.00012328,
+                "upstream_inference_prompt_cost": 4.1e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 410,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 652
+            }
+          },
+          "response_sha256": "sha256:dcf404b4720944a33d0b755055e8f6ae97bb3b9fe1a4da1246893fcba63bc23b",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:41:30.420719+00:00",
+              "entry_id": 9,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2706",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00012328"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "google/gemma-4-31b-it-20260402",
+                  "expected_provider_name": "CoreWeave",
+                  "requested_model": "google/gemma-4-31b-it",
+                  "requested_provider_route": "coreweave/fp4",
+                  "response_model": "google/gemma-4-31b-it",
+                  "response_provider_name": "CoreWeave",
+                  "selected_endpoint_model": "google/gemma-4-31b-it-20260402",
+                  "selected_endpoint_provider_name": "CoreWeave",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 4226
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 9,
+                "field": "response"
+              },
+              "response_sha256": "sha256:dcf404b4720944a33d0b755055e8f6ae97bb3b9fe1a4da1246893fcba63bc23b",
+              "wire_body_bytes": 2706,
+              "wire_body_sha256": "sha256:21ca78ec438cad52fe8347544558435341ea7f46e32fa09f9421e2bea287e3b4"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

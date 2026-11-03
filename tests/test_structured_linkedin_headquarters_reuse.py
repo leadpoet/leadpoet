@@ -18,8 +18,9 @@ PROFILE = "https://www.linkedin.com/company/quaise-energy"
 ANCHOR = {"normalized_name": "Quaise Energy", "registrable_dns_domain": "quaise.com",
           "linkedin_company_slug": "quaise-energy"}
 CAPTURES = json.loads((Path(__file__).parent / "fixtures/quaise_structured_hq_profiles.json").read_text())
-HQ_TEXT = ("Quaise Energy headquarters: Houston, Texas, United States. "
-           "(harvestapi_get_company locations.headquarter=true)")
+HQ_TEXT = profile.project_structured_linkedin_company_headquarters(
+    "quaise.com", PROFILE, "Quaise Energy", CAPTURES[1]["fixture"],
+)["text"]
 
 
 def _body():
@@ -108,7 +109,7 @@ def test_international_hq_projects_without_a_us_assumption():
         "parsed": {"country": "Germany", "countryCode": "DE", "city": "Berlin"},
     }]
     evidence = _project(body)
-    assert "headquarters: Berlin, Germany." in evidence["text"]
+    assert json.loads(evidence["text"])["locations"][0]["city"] == "Berlin"
 
 
 @pytest.mark.parametrize("field,value", [
@@ -184,6 +185,8 @@ def test_real_targeted_scoring_consumes_hq_and_keeps_evidence_geography_gates(
     if country == "Germany":
         body["element"]["locations"] = [{"headquarter": True, "country": "Germany", "city": "Berlin"}]
     cache = _fetch(monkeypatch, body)
+    if country == "Germany":
+        quote = cache["structured_profile_headquarters_evidence"]["text"]
     requests = []
 
     async def post(_session, _url, *, headers, payload):
@@ -226,6 +229,9 @@ def test_real_targeted_scoring_consumes_hq_and_keeps_evidence_geography_gates(
     assert result.decision == expected, json.dumps({"details": result.details, "reason": result.reason, "claims": claims})
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["prefetched_sources"] == [{"url": PROFILE, "text": cache["structured_profile_headquarters_evidence"]["text"]}]
+    assert "quote the\ncomplete bounded JSON containing name, the company profile URL" in requests[0]["messages"][0]["content"]
+    record = json.loads(document["prefetched_sources"][0]["text"])
+    assert record["locations"][0]["headquarter"] is True
     assert document["investigation_limits"]["prefetched_pages"] == 1
     assert result.details["investigation_receipt"]["usage"].get("fetch_calls", 0) == 0
     assert fetch.await_count == 0
@@ -312,7 +318,9 @@ def test_empty_optional_location_fields_do_not_discard_explicit_hq():
     hq["geographicArea"] = ""
     hq["city"] = ""
     hq["parsed"]["countryFull"] = ""
-    assert _project(body)["text"] == HQ_TEXT
+    record = json.loads(_project(body)["text"])
+    assert record["locations"][0]["geographicArea"] == ""
+    assert record["locations"][0]["parsed"]["city"] == "Houston"
 
 
 def test_hq_prefetch_keeps_known_first_party_page_and_does_not_truncate_it():
@@ -367,3 +375,47 @@ def test_current_first_party_hq_can_still_override_the_structured_profile_locati
         projected, icp, company=_company(), company_quality=True,
         validated_geography_finding=claims["geography"],
     ) == "mismatch"
+
+
+@pytest.mark.parametrize('fault', ['', 'no-private', 'wrong-domain', 'wrong-state', 'unproven'])
+def test_initial_deterministic_hq_still_decides_without_an_investigator(monkeypatch, fault):
+    cache = _fetch(monkeypatch, _body())
+    icp = ICPPrompt(icp_id='initial-hq', geography='United States', industry='Energy',
+                    sub_industry='Geothermal power', employee_count='51-200', company_stage='',
+                    product_service='Geothermal power plants')
+    verdict = lead_scorer._project_verified_linkedin_headquarters(
+        _verdict(), verified_identity=ANCHOR, invocation_cache=cache,
+        linkedin_profile_source=None, icp=icp, company=_company(), company_quality=True,
+    )
+    source = deepcopy(cache['structured_profile_headquarters_evidence'])
+    if fault == 'no-private': source = None
+    elif fault == 'wrong-domain': source['website'] = 'https://other.example/'
+    elif fault == 'wrong-state': source['state'] = 'Massachusetts'
+    kwargs = {'validated_geography_finding': {'target': 'geography', 'status': 'UNPROVEN'}} if fault == 'unproven' else {}
+    result = lead_scorer._reverify_decision(
+        verdict, '', '', icp=icp, company=_company(), verified_homepage_identity=ANCHOR,
+        verified_homepage_transport_domain='quaise.com', company_quality=True,
+        structured_profile_headquarters_evidence=source, **kwargs,
+    )
+    assert result.details['dimension_decisions']['geography'] == ('match' if fault in {'', 'unproven'} else 'unavailable')
+
+
+def test_private_hq_does_not_decide_a_custom_locality_without_review(monkeypatch):
+    body = _body()
+    body['element']['locations'] = [{'headquarter': True, 'city': 'London',
+                                     'country': 'GB', 'geographicArea': 'England'}]
+    cache = _fetch(monkeypatch, body)
+    company = _company().model_copy(update={'country': 'United Kingdom', 'state': 'London'})
+    icp = ICPPrompt(icp_id='semantic-hq', country='United Kingdom', geography='London',
+                    industry='Energy', sub_industry='Geothermal power', employee_count='51-200',
+                    company_stage='', product_service='Geothermal power plants')
+    verdict = lead_scorer._project_verified_linkedin_headquarters(
+        _verdict(), verified_identity=ANCHOR, invocation_cache=cache,
+        linkedin_profile_source=None, icp=icp, company=company, company_quality=True,
+    )
+    result = lead_scorer._reverify_decision(
+        verdict, '', '', icp=icp, company=company, verified_homepage_identity=ANCHOR,
+        verified_homepage_transport_domain='quaise.com', company_quality=True,
+        structured_profile_headquarters_evidence=cache['structured_profile_headquarters_evidence'],
+    )
+    assert result.details['dimension_decisions']['geography'] == 'unavailable'

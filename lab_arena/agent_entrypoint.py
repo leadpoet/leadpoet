@@ -122,7 +122,7 @@ def _automatic_capture(output_dir: Path):
                 module = importlib.util.module_from_spec(specification)
                 sys.modules[specification.name] = module
                 specification.loader.exec_module(module)
-                recorder = module.install(lab_arena_checkpoint)
+                recorder = module.install(lab_arena_checkpoint, handoff_dir=output_dir)
     except Exception:
         # Missing observation is an evidence gap, not an agent execution error.
         recorder = None

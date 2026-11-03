@@ -1,0 +1,471 @@
+{
+  "provenance": {
+    "evidence": {
+      "artifact": "production-audit/remaining-identity/maa-exact-evidence-doc.json",
+      "sha256": "131a9a6c880da49e944f100582cc1d7ca51c02de0b7a0d3aff3c816cf4f89763"
+    },
+    "public_result": {
+      "artifact": "production-audit/result-27-sub-a888b30fbd4ad6dbfbb36d77fa3a2090.json",
+      "sha256": "d4150dd15fc4e46e19fb736369731bf4f3c8075c38857e3f202cdc51247b7c81"
+    },
+    "benchmark": {
+      "artifact": "independent-research/benchmark-oct27.json",
+      "sha256": "56a859b5bb095f4caaefd1ec4f673df795b8b015f6426811a217b1a35a6a3214"
+    }
+  },
+  "source_score_run_id": "arena-2026-10-27:sub-a888b30fbd4ad6dbfbb36d77fa3a2090:2:7:score:1",
+  "cache_key": "sha256:dcad7431b2843a9013da4bb65a055c72bfc108704fc98aa2c841a189012793b6",
+  "company_input_hash": "sha256:8f711f713d02060cadbf26c5acfc8ab639aea29a086da3d07cc2458539e6a088",
+  "evidence_hash": "sha256:3c9ca5c0db01d0618771783c427b5575166233fa8033e36e0f5683f3991d10ee",
+  "company": {
+    "company_name": "Mid-America Apartment Communities",
+    "company_website": "https://maac.com/",
+    "company_linkedin": "https://www.linkedin.com/company/mid-america-apartment-communities",
+    "industry": "real estate",
+    "employee_count": "1,001-5,000",
+    "company_stage": "",
+    "country": "United States",
+    "state": "Tennessee",
+    "intent_details": "A report dated August 24, 2026 says MAA bought a SouthPark apartment property three years after a fire. This acquisition may help MAA expand its multifamily apartment communities.",
+    "intent_signals": [
+      {
+        "matched_icp_signal": 0,
+        "description": "MAA buys SouthPark apartment property 3 years after fire ...",
+        "date": "2026-08-24",
+        "url": "https://www.bizjournals.com/charlotte/news/2026/08/24/southpark-apartments-modera-liberty-row-maa-sale.html"
+      }
+    ],
+    "company_stage_evidence": [],
+    "required_attribute": {
+      "text": "Owns and operates multifamily or other residential rental properties and actively acquires or develops communities.",
+      "passed": true,
+      "evidence_url": "https://www.maac.com/about-us/",
+      "evidence_quote": "Based in Memphis, TN, MAA owns and operates nearly 300 properties in 16 states and D.C.",
+      "explanation": "The page states: “Based in Memphis, TN, MAA owns and operates nearly 300 properties in 16 states and D.C”."
+    }
+  },
+  "icp": {
+    "required_attribute": "Owns and operates multifamily or other residential rental properties and actively acquires or develops communities.",
+    "company_stage": "",
+    "country": "United States",
+    "intent_signal": "Announced the acquisition of a property or portfolio in the last 12 months, per a press release, earnings release, or news coverage",
+    "intent_signals": [
+      "Announced the acquisition of a property or portfolio in the last 12 months, per a press release, earnings release, or news coverage",
+      "Announced a leadership change in the last 12 months, per a press release or company announcement"
+    ],
+    "geography": "United States, South",
+    "prompt": "Find companies meeting every company requirement. Industry: Real Estate; Sub-industry: Multifamily residential property owners and operators; Country: United States; Headquarters geography: United States, South; Allowed employee size: 201-500, 501-1,000, 1,001-5,000; Product/service requirement: Owns, develops, and operates multifamily apartment communities, leasing homes to residents and managing the properties.; Required attribute: Owns and operates multifamily or other residential rental properties and actively acquires or develops communities.\n\nIntent qualification:\nRequired primary intent (365 days): Announced the acquisition of a property or portfolio in the last 12 months, per a press release, earnings release, or news coverage\nOptional bonus intent (365 days): Announced a leadership change in the last 12 months, per a press release or company announcement\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+    "intent_max_age_days": 365,
+    "employee_count": [
+      "201-500",
+      "501-1,000",
+      "1,001-5,000"
+    ],
+    "sub_industry": "Multifamily residential property owners and operators",
+    "industry": "Real Estate",
+    "excluded_companies": [
+      "gables.com"
+    ],
+    "bonus_intents": [
+      {
+        "intent_category": "LEADERSHIP_CHANGE",
+        "intent_max_age_days": 365,
+        "intent_signal": "Announced a leadership change in the last 12 months, per a press release or company announcement"
+      }
+    ],
+    "product_service": "Owns, develops, and operates multifamily apartment communities, leasing homes to residents and managing the properties.",
+    "max_companies": 5,
+    "icp_id": "icp_20261026_008",
+    "intent_category": "ACQUISITION",
+    "icp_position": 7,
+    "baseline_score": 24.5
+  },
+  "raw_judgment": {
+    "icp_fit": 0,
+    "final_score": 0,
+    "cost_penalty": 0,
+    "time_penalty": 0,
+    "decision_maker": 0,
+    "failure_reason": "Company fit unavailable: unproven dimensions: identity",
+    "intent_signal_raw": 0,
+    "intent_signal_final": 0,
+    "company_identity_key": "domain:maac.com|name:mid america apartment communities",
+    "intent_signals_detail": null,
+    "time_decay_multiplier": 1,
+    "verifier_gate_receipts": [
+      {
+        "gate": "company_fit",
+        "reason": "unproven dimensions: identity",
+        "decision": "unavailable",
+        "contract_id": "company-fit-decision:v1",
+        "failure_class": "insufficient_fit_evidence",
+        "contract_version": "company-fit-decision:v1",
+        "dimension_evidence": {
+          "stage": {
+            "decision": "match",
+            "web_evidence": {},
+            "observed_decision": "match",
+            "submitted_decision": "match"
+          },
+          "identity": {
+            "reason": "verified: independently observed first-party name, final domain, and exact LinkedIn company identity",
+            "decision": "unavailable",
+            "identity": {
+              "decision": "match",
+              "reason_code": "verifier_accepted",
+              "observed_name": "midamericaapartmentcommunities",
+              "submitted_name": "midamericaapartmentcommunities",
+              "evidence_source": "company_homepage",
+              "observed_domain": "maac.com",
+              "submitted_domain": "maac.com",
+              "verified_brand_name": "MAA",
+              "observed_linkedin_slug": "mid-america-apartment-communities",
+              "submitted_linkedin_slug": "mid-america-apartment-communities",
+              "verified_legal_name_aliases": [
+                "Mid-America Apartment Communities, Inc."
+              ]
+            },
+            "actual_final_url": "https://www.maac.com/",
+            "web_identity_receipt": {
+              "decision": "unavailable",
+              "reason_code": "rebrand_continuity_unproven",
+              "observed_name": "maa",
+              "submitted_name": "midamericaapartmentcommunities",
+              "evidence_source": "company_web_reverification",
+              "observed_domain": "maac.com",
+              "submitted_domain": "maac.com",
+              "observed_linkedin_slug": "mid-america-apartment-communities",
+              "submitted_linkedin_slug": "mid-america-apartment-communities"
+            },
+            "web_identity_decision": "unavailable",
+            "homepage_identity_reason": "verified: independently observed first-party name, final domain, and exact LinkedIn company identity",
+            "homepage_identity_decision": "match"
+          },
+          "industry": {
+            "decision": "match",
+            "web_evidence": {
+              "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-SECOND-QUARTER-2026-RESULTS/default.aspx",
+              "quote": "MAA MAA, an S&P 500 company, is a real estate investment trust (REIT) focused on delivering full-cycle and superior investment performance for shareholders through the ownership, management, acquisition, development and redevelopment of quality apartment communities primarily in the Southeast, Southwest and Mid-Atlantic regions of the United States."
+            },
+            "observed_decision": "match",
+            "submitted_decision": "match"
+          },
+          "geography": {
+            "decision": "match",
+            "web_evidence": {
+              "url": "https://www.linkedin.com/company/mid-america-apartment-communities",
+              "quote": "Headquarters \n\n Germantown, Tennessee"
+            },
+            "observed_decision": "match",
+            "submitted_decision": "match"
+          },
+          "employee_size": {
+            "decision": "match",
+            "web_evidence": {
+              "url": "https://www.linkedin.com/company/mid-america-apartment-communities",
+              "website": "https://maac.com/",
+              "provider": "harvestapi_get_company",
+              "source_field": "employeeCountRange",
+              "employee_count": "1,001-5,000"
+            },
+            "observed_decision": "match",
+            "submitted_decision": "match"
+          },
+          "web_observations": {
+            "industry_matches": true,
+            "geography_matches": true,
+            "observed_hq_state": "Tennessee",
+            "observed_industry": "Real estate investment trust focused on ownership, management, acquisition and development of apartment communities",
+            "attribute_evidence": "",
+            "observed_hq_country": "United States",
+            "observed_subindustry": "Multifamily apartment communities",
+            "observed_company_name": "MAA",
+            "industry_activity_role": "supplier_operator",
+            "observed_company_stage": "public company",
+            "observed_employee_count": null,
+            "observed_company_website": "https://www.maac.com/",
+            "observed_company_linkedin": "https://www.linkedin.com/company/mid-america-apartment-communities"
+          },
+          "required_attribute": {
+            "decision": "match",
+            "web_evidence": {
+              "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-SECOND-QUARTER-2026-RESULTS/default.aspx",
+              "quote": "MAA MAA, an S&P 500 company, is a real estate investment trust (REIT) focused on delivering full-cycle and superior investment performance for shareholders through the ownership, management, acquisition, development and redevelopment of quality apartment communities primarily in the Southeast, Southwest and Mid-Atlantic regions of the United States."
+            }
+          }
+        },
+        "supporting_receipts": [
+          {
+            "gate": "company_evidence_investigation",
+            "usage": {
+              "fetch_calls": 3,
+              "search_calls": 2,
+              "fetch_outcomes": [
+                {
+                  "ok": true,
+                  "url_sha256": "ce7c38762f083e0a9cbe4c6062d19e3c06db36d73070754bf007e7b268fa34cf",
+                  "error_class": "",
+                  "loaded_text_length": 2414
+                },
+                {
+                  "ok": true,
+                  "url_sha256": "5a19f1acbe87d3477d24a6db8254a50e988e3ef5d213e779de3b9d63aba21482",
+                  "error_class": "",
+                  "loaded_text_length": 24000
+                },
+                {
+                  "ok": true,
+                  "url_sha256": "ee7e59148271285e8b70a974a70ee71a10fbbbbcd40b689596223f32f2dad38d",
+                  "error_class": "",
+                  "loaded_text_length": 7678
+                }
+              ],
+              "reasoning_turns": 9,
+              "prefetched_pages": 1,
+              "total_loaded_pages": 4
+            },
+            "claims": {
+              "rebrand": {
+                "reason": "First-party evidence explains that the company would conduct business as MAA, but the evidence validator has rejected the available span as insufficient to establish the required old-to-new operating-company continuity. The claim therefore remains unproven.",
+                "status": "UNPROVEN",
+                "target": "rebrand",
+                "new_name": "MAA",
+                "old_name": "Mid-America Apartment Communities",
+                "new_domain": "maac.com",
+                "old_domain": "maac.com",
+                "evidence_url": "",
+                "activity_role": "unresolved",
+                "evidence_quote": "",
+                "observed_state": "",
+                "observed_value": null,
+                "observed_country": "",
+                "observed_industry": "",
+                "supporting_evidence": [],
+                "observed_subindustry": "",
+                "shared_linkedin_slug": "mid-america-apartment-communities"
+              },
+              "industry": {
+                "reason": "The issuer directly describes MAA's own activities as owning, managing, acquiring, developing, and redeveloping apartment communities. This supports the real-estate and multifamily residential owner/operator activity requested; no geographic or commercial-term attribute is part of this industry crit",
+                "status": "VERIFIED",
+                "target": "industry",
+                "new_name": "MAA",
+                "old_name": "Mid-America Apartment Communities",
+                "new_domain": "maac.com",
+                "old_domain": "maac.com",
+                "evidence_url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-SECOND-QUARTER-2026-RESULTS/default.aspx",
+                "activity_role": "supplier_operator",
+                "evidence_quote": "MAA MAA, an S&P 500 company, is a real estate investment trust (REIT) focused on delivering full-cycle and superior investment performance for shareholders through the ownership, management, acquisition, development and redevelopment of quality apartment communities primarily in the Southeast, Southwest and Mid-Atlantic regions of the United States.",
+                "observed_state": "",
+                "observed_value": "Ownership, management, acquisition, development, and redevelopment of apartment communities",
+                "observed_country": "",
+                "observed_industry": "Real estate investment trust focused on ownership, management, acquisition and development of apartment communities",
+                "supporting_evidence": [],
+                "observed_subindustry": "Multifamily apartment communities",
+                "shared_linkedin_slug": "mid-america-apartment-communities"
+              },
+              "required_attribute": {
+                "reason": "The first-party issuer description names apartment communities as the object of MAA's ownership and management and expressly includes acquisition and development. Together these prove ownership and operation of residential apartment communities plus active acquisition or development.",
+                "status": "VERIFIED",
+                "target": "required_attribute",
+                "new_name": "MAA",
+                "old_name": "Mid-America Apartment Communities",
+                "new_domain": "maac.com",
+                "old_domain": "maac.com",
+                "evidence_url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-SECOND-QUARTER-2026-RESULTS/default.aspx",
+                "activity_role": "supplier_operator",
+                "evidence_quote": "MAA MAA, an S&P 500 company, is a real estate investment trust (REIT) focused on delivering full-cycle and superior investment performance for shareholders through the ownership, management, acquisition, development and redevelopment of quality apartment communities primarily in the Southeast, Southwest and Mid-Atlantic regions of the United States.",
+                "observed_state": "",
+                "observed_value": "Ownership, management, acquisition, development, and redevelopment of apartment communities",
+                "observed_country": "",
+                "observed_industry": "",
+                "supporting_evidence": [],
+                "observed_subindustry": "",
+                "shared_linkedin_slug": "mid-america-apartment-communities"
+              }
+            },
+            "targets": [
+              "rebrand",
+              "required_attribute",
+              "industry"
+            ],
+            "failure_reason": "",
+            "prior_decision": "mismatch",
+            "projected_decision": "unavailable",
+            "positive_semantic_review": true,
+            "checked_source_provenance": {
+              "scope": "investigation_request_only_not_criterion_proof",
+              "schema": "checked_investigation_sources_v1",
+              "sources": [
+                {
+                  "url": "https://maac.com/",
+                  "kind": "loaded_page_excerpt",
+                  "url_sha256": "sha256:43cb0991ab6bbbfb69d57ccb3f6a184fada35ec58a18c2f2a5989db0737b74be",
+                  "source_index": 0,
+                  "message_index": 0,
+                  "shown_content_sha256": "sha256:bb2fb648614f99b57305852d6252d3912148f1b6fb80ccf77f0cae3d92028123",
+                  "message_content_sha256": "sha256:66d8d3a60ae3fe9dfcbd923141b6985e14a506c0931c769055ebc24d464776ed"
+                },
+                {
+                  "url": "https://www.maac.com/about-us/",
+                  "kind": "loaded_page_excerpt",
+                  "url_sha256": "sha256:ce7c38762f083e0a9cbe4c6062d19e3c06db36d73070754bf007e7b268fa34cf",
+                  "source_index": 1,
+                  "message_index": 0,
+                  "shown_content_sha256": "sha256:7cf49f21d274e032ac195b5f64644f9087dc0895edba93eb6a5cb444393fcfde",
+                  "message_content_sha256": "sha256:66d8d3a60ae3fe9dfcbd923141b6985e14a506c0931c769055ebc24d464776ed"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-SECOND-QUARTER-2026-RESULTS/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:5a19f1acbe87d3477d24a6db8254a50e988e3ef5d213e779de3b9d63aba21482",
+                  "source_index": 0,
+                  "message_index": 2,
+                  "shown_content_sha256": "sha256:d6db9cb1461661e06c4b27cf6912265bf5c635bb11ea9f11b61214cc87dfd89a",
+                  "message_content_sha256": "sha256:9ace3f28da88397b1a07fa62c7bff6bfb168c97f6850886c47e67d4aab00abdc"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-FIRST-QUARTER-2026-RESULTS/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:aa12b84560806aff5a22a0da87388e2cd2a1081c470f527427118a6b3eead618",
+                  "source_index": 1,
+                  "message_index": 2,
+                  "shown_content_sha256": "sha256:20c5ad3afa0d52bb1ba9852417271f579a8d84e98da60d1da57c0d04a7d3fa9f",
+                  "message_content_sha256": "sha256:9ace3f28da88397b1a07fa62c7bff6bfb168c97f6850886c47e67d4aab00abdc"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-FOURTH-QUARTER-AND-FULL-YEAR-2025-RESULTS/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:99ba59366f4756b133239c8c669be41edf5d2a42fae2f885e013f95c78ca7c5e",
+                  "source_index": 2,
+                  "message_index": 2,
+                  "shown_content_sha256": "sha256:1677b0f79d52d38e9a2e537197448e36c645ca0af2ec0acba26e684993d9a94e",
+                  "message_content_sha256": "sha256:9ace3f28da88397b1a07fa62c7bff6bfb168c97f6850886c47e67d4aab00abdc"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2025/MAA-REPORTS-SECOND-QUARTER-2025-RESULTS/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:f9c829875a5c76794de61323a21f72393778e9d475f91510ba5d4b655387080d",
+                  "source_index": 3,
+                  "message_index": 2,
+                  "shown_content_sha256": "sha256:0efbd27eb5d5f3736f35ef0d0f0ea658a9eae4dd16f05f0973afc05650ba7a24",
+                  "message_content_sha256": "sha256:9ace3f28da88397b1a07fa62c7bff6bfb168c97f6850886c47e67d4aab00abdc"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2025/MAA-REPORTS-THIRD-QUARTER-2025-RESULTS/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:e109288a98d421e433caa05ca7f731eeb8eb8c83d62e895d7f25bc58e1f2ad39",
+                  "source_index": 4,
+                  "message_index": 2,
+                  "shown_content_sha256": "sha256:77b1c51b5e1b59090dcc081bf8b87797f2d88f188e0f8bbe5c973986aeb09fe4",
+                  "message_content_sha256": "sha256:9ace3f28da88397b1a07fa62c7bff6bfb168c97f6850886c47e67d4aab00abdc"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-REPORTS-SECOND-QUARTER-2026-RESULTS/default.aspx",
+                  "kind": "loaded_page_excerpt",
+                  "url_sha256": "sha256:5a19f1acbe87d3477d24a6db8254a50e988e3ef5d213e779de3b9d63aba21482",
+                  "source_index": 0,
+                  "message_index": 6,
+                  "shown_content_sha256": "sha256:d0ecc1dba3e9a9f44cb6420c64e36311835e65522558ab244835f886cbe3e057",
+                  "message_content_sha256": "sha256:46d32d4af4dd335ceceec32cbe80087457f7644271215bb0c53991e4af49fde5"
+                },
+                {
+                  "url": "https://ir.maac.com/stock-information/stock-quote/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:04ebbbf8c8961ff7c7684decf88d5597d219d1af633e725190039e2838b99f8f",
+                  "source_index": 0,
+                  "message_index": 10,
+                  "shown_content_sha256": "sha256:cb2496d67ee97bc09900a9d4ce95e2c82133be99c413bf089ed7029eb159bef0",
+                  "message_content_sha256": "sha256:bfb9848b71319a59f690b16d0e2c551fc819c4befa96d5129db1a756cb35f7f8"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2011/MAA-Announces-Update-to-Its-Brand-and-Logo/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:ee7e59148271285e8b70a974a70ee71a10fbbbbcd40b689596223f32f2dad38d",
+                  "source_index": 1,
+                  "message_index": 10,
+                  "shown_content_sha256": "sha256:c4381ca19df34e56ab6e1361c8be8ac61513c1188a08afecd23d1b3327ada7c7",
+                  "message_content_sha256": "sha256:bfb9848b71319a59f690b16d0e2c551fc819c4befa96d5129db1a756cb35f7f8"
+                },
+                {
+                  "url": "https://www.maac.com/terms-of-service/",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:b2a58a9eb8f6723869d1402a2ea5f6cf9b66d717110a28d975c8a75836ee6438",
+                  "source_index": 2,
+                  "message_index": 10,
+                  "shown_content_sha256": "sha256:c76218a8b726c7f41b54977fde71d0a1fc52fb5ee5cc6a731e54c89c90ee08dd",
+                  "message_content_sha256": "sha256:bfb9848b71319a59f690b16d0e2c551fc819c4befa96d5129db1a756cb35f7f8"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2024/MAA-Recognizes-30-Years-as-A-Publicly-Traded-Company/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:cf03a753fbb187566dc4cb825f85e0044eeb5cf418eda3bac6d675829437f3c7",
+                  "source_index": 3,
+                  "message_index": 10,
+                  "shown_content_sha256": "sha256:34448fc4d00213488875f748d8169ec30473abd466ba58431e6a572b77fb0c4a",
+                  "message_content_sha256": "sha256:bfb9848b71319a59f690b16d0e2c551fc819c4befa96d5129db1a756cb35f7f8"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2026/MAA-to-Participate-in-the-2026-Citi-Global-Property-CEO-Conference/default.aspx",
+                  "kind": "search_locator_only",
+                  "url_sha256": "sha256:cf30df053b560dd9ea923a421c93c3d29055920a963fdea18ee3074dbb49fefa",
+                  "source_index": 4,
+                  "message_index": 10,
+                  "shown_content_sha256": "sha256:4f222413a5c05d3bb8f0e2a080a13068d07f6d76b1f1410b1268f7d88c119090",
+                  "message_content_sha256": "sha256:bfb9848b71319a59f690b16d0e2c551fc819c4befa96d5129db1a756cb35f7f8"
+                },
+                {
+                  "url": "https://ir.maac.com/news-events/press-releases/news-details/2011/MAA-Announces-Update-to-Its-Brand-and-Logo/default.aspx",
+                  "kind": "loaded_page_excerpt",
+                  "url_sha256": "sha256:ee7e59148271285e8b70a974a70ee71a10fbbbbcd40b689596223f32f2dad38d",
+                  "source_index": 0,
+                  "message_index": 12,
+                  "shown_content_sha256": "sha256:c5f2d3ce300c161cd9cb9f8cbf233bd570e22d3f1e53a8e42c056bb1883076f5",
+                  "message_content_sha256": "sha256:122a833ead0879257b03e26ba557d200848a8172e9586aa6e84be6bae082e20a"
+                }
+              ],
+              "request_sha256": "sha256:e7b3302fb40c0aa1f04e03be50d8926979a7e18b2deb5c680bb25c03afcadb7c",
+              "unproven_claims": {
+                "rebrand": {
+                  "status": "UNPROVEN",
+                  "claim_sha256": "sha256:1a2a1411cd390b45d0274b5731658a935d164dee124ecfab07cb8995c2226f2b",
+                  "criterion_sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+                }
+              },
+              "source_limit_reached": false,
+              "company_locator_sha256": "sha256:b370a3b43ee15b519169dccaf181e19a37263a191c7604f7dc01d42f87764c44"
+            },
+            "prior_dimension_decisions": {
+              "stage": "match",
+              "industry": "match",
+              "geography": "match",
+              "employee_size": "match"
+            },
+            "completed_submitted_findings": true,
+            "positive_semantic_review_resolved": true
+          },
+          {
+            "gate": "required_attribute_source",
+            "status": "grounded",
+            "cache_hit": true,
+            "final_url_sha256": "5a19f1acbe87d3477d24a6db8254a50e988e3ef5d213e779de3b9d63aba21482",
+            "source_url_sha256": "5a19f1acbe87d3477d24a6db8254a50e988e3ef5d213e779de3b9d63aba21482"
+          }
+        ],
+        "company_fit_decision": "unavailable",
+        "company_fit_dimensions": {
+          "stage": "match",
+          "identity": "unavailable",
+          "industry": "match",
+          "geography": "match",
+          "employee_size": "match"
+        },
+        "company_fit_stage_required": false,
+        "required_attribute_decision": "match"
+      }
+    ],
+    "company_judgment_policy": "company_judgment_v1",
+    "company_identity_alias_keys": [
+      "domain:maac.com|name:mid america apartment communities"
+    ]
+  }
+}

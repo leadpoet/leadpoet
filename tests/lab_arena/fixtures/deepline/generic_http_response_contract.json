@@ -1,0 +1,51 @@
+{
+  "capture_note": "Paired live Deepline generic_http_request receipts observed 2026-10-26. Native IDs, URLs and body are synthetic; recovery keys and non-content headers are omitted. Envelope, rawV2 and final-zero billing shapes match the captures.",
+  "parameters": {
+    "tool": "generic_http_request",
+    "payload": {
+      "url": "https://r.jina.ai/https://example.com/news/product-update/",
+      "method": "GET"
+    }
+  },
+  "arena_raw": {
+    "job_id": "public-execute:11111111-2222-4333-8444-555555555555",
+    "status": "completed",
+    "result": {
+      "data": "Example Company announced a product update."
+    },
+    "billing": {
+      "credits_charged": 0,
+      "cost_usd": 0,
+      "pricing_status": "final",
+      "settlement_status": "released",
+      "billing_outcome_reason": "free_operation"
+    }
+  },
+  "native_raw_v2": {
+    "job_id": "public-execute:11111111-2222-4333-8444-555555555555",
+    "status": "completed",
+    "toolResponse": {
+      "rawV2": {
+        "provider": "generic_http",
+        "operation": "generic_http_request",
+        "method": "GET",
+        "requested_url": "https://r.jina.ai/https://example.com/news/product-update/",
+        "final_url": "https://r.jina.ai/https://example.com/news/product-update/",
+        "status_code": 200,
+        "ok": true,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "data": "Example Company announced a product update."
+      },
+      "view": "rawV2"
+    },
+    "billing": {
+      "credits_charged": 0,
+      "cost_usd": 0,
+      "pricing_status": "final",
+      "settlement_status": "released",
+      "billing_outcome_reason": "free_operation"
+    }
+  }
+}

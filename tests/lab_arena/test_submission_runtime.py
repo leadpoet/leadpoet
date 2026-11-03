@@ -18,8 +18,8 @@ class Store:
     def get_submission(self, submission_id):
         return self.row if submission_id == self.row["submission_id"] else None
 
-    def get_round(self, round_id):
-        return {"configuration_doc": {"baseline_hotkey": "organizer"}}
+    def get_round_baseline_hotkey(self, round_id):
+        return "organizer"
 
     def get_submission_credential(self, submission_id, miner_hotkey, provider):
         return {"submission_id": submission_id, "miner_hotkey": miner_hotkey, "provider": provider, "ciphertext_b64": "encrypted"}

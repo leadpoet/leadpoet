@@ -403,9 +403,8 @@ def test_attempt_connection_limit_cannot_be_reset_by_reopening(socket_root, prox
         second = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         second.settimeout(2)
         second.connect(str(server.path))
-        second.sendall(
-            b"GET http://public.example/ HTTP/1.1\r\nHost: public.example\r\n\r\n"
-        )
+        # The total budget rejects at accept, before reading another request.
+        # Writing here races that immediate close and can raise BrokenPipeError.
         assert _read_headers(second).startswith(b"HTTP/1.1 503 Service Unavailable")
         second.close()
     finally:
@@ -489,10 +488,14 @@ def test_unproven_shared_proxy_cleanup_blocks_new_connections_until_released(
         assert _read_headers(first).startswith(b"HTTP/1.1 403 Forbidden")
         first.close()
 
-        second = socket.create_connection(("127.0.0.1", bridge.port), timeout=2)
-        second.sendall(raw_request)
-        assert _read_headers(second).startswith(b"HTTP/1.1 503 Service Unavailable")
-        second.close()
+        # Cleanup blocks at accept, before reading a request. Sending through
+        # the bridge races the closed upstream and can discard its rejection.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
+            second.settimeout(2)
+            second.connect(str(server.path))
+            assert _read_headers(second).startswith(
+                b"HTTP/1.1 503 Service Unavailable"
+            )
         assert server.summary["pending_cleanup_count"] == 1
 
         stream.allow_close = True
@@ -501,6 +504,7 @@ def test_unproven_shared_proxy_cleanup_blocks_new_connections_until_released(
         assert _read_headers(third).startswith(b"HTTP/1.1 403 Forbidden")
         third.close()
     finally:
+        stream.allow_close = True
         bridge.stop()
         server.stop()
 

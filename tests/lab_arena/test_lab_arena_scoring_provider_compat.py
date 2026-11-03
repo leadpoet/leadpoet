@@ -24,6 +24,20 @@ def route(operation_id, parameters, *, round_id="arena-2026-09-04"):
     )
 
 
+@pytest.mark.parametrize("raw_html,content_type", [
+    ("<html>Parsed PDF text must use document recovery</html>", "application/pdf; charset=binary"),
+    ("%PDF-1.7 decoded binary", "text/html"),
+    ("JVBERi0xLjcKbase64document", "text/html"),
+])
+def test_document_content_cannot_be_admitted_as_raw_html(raw_html, content_type):
+    url = "https://example.com/document"
+    selected = route("scrapingdog.scrape", {"url": url})
+    with pytest.raises(compat.CompatibilityResponseError, match="missing_firecrawl_raw_html"):
+        compat.adapt_response_with_trusted_url(selected, status=200, headers={},
+            body=envelope({"rawHtml": raw_html, "metadata": {
+                "url": url, "sourceURL": url, "statusCode": 200, "contentType": content_type}}))
+
+
 def test_routes_apply_only_to_miner_funded_scoring():
     request = {"url": "https://example.com/about", "dynamic": False}
     assert route("scrapingdog.scrape", request) is not None

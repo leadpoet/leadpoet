@@ -151,8 +151,8 @@ def test_fresh_locator_does_not_force_attribute_acceptance(monkeypatch):
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
 
 
-def test_server_terms_fetch_counts_against_three_call_cap(monkeypatch):
-    fresh = [HOME + f"fresh-{i}" for i in range(3)]
+def test_server_terms_fetch_counts_against_shared_call_cap(monkeypatch):
+    fresh = [HOME + f"fresh-{i}" for i in range(investigator.MAX_FETCH_CALLS)]
     actions = [("fetch_page", {"url": url}) for url in fresh]
     actions.append(("submit_findings", {"findings": [
         _finding("stage", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
@@ -160,19 +160,23 @@ def test_server_terms_fetch_counts_against_three_call_cap(monkeypatch):
         _finding("required_attribute", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
     ]}))
     result, _, fetched, _, requests = run_case(monkeypatch, actions=actions)
-    assert fetched == [TERMS, *fresh[:2]]
-    assert result["usage"]["fetch_calls"] == 3
+    assert fetched == [TERMS, *fresh[:investigator.MAX_FETCH_CALLS - 1]]
+    assert result["usage"]["fetch_calls"] == investigator.MAX_FETCH_CALLS
     assert json.loads(requests[-1]["messages"][-1]["content"])["error"] == "fetch_budget_exhausted"
     assert (investigator.MAX_FETCH_CALLS, investigator.MAX_PAGE_CHARACTERS,
-            investigator.ADMISSION_DEADLINE_SECONDS) == (3, 24_000, 110.0)
+            investigator.ADMISSION_DEADLINE_SECONDS) == (4, 24_000, 110.0)
 
 
 def test_terms_fetch_does_not_extend_admission_deadline(monkeypatch):
     result, initial, fetched, queries, requests = run_case(monkeypatch, expire_after_fetch=True)
     assert fetched == [TERMS]
-    assert queries == requests == []
-    assert initial is None
-    assert result["usage"]["reasoning_turns"] == 0
+    assert queries == []
+    # The existing final-judgment turn may consume already loaded proof only.
+    assert len(requests) == result["usage"]["reasoning_turns"] == 1
+    assert requests[0]["tool_choice"]["function"]["name"] == "submit_findings"
+    assert [tool["function"]["name"] for tool in requests[0]["tools"]] == ["submit_findings"]
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == "admission_budget_interrupted"
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
 
 

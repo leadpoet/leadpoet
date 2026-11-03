@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_arena import contracts, operations, runner, shim, training_observations as obs
+from lab_arena import contracts, operations, runner, shim, training_capture, training_observations as obs
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 from lab_arena.training_export import assemble_example
@@ -82,6 +82,88 @@ def save(values, document, *, generation=1, claim_hash=CLAIM_HASH):
         "status": "stored", "payload_sha256": snapshot["payload_sha256"],
         **{key: document[key] for key in ("observation_count", "local_refusal_count", "complete")}}
     return snapshot
+
+
+@pytest.mark.parametrize("operation", ["openrouter.responses", "openrouter.chat"])
+@pytest.mark.parametrize("protocol", ["frame", "http"])
+def test_rejected_model_controls_survive_runner_snapshot_and_export(tmp_path, operation, protocol):
+    parameters = {"model": "deepseek/deepseek-v4.1-flash-1017", "reasoning": {"effort": "high"}}
+    history = "synthetic history " * 2100
+    parameters.update({"input": history} if operation == "openrouter.responses" else {
+        "messages": [{"role": "user", "content": history}]})
+    # Exercise the actual legacy admission rejection, without changing its cap.
+    frame = shim.build_operation_frame(operation, parameters, 1000)
+    with pytest.raises(operations.OperationRequestError):
+        shim.decode_operation_frame(frame)
+    state = runner.RunState(lease=lease(), lease_token=TOKEN)
+    api = FakeApi([])
+    server = runner.WorkerSocketServer(tmp_path / "worker.sock", api, state)
+    if protocol == "frame":
+        returned = json.loads(server.handle_frame(frame))
+        expected_request = {"raw_frame": json.loads(frame)}
+    else:
+        path = "/api/v1/responses" if operation == "openrouter.responses" else "/api/v1/chat/completions"
+        url = "https://openrouter.ai" + path
+        headers = {"content-type": "application/json"}
+        body = contracts.canonical_json(parameters).encode()
+        with pytest.raises(operations.OperationRequestError):
+            operations.match_request("POST", url, body, headers)
+        status, returned_headers, returned_body = server.handle_http("POST", url, body, headers)
+        assert status == 400
+        returned = {"status": status, "headers": returned_headers,
+                    "body_b64": base64.b64encode(returned_body).decode()}
+        expected_request = {"method": "POST", "url": url, "headers": headers, "body_text": parameters}
+    document = state.worker_observations.document()
+    row = document["observations"][0]
+    assert row["kind"] == "local_parse_error" and row["outcome"]["response"] == returned
+    assert row["outcome"]["protocol"] == protocol
+    assert row["request"]["admitted_parameters"] == expected_request
+    assert row["privacy"] == {"redacted": False, "redactions": []}
+    assert document["complete"] and state.action_sequence == len(state.calls) == len(api.provider_frames) == 0
+
+    values = fixture()
+    snapshot = save(values, document)
+    readback = obs.read_snapshot(values["objects"], "execute:1", "execute", 1, CLAIM_HASH)
+    assert readback == snapshot
+    result = assemble_example(**values)
+    exported = result["worker_observation_artifacts"]["execute:1"]
+    assert exported == snapshot
+    assert result["completeness"]["complete"]
+    assert not result["privacy"]["privacy_filtered"]
+    assert not result["privacy"]["hidden_reasoning_removed"]
+    for value in (row["request"], row, document, snapshot, result):
+        assert training_capture.sanitize_training_value(value) == (value, [])
+        assert json.loads(contracts.canonical_json(value)) == value
+    assert contracts.document_hash(exported["payload"]) == snapshot["payload_sha256"]
+    restored_request = exported["payload"]["observations"][0]["request"]["admitted_parameters"]
+    restored_parameters = (restored_request["raw_frame"]["parameters"] if protocol == "frame"
+                           else restored_request["body_text"])
+    assert contracts.document_hash(restored_parameters["reasoning"]) == contracts.document_hash(parameters["reasoning"])
+
+
+@pytest.mark.parametrize("protocol", ["frame", "http"])
+def test_rejected_model_fix_preserves_historical_privacy_flags(protocol):
+    row = observation(kind="local_parse_error", operation="unknown", action=None, contributes=False)
+    row["request"] = {"admitted_parameters": {"raw_frame": {
+        "operation_id": "openrouter.responses", "parameters": {
+            "model": "synthetic/model", "reasoning": "[REDACTED]", "input": "synthetic"}}},
+        "timeout_ms": 0}
+    row["outcome"] = {"protocol": "frame", "response": {"error": "invalid_request"}}
+    if protocol == "http":
+        row["request"] = {"admitted_parameters": {"method": "POST",
+            "url": "https://openrouter.ai/api/v1/responses", "headers": {},
+            "body_text": {"model": "synthetic/model", "reasoning": "[REDACTED]", "input": "synthetic"}},
+            "timeout_ms": 0}
+        row["outcome"] = {"protocol": "http", "response": {"status": 400, "headers": {},
+            "body_b64": base64.b64encode(b'{"error":"invalid_request"}').decode()}}
+    row["privacy"] = {"redacted": True, "redactions": ["hidden_reasoning"]}
+    values = fixture()
+    snapshot = save(values, payload(row))
+    assert obs.read_snapshot(values["objects"], "execute:1", "execute", 1, CLAIM_HASH) == snapshot
+    result = assemble_example(**values)
+    assert result["worker_observation_artifacts"]["execute:1"] == snapshot
+    assert result["privacy"]["hidden_reasoning_removed"] and result["privacy"]["privacy_filtered"]
+    assert "worker_observation_privacy_nonexact" in result["completeness"]["incomplete_reasons"]
 
 
 def test_owned_endpoint_roundtrip_immutable_and_private(tmp_path):
@@ -176,6 +258,46 @@ def test_worker_observation_keeps_plaintext_response_alias_but_redacts_request_a
     body = json.loads(base64.b64decode(saved["outcome"]["response"]["body_b64"]))
     assert body["choices"][0]["message"]["reasoning_content"] == "provider returned text"
     assert saved["privacy"] == {"redacted": True, "redactions": ["hidden_reasoning"]}
+
+
+def test_worker_observation_keeps_public_article_url_in_request_and_response():
+    url = ("https://www.prnewswire.com/news-releases/biohaven-and-sk-"
+           "biopharmaceuticals-enter-into-strategic-global-licensing-agreement-"
+           "for-novel-kv7-ion-channel-platform-and-opakalim-lead-candidate-for-"
+           "epilepsy-302860299.html")
+    row = observation()
+    row["request"]["admitted_parameters"]["messages"][0]["content"] = url
+    body = {"url": url}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    buffer = obs.Buffer()
+    buffer.append(row)
+    saved = buffer.observations[0]
+    assert saved["privacy"] == {"redacted": False, "redactions": []}
+    assert saved["request"]["admitted_parameters"]["messages"][0]["content"] == url
+    assert json.loads(base64.b64decode(saved["outcome"]["response"]["body_b64"])) == body
+
+
+def test_worker_web_observation_keeps_public_article_url():
+    url = ("https://www.prnewswire.com/news-releases/biohaven-and-sk-"
+           "biopharmaceuticals-enter-into-strategic-global-licensing-agreement-"
+           "for-novel-kv7-ion-channel-platform-and-opakalim-lead-candidate-for-"
+           "epilepsy-302860299.html")
+    body = "Public source: " + url
+    data = {
+        "url": url, "final_url": url, "retrieved_at": "2026-10-28T00:00:00Z",
+        "status": 200, "content_type": "text/html", "body": body, "body_ref": None,
+        "body_sha256": contracts.hash_bytes(body.encode()), "body_bytes": len(body.encode()),
+        "stored_body_sha256": None, "stored_body_bytes": None,
+    }
+    row = {"id": 0, "kind": "web_fetch", "observed_at": "2026-10-28T00:00:00Z",
+           "after_action_sequence": None, "depends_on": [], "data": data,
+           "privacy": {"redacted": False, "redactions": []}}
+    buffer = obs.Buffer()
+    assert buffer.append_agent_observation(row) == 0
+    saved = buffer.agent_observations[0]
+    assert saved["privacy"] == {"redacted": False, "redactions": []}
+    assert saved["data"]["url"] == saved["data"]["final_url"] == url
+    assert saved["data"]["body"] == body
 
 
 def test_buffer_overflow_is_explicit_incomplete_and_never_clipped():

@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Temporary, isolated Leadpoet source-export and RDS restore runner. No export,
+  restore, secret retrieval or application job starts during bootstrap.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0c975a643bc1e0e79
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-025170c1eff61494d
+    Description: Existing public subnet in the lab VPC; verify its IGW route.
+  TargetDatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-0081d026fe5311783
+    Description: Only the dedicated leadpoet-subnet-arena database group.
+  SourcePoolerIpv4CidrA:
+    Type: String
+    AllowedPattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$'
+    ConstraintDescription: Supply one current source pooler IPv4 address as /32.
+  SourcePoolerIpv4CidrB:
+    Type: String
+    AllowedPattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$'
+    ConstraintDescription: Supply one current source pooler IPv4 address as /32.
+  SourcePoolerIpv4CidrC:
+    Type: String
+    AllowedPattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$'
+    ConstraintDescription: Supply one current source pooler IPv4 address as /32.
+  SourceExportSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws:secretsmanager:us-east-1:493765492819:secret:[A-Za-z0-9/_+=.@!-]+$'
+    Description: Exact ARN of the dedicated temporary source-export credential.
+  TargetDatabaseSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws:secretsmanager:us-east-1:493765492819:secret:[A-Za-z0-9/_+=.@!-]+$'
+    Description: Exact ARN of the RDS-managed target master credential.
+  RunnerAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+
+Resources:
+  RunnerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Temporary restore runner - no ingress, scoped outbound
+      VpcId: !Ref VpcId
+      # Explicit rules replace the default unrestricted outbound rule.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: SSM, official packages and TLS certificate downloads
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref SourcePoolerIpv4CidrA
+          Description: Exact source session pooler address A
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref SourcePoolerIpv4CidrB
+          Description: Exact source session pooler address B
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref SourcePoolerIpv4CidrC
+          Description: Exact source session pooler address C
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref TargetDatabaseSecurityGroupId
+          Description: Dedicated private rehearsal RDS only
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-restore-20261028
+        - Key: Purpose
+          Value: migration-rehearsal
+  TargetDatabaseRunnerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TargetDatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt RunnerSecurityGroup.GroupId
+      Description: Temporary isolated restore runner only
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadExactMigrationCredentials
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref SourceExportSecretArn
+                  - !Ref TargetDatabaseSecretArn
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-restore-20261028
+        - Key: Purpose
+          Value: migration-rehearsal
+  RunnerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref RunnerRole
+  Runner:
+    Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId: !Ref RunnerAmiId
+      InstanceType: t4g.medium
+      IamInstanceProfile: !Ref RunnerInstanceProfile
+      DisableApiTermination: true
+      InstanceInitiatedShutdownBehavior: stop
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        InstanceMetadataTags: disabled
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnetId
+          GroupSet:
+            - !GetAtt RunnerSecurityGroup.GroupId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 200
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euo pipefail
+          umask 077
+          systemctl enable --now amazon-ssm-agent
+          dnf install -y postgresql17 python3 ca-certificates
+          update-ca-trust
+          pg_dump --version | grep -Eq '^pg_dump \(PostgreSQL\) 17\.'
+          pg_restore --version | grep -Eq '^pg_restore \(PostgreSQL\) 17\.'
+          psql --version | grep -Eq '^psql \(PostgreSQL\) 17\.'
+          aws --version 2>&1 | grep -Eq '^aws-cli/2\.'
+          install -d -m 0700 /var/lib/leadpoet-migration
+          install -d -m 0755 /etc/leadpoet-migration
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem \
+            -o /etc/leadpoet-migration/rds-us-east-1-bundle.pem
+          test -s /etc/leadpoet-migration/rds-us-east-1-bundle.pem
+          chmod 0644 /etc/leadpoet-migration/rds-us-east-1-bundle.pem
+          test -s /etc/pki/tls/certs/ca-bundle.crt
+          touch /var/lib/leadpoet-migration/bootstrap.ready
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-restore-20261028
+        - Key: Purpose
+          Value: migration-rehearsal
+
+Outputs:
+  RunnerInstanceId:
+    Value: !Ref Runner
+  RunnerSecurityGroupId:
+    Value: !GetAtt RunnerSecurityGroup.GroupId
+  RunnerRoleArn:
+    Value: !GetAtt RunnerRole.Arn
+  ResolvedRunnerAmiId:
+    Value: !Ref RunnerAmiId

@@ -220,7 +220,7 @@ def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeyp
     }
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS
 
 
 def test_unibuddy_industry_only_quote_failure_uses_remaining_search(monkeypatch):

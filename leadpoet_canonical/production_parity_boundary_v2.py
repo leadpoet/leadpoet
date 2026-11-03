@@ -16,7 +16,7 @@ from typing import Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
 
-PRODUCTION_SUPABASE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+PRODUCTION_SUPABASE_ORIGIN = "https://gateway.subnet71.com"
 PRODUCTION_CHAIN_HOST = "entrypoint-finney.opentensor.ai"
 PRODUCTION_CHAIN_ARCHIVE_HOST = "archive.chain.opentensor.ai"
 PRODUCTION_PARITY_MODE_ENV = "LEADPOET_PRODUCTION_PARITY_MODE"

@@ -1,0 +1,1346 @@
+{
+  "schema_version": 1,
+  "kind": "live_broker_postgres_capture_probe",
+  "model": "reflection/beam-1.0-501b-a23b",
+  "provider": "nebius/fp8",
+  "verified_at": "2026-10-24T00:50:28.358893Z",
+  "semantic_source": "https://developers.reflection.ai/reasoning",
+  "qualification": "provider-exposed generated text; not a claim about all internal computation",
+  "proof_limit": "Synthetic local PostgreSQL, object-store, and worker socket/SDK receipt calls; no deployed gateway, full ICP quality, or complete labeled trajectory claim.",
+  "checks": {
+    "raw_and_readable_readback": true,
+    "two_tool_continuations": true,
+    "strict_json": true,
+    "positive_and_negative_qualification": true,
+    "evidence_id_order_not_significant": true,
+    "worker_socket_and_agent_acknowledgement": true
+  },
+  "runs": [
+    {
+      "scenario": "live",
+      "original_report_sha256": "00de12f11e7b11b037e95dc4178ffe623bb020a7c23868722e6df8377dd5b080",
+      "export_sha256": "d77b7848120b8b7b48720f115163dfeef117b58583b25ec8e2fd08e8752d69a1",
+      "thinking_chars": [
+        445,
+        88,
+        413
+      ],
+      "validated_final_json": {
+        "company": "Acme Test",
+        "evidence_ids": [
+          "profile",
+          "headcount"
+        ],
+        "qualified": true
+      },
+      "calls": [
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "reflection/beam-1.0-501b-a23b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 1,
+                "prompt": 0.25,
+                "request": 0
+              },
+              "only": [
+                "nebius/fp8"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "The user wants me to qualify \"Acme Test\" as a company only if it meets specific criteria:\n1. US B2B software company\n2. 50-200 employees\n\nI need to:\n1. First call lookup_evidence with evidence_id 'profile'\n2. Then call lookup_evidence with evidence_id 'headcount'\n3. After both results return, output only JSON with company, qualified, evidence_ids\n4. Use only supplied tool evidence, don't infer missing facts\n\nLet me start with the first call.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "The user wants me to qualify \"Acme Test\" as a company only if it meets specific criteria:\n1. US B2B software company\n2. 50-200 employees\n\nI need to:\n1. First call lookup_evidence with evidence_id 'profile'\n2. Then call lookup_evidence with evidence_id 'headcount'\n3. After both results return, output only JSON with company, qualified, evidence_ids\n4. Use only supplied tool evidence, don't infer missing facts\n\nLet me start with the first call.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\": \"profile\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call_7872213a4ff24980bae35db7",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792801434,
+            "id": "gen-1792801434-zBzrbHfQxWqbLAylhytx",
+            "model": "reflection/beam-1.0-501b-a23b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "reflection/beam-1.0-501b-a23b-20261016",
+                    "provider": "Nebius",
+                    "selected": true
+                  }
+                ],
+                "total": 6
+              },
+              "generation_time": 712,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "reflection/beam-1.0-501b-a23b",
+              "strategy": "direct",
+              "summary": "available=1, selected=Nebius"
+            },
+            "provider": "Nebius",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 137,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 118
+              },
+              "cost": 0.0001805,
+              "cost_details": {
+                "upstream_inference_completions_cost": 0.000137,
+                "upstream_inference_cost": 0.0001805,
+                "upstream_inference_prompt_cost": 4.35e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 174,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 311
+            }
+          },
+          "response_sha256": "sha256:31a33daf35c2112f190f48a45605f3505540dee9d7f22d71342b186e5621b01a",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:23:55.50829+00:00",
+              "entry_id": 3,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2312",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.0001805"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "reflection/beam-1.0-501b-a23b-20261016",
+                  "expected_provider_name": "Nebius",
+                  "requested_model": "reflection/beam-1.0-501b-a23b",
+                  "requested_provider_route": "nebius/fp8",
+                  "response_model": "reflection/beam-1.0-501b-a23b",
+                  "response_provider_name": "Nebius",
+                  "selected_endpoint_model": "reflection/beam-1.0-501b-a23b-20261016",
+                  "selected_endpoint_provider_name": "Nebius",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 970
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 3,
+                "field": "response"
+              },
+              "response_sha256": "sha256:31a33daf35c2112f190f48a45605f3505540dee9d7f22d71342b186e5621b01a",
+              "wire_body_bytes": 2312,
+              "wire_body_sha256": "sha256:f2952aa2eb323d4336abf69f8e3d0b55e7e658e75ac61256d24ab288d5ae1417"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants me to qualify \"Acme Test\" as a company only if it meets specific criteria:\n1. US B2B software company\n2. 50-200 employees\n\nI need to:\n1. First call lookup_evidence with evidence_id 'profile'\n2. Then call lookup_evidence with evidence_id 'headcount'\n3. After both results return, output only JSON with company, qualified, evidence_ids\n4. Use only supplied tool evidence, don't infer missing facts\n\nLet me start with the first call.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants me to qualify \"Acme Test\" as a company only if it meets specific criteria:\n1. US B2B software company\n2. 50-200 employees\n\nI need to:\n1. First call lookup_evidence with evidence_id 'profile'\n2. Then call lookup_evidence with evidence_id 'headcount'\n3. After both results return, output only JSON with company, qualified, evidence_ids\n4. Use only supplied tool evidence, don't infer missing facts\n\nLet me start with the first call.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\": \"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call_7872213a4ff24980bae35db7",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\"}",
+                "role": "tool",
+                "tool_call_id": "call_7872213a4ff24980bae35db7"
+              }
+            ],
+            "model": "reflection/beam-1.0-501b-a23b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 1,
+                "prompt": 0.25,
+                "request": 0
+              },
+              "only": [
+                "nebius/fp8"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "Got the profile result. Now I need to call lookup_evidence with evidence_id 'headcount'.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Got the profile result. Now I need to call lookup_evidence with evidence_id 'headcount'.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\": \"headcount\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call_4269f99927934f4ba528ed4a",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792801435,
+            "id": "gen-1792801435-ZyRWbw1l4FC5bU4aQGGt",
+            "model": "reflection/beam-1.0-501b-a23b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "reflection/beam-1.0-501b-a23b-20261016",
+                    "provider": "Nebius",
+                    "selected": true
+                  }
+                ],
+                "total": 6
+              },
+              "generation_time": 666,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "reflection/beam-1.0-501b-a23b",
+              "strategy": "direct",
+              "summary": "available=1, selected=Nebius"
+            },
+            "provider": "Nebius",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 46,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 26
+              },
+              "cost": 0.000133,
+              "cost_details": {
+                "upstream_inference_completions_cost": 4.6e-05,
+                "upstream_inference_cost": 0.000133,
+                "upstream_inference_prompt_cost": 8.7e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 348,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 394
+            }
+          },
+          "response_sha256": "sha256:2a22ccb8e384c3d6ab5eefa3ee76ed2bb9342c01c69e5eba266a116204ae6932",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:23:56.652627+00:00",
+              "entry_id": 6,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "1571",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.000133"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "reflection/beam-1.0-501b-a23b-20261016",
+                  "expected_provider_name": "Nebius",
+                  "requested_model": "reflection/beam-1.0-501b-a23b",
+                  "requested_provider_route": "nebius/fp8",
+                  "response_model": "reflection/beam-1.0-501b-a23b",
+                  "response_provider_name": "Nebius",
+                  "selected_endpoint_model": "reflection/beam-1.0-501b-a23b-20261016",
+                  "selected_endpoint_provider_name": "Nebius",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 1076
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 6,
+                "field": "response"
+              },
+              "response_sha256": "sha256:2a22ccb8e384c3d6ab5eefa3ee76ed2bb9342c01c69e5eba266a116204ae6932",
+              "wire_body_bytes": 1571,
+              "wire_body_sha256": "sha256:38a43e7d1de2ada21ac6eb64ad7914c2abe66acf7fd7f272078d8b0ec1f6e2e9"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants me to qualify \"Acme Test\" as a company only if it meets specific criteria:\n1. US B2B software company\n2. 50-200 employees\n\nI need to:\n1. First call lookup_evidence with evidence_id 'profile'\n2. Then call lookup_evidence with evidence_id 'headcount'\n3. After both results return, output only JSON with company, qualified, evidence_ids\n4. Use only supplied tool evidence, don't infer missing facts\n\nLet me start with the first call.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants me to qualify \"Acme Test\" as a company only if it meets specific criteria:\n1. US B2B software company\n2. 50-200 employees\n\nI need to:\n1. First call lookup_evidence with evidence_id 'profile'\n2. Then call lookup_evidence with evidence_id 'headcount'\n3. After both results return, output only JSON with company, qualified, evidence_ids\n4. Use only supplied tool evidence, don't infer missing facts\n\nLet me start with the first call.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\": \"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call_7872213a4ff24980bae35db7",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\"}",
+                "role": "tool",
+                "tool_call_id": "call_7872213a4ff24980bae35db7"
+              },
+              {
+                "content": null,
+                "reasoning": "Got the profile result. Now I need to call lookup_evidence with evidence_id 'headcount'.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "Got the profile result. Now I need to call lookup_evidence with evidence_id 'headcount'.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\": \"headcount\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call_4269f99927934f4ba528ed4a",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"headcount\",\"employees\":80}",
+                "role": "tool",
+                "tool_call_id": "call_4269f99927934f4ba528ed4a"
+              }
+            ],
+            "model": "reflection/beam-1.0-501b-a23b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 1,
+                "prompt": 0.25,
+                "request": 0
+              },
+              "only": [
+                "nebius/fp8"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "response_format": {
+              "json_schema": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "stream": false
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": "{\"company\":\"Acme Test\",\"evidence_ids\":[\"profile\",\"headcount\"],\"qualified\":true}",
+                  "reasoning": "Now I have both results:\n- profile: company \"Acme Test\", country \"US\", business \"B2B software\"\n- headcount: employees 80\n\nQualification criteria:\n1. US B2B software company - profile shows country US and business B2B software ✓\n2. 50-200 employees - headcount shows 80, which is within 50-200 ✓\n\nSo qualified = true.\n\nEvidence IDs used: [\"profile\", \"headcount\"]\n\nOutput JSON with company, qualified, evidence_ids.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now I have both results:\n- profile: company \"Acme Test\", country \"US\", business \"B2B software\"\n- headcount: employees 80\n\nQualification criteria:\n1. US B2B software company - profile shows country US and business B2B software ✓\n2. 50-200 employees - headcount shows 80, which is within 50-200 ✓\n\nSo qualified = true.\n\nEvidence IDs used: [\"profile\", \"headcount\"]\n\nOutput JSON with company, qualified, evidence_ids.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant"
+                },
+                "native_finish_reason": "stop"
+              }
+            ],
+            "created": 1792801436,
+            "id": "gen-1792801436-kIXGgTAKlmb6B0j4bB9A",
+            "model": "reflection/beam-1.0-501b-a23b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "reflection/beam-1.0-501b-a23b-20261016",
+                    "provider": "Nebius",
+                    "selected": true
+                  }
+                ],
+                "total": 6
+              },
+              "generation_time": 512,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "reflection/beam-1.0-501b-a23b",
+              "strategy": "direct",
+              "summary": "available=1, selected=Nebius"
+            },
+            "provider": "Nebius",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 146,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 122
+              },
+              "cost": 0.00024125,
+              "cost_details": {
+                "upstream_inference_completions_cost": 0.000146,
+                "upstream_inference_cost": 0.00024125,
+                "upstream_inference_prompt_cost": 9.525e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 381,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 527
+            }
+          },
+          "response_sha256": "sha256:029b49d78d725ae1d63efc2ce1ae1a8ec085887ded8c6989b09881e9d970c156",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:23:57.38509+00:00",
+              "entry_id": 9,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2191",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00024125"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "reflection/beam-1.0-501b-a23b-20261016",
+                  "expected_provider_name": "Nebius",
+                  "requested_model": "reflection/beam-1.0-501b-a23b",
+                  "requested_provider_route": "nebius/fp8",
+                  "response_model": "reflection/beam-1.0-501b-a23b",
+                  "response_provider_name": "Nebius",
+                  "selected_endpoint_model": "reflection/beam-1.0-501b-a23b-20261016",
+                  "selected_endpoint_provider_name": "Nebius",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 686
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 9,
+                "field": "response"
+              },
+              "response_sha256": "sha256:029b49d78d725ae1d63efc2ce1ae1a8ec085887ded8c6989b09881e9d970c156",
+              "wire_body_bytes": 2191,
+              "wire_body_sha256": "sha256:d1bc5a411f0a5ac4921f0c5c93aef1f59aaa4c0f9afd4024bd93f9880d8aeb96"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "complex",
+      "artifact_name": "worker-final-reflection--beam-1.0-501b-a23b",
+      "original_report_sha256": "04e712f646d5f8c14a507b66ebb12049161bfef4ed12d66a159da020c38c0f7c",
+      "export_sha256": "e9d4b892a404743eaa753f7818e1774ac64aa099fa80677ff0abb2f58db3110b",
+      "worker_receipts_proved": true,
+      "thinking_chars": [
+        227,
+        51,
+        970
+      ],
+      "validated_final_json": {
+        "company": "Acme Test",
+        "evidence_ids": [
+          "headcount",
+          "profile"
+        ],
+        "qualified": false
+      },
+      "calls": [
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "reflection/beam-1.0-501b-a23b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 1,
+                "prompt": 0.25,
+                "request": 0
+              },
+              "only": [
+                "nebius/fp8"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "The user wants me to decide whether Acme Test is a US B2B software company with 50-200 current employees. I need to first call lookup_evidence for 'profile', then for 'headcount', one call per turn. Let me start with 'profile'.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "The user wants me to decide whether Acme Test is a US B2B software company with 50-200 current employees. I need to first call lookup_evidence for 'profile', then for 'headcount', one call per turn. Let me start with 'profile'.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\": \"profile\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call_0064d8e3961d4d15a53ce212",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792802463,
+            "id": "gen-1792802463-BosIE9krHmRnSyQYXTSU",
+            "model": "reflection/beam-1.0-501b-a23b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "reflection/beam-1.0-501b-a23b-20261016",
+                    "provider": "Nebius",
+                    "selected": true
+                  }
+                ],
+                "total": 6
+              },
+              "generation_time": 681,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "reflection/beam-1.0-501b-a23b",
+              "strategy": "direct",
+              "summary": "available=1, selected=Nebius"
+            },
+            "provider": "Nebius",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 84,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 65
+              },
+              "cost": 0.00010365,
+              "cost_details": {
+                "upstream_inference_completions_cost": 8.4e-05,
+                "upstream_inference_cost": 0.00010365,
+                "upstream_inference_prompt_cost": 1.965e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 181,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 128,
+                "video_tokens": 0
+              },
+              "total_tokens": 265
+            }
+          },
+          "response_sha256": "sha256:4ecf5d2cf84170bf05fa756382fd8be82d18c0f7dd6eb4c6d2b36beb9afb1449",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:41:04.019463+00:00",
+              "entry_id": 3,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "1855",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00010365"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "reflection/beam-1.0-501b-a23b-20261016",
+                  "expected_provider_name": "Nebius",
+                  "requested_model": "reflection/beam-1.0-501b-a23b",
+                  "requested_provider_route": "nebius/fp8",
+                  "response_model": "reflection/beam-1.0-501b-a23b",
+                  "response_provider_name": "Nebius",
+                  "selected_endpoint_model": "reflection/beam-1.0-501b-a23b-20261016",
+                  "selected_endpoint_provider_name": "Nebius",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 837
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 3,
+                "field": "response"
+              },
+              "response_sha256": "sha256:4ecf5d2cf84170bf05fa756382fd8be82d18c0f7dd6eb4c6d2b36beb9afb1449",
+              "wire_body_bytes": 1855,
+              "wire_body_sha256": "sha256:eea71f4b328cdab8e035642b48dca5b5a9d79983cff85e775f102493495c265a"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants me to decide whether Acme Test is a US B2B software company with 50-200 current employees. I need to first call lookup_evidence for 'profile', then for 'headcount', one call per turn. Let me start with 'profile'.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants me to decide whether Acme Test is a US B2B software company with 50-200 current employees. I need to first call lookup_evidence for 'profile', then for 'headcount', one call per turn. Let me start with 'profile'.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\": \"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call_0064d8e3961d4d15a53ce212",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "role": "tool",
+                "tool_call_id": "call_0064d8e3961d4d15a53ce212"
+              }
+            ],
+            "model": "reflection/beam-1.0-501b-a23b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 1,
+                "prompt": 0.25,
+                "request": 0
+              },
+              "only": [
+                "nebius/fp8"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "Now I need to call lookup_evidence for 'headcount'.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now I need to call lookup_evidence for 'headcount'.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\": \"headcount\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "call_8ba72e32914943f2881dbe11",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792802464,
+            "id": "gen-1792802464-IMnFqoIBp19ExC9joinh",
+            "model": "reflection/beam-1.0-501b-a23b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "reflection/beam-1.0-501b-a23b-20261016",
+                    "provider": "Nebius",
+                    "selected": true
+                  }
+                ],
+                "total": 6
+              },
+              "generation_time": 567,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "reflection/beam-1.0-501b-a23b",
+              "strategy": "direct",
+              "summary": "available=1, selected=Nebius"
+            },
+            "provider": "Nebius",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 39,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 19
+              },
+              "cost": 6.83e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 3.9e-05,
+                "upstream_inference_cost": 6.83e-05,
+                "upstream_inference_prompt_cost": 2.93e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 322,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 256,
+                "video_tokens": 0
+              },
+              "total_tokens": 361
+            }
+          },
+          "response_sha256": "sha256:cc6837577239d084acb548f100bafd35b30f80e6a75ca066c9fe360281a98c96",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:41:04.793569+00:00",
+              "entry_id": 6,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "1502",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.0000683"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "reflection/beam-1.0-501b-a23b-20261016",
+                  "expected_provider_name": "Nebius",
+                  "requested_model": "reflection/beam-1.0-501b-a23b",
+                  "requested_provider_route": "nebius/fp8",
+                  "response_model": "reflection/beam-1.0-501b-a23b",
+                  "response_provider_name": "Nebius",
+                  "selected_endpoint_model": "reflection/beam-1.0-501b-a23b-20261016",
+                  "selected_endpoint_provider_name": "Nebius",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 717
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 6,
+                "field": "response"
+              },
+              "response_sha256": "sha256:cc6837577239d084acb548f100bafd35b30f80e6a75ca066c9fe360281a98c96",
+              "wire_body_bytes": 1502,
+              "wire_body_sha256": "sha256:25a7c54f585f469bbc8ff5212bd58939b17afefe82ff5fd4ec8f42ebcb5968eb"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user wants me to decide whether Acme Test is a US B2B software company with 50-200 current employees. I need to first call lookup_evidence for 'profile', then for 'headcount', one call per turn. Let me start with 'profile'.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user wants me to decide whether Acme Test is a US B2B software company with 50-200 current employees. I need to first call lookup_evidence for 'profile', then for 'headcount', one call per turn. Let me start with 'profile'.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\": \"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call_0064d8e3961d4d15a53ce212",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "role": "tool",
+                "tool_call_id": "call_0064d8e3961d4d15a53ce212"
+              },
+              {
+                "content": null,
+                "reasoning": "Now I need to call lookup_evidence for 'headcount'.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "Now I need to call lookup_evidence for 'headcount'.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\": \"headcount\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "call_8ba72e32914943f2881dbe11",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "role": "tool",
+                "tool_call_id": "call_8ba72e32914943f2881dbe11"
+              }
+            ],
+            "model": "reflection/beam-1.0-501b-a23b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 1,
+                "prompt": 0.25,
+                "request": 0
+              },
+              "only": [
+                "nebius/fp8"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "response_format": {
+              "json_schema": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "stream": false
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": "{\"company\":\"Acme Test\",\"evidence_ids\":[\"headcount\",\"profile\"],\"qualified\":false}",
+                  "reasoning": "Now I have both pieces of evidence. Let me analyze:\n\nProfile evidence (older, observed 2024-01-01):\n- Company: Acme Test\n- Country: US\n- Business: B2B software\n- Employees: 80\n\nHeadcount evidence (newer official, observed 2026-10-23):\n- Employees: 12\n- Source: current official staffing\n\nThe question: Is Acme Test a US B2B software company with 50-200 current employees?\n\n- US: Yes (from profile)\n- B2B software: Yes (from profile)\n- 50-200 current employees: The newer official headcount says 12 employees, which is NOT in 50-200 range.\n\nThe instruction says: \"The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion.\"\n\nSo for the employee criterion, use 12. 12 is not in 50-200 range. So qualified = false.\n\nEvidence IDs: profile, headcount (both sources used).\n\nStrict JSON output with company, qualified, evidence_ids.\n\n{\"company\":\"Acme Test\",\"qualified\":false,\"evidence_ids\":[\"profile\",\"headcount\"]}",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now I have both pieces of evidence. Let me analyze:\n\nProfile evidence (older, observed 2024-01-01):\n- Company: Acme Test\n- Country: US\n- Business: B2B software\n- Employees: 80\n\nHeadcount evidence (newer official, observed 2026-10-23):\n- Employees: 12\n- Source: current official staffing\n\nThe question: Is Acme Test a US B2B software company with 50-200 current employees?\n\n- US: Yes (from profile)\n- B2B software: Yes (from profile)\n- 50-200 current employees: The newer official headcount says 12 employees, which is NOT in 50-200 range.\n\nThe instruction says: \"The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion.\"\n\nSo for the employee criterion, use 12. 12 is not in 50-200 range. So qualified = false.\n\nEvidence IDs: profile, headcount (both sources used).\n\nStrict JSON output with company, qualified, evidence_ids.\n\n{\"company\":\"Acme Test\",\"qualified\":false,\"evidence_ids\":[\"profile\",\"headcount\"]}",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant"
+                },
+                "native_finish_reason": "stop"
+              }
+            ],
+            "created": 1792802464,
+            "id": "gen-1792802464-T7FBPoJjHJmEW8dwHrSF",
+            "model": "reflection/beam-1.0-501b-a23b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "reflection/beam-1.0-501b-a23b-20261016",
+                    "provider": "Nebius",
+                    "selected": true
+                  }
+                ],
+                "total": 6
+              },
+              "generation_time": 960,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "reflection/beam-1.0-501b-a23b",
+              "strategy": "direct",
+              "summary": "available=1, selected=Nebius"
+            },
+            "provider": "Nebius",
+            "service_tier": null,
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 302,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 278
+              },
+              "cost": 0.00039425,
+              "cost_details": {
+                "upstream_inference_completions_cost": 0.000302,
+                "upstream_inference_cost": 0.00039425,
+                "upstream_inference_prompt_cost": 9.225e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 369,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 671
+            }
+          },
+          "response_sha256": "sha256:ce4ad4fe96dbae51d8eee8b81964252f3fa277f4b2d570b42156178013a837b0",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:41:05.961595+00:00",
+              "entry_id": 9,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "3334",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00039425"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "reflection/beam-1.0-501b-a23b-20261016",
+                  "expected_provider_name": "Nebius",
+                  "requested_model": "reflection/beam-1.0-501b-a23b",
+                  "requested_provider_route": "nebius/fp8",
+                  "response_model": "reflection/beam-1.0-501b-a23b",
+                  "response_provider_name": "Nebius",
+                  "selected_endpoint_model": "reflection/beam-1.0-501b-a23b-20261016",
+                  "selected_endpoint_provider_name": "Nebius",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 1117
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 9,
+                "field": "response"
+              },
+              "response_sha256": "sha256:ce4ad4fe96dbae51d8eee8b81964252f3fa277f4b2d570b42156178013a837b0",
+              "wire_body_bytes": 3334,
+              "wire_body_sha256": "sha256:030fa14ab7fcbfa79ce95980b96efc0127c9877ac99f63453cc24ac59f723667"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

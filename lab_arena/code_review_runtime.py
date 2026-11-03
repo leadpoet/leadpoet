@@ -8,7 +8,10 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_coverage
+
+
+_ROUND_NOT_PROVIDED = object()
 
 
 class SubmissionCodeReviewer:
@@ -49,11 +52,13 @@ class SubmissionCodeReviewer:
             error_code = document.get("error_code", telemetry.NO_ERROR)
             retryable = False
             if committed == "error":
-                policy_retryable = document.get("retryable")
-                if policy_retryable is True:
-                    retryable = committed_attempt < code_review_policy.MAX_TRANSIENT_ATTEMPTS
-                elif policy_retryable is not False:
-                    retryable = committed_attempt < code_review_policy.LEGACY_MAX_ATTEMPTS
+                retryable = code_review_policy.review_retry_available({
+                    "code_review_status": committed,
+                    "code_review_attempts": committed_attempt,
+                    "code_review_doc": document,
+                })
+            if result.get("refusal_recovery") is True and type(result.get("retryable")) is bool:
+                retryable = result["retryable"]
             if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
                 error_code = {
                     "deadline": "code_review_deadline_exceeded",
@@ -89,7 +94,23 @@ class SubmissionCodeReviewer:
             pass
         return result
 
-    def review(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+    def review_with_frozen_round(
+        self, row: Mapping[str, Any], round_row: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Reuse the exact round already read and checked by ArenaService.
+
+        This internal entry point receives service state, never submission
+        annotations. Standalone review still reads its authoritative round.
+        """
+        return self.review(row, _frozen_round=round_row)
+
+    def review(
+        self, row: Mapping[str, Any], *, _frozen_round: Any = _ROUND_NOT_PROVIDED,
+    ) -> Mapping[str, Any]:
+        if code_review_policy.legacy_refusal_candidate(row):
+            hydrate = getattr(self._store, "_hydrate_legacy_review", None)
+            if callable(hydrate):
+                row = hydrate(row)
         state = row.get("code_review_status")
         if state in ("passed", "rejected"):
             return {"status": "existing", "code_review_status": state}
@@ -108,11 +129,33 @@ class SubmissionCodeReviewer:
                 return {"status": "busy" if state == "reviewing" else "backoff", "code_review_status": state}
         submission_id = str(row["submission_id"])
         hotkey = str(row["miner_hotkey"])
+        review_model = code_review_policy.review_model_for(row)
+        review_context = (
+            code_review.FALLBACK_CONTEXT_WINDOW_TOKENS
+            if review_model == code_review.FALLBACK_REVIEW_MODEL
+            else code_review.DEFAULT_CONTEXT_WINDOW_TOKENS
+        )
         prepared = None
         preparation_error = None
         exact_duplicate = False
         reservation = 0
+        research_control = False
         try:
+            round_row = _frozen_round
+            if round_row is _ROUND_NOT_PROVIDED:
+                get_round = getattr(self._store, "get_round", None)
+                if callable(get_round):
+                    round_row = get_round(str(row["round_id"]))
+            if round_row is not _ROUND_NOT_PROVIDED:
+                if (not isinstance(round_row, Mapping)
+                        or not isinstance(round_row.get("configuration_doc"), Mapping)
+                        or (_frozen_round is not _ROUND_NOT_PROVIDED
+                            and round_row.get("round_id") != row["round_id"])
+                        or round_row.get("round_id", row["round_id"]) != row["round_id"]):
+                    raise ValueError("round configuration unavailable")
+                configuration = round_row["configuration_doc"]
+                research_control = reasoning_capture.enabled(configuration)
+                training_coverage.missing_reasoning_percent_from_configuration(configuration)
             payload = self._objects.get_bounded(
                 str(row["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
             )
@@ -120,7 +163,10 @@ class SubmissionCodeReviewer:
                 raise code_review.CodeReviewError("code_review_source_size_mismatch")
             # First validate the full archive, even when a local duplicate can
             # skip the paid review. Persisted digests bind rows to object bytes.
-            prepared = code_review.prepare_request(payload)
+            prepared = code_review.prepare_request(
+                payload, model=review_model, context_window_tokens=review_context,
+                research_control=research_control,
+            )
             if (self._similarity_references_for is not None or row.get("source_archive_sha256")
                     or row.get("source_normalized_sha256")):
                 candidate = submission_similarity.inspect_archive(payload)
@@ -173,13 +219,29 @@ class SubmissionCodeReviewer:
                             contexts.append(context)
                 if contexts and not exact_duplicate:
                     prepared = code_review.prepare_request(
-                        payload, similarity_contexts=tuple(contexts)
+                        payload, similarity_contexts=tuple(contexts),
+                        model=review_model, context_window_tokens=review_context,
+                        research_control=research_control,
                     )
             if not exact_duplicate:
-                reservation = broker.max_openrouter_cost_microusd(
-                    self._prices, prepared.parameters["model"], prepared.parameters,
-                    max_output_tokens=prepared.parameters["max_tokens"],
-                )
+                if review_model == code_review.FALLBACK_REVIEW_MODEL:
+                    # Reuse the existing conservative Sol Azure price ceiling,
+                    # including the long-input tier and regional/cache premium.
+                    # Admission keeps its own single pinned endpoint policy.
+                    route = broker._openrouter_host_route(
+                        kind="score", operation_id="openrouter.chat",
+                        model=review_model, pricing=self._prices["models"][review_model],
+                        parameters=prepared.parameters, industry_review_model=review_model,
+                    )
+                    reservation = broker._max_openrouter_cost_for_pricing(
+                        route.reservation_pricing, prepared.parameters,
+                        max_output_tokens=prepared.parameters["max_tokens"], model=review_model,
+                    )
+                else:
+                    reservation = broker.max_openrouter_cost_microusd(
+                        self._prices, prepared.parameters["model"], prepared.parameters,
+                        max_output_tokens=prepared.parameters["max_tokens"],
+                    )
         except code_review.CodeReviewError as exc:
             preparation_error = code_review_policy.source_diagnostic(exc.code)
         except Exception:
@@ -190,7 +252,7 @@ class SubmissionCodeReviewer:
         token = secrets.token_hex(32)
         claim = self._store.begin_submission_review(
             submission_id, hotkey, token, reservation,
-            code_review.DEFAULT_REVIEW_MODEL,
+            review_model,
             len(prepared.reviewed_files) if prepared else 0,
             prepared.reviewed_file_bytes if prepared else 0,
         )
@@ -203,7 +265,7 @@ class SubmissionCodeReviewer:
         if preparation_error:
             return self._finish_review(
                 row, token, "error",
-                {**preparation_error, "model": code_review.DEFAULT_REVIEW_MODEL,
+                {**preparation_error, "model": review_model,
                  "file_count": len(prepared.reviewed_files) if prepared else 0,
                  "source_bytes": prepared.reviewed_file_bytes if prepared else 0}, 0,
                 attempt=claim.get("attempt"),
@@ -213,7 +275,7 @@ class SubmissionCodeReviewer:
                 row, token, "rejected",
                 {"passed": False, "verdict": "reject",
                  "categories": ["duplicate_submission"],
-                 "model": code_review.DEFAULT_REVIEW_MODEL,
+                 "model": review_model,
                  "file_count": len(prepared.reviewed_files),
                  "source_bytes": prepared.reviewed_file_bytes}, 0,
                 attempt=claim.get("attempt"),
@@ -222,6 +284,7 @@ class SubmissionCodeReviewer:
         status = "error"
         provider_http_status = 0
         provider_observation: dict[str, Any] = {}
+        diagnostic_response: tuple[Any, Mapping[str, Any]] | None = None
         funding_route = "none"
         document: dict[str, Any] = code_review_policy.diagnostic(
             "code_review_provider_unavailable"
@@ -246,8 +309,8 @@ class SubmissionCodeReviewer:
                 )
         except Exception:
             secret = ""
-            # Unknown local failures retain the legacy cap without exposing
-            # exception text or claiming that the miner's key is invalid.
+            # A local failure is incomplete; never expose exception text or
+            # claim that the miner's key is invalid without a typed failure.
             document = code_review_policy.diagnostic(
                 "code_review_provider_unavailable"
             )
@@ -276,6 +339,7 @@ class SubmissionCodeReviewer:
                         parsed = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         parsed = None
+                    diagnostic_response = (parsed, response.headers)
                     if response.internal_provenance is None:
                         provider_observation = code_review_policy.provider_response_observation(
                             parsed, raw_http_status=provider_http_status,
@@ -314,7 +378,16 @@ class SubmissionCodeReviewer:
                             parsed, raw_http_status=provider_http_status,
                             effective_http_status=response.status,
                         )
-                    if response.status == 200:
+                    if response.status == 200 and code_review_policy.explicit_provider_refusal(parsed):
+                        # Refusal is a provider request failure, never evidence
+                        # of source misconduct. Account this call before a new
+                        # durable claim can select the one full-source alternate.
+                        document = code_review_policy.diagnostic(
+                            "code_review_provider_refused",
+                            provider_http_status=200,
+                            retryable=review_model != code_review.FALLBACK_REVIEW_MODEL,
+                        )
+                    elif response.status == 200:
                         if not isinstance(parsed, Mapping):
                             raise code_review.CodeReviewError(
                                 "review_response_invalid", response_reason="envelope"
@@ -328,14 +401,25 @@ class SubmissionCodeReviewer:
                             "categories": sorted({item["category"] for item in result.findings}),
                         }
                         status = "passed" if result.passed else "rejected"
+                        if research_control:
+                            document["research_control"] = dict(result.research_control)
+                            classification = result.research_control["classification"]
+                            if classification == "workflow" and status == "passed":
+                                status = "rejected"
+                                document.update({"passed": False, "verdict": "reject"})
+                            elif classification == "unverified" and status == "passed":
+                                status = "error"
+                                document.update(code_review_policy.diagnostic(
+                                    "code_review_research_unverified", retryable=True
+                                ))
                     elif (
                         response.status == 403
                         and broker._openrouter_request_policy_refusal(response)
                     ):
                         document = code_review_policy.diagnostic(
-                            "code_review_provider_request_rejected",
+                            "code_review_provider_refused",
                             provider_http_status=403,
-                            retryable=False,
+                            retryable=review_model != code_review.FALLBACK_REVIEW_MODEL,
                         )
                     else:
                         document = code_review_policy.provider_http_diagnostic(
@@ -344,10 +428,12 @@ class SubmissionCodeReviewer:
                         if provider_http_status == 402 and response.status == 429:
                             document["provider_http_status"] = provider_http_status
             except code_review.CodeReviewError as exc:
-                # A malformed successful generation may already have been paid.
-                # Retain the legacy three-attempt cap rather than expanding it.
+                # An unusable provider review is not a negative code verdict.
+                # Account this call, then let the admission window and backoff
+                # bound the next independent claim. Never loop within a call.
                 document = code_review_policy.diagnostic(
-                    exc.code, error_reason=exc.response_reason
+                    exc.code, error_reason=exc.response_reason,
+                    retryable=True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None,
                 )
             except broker.ProviderTransportError:
                 # The request may have reached the provider, so its cost is unknown.
@@ -355,7 +441,7 @@ class SubmissionCodeReviewer:
                     "code_review_transport_error", retryable=True
                 )
             except Exception:
-                # Unknown failures retain the legacy cap and no raw detail.
+                # A local/provider failure remains incomplete, with no raw detail.
                 document = code_review_policy.diagnostic(
                     "code_review_provider_unavailable"
                 )
@@ -364,20 +450,43 @@ class SubmissionCodeReviewer:
         if actual is None and status == "passed":
             status = "error"
             # Missing accounting can mean a completed paid generation. Keep
-            # its conservative uncertain charge and the legacy retry cap.
+            # its conservative uncertain charge; never replay a valid verdict for billing.
             document = code_review_policy.diagnostic(
-                "code_review_cost_unavailable"
+                "code_review_cost_unavailable", retryable=False
             )
         if status == "error" and any(
             provider_observation.get(name, 0) >= 400
             for name in ("provider_raw_http_status", "provider_effective_http_status")
         ):
             document.update(provider_observation)
+        previous = row.get("code_review_doc") or {}
+        if code_review_policy.refusal_recovery(previous) or document.get("error_code") == "code_review_provider_refused":
+            primary_before = int(previous.get("review_primary_attempts") or 0) if code_review_policy.refusal_recovery(previous) else 0
+            alternate_before = int(previous.get("review_alternate_attempts") or 0)
+            document.update({"refusal_recovery": True,
+                "refusal_episode_start": int(previous.get("refusal_episode_start") or claim.get("attempt") or 1),
+                "review_primary_attempts": primary_before + (review_model == code_review.DEFAULT_REVIEW_MODEL),
+                "review_alternate_attempts": alternate_before + (review_model == code_review.FALLBACK_REVIEW_MODEL)})
+        if status == "error" and review_model == code_review.FALLBACK_REVIEW_MODEL:
+            previous = row.get("code_review_doc") or {}
+            document["retryable"] = (int(previous.get("review_alternate_attempts") or 0) + 1 < 2
+                and code_review_policy.recovery_retryable(document))
         document.update({
-            "model": code_review.DEFAULT_REVIEW_MODEL,
+            "model": review_model,
             "file_count": len(prepared.reviewed_files),
             "source_bytes": prepared.reviewed_file_bytes,
         })
+        if diagnostic_response is not None:
+            # Decide the review and cost first. Optional diagnostics cannot
+            # replace either outcome if their own projection fails.
+            try:
+                parsed, headers = diagnostic_response
+                _present, generation_id = broker._openrouter_generation_identity(parsed, headers)
+                document["provider_diagnostic"] = code_review_policy.private_response_diagnostic(
+                    parsed, prepared, generation_id=generation_id,
+                )
+            except Exception:
+                pass
         return self._finish_review(
             row, token, status, document, actual,
             attempt=claim.get("attempt"),

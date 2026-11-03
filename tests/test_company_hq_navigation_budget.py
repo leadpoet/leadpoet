@@ -154,10 +154,10 @@ def test_kestra_contact_prefetch_leaves_pricing_reachable_with_three_fetches(
                                                 "text": "Kestra workflow orchestration."}},
     ))
     assert calls == [contact, stage, pricing]
-    assert result["usage"]["fetch_calls"] == investigator.MAX_FETCH_CALLS == 3
+    assert result["usage"]["fetch_calls"] == 3 <= investigator.MAX_FETCH_CALLS == 4
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["evidence_url"] == pricing
     assert result["claims"]["geography"]["status"] == "UNPROVEN"
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["server_priority_submitted_source"]["url"] == contact
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS - 1

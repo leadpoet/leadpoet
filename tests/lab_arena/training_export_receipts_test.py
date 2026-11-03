@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from lab_arena import contracts, training_observations
+from lab_arena import contracts, training_input, training_observations
 from lab_arena.training_export import assemble_example, _link_worker_receipts
-from tests.lab_arena.training_export_test import CLAIM_HASH, add_call, fixture
+from tests.lab_arena.training_export_test import CLAIM_HASH, add_call, fixture, save_input
 
 
 def values_with_receipts(*, acknowledged=True):
@@ -180,6 +180,68 @@ def test_arbitrary_snapshot_or_incomplete_phase_report_cannot_clear_state_gap(ch
     payload["agent_observation_count"] = len(payload["agent_observations"])
     save(values, payload)
     assert "agent_task_state_unverified" in assemble_example(**values)["completeness"]["incomplete_reasons"]
+
+
+def test_failed_execution_phases_do_not_poison_accepted_retry_or_hide_old_receipts():
+    values, selected_payload = values_with_receipts()
+    selected = values["runs"][0]
+    selected["attempt"] = 2
+    prior = copy.deepcopy(selected)
+    prior.update(run_id="execute:0", attempt=1, status="failed",
+                 terminal_cause="invalid_output", output_ref=None)
+    values["runs"].append(prior)
+    prior_identity = "sha256:" + "2" * 64
+    prior_ledger = copy.deepcopy(values["ledger_rows"])
+    for index, row in enumerate(prior_ledger, start=4):
+        row.update(run_id=prior["run_id"], call_identity=prior_identity, entry_id=index)
+        row["entry_doc"]["base_call_identity"] = prior_identity
+    values["ledger_rows"].extend(prior_ledger)
+    prior_payload = copy.deepcopy(selected_payload)
+    prior_payload["response_receipts"][0]["call_identity"] = prior_identity
+    prior_payload["agent_observations"][0]["data"]["call_identity"] = prior_identity
+    prior_payload["agent_observations"] = [row for row in prior_payload["agent_observations"]
+                                           if row["kind"] != "state_snapshot" or row["data"]["name"]
+                                           in {"after_discovery", "after_verification"}]
+    for index, row in enumerate(prior_payload["agent_observations"]):
+        row["id"] = index
+    prior_payload["agent_observation_count"] = len(prior_payload["agent_observations"])
+    prior_snapshot, raw = training_observations.build_snapshot(
+        prior["run_id"], "execute", prior_payload,
+        lease_generation=1, claim_request_hash=CLAIM_HASH)
+    values["objects"].put(training_observations.object_ref(prior["run_id"], 1, CLAIM_HASH), raw)
+    selected_input = training_input.read_input(values["objects"], selected["run_id"], "execute", 1, CLAIM_HASH)
+    save_input(values["objects"], prior["run_id"], "execute", selected_input["input"])
+    selected_snapshot = save(values, selected_payload)
+
+    exported = assemble_example(**values)
+    assert exported["completeness"]["complete"]
+    assert {row["run_id"] for row in exported["attempts"] if row["kind"] == "execute"} == {
+        prior["run_id"], selected["run_id"]}
+    assert len(exported["provider_calls"]) == 2
+    assert exported["costs"]["confirmed_actual_microusd"] == 84
+    assert exported["worker_observation_artifacts"][prior["run_id"]] == prior_snapshot
+    assert exported["worker_observation_artifacts"][selected["run_id"]] == selected_snapshot
+    assert all(call["response_provenance"]["agent_receipt"] == "reported_exact_body_received"
+               for call in exported["provider_calls"])
+
+    selected_payload["agent_observations"] = [row for row in selected_payload["agent_observations"]
+                                              if row["kind"] != "state_snapshot" or row["data"]["name"] != "final"]
+    for index, row in enumerate(selected_payload["agent_observations"]):
+        row["id"] = index
+    selected_payload["agent_observation_count"] = len(selected_payload["agent_observations"])
+    save(values, selected_payload)
+    assert "agent_task_state_unverified" in assemble_example(**values)["completeness"]["incomplete_reasons"]
+
+    save(values, selected_snapshot["payload"])
+    prior_payload["agent_observations"][0]["data"]["body_bytes"] += 1
+    prior_snapshot, raw = training_observations.build_snapshot(
+        prior["run_id"], "execute", prior_payload,
+        lease_generation=1, claim_request_hash=CLAIM_HASH)
+    values["objects"].put(training_observations.object_ref(prior["run_id"], 1, CLAIM_HASH), raw)
+    exported = assemble_example(**values)
+    assert not exported["completeness"]["complete"]
+    assert "agent_response_receipt_link_invalid" in exported["completeness"]["incomplete_reasons"]
+    assert exported["costs"]["confirmed_actual_microusd"] == 84
 
 
 @pytest.mark.parametrize("mutation", ["status", "bytes", "hash", "action", "identity", "unwritten", "ack"])

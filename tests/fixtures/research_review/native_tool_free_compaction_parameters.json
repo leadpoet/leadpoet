@@ -1,0 +1,20 @@
+{
+  "provenance": "Reduced structural form of the October 28 Tyche Codex 0.154.0 compaction requests. All private instructions, history, cache identity and output text are replaced with synthetic content. Codex compact.rs uses Prompt::default(), whose tools are empty and parallel_tool_calls is false.",
+  "request": {
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "parallel_tool_calls": false,
+    "include": ["reasoning.encrypted_content"],
+    "tool_choice": "auto",
+    "reasoning": {"effort": "high"},
+    "max_output_tokens": 4096,
+    "instructions": "Retain the synthetic task facts.",
+    "input": [
+      {"type": "message", "role": "user", "content": "Inspect the synthetic saved observation."},
+      {"type": "function_call", "id": "fc-history", "call_id": "call-history", "name": "inspect", "arguments": "{}", "status": "completed"},
+      {"type": "function_call_output", "call_id": "call-history", "output": "Retained observation: additional_tools is text, not an active declaration."},
+      {"type": "message", "role": "user", "content": "Summarize the saved task without taking actions."}
+    ],
+    "prompt_cache_key": "synthetic-tool-free-compaction",
+    "tools": []
+  }
+}

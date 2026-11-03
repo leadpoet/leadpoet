@@ -318,7 +318,7 @@ PY
 
 
 retire_arena_runtime_tree() {
-  local slot="$1" sha="$2" tree="$3" expected helper
+  local slot="$1" sha="$2" tree="$3" expected helper report status
   expected="$(arena_runtime_tree "$slot" "$sha")" || return 1
   if [ "$tree" != "$expected" ] || [ -L "$tree" ] || [ ! -d "$tree" ]; then
     echo "ERROR: retired Arena runtime is not the exact owned archive" >&2
@@ -327,9 +327,26 @@ retire_arena_runtime_tree() {
   helper="$GATEWAY_PREFLIGHT_TREE/scripts/arena_runtime_cache_retirement.py"
   # The privileged operation removes only validated source-derived caches.
   # Source ownership and file modes stay unchanged; the caller removes source.
-  sudo env -i PATH=/usr/bin:/bin PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+  report="$(sudo env -i PATH=/usr/bin:/bin PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
     "$GATEWAY_PYTHON_BIN" -B "$helper" --repo-root "$LEADPOET_REPO_ROOT" \
-    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)" || return 1
+    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)" --defer-if-busy)" || return 1
+  status="$("$GATEWAY_PYTHON_BIN" - "$tree" "$report" <<'PY'
+import json
+import sys
+report = json.loads(sys.argv[2])
+if (not isinstance(report, dict) or report.get("archive") != sys.argv[1]
+        or type(report.get("cache_paths")) is not int or report["cache_paths"] < 0
+        or report.get("status") not in ("cache_cleanup_complete", "deferred_in_use")
+        or type(report.get("applied")) is not bool
+        or report["applied"] != (report["status"] == "cache_cleanup_complete")):
+    raise SystemExit("invalid Arena runtime retirement result")
+print(report["status"])
+PY
+)" || return 1
+  if [ "$status" = deferred_in_use ]; then
+    echo "Arena runtime retirement deferred: validated inactive archive is still in use: $tree"
+    return 0
+  fi
   find "$tree" -type d -exec chmod u+w {} + || return 1
   rm -rf -- "$tree"
 }
@@ -447,7 +464,11 @@ stop_arena_component() {
   arena_component_command "$component" "$slot" || return 1
   # Use the newly verified controller helper even when retiring a different
   # source SHA. The old runtime tree supplies only the exact process cwd.
-  process_helper="$ARENA_CANDIDATE_TREE/scripts/manage_owned_process_group.py"
+  if [ -n "${4:-}" ]; then
+    process_helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+  else
+    process_helper="$ARENA_CANDIDATE_TREE/scripts/manage_owned_process_group.py"
+  fi
   if ! verify_controller_process_helper "$process_helper"; then
     echo "ERROR: Arena release process helper is unavailable" >&2
     return 1
@@ -455,8 +476,9 @@ stop_arena_component() {
   if [ -n "${4:-}" ]; then
     # Recovery runs old source but stops through the exact new controller. Bind
     # its fresh private receipt to this owner after the latest idle proof.
-    process_helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
-    verify_controller_process_helper "$process_helper" || return 1
+    if [ -n "${6:-}" ]; then
+      state_hash="$6"
+    else
     proof="$("$GATEWAY_PYTHON_BIN" "$process_helper" verify \
       --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" --uid "$(id -u)" \
       -- "${ARENA_COMPONENT_COMMAND[@]}")" || return 1
@@ -471,6 +493,7 @@ if proof.get("ok") is not True or not isinstance(value, str) or not re.fullmatch
 print(value)
 PY
     )" || return 1
+    fi
     verified_stop_args+=(--verified-state-sha256 "$state_hash" --verified-invocation "$4" --release-sha "$5")
   fi
   "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
@@ -531,12 +554,8 @@ PY
 
 require_arena_lock_recovery_idle() {
   local state generation
-  # API code review is separate from the driver and durable execute/score leases.
-  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
-    "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
-    --environment-file "$GATEWAY_ENV_FILE" >/dev/null || return 1
   state="$(run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" owned)" || return 1
-  generation="$("$GATEWAY_PYTHON_BIN" -B - "$PREPARED_GATEWAY_SHA" "$state" <<'PY'
+  generation="$("$GATEWAY_PYTHON_BIN" -B - "$PREPARED_GATEWAY_SHA" "$state" "$GATEWAY_RESTART_GUARD_SCOPE" "${1:-}" <<'PY'
 import json
 import sys
 state = json.loads(sys.argv[2])
@@ -544,9 +563,10 @@ drain = state.get("drain", {})
 if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
         or state.get("guard_present") is not True or state.get("guard_active") is not True
         or state.get("candidate_commit") != sys.argv[1]
-        or state.get("restart_scope") != "gateway"
+        or state.get("restart_scope") != sys.argv[3]
         or state.get("restart_phase") != "gateway_destructive"
         or type(state.get("guard_generation")) is not int or state["guard_generation"] <= 0
+        or (sys.argv[4] and str(state["guard_generation"]) != sys.argv[4])
         or drain.get("preserved") is not True
         or any(type(drain.get(key)) is not int or drain[key] != 0 for key in
                ("current_leased_count", "still_leased_count", "lost_or_mutated_count"))):
@@ -554,10 +574,75 @@ if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
 print(state["guard_generation"])
 PY
   )" || return 1
+  # The exact active guard blocks new API reviews. Still reject every live or
+  # ambiguous paid-review claim/lease before recovering process locks.
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
+    --environment-file "$GATEWAY_ENV_FILE" \
+    --candidate "$PREPARED_GATEWAY_SHA" \
+    --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    --scope "$GATEWAY_RESTART_GUARD_SCOPE" --generation "$generation" >/dev/null || return 1
   # The normal canonical RPC checks the same owner, generation, active lease and
   # current drain atomically. Repeating its current destructive phase is legal.
   run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
     --generation "$generation" --phase gateway_destructive >/dev/null
+}
+
+retire_arena_retained_overlap() {
+  (
+    # Keep the serving archive/API untouched. Recover only the opposite slot
+    # described by exact private receipts before ordinary candidate allocation.
+    PREPARED_GATEWAY_SHA="$ARENA_PREVIOUS_SHA"
+    helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+    verify_controller_process_helper "$helper" || exit 1
+    for component in api edge; do
+      arena_component_command "$component" "$ARENA_PREVIOUS_SLOT"
+      [ "$("$GATEWAY_PYTHON_BIN" "$helper" verify-invocation \
+        --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")" \
+        --uid "$(id -u)" --release-sha "$ARENA_PREVIOUS_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
+        "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
+    done
+    old_slot=$((1 - ARENA_PREVIOUS_SLOT))
+    report="$("$GATEWAY_PYTHON_BIN" "$helper" inspect-retained-slot \
+      --runtime-root "$ARENA_RUNTIME_ROOT" --slot "$old_slot" --uid "$(id -u)" \
+      --python-bin "$GATEWAY_PYTHON_BIN" --environment-file "$GATEWAY_ENV_FILE" \
+      --owner "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID")" || exit 1
+    read -r old_tree old_sha old_owner <<< "$("$GATEWAY_PYTHON_BIN" -B - "$report" <<'PY'
+import json,sys
+r=json.loads(sys.argv[1])
+print(r['tree'] or '-',r['sha'] or '-',r['owner'])
+PY
+    )"
+    [ "$old_tree" != - ] || exit 0
+    [ "$old_tree" = "$(arena_runtime_tree "$old_slot" "$old_sha")" ] || exit 1
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+        "$LEADPOET_REPO_ROOT" "$old_tree" "$old_sha" <<'PY' || exit 1
+from pathlib import Path
+import sys
+from scripts.gateway_git_deploy import verify_materialized_tree
+verify_materialized_tree(repo_root=Path(sys.argv[1]),materialized_root=Path(sys.argv[2]),
+                         target_sha=sys.argv[3],strict_extras=True)
+PY
+    state="$(run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" owned)" || exit 1
+    generation="$("$GATEWAY_PYTHON_BIN" -B - "$state" <<'PY'
+import json,sys
+print(json.loads(sys.argv[1])['guard_generation'])
+PY
+    )" || exit 1
+    for component in driver edge api; do
+      state_hash="$("$GATEWAY_PYTHON_BIN" -B - "$report" "$component" <<'PY'
+import json,sys
+print(json.loads(sys.argv[1])['components'].get(sys.argv[2],''))
+PY
+      )" || exit 1
+      if [ -n "$state_hash" ]; then
+        require_arena_lock_recovery_idle "$generation" || exit 1
+        stop_arena_component "$component" "$old_slot" "$old_tree" "$old_owner" "$old_sha" "$state_hash" || exit 1
+      fi
+    done
+    require_arena_lock_recovery_idle "$generation" || exit 1
+    retire_arena_runtime_tree "$old_slot" "$old_sha" "$old_tree" || exit 1
+  )
 }
 
 recover_arena_inherited_docker_locks() {
@@ -964,14 +1049,15 @@ abort_lab_arena_restart_guard_before_destructive() {
 
 drain_lab_arena_for_restart() {
   local source_root="$1" report
-  # Cover the longest supported lease (90-minute recovery plus 15 minutes)
-  # and five minutes for natural expiry and completion polling.
+  # Provider activity can renew a lease near the end of its runtime. Cover
+  # the longest supported runtime (90 minutes), its full renewable lease
+  # (105 minutes), and five minutes for natural expiry and completion polling.
   LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=" $(jobs -pr | tr '\n' ' ')"
   LAB_ARENA_RESTART_DRAIN_REPORT="$(mktemp "${GATEWAY_RESTART_TIMING_FILE%.jsonl}.drain.XXXXXX")" || return 1
   (
     run_lab_arena_restart_guard --exec-drain "$source_root" drain \
       --scope "$GATEWAY_RESTART_GUARD_SCOPE" \
-      --timeout-seconds 6600
+      --timeout-seconds 12000
   ) >"$LAB_ARENA_RESTART_DRAIN_REPORT" &
   LAB_ARENA_RESTART_DRAIN_PID=$!
   if ! wait "$LAB_ARENA_RESTART_DRAIN_PID"; then
@@ -2124,39 +2210,16 @@ root_free_kb() {
   df --output=avail / | tail -1 | tr -d ' '
 }
 
-docker_storage_counts() {
-  OVERLAY_DIRS="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
-  OVERLAY_KB="$(sudo du -sxk /var/lib/docker/overlay2 2>/dev/null | awk '{print $1}' || true)"
-  OVERLAY_KB="${OVERLAY_KB:-0}"
-  DOCKER_ROOT_KB="$(sudo du -sxk /var/lib/docker 2>/dev/null | awk '{print $1}' || true)"
-  DOCKER_ROOT_KB="${DOCKER_ROOT_KB:-0}"
-  IMAGE_COUNT="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
-  CONTAINER_COUNT="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
-  VOLUME_COUNT="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
-}
-
 reset_orphaned_docker_storage_if_needed() {
-  local free_kb_after_prune="$1"
-  local reason="${2:-orphaned Docker storage}"
-  local reclaim_script
-  docker_storage_counts
-
-  if [ "${IMAGE_COUNT:-0}" -eq 0 ] \
-     && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
-     && [ "${VOLUME_COUNT:-0}" -eq 0 ] \
-     && { [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] || [ "${DOCKER_ROOT_KB:-0}" -gt 1024 ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
-    echo "Detected ${reason} with no tracked Docker objects; resetting full Docker data root"
-    echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
-    reclaim_script="$LEADPOET_REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh"
-    if [ ! -r "$reclaim_script" ]; then
-      echo "ERROR: guarded Docker storage reclaim helper is unavailable" >&2
-      return 1
-    fi
-    VALIDATOR_DOCKER_MIN_FREE_BYTES=$((MIN_FREE_KB * 1024)) \
-      VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
-      VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
-      bash "$reclaim_script"
-  fi
+  local required_kb cleanup_source_root
+  cleanup_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
+  required_kb="$(docker_build_required_kb)" || return 1
+  # Export leaks can exist with ample free space. Reuse the preserving path
+  # at this existing maintenance boundary instead of waiting for capacity loss.
+  VALIDATOR_DOCKER_MIN_FREE_BYTES=$((required_kb * 1024)) \
+    VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+    VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
+    bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"
 }
 
 ensure_docker_ready() {
@@ -2296,10 +2359,45 @@ preflight_gateway_restart_disk() {
   fi
 }
 
+pending_docker_reconcile() {
+  local pending
+  if ! pending="$(sudo python3 -I -c '
+from pathlib import Path
+try:
+    Path("/var/lib/docker/.leadpoet-pending-overlay-reconcile").lstat()
+except FileNotFoundError:
+    print("0")
+else:
+    print("1")
+')" || { [ "$pending" != "0" ] && [ "$pending" != "1" ]; }; then
+    echo "ERROR: pending Docker reconciliation state is unreadable" >&2
+    exit 1
+  fi
+  [ "$pending" = "1" ]
+}
+
+docker_build_required_kb() {
+  python3 - "${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" <<'PY'
+import re
+import sys
+
+value = sys.argv[1]
+if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) > 9223372036854775807:
+    raise SystemExit("invalid Docker build free-space requirement")
+print((int(value) + 1023) // 1024)
+PY
+}
+
 emergency_disk_preflight() {
-  local free_kb emergency_lock_helper
+  local free_kb emergency_lock_helper required_kb cleanup_source_root
+  cleanup_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
+  required_kb="$(docker_build_required_kb)" || return 1
   free_kb="$(root_free_kb)"
-  if [ "${free_kb:-0}" -ge "$MIN_FREE_KB" ]; then
+  if ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: gateway disk capacity is unreadable" >&2
+    return 1
+  fi
+  if [ "$free_kb" -ge "$required_kb" ] && ! pending_docker_reconcile; then
     return 0
   fi
 
@@ -2311,7 +2409,7 @@ emergency_disk_preflight() {
     \( -name "gateway.env.before-gw-restart.*.bak" -o -name "gateway.env.before-secret-hydrate.*" \) \
     -delete 2>/dev/null || true
   sudo journalctl --vacuum-size=200M 2>/dev/null || true
-  emergency_lock_helper="$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+  emergency_lock_helper="$cleanup_source_root/validator_tee/scripts/docker_operation_lock_v2.sh"
   if [ ! -r "$emergency_lock_helper" ]; then
     echo "ERROR: emergency Docker lock helper is unavailable" >&2
     return 1
@@ -2324,8 +2422,9 @@ emergency_disk_preflight() {
   run_bounded_restart_artifact_cleanup
   if ! VALIDATOR_DOCKER_MIN_FREE_BYTES=$((MIN_FREE_KB * 1024)) \
       VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+      VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
       VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
-      bash "$LEADPOET_REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh"; then
+      bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"; then
     leadpoet_release_docker_operation_lock_v2 || true
     echo "ERROR: guarded emergency Docker cleanup failed closed" >&2
     return 1
@@ -3170,6 +3269,9 @@ PY
           fi
         fi
       fi
+      if [ "$ARENA_RECOVERING" = 1 ]; then
+        retire_arena_retained_overlap || exit 1
+      fi
       ;;
     *) echo "ERROR: Arena ingress is not in a safe ready state" >&2; exit 1 ;;
   esac
@@ -3543,21 +3645,19 @@ df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo journalctl --vacuum-size=200M 2>/dev/null || true
 run_bounded_restart_artifact_cleanup
 
-sudo docker container prune -f 2>/dev/null || true
 sudo docker builder prune -af 2>/dev/null || true
-sudo docker system prune -af --volumes 2>/dev/null || true
 
-FREE_KB_AFTER_PRUNE="$(root_free_kb)"
-reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE" "stale Docker storage after cleanup"
+reset_orphaned_docker_storage_if_needed
 
 echo "Disk after cleanup"
 df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo docker system df 2>/dev/null || true
 
 FREE_KB="$(root_free_kb)"
-if ! [[ "$FREE_KB" =~ ^[0-9]+$ ]] || [ "$FREE_KB" -lt "$MIN_FREE_KB" ]; then
+DOCKER_BUILD_REQUIRED_KB="$(docker_build_required_kb)"
+if ! [[ "$FREE_KB" =~ ^[0-9]+$ ]] || [ "$FREE_KB" -lt "$DOCKER_BUILD_REQUIRED_KB" ]; then
   echo "ERROR: insufficient free disk after activation: $(df -h / | tail -1)" >&2
-  echo "Need at least 10GiB free before starting gateway Arena Docker workloads." >&2
+  echo "Need at least $DOCKER_BUILD_REQUIRED_KB KiB free before starting gateway Arena Docker workloads." >&2
   exit 1
 fi
 

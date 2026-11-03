@@ -271,17 +271,10 @@ def test_partial_late_score_preserves_write_once_and_cannot_create_final_authori
 
 @pytest.fixture(scope='module')
 def current_runner_database():
-    # Full latest-service proofs use the complete committed recovery chain.
-    # Keep the original 470 database for its historical bounded-policy tests.
-    from tests.lab_arena import paid_host_quarantine480_postgres_test as current
-    generator = current.database.__wrapped__()
-    db = next(generator)
-    try:
-        with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
-            cur.execute(current.SQL.read_text())
-        yield db
-    finally:
-        generator.close()
+    # Exact470 migration tests keep their own frozen database above. The current
+    # signed service consumes the complete current recovery/credit contracts.
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
 
 
 @pytest.mark.parametrize('recover_successfully',[True,False])
@@ -290,8 +283,8 @@ def test_normal_signed_runner_recovers_only_missing_baseline_work_and_preserves_
                                      recover_successfully)
 
 
-def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_successfully):
-    """Real signed-runner proof using the caller's complete current migration chain."""
+def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_successfully, *, current_publication=True):
+    """Signed runner on the caller's explicit migration authority."""
     from dataclasses import replace
     from lab_arena import contracts
     from tests.lab_arena import test_lab_arena_service_round as flows
@@ -312,10 +305,10 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
 
     monkeypatch.setattr(flows, 'FakeProviderTransport', PaidRecoveryTransport)
     with pg.connect(**dsn) as conn:
-        seed(conn)  # Remove prior controlled fixture state and accounting.
         with conn.cursor() as cur:
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute('TRUNCATE public.lab_arena_rounds,public.lab_arena_ledger,public.lab_arena_trajectory_events RESTART IDENTITY CASCADE')
+            cur.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=false,guard_commitment='',owner_commitment='',guard_expires_at=NULL,captured_leases='[]'")
     class RecoveryHarness(IntegrityHarness):
         def objects_key(self):
             # These disposable databases repeat round IDs. Their immutable
@@ -336,15 +329,35 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
         with pg.connect(**dsn) as conn, conn.cursor() as cur:
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' "
-                        "WHERE round_id=%s AND kind='score' AND status='pending' AND attempt>1",
+                        "WHERE round_id=%s AND status='pending' AND ((kind='score' AND attempt>1) OR (kind='execute' AND attempt>2))",
                         (harness.round_id,))
+        # The explicit stage2 boundary control below owns scheduling time.
+        # Runner drains must not cross final_scoring_close before its hold check.
         return normal_run(count)
 
     monkeypatch.setattr(harness, 'run_stage_with_runners', run_after_retry_backoff)
     monkeypatch.setattr(flows,'deterministic_scorer',_baseline_first_judge)
     assert flows._start_round(harness,day=23 if recover_successfully else 24,epoch=62523 if recover_successfully else 62524)==2
+    from tests.lab_arena.historical_service import pin_pre484_credit_terminal
+    if not current_publication:
+        pin_pre484_credit_terminal(harness.service, harness.connect, round_id=harness.round_id)
     harness.clock.advance_to(harness.schedule()['stage_1_start'])
-    harness.advance_until('stage1_scored',runners=1)
+    for _ in range(30):
+        status = harness.status()
+        if status == 'stage1_scored':
+            break
+        if status in ('stage1','stage1_scoring','stage2','stage2_scoring'):
+            harness.run_stage_with_runners(1)
+        # Set up the original scored-baseline resume boundary through actual
+        # stage APIs. Current572's driver may overlap miner execution earlier.
+        outcome = (harness.service.close_scoring(harness.round_id, 1)
+                   if status == 'stage1_scoring'
+                   else harness.service.score_stage(harness.round_id, 1)
+                   if status == 'stage1_judged'
+                   else harness.service.advance_round(harness.round_id))
+        assert outcome['status'] not in ('terminal','retry','cancelled'), (status,outcome)
+    else:
+        raise AssertionError('stage1 scored missing')
     row=harness.service.store.get_round(harness.round_id)
     baseline=next(p for p in row['participants'] if p['is_king'])['submission_id']
     execution=harness.service.store.list_runs(harness.round_id,stage=1,kind='execute')
@@ -375,7 +388,55 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
         harness.sandbox.judge_failures.add(('PublicBaseline',3))
     harness.clock.advance_to(harness.schedule()['stage_2_start'])
     harness.service.advance_round(harness.round_id)
+    if not recover_successfully:
+        # Finish actual source/miner work before crossing the frozen window.
+        # The current driver must hold unfinished judging before that boundary.
+        for _ in range(40):
+            status = harness.status()
+            if status in ('stage2', 'stage2_scoring'):
+                harness.run_stage_with_runners(1)
+            sources = harness.service.store.list_runs(harness.round_id, kind='execute')
+            judges = harness.service.store.list_runs(harness.round_id, kind='score')
+            if (status == 'stage2_scoring'
+                and any(r['attempt']==3 and r['icp_position']==0 and r['status']=='accepted' for r in sources)
+                and any(r['scored_run_id']==retained_source['run_id'] and r['attempt']>=4 and r['status']=='pending' for r in judges)):
+                assert all(r['status'] == 'accepted' for r in judges if r['stage'] == 2)
+                assert harness.clock.now < datetime.fromisoformat(
+                    harness.schedule()['final_scoring_close'].replace('Z', '+00:00'))
+                assert harness.service.advance_round(harness.round_id)['status'] == 'waiting'
+                # Close at the exact boundary; the publication deadline is one
+                # second later and must still exercise the retry guard.
+                harness.clock.now = datetime.fromisoformat(harness.schedule()['final_scoring_close'].replace('Z', '+00:00'))
+                assert harness.service.advance_round(harness.round_id)['status'] == 'closed'
+                break
+            harness.service.advance_round(harness.round_id)
+        else:
+            raise AssertionError('unfinished baseline boundary not reached')
     harness.advance_until('scored',runners=1)
+    # Current continuation materializes missing baseline scores in the
+    # guarded publication phase, after the scored transition.
+    before_publish = harness.service.store.get_round(harness.round_id)
+    before_runs = harness.service.store.list_runs(harness.round_id, kind='execute')
+    before_judges = harness.service.store.list_runs(harness.round_id, kind='score')
+    before_ledger = harness.service.store.list_ledger()
+    publication = harness.service.publish(harness.round_id)
+    if recover_successfully:
+        assert publication['status'] == 'ok'
+    else:
+        assert publication == {'status': 'retry', 'round_status': 'scored',
+                               'reason': 'baseline_incomplete'}
+        assert harness.service.store.get_round(harness.round_id) == before_publish
+    after_runs = harness.service.store.list_runs(harness.round_id, kind='execute')
+    for before, after in zip(before_runs, after_runs, strict=True):
+        assert {k: v for k, v in before.items() if k not in ('per_icp_score', 'qualification_doc', 'updated_at')} == {
+            k: v for k, v in after.items() if k not in ('per_icp_score', 'qualification_doc', 'updated_at')}
+        if before != after:
+            assert before['submission_id'] == baseline and before['status'] == 'accepted'
+            assert before['per_icp_score'] is None and after['per_icp_score'] == 80
+            assert after['qualification_doc'] is not None
+            assert datetime.fromisoformat(after['updated_at']) >= datetime.fromisoformat(before['updated_at'])
+    assert harness.service.store.list_runs(harness.round_id, kind='score') == before_judges
+    assert harness.service.store.list_ledger() == before_ledger
     final=harness.service.store.get_round(harness.round_id)
     all_exec=harness.service.store.list_runs(harness.round_id,kind='execute')
     all_judges=harness.service.store.list_runs(harness.round_id,kind='score')
@@ -396,15 +457,43 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
     if recover_successfully:
         assert new_source['per_icp_score']==80
         assert harness.service._baseline_final_ready(final)
-        assert harness.service.publish(harness.round_id)['status']=='ok'
+        assert final['status'] == 'published'
     else:
-        assert new_source['per_icp_score'] is None
+        assert new_source['per_icp_score'] == 80
+        incomplete_source = next(r for r in all_exec if r['run_id'] == retained_source['run_id'])
+        assert incomplete_source['per_icp_score'] is None and incomplete_source['qualification_doc'] is None
         assert not harness.service._baseline_final_ready(final)
-        assert harness.service.publish(harness.round_id)['reason']=='baseline_incomplete'
+        if current_publication:
+            assert harness.service.publish(harness.round_id) == {
+                'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete'}
+            assert harness.service.store.get_round(harness.round_id) == final
+        # The exact481 claim proof predates484's terminal-credit RPC. Its
+        # persisted missing-score/readiness proof creates no publication authority;
+        # the separate current database variant exercises today's publish guard.
         assert final['published_at'] is None and final['reward_activated_at'] is None
         retained_judges = [r for r in all_judges if r['scored_run_id']==retained_source['run_id']]
         assert any(r['status']=='failed' and r['attempt']==3 for r in retained_judges)
         assert any(r['status']=='pending' and r['attempt']>=4 for r in retained_judges)
+        harness.clock.advance_to(harness.schedule()['publication_deadline'])
+        assert harness.service.publish(harness.round_id)['status'] == 'cancelled'
+        cancelled = harness.service.store.get_round(harness.round_id)
+        assert cancelled['cancel_reason'] == 'scoring_incomplete'
+        assert cancelled['published_at'] is None and cancelled['reward_activated_at'] is None
+        assert harness.service.store.list_runs(harness.round_id, kind='execute') == all_exec
+        cancelled_judges = harness.service.store.list_runs(harness.round_id, kind='score')
+        for before, after in zip(all_judges, cancelled_judges, strict=True):
+            if before['status'] != 'pending':
+                assert after == before
+                continue
+            assert after['status'] == 'failed' and after['terminal_cause'] == 'stage_closed'
+            assert set(after['terminal_doc']) == {'cancelled_at', 'previous_status'}
+            assert after['terminal_doc']['previous_status'] == 'pending'
+            assert datetime.fromisoformat(after['terminal_doc']['cancelled_at'])
+            assert datetime.fromisoformat(after['updated_at']) >= datetime.fromisoformat(before['updated_at'])
+            terminal_fields = {'status', 'terminal_cause', 'terminal_doc', 'updated_at'}
+            assert {k: v for k, v in before.items() if k not in terminal_fields} == {
+                k: v for k, v in after.items() if k not in terminal_fields}
+        assert harness.service.store.list_ledger() == before_ledger
     harness.service.store.close()
 
 @pytest.mark.parametrize('state',[None,{}, {'inflight_calls':0}, {'inflight_calls':None,'success_unresolved_calls':0}])

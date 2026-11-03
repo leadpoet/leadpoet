@@ -255,7 +255,7 @@ def test_native_retry_retains_sibling_and_only_zeros_local_exhaustion(
         "max_retries": 3,
     }
     if systemic:
-        with pytest.raises(scoring.ScoringError, match="retryable verifier failure"):
+        with pytest.raises(scoring.ScoringError, match=r"judge_exhausted attempts=3 reason=unknown fit=absent"):
             scoring.score_work_item({"scored_run_id": "fixture"}, **kwargs)
     else:
         result = scoring.score_work_item({"scored_run_id": "fixture"}, **kwargs)

@@ -65,13 +65,13 @@ def test_outbound_request_matches_the_official_client():
     assert set(ops.DEEPLINE_TOOL_PROVIDERS) == set(ops.DEEPLINE_TOOLS)
 
 
-def test_contextdev_response_keeps_the_generic_one_megabyte_fail_closed_cap():
+def test_contextdev_response_keeps_the_generic_two_megabyte_fail_closed_cap():
     operation = ops.OPERATIONS["deepline.execute"]
-    assert operation.max_response_bytes == 1_048_576
+    assert operation.max_response_bytes == 2_097_152
     body = json.dumps({
         "job_id": "iad1::contextdev",
         "status": "completed",
-        "result": {"data": {"success": True, "markdown": "x" * 1_048_576}},
+        "result": {"data": {"success": True, "markdown": "x" * 2_097_152}},
     }).encode()
     with pytest.raises(ops.OperationResponseError, match="response_too_large"):
         ops.sanitize_response(

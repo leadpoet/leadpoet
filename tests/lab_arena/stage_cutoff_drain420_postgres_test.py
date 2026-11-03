@@ -19,6 +19,8 @@ from tests.lab_arena.oct07_cutoff_recovery419_postgres_test import (
     _verified_test_pool, daily_icps,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 ROOT = Path(__file__).resolve().parents[2]
 SQL = ROOT / "scripts/420-lab-arena-bounded-stage-cutoff-drain.sql"
@@ -45,7 +47,7 @@ def _stamp(at):
     return at.isoformat().replace("+00:00", "Z")
 
 
-def _seed(conn, *, profile=PROFILES[1], kind="execute", policy=True, positions=2):
+def _seed(conn, *, profile=PROFILES[1], kind="execute", policy=True, positions=2, current_schema=False):
     config = fixture_configuration(ROUND)
     minutes, wall, ttl = profile
     config.update(checkpoint_deadline_policy=f"atomic_checkpoint_{minutes}m_v1",
@@ -68,7 +70,9 @@ def _seed(conn, *, profile=PROFILES[1], kind="execute", policy=True, positions=2
         cur.execute("INSERT INTO public.lab_arena_submissions(submission_id,round_id,miner_hotkey,status,is_king,source_ref,source_size_bytes,submission_doc,code_review_status,code_review_doc,code_review_claim,code_review_started_at,code_review_attempts) VALUES (%s,%s,%s,'frozen',false,%s,123,'{}','passed','{\"decision\":\"pass\"}','sha256:'||repeat('1',64),now(),1)",(SUB,ROUND,hotkey(SUB),source))
         for index in range(positions):
             assignment=f"{ROUND}:{SUB}:2:{10+index}" + (":score" if kind=="score" else "")
-            cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation) VALUES (%s,%s,%s,%s,%s,2,%s,1,%s,'pending',7)",(assignment+":1",assignment,ROUND,SUB,hotkey(SUB),10+index,kind))
+            generation_column = ",scoring_generation_floor" if current_schema else ""
+            generation_value = ",0" if current_schema else ""
+            cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation" + generation_column + ") VALUES (%s,%s,%s,%s,%s,2,%s,1,%s,'pending',7" + generation_value + ")",(assignment+":1",assignment,ROUND,SUB,hotkey(SUB),10+index,kind))
         cur.execute("SET LOCAL session_replication_role=origin")
     conn.commit()
     return config
@@ -266,14 +270,16 @@ def test_hold_stale_token_and_close_claim_lock_preserve_work(database):
 def test_service_billing_return_only_yields_at_execution_cutoff(case):
     now=datetime.now(timezone.utc)
     service=object.__new__(svc.ArenaService)
+    service._lock=threading.RLock()
     calls=[]
     status="stage2_scoring" if case=="scoring" else "stage2"
     config={"schedule":{"stage_2_close":_stamp(now+timedelta(seconds=1 if case=="before" else -1))}}
     if case!="legacy": config["execution_sequence_policy"]=contracts.BASELINE_SCORED_FIRST_POLICY
+    service._lock=threading.RLock()
     service._clock=lambda:now
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)
-    service._reconcile_deepline_cost=lambda _:{"status":"none"}
+    service._reconcile_active_deepline_cost=lambda _:{"status":"none", "checked":0}
     service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(now+timedelta(days=1))}
     service._store=SimpleNamespace(operator_hold_active=lambda:case=="held",expire_leases=lambda _:calls.append("expire"))
     service._advance_round_locked=lambda _:calls.append("advance") or {"status":"draining"}
@@ -378,14 +384,19 @@ def test_authenticated_abandoned_host_after_cutoff_keeps_failure_without_retry(d
         assert _close(conn)["status"]=="cancelled"
 
 
-def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(database):
+@pytest.fixture
+def current_billing_database():
+    yield from current_service_database()
+
+
+def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(current_billing_database,tmp_path):
     from lab_arena.store import ArenaStore,PsycopgTransport
-    psycopg,dsn=database
+    psycopg,dsn=current_billing_database
     connect=lambda:psycopg.connect(**dsn)
     store=ArenaStore(PsycopgTransport(connect),lease_ttl_seconds=4500)
     try:
         with connect() as conn:
-            _seed(conn); lease=_claim(conn)
+            _seed(conn,current_schema=True); lease=_claim(conn)
             _boundary(conn)
         arguments=dict(run_id=lease["run_id"],lease_token_hash="sha256:"+"a"*64,call_identity="sha256:"+"e"*64)
         reserved=store.reserve_call(**arguments,operation_id="openrouter.chat",provider="openrouter",funding_source="miner_key",amount_microusd=1000,call_doc={})
@@ -394,13 +405,20 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         assert store.mark_uncertain(**arguments,call_doc={"reason":"missing_provider_cost","call_succeeded":True,"provider_status":200})["status"]=="uncertain"
         with connect() as conn,conn.cursor() as cur:
             cur.execute("UPDATE public.lab_arena_runs SET lease_expires_at=clock_timestamp()+interval '1 day' WHERE run_id=%s",(lease["run_id"],))
-        service=object.__new__(svc.ArenaService)
+        from tests.lab_arena.test_lab_arena_service_round import Harness
+        service=Harness(connect,tmp_path,challengers=[],runners=["alpha"]).service
         service._store=store
+        service._config.store=store
+        service._objects.put(f"arena/{ROUND}/benchmark.json", json.dumps({
+            "schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": ROUND,
+            "icps": daily_icps(),
+        }).encode())
         service._lock=threading.RLock()
         service._clock=lambda:datetime.now(timezone.utc)
         service._invalidate_hot_round=lambda:None
         service._round=lambda _:store.get_round(ROUND)
         service._reconcile_deepline_cost=lambda _:{"status":"none"}
+        service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
         service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(datetime.now(timezone.utc)+timedelta(days=1))}
         with connect() as conn: before=_state(conn)
         assert service.advance_round(ROUND)["status"]=="draining"
@@ -408,8 +426,16 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
             assert _state(conn)==before
             _boundary(conn,-4501)
             before_close=_state(conn)
-        assert service.advance_round(ROUND)["status"]=="cancelled"
+        service.advance_round(ROUND)
         with connect() as conn: after=_state(conn)
+        # Later drivers retain incomplete work instead of cancelling it. The
+        # absolute lease bound must still end this execution without grading it.
+        final_lease = store.get_run(lease["run_id"])
+        assert final_lease["status"] == "failed"
+        assert final_lease["terminal_cause"] in ("stage_closed", "lease_expired")
+        final_round = store.get_round(ROUND)
+        assert final_round["publication_doc"] is None
+        assert final_round["reward_activated_at"] is None
         # Original uncertain charge stays counted and retains its source key.
         assert after["lab_arena_ledger"][:len(before_close["lab_arena_ledger"])]==before_close["lab_arena_ledger"]
         assert any(e["entry_kind"]=="uncertain" and e["call_identity"]==arguments["call_identity"] for e in after["lab_arena_ledger"])
@@ -418,7 +444,129 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         store.close()
 
 
-def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_path):
+@pytest.fixture()
+def current_application_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def _replay_accepted_stage_scores(service, round_row, runs):
+    from lab_arena import scoring
+
+    configuration = round_row['configuration_doc']
+    icps = service.evaluation_icps(round_row['round_id'])
+    by_id = {run['run_id']: run for run in runs}
+    judgments = service._select_scoring_outputs(
+        [run for run in runs if run['kind'] == 'score'], round_row=round_row)
+    replayed = {}
+    for stage in (1, 2):
+        plan = round_row['stage%d_scoring_plan_doc' % stage]
+        outputs, breakdowns = {}, {}
+        for item in plan['work_items']:
+            run_id = item['scored_run_id']
+            source, judge = by_id[run_id], judgments[run_id]
+            assert service._judgment_matches_execution(round_row, judge, source)
+            output = json.loads(service._objects.get(source['output_ref']))
+            outputs[run_id] = output['companies']
+            breakdowns[run_id] = service._verified_breakdowns(
+                judge, icp=icps[int(item['icp_position'])],
+                companies=output['companies'], policy=configuration['scorer_policy'],
+                round_context=round_row)
+        scores = scoring.build_stage_scores(
+            plan=plan, policy=configuration['scorer_policy'],
+            icps_by_position=dict(enumerate(icps)), outputs_by_run=outputs,
+            breakdowns_by_item=breakdowns, configuration=configuration)
+        records = scoring.run_scores_for_store(
+            scores, [run for run in runs if run['kind'] == 'execute' and run['stage'] == stage])
+        replayed.update({record['run_id']: record for record in records})
+    return replayed
+
+
+def _assert_accepted_run_preserved(old, current, *, service, round_row, judgments,
+                                   public, expected_output, replayed):
+    if current == old:
+        return
+    assert old['kind'] == 'execute' and old['status'] == 'accepted'
+    assert old['per_icp_score'] is None and old['qualification_doc'] is None
+    scored_fields = {'per_icp_score', 'qualification_doc', 'updated_at'}
+    assert {k: v for k, v in current.items() if k not in scored_fields} == {
+        k: v for k, v in old.items() if k not in scored_fields}
+    assert current['per_icp_score'] is not None
+    assert isinstance(current['qualification_doc'], dict)
+    assert replayed['run_id'] == current['run_id']
+    assert current['per_icp_score'] == replayed['per_icp_score']
+    assert current['qualification_doc'] == replayed.get('qualification_doc')
+    assert any(service._judgment_matches_execution(round_row, judge, current)
+               for judge in judgments)
+    public_scores = public['scores']['stage_1'] + public['scores']['stage_2']
+    assert any(score['run_id'] == current['run_id']
+               and score['per_icp_score'] == current['per_icp_score']
+               and score['icp_position'] == current['icp_position']
+               for score in public_scores)
+    assert public['outputs'][current['run_id']] == expected_output
+
+
+def _accepted_run_preservation_case():
+    old = dict(run_id='execution', assignment_id='assignment', round_id='round',
+               submission_id='submission', miner_hotkey='miner', stage=1,
+               icp_position=0, kind='execute', status='accepted',
+               terminal_cause='accepted', attempt=1, output_ref='execution-output',
+               result_doc={'terminal_status': 'accepted'}, lease_token_hash='token',
+               per_icp_score=None, qualification_doc=None, updated_at='before')
+    current = {**old, 'per_icp_score': 30.0,
+               'qualification_doc': {'companies': [{'company_qualified': True} for _ in range(5)]}, 'updated_at': 'after'}
+    judge = {**current, 'kind': 'score', 'run_id': 'judge',
+             'scored_run_id': 'execution', 'output_ref': 'judge-output'}
+    output = {'companies': []}
+    arguments = dict(service=svc.ArenaService.__new__(svc.ArenaService),
+                     round_row={'round_id': 'round', 'configuration_doc': {}},
+                     judgments=[judge], expected_output=output,
+                     replayed={key: copy.deepcopy(current[key]) for key in
+                               ('run_id', 'per_icp_score', 'qualification_doc')},
+                     public={'scores': {'stage_1': [{'run_id': 'execution',
+                             'icp_position': 0, 'per_icp_score': 30.0}],
+                             'stage_2': []}, 'outputs': {'execution': output}})
+    return old, current, arguments
+
+
+def test_accepted_run_preservation_allows_only_bound_public_scoring():
+    old, current, arguments = _accepted_run_preservation_case()
+    _assert_accepted_run_preserved(old, current, **arguments)
+    # Already judged accepted work remains byte-exact.
+    _assert_accepted_run_preserved(current, current.copy(), **arguments)
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(current, {**current, 'updated_at': 'later'}, **arguments)
+
+
+@pytest.mark.parametrize('change', ['qualification_doc', 'score_and_public'])
+def test_accepted_run_preservation_rejects_tampered_replayed_score(change):
+    old, current, arguments = _accepted_run_preservation_case()
+    if change == 'qualification_doc':
+        current['qualification_doc']['companies'][0]['unbound_evidence'] = 'tampered'
+    else:
+        current['per_icp_score'] = 99
+        arguments['public']['scores']['stage_1'][0]['per_icp_score'] = 99
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(old, current, **arguments)
+
+
+@pytest.mark.parametrize('change', [
+    'missing_judge', 'wrong_generation', 'public_output',
+])
+def test_accepted_run_preservation_rejects_unbound_or_nonpublic_score(change):
+    old, current, arguments = _accepted_run_preservation_case()
+    judge = arguments['judgments'][0]
+    if change == 'missing_judge':
+        arguments['judgments'] = []
+    elif change == 'public_output':
+        arguments['public']['outputs']['execution'] = {'companies': ['foreign']}
+    else:
+        judge['scoring_generation_floor'] = 1
+    with pytest.raises(AssertionError):
+        _assert_accepted_run_preserved(old, current, **arguments)
+
+
+def test_real_signed_late_execution_preserves_costs_and_publishes(current_application_database,tmp_path):
     """Actual service, signed runner, cost RPCs and scoring/publication.
 
     Only local fixture schedule boundaries are projected before claiming.
@@ -426,12 +574,13 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     """
     import time
     from tests.lab_arena.confirmed_cost_admission_postgres_test import _reserve,_dispatch,_settle
+    database=current_application_database
     psycopg,dsn=database
     connect=lambda:psycopg.connect(**dsn)
     with connect() as conn,conn.cursor() as cur:
         cur.execute("SET LOCAL session_replication_role=replica")
         cur.execute("TRUNCATE public.lab_arena_rounds CASCADE")
-    h=QualityHarness(connect,tmp_path,challengers=["PublicBaselineAlternate"],runners=["alpha","beta"])
+    h=_FrozenQualityHarness(connect,tmp_path,challengers=["PublicBaselineAlternate"],runners=["alpha","beta"])
     h.service.config.defaults=replace(h.service.config.defaults,benchmark_icp_count=10,checkpoint_deadline_enabled=True,runner_slot_ceiling=10,company_quality_from=None,intent_details_from="2026-01-01T00:00:00Z",contacts_from=None,execution_sequence_from="2026-01-01T00:00:00Z",per_icp_cost_policy=True,rewards_enabled=True)
     h.service.config.daily_icp_source=lambda **kwargs:{"status":"ready","set_id":int(kwargs["set_id"]),"icps":copy.deepcopy(daily_icps()[:10])}
     observed=_install_company_only_sandbox(h)
@@ -467,7 +616,7 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     # Preserve monotonic dates while placing the local stage2 cutoff seconds
     # away. All subsequent signed leases bind this same frozen document.
     for index,field in enumerate(fields):
-        if field=="submission_open": continue  # frozen previous-day bank date
+        if field in ("submission_open","submission_cutoff"): continue  # frozen Day0/Day1 authority
         if field=="stage_2_close": at=now+timedelta(seconds=5)
         elif field in ("final_scoring_close","publication_deadline"):
             at=now+timedelta(hours=6,seconds=index)
@@ -508,18 +657,42 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
     assert final["publication_doc"]["final_ranking"]
     assert observed=={"execute":20,"score":20}
     assert runtime_budgets==[3600]*20
-    assert h.service.activate_reward(ROUND)["status"]=="activated"
+    from tests.lab_arena.baseline_cost_zero_round_test import _activate_single_champion_reward
+    assert _activate_single_champion_reward(h)["status"]=="activated"
     h.clock.now=datetime.now(timezone.utc)+timedelta(days=2)
+    public_results={}
     for participant in participants:
         public=h.service.public_results(ROUND,participant["submission_id"])
+        public_results[participant['submission_id']]=public
         assert public["score_status"]=="published"
         assert len(public["scores"]["stage_1"]+public["scores"]["stage_2"])==10
     with connect() as conn:
         after=_state(conn)
+        replayed = _replay_accepted_stage_scores(h.service, final, after['lab_arena_runs'])
         old_accepted=[r for r in before["lab_arena_runs"] if r["status"]=="accepted"]
         for old in old_accepted:
             current=next(r for r in after["lab_arena_runs"] if r["run_id"]==old["run_id"])
-            assert current==old
+            if old['kind']=='execute' and old['per_icp_score'] is None:
+                # Current baseline judging can continue during stage 2. The
+                # accepted execution remains immutable while its first actual
+                # judgment adds only these derived projection fields.
+                projected_fields={'qualification_doc','per_icp_score','updated_at'}
+                assert {k:v for k,v in current.items() if k not in projected_fields}=={
+                    k:v for k,v in old.items() if k not in projected_fields}
+                baseline_ids={p['submission_id'] for p in participants if p['is_king']}
+                assert current['per_icp_score']==(30 if old['submission_id'] in baseline_ids else 60)
+                assert len(current['qualification_doc']['companies'])==5
+                assert all(c['company_qualified'] for c in current['qualification_doc']['companies'])
+                assert current['updated_at']>=old['updated_at']
+            else:
+                assert current==old
+            _assert_accepted_run_preserved(
+                old, current, service=h.service, round_row=final,
+                judgments=after['lab_arena_runs'],
+                public=public_results[old['submission_id']],
+                expected_output=json.loads(h.service._objects.get(old['output_ref'])),
+                replayed=replayed.get(old['run_id']),
+            )
         assert all(r["status"]=="accepted" for r in after["lab_arena_runs"])
         assert _close(conn)["status"]=="existing"
         assert _state(conn)==after
@@ -530,3 +703,16 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(database,tmp_p
 def test_confirmed_billed_failure_still_reaches_cap_across_attempts(database,tmp_path):
     from tests.lab_arena.confirmed_cost_admission_postgres_test import test_confirmed_billed_failure_reaches_cap_across_attempts
     test_confirmed_billed_failure_reaches_cap_across_attempts(database,tmp_path)
+
+
+class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+
+        def commit_historical(round_id):
+            freeze_historical_intake_dates(self, "2026-10-07")
+            return commit(round_id)
+
+        service.commit_benchmark = commit_historical
+        return service

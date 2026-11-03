@@ -8,7 +8,7 @@ validator identity, or wallet use.
 
 ## Daily benchmark settings
 
-New rounds default to 10 ICPs and a champion promotion margin of 0.5 points.
+New rounds default to 10 ICPs and a champion promotion margin of 8 points.
 The gateway accepts `LAB_ARENA_BENCHMARK_ICP_COUNT` (2 to 100) and
 `LAB_ARENA_PROMOTION_MARGIN` (0 to 100). Restart through the normal deployment
 workflow after changing these settings. They apply to newly created rounds.
@@ -224,15 +224,30 @@ checked as well as completed attempt counts.
 
 ## Round and host safeguards
 
-Parallel execution follows the round's frozen execution policy, including the
-current baseline-first flow. Historical rounds keep their prior stage behavior;
-a validator restart cannot rewrite that round-level decision. Migration 401
-adds proxy-based model admission without changing those stage transitions.
+Parallel execution follows the frozen baseline-first participant and ICP layout.
+The legacy wire name `baseline_scored_first_v1` stays unchanged so existing
+strict validators can read the configuration. Migration 572 permits early miner
+execution after every frozen baseline execution position is accepted, while
+baseline judging and retries continue. It applies to eligible unpublished
+rounds and future rounds using the same policy. It does not change frozen
+inputs, scorer images, budgets, deadlines or accepted work. Complete legitimate
+baseline scoring still gates publication, promotion, incentives and weights.
+Eligible baseline judges take priority over the miner queue and keep their
+normal retry backoff. Existing post-deadline partial-baseline recovery stays
+unchanged, including its complete-baseline final publication gate. Other
+execution policies keep their existing behavior.
+Migration 401 adds proxy-based model admission without changing these gates.
 
-The readiness guard reserves 2 GiB for each active slot, 2 GiB for the host,
-and another 128 MiB for each slot. Twenty slots therefore require 44.5 GiB;
-plan for approximately 45 GiB of available memory. Readiness derives the safe
-slot count from available host and cgroup memory. It reduces concurrent slots
+The readiness guard reserves the full 2 GiB sandbox limit for each active slot,
+512 MiB for further host growth, and another 32 MiB for each slot's launcher
+overhead. Memory already used by host services is excluded by `MemAvailable`
+and finite cgroup headroom before these extra reserves are applied. Ten slots
+require 20.8125 GiB of available memory; twenty require 41.125 GiB. This is an
+admission policy, not a smaller sandbox limit or a fixed minimum slot count.
+The smaller extra reserves leave less room for unexpected host or launcher
+growth, so verify available memory and OOM counters after deployment.
+Readiness derives the slot count from the tighter available host and cgroup
+memory. It reduces concurrent slots
 when memory is limited, retains all verified proxy profiles for slot rotation,
 and stops scoring startup if even one slot cannot fit. The weight loop remains
 independent.

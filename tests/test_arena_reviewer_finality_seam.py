@@ -23,19 +23,26 @@ from scripts import build_arena_reviewer_runtime as composer
 from scripts.arena_reviewer_finality_seam import CORRECTION_ID
 from tests.lab_arena.reviewer_runtime_composition_test import layer
 from tests import test_completed_cross_domain_negative as controls
+from tests.reviewer_frozen_sources import frozen_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_FROZEN_ORIGINAL = frozen_source("negative_finality", FINALITY_FILE)
+_FROZEN_POSTIMAGE = _FROZEN_ORIGINAL.replace(
+    _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1)
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def _current_source():
-    # This suite isolates PR483. Reverse the separate source-access correction
-    # so its original frozen847 hash remains a real immutable-source control.
-    from scripts.arena_reviewer_source_access_seam import FINALITY_DELTAS
-    source = (ROOT / FINALITY_FILE).read_bytes()
-    for _, old, new in FINALITY_DELTAS:
-        source = source.replace(new.encode(), old.encode(), 1)
-    return source
+    # The seam targets frozen847, not the evolving current implementation.
+    # Keep its original predicate golden bound to the reviewed postimage.
+    return _FROZEN_POSTIMAGE
 
 
 def _original_source():
@@ -59,12 +66,15 @@ def _predicate(source):
 
 
 def test_exact_frozen847_predicate_gets_only_the_reviewed_pr483_delta():
-    original = _original_source()
+    original = (ROOT / 'tests/fixtures/arena_reviewer/frozen847_functions.py.txt').read_bytes()
     # Source-segment hash from frozen847 revision77db393b, including one LF.
     assert hashlib.sha256(_predicate_source(original).encode()).hexdigest() == (
         "73a270140e1bd228d3088a15f42cfe3cf1073b3609867120063880604041dd54"
     )
-    assert convert_finality_seam(original) == _current_source()
+    assert original.count(_ORIGINAL_GUARD.encode()) == 1
+    assert convert_finality_seam(original) == original.replace(
+        _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1,
+    )
     before = ast.parse(original)
     after = ast.parse(convert_finality_seam(original))
     for tree in (before, after):
@@ -106,9 +116,11 @@ def test_unknown_partial_and_ambiguous_shapes_fail_closed(fault):
 
 
 def _base_sources():
-    return {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
+    files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
                           if name == "scorer_entrypoint.py" else name)).read_bytes()
             for name in (GRADER_FILE, *ENTRYPOINT_FILES)}
+    files[GRADER_FILE] = _FROZEN_GRADER
+    return files
 
 
 def test_composition_requires_explicit_opt_in_and_exact_frozen_input():
@@ -222,11 +234,13 @@ def test_composed_predicate_preserves_all_unfinished_evidence_controls(monkeypat
 
 @pytest.mark.parametrize("semantic", [False, True])
 @pytest.mark.parametrize("homepage_fault", [None, "provider_error", "malformed_response"])
+@pytest.mark.parametrize("investigation_fault", ["", "provider_error", "malformed_response", "unbound_fault", "incomplete"])
+@pytest.mark.parametrize("preserve_marker", [True, False])
 def test_composed_finality_through_fit_zero_and_existing_arena_completion(
-    monkeypatch, semantic, homepage_fault,
+    monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
 ):
     monkeypatch.setattr(lead_scorer, PREDICATE,
                         _predicate(convert_finality_seam(_original_source())))
     controls.test_negative_completion_through_fit_and_arena(
-        monkeypatch, semantic, homepage_fault,
+        monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
     )

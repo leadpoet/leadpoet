@@ -22,8 +22,11 @@ RUNSC_CHECK_CLEANUP_SECONDS = 2
 DEPENDENCY_INSTALLER_CHECK_TIMEOUT_SECONDS = 5
 DEPENDENCY_INSTALLER_CHECK_CLEANUP_SECONDS = 2
 DEFAULT_RUNNER_SOCKET_ROOT = Path("/tmp")
-HOST_MEMORY_RESERVE_BYTES = 2 * 1024 ** 3
-PER_SLOT_MEMORY_RESERVE_BYTES = 128 * 1024 ** 2
+# MemAvailable/cgroup headroom already excludes memory in use by host services.
+# Keep additional headroom for host growth and per-slot launcher overhead;
+# every slot still reserves its full, separately enforced sandbox memory limit.
+HOST_MEMORY_RESERVE_BYTES = 512 * 1024 ** 2
+PER_SLOT_MEMORY_RESERVE_BYTES = 32 * 1024 ** 2
 DEFAULT_SANDBOX_MEMORY_BYTES = 2 * 1024 ** 3
 _REASONS = {
     "runtime_host_error": "the host cannot run the Arena sandbox",

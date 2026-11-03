@@ -3,17 +3,35 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi.testclient import TestClient
 
-from lab_arena.capacity import daily_challenger_capacity
+from lab_arena.api import create_app
+from tests.lab_arena.test_lab_arena_admission_load_postgres import _upload, _finalize
+
 from lab_arena.service import ServiceError
 from tests.lab_arena.test_lab_arena_service_round import Harness, connect, database
 from tests.postgres_migration_harness import SCRIPTS
 
 
+def _accept_capacity_submission(harness, round_id, flavor):
+    # Capacity is enforced at signed finalization, before the later review
+    # window. Do not require a paid review to have run during source intake.
+    harness.round_id = round_id
+    with TestClient(create_app(harness.service)) as http:
+        upload = _upload(harness, http, flavor)
+        response = _finalize(http, upload)
+    if response.status_code != 200:
+        raise ServiceError(response.json()["code"], response.status_code)
+    assert response.json()["status"] == "accepted"
+    submission_id = upload[0]["submission_id"]
+    assert harness.service.store.get_submission(submission_id)["status"] == "accepted"
+    return submission_id
+
+
 def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None):
     harness = Harness(connect, tmp_path, challengers=[], runners=["capacity"])
     harness.clock.now = datetime.now(timezone.utc)
-    cutoff = (harness.clock.now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = (harness.clock.now + timedelta(minutes=30)).replace(microsecond=0)
     harness.service.config.defaults.stage_minutes = {
         "benchmark": 30, "stage_1": 240, "stage_1_scoring": 360,
         "stage_2": 180, "final_scoring": 240,
@@ -24,7 +42,8 @@ def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None
     harness.service.config.mode = "shadow"
     config = harness.service.create_round(cutoff, round_id=round_id)
     # Use a separate live ID so no immutable row needs rewriting in setup.
-    config.update(round_id=round_id + "live", mode="live", max_challengers=cap)
+    config.update(round_id=round_id + "live", mode="live", max_challengers=cap,
+                  scoring_wall_clock_seconds=900)
     if changed_schedule:
         field = changed_schedule
         value = datetime.fromisoformat(config["schedule"][field].replace("Z", "+00:00"))
@@ -32,7 +51,7 @@ def old_round(connect, tmp_path, suffix, count, *, cap=16, changed_schedule=None
     harness.service.config.mode = "live"
     harness.service.store.create_round(config["round_id"], config)
     for index in range(count):
-        harness.submit("capacity-%s-%d" % (suffix, index), config["round_id"])
+        _accept_capacity_submission(harness, config["round_id"], "capacity-%s-%d" % (suffix, index))
     return harness, config
 
 
@@ -52,7 +71,9 @@ def test_open_round_upgrade_preserves_submissions_and_reenables_immutability(con
     submissions = harness.service.store.list_submissions(round_id)
     apply_migration(connect)
     after = harness.service.store.get_round(round_id)["configuration_doc"]
-    assert after["max_challengers"] == daily_challenger_capacity(after) == 8
+    # Migration 201 fixes the original schedule at eight. Later runtime
+    # capacity calculations use different wall-clock and review policies.
+    assert after["max_challengers"] == 8
     assert after["schedule"]["submission_open"] == before["schedule"]["submission_open"]
     assert after["schedule"]["submission_cutoff"] == before["schedule"]["submission_cutoff"]
     assert {k: v for k, v in after.items() if k not in ("schedule", "max_challengers")} == {
@@ -93,7 +114,7 @@ def test_parallel_finalizations_cannot_overbook_or_store_rejected_credentials(co
     harness.service = harness.build_service()
     harness.clock.now = datetime.now(timezone.utc)
     config = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id="arena-2099-01-01-parallel"
+        harness.clock.now + timedelta(minutes=30), round_id="arena-2099-01-01-parallel"
     )
     barrier = Barrier(3)
     manager = harness.service.config.credential_manager
@@ -108,7 +129,7 @@ def test_parallel_finalizations_cannot_overbook_or_store_rejected_credentials(co
 
     def submit(index):
         try:
-            harness.submit("parallel-capacity-%d" % index, config["round_id"])
+            _accept_capacity_submission(harness, config["round_id"], "parallel-capacity-%d" % index)
             return "accepted"
         except ServiceError as exc:
             return exc.code
@@ -155,6 +176,7 @@ def test_upgrade_leaves_operator_limited_round_unchanged(connect, tmp_path):
             sign_message=lambda message: miner.sign(message.encode()).hex(),
         )
         # Registration does not finalize or store credentials.
+        harness.chain.registered.append(miner.ss58_address)
         harness.service.handle_submission_presign(request)
     submissions = harness.service.store.list_submissions(before["round_id"])
     assert len(submissions) == 7

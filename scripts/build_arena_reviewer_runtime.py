@@ -9,15 +9,27 @@ shared failed attribute-source review, identity schema-repair reachability and
 rejected-final-packet completion and structured numeric-homepage alias
 repairs to frozen source. A separate exact-source option repairs explicit
 first-party legal/brand identity and same-origin Organization URL resolution.
+Another normalizes the existing typed LinkedIn source-blocked diagnostic.
+An optional auxiliary-source correction enforces the existing reviewer's name binding.
+Another explicit option permits one existing identity repair when an unproved
+web LinkedIn conflict also changes the observed name.
+An observed-locator option adds only single-decoded ampersand company slugs.
+A separate brand option requires its matching host receipt validator deployment.
 No option imports today's complete grading implementation.
+
+The mutually exclusive --shim-only mode appends only the exact-source socket
+return-margin repair. It does not import the current runtime package or grading
+converters and can be selected as a prospective scorer default after verification.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -38,9 +50,92 @@ BOUND_IDENTITY_FILES = (
     "qualification/scoring/company_fit_decision.py",
     "qualification/scoring/linkedin_company_size.py",
 )
+BRAND_IDENTITY_FILES = (FINALITY_FILE, "qualification/scoring/company_fit_decision.py")
 ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
 MAX_OVERLAY_BYTES = 4 * 1024 * 1024
+
+
+def _managed_docker_host() -> bool:
+    return sys.platform.startswith("linux") and bool(
+        os.environ.get("LEADPOET_DOCKER_OPERATION_LOCK_FILE")
+        or Path("/home/ec2-user/.config/leadpoet").is_dir()
+    )
+
+
+def _require_managed_docker_locks() -> None:
+    if os.environ.get("LEADPOET_DOCKER_OPERATION_LOCK_HELD") != "1":
+        # Let the existing shell contract acquire both locks. Preserve open
+        # inherited lock descriptors through this one managed-host re-exec.
+        descriptors = []
+        for descriptor in (7, 8):
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                continue
+            descriptors.append(descriptor)
+        result = subprocess.run([
+            "bash", "-c",
+            'set -euo pipefail; . "$1"; shift; '
+            'leadpoet_acquire_docker_operation_lock_v2 >&2; exec "$@"',
+            "arena-reviewer-build",
+            str(ROOT / "validator_tee/scripts/docker_operation_lock_v2.sh"),
+            sys.executable, str(Path(__file__).resolve()), *sys.argv[1:],
+        ], cwd=ROOT, pass_fds=tuple(descriptors))
+        raise SystemExit(result.returncode)
+
+    from validator_tee.host.docker_zero_runtime_reconciler_v2 import (
+        DockerZeroRuntimeReconcilerV2Error,
+        verify_docker_operation_locks_v2,
+    )
+    try:
+        if os.environ.get("LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD") != "1":
+            raise CompositionError("managed build requires both Docker locks")
+        verify_docker_operation_locks_v2(
+            lock_file=Path(os.environ["LEADPOET_DOCKER_OPERATION_LOCK_FILE"]),
+            admission_lock_file=Path(os.environ["LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE"]),
+            owner_pid=os.getpid(),
+        )
+    except (KeyError, DockerZeroRuntimeReconcilerV2Error) as exc:
+        raise CompositionError("managed build Docker locks are not held") from exc
+
+
+@contextmanager
+def _managed_build_images(*, publish: bool, verify_only: bool):
+    if not _managed_docker_host():
+        yield
+        return
+    _require_managed_docker_locks()
+    subprocess.run([
+        sys.executable, str(ROOT / "validator_tee/host/docker_operation_guard_v2.py"),
+        "--wait", "--timeout-seconds", "1800", "--interval-seconds", "3",
+    ], check=True, stdout=sys.stderr, pass_fds=(7, 8))
+    if verify_only:
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix="arena-reviewer-images-") as directory:
+        inventory = str(Path(directory) / "images.txt")
+        helper = str(ROOT / "validator_tee/scripts/reclaim_release_build_images_v2.sh")
+        subprocess.run(["bash", helper, "snapshot", inventory], check=True,
+                       stdout=sys.stderr, pass_fds=(7, 8))
+        failed = False
+        try:
+            yield
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                # A successful non-push build intentionally retains its image.
+                if publish or failed:
+                    subprocess.run(["bash", helper, "cleanup", inventory], check=True,
+                                   stdout=sys.stderr, pass_fds=(7, 8))
+                subprocess.run(["docker", "builder", "prune", "--all", "--force"],
+                               check=True, stdout=sys.stderr, pass_fds=(7, 8))
+            except (OSError, subprocess.SubprocessError) as exc:
+                print("ERROR: reviewer build cleanup failed", file=sys.stderr)
+                if not failed:
+                    raise CompositionError("reviewer build cleanup failed") from exc
 
 
 class CompositionError(ValueError):
@@ -145,6 +240,7 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
 
 def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
+    shim_only: bool = False,
     source_access_denied: bool = False,
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
@@ -153,6 +249,11 @@ def extract_frozen_sources(
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
     archive_snapshot_https: bool = False,
+    greenhouse_api_source: bool = False,
+    auxiliary_source_name_binding: bool = False,
+    homepage_linkedin_conflict_repair: bool = False,
+    observed_linkedin_ampersand: bool = False,
+    verified_homepage_brand_alias: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -161,14 +262,19 @@ def extract_frozen_sources(
         if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
-                or bound_homepage_legal_alias):
+                or bound_homepage_legal_alias or auxiliary_source_name_binding
+                or homepage_linkedin_conflict_repair or verified_homepage_brand_alias):
             names += (FINALITY_FILE,)
         if authenticated_page_refusal:
             names += (VERIFICATION_FILE,)
-        if bound_homepage_legal_alias:
+        if bound_homepage_legal_alias or observed_linkedin_ampersand:
             names += BOUND_IDENTITY_FILES
-        if archive_snapshot_https:
+        if verified_homepage_brand_alias:
+            names += BRAND_IDENTITY_FILES
+        if archive_snapshot_https or greenhouse_api_source:
             names += (ARCHIVE_FILE,)
+        if shim_only:
+            names = ("lab_arena/shim.py", "lab_arena/operations.py")
         for name in dict.fromkeys(names):
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,9 +297,15 @@ def expected_overlay(
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
     archive_snapshot_https: bool = False,
+    greenhouse_api_source: bool = False,
     numeric_profile_legal_self_name: bool = False,
     single_tool_protocol_repair: bool = False,
     rejected_final_packet: bool = False,
+    source_blocked_alias: bool = False,
+    auxiliary_source_name_binding: bool = False,
+    homepage_linkedin_conflict_repair: bool = False,
+    observed_linkedin_ampersand: bool = False,
+    verified_homepage_brand_alias: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
@@ -204,13 +316,16 @@ def expected_overlay(
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
-                or bound_homepage_legal_alias):
+                or bound_homepage_legal_alias or auxiliary_source_name_binding
+                or homepage_linkedin_conflict_repair or verified_homepage_brand_alias):
         expected.add(FINALITY_FILE)
     if authenticated_page_refusal:
         expected.add(VERIFICATION_FILE)
-    if bound_homepage_legal_alias:
+    if bound_homepage_legal_alias or observed_linkedin_ampersand:
         expected.update(BOUND_IDENTITY_FILES)
-    if archive_snapshot_https:
+    if verified_homepage_brand_alias:
+        expected.update(BRAND_IDENTITY_FILES)
+    if archive_snapshot_https or greenhouse_api_source:
         expected.add(ARCHIVE_FILE)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
@@ -219,10 +334,13 @@ def expected_overlay(
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
-                or bound_homepage_legal_alias):
+                or bound_homepage_legal_alias or auxiliary_source_name_binding
+                or homepage_linkedin_conflict_repair or verified_homepage_brand_alias):
         files[FINALITY_FILE] = original[FINALITY_FILE]
-    if bound_homepage_legal_alias:
+    if bound_homepage_legal_alias or observed_linkedin_ampersand:
         files.update({name: original[name] for name in BOUND_IDENTITY_FILES})
+    if verified_homepage_brand_alias:
+        files.update({name: original[name] for name in BRAND_IDENTITY_FILES})
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
         files[FINALITY_FILE] = convert_finality_seam(files[FINALITY_FILE])
@@ -232,6 +350,9 @@ def expected_overlay(
         )
         files[GRADER_FILE] = convert_source_access_seam(files[GRADER_FILE])
         files[FINALITY_FILE] = convert_source_access_finality_seam(files[FINALITY_FILE])
+    if source_blocked_alias:
+        from scripts.arena_reviewer_source_blocked_seam import convert_source_blocked_seam
+        files[GRADER_FILE] = convert_source_blocked_seam(files[GRADER_FILE])
     if pending_final_correction:
         from scripts.arena_reviewer_budget_seam import convert_budget_seam
         files[GRADER_FILE] = convert_budget_seam(files[GRADER_FILE])
@@ -281,6 +402,33 @@ def expected_overlay(
     if archive_snapshot_https:
         from scripts.arena_reviewer_archive_https_seam import convert_archive_https_seam
         files[ARCHIVE_FILE] = convert_archive_https_seam(original[ARCHIVE_FILE])
+    if greenhouse_api_source:
+        from scripts.arena_reviewer_greenhouse_api_source_seam import convert_greenhouse_api_source_seam
+        files[ARCHIVE_FILE] = convert_greenhouse_api_source_seam(
+            files.get(ARCHIVE_FILE, original[ARCHIVE_FILE])
+        )
+    if auxiliary_source_name_binding:
+        from scripts.arena_reviewer_auxiliary_source_name_seam import (
+            convert_auxiliary_source_name_seam,
+        )
+        files[FINALITY_FILE] = convert_auxiliary_source_name_seam(files[FINALITY_FILE])
+    if homepage_linkedin_conflict_repair:
+        from scripts.arena_reviewer_homepage_linkedin_conflict_seam import (
+            convert_homepage_linkedin_conflict_seam,
+        )
+        files[FINALITY_FILE] = convert_homepage_linkedin_conflict_seam(files[FINALITY_FILE])
+    if observed_linkedin_ampersand:
+        from scripts.arena_reviewer_observed_linkedin_ampersand_seam import (
+            convert_observed_linkedin_ampersand_files,
+        )
+        files.update(convert_observed_linkedin_ampersand_files(
+            {name: files[name] for name in BOUND_IDENTITY_FILES},
+        ))
+    if verified_homepage_brand_alias:
+        from scripts.arena_reviewer_homepage_brand_alias_seam import convert_homepage_brand_alias_files
+        files.update(convert_homepage_brand_alias_files(
+            {name: files[name] for name in (*BRAND_IDENTITY_FILES, GRADER_FILE)},
+        ))
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -296,12 +444,20 @@ def main() -> int:
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
+        "--shim-only", action="store_true",
+        help="append only the reviewed frozen shim return-margin repair; excludes all grading corrections",
+    )
+    parser.add_argument(
         "--complete-negative-finality", action="store_true",
         help="apply only the approved PR483 terminal-negative correction; use the same option for --verify-image",
     )
     parser.add_argument(
         "--source-access-denied", action="store_true",
         help="apply the exact-source access-denial correction; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--source-blocked-alias", action="store_true",
+        help="normalize the typed LinkedIn source diagnostic to existing source-access finality; use the same option for --verify-image",
     )
     parser.add_argument(
         "--pending-final-correction", action="store_true",
@@ -347,7 +503,30 @@ def main() -> int:
         "--archive-snapshot-https", action="store_true",
         help="use HTTPS for an exact source-bound Wayback snapshot locator; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--greenhouse-api-source", action="store_true",
+        help="read exact Greenhouse API postings through the existing bound source parser; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--auxiliary-source-name-binding", action="store_true",
+        help="omit optional auxiliary context rejected by the existing exact-name rule; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--homepage-linkedin-conflict-repair", action="store_true",
+        help="reach existing identity repair for an unproved same-domain LinkedIn conflict; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--observed-linkedin-ampersand", action="store_true",
+        help="route only reviewed observed ampersand company locators; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--verified-homepage-brand-alias", action="store_true",
+        help="compose verified brand identity and its matching host-validator contract; deploy that host validator too; use the same option for --verify-image",
+    )
     args = parser.parse_args()
+    if args.shim_only and any(value is True for name, value in vars(args).items()
+                              if name not in {"shim_only", "push"}):
+        raise CompositionError("shim-only mode cannot include grading corrections")
     if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
         raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
@@ -358,48 +537,79 @@ def main() -> int:
     revision = checked_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
     if args.push and checked_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise CompositionError("publishing requires a clean committed checkout")
+    with _managed_build_images(publish=args.push, verify_only=bool(args.verify_image)):
+        return _build_runtime(args, match, revision)
+
+
+def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str) -> int:
     base = image_inspect(args.grading_image)
     if base.get("Architecture") != "amd64" or base.get("Os") != "linux":
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        original = extract_frozen_sources(
-            args.grading_image, root / "original",
-            complete_negative_finality=args.complete_negative_finality,
-            source_access_denied=args.source_access_denied,
-            failed_attribute_source_recovery=args.failed_attribute_source_recovery,
-            **({"completed_investigation_finality": True}
-               if args.completed_investigation_finality else {}),
-            **({"identity_schema_repair": True}
-               if args.identity_schema_repair else {}),
-            **({"structured_homepage_numeric_alias": True}
-               if args.structured_homepage_numeric_alias else {}),
-            **({"bound_homepage_legal_alias": True}
-               if args.bound_homepage_legal_alias else {}),
-            **({"archive_snapshot_https": True}
-               if args.archive_snapshot_https else {}),
-            **({"authenticated_page_refusal": True}
-               if args.authenticated_page_refusal else {}),
-        )
-        files = expected_overlay(
-            original, complete_negative_finality=args.complete_negative_finality,
-            source_access_denied=args.source_access_denied,
-            pending_final_correction=args.pending_final_correction,
-            failed_attribute_source_recovery=args.failed_attribute_source_recovery,
-            authenticated_page_refusal=args.authenticated_page_refusal,
-            completed_investigation_finality=args.completed_investigation_finality,
-            identity_schema_repair=args.identity_schema_repair,
-            structured_homepage_numeric_alias=args.structured_homepage_numeric_alias,
-            bound_homepage_legal_alias=args.bound_homepage_legal_alias,
-            numeric_profile_legal_self_name=args.numeric_profile_legal_self_name,
-            single_tool_protocol_repair=args.single_tool_protocol_repair,
-            rejected_final_packet=args.rejected_final_packet,
-            archive_snapshot_https=args.archive_snapshot_https,
-        )
+        if args.shim_only:
+            from scripts.arena_reviewer_shim_response_window_seam import (
+                SHIM_FILE, OPERATIONS_FILE, convert_shim_response_window,
+            )
+            original = extract_frozen_sources(args.grading_image, root / "original", shim_only=True)
+            if set(original) != {SHIM_FILE, OPERATIONS_FILE}:
+                raise CompositionError("frozen shim sources are incomplete")
+            files = {SHIM_FILE: convert_shim_response_window(original[SHIM_FILE], original[OPERATIONS_FILE])}
+        else:
+            original = extract_frozen_sources(
+                args.grading_image, root / "original",
+                complete_negative_finality=args.complete_negative_finality,
+                source_access_denied=args.source_access_denied,
+                failed_attribute_source_recovery=args.failed_attribute_source_recovery,
+                **({"completed_investigation_finality": True}
+                   if args.completed_investigation_finality else {}),
+                **({"identity_schema_repair": True}
+                   if args.identity_schema_repair else {}),
+                **({"structured_homepage_numeric_alias": True}
+                   if args.structured_homepage_numeric_alias else {}),
+                **({"bound_homepage_legal_alias": True}
+                   if args.bound_homepage_legal_alias else {}),
+                **({"archive_snapshot_https": True}
+                   if args.archive_snapshot_https else {}),
+                **({"greenhouse_api_source": True}
+                   if args.greenhouse_api_source else {}),
+                **({"authenticated_page_refusal": True}
+                   if args.authenticated_page_refusal else {}),
+                **({"auxiliary_source_name_binding": True}
+                   if args.auxiliary_source_name_binding else {}),
+                **({"homepage_linkedin_conflict_repair": True}
+                   if args.homepage_linkedin_conflict_repair else {}),
+                **({"observed_linkedin_ampersand": True}
+                   if args.observed_linkedin_ampersand else {}),
+                **({"verified_homepage_brand_alias": True}
+                   if args.verified_homepage_brand_alias else {}),
+            )
+            files = expected_overlay(
+                original, complete_negative_finality=args.complete_negative_finality,
+                source_access_denied=args.source_access_denied,
+                pending_final_correction=args.pending_final_correction,
+                failed_attribute_source_recovery=args.failed_attribute_source_recovery,
+                authenticated_page_refusal=args.authenticated_page_refusal,
+                completed_investigation_finality=args.completed_investigation_finality,
+                identity_schema_repair=args.identity_schema_repair,
+                structured_homepage_numeric_alias=args.structured_homepage_numeric_alias,
+                bound_homepage_legal_alias=args.bound_homepage_legal_alias,
+                numeric_profile_legal_self_name=args.numeric_profile_legal_self_name,
+                single_tool_protocol_repair=args.single_tool_protocol_repair,
+                rejected_final_packet=args.rejected_final_packet,
+                archive_snapshot_https=args.archive_snapshot_https,
+                greenhouse_api_source=args.greenhouse_api_source,
+                **({"source_blocked_alias": True} if args.source_blocked_alias else {}),
+                auxiliary_source_name_binding=args.auxiliary_source_name_binding,
+                homepage_linkedin_conflict_repair=args.homepage_linkedin_conflict_repair,
+                observed_linkedin_ampersand=args.observed_linkedin_ampersand,
+                verified_homepage_brand_alias=args.verified_homepage_brand_alias,
+            )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
             + ("-negative-finality" if args.complete_negative_finality else "")
             + ("-source-access" if args.source_access_denied else "")
+            + ("-source-blocked-alias" if args.source_blocked_alias else "")
             + ("-pending-final-correction" if args.pending_final_correction else "")
             + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
             + ("-refusal" if args.authenticated_page_refusal else "")
@@ -409,8 +619,14 @@ def main() -> int:
             + ("-bound-homepage-legal-alias" if args.bound_homepage_legal_alias else "")
             + ("-numeric-legal-self-name" if args.numeric_profile_legal_self_name else "")
             + ("-archive-https" if args.archive_snapshot_https else "")
+            + ("-greenhouse-api" if args.greenhouse_api_source else "")
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
             + ("-rejected-final-packet" if args.rejected_final_packet else "")
+            + ("-auxiliary-name-binding" if args.auxiliary_source_name_binding else "")
+            + ("-homepage-linkedin-conflict" if args.homepage_linkedin_conflict_repair else "")
+            + ("-observed-linkedin-ampersand" if args.observed_linkedin_ampersand else "")
+            + ("-verified-homepage-brand" if args.verified_homepage_brand_alias else "")
+            + ("-shim-only" if args.shim_only else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -440,6 +656,9 @@ def main() -> int:
         if args.source_access_denied:
             from scripts.arena_reviewer_source_access_seam import CORRECTION_ID as SOURCE_ACCESS_CORRECTION_ID
             corrections.append(SOURCE_ACCESS_CORRECTION_ID)
+        if args.source_blocked_alias:
+            from scripts.arena_reviewer_source_blocked_seam import CORRECTION_ID as SOURCE_BLOCKED_CORRECTION_ID
+            corrections.append(SOURCE_BLOCKED_CORRECTION_ID)
         if args.pending_final_correction:
             from scripts.arena_reviewer_budget_seam import CORRECTION_ID as BUDGET_CORRECTION_ID
             corrections.append(BUDGET_CORRECTION_ID)
@@ -473,13 +692,38 @@ def main() -> int:
         if args.archive_snapshot_https:
             from scripts.arena_reviewer_archive_https_seam import CORRECTION_ID as ARCHIVE_HTTPS_CORRECTION_ID
             corrections.append(ARCHIVE_HTTPS_CORRECTION_ID)
+        if args.greenhouse_api_source:
+            from scripts.arena_reviewer_greenhouse_api_source_seam import CORRECTION_ID as GREENHOUSE_API_CORRECTION_ID
+            corrections.append(GREENHOUSE_API_CORRECTION_ID)
+        if args.auxiliary_source_name_binding:
+            from scripts.arena_reviewer_auxiliary_source_name_seam import CORRECTION_ID as AUXILIARY_NAME_CORRECTION_ID
+            corrections.append(AUXILIARY_NAME_CORRECTION_ID)
+        if args.homepage_linkedin_conflict_repair:
+            from scripts.arena_reviewer_homepage_linkedin_conflict_seam import CORRECTION_ID as HOMEPAGE_LINKEDIN_CONFLICT_CORRECTION_ID
+            corrections.append(HOMEPAGE_LINKEDIN_CONFLICT_CORRECTION_ID)
+        if args.observed_linkedin_ampersand:
+            from scripts.arena_reviewer_observed_linkedin_ampersand_seam import CORRECTION_ID as OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID
+            corrections.append(OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID)
+        host_requirements = {}
+        if args.verified_homepage_brand_alias:
+            from scripts.arena_reviewer_homepage_brand_alias_seam import (
+                CORRECTION_ID as BRAND_CORRECTION_ID, HOST_VALIDATOR_REQUIREMENT,
+            )
+            corrections.append(BRAND_CORRECTION_ID)
+            host_requirements["host_validator_requirement"] = HOST_VALIDATOR_REQUIREMENT
+        identity = {"grading_image": args.grading_image}
+        if args.shim_only:
+            from scripts.arena_reviewer_shim_response_window_seam import CORRECTION_ID as SHIM_CORRECTION_ID
+            identity = {"composition_mode": "shim_only_transport", "base_image": args.grading_image,
+                        "base_image_id": base.get("Id"), "transport_corrections": [SHIM_CORRECTION_ID]}
         print(json.dumps({
-            "grading_image": args.grading_image,
+            **identity,
             "runtime_image": reference,
             "runtime_source_commit": revision,
             "base_layers_unchanged": True,
             "process_configuration_unchanged": True,
             "grading_corrections": corrections,
+            **host_requirements,
             "original_files": {name: hashlib.sha256(value).hexdigest() for name, value in original.items()},
             "overlay_files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
         }, sort_keys=True))
@@ -491,3 +735,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (CompositionError, ValueError) as exc:
         raise SystemExit(str(exc)) from None
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(exc.returncode) from None

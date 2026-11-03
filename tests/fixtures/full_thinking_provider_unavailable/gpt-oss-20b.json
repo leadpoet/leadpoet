@@ -1,0 +1,837 @@
+{
+  "example": {
+    "completeness": {
+      "complete": false,
+      "incomplete_reasons": [
+        "scoring_label_unavailable",
+        "agent_task_state_unverified"
+      ]
+    },
+    "configuration": {
+      "reasoning_capture_policy": "full_generated_thinking_v1",
+      "reasoning_route_registry": {
+        "approved_routes": [
+          {
+            "allowed_fallback_routes": [],
+            "answer_headroom_tokens": 1024,
+            "api": "openrouter.chat",
+            "context_tokens": 131072,
+            "evidence": {
+              "documentation_url": "https://openrouter.ai/",
+              "probe_id": "isolated-candidate-probe",
+              "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "verified_at": "2026-10-23T00:00:00Z"
+            },
+            "full_text_fields": [
+              "reasoning",
+              "reasoning_details.text"
+            ],
+            "max_output_tokens": 32768,
+            "mode": {
+              "effort": "high"
+            },
+            "model_id": "openai/gpt-oss-20b",
+            "model_version": "openai/gpt-oss-20b",
+            "parser_version": "arena_openrouter_reasoning_v1",
+            "price_ceiling": {
+              "completion": "0.00000014",
+              "internal_reasoning": "0",
+              "prompt": "0.00000003",
+              "request": "0"
+            },
+            "provider": "deepinfra/bf16",
+            "provider_name": "DeepInfra",
+            "semantic_class": "full_generated_thinking",
+            "status": "approved"
+          }
+        ],
+        "baseline_route": null,
+        "schema_version": 1
+      }
+    },
+    "example_hash": "sha256:a0fd98d6257461302fab80c6da8b304321fbb4f1bbc13cc3b9642f47f827bd3e",
+    "provider_calls": [
+      {
+        "accounting_state": "settlement",
+        "action_sequence": 0,
+        "actual_microusd": 0,
+        "base_call_identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f",
+        "call_identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f",
+        "evidence_gaps": [],
+        "funding_source": "miner_key",
+        "lifecycle": [
+          {
+            "accounting": {
+              "action_sequence": 0,
+              "base_call_identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f",
+              "provider_attempt": 1,
+              "request_hash": "sha256:42451f9d112089481a29c8c97dbd19e2d11ee61ac2def39d8d15ed13f2ce7beb"
+            },
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:12:45.75207+00:00",
+            "entry_id": 1,
+            "entry_kind": "reservation",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {},
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:12:45.753903+00:00",
+            "entry_id": 2,
+            "entry_kind": "dispatch",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {
+              "released_microusd": 0,
+              "reserved_microusd": 0,
+              "variance_microusd": 0
+            },
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:12:45.814828+00:00",
+            "entry_id": 3,
+            "entry_kind": "settlement",
+            "funding_source": "miner_key"
+          }
+        ],
+        "operation_id": "openrouter.chat",
+        "provider": "openrouter",
+        "provider_attempt": 1,
+        "reasoning_capture": {
+          "api": "openrouter.chat",
+          "changes": [
+            "reasoning",
+            "tested_output_allowance"
+          ],
+          "context_tokens": 131072,
+          "full_text_fields": [
+            "reasoning",
+            "reasoning_details.text"
+          ],
+          "max_output_tokens": 32768,
+          "mode": {
+            "effort": "high"
+          },
+          "model_id": "openai/gpt-oss-20b",
+          "model_version": "openai/gpt-oss-20b",
+          "parser_version": "arena_openrouter_reasoning_v1",
+          "policy": "full_generated_thinking_v1",
+          "price_ceiling": {
+            "completion": "0.00000014",
+            "internal_reasoning": "0",
+            "prompt": "0.00000003",
+            "request": "0"
+          },
+          "probe_id": "isolated-candidate-probe",
+          "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "provider_name": "DeepInfra",
+          "provider_route": "deepinfra/bf16",
+          "registry_sha256": "29e6cc722f449e81bd1b619047f7b5fa0de979c3c80b0835f457f75c81f54c1b",
+          "requested": true,
+          "reviewed_route": true,
+          "semantic_class": "full_generated_thinking"
+        },
+        "request": {
+          "admitted_parameters": {
+            "max_tokens": 2048,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "effective_operation_id": "openrouter.chat",
+          "effective_parameters": {
+            "max_tokens": 32768,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "hashed_parameters": {
+            "max_tokens": 32768,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "normalized_parameters": {
+            "max_tokens": 2048,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "operation_id": "openrouter.chat",
+          "outbound": {
+            "body": {
+              "max_tokens": 32768,
+              "messages": [
+                {
+                  "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                  "role": "user"
+                }
+              ],
+              "model": "openai/gpt-oss-20b",
+              "provider": {
+                "allow_fallbacks": false,
+                "data_collection": "deny",
+                "max_price": {
+                  "completion": 0.14,
+                  "prompt": 0.03,
+                  "request": 0
+                },
+                "only": [
+                  "deepinfra/bf16"
+                ],
+                "require_parameters": true,
+                "zdr": true
+              },
+              "reasoning": {
+                "effort": "high",
+                "exclude": false
+              },
+              "stream": false,
+              "tool_choice": {
+                "function": {
+                  "name": "lookup_evidence"
+                },
+                "type": "function"
+              },
+              "tools": [
+                {
+                  "function": {
+                    "description": "Read synthetic company evidence by ID.",
+                    "name": "lookup_evidence",
+                    "parameters": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "evidence_id": {
+                          "enum": [
+                            "profile",
+                            "headcount"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "evidence_id"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "type": "function"
+                }
+              ]
+            },
+            "body_sha256": "sha256:dc8c811c31a3191c4cbabe5f6961357e22bec887604ae143abcb4570119e9693",
+            "content_type": "application/json",
+            "host": "openrouter.ai",
+            "method": "POST",
+            "path": "/api/v1/chat/completions",
+            "query": {}
+          },
+          "privacy": {
+            "redacted": false,
+            "redactions": []
+          },
+          "reasoning_capture": {
+            "api": "openrouter.chat",
+            "changes": [
+              "reasoning",
+              "tested_output_allowance"
+            ],
+            "context_tokens": 131072,
+            "full_text_fields": [
+              "reasoning",
+              "reasoning_details.text"
+            ],
+            "max_output_tokens": 32768,
+            "mode": {
+              "effort": "high"
+            },
+            "model_id": "openai/gpt-oss-20b",
+            "model_version": "openai/gpt-oss-20b",
+            "parser_version": "arena_openrouter_reasoning_v1",
+            "policy": "full_generated_thinking_v1",
+            "price_ceiling": {
+              "completion": "0.00000014",
+              "internal_reasoning": "0",
+              "prompt": "0.00000003",
+              "request": "0"
+            },
+            "probe_id": "isolated-candidate-probe",
+            "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "provider_name": "DeepInfra",
+            "provider_route": "deepinfra/bf16",
+            "registry_sha256": "29e6cc722f449e81bd1b619047f7b5fa0de979c3c80b0835f457f75c81f54c1b",
+            "requested": true,
+            "reviewed_route": true,
+            "semantic_class": "full_generated_thinking"
+          },
+          "request_hash": "sha256:42451f9d112089481a29c8c97dbd19e2d11ee61ac2def39d8d15ed13f2ce7beb",
+          "route": {},
+          "schema_version": "leadpoet.lab_arena.training_request.v1"
+        },
+        "request_capture": {
+          "compressed_bytes": 1306,
+          "encoding": "gzip",
+          "redacted": false,
+          "redactions": [],
+          "ref": "private/arena-training/requests/2dc1492d2920fa2f91585af52969e7b1e15feb3ec78cc7a65d7a5e723490e256.json.gz",
+          "schema_version": "leadpoet.lab_arena.training_request.v1",
+          "sha256": "sha256:2dc1492d2920fa2f91585af52969e7b1e15feb3ec78cc7a65d7a5e723490e256",
+          "size_bytes": 6277,
+          "status": "referenced"
+        },
+        "request_hash": "sha256:42451f9d112089481a29c8c97dbd19e2d11ee61ac2def39d8d15ed13f2ce7beb",
+        "reservation_entry_id": 1,
+        "response": {
+          "error": {
+            "code": 404,
+            "message": "All providers have been ignored. To change your default ignored providers, visit: https://openrouter.ai/settings/privacy",
+            "metadata": {
+              "failed_routing_step": "Filter by Ignored Providers",
+              "routing_funnel": [
+                {
+                  "endpoint_count": 11,
+                  "step": "Initial Endpoints"
+                },
+                {
+                  "endpoint_count": 10,
+                  "step": "Filter by Regional Surcharge"
+                },
+                {
+                  "endpoint_count": 5,
+                  "step": "Filter by Max Price"
+                },
+                {
+                  "endpoint_count": 1,
+                  "reason": "not in your request's provider.only preference",
+                  "step": "Filter by Allowed Providers"
+                }
+              ]
+            }
+          },
+          "openrouter_metadata": {
+            "attempt": 0,
+            "endpoints": {
+              "available": [
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "Darkbloom",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "AkashML",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "DekaLLM",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "CoreWeave",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "DeepInfra",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "Parasail",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "SiliconFlow",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "Amazon Bedrock",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "Amazon Bedrock",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "Google",
+                  "selected": false
+                },
+                {
+                  "model": "openai/gpt-oss-20b",
+                  "provider": "Groq",
+                  "selected": false
+                }
+              ],
+              "total": 11
+            },
+            "is_byok": false,
+            "region": "SJC",
+            "requested": "openai/gpt-oss-20b",
+            "strategy": "direct",
+            "summary": "available=11"
+          }
+        },
+        "response_hidden_reasoning_removed": false,
+        "response_privacy_redactions": [],
+        "response_provenance": {
+          "agent_receipt": "reported_exact_body_received",
+          "agent_receipt_refs": [
+            {
+              "id": 0,
+              "payload_sha256": "sha256:d3c10a9846d237ac04c826423afffc8162d64d99ff76a31720bc71230a9fddc8",
+              "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+            }
+          ],
+          "delivery_to_worker": "socket_written",
+          "selected_response_acknowledged": true,
+          "source": "stored_provider_ledger_receipt",
+          "worker_body_exact_in_artifact": true,
+          "worker_body_source": "ledger_terminal",
+          "worker_error_observation_ref": {
+            "ordinal": 0,
+            "payload_sha256": "sha256:d3c10a9846d237ac04c826423afffc8162d64d99ff76a31720bc71230a9fddc8",
+            "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+          },
+          "worker_receipt_ref": {
+            "ordinal": 0,
+            "payload_sha256": "sha256:d3c10a9846d237ac04c826423afffc8162d64d99ff76a31720bc71230a9fddc8",
+            "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+          },
+          "worker_received_receipt_entry_ids": [
+            3
+          ]
+        },
+        "response_receipts": [
+          {
+            "created_at": "2026-10-25T17:12:45.814828+00:00",
+            "entry_id": 3,
+            "entry_kind": "settlement",
+            "metadata": {
+              "call_succeeded": false,
+              "headers": {
+                "content-length": "1478",
+                "content-type": "application/json"
+              },
+              "reasoning_route_observation": {
+                "expected_model_version": "openai/gpt-oss-20b",
+                "expected_provider_name": "DeepInfra",
+                "requested_model": "openai/gpt-oss-20b",
+                "requested_provider_route": "deepinfra/bf16",
+                "response_model": null,
+                "response_provider_name": null,
+                "selected_endpoint_model": null,
+                "selected_endpoint_provider_name": null,
+                "status": "unverified"
+              },
+              "status": 404,
+              "timing_scope": "initial_provider_transport_send",
+              "transport_elapsed_ms": 59
+            },
+            "privacy_redactions": [],
+            "response_ref": {
+              "entry_id": 3,
+              "field": "response"
+            },
+            "response_sha256": "sha256:f8a400d66dd3c166cd07845d69c0b16fa8f4a72858e9a4b63d6622e7b4b53d8a",
+            "wire_body_bytes": 1478,
+            "wire_body_sha256": "sha256:044b0843202f0c1e8e0b9789f47209f0676ea4023965db46581912dd9ead59d6"
+          }
+        ],
+        "response_sha256": "sha256:f8a400d66dd3c166cd07845d69c0b16fa8f4a72858e9a4b63d6622e7b4b53d8a",
+        "response_status": 404,
+        "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+        "terminal_entry_id": 3,
+        "upstream_response_receipts": [
+          {
+            "body_bytes": 1478,
+            "body_sha256": "sha256:044b0843202f0c1e8e0b9789f47209f0676ea4023965db46581912dd9ead59d6",
+            "delivery_to_worker": "not_proved",
+            "entry_id": 3,
+            "privacy_redactions": [],
+            "provenance": "private_upstream_response_receipt",
+            "response": {
+              "error": {
+                "code": 404,
+                "message": "All providers have been ignored. To change your default ignored providers, visit: https://openrouter.ai/settings/privacy",
+                "metadata": {
+                  "failed_routing_step": "Filter by Ignored Providers",
+                  "routing_funnel": [
+                    {
+                      "endpoint_count": 11,
+                      "step": "Initial Endpoints"
+                    },
+                    {
+                      "endpoint_count": 10,
+                      "step": "Filter by Regional Surcharge"
+                    },
+                    {
+                      "endpoint_count": 5,
+                      "step": "Filter by Max Price"
+                    },
+                    {
+                      "endpoint_count": 1,
+                      "reason": "not in your request's provider.only preference",
+                      "step": "Filter by Allowed Providers"
+                    }
+                  ]
+                }
+              },
+              "openrouter_metadata": {
+                "attempt": 0,
+                "endpoints": {
+                  "available": [
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "Darkbloom",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "AkashML",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "DekaLLM",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "CoreWeave",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "DeepInfra",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "Parasail",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "SiliconFlow",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "Amazon Bedrock",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "Amazon Bedrock",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "Google",
+                      "selected": false
+                    },
+                    {
+                      "model": "openai/gpt-oss-20b",
+                      "provider": "Groq",
+                      "selected": false
+                    }
+                  ],
+                  "total": 11
+                },
+                "is_byok": false,
+                "region": "SJC",
+                "requested": "openai/gpt-oss-20b",
+                "strategy": "direct",
+                "summary": "available=11"
+              }
+            },
+            "status": 404,
+            "wire_body_bytes": 1478,
+            "wire_body_sha256": "sha256:044b0843202f0c1e8e0b9789f47209f0676ea4023965db46581912dd9ead59d6"
+          }
+        ]
+      }
+    ],
+    "role": "miner",
+    "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+    "schema_version": "leadpoet.lab_arena.training_example.v1",
+    "worker_observation_artifacts": {
+      "arena-2099-10-14-host474:drain420-miner:2:8:1": {
+        "claim_request_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "execute",
+        "lease_generation": 1,
+        "payload": {
+          "agent_observation_count": 1,
+          "agent_observations": [
+            {
+              "after_action_sequence": 0,
+              "data": {
+                "body_bytes": 1478,
+                "body_sha256": "sha256:044b0843202f0c1e8e0b9789f47209f0676ea4023965db46581912dd9ead59d6",
+                "call_identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f",
+                "status": 404
+              },
+              "depends_on": [],
+              "id": 0,
+              "kind": "response_received",
+              "observed_at": "2026-10-25T17:12:45Z",
+              "privacy": {
+                "redacted": false,
+                "redactions": []
+              }
+            }
+          ],
+          "complete": true,
+          "failures": [],
+          "local_refusal_count": 0,
+          "observation_count": 1,
+          "observations": [
+            {
+              "action_sequence": 0,
+              "call_identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f",
+              "contributes_to_provider_call_count": true,
+              "kind": "nonstandard_response",
+              "operation_id": "openrouter.chat",
+              "ordinal": 0,
+              "outcome": {
+                "protocol": "frame",
+                "response": {
+                  "body_b64": "eyJlcnJvciI6eyJtZXNzYWdlIjoiQWxsIHByb3ZpZGVycyBoYXZlIGJlZW4gaWdub3JlZC4gVG8gY2hhbmdlIHlvdXIgZGVmYXVsdCBpZ25vcmVkIHByb3ZpZGVycywgdmlzaXQ6IGh0dHBzOi8vb3BlbnJvdXRlci5haS9zZXR0aW5ncy9wcml2YWN5IiwiY29kZSI6NDA0LCJtZXRhZGF0YSI6eyJyb3V0aW5nX2Z1bm5lbCI6W3sic3RlcCI6IkluaXRpYWwgRW5kcG9pbnRzIiwiZW5kcG9pbnRfY291bnQiOjExfSx7InN0ZXAiOiJGaWx0ZXIgYnkgUmVnaW9uYWwgU3VyY2hhcmdlIiwiZW5kcG9pbnRfY291bnQiOjEwfSx7InN0ZXAiOiJGaWx0ZXIgYnkgTWF4IFByaWNlIiwiZW5kcG9pbnRfY291bnQiOjV9LHsic3RlcCI6IkZpbHRlciBieSBBbGxvd2VkIFByb3ZpZGVycyIsImVuZHBvaW50X2NvdW50IjoxLCJyZWFzb24iOiJub3QgaW4geW91ciByZXF1ZXN0J3MgcHJvdmlkZXIub25seSBwcmVmZXJlbmNlIn1dLCJmYWlsZWRfcm91dGluZ19zdGVwIjoiRmlsdGVyIGJ5IElnbm9yZWQgUHJvdmlkZXJzIn19LCJvcGVucm91dGVyX21ldGFkYXRhIjp7InJlcXVlc3RlZCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInN0cmF0ZWd5IjoiZGlyZWN0IiwicmVnaW9uIjoiU0pDIiwic3VtbWFyeSI6ImF2YWlsYWJsZT0xMSIsImF0dGVtcHQiOjAsImlzX2J5b2siOmZhbHNlLCJlbmRwb2ludHMiOnsidG90YWwiOjExLCJhdmFpbGFibGUiOlt7InByb3ZpZGVyIjoiRGFya2Jsb29tIiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJBa2FzaE1MIiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJEZWthTExNIiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJDb3JlV2VhdmUiLCJtb2RlbCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInNlbGVjdGVkIjpmYWxzZX0seyJwcm92aWRlciI6IkRlZXBJbmZyYSIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfSx7InByb3ZpZGVyIjoiUGFyYXNhaWwiLCJtb2RlbCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInNlbGVjdGVkIjpmYWxzZX0seyJwcm92aWRlciI6IlNpbGljb25GbG93IiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJBbWF6b24gQmVkcm9jayIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfSx7InByb3ZpZGVyIjoiQW1hem9uIEJlZHJvY2siLCJtb2RlbCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInNlbGVjdGVkIjpmYWxzZX0seyJwcm92aWRlciI6Ikdvb2dsZSIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfSx7InByb3ZpZGVyIjoiR3JvcSIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfV19fX0=",
+                  "headers": {
+                    "content-length": "1478",
+                    "content-type": "application/json",
+                    "x-leadpoet-call-identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f"
+                  },
+                  "status": 404
+                }
+              },
+              "privacy": {
+                "redacted": false,
+                "redactions": []
+              },
+              "request": {
+                "admitted_parameters": {
+                  "max_tokens": 2048,
+                  "messages": [
+                    {
+                      "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                      "role": "user"
+                    }
+                  ],
+                  "model": "openai/gpt-oss-20b",
+                  "tool_choice": {
+                    "function": {
+                      "name": "lookup_evidence"
+                    },
+                    "type": "function"
+                  },
+                  "tools": [
+                    {
+                      "function": {
+                        "description": "Read synthetic company evidence by ID.",
+                        "name": "lookup_evidence",
+                        "parameters": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "evidence_id": {
+                              "enum": [
+                                "profile",
+                                "headcount"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "evidence_id"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "function"
+                    }
+                  ]
+                },
+                "timeout_ms": 120000
+              }
+            }
+          ],
+          "response_receipt_count": 1,
+          "response_receipts": [
+            {
+              "action_sequence": 0,
+              "body_bytes": 1478,
+              "body_sha256": "sha256:044b0843202f0c1e8e0b9789f47209f0676ea4023965db46581912dd9ead59d6",
+              "call_identity": "sha256:9f218841fd583c01688b05098e528ab06728dc82955f25b7826e86374f328f8f",
+              "operation_id": "openrouter.chat",
+              "ordinal": 0,
+              "protocol": "frame",
+              "socket_written_at": "2026-10-25T17:12:45Z",
+              "status": 404,
+              "write_state": "socket_written"
+            }
+          ]
+        },
+        "payload_sha256": "sha256:d3c10a9846d237ac04c826423afffc8162d64d99ff76a31720bc71230a9fddc8",
+        "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+        "schema_version": "leadpoet.lab_arena.training_observations.v2"
+      }
+    }
+  },
+  "model": "openai/gpt-oss-20b",
+  "source": "Bounded real OpenRouter probe, 2026-10-25; no generation returned.",
+  "wire_body_b64": "eyJlcnJvciI6eyJtZXNzYWdlIjoiQWxsIHByb3ZpZGVycyBoYXZlIGJlZW4gaWdub3JlZC4gVG8gY2hhbmdlIHlvdXIgZGVmYXVsdCBpZ25vcmVkIHByb3ZpZGVycywgdmlzaXQ6IGh0dHBzOi8vb3BlbnJvdXRlci5haS9zZXR0aW5ncy9wcml2YWN5IiwiY29kZSI6NDA0LCJtZXRhZGF0YSI6eyJyb3V0aW5nX2Z1bm5lbCI6W3sic3RlcCI6IkluaXRpYWwgRW5kcG9pbnRzIiwiZW5kcG9pbnRfY291bnQiOjExfSx7InN0ZXAiOiJGaWx0ZXIgYnkgUmVnaW9uYWwgU3VyY2hhcmdlIiwiZW5kcG9pbnRfY291bnQiOjEwfSx7InN0ZXAiOiJGaWx0ZXIgYnkgTWF4IFByaWNlIiwiZW5kcG9pbnRfY291bnQiOjV9LHsic3RlcCI6IkZpbHRlciBieSBBbGxvd2VkIFByb3ZpZGVycyIsImVuZHBvaW50X2NvdW50IjoxLCJyZWFzb24iOiJub3QgaW4geW91ciByZXF1ZXN0J3MgcHJvdmlkZXIub25seSBwcmVmZXJlbmNlIn1dLCJmYWlsZWRfcm91dGluZ19zdGVwIjoiRmlsdGVyIGJ5IElnbm9yZWQgUHJvdmlkZXJzIn19LCJvcGVucm91dGVyX21ldGFkYXRhIjp7InJlcXVlc3RlZCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInN0cmF0ZWd5IjoiZGlyZWN0IiwicmVnaW9uIjoiU0pDIiwic3VtbWFyeSI6ImF2YWlsYWJsZT0xMSIsImF0dGVtcHQiOjAsImlzX2J5b2siOmZhbHNlLCJlbmRwb2ludHMiOnsidG90YWwiOjExLCJhdmFpbGFibGUiOlt7InByb3ZpZGVyIjoiRGFya2Jsb29tIiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJBa2FzaE1MIiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJEZWthTExNIiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJDb3JlV2VhdmUiLCJtb2RlbCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInNlbGVjdGVkIjpmYWxzZX0seyJwcm92aWRlciI6IkRlZXBJbmZyYSIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfSx7InByb3ZpZGVyIjoiUGFyYXNhaWwiLCJtb2RlbCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInNlbGVjdGVkIjpmYWxzZX0seyJwcm92aWRlciI6IlNpbGljb25GbG93IiwibW9kZWwiOiJvcGVuYWkvZ3B0LW9zcy0yMGIiLCJzZWxlY3RlZCI6ZmFsc2V9LHsicHJvdmlkZXIiOiJBbWF6b24gQmVkcm9jayIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfSx7InByb3ZpZGVyIjoiQW1hem9uIEJlZHJvY2siLCJtb2RlbCI6Im9wZW5haS9ncHQtb3NzLTIwYiIsInNlbGVjdGVkIjpmYWxzZX0seyJwcm92aWRlciI6Ikdvb2dsZSIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfSx7InByb3ZpZGVyIjoiR3JvcSIsIm1vZGVsIjoib3BlbmFpL2dwdC1vc3MtMjBiIiwic2VsZWN0ZWQiOmZhbHNlfV19fX0="
+}

@@ -13,11 +13,20 @@ from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows, _security_state
 from tests.lab_arena.competition_summary_projection_test import _row
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, current_service_database, database_with_lab_arena_migration
 
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/464-lab-arena-public-read-index.sql"
 INDEX = "lab_arena_rounds_chain_mode_created_idx"
+# Migration 501 adds company_judgment_policy to this projection. These exact
+# migration-464 checks must keep the original public field contract.
+PUBLIC_CONFIGURATION_FIELDS_464 = (
+    'mode', 'network_name', 'netuid', 'schedule', 'benchmark_disclosure_policy',
+    'stage_1_icp_count', 'stage_2_icp_count', 'promotion_margin',
+    'execution_sequence_policy', 'sourcing_cost_eligibility_policy',
+    'recovery_source_round_id', 'integrity_policy', 'contact_policy',
+    'company_quality_policy', 'intent_details_policy', 'baseline_hotkey',
+)
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +35,14 @@ def database():
         tuple(name for name in CURRENT_SERVICE_MIGRATIONS if name != MIGRATION.name)
         + ("443-lab-arena-competition-publication-projection.sql",)
     )
+
+
+@pytest.fixture
+def current_database_without_index():
+    for database in current_service_database():
+        with database[0].connect(**database[1]) as connection,connection.cursor() as cursor:
+            cursor.execute('DROP INDEX public.' + INDEX)
+        yield database
 
 
 def _plan(cursor, sql):
@@ -39,13 +56,15 @@ def _nodes(plan):
         yield from _nodes(child)
 
 
-def test_index_bounds_large_round_reads_preserves_responses_and_security(database, monkeypatch):
-    pg, dsn = database
+def test_index_bounds_large_round_reads_preserves_responses_and_security(current_database_without_index, monkeypatch):
+    pg, dsn = current_database_without_index
     connection = pg.connect(**dsn)
     connection.autocommit = True
     transport = PsycopgTransport(lambda: pg.connect(**dsn))
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 10, 14, tzinfo=timezone.utc)
     service._store = ArenaStore(transport)
+    service._clock = lambda: datetime(2026, 10, 13, tzinfo=timezone.utc)
     service._config = SimpleNamespace(mode="live", pinned_round_id=None,
         chain=SimpleNamespace(current_settlement_epoch=lambda: 100))
     # Deliberately difficult to compress: public reads must not walk shadow
@@ -67,6 +86,8 @@ def test_index_bounds_large_round_reads_preserves_responses_and_security(databas
             security_before = _security_state(cursor)
             cursor.execute("SELECT md5(string_agg(to_jsonb(r)::text, '' ORDER BY round_id)) FROM public.lab_arena_rounds r")
             data_before = cursor.fetchone()
+            cursor.execute("SELECT pg_get_functiondef('public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'::regprocedure)")
+            current_configuration_reader = cursor.fetchone()[0]
             query = "SELECT round_id FROM public.lab_arena_rounds WHERE arena_network_name='finney' AND arena_netuid=71 AND configuration_doc->>'mode'='live' ORDER BY created_at DESC LIMIT 30"
             cursor.execute("SET ROLE lab_arena_service")
             before = _plan(cursor, query)
@@ -82,6 +103,12 @@ def test_index_bounds_large_round_reads_preserves_responses_and_security(databas
         with connection.cursor() as cursor:
             cursor.execute(MIGRATION.read_text())
             cursor.execute(MIGRATION.read_text())
+            # Migration 464 resets the reader to its original body. Restore
+            # this fixture's current reader, then apply migration 601 before
+            # checking current API parity. The separate test below still
+            # checks the original migration 464 projection without upgrades.
+            cursor.execute(current_configuration_reader)
+            cursor.execute(MIGRATION.with_name("601-lab-arena-defending-champion-proof.sql").read_text())
             # Indexes do not alter table/schema privileges or row policies.
             security_after = _security_state(cursor)
             assert security_after[0] == security_before[0]
@@ -133,6 +160,6 @@ def test_compact_configuration_preserves_types_missing_null_and_permissions(data
                 cursor.execute("SELECT public.lab_arena_public_configuration_v1(jsonb_populate_record(NULL::public.lab_arena_rounds,%s::jsonb))", (json.dumps({"configuration_doc": configuration}),))
                 actual = cursor.fetchone()[0]
                 assert actual == ({key: value for key, value in configuration.items()
-                    if key in store_module.PUBLIC_CONFIGURATION_FIELDS} if isinstance(configuration, dict) else {})
+                    if key in PUBLIC_CONFIGURATION_FIELDS_464} if isinstance(configuration, dict) else {})
     finally:
         connection.close()

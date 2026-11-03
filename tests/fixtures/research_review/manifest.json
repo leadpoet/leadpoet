@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "scope": "Synthetic source-only reviewer benchmark under an injected local runtime contract. This manifest is never included in reviewed archives.",
+  "runtime_assumption": "Local causal checks call configure(model, tools) before run_icp. Production Arena does not supply this setup; these fixtures do not prove admitted-submission runtime compatibility.",
+  "cases": [
+    {"id": "adaptive_json", "expected": "model_directed"},
+    {"id": "native_tools", "expected": "model_directed"},
+    {"id": "bounded_hybrid", "expected": "model_directed"},
+    {"id": "fixed_extractor", "expected": "workflow"},
+    {"id": "fixed_query_plan", "expected": "workflow"},
+    {"id": "ignored_model_decoy", "expected": "workflow"},
+    {"id": "forced_tool_decoy", "expected": "workflow"},
+    {"id": "unreachable_adaptive", "expected": "workflow"},
+    {"id": "posthoc_explanation", "expected": "workflow"},
+    {"id": "dynamic_helper", "expected": "unverified"}
+  ]
+}

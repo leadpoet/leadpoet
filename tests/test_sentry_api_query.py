@@ -120,268 +120,136 @@ def test_remote_failure_does_not_echo_captured_secret(monkeypatch):
     assert FAKE_TOKEN not in raised.value.detail
 
 
-def test_configurator_sends_token_only_over_ssh_stdin(monkeypatch):
-    observed = {}
+class _SentryMemoryClient:
+    def __init__(self, initial):
+        self.current = "v1"
+        self.versions = {"v1": initial}
+        self.stages = {"v1": ["AWSCURRENT"]}
+        self.puts = []
+        self.reads = 0
 
-    def run(command, **kwargs):
-        observed["command"] = command
-        observed["input"] = kwargs["input"]
-        return _Result(stdout='{"updated":true,"format":"dotenv"}')
+    def get_secret_value(self, **kwargs):
+        self.reads += 1
+        version = kwargs.get("VersionId", self.current)
+        return {"VersionId": version, "SecretString": self.versions[version]}
 
-    monkeypatch.setattr(configure.subprocess, "run", run)
+    def put_secret_value(self, **kwargs):
+        previous = self.current
+        self.current = kwargs["ClientRequestToken"]
+        self.versions[self.current] = kwargs["SecretString"]
+        self.stages = {previous: ["AWSPREVIOUS"], self.current: ["AWSCURRENT"]}
+        self.puts.append(kwargs)
+        return {"VersionId": self.current}
 
-    document_format = configure._update_target(
-        "gateway",
-        FAKE_TOKEN,
-        ssh_key=Path("/tmp/test.pem"),
-        timeout=2,
-    )
-
-    assert document_format == "dotenv"
-    assert observed["input"] == FAKE_TOKEN
-    assert FAKE_TOKEN not in " ".join(observed["command"])
-
-
-def test_configurator_failure_never_echoes_remote_output(monkeypatch):
-    monkeypatch.setattr(
-        configure.subprocess,
-        "run",
-        lambda *args, **kwargs: _Result(
-            returncode=35,
-            stdout=FAKE_TOKEN,
-            stderr=FAKE_TOKEN,
-        ),
-    )
-
-    with pytest.raises(configure.ConfigurationError) as raised:
-        configure._update_target(
-            "validator",
-            FAKE_TOKEN,
-            ssh_key=Path("/tmp/test.pem"),
-            timeout=2,
-        )
-
-    assert FAKE_TOKEN not in str(raised.value)
-    assert FAKE_TOKEN not in raised.value.detail
+    def describe_secret(self, **kwargs):
+        return {"VersionIdsToStages": self.stages}
 
 
-@pytest.mark.parametrize(
-    ("status", "expected_code"),
-    [
-        (31, "secret_read_unavailable"),
-        (32, "secret_document_invalid"),
-        (34, "secret_changed_concurrently"),
-        (35, "secret_writer_access_denied"),
-        (36, "secret_write_readback_mismatch"),
-        (37, "secret_not_found"),
-        (38, "secret_write_rejected"),
-        (39, "secret_write_failed"),
-        (40, "secret_write_superseded"),
-        (255, "secret_update_unavailable"),
-    ],
-)
-def test_configurator_maps_remote_failure_without_exposing_stderr(
-    monkeypatch,
-    status,
-    expected_code,
-):
-    monkeypatch.setattr(
-        configure.subprocess,
-        "run",
-        lambda *args, **kwargs: _Result(
-            returncode=status,
-            stdout=FAKE_TOKEN,
-            stderr="failure " + FAKE_TOKEN,
-        ),
-    )
-
-    with pytest.raises(configure.ConfigurationError) as raised:
-        configure._update_target(
-            "gateway",
-            FAKE_TOKEN,
-            ssh_key=Path("/tmp/test.pem"),
-            timeout=2,
-        )
-
-    assert raised.value.code == expected_code
-    assert FAKE_TOKEN not in str(raised.value)
-    assert FAKE_TOKEN not in raised.value.detail
+def test_configurator_keeps_token_in_local_sdk_memory_without_subprocess(monkeypatch, capsys):
+    from scripts import production_secret_operator
+    client = _SentryMemoryClient("export SAFE_VALUE=present\n")
+    seen = []
+    monkeypatch.setattr(production_secret_operator, "secret_operator_client",
+                        lambda **kwargs: seen.append(kwargs) or (client, "493765492819"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("secret subprocess"))
+    assert configure._update_target("gateway", FAKE_TOKEN, timeout=2) == "dotenv"
+    assert seen == [{"profile": "leadpoet-lab", "timeout_seconds": 5.0}]
+    assert client.puts[0]["SecretString"].count(FAKE_TOKEN) == 1
+    assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize(
-    ("initial", "expected_format"),
-    [
-        (
-            "export LEADPOET_SENTRY_ENABLED=1\n"
-            "export LEADPOET_SENTRY_API_TOKEN=old-value\n"
-            "export SAFE_VALUE=present\n",
-            "dotenv",
-        ),
-        (
-            json.dumps(
-                {
-                    "LEADPOET_SENTRY_ENABLED": "1",
-                    "LEADPOET_SENTRY_API_TOKEN": "old-value",
-                    "SAFE_VALUE": "present",
-                }
-            ),
-            "json",
-        ),
-    ],
-)
-def test_remote_configurator_preserves_document_format_and_verifies_readback(
-    tmp_path,
-    initial,
-    expected_format,
-):
-    state = tmp_path / "state.json"
-    state.write_text(
-        json.dumps(
-            {
-                "current": "v1",
-                "versions": {"v1": initial},
-                "stages": {"v1": ["AWSCURRENT"]},
-                "write_argv": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    aws = tmp_path / "aws"
-    aws.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
-
-state_path = Path(os.environ["FAKE_SECRET_STATE"])
-state = json.loads(state_path.read_text(encoding="utf-8"))
-args = sys.argv[1:]
-if args[:2] == ["secretsmanager", "get-secret-value"]:
-    version_id = (
-        args[args.index("--version-id") + 1]
-        if "--version-id" in args
-        else state["current"]
-    )
-    print(json.dumps({
-        "VersionId": version_id,
-        "SecretString": state["versions"][version_id],
-    }))
-    raise SystemExit(0)
-if args[:2] == ["secretsmanager", "put-secret-value"]:
-    value = args[args.index("--secret-string") + 1]
-    version_id = args[args.index("--client-request-token") + 1]
-    if not value.startswith("file://"):
-        raise SystemExit(91)
-    previous = state["current"]
-    state["versions"][version_id] = Path(value[7:]).read_text(encoding="utf-8")
-    state["current"] = version_id
-    state["stages"] = {
-        previous: ["AWSPREVIOUS"],
-        version_id: ["AWSCURRENT"],
-    }
-    state["write_argv"] = args
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-    print(json.dumps({"VersionId": version_id}))
-    raise SystemExit(0)
-if args[:2] == ["secretsmanager", "describe-secret"]:
-    print(json.dumps(state["stages"]))
-    raise SystemExit(0)
-raise SystemExit(92)
-""",
-        encoding="utf-8",
-    )
-    aws.chmod(0o700)
-    env = dict(os.environ)
-    env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
-    env["FAKE_SECRET_STATE"] = str(state)
-
-    result = subprocess.run(
-        ["python3", "-c", configure._REMOTE_UPDATER, "test/secret"],
-        input=FAKE_TOKEN,
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "updated": True,
-        "format": expected_format,
-    }
-    persisted = json.loads(state.read_text(encoding="utf-8"))
-    updated = persisted["versions"][persisted["current"]]
-    assert "SAFE_VALUE" in updated
-    assert "old-value" not in updated
+@pytest.mark.parametrize(("initial", "expected_format"), [
+    ("export LEADPOET_SENTRY_ENABLED=1\nexport LEADPOET_SENTRY_API_TOKEN=old-value\nexport SAFE_VALUE=present\n", "dotenv"),
+    (json.dumps({"LEADPOET_SENTRY_ENABLED": "1", "LEADPOET_SENTRY_API_TOKEN": "old-value", "SAFE_VALUE": "present"}), "json"),
+])
+def test_local_configurator_preserves_document_format_and_verifies_readback(initial, expected_format):
+    client = _SentryMemoryClient(initial)
+    assert configure._update_secret(client, configure.TARGETS["gateway"], FAKE_TOKEN) == expected_format
+    updated = client.versions[client.current]
+    assert "SAFE_VALUE" in updated and "old-value" not in updated
     assert updated.count(configure.TOKEN_ENV_NAME) == 1
     assert updated.count(FAKE_TOKEN) == 1
-    assert persisted["stages"]["v1"] == ["AWSPREVIOUS"]
-    assert persisted["stages"][persisted["current"]] == ["AWSCURRENT"]
-    assert persisted["write_argv"][:2] == ["secretsmanager", "put-secret-value"]
-    assert "--client-request-token" in persisted["write_argv"]
-    assert FAKE_TOKEN not in persisted["write_argv"]
+    assert client.stages["v1"] == ["AWSPREVIOUS"]
+    assert client.stages[client.current] == ["AWSCURRENT"]
+    assert set(client.puts[0]) == {"SecretId", "ClientRequestToken", "SecretString"}
 
 
-def test_remote_configurator_uses_versioning_not_secret_metadata_update():
-    assert '"put-secret-value"' in configure._REMOTE_UPDATER
-    assert '"--client-request-token"' in configure._REMOTE_UPDATER
-    assert '"update-secret"' not in configure._REMOTE_UPDATER
+@pytest.mark.parametrize(("provider_code", "expected_code"), [
+    ("AccessDeniedException", "secret_writer_access_denied"),
+    ("ResourceNotFoundException", "secret_not_found"),
+    ("InvalidRequestException", "secret_write_rejected"),
+    ("UnknownProviderFailure", "secret_write_failed"),
+])
+def test_configurator_preserves_redacted_sdk_failure_codes(provider_code, expected_code):
+    from botocore.exceptions import ClientError
+    client = _SentryMemoryClient("export SAFE_VALUE=present\n")
+    def fail(**kwargs):
+        raise ClientError({"Error": {"Code": provider_code, "Message": FAKE_TOKEN}}, "PutSecretValue")
+    client.put_secret_value = fail
+    with pytest.raises(configure.ConfigurationError) as raised:
+        configure._update_secret(client, configure.TARGETS["gateway"], FAKE_TOKEN)
+    assert raised.value.code == expected_code
+    assert FAKE_TOKEN not in str(raised.value) + raised.value.detail
 
 
-def test_remote_configurator_sanitizes_put_secret_value_access_denied(tmp_path):
-    state = tmp_path / "state.json"
-    state.write_text(
-        json.dumps(
-            {
-                "VersionId": "v1",
-                "SecretString": "export SAFE_VALUE=present\n",
-            }
-        ),
-        encoding="utf-8",
-    )
-    aws = tmp_path / "aws"
-    aws.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-import sys
-from pathlib import Path
+@pytest.mark.parametrize("failure", ["read", "document", "race", "readback", "stages"])
+def test_configurator_preserves_read_race_readback_and_stage_guards(failure):
+    client = _SentryMemoryClient("export SAFE_VALUE=present\n")
+    get = client.get_secret_value
+    def altered(**kwargs):
+        if failure == "read":
+            raise RuntimeError(FAKE_TOKEN)
+        if failure == "document":
+            return {}
+        value = get(**kwargs)
+        if failure == "race" and client.reads == 2:
+            value["VersionId"] = "concurrent"
+        if failure == "readback" and kwargs.get("VersionId"):
+            value["SecretString"] = "different"
+        return value
+    client.get_secret_value = altered
+    if failure == "stages":
+        client.describe_secret = lambda **kwargs: {"VersionIdsToStages": {}}
+    expected = {"read": "secret_read_unavailable", "document": "secret_document_invalid",
+                "race": "secret_changed_concurrently", "readback": "secret_write_readback_mismatch",
+                "stages": "secret_write_superseded"}[failure]
+    with pytest.raises(configure.ConfigurationError) as raised:
+        configure._update_secret(client, configure.TARGETS["gateway"], FAKE_TOKEN)
+    assert raised.value.code == expected
+    assert FAKE_TOKEN not in str(raised.value) + raised.value.detail
+    if failure in {"read", "document", "race"}:
+        assert client.puts == []
 
-args = sys.argv[1:]
-if args[:2] == ["secretsmanager", "get-secret-value"]:
-    print(Path(os.environ["FAKE_SECRET_STATE"]).read_text(encoding="utf-8"))
-    raise SystemExit(0)
-if args[:2] == ["secretsmanager", "put-secret-value"]:
-    print(
-        "An error occurred (AccessDeniedException) when calling the "
-        "PutSecretValue operation: seeded-sensitive-detail",
-        file=sys.stderr,
-    )
-    raise SystemExit(254)
-raise SystemExit(92)
-""",
-        encoding="utf-8",
-    )
-    aws.chmod(0o700)
-    env = dict(os.environ)
-    env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
-    env["FAKE_SECRET_STATE"] = str(state)
 
-    result = subprocess.run(
-        ["python3", "-c", configure._REMOTE_UPDATER, "test/secret"],
-        input=FAKE_TOKEN,
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
+def test_sentry_check_is_read_only_and_uses_explicit_operator(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(configure, "_read_token", lambda: FAKE_TOKEN)
+    monkeypatch.setattr(configure, "_update_target", lambda name, token, **kwargs: calls.append((name, kwargs)) or "dotenv")
+    assert configure.main(["--check", "--aws-profile", "leadpoet-lab"]) == 0
+    assert [kwargs["apply"] for _, kwargs in calls] == [False, False]
+    assert [kwargs["profile"] for _, kwargs in calls] == ["leadpoet-lab", "leadpoet-lab"]
+    assert FAKE_TOKEN not in capsys.readouterr().out
 
-    assert result.returncode == 35
-    assert result.stdout == ""
-    assert result.stderr == ""
-    assert FAKE_TOKEN not in result.stdout + result.stderr
-    assert "seeded-sensitive-detail" not in result.stdout + result.stderr
+
+@pytest.mark.parametrize("failed_stage", ["preflight", "apply"])
+def test_sentry_two_target_preflight_and_partial_apply_are_reported(monkeypatch, capsys, failed_stage):
+    calls = []
+    monkeypatch.setattr(configure, "_read_token", lambda: FAKE_TOKEN)
+    def target(name, token, **kwargs):
+        calls.append((name, kwargs["apply"]))
+        if name == "validator" and kwargs["apply"] == (failed_stage == "apply"):
+            raise configure.ConfigurationError("secret_read_unavailable")
+        return "dotenv"
+    monkeypatch.setattr(configure, "_update_target", target)
+    assert configure.main([]) == 1
+    if failed_stage == "preflight":
+        assert calls == [("gateway", False), ("validator", False)]
+    else:
+        assert calls == [("gateway", False), ("validator", False), ("gateway", True), ("validator", True)]
+    output = capsys.readouterr()
+    assert FAKE_TOKEN not in output.out + output.err
+    if failed_stage == "apply":
+        assert "applied_targets=1" in output.err
 
 
 def test_issue_query_is_bounded_allowlisted_and_redacted(monkeypatch):

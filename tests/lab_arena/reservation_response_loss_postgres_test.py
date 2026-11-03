@@ -15,8 +15,7 @@ from lab_arena.store import (
     hash_lease_token,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_broker import (
     FakeTransport,
@@ -29,13 +28,12 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
     frozen_participants,
     hotkey,
     round_config,
-    stage_positions,
 )
 
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def _store(database) -> ArenaStore:
@@ -57,7 +55,7 @@ def _open_round(store, round_id: str, *, prefix: str, stage_1_icps: int, cap=5_0
     assert store.create_round(round_id, config)["status"] == "created"
     participants = frozen_participants(store, round_id, 1, prefix=prefix)
     commit_round(store, round_id, participants)
-    assert store.open_stage(round_id, 1, participants, stage_positions(1))[
+    assert store.open_stage(round_id, 1, participants, list(range(stage_1_icps)))[
         "status"
     ] == "ok"
     return runners

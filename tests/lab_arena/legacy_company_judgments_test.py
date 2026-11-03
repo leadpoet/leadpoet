@@ -5,6 +5,8 @@ import copy
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("scorer_process_environment")
+
 from lab_arena import company_judgments, contracts, scorer_entrypoint, scoring, verify
 from qualification.scoring import lead_scorer
 from qualification.scoring.competition import (
@@ -12,6 +14,7 @@ from qualification.scoring.competition import (
 )
 from tests.test_arena_score_integrity import _icp, _positive_breakdown, _public_company
 from tests.lab_arena.company_judgments_test import _miss
+from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
 
 
 def _input(names=("A", "B"), *, policy=None):

@@ -11,7 +11,7 @@ from lab_arena import contracts, public_dashboard as dashboard
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.competition_summary_projection_test import _row, _service
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    CURRENT_SERVICE_MIGRATIONS, current_service_database, database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_postgrest_route import (
     DOCKER, make_transport, stack,
@@ -19,6 +19,7 @@ from tests.lab_arena.test_lab_arena_postgrest_route import (
 
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/443-lab-arena-competition-publication-projection.sql"
+DEFENDER_MIGRATION = MIGRATION.with_name("601-lab-arena-defending-champion-proof.sql")
 SIGNATURE = "public.lab_arena_competition_publication_v1(public.lab_arena_rounds)"
 
 
@@ -50,6 +51,18 @@ def projected_database(database):
         assert _security_state(cursor) == before
     connection.close()
     return psycopg2, dsn, before
+
+
+@pytest.fixture(scope="module")
+def current_database():
+    database = current_service_database()
+    try:
+        value = next(database)
+        with value[0].connect(**value[1]) as connection, connection.cursor() as cursor:
+            cursor.execute(DEFENDER_MIGRATION.read_text())
+        yield value
+    finally:
+        database.close()
 
 
 def _project(cursor, row):
@@ -229,13 +242,16 @@ def _insert_rows(connection, rows):
                 cursor.execute("INSERT INTO public.lab_arena_rounds "
                                "(round_id,status,configuration_doc,participants,publication_doc,created_at,"
                                "published_at,cancel_reason,promotion_required,baseline_promoted_at,"
-                               "evaluation_date,icp_set_date) VALUES "
-                               "(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)",
+                               "evaluation_date,icp_set_date,champion_funding_frozen,"
+                               "champion_submission_id,champion_hotkey) VALUES "
+                               "(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                                (row["round_id"], row["status"], json.dumps(row["configuration_doc"]),
                                 json.dumps(row["participants"]), json.dumps(row["publication_doc"]),
                                 row["created_at"], row["published_at"], row["cancel_reason"],
                                 row["promotion_required"], row["baseline_promoted_at"],
-                                row["evaluation_date"], row["icp_set_date"]))
+                                row["evaluation_date"], row["icp_set_date"],
+                                row.get("champion_funding_frozen", True),
+                                row.get("champion_submission_id"), row.get("champion_hotkey")))
         finally:
             cursor.execute("SET session_replication_role=origin")
 
@@ -250,6 +266,9 @@ def _response_controls(store, rows, monkeypatch):
         monkeypatch.setattr(dashboard, "_COMPETITION_ROUND_COLUMNS", columns)
         assert dashboard.competition_snapshot(service, limit=limit) == expected
     assert expected["rounds"][-1]["promotion_status"] == "superseded"
+    assert expected["rounds"][-1]["defending_champion"] == {
+        "submission_id": "prior-champion", "miner_hotkey": "5Prior",
+    }
     # Generic reads, results, miner history and pinned reads retain full docs.
     full = store.get_round(rows[-1]["round_id"])
     assert len(full["publication_doc"]["final_ranking"]) == 145
@@ -266,8 +285,8 @@ def _history_rows():
     return [archived, opened, _row("2026-10-10"), _row("2026-10-09")]
 
 
-def test_actual_psycopg_query_and_full_competition_response(projected_database, monkeypatch):
-    psycopg2, dsn, _ = projected_database
+def test_actual_psycopg_query_and_full_competition_response(current_database, monkeypatch):
+    psycopg2, dsn = current_database
     rows = _history_rows()
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
@@ -286,13 +305,13 @@ def test_actual_psycopg_query_and_full_competition_response(projected_database, 
 
 @pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
 def test_actual_postgrest_computed_selection_and_response(stack, monkeypatch):
+    psycopg2 = pytest.importorskip('psycopg2')
     rows = _history_rows()
     with stack["connection"].cursor() as cursor:
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+        cursor.execute(DEFENDER_MIGRATION.read_text(encoding="utf-8"))
     _insert_rows(stack["connection"], rows)
     transport = make_transport(stack, "lab_arena_service")
-    original_get = transport._client.get
-    transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
     try:
         store = ArenaStore(transport)
         # NOTIFY reload is asynchronous; poll only this bounded schema read.

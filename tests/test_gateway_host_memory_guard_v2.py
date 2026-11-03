@@ -145,11 +145,32 @@ def test_gateway_restart_uses_bounded_memory_gates_without_async_termination() -
         '"$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"'
         in restart
     )
-    assert "--minimum-available-mib 16384" in workflow
-    assert "--minimum-available-mib 4096" in workflow
     assert "--watch-parent" not in restart
     assert "--watch-parent" not in (
         root / "gateway" / "tee" / "host_memory_guard_v2.py"
     ).read_text(encoding="utf-8")
-    assert "Guard gateway builder host memory" in workflow
     assert "--watch-parent" not in workflow
+
+    # Attested releases now build on isolated runners. The production restart
+    # still needs the bounded memory gates above; its host-memory cleanup must
+    # not be transplanted into the isolated release workflow.
+    import yaml
+
+    builds = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["builds"]
+    assert builds["strategy"]["matrix"]["include"] == [
+        {"domain": "gateway", "runner": "ubuntu-24.04"},
+        {"domain": "validator", "runner": "runs-on"},
+    ]
+    assert "attested-v2-isolated" in builds["runs-on"]
+    assert any(
+        step.get("run") == "bash .github/scripts/build_attested_release.sh"
+        for step in builds["steps"]
+    )
+    builder = (root / ".github/scripts/build_attested_release.sh").read_text(
+        encoding="utf-8"
+    )
+    assert builder.index(
+        "python3 .github/scripts/verify_attested_builder_isolation.py"
+    ) < builder.index("bash gateway/tee/build_release_evidence_v2.sh")
+    assert "host_memory_guard_v2.py" not in workflow + builder
+    assert "--watch-parent" not in builder

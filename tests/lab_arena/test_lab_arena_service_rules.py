@@ -775,6 +775,8 @@ def test_completion_records_only_newly_committed_matching_outcome(
     assert service.handle_complete({}) == store_result
     assert observed == ([(("execute", "model_error"), {
         "run_identity": _telemetry_run_identity(service._store.get_run("run-1")),
+        "failure_stage": "-",
+        "failure_error_class": "-",
     })] if recorded else [])
 
 
@@ -794,6 +796,8 @@ def test_completion_records_newly_committed_accepted_run(monkeypatch):
     assert service.handle_complete({}) == committed
     assert observed == [(("execute", "accepted"), {
         "run_identity": _telemetry_run_identity(service._store.get_run("run-1")),
+        "failure_stage": "-",
+        "failure_error_class": "-",
     })]
 
 
@@ -836,6 +840,8 @@ def test_completion_identity_comes_from_committed_run_not_request(
     service.handle_complete({})
     assert observed == [(("execute", "model_error"), {
         "run_identity": _telemetry_run_identity(run),
+        "failure_stage": "-",
+        "failure_error_class": "-",
     })]
     assert observed[0][1]["run_identity"]["arena.runner_hotkey"] == runner_hotkey
     assert observed[0][1]["run_identity"]["arena.attempt"] == attempt

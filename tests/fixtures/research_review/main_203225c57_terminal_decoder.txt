@@ -1,0 +1,119 @@
+# Exact _decode_terminal from origin/main commit 203225c57.
+def _decode_terminal(
+    document: Any,
+    *,
+    secret: str = "",
+) -> Tuple[int, Dict[str, str], bytes]:
+    required = {"status", "headers", "body_b64"}
+    allowed = required | {
+        "call_succeeded",
+        "provider_cost",
+        "account_failure_evidence",
+        "credit_failure_proof",
+        "judgment_cache_eligible",
+        "judgment_cache_key",
+        "judgment_cache_source_call_identity",
+        "judgment_cache_source_run_id",
+        "deepline_async_job_ids",
+        "deepline_response_missing",
+        "deepline_response_missing_reason",
+        "compatibility_failure_code",
+        "upstream_response_receipt",  # Private evidence has no replay authority.
+    }
+    if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    compatibility_failure_code = document.get("compatibility_failure_code")
+    if "compatibility_failure_code" in document and (
+        not isinstance(compatibility_failure_code, str)
+        or compatibility_failure_code not in _FIRECRAWL_COMPATIBILITY_FAILURE_CODES
+        or document.get("call_succeeded") is not False
+        or type(document.get("status")) is not int
+        or document["status"] != 502
+        or not isinstance(document.get("provider_cost"), Mapping)
+    ):
+        raise BrokerError("broker_unavailable")
+    if "deepline_response_missing" in document and document["deepline_response_missing"] is not True:
+        raise BrokerError("broker_unavailable")
+    if "deepline_response_missing_reason" in document and (
+        document["deepline_response_missing_reason"] != "transport_failure"
+        or document.get("deepline_response_missing") is not True
+        or document.get("status") != 502
+        or document.get("call_succeeded") is not False
+    ):
+        raise BrokerError("broker_unavailable")
+    async_ids = document.get("deepline_async_job_ids")
+    if async_ids is not None and (
+        not isinstance(async_ids, list) or not 1 <= len(async_ids) <= 32
+        or any(not isinstance(value, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(value) is None
+               for value in async_ids)
+    ):
+        raise BrokerError("broker_unavailable")
+    provider_cost = document.get("provider_cost")
+    if provider_cost is not None and (
+        not isinstance(provider_cost, Mapping)
+        or set(provider_cost) not in (
+            {"basis", "units", "unit_name", "operation"},
+            {"basis", "units", "unit_name", "operation", "request_id"},
+        )
+    ):
+        raise BrokerError("broker_unavailable")
+    call_succeeded = document.get("call_succeeded")
+    if call_succeeded is not None and not isinstance(call_succeeded, bool):
+        raise BrokerError("broker_unavailable")
+    eligible = document.get("judgment_cache_eligible")
+    if eligible is not None and eligible is not True:
+        raise BrokerError("broker_unavailable")
+    cache_markers = {
+        "judgment_cache_key", "judgment_cache_source_call_identity",
+        "judgment_cache_source_run_id",
+    }
+    present_markers = cache_markers & set(document)
+    if present_markers:
+        if present_markers != cache_markers or eligible is not True:
+            raise BrokerError("broker_unavailable")
+        for name in ("judgment_cache_key", "judgment_cache_source_call_identity"):
+            try:
+                contracts.require_sha256(document[name], name)
+            except ArenaContractError as exc:
+                raise BrokerError("broker_unavailable") from exc
+        if not isinstance(document["judgment_cache_source_run_id"], str) or not document["judgment_cache_source_run_id"]:
+            raise BrokerError("broker_unavailable")
+    _validated_account_failure_evidence(
+        document.get("account_failure_evidence")
+    )
+    _validated_credit_failure_proof(document.get("credit_failure_proof"))
+    try:
+        status = int(document["status"])
+        headers = dict(document["headers"])
+        body = base64.b64decode(str(document["body_b64"]), validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BrokerError("broker_unavailable") from exc
+    if compatibility_failure_code is not None and body != operations.GENERIC_UNAVAILABLE_BODY:
+        raise BrokerError("broker_unavailable")
+    if document.get("credit_failure_proof") is not None and call_succeeded is not False:
+        raise BrokerError("broker_unavailable")
+    trusted_names = [
+        name
+        for name in headers
+        if isinstance(name, str)
+        and name.lower() == operations.TRUSTED_RESPONSE_URL_HEADER
+    ]
+    if len(trusted_names) > 1:
+        raise BrokerError("broker_unavailable")
+    if trusted_names:
+        if compatibility_failure_code is not None and (
+            compatibility_failure_code != "firecrawl_source_content_unavailable"
+        ):
+            raise BrokerError("broker_unavailable")
+        name = trusted_names[0]
+        headers[operations.TRUSTED_RESPONSE_URL_HEADER] = _validated_response_url(
+            headers.pop(name),
+            secret=secret,
+        )
+        if compatibility_failure_code is not None and not (
+            scoring_provider_compat._safe_public_source_https_url(
+                headers[operations.TRUSTED_RESPONSE_URL_HEADER]
+            )
+        ):
+            raise BrokerError("broker_unavailable")
+    return status, headers, body

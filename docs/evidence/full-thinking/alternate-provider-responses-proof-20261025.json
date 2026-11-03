@@ -1,0 +1,320 @@
+{
+  "capture_source_commit": "8fe397c70d676b8337d4d64490f4eda27b6c9319",
+  "captures": [
+    {
+      "api": "openrouter.responses",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 177,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:81eef20f47f309b47bcb3b6a710ae6ae0ff32f584831184e3d761af1d5176733",
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "f0e8d9129d6b034a5261bae88709c7c8297624f91ce25b6a0789e896f11cd224",
+        "ledger-readback.json": "d8227668cc3c618b29a68cfd321e2cf80c170b56fbe8d39e9f2a0a20884faa3e",
+        "new-policy-proof.json": "8da91b83e48d9f660cd9c6c74c4e0917e100b0c4463474b24c5df36fdb160ead",
+        "readable-trace.json": "cdf7bcaf3abfda9c32b902d0e8e0cd47c7309c15c788eb5d0d3e5ac92caaf371",
+        "readable-trace.md": "bf827509adab3814dbd22a7739b676a7aab6af004ee4e39ac80f77ad467cc502",
+        "wire-index.json": "7a9020ff5bbc82eefdc11df33b055f391d6628d35400fa3125e29f84a708fb89"
+      },
+      "provider": "nebius/fp8",
+      "raw_export_example_hash": "sha256:99dd69d6a28b1cd65208d7ba0f6cc51ae233e8ebe56d01c96ad76cde1071753d",
+      "readable_trace_document_sha256": "sha256:753953e0cb4d80a3730724b0c787096b2c0e79c3b78b214a564bfaed091777c2",
+      "reported_cost_usd": "0.000525840",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.responses",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "output.content.reasoning_text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+        "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000012",
+          "internal_reasoning": "0",
+          "prompt": "0.0000003",
+          "request": "0"
+        },
+        "provider": "nebius/fp8",
+        "provider_name": "Nebius",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+          "delivered_response_sha256": "sha256:ea1b629656daf90343c6d1087d4d1d9c0cd3c91fb4e593622009734e98dba6f3",
+          "full_segments": 1,
+          "input_sha256": "sha256:e087c5647a1f847c903804324314a1064502e374b5a4e3f6ecb71f6afd8ce0cf",
+          "reported_reasoning_tokens": 44,
+          "target_sha256": "sha256:4c97a661023d610e1993c78f5b53fa39eebc52e26ed3eb5f9695d1f45b5a1891"
+        },
+        {
+          "call_identity": "sha256:adb64dc93a4008f15abcc5bef545753c75293f65b1353a4a39db80f4e8a85eec",
+          "delivered_response_sha256": "sha256:643c156ef14d0a872f7cd91425a2a09ef3053c4c56f7ccff8fd4b5dedd982150",
+          "full_segments": 1,
+          "input_sha256": "sha256:d1db30591d1ef5fb6b391941a22fc29332cf590f33eaa28b52b8c97364c1d15a",
+          "reported_reasoning_tokens": 5,
+          "target_sha256": "sha256:59821aa6d53cd3b76b00202d03ea1b28641738534943e10a3480384d46076c34"
+        },
+        {
+          "call_identity": "sha256:44aa3a4009ac63e090c60c96c6aa489d74d0d1c2efe5d5f6db0cf93d85851fe1",
+          "delivered_response_sha256": "sha256:24852fd81b704b7158ea6e452f0da45350be649cfccc6fc9bbd2ffcf6c07df52",
+          "full_segments": 1,
+          "input_sha256": "sha256:e46732d13d3152c231cf157659822da90451e29556a07ac3b1cb01a83704b7a5",
+          "reported_reasoning_tokens": 128,
+          "target_sha256": "sha256:5024744ac31891e9253134c9520972f637e3be570f79b42020b14ca504a80c51"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:e087c5647a1f847c903804324314a1064502e374b5a4e3f6ecb71f6afd8ce0cf",
+          "status": 200,
+          "wire_body_bytes": 2174,
+          "wire_body_sha256": "sha256:1aa23227f6117efec6124e4e3dcc7daae11f4488f7fd76eff33d976dae4b188c"
+        },
+        {
+          "outbound_body_sha256": "sha256:d1db30591d1ef5fb6b391941a22fc29332cf590f33eaa28b52b8c97364c1d15a",
+          "status": 200,
+          "wire_body_bytes": 2012,
+          "wire_body_sha256": "sha256:40c245ffde5105899545147ce464aef372d32500a2ef5beecf30d19bd39cc208"
+        },
+        {
+          "outbound_body_sha256": "sha256:e46732d13d3152c231cf157659822da90451e29556a07ac3b1cb01a83704b7a5",
+          "status": 200,
+          "wire_body_bytes": 2630,
+          "wire_body_sha256": "sha256:d4497c256179f7a909db74e183b353c8dbc6635c0311cf0612655bdb16d4847b"
+        }
+      ],
+      "worker_payload_sha256": "sha256:2961b48043f0b2f405d814458883ccb73fcddc1a2a3136b36de9d58cc4a21ce4"
+    },
+    {
+      "api": "openrouter.responses",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 156,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:4c7dc5d68378bd186e4365306873663de2c6840be42faba54dd3e5ce20e9eae0",
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "9c06c74340f3b43ab7785e5bf2d21e34b863cb6612bb1ef2d784c47450d5c925",
+        "ledger-readback.json": "a6bdd3f740a3a4fe88f56075285c45d621c4112fa7118a1121deef6aa95cdc5d",
+        "new-policy-proof.json": "611441bfe915cfc8cde8bf1b51d2979f4a63cc4710930e3b120d7248771845ff",
+        "readable-trace.json": "62ee1ee12b3bc61bcfefe60f776c67e4d531ad7dae550fba548e91242c776179",
+        "readable-trace.md": "7173b80ba5ce0feedc1b6a1048343f31ef3fb5e60c0285b93ad0aa63045601d9",
+        "wire-index.json": "9ac92de4e47eb90b13eee40f556ee339aa365fa8440ebc49f870270f079ef7a2"
+      },
+      "provider": "together",
+      "raw_export_example_hash": "sha256:c07fe84080b8b7ac36bd5828cf09a3ec7aa5c0bc1c9cbc4e0dae3fa6d9eec133",
+      "readable_trace_document_sha256": "sha256:05020ce0506491808217a968be217d99cebf1274b678a322e3c45272681ef756",
+      "reported_cost_usd": "0.000383844",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.responses",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "output.content.reasoning_text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+        "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000012",
+          "internal_reasoning": "0",
+          "prompt": "0.0000003",
+          "request": "0"
+        },
+        "provider": "together",
+        "provider_name": "Together",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+          "delivered_response_sha256": "sha256:3b41b76d19c7d6636ed5ff2c553dc6fe73a10255aaca9b83a72747b9bff048c9",
+          "full_segments": 1,
+          "input_sha256": "sha256:0068350717f9e1a73e13aa137c5995885ececf47128b543fa6504f38c6d97ff4",
+          "reported_reasoning_tokens": 31,
+          "target_sha256": "sha256:04e6396d0cd149ad1474f2602b7f660df7fa6c83971d743d1c20c2f32ed50c73"
+        },
+        {
+          "call_identity": "sha256:c8ea41a41385ee3c169cdc87d90776f28c11185eff3013e2ce14a38d3745e0fd",
+          "delivered_response_sha256": "sha256:aa77cca09246a28fe937e35362dca028cf4bb2c722f6d6e9d2747be63cb11ff3",
+          "full_segments": 1,
+          "input_sha256": "sha256:8704f19990ca10ac286fff38d63d3f439a348b70abdb6a3b98952b0ab8b97239",
+          "reported_reasoning_tokens": 5,
+          "target_sha256": "sha256:71bff2a61282e3e995aab35c3ae29e5523ccefd5e1e2444e282e6e8979647388"
+        },
+        {
+          "call_identity": "sha256:5a3bcb588f03501aa8896de694fdf8ce262620a92ac8d286beba0ce5749648d8",
+          "delivered_response_sha256": "sha256:842b12c000986fcdb2943a9a488dc16cee2f8b576ac80ec098cc32df39f600e7",
+          "full_segments": 1,
+          "input_sha256": "sha256:577e77309c26b422d511cb97dc8ac25eff25cd7eb15116d787cea5f07969c341",
+          "reported_reasoning_tokens": 120,
+          "target_sha256": "sha256:df64a1726bf564bccb024c43d8e992dbd2d546c6a3c593c9ceb98742d819b1fd"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:0068350717f9e1a73e13aa137c5995885ececf47128b543fa6504f38c6d97ff4",
+          "status": 200,
+          "wire_body_bytes": 2107,
+          "wire_body_sha256": "sha256:6642dfe2d771788c917e8abfb829549d98ac7fb2babac45d902e67040a1408af"
+        },
+        {
+          "outbound_body_sha256": "sha256:8704f19990ca10ac286fff38d63d3f439a348b70abdb6a3b98952b0ab8b97239",
+          "status": 200,
+          "wire_body_bytes": 2000,
+          "wire_body_sha256": "sha256:11659f677fa749783378ceae3222611d548847ca1d458906493c06fc22f23645"
+        },
+        {
+          "outbound_body_sha256": "sha256:577e77309c26b422d511cb97dc8ac25eff25cd7eb15116d787cea5f07969c341",
+          "status": 200,
+          "wire_body_bytes": 2587,
+          "wire_body_sha256": "sha256:fdfd169ea3625177b472c19433d39c2e166fbdf02692827c29d8406eb4d36908"
+        }
+      ],
+      "worker_payload_sha256": "sha256:a2f9bd46930eed2a4979e628a335bb18229bb5acb31c80444faa9d71cea4d8cf"
+    },
+    {
+      "api": "openrouter.responses",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 1,
+        "full_thinking_calls": 2,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 32,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:ef7f5dbd082f1097d5934368bb6da6605f75a20146eed49b0ff22b34108ed6ab",
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "4a5e79bdefc6a28fc45feaca7a5e916778e593c8869134a9eddc1b2fc550877b",
+        "ledger-readback.json": "7a11da8acd3b40cf6f7cf39b1552f9b713fea3a5f366da277300fc53ece805b4",
+        "new-policy-proof.json": "5850cea5674457b3fb7d7d7dd4f8af6d1e0c0b123dcbd0857e5482d1b128a587",
+        "readable-trace.json": "5ab133e3350d0ec9cc83c227ac16387bfc2be87d984b5982efd2165257f81fe0",
+        "readable-trace.md": "7442a46ebb361ba5d89dfdec89fd424769f2bc9767cd391f6374d695b892c546",
+        "wire-index.json": "406f9f7781150746622af93c3bcdb38d03ab410388c6d0590e36b00c53df24eb"
+      },
+      "provider": "fireworks/spot",
+      "raw_export_example_hash": "sha256:afe943350150ce87200552af2af4691c439bdb6f9c2f3299cbd34c6c9500043d",
+      "readable_trace_document_sha256": "sha256:f2f636de89931961f29c03e2bab8dc8401168e0b2d0162770d57162db9bd089b",
+      "reported_cost_usd": "0.0002209368",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.responses",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "output.content.reasoning_text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+        "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.00000084",
+          "internal_reasoning": "0",
+          "prompt": "0.00000021",
+          "request": "0"
+        },
+        "provider": "fireworks/spot",
+        "provider_name": "Fireworks",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+          "delivered_response_sha256": "sha256:27dadb9b4e46b8f7d2ea06cb64c5a0d39a02f8f94a516d3a90929694bb6f1239",
+          "full_segments": 0,
+          "input_sha256": "sha256:20cd2dacda0f32fccb1b0161d18208b63e3aab69f5d449aa2095569016b54ad1",
+          "reported_reasoning_tokens": 0,
+          "target_sha256": "sha256:bd3ffa751cc0579a587742db1d353d911c5b5c79957a55f05890d18e22ac3aa7"
+        },
+        {
+          "call_identity": "sha256:551f65adc518398183f5ec9549646090fa2fe01b58391d12bff8a4629c98d001",
+          "delivered_response_sha256": "sha256:2798514db4aa7610be5cc3dfbec27e091343469247aaf301c79b60c652f82ffe",
+          "full_segments": 1,
+          "input_sha256": "sha256:35c01abea80ea00da4c62e910ab003225869cb2c120361b06fcd86efac8fb1f8",
+          "reported_reasoning_tokens": 5,
+          "target_sha256": "sha256:e72ca2c0482801c592ca5de0dbab4e17c1f5b709bf6a3857bc296f67946e1713"
+        },
+        {
+          "call_identity": "sha256:fefcb2710deffe3cfb8a4d174c6193e34c71bc934da3077113eb532ec20c6b95",
+          "delivered_response_sha256": "sha256:22b4742a1e2621351e8bac0c8dbb845b604fb29439ee5cd3d4d8d2e3dd91910f",
+          "full_segments": 1,
+          "input_sha256": "sha256:d8668df9e6c0c7f4638a4ba9a2504c34ce6a2fed42549c6a2fbfd25efa57d4c6",
+          "reported_reasoning_tokens": 27,
+          "target_sha256": "sha256:8feece5ffb47df6cb7a253ed008adefd1576836b60555085c4a2bcd464c44478"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:20cd2dacda0f32fccb1b0161d18208b63e3aab69f5d449aa2095569016b54ad1",
+          "status": 200,
+          "wire_body_bytes": 1837,
+          "wire_body_sha256": "sha256:c4ef21268dae8077ac0f573bf79ab9276013b5b88cfcd85830efedd691341e99"
+        },
+        {
+          "outbound_body_sha256": "sha256:35c01abea80ea00da4c62e910ab003225869cb2c120361b06fcd86efac8fb1f8",
+          "status": 200,
+          "wire_body_bytes": 2006,
+          "wire_body_sha256": "sha256:6ad14e68ed247c96688d2e84151fc7978d2e20a4c204b70cda73cab90bb85370"
+        },
+        {
+          "outbound_body_sha256": "sha256:d8668df9e6c0c7f4638a4ba9a2504c34ce6a2fed42549c6a2fbfd25efa57d4c6",
+          "status": 200,
+          "wire_body_bytes": 2180,
+          "wire_body_sha256": "sha256:c8ddf0bfc1cbd475031bd70db319ca7d2ef92b822417682104ed17b158dce98c"
+        }
+      ],
+      "worker_payload_sha256": "sha256:5c7b388bf99ff54e68dedc258c204efc15d46ebbbd2ff37c7c4b0b7218b4a88e"
+    }
+  ],
+  "counts": {
+    "explicit_zero_calls": 1,
+    "full_reasoning_calls": 8,
+    "reported_reasoning_tokens": 365,
+    "routes_passed": 3,
+    "strict_pair_candidates": 9,
+    "successful_model_calls": 9
+  },
+  "full_capture_archive_bytes": 356574,
+  "full_capture_archive_sha256": "3597c41dc69c95d54a7884d4a32dd4e317243c461ab35b3641570bf450d3f9c6",
+  "limits": [
+    "No production activation, full native agent workflow, scored ICPs, or labeled dataset admission is claimed.",
+    "Full raw synthetic artifacts remain private; exact hashes bind the retained requests, wire bodies, SQL rows, host writes, readable projections, and targets.",
+    "Initial candidate evidence is separate from the subsequent expanded-registry selection proof to avoid circular hashes."
+  ],
+  "schema_version": "leadpoet.alternate_provider_responses_capture_summary.v1",
+  "scope": "Three passing DeepSeek Responses alternate endpoints with exact isolated candidate pins, original caps and modes, real Broker and worker, PostgreSQL readback, two tool continuations and strict JSON, without client callbacks.",
+  "verified_date": "2026-10-25"
+}

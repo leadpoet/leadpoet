@@ -20,7 +20,7 @@ from lab_arena.api import create_app
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 from lab_arena.store import hash_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_DEEPLINE_KEY, CANARY_OPENROUTER_KEY,
@@ -33,7 +33,7 @@ from tests.lab_arena.test_queued_submission_replacement_flow import (
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture(scope="module")
@@ -122,6 +122,9 @@ class LabeledReviewTransport:
 
 
 def submit(http, h, round_id, miner, payload, *, duplicate=False, rejection_code=None):
+    # Positive admission fixtures are registered miners; request validation stays real.
+    if miner.ss58_address not in h.chain.registered:
+        h.chain.registered.append(miner.ss58_address)
     checksum = base64.b64encode(hashlib.md5(payload, usedforsecurity=False).digest()).decode()
     presign = http.post("/arena/v1/submissions/presign", json=signed(
         h, miner, round_id, contracts.SCOPE_SUBMISSION_PRESIGN,
@@ -199,6 +202,13 @@ def test_signed_duplicate_gate_review_and_freeze(connect, tmp_path, monkeypatch)
                                 "consent": {"public_rerun": True}})
         bad_signature["signature"] = "00" * 64
         assert http.post("/arena/v1/submissions/presign", json=bad_signature).status_code == 401
+        unregistered = signed(h, keypair("duplicate-flow-unregistered"), round_id,
+                              contracts.SCOPE_SUBMISSION_PRESIGN,
+                              {"source_size_bytes": len(variants[0][1]),
+                               "consent": {"public_rerun": True}})
+        refused = http.post("/arena/v1/submissions/presign", json=unregistered)
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "hotkey_unregistered"
         for label, payload in variants:
             ids[label] = submit(
                 http, h, round_id, keypair("duplicate-flow-" + label), payload,

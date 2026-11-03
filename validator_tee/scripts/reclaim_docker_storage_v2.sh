@@ -1,5 +1,7 @@
 #!/bin/bash
 # Reclaim validator-builder Docker storage, including an orphaned data root.
+# Privileged Python must use -B: sudo resets bytecode environment settings,
+# and root-owned import caches prevent unprivileged frozen-source cleanup.
 
 set -euo pipefail
 
@@ -103,6 +105,23 @@ available_bytes() {
   printf '%s\n' "$value"
 }
 
+pending_docker_reconcile() {
+  local pending
+  if ! pending="$(sudo python3 -B -I -c '
+from pathlib import Path
+try:
+    Path("/var/lib/docker/.leadpoet-pending-overlay-reconcile").lstat()
+except FileNotFoundError:
+    print("0")
+else:
+    print("1")
+')" || { [ "$pending" != "0" ] && [ "$pending" != "1" ]; }; then
+    echo "ERROR: pending Docker reconciliation state is unreadable" >&2
+    exit 1
+  fi
+  [ "$pending" = "1" ]
+}
+
 inspect_exact_host_gateway_runtime() {
   local phase="$1"
 
@@ -190,7 +209,9 @@ protect_exact_host_gateway_runtime() {
     AVAILABLE="$(available_bytes)"
     echo "Docker storage requirement: runtime_mode=host-gateway-live phase=$phase required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
     if [ "$AVAILABLE" -ge "$LIVE_RUNTIME_MIN_FREE_BYTES" ] \
-        && [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ]; then
+        && [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ] \
+        && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "1" ] \
+        && ! pending_docker_reconcile; then
       echo "Docker storage maintenance deferred while the exact host gateway is live: phase=$phase free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
       exit 0
     fi
@@ -301,7 +322,7 @@ reconcile_empty_docker_runtime() {
   local reconcile_result
 
   if ! reconcile_result="$(
-    run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+    run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
       "$REPO_ROOT/validator_tee/host/docker_zero_runtime_reconciler_v2.py" \
       --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
       --docker-admission-lock-file "$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE" \
@@ -512,7 +533,7 @@ empty_runtime_metadata_is_clear() {
     return 1
   fi
   if ! audit="$(
-    run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+    run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
       "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
       --audit-only
   )"; then
@@ -572,7 +593,7 @@ require_same_online_gateway() {
   local phase="$1"
 
   inspect_exact_host_gateway_runtime "$phase"
-  if [ "$HOST_GATEWAY_LIVE" -ne 1 ] \
+  if [ "$HOST_GATEWAY_LIVE" -ne "$INITIAL_HOST_GATEWAY_LIVE" ] \
       || [ "$HOST_GATEWAY_PID" -ne "$ONLINE_GATEWAY_PID" ] \
       || [ "$HOST_GATEWAY_START_TIME_TICKS" -ne "$ONLINE_GATEWAY_START_TIME_TICKS" ]; then
     echo "ERROR: exact host gateway identity changed during online Docker reclaim: phase=$phase" >&2
@@ -593,11 +614,41 @@ require_same_online_docker_root() {
   fi
 }
 
+online_volume_manifest() {
+  local names
+  names="$(run_bounded_daemon_inventory docker volume ls -q)" || return 1
+  if ! printf '%s' "$names" | python3 -c '
+import re, sys
+names = sys.stdin.read().splitlines()
+if len(names) != len(set(names)) or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is None for name in names):
+    raise SystemExit("invalid Docker volume inventory")
+'; then return 1; fi
+  if [ -n "$names" ]; then
+    # Names are validated above; split only the newline-separated Docker names.
+    run_bounded_daemon_inventory docker volume inspect $names
+  else
+    printf '[]'
+  fi | python3 -c '
+import hashlib, json, sys
+rows = json.load(sys.stdin)
+expected = set(sys.argv[1].splitlines())
+if not isinstance(rows, list) or len(rows) != len(expected) or any(not isinstance(row, dict) for row in rows) or {row.get("Name") for row in rows} != expected:
+    raise SystemExit("incomplete Docker volume inspection")
+keys = ("Name", "Driver", "Mountpoint", "Options", "Labels", "Scope", "CreatedAt")
+payload = sorted(({key: row.get(key) for key in keys} for row in rows), key=lambda row: row["Name"])
+print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+' "$names"
+}
+
 require_same_online_images() {
   local phase="$1"
   local observed_image_ids
 
   if ! observed_image_ids="$(online_image_ids)"; then
+    return 1
+  fi
+  if [ "$(online_volume_manifest)" != "$ONLINE_VOLUME_MANIFEST" ]; then
+    echo "ERROR: retained Docker volume identity changed during online reclaim: phase=$phase" >&2
     return 1
   fi
   if [ "$observed_image_ids" != "$ONLINE_IMAGE_IDS" ]; then
@@ -873,12 +924,47 @@ if before["active_manifest_hash"] != after["active_manifest_hash"]:
 '
 }
 
-if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
+LIVE_CONTAINER_IDS="$(run_bounded_daemon_inventory docker ps -aq --no-trunc)"
+if pending_docker_reconcile && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "1" ]; then
+  echo "ERROR: pending Docker reconciliation requires the guarded preserving entry" >&2
+  exit 1
+fi
+if { [ -n "$LIVE_CONTAINER_IDS" ] || pending_docker_reconcile; } \
+    && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ]; then
+  ONLINE_GATEWAY_PID="$HOST_GATEWAY_PID"
+  ONLINE_GATEWAY_START_TIME_TICKS="$HOST_GATEWAY_START_TIME_TICKS"
+  INITIAL_HOST_GATEWAY_LIVE="$HOST_GATEWAY_LIVE"
+  if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
+    echo "ERROR: zero-runtime reconciliation refuses live containers" >&2
+    exit 1
+  fi
+  run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
+    "$REPO_ROOT/validator_tee/host/docker_live_restore_reconciler_v2.py" \
+    --reclaim-stale \
+    --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+    --docker-admission-lock-file "$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE" \
+    --docker-lock-owner-pid "$LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID"
+  if [ "$INITIAL_HOST_GATEWAY_LIVE" -eq 1 ]; then
+    require_same_online_gateway "post-live-reclaim"
+  else
+    require_exact_host_gateway_absent "post-live-reclaim"
+  fi
+  AVAILABLE="$(available_bytes)"
+  if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ]; then
+    echo "ERROR: live Docker reclaim left fewer than $LIVE_RUNTIME_MIN_FREE_BYTES free bytes" >&2
+    exit 1
+  fi
+  echo "Docker storage ready after guarded live-container reclaim: free_bytes=$AVAILABLE"
+  exit 0
+fi
+if [ "$HOST_GATEWAY_LIVE" -eq 1 ] || [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ]; then
+  INITIAL_HOST_GATEWAY_LIVE="$HOST_GATEWAY_LIVE"
   ONLINE_GATEWAY_PID="$HOST_GATEWAY_PID"
   ONLINE_GATEWAY_START_TIME_TICKS="$HOST_GATEWAY_START_TIME_TICKS"
   inventory_empty_online_runtime "pre-prune"
   ONLINE_DOCKER_ROOT="$(online_docker_root)"
   ONLINE_IMAGE_IDS="$(online_image_ids)"
+  ONLINE_VOLUME_MANIFEST="$(online_volume_manifest)"
   run_prune_with_retry builder docker builder prune --all --force
   inventory_empty_online_runtime "post-builder-prune"
   require_same_online_gateway "post-builder-prune"
@@ -887,13 +973,14 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
   AVAILABLE="$(available_bytes)"
   ONLINE_RAW_RECLAIM_PERFORMED=0
   if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ] \
-      || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
+      || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ] \
+      || [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ]; then
     inventory_empty_online_runtime "pre-stale-reclaim"
     require_same_online_gateway "pre-stale-reclaim"
     require_same_online_docker_root "pre-stale-reclaim"
     require_same_online_images "pre-stale-reclaim"
     if ! ONLINE_PRE_RECLAIM_AUDIT="$(
-      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
         "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
         --audit-only
     )"; then
@@ -912,7 +999,7 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       exit 1
     fi
     if ! ONLINE_RECLAIM_RESULT="$(
-      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
         "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"
     )"; then
       echo "ERROR: validated stale Docker overlay reclaim failed while the exact host gateway is live" >&2
@@ -927,7 +1014,7 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       exit 1
     fi
     if ! ONLINE_PRE_RECONCILE_AUDIT="$(
-      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+      run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
         "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
         --audit-only
     )"; then
@@ -985,7 +1072,7 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       require_same_online_docker_root "post-daemon-reconcile"
       require_same_online_images "post-daemon-reconcile"
       if ! ONLINE_POST_RECONCILE_AUDIT="$(
-        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
           "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
           --audit-only
       )"; then
@@ -1037,7 +1124,7 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then
       require_same_online_docker_root "post-reconcile-builder-prune"
       require_same_online_images "post-reconcile-builder-prune"
       if ! ONLINE_POST_PRUNE_AUDIT="$(
-        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 \
+        run_bounded_daemon_command sudo env PYTHONSAFEPATH=1 python3 -B \
           "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py" \
           --audit-only
       )"; then
@@ -1107,7 +1194,7 @@ if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]; then
   # stdlib-only helper directly so validator_tee/__init__.py cannot import
   # wallet/runtime packages that are intentionally unavailable at this stage.
   RECLAIM_RESULT="$(
-    sudo env PYTHONSAFEPATH=1 python3 \
+    sudo env PYTHONSAFEPATH=1 python3 -B \
       "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"
   )"
   printf '%s\n' "$RECLAIM_RESULT"
@@ -1147,7 +1234,7 @@ print(int(any(document[field] for field in fields)))
   if [ "$RAW_RECLAIM_PERFORMED" -eq 1 ] \
       || [ "$LIVE_RESTORE_ENABLED" != "true" ]; then
     echo "Reconciling dockerd metadata while preserving the live runtime"
-    sudo env PYTHONSAFEPATH=1 python3 \
+    sudo env PYTHONSAFEPATH=1 python3 -B \
       "$REPO_ROOT/validator_tee/host/docker_live_restore_reconciler_v2.py"
   fi
   # A stale Nitro build mount can keep otherwise unreferenced layers alive.

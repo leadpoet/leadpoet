@@ -136,7 +136,8 @@ def test_openrouter_http_error_log_does_not_disclose_provider_body(monkeypatch, 
     system_prompt = requests[0]["messages"][0]["content"]
     assert "Generate exactly 20 ICPs" in system_prompt
     assert ", ".join(icp_generator.INDUSTRY_DISTRIBUTION) in system_prompt
-    assert "Seed: 2-3 ICPs" in system_prompt
+    assert 'EXACTLY 3 of the 20 ICPs MUST set `company_stage` to one allowed stage.' in system_prompt
+    assert 'The remaining 17 ICPs MUST set `company_stage` to "".' in system_prompt
 
 
 def test_integrity_retry_preserves_terminal_scores_and_original_sparse_positions():
@@ -183,10 +184,10 @@ def test_irrelevant_padding_cannot_raise_cost_allowance(returned):
     for icp in icps:
         icp["employee_count"] = ["1-10"]
     service.evaluation_icps = lambda _round_id: icps
-    service._scoring_outputs = lambda _round_id, stage: {
+    service._scoring_outputs = lambda _round_id, stage, **_kwargs: {
         run["run_id"]: {"status": "accepted"} for run in runs if run["stage"] == stage
     }
-    def accepted_judgment(_run, *, icp, companies, policy):
+    def accepted_judgment(_run, *, icp, companies, policy, **_kwargs):
         return [{"company_index": index, "company_identity_key": str(index),
             "company_qualified": index == 0, "duplicate_company": False,
             "final_score": 54 if index == 0 else 0} for index in range(len(companies))]

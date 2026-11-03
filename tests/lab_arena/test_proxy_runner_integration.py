@@ -271,10 +271,14 @@ def _required_parallel_memory(slots):
     )
 
 
-def test_parallel_memory_capacity_reduces_eleven_inventory_slots_to_ten(tmp_path):
-    options = _parallel_memory_paths(tmp_path, 25_558_732 * 1024)
+def test_parallel_memory_capacity_admits_ten_on_the_primary_idle_snapshot(tmp_path):
+    # The idle primary's 2026-10-26 snapshot admitted only eight slots under
+    # the former 2 GiB host + 128 MiB per-slot reserve policy.
+    available = 22_642_827_264
+    assert (available - 2 * 1024**3) // (2 * 1024**3 + 128 * 1024**2) == 8
+    options = _parallel_memory_paths(tmp_path, available)
     assert parallel_memory_capacity(
-        11, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options
+        20, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options
     ) == 10
 
 
@@ -283,6 +287,107 @@ def test_parallel_memory_capacity_accepts_the_exact_slot_boundary(tmp_path):
     assert parallel_memory_capacity(
         11, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options
     ) == 10
+
+
+@pytest.mark.parametrize("slots", [1, 4, 10, 20, 251])
+def test_parallel_memory_capacity_scales_without_a_fixed_minimum(tmp_path, slots):
+    options = _parallel_memory_paths(tmp_path, _required_parallel_memory(slots))
+    # The high-capacity cases need a host whose total RAM also fits the fleet.
+    options["meminfo_path"].write_text(
+        "MemTotal: %d kB\nMemAvailable: %d kB\n"
+        % ((_required_parallel_memory(slots) + 1024**3) // 1024,
+           _required_parallel_memory(slots) // 1024)
+    )
+    assert parallel_memory_capacity(251, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options) == slots
+    options["meminfo_path"].write_text(
+        "MemTotal: %d kB\nMemAvailable: %d kB\n"
+        % ((_required_parallel_memory(slots) + 1024**3) // 1024,
+           (_required_parallel_memory(slots) - 1024) // 1024)
+    )
+    if slots == 1:
+        with pytest.raises(RuntimeHostError, match="available memory"):
+            parallel_memory_capacity(251, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options)
+    else:
+        assert parallel_memory_capacity(251, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options) == slots - 1
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("limited_level", ["service", "ancestor"])
+def test_parallel_memory_capacity_honors_used_cgroup_headroom(
+    tmp_path, version, limited_level
+):
+    options = _parallel_memory_paths(tmp_path, 22_642_827_264)
+    root = options["cgroup_root"]
+    if version == 1:
+        root = root / "memory"
+        (root / "service").mkdir(parents=True)
+        options["membership_path"].write_text("7:memory:/service\n")
+    limit_name = "memory.max" if version == 2 else "memory.limit_in_bytes"
+    used_name = "memory.current" if version == 2 else "memory.usage_in_bytes"
+    limited = root / "service" if limited_level == "service" else root
+    (limited / limit_name).write_text(str(_required_parallel_memory(4) + 1024**3))
+    (limited / used_name).write_text(str(1024**3))
+    assert parallel_memory_capacity(20, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options) == 4
+    with pytest.raises(RuntimeHostError) as failure:
+        require_parallel_memory(10, runtime.DEFAULT_MEMORY_LIMIT_BYTES, **options)
+    assert failure.value.reason == "parallel_memory_insufficient"
+
+
+def test_memory_admission_flows_through_startup_claim_and_proxy_rotation(tmp_path, monkeypatch):
+    from lab_arena import proxy_workers, runner as rn, scoring_startup
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config as runner_config
+
+    options = _parallel_memory_paths(tmp_path, 22_642_827_264)
+    environment = {
+        "LAB_ARENA_WEBSHARE_PROXY_%d" % index:
+            "http://user:private@proxy-%d.example:80" % index
+        for index in range(1, 20)
+    }
+    original_preflight = proxy_workers.preflight_proxy_workers
+
+    def preflight(inventory):
+        exits = {worker.proxy_url: "8.8.4.%d" % worker.slot_index
+                 for worker in inventory.workers}
+        return original_preflight(
+            inventory, transport_probe=lambda *_args, **_kwargs: None,
+            exit_ip_probe=lambda url, **_kwargs: exits[url],
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+
+    monkeypatch.setattr(proxy_workers, "preflight_proxy_workers", preflight)
+    startup = scoring_startup.prepare_validator_scoring(
+        SimpleNamespace(runsc_path="/usr/local/bin/runsc", work_dir=tmp_path / "runner"),
+        environment=environment, prepare_host=lambda *_args: None,
+        memory_capacity=lambda slots, sandbox: parallel_memory_capacity(slots, sandbox, **options),
+    )
+    assert startup.parallelism == 10
+    assert startup.verified_proxies.webshare_worker_count == 19
+    pool = proxy_workers.ProxyWorkerPool(startup.verified_proxies)
+    api = FakeApi([])
+    instance = rn.Runner(replace(
+        runner_config(tmp_path, api, Mock(), parallel=startup.parallelism),
+        proxy_worker_pool=pool,
+    ))
+    try:
+        assert instance.claim_one() == {"status": "no_pending"}
+        assert api.claims[-1]["body"]["declared_parallelism"] == 10
+        assert [instance._slots.acquire(blocking=False) for _ in range(11)] == [True] * 10 + [False]
+        for _ in range(10):
+            instance._slots.release()
+        rotated = []
+        for _ in range(2):
+            leases = [pool.acquire(timeout=0) for _ in range(startup.parallelism)]
+            rotated.extend(lease.slot_index for lease in leases)
+            for lease in leases:
+                lease.release()
+        assert set(rotated) == set(range(20))
+        assert pool.capacity == 20
+    finally:
+        instance.close()
+    for command in (runtime.AGENT_ENTRY_COMMAND, runtime.SCORER_ENTRY_COMMAND):
+        spec = make_spec(tmp_path, entry_command=command)
+        assert spec.memory_limit_bytes == 2 * 1024**3
+        assert runtime.oci_spec(spec)["linux"]["resources"]["memory"]["limit"] == 2 * 1024**3
 
 
 def test_parallel_memory_capacity_fails_when_one_slot_does_not_fit(tmp_path):

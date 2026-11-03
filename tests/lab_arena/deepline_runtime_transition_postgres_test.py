@@ -14,9 +14,22 @@ from tests.lab_arena.test_deepline_catalog import row
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_DEEPLINE_KEY, Harness, InProcessApi, assert_canary_absent, keypair, price_table,
 )
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 TOOL = "vendor_company_search"
 
+
+
+class _FrozenResearchHarness(HistoricalStoreHarnessMixin, Harness):
+    """Only this module's pinned SQL uses the historical client and judge date."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-20")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
 
 class ExactResearchTransport:
     """Return exact provider receipts without dispatching paid work."""
@@ -96,14 +109,15 @@ class FrozenResearchSandbox:
         return runtime.fake_result(exit_code=0, output_bytes=runtime.read_output(spec))
 
 
-def test_dynamic_research_baseline_and_miner_complete_and_publish(database, tmp_path):
+def test_dynamic_research_baseline_and_miner_complete_and_publish(database, tmp_path, request):
     connect = lambda: database[0].connect(**database[1])
     with connect() as connection, connection.cursor() as cursor:
         for name in ("365-lab-arena-trajectories.sql", "366-lab-arena-trajectory-capacity.sql"):
             cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / name).read_text())
-    h = Harness(connect, tmp_path, challengers=["DynamicResearch"], runners=["alpha"])
+    h = _FrozenResearchHarness(connect, tmp_path, challengers=["DynamicResearch"], runners=["alpha"])
     miner = keypair("svc-miner-DynamicResearch").ss58_address
     h.chain.owned[miner] = [miner]
+    request.addfinalizer(h.service.store.close)
     h.service.config.defaults = replace(h.service.config.defaults,
         per_icp_cost_policy=True, integrity_from="2000-01-01T00:00:00Z")
     snapshot = deepline_catalog.freeze_catalog({"tools": [row(

@@ -576,7 +576,7 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
     assert document["investigation_limits"]["server_prefetch_fetch_calls"] == 1
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS - 1
     assert document["investigation_limits"]["remaining_search_calls"] == 1
 
 
@@ -632,14 +632,21 @@ def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_url"] == good_url
-    assert fetched == [*bad_urls, good_url]
+    # Current-stage discovery prioritizes the useful issuer source after
+    # the first diagnostic; it need not fetch a second diagnostic page.
+    assert fetched == [bad_urls[0], good_url]
     assert _core_usage(result["usage"]) == {
-        "reasoning_turns": 4, "search_calls": 1, "fetch_calls": 3,
+        "reasoning_turns": 3, "search_calls": 1, "fetch_calls": 3,
     }
     assert result["usage"]["total_loaded_pages"] == 1
     assert [item["error_class"] for item in result["usage"]["fetch_outcomes"]] == [
-        "provider_diagnostic_body", "provider_diagnostic_body", "",
+        "provider_diagnostic_body", "fetch_failed", "",
     ]
+    # A model retry of the rejected server-prefetch URL spends a logical
+    # fetch slot without exposing or loading the cached diagnostic body.
+    outcomes = result["usage"]["fetch_outcomes"]
+    assert outcomes[0]["url_sha256"] == outcomes[1]["url_sha256"]
+    assert outcomes[0]["loaded_text_length"] == outcomes[1]["loaded_text_length"] == 0
     assert "Provider account capacity details redacted." not in json.dumps(requests)
     assert TENB_QUOTE in json.dumps(requests[-1])
 
@@ -969,7 +976,7 @@ def test_three_pe_prefetches_keep_fresh_fetch_budget(monkeypatch):
     fetch.assert_not_awaited()
     assert requests[0]["tool_choice"] == "required"
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS
 
 
 ACADEMY_IR_URL = (

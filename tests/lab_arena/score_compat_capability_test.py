@@ -38,7 +38,7 @@ def routed_broker(*, funding_source="host", transport=None):
     )
 
 
-def firecrawl_catalog(*, max_url_length=None):
+def firecrawl_catalog(*, max_url_length=None, parsers=None):
     url_schema = {"type": "string"}
     if max_url_length is not None:
         url_schema["maxLength"] = max_url_length
@@ -51,6 +51,8 @@ def firecrawl_catalog(*, max_url_length=None):
         "storeInCache": {"type": "boolean"},
     }, "required": ["url", "formats", "onlyMainContent", "maxAge",
                     "timeout", "storeInCache"]}
+    if parsers is not None:
+        schema["properties"]["parsers"] = parsers
     return frozen(row("firecrawl_scrape", provider="firecrawl",
                       categories=["research"], inputSchema=schema))
 
@@ -92,8 +94,9 @@ def test_direct_bad_miner_tool_stays_invalid_request():
     assert store.calls == {} and transport.sent == []
 
 
+@pytest.mark.parametrize("parsers", [None, {"type": "array"}, {"type": "array", "minItems": 1}])
 @pytest.mark.parametrize("funding_source", ["host", "miner_key"])
-def test_present_frozen_score_tool_still_dispatches_and_adapts(funding_source):
+def test_present_frozen_score_tool_still_dispatches_and_adapts(funding_source, parsers):
     source = "https://example.com/about"
     transport = FakeTransport([(200, {
         "status": "completed", "billing": {"credits_charged": 0.02},
@@ -104,13 +107,18 @@ def test_present_frozen_score_tool_still_dispatches_and_adapts(funding_source):
     broker, store, _ = routed_broker(funding_source=funding_source,
                                       transport=transport)
     result = broker.execute(
-        score_context(firecrawl_catalog()), operation_id="scrapingdog.scrape",
+        score_context(firecrawl_catalog(parsers=parsers)), operation_id="scrapingdog.scrape",
         parameters={"url": source}, action_sequence=1, timeout_ms=30_000,
     )
     assert result.status == 200
     assert result.call["outcome"] == "settled"
     assert len(store.calls) == 1 and len(transport.sent) == 1
     assert transport.sent[0]["method"] == "POST"
+    payload = json.loads(transport.sent[0]["body"])["payload"]
+    if parsers == {"type": "array"}:
+        assert payload["parsers"] == []
+    else:
+        assert "parsers" not in payload  # Preserve older frozen capabilities.
 
 
 @pytest.mark.parametrize("funding_source", ["host", "miner_key"])

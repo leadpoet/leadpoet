@@ -32,7 +32,7 @@ def _adapted_result(raw_html):
     return result, ledger
 
 
-def _investigate(monkeypatch, response, *, exa_ok=True, cap=None,
+def _investigate(monkeypatch, response, *, exa_ok=True, exa_absence=False, cap=None,
                  deadline=False, remove_exa=False, source_url=URL,
                  fetch_exception=None):
     calls = {"fetch": 0, "exa": 0, "model": 0}
@@ -69,6 +69,11 @@ def _investigate(monkeypatch, response, *, exa_ok=True, cap=None,
             assert payload["maxAgeHours"] == 0
             if not exa_ok:
                 return 503, {"error": "offline failure"}
+            if exa_absence:
+                return 200, {"results": [], "statuses": [{
+                    "id": source_url, "status": "error",
+                    "error": {"httpStatusCode": 404, "tag": "CRAWL_HTTP_404"},
+                }]}
             return 200, {"results": [{"url": source_url,
                                       "text": "Acme supplies software products."}]}
         calls["model"] += 1
@@ -123,17 +128,47 @@ def test_paid_adapter_diagnostic_uses_real_reader_and_exact_url_fallback(monkeyp
     assert ledger.log.count("settle") == 1
 
 
-@pytest.mark.parametrize("status", [502, 503, 401, 402, 403, 429, 500, 504])
-def test_only_typed_502_and_503_allow_exact_url_fallback(monkeypatch, status):
+@pytest.mark.parametrize("status", [404, 502, 503, 401, 402, 403, 429, 500, 504])
+def test_only_typed_unbound_404_502_and_503_allow_exact_url_fallback(monkeypatch, status):
     response = br.BrokerResult(status, {}, b'{"error":{"code":"provider_unavailable"}}', {})
     result, calls = _investigate(monkeypatch, response)
-    if status in (502, 503):
+    if status in (404, 502, 503):
         assert calls["exa"] == 1
         assert result["_completed_submit"] is True
     else:
         assert calls["exa"] == 0
         assert result["failure_reason"] == "provider_error"
         assert result.get("_completed_submit") is not True
+
+
+def test_validated_target_404_is_not_a_broker_error_or_exa_fallback(monkeypatch):
+    response = br.BrokerResult(
+        404, {operations.TRUSTED_RESPONSE_URL_HEADER: URL}, b"", {},
+    )
+    result, calls = _investigate(monkeypatch, response)
+    assert calls["fetch"] == 1 and calls["exa"] == 0
+    assert result["usage"]["fetch_outcomes"][0]["error_class"] == "source_not_found"
+
+
+def test_unbound_404_failed_exact_fallback_stays_incomplete(monkeypatch):
+    response = br.BrokerResult(404, {}, b'{"message":"provider failure"}', {})
+    result, calls = _investigate(monkeypatch, response, exa_ok=False)
+    assert calls["fetch"] == 1 and calls["exa"] == 1
+    assert result["failure_reason"] == "provider_error"
+    assert result.get("_completed_submit") is not True
+
+
+def test_unbound_broker_404_needs_exact_exa_absence_for_unproven(monkeypatch):
+    response = br.BrokerResult(404, {}, b'{"message":"unbound provider failure"}', {})
+    result, calls = _investigate(monkeypatch, response, exa_absence=True)
+    assert calls["fetch"] == 1 and calls["exa"] == 1
+    assert result["failure_reason"] == ""
+    assert result["_completed_submit"] is True
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert [row["error_class"] for row in result["usage"]["fetch_outcomes"]] == [
+        "fetch_failed", "source_not_found",
+    ]
+    assert all(row["loaded_text_length"] == 0 for row in result["usage"]["fetch_outcomes"])
 
 
 @pytest.mark.parametrize("status", [None, "502", True, 0, 600])
@@ -166,14 +201,16 @@ def test_failed_fallback_stays_incomplete_infrastructure(monkeypatch):
     assert result["_completed_submit"] is False
 
 
-def test_failed_fallback_cannot_finalize_an_arena_zero(monkeypatch):
+@pytest.mark.parametrize("status", [404, 502])
+def test_failed_fallback_cannot_finalize_an_arena_zero(monkeypatch, status):
     from lab_arena import scoring
     from qualification.scoring import lead_scorer
     from tests.test_company_evidence_investigator import (
         _competition_company, _complete_verdict, _icp,
     )
 
-    response, _ = _adapted_result(DIAGNOSTIC)
+    response = (br.BrokerResult(404, {}, b'{"message":"unbound provider failure"}', {})
+                if status == 404 else _adapted_result(DIAGNOSTIC)[0])
     failed, _ = _investigate(monkeypatch, response, exa_ok=False)
     attempts = []
 
@@ -214,9 +251,11 @@ def test_failed_fallback_cannot_finalize_an_arena_zero(monkeypatch):
     assert error.value.failure_reason == "provider_error"
 
 
+@pytest.mark.parametrize("status", [404, 502])
 @pytest.mark.parametrize("limit", ["cap", "deadline", "no_exa"])
-def test_existing_admission_and_fetch_limits_still_bound_fallback(monkeypatch, limit):
-    response, _ = _adapted_result(DIAGNOSTIC)
+def test_existing_admission_and_fetch_limits_still_bound_fallback(monkeypatch, limit, status):
+    response = (br.BrokerResult(404, {}, b'{"message":"unbound provider failure"}', {})
+                if status == 404 else _adapted_result(DIAGNOSTIC)[0])
     result, calls = _investigate(
         monkeypatch, response, cap=1 if limit == "cap" else None,
         deadline=limit == "deadline", remove_exa=limit == "no_exa",

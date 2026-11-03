@@ -1,0 +1,532 @@
+{
+  "probe_id": "full-thinking-deepseek-deepseek-v4.1-flash-1017-fireworks",
+  "verified_at": "2026-10-23T23:44:46.146026+00:00",
+  "model": "deepseek/deepseek-v4.1-flash-1017",
+  "provider": "fireworks",
+  "api": "openrouter.chat",
+  "zdr": true,
+  "checks": {
+    "two_tool_continuations": true,
+    "final_json": true,
+    "returned_text": true,
+    "no_truncation": true
+  },
+  "attempts": [
+    {
+      "status": 200,
+      "seconds": 0.623,
+      "request": {
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "fireworks"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.3,
+            "completion": 1.2,
+            "request": 0
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_evidence",
+              "description": "Read synthetic company evidence by ID.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "evidence_id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ]
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup_evidence"
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799084-Ta4PEBJpuizDwGFsW2pV",
+        "object": "chat.completion",
+        "created": 1792799084,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider": "Fireworks",
+        "system_fingerprint": null,
+        "service_tier": null,
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "tool_calls",
+            "native_finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "refusal": null,
+              "reasoning": null,
+              "tool_calls": [
+                {
+                  "type": "function",
+                  "index": 0,
+                  "id": "call_1b1f6ede0ddb42ceb6b43f46",
+                  "function": {
+                    "name": "lookup_evidence",
+                    "arguments": "{\"evidence_id\":\"profile\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 394,
+          "completion_tokens": 41,
+          "total_tokens": 435,
+          "cost": 6.28488e-05,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 264,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 6.28488e-05,
+            "upstream_inference_prompt_cost": 2.84088e-05,
+            "upstream_inference_completions_cost": 3.444e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "deepseek/deepseek-v4.1-flash-1017",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=Fireworks",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 34,
+            "available": [
+              {
+                "provider": "Fireworks",
+                "model": "deepseek/deepseek-v4.1-flash-20261017",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 504
+        }
+      },
+      "request_sha256": "b88127ecb5307539c78e02c8c67b4edb6034de99e2ba097b60a2e9d30235bb7a",
+      "response_sha256": "67e2327423b809b3f4136eba9bc5958aa0c8e9a1cce3516325bf19d10fdeaf98",
+      "turn": 0,
+      "thinking_fields": {}
+    },
+    {
+      "status": 200,
+      "seconds": 0.522,
+      "request": {
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": null,
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "call_1b1f6ede0ddb42ceb6b43f46",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\"evidence_id\":\"profile\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_1b1f6ede0ddb42ceb6b43f46",
+            "content": "{\"business\":\"B2B software\",\"company\":\"Acme Test\",\"country\":\"US\",\"evidence_id\":\"profile\"}"
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "fireworks"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.3,
+            "completion": 1.2,
+            "request": 0
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_evidence",
+              "description": "Read synthetic company evidence by ID.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "evidence_id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ]
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup_evidence"
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799085-MixPgKZyBFqrh1ZlOoiV",
+        "object": "chat.completion",
+        "created": 1792799085,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider": "Fireworks",
+        "system_fingerprint": null,
+        "service_tier": null,
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "tool_calls",
+            "native_finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "refusal": null,
+              "reasoning": "Now second call.",
+              "tool_calls": [
+                {
+                  "type": "function",
+                  "index": 0,
+                  "id": "call_9d2d6556547f4b06ae4ef1e5",
+                  "function": {
+                    "name": "lookup_evidence",
+                    "arguments": "{\"evidence_id\":\"headcount\"}"
+                  }
+                }
+              ],
+              "reasoning_details": [
+                {
+                  "type": "reasoning.text",
+                  "text": "Now second call.",
+                  "format": "unknown",
+                  "index": 0
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 470,
+          "completion_tokens": 46,
+          "total_tokens": 516,
+          "cost": 6.7368e-05,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 340,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 6.7368e-05,
+            "upstream_inference_prompt_cost": 2.8728e-05,
+            "upstream_inference_completions_cost": 3.864e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 4,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "deepseek/deepseek-v4.1-flash-1017",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=Fireworks",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 34,
+            "available": [
+              {
+                "provider": "Fireworks",
+                "model": "deepseek/deepseek-v4.1-flash-20261017",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 440
+        }
+      },
+      "request_sha256": "a3ceac414acc14e779b66ac10fe1f36a3cf165946ee09a83e2354725a4319827",
+      "response_sha256": "e57eb90af033ca8160f27b979745d21549e2924a6c4a877cb9e4808abe1e039c",
+      "turn": 1,
+      "thinking_fields": {
+        "reasoning": 16,
+        "reasoning_details.text": 16
+      }
+    },
+    {
+      "status": 200,
+      "seconds": 0.572,
+      "request": {
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": null,
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "call_1b1f6ede0ddb42ceb6b43f46",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\"evidence_id\":\"profile\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_1b1f6ede0ddb42ceb6b43f46",
+            "content": "{\"business\":\"B2B software\",\"company\":\"Acme Test\",\"country\":\"US\",\"evidence_id\":\"profile\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "Now second call.",
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "call_9d2d6556547f4b06ae4ef1e5",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\"evidence_id\":\"headcount\"}"
+                }
+              }
+            ],
+            "reasoning_details": [
+              {
+                "type": "reasoning.text",
+                "text": "Now second call.",
+                "format": "unknown",
+                "index": 0
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_9d2d6556547f4b06ae4ef1e5",
+            "content": "{\"employees\":80,\"evidence_id\":\"headcount\"}"
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "fireworks"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.3,
+            "completion": 1.2,
+            "request": 0
+          }
+        },
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "qualification",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "company": {
+                  "type": "string"
+                },
+                "qualified": {
+                  "type": "boolean"
+                },
+                "evidence_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "company",
+                "qualified",
+                "evidence_ids"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799085-3SW1BqDHD0nIWWLNdIns",
+        "object": "chat.completion",
+        "created": 1792799085,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider": "Fireworks",
+        "system_fingerprint": null,
+        "service_tier": null,
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "stop",
+            "native_finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "{\"company\": \"Acme Test\", \"qualified\": true, \"evidence_ids\": [\"profile\", \"headcount\"]}",
+              "refusal": null,
+              "reasoning": "80 employees, US, B2B software \u2192 qualified true.",
+              "reasoning_details": [
+                {
+                  "type": "reasoning.text",
+                  "text": "80 employees, US, B2B software \u2192 qualified true.",
+                  "format": "unknown",
+                  "index": 0
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 342,
+          "completion_tokens": 40,
+          "total_tokens": 382,
+          "cost": 6.17904e-05,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 212,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 6.17904e-05,
+            "upstream_inference_prompt_cost": 2.81904e-05,
+            "upstream_inference_completions_cost": 3.36e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 13,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "deepseek/deepseek-v4.1-flash-1017",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=Fireworks",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 34,
+            "available": [
+              {
+                "provider": "Fireworks",
+                "model": "deepseek/deepseek-v4.1-flash-20261017",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 459
+        }
+      },
+      "request_sha256": "0d5658f521a7c063967d20c84a820f0272e2887bae4ebee029c6e66a42a5161e",
+      "response_sha256": "99b0f7f62a5493b624af6c519a45e382b2c6fd3c981ecc6e94b017a28c84dded",
+      "turn": 2,
+      "thinking_fields": {
+        "reasoning": 48,
+        "reasoning_details.text": 48
+      }
+    }
+  ],
+  "reported_cost_usd": "0.0001920072",
+  "approval_granted": false,
+  "limitation": "Synthetic compatibility evidence only; requires semantic review, gateway/export tests, and ICP evaluation."
+}

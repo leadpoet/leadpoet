@@ -8,6 +8,7 @@ import pytest
 from lab_arena import training_readiness as readiness
 from scripts import report_arena_training as cli
 from tests.lab_arena.training_dataset_test import example, claim, row, seal
+from tests.lab_arena.training_eligibility_test import ten_selected_examples
 
 
 def document(run="private-run"):
@@ -22,6 +23,45 @@ def test_real_build_reports_company_candidate_without_claiming_complete_executio
     assert report["readiness"]["training_ready"] is False
     assert report["readiness"]["human_label_review"] == "not_proved_by_storage"
     assert report["agent_steps"]["candidate_records"] == 0
+
+
+def test_full_thinking_inventory_reports_frozen_coverage_without_champion_claim():
+    exports = list(ten_selected_examples().values())
+    for position, item in enumerate(exports):
+        item["configuration"]["training_minimum_icp_coverage_percent"] = 80
+        item["configuration"].update(stage_1_icp_count=5, stage_2_icp_count=5)
+        item["icp_position"] = position
+        seal(item)
+    report = readiness.build(exports, production_rounds_only=False)
+    coverage = report["full_thinking"]["coverage"]
+    assert len(coverage) == 1
+    assert coverage[0]["provided_icps"] == 10
+    assert coverage[0]["required_icps"] == 8
+    assert coverage[0]["strict_icps"] == 10
+    assert coverage[0]["supplied_inventory_complete"] is True
+    assert coverage[0]["strict_coverage_met_in_supplied_inventory"] is True
+    assert report["readiness"]["training_ready"] is False
+    exports[-1]["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
+    report = readiness.build([*exports[:-1], seal(exports[-1])], production_rounds_only=False)
+    assert report["full_thinking"]["coverage"][0]["strict_icps"] == 10
+    # Other exact pairs remain in the export inventory. The eligibility gate
+    # separately rejects an ICP that has a real selected-result redaction.
+    call = exports[-1]["provider_calls"][1]
+    call["response_privacy_redactions"] = ["credential"]
+    call["response_receipts"][0]["privacy_redactions"] = ["credential"]
+    report = readiness.build([*exports[:-1], seal(exports[-1])], production_rounds_only=False)
+    assert report["full_thinking"]["coverage"][0]["strict_icps"] == 10
+    assert "not_complete_icps" in report["full_thinking"]["coverage_scope"]
+    from lab_arena import training_eligibility, training_steps, training_thinking
+    from tests.lab_arena.training_eligibility_test import submission
+    example = exports[-1]
+    gate = training_eligibility.assess_capture(
+        submission(), {example["run_id"]: example}, [example["run_id"]], enabled=True)
+    assert gate["eligible"] is False
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits["train"] + splits["eval"]
+    assert len(records) == 1
+    assert all(ref["call_identity"] != call["call_identity"] for row in records for ref in row["source_refs"])
 
 
 def test_duplicate_exports_conflicting_versions_and_bad_hash_are_not_counted_twice():
@@ -46,6 +86,24 @@ def test_mixed_scorer_cohorts_are_separate_instead_of_combined():
     assert len(report["qualification"]["cohorts"]) == 2
     assert report["qualification"]["candidate_records"] == 2
     assert report["qualification"]["cohorts_must_not_be_combined_for_training"]
+
+
+def test_missing_image_cohort_stays_exact_while_using_full_source_split_graph():
+    first = document("image-missing")
+    first["configuration"]["scorer_image_digest"] = None
+    first["submission_id"] = "missing-image-source"
+    first["companies"][0]["company"] = claim("Missing Image", "missing-image.example", "missing-image")
+    first["output"]["companies"][0] = first["companies"][0]["company"]
+    second = document("image-present")
+    second["submission_id"] = "present-image-source"
+    second["companies"][0]["company"] = claim("Present Image", "present-image.example", "present-image")
+    second["output"]["companies"][0] = second["companies"][0]["company"]
+    report = readiness.build([seal(first), seal(second)])
+    cohorts = report["qualification"]["cohorts"]
+    assert len(cohorts) == 2
+    assert [sum(cohort["records"][name] for name in ("train", "eval"))
+            for cohort in cohorts] == [1, 1]
+    assert report["qualification"]["candidate_records"] == 2
 
 
 def test_truthy_completeness_metadata_cannot_claim_complete():

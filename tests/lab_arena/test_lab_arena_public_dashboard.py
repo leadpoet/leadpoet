@@ -16,6 +16,13 @@ BASELINE_HOTKEY = "5" + "A" * 47
 MINER_HOTKEY = "5" + "B" * 47
 
 
+class DashboardService(SimpleNamespace):
+    """Expose the real public-read and identifier contracts on focused stubs."""
+
+    _public_submissions_round = ArenaService._public_submissions_round
+    _require_identifier = staticmethod(ArenaService._require_identifier)
+
+
 def _now():
     return datetime(2026, 9, 11, 2, 0, tzinfo=timezone.utc)
 
@@ -101,6 +108,50 @@ def test_round_summary_does_not_mistake_ranked_baseline_for_champion():
     assert "runner_hotkeys" not in serialized
 
 
+def test_round_summary_names_the_frozen_defending_champion():
+    row = _published_round()
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+    row.update(champion_submission_id="sub-prior", champion_hotkey=MINER_HOTKEY)
+    # A freeze that kept another baseline source (e.g. October 28) names no one.
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+    row.update(champion_funding_frozen=True)
+    row["configuration_doc"]["baseline_reasoning_configuration"] = {}
+    summary = public_dashboard.round_summary(row)
+    assert summary["defending_champion"] == {
+        "submission_id": "sub-prior",
+        "miner_hotkey": MINER_HOTKEY,
+    }
+    # The baseline participant still names the organizer that ran it.
+    assert summary["baseline"]["miner_hotkey"] == BASELINE_HOTKEY
+    row.update(champion_hotkey=None)
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+
+
+@pytest.mark.parametrize("contract,verified", [
+    (None, False), ("legacy", False), (False, False), ([], False),
+    ({}, True), ({"reasoning_capture_policy": "full_generated_thinking_v1"}, True),
+])
+def test_defender_source_proof_includes_empty_legacy_contract(contract, verified):
+    row = _published_round()
+    row.update(champion_funding_frozen=True, champion_submission_id="sub-prior",
+               champion_hotkey=MINER_HOTKEY)
+    row["configuration_doc"]["baseline_reasoning_configuration"] = contract
+    # A derived marker cannot override a malformed complete-row contract.
+    row["configuration_doc"]["baseline_champion_source_frozen"] = True
+    expected = {"submission_id": "sub-prior", "miner_hotkey": MINER_HOTKEY} if verified else None
+    assert public_dashboard.round_summary(row)["defending_champion"] == expected
+
+
+@pytest.mark.parametrize("funding", [None, False, 1, "true"])
+def test_defender_requires_strictly_frozen_funding(funding):
+    row = _published_round()
+    row.update(champion_funding_frozen=funding, champion_submission_id="sub-prior",
+               champion_hotkey=MINER_HOTKEY)
+    row["configuration_doc"].update(baseline_reasoning_configuration={},
+                                    baseline_champion_source_frozen=True)
+    assert public_dashboard.round_summary(row)["defending_champion"] is None
+
+
 def test_round_summary_names_submission_bank_and_evaluation_days():
     row = _published_round()
     row.update(icp_set_date="2026-09-08", evaluation_date="2026-09-09")
@@ -124,7 +175,7 @@ def test_open_round_dates_are_planned_but_no_scores_are_disclosed():
 def test_intermediate_scores_are_not_read_or_released(status):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("Unpublished score rows must not be read")
-    service = SimpleNamespace(_store=SimpleNamespace(list_runs=forbidden))
+    service = DashboardService(_store=SimpleNamespace(list_runs=forbidden))
     assert public_dashboard._stage1_scores(service, {"status": status}) == {}
 
 
@@ -295,7 +346,7 @@ def test_competition_snapshot_is_scoped_and_separates_open_running_and_completed
             return [opened, running, cancelled, published]
 
     store = Store()
-    service = SimpleNamespace(
+    service = DashboardService(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -339,7 +390,7 @@ def test_competition_snapshot_fetches_the_latest_published_outside_recent_window
             return [published] if kwargs.get("status") == "published" else [opened, cancelled]
 
     store = Store()
-    service = SimpleNamespace(
+    service = DashboardService(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -406,21 +457,13 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
             }
             rows = pages.get(kwargs.get("offset", 0), [])
             if archive_reason == "authorized_baseline_recovery440":
-                # Production fetches compact JSON projections, not full config.
-                assert "cfg_recovery_source_round_id:" in kwargs["columns"]
-                return [
-                    {
-                        **{key: value for key, value in row.items()
-                           if key != "configuration_doc"},
-                        **{"cfg_" + key: json.dumps(value)
-                           for key, value in row["configuration_doc"].items()},
-                    }
-                    for row in rows
-                ]
+                # The current public configuration reader includes the recovery
+                # identity without selecting the full private configuration.
+                assert "configuration_doc:lab_arena_public_configuration_v1" in kwargs["columns"]
             return rows
 
     store = Store()
-    service = SimpleNamespace(
+    service = DashboardService(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -453,7 +496,7 @@ def test_competition_snapshot_keeps_a_real_cancelled_round():
         def list_rounds(**_kwargs):
             return [cancelled, published]
 
-    service = SimpleNamespace(
+    service = DashboardService(
         _config=SimpleNamespace(mode="live"),
         _store=Store(),
         _chain_scope=lambda: ("finney", 71),
@@ -483,7 +526,7 @@ def test_competition_snapshot_honors_an_explicitly_pinned_archive():
         def list_rounds(**_kwargs):
             raise AssertionError("pinned public reads must not enumerate rounds")
 
-    service = SimpleNamespace(
+    service = DashboardService(
         _config=SimpleNamespace(
             mode="live", pinned_round_id=archive["round_id"]
         ),
@@ -516,7 +559,7 @@ def test_competition_snapshot_stops_on_a_repeated_archive_page():
             return [] if kwargs.get("status") == "published" else [archive]
 
     store = Store()
-    service = SimpleNamespace(
+    service = DashboardService(
         _config=SimpleNamespace(mode="live"),
         _store=store,
         _chain_scope=lambda: ("finney", 71),
@@ -569,7 +612,7 @@ def test_open_submissions_disclose_only_accepted_intake_as_queued():
             assert "encrypted_credentials" not in kwargs["columns"]
             return records
 
-    service = SimpleNamespace(
+    service = DashboardService(
         _round=lambda _round_id: round_row,
         _store=Store(),
         now=_now,
@@ -654,7 +697,7 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
             }
             return runs
 
-    service = SimpleNamespace(
+    service = DashboardService(
         _round=lambda _round_id: round_row,
         _store=Store(),
         now=_now,
@@ -783,7 +826,7 @@ def _published_submission_records():
 
 def test_per_icp_stage1_uses_frozen_cost_adjusted_baseline_and_miner_scores():
     row = _per_icp_published_round()
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -813,7 +856,7 @@ def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
         def list_submissions(*_args, **_kwargs):
             return _published_submission_records()
 
-    service = SimpleNamespace(
+    service = DashboardService(
         _round=lambda _round_id: row,
         _store=Store(),
         now=_now,
@@ -835,7 +878,7 @@ def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
 def test_per_icp_stage1_does_not_restore_raw_cost_ineligible_miner_score():
     row = _per_icp_published_round()
     row["publication_doc"]["stage1_ranking"][0]["stage1_score"] = 0.0
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(
             list_runs=lambda *_args, **_kwargs: _stage1_runs(miner_position=0)
         )
@@ -854,7 +897,7 @@ def test_per_icp_stage1_does_not_fall_back_to_raw_miner_score(published_score):
         del ranking["stage1_score"]
     else:
         ranking["stage1_score"] = published_score
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -873,7 +916,7 @@ def test_per_icp_stage1_hides_baseline_when_frozen_cost_basis_is_invalid(
         baseline["cost_summary"] = None
     else:
         baseline["cost_summary"]["per_icp"][1]["icp_position"] = 0
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -888,7 +931,7 @@ def test_successful_calls_policy_round_keeps_historical_raw_stage1_rule():
     row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
         contracts.SUCCESSFUL_CALLS_COST_POLICY
     )
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
     )
 
@@ -918,7 +961,7 @@ def test_cancelled_round_never_fabricates_aggregate_scores():
             "accepted_at": "2026-09-08T01:05:00Z",
         }
     ]
-    service = SimpleNamespace(
+    service = DashboardService(
         _round=lambda _round_id: row,
         _store=SimpleNamespace(list_submissions=lambda *_args, **_kwargs: records,
                                list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []),
@@ -943,7 +986,7 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
         "round_id": "arena-2026-09-09",
     }
     checked = []
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(get_submission=lambda _submission_id: submission),
         _round=lambda round_id: checked.append(round_id),
         _objects=object(),
@@ -972,7 +1015,7 @@ def test_public_code_service_hook_checks_round_scope_and_translates_denial(monke
 
 def test_submission_status_uses_full_round_scope_check():
     checked = []
-    service = SimpleNamespace(
+    service = DashboardService(
         _store=SimpleNamespace(
             get_submission=lambda _submission_id: {
                 "submission_id": "sub-miner",
@@ -1014,7 +1057,7 @@ def test_previously_admitted_review_exclusion_remains_visible_without_scores(rou
             "provider_response": "private-provider-do-not-publish",
         },
     }
-    service = SimpleNamespace(_round=lambda _: row, now=_now,
+    service = DashboardService(_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
                              list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     result = public_dashboard.submissions_snapshot(service, row["round_id"])
@@ -1041,7 +1084,7 @@ def test_review_visibility_does_not_disclose_unadmitted_or_superseded_sources(ch
     submission = {"submission_id": "private-id", "miner_hotkey": MINER_HOTKEY,
         "status": "rejected", "rejection_rule": "code_review_incomplete",
         "accepted_at": "2026-09-08T17:50:08Z", **change}
-    service = SimpleNamespace(_round=lambda _: row, now=_now,
+    service = DashboardService(_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
                              list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     assert public_dashboard.submissions_snapshot(service, row["round_id"])["submissions"] == []
@@ -1116,11 +1159,11 @@ def test_public_review_ignores_stale_credit_evidence_after_status_change(status)
 
 
 @pytest.mark.parametrize('attempts,round_status,offset,expected', [
-    (3, 'open', -1, True), (6, 'open', -1, False),
+    (3, 'open', -1, True), (6, 'open', -1, True),
     (3, 'open', 0, False), (3, 'open', 1, False),
     (3, 'published', -1, False),
 ])
-def test_public_review_retry_flag_stops_at_cap_and_deadline(attempts, round_status, offset, expected):
+def test_public_review_retry_flag_stops_at_deadline_and_round_close(attempts, round_status, offset, expected):
     from datetime import timedelta
     deadline = _now()
     view = public_dashboard.code_review_summary({

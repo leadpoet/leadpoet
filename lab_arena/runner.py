@@ -741,6 +741,8 @@ class ArenaApiClient(Protocol):
 
     def training_observations(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
+    def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> bool: ...
+
     def training_observation_segment(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
     def source(self, run_id: str, lease_token: str) -> bytes: ...
@@ -880,6 +882,21 @@ class HttpArenaApiClient:
             timeout_seconds=TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
             preserve_http_status=True,
         )
+
+    def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> bool:
+        training_input.object_ref(run_id, 1)
+        if not isinstance(payload_sha256, str) or not contracts.SHA256_RE.fullmatch(payload_sha256):
+            raise RunnerError("training observations digest is invalid")
+        etag = '"' + payload_sha256 + '"'
+        try:
+            response = self._client.head(
+                self._base_url + "/arena/v1/runs/%s/training-observations" % run_id,
+                headers={"x-lab-arena-lease": lease_token, "If-Match": etag},
+                timeout=httpx.Timeout(TRAINING_OBSERVATIONS_TIMEOUT_SECONDS),
+            )
+        except httpx.HTTPError as exc:
+            raise RunnerError("training observations verification transport failure") from exc
+        return response.status_code == 204 and response.headers.get("ETag") == etag
 
     def training_observation_segment(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
@@ -2000,6 +2017,7 @@ def _provider_error_event(
 def _buffer_provider_error_event_locked(
     state: RunState, provider_event: Dict[str, Any],
 ) -> None:
+    """Bound the existing runtime diagnostics, including failed socket writes."""
     if len(state.provider_error_events) < MAX_BUFFERED_PROVIDER_ERROR_EVENTS:
         state.provider_error_events.append(provider_event)
         return
@@ -2007,6 +2025,23 @@ def _buffer_provider_error_event_locked(
     content = state.provider_error_events[-1]["content"]
     content["dropped"] = True
     content["dropped_count"] = state.provider_error_events_dropped
+
+
+def _socket_write_failure_event(receipt: Mapping[str, Any], exc: BaseException) -> Dict[str, Any]:
+    # Never retain exception prose, filenames or an arbitrary subclass name.
+    category = next((kind.__name__ for kind in (
+        BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError,
+    ) if isinstance(exc, kind)), "other")
+    number = getattr(exc, "errno", None)
+    return trajectory.event("runtime.socket_write_failed", {
+        "receipt_ordinal": receipt["ordinal"],
+        "action_sequence": receipt["action_sequence"],
+        "call_identity": receipt["call_identity"],
+        "operation_id": receipt["operation_id"],
+        "protocol": receipt["protocol"],
+        "exception_class": category,
+        "errno": number if type(number) is int and 0 <= number <= 65535 else None,
+    })
 
 
 def _provider_error_events(state: RunState) -> List[Dict[str, Any]]:
@@ -2080,7 +2115,13 @@ def _call_provider_matches_operation(call: Mapping[str, Any], operation_id: str)
     return bool(
         call.get("provider") == "deepline"
         and call.get("effective_operation_id") == scoring_provider_compat.EFFECTIVE_OPERATION_ID
-        and call.get("compatibility_version") == scoring_provider_compat.COMPATIBILITY_VERSION
+        and (
+            call.get("compatibility_version") == scoring_provider_compat.COMPATIBILITY_VERSION
+            or (
+                call.get("compatibility_version") == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+                and call.get("adapter") == "generic_http_raw_html"
+            )
+        )
         and isinstance(call.get("adapter"), str)
         and isinstance(call.get("tool"), str)
         and (operation_id, call.get("adapter"), call.get("tool")) in {
@@ -2094,6 +2135,15 @@ def _call_provider_matches_operation(call: Mapping[str, Any], operation_id: str)
             ("scrapingdog.profile_post", "harvest_linkedin_post", scoring_provider_compat.HARVEST_POST_TOOL),
         }
     )
+
+
+@dataclass
+class _WorkerSocketAdmission:
+    permit: threading.BoundedSemaphore
+    capture_only: bool
+    completion_deadline: float
+    read_deadline: Optional[float] = None
+    provider_deadline: Optional[float] = None
 
 
 class WorkerSocketServer:
@@ -2139,6 +2189,35 @@ class WorkerSocketServer:
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
+        self._admissions: Dict[socket.socket, _WorkerSocketAdmission] = {}
+        self._handler_context = threading.local()
+
+    def _retain_handler_deadline(self, deadline: float, clock: Callable[[], float]) -> None:
+        """Retain an existing dispatch window, without changing provider behavior."""
+
+        admission = getattr(self._handler_context, "admission", None)
+        if admission is None:
+            return
+        # Dispatch recovery tests can inject a separate monotonic clock. Keep
+        # admission and drain deadlines in the real socket clock domain.
+        socket_deadline = time.monotonic() + max(0.0, deadline - clock())
+        with self._state.lock:
+            if admission.provider_deadline is None:
+                admission.provider_deadline = socket_deadline
+            else:
+                # Responses retries share the first operation window. A later
+                # attempt must never give final capture a fresh lifetime.
+                admission.provider_deadline = min(admission.provider_deadline, socket_deadline)
+            admission.completion_deadline = admission.provider_deadline
+
+    def _retain_socket_write_deadline(self, connection: socket.socket) -> None:
+        """Capture a response write within the socket's unchanged timeout."""
+
+        admission = getattr(self._handler_context, "admission", None)
+        timeout = connection.gettimeout()
+        if admission is not None and timeout is not None:
+            with self._state.lock:
+                admission.completion_deadline = time.monotonic() + timeout
 
     def _quota_snapshot(
         self, *, include_sourcing_cost: bool = False
@@ -2396,7 +2475,7 @@ class WorkerSocketServer:
             return contracts.canonical_json({"recorded": False}).encode("utf-8")
         return contracts.canonical_json({"recorded": True}).encode("utf-8")
 
-    def _handle_training_control(self, raw: bytes) -> Optional[bytes]:
+    def _handle_training_control(self, raw: bytes, *, replayed: bool = False) -> Optional[bytes]:
         """Store only explicit sandbox reports under this worker's active lease."""
         if len(raw) > lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES:
             self._mark_observations_incomplete()
@@ -2456,7 +2535,8 @@ class WorkerSocketServer:
                         return unavailable
                 value = {"id": len(buffer.agent_observations), "kind": frame["kind"],
                          "observed_at": _timestamp(lambda: datetime.now(timezone.utc)),
-                         "after_action_sequence": self._state.action_sequence - 1 if self._state.action_sequence else None,
+                         "after_action_sequence": (None if replayed else
+                                                   self._state.action_sequence - 1 if self._state.action_sequence else None),
                          "depends_on": references, "data": data,
                          "privacy": {"redacted": False, "redactions": []}}
                 identity = buffer.append_agent_observation(value, secrets=(
@@ -2473,7 +2553,9 @@ class WorkerSocketServer:
             self._mark_observations_incomplete()
             return unavailable
 
-    def _mark_socket_delivery(self, report: Mapping[str, Any], *, written: bool) -> None:
+    def _mark_socket_delivery(
+        self, report: Mapping[str, Any], *, written: bool, error: BaseException | None = None,
+    ) -> None:
         ordinal = report.get("receipt_ordinal")
         if type(ordinal) is not int:
             return
@@ -2483,6 +2565,12 @@ class WorkerSocketServer:
                     self._state.worker_observations.mark_socket_write(
                         ordinal, written_at=_timestamp(lambda: datetime.now(timezone.utc)) if written else None,
                     )
+                    if not written and error is not None:
+                        receipt = next(row for row in self._state.worker_observations.response_receipts
+                                       if row["ordinal"] == ordinal)
+                        _buffer_provider_error_event_locked(
+                            self._state, _socket_write_failure_event(receipt, error),
+                        )
         except Exception:
             self._mark_observations_incomplete()
 
@@ -2584,6 +2672,14 @@ class WorkerSocketServer:
             return None
         if body != {"error": {"code": call["error_code"]}}:
             return None
+        if (call.get("deepline_terminal_failure") is True
+            and type(call.get("provider_status")) is int
+            and 400 <= call["provider_status"] <= 599
+            and call.get("transport_error_class") is None
+            and call.get("deepline_response_missing") is not True):
+            # A broker-proved completed failure cannot yield a missing success.
+            # Its unknown charge still follows the ordinary delayed audit.
+            return None
         return call["call_identity"]
 
     def _recover_deepline_response(
@@ -2669,6 +2765,7 @@ class WorkerSocketServer:
         deadline = self._monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
         )
+        self._retain_handler_deadline(deadline, self._monotonic)
         # Compatibility routes and the native execute route share the actual
         # Deepline tool's guard. Catalog reads and other providers stay separate.
         tool = (
@@ -3037,6 +3134,7 @@ class WorkerSocketServer:
         deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
         )
+        self._retain_handler_deadline(deadline, time.monotonic)
         attempt_timeout_ms = timeout_ms
         hidden_retry_call_identities: List[str] = []
         for retry in range(RESPONSES_RATE_LIMIT_RETRIES + 1):
@@ -3330,7 +3428,12 @@ class WorkerSocketServer:
         if control_response is not None:
             return control_response
         try:
-            operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw, deepline_catalog=self._state.lease.get("deepline_catalog"))
+            operation_id, parameters, timeout_ms = shim.decode_operation_frame(
+                raw, deepline_catalog=self._state.lease.get("deepline_catalog"),
+                allow_full_thinking=self._state.lease.get("kind") == "execute"
+                and self._state.lease.get("reasoning_capture_policy")
+                == shim.FULL_THINKING_POLICY,
+            )
         except shim.OperationFrameError as exc:
             code = str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame"
             self._record_parse_observation({"raw_frame": self._observation_text(raw)}, {"error": code}, "frame", code)
@@ -3374,7 +3477,13 @@ class WorkerSocketServer:
         """The miner contract: a provider's own HTTP request, sent over the socket without a credential."""
 
         try:
-            operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=self._state.lease.get("deepline_catalog"))
+            operation_id, parameters = operations.match_request(
+                method, url, body, headers,
+                deepline_catalog=self._state.lease.get("deepline_catalog"),
+                allow_full_thinking=self._state.lease.get("kind") == "execute"
+                and self._state.lease.get("reasoning_capture_policy")
+                == shim.FULL_THINKING_POLICY,
+            )
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             status, payload = HTTP_ERROR_STATUS.get(code, 400), _http_error_body(code)
@@ -3418,6 +3527,8 @@ class WorkerSocketServer:
         self._stopping.clear()
         server_self = self
         slots = threading.BoundedSemaphore(self._max_connections)
+        capture_slot = threading.BoundedSemaphore(1)
+        admissions = self._admissions
 
         def connection_closed(connection: socket.socket) -> bool:
             if server_self._stopping.is_set():
@@ -3434,26 +3545,58 @@ class WorkerSocketServer:
             daemon_threads = True
 
             def verify_request(self, request: Any, client_address: Any) -> bool:
-                return slots.acquire(blocking=False)
+                if slots.acquire(blocking=False):
+                    permit, capture_only = slots, False
+                elif capture_slot.acquire(blocking=False):
+                    # One capture writer must make progress while all eight
+                    # provider handlers are busy. This permit grants no dispatch.
+                    permit, capture_only = capture_slot, True
+                else:
+                    return False
+                try:
+                    read_deadline = time.monotonic() + (
+                        min(server_self._read_timeout_seconds,
+                            lab_arena_checkpoint.TRAINING_SOCKET_TIMEOUT_SECONDS)
+                        if capture_only else server_self._read_timeout_seconds
+                    )
+                    admission = _WorkerSocketAdmission(
+                        permit, capture_only=capture_only,
+                        completion_deadline=read_deadline,
+                        read_deadline=read_deadline if capture_only else None,
+                    )
+                    with server_self._state.lock:
+                        admissions[request] = admission
+                except BaseException:
+                    permit.release()
+                    raise
+                return True
+
+            def admission_for(self, request: socket.socket) -> _WorkerSocketAdmission:
+                with server_self._state.lock:
+                    return admissions[request]
+
+            def release_request(self, request: socket.socket) -> None:
+                with server_self._state.lock:
+                    admission = admissions.pop(request)
+                    server_self._state.worker_handlers_inflight -= 1
+                    admission.permit.release()
 
             def process_request(self, request: Any, client_address: Any) -> None:
                 with server_self._state.lock:
                     server_self._state.worker_handlers_inflight += 1
                 try:
                     super().process_request(request, client_address)
-                except Exception:
-                    with server_self._state.lock:
-                        server_self._state.worker_handlers_inflight -= 1
-                    slots.release()
+                except BaseException:
+                    self.release_request(request)
                     raise
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
+                server_self._handler_context.admission = self.admission_for(request)
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    with server_self._state.lock:
-                        server_self._state.worker_handlers_inflight -= 1
-                    slots.release()
+                    del server_self._handler_context.admission
+                    self.release_request(request)
 
         class HttpBridge(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -3493,8 +3636,8 @@ class WorkerSocketServer:
                 )
                 try:
                     self._answer(status, response_headers, payload)
-                except BaseException:
-                    server_self._mark_socket_delivery(delivery_report, written=False)
+                except BaseException as exc:
+                    server_self._mark_socket_delivery(delivery_report, written=False, error=exc)
                     raise
                 server_self._mark_socket_delivery(delivery_report, written=True)
 
@@ -3521,8 +3664,10 @@ class WorkerSocketServer:
                     self.send_header(name, value)
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Connection", "close")
+                server_self._retain_socket_write_deadline(self.connection)
                 self.end_headers()
                 if self.command != "HEAD":
+                    server_self._retain_socket_write_deadline(self.connection)
                     self.wfile.write(payload)
                 self.wfile.flush()
 
@@ -3531,21 +3676,25 @@ class WorkerSocketServer:
         class Handler(socketserver.BaseRequestHandler):
             def handle(self) -> None:
                 connection = self.request
+                admission = self.server.admission_for(connection)
                 connection.settimeout(server_self._read_timeout_seconds)
-                try:
-                    first = connection.recv(1, socket.MSG_PEEK)
-                except OSError:
-                    return
-                if first and first[0] in HTTP_FIRST_BYTES:
+                if not admission.capture_only:
                     try:
-                        HttpBridge(connection, self.client_address, self.server)
-                    except (OSError, ValueError):
+                        first = connection.recv(1, socket.MSG_PEEK)
+                    except OSError:
                         return
-                    return
+                    if first and first[0] in HTTP_FIRST_BYTES:
+                        try:
+                            HttpBridge(connection, self.client_address, self.server)
+                        except (OSError, ValueError):
+                            return
+                        return
                 try:
-                    header = _recv_exact(connection, 4)
+                    header = _recv_exact(connection, 4, deadline=admission.read_deadline)
                     declared = int.from_bytes(header, "big")
                     training_frame = bool(declared & 0x80000000)
+                    if admission.capture_only and not training_frame:
+                        return
                     size = declared & 0x7fffffff if training_frame else declared
                     delivery_report: Dict[str, Any] = {}
                     frame_limit = lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES if training_frame else shim.MAX_FRAME_BYTES
@@ -3558,7 +3707,9 @@ class WorkerSocketServer:
                     elif training_frame:
                         # The extended prefix is reserved for optional capture;
                         # it cannot dispatch provider or other control work.
-                        payload = server_self._handle_training_control(_recv_exact(connection, size))
+                        payload = server_self._handle_training_control(
+                            _recv_exact(connection, size, deadline=admission.read_deadline)
+                        )
                         if payload is None:
                             server_self._mark_observations_incomplete()
                             payload = contracts.canonical_json({"recorded": False}).encode("utf-8")
@@ -3569,9 +3720,10 @@ class WorkerSocketServer:
                             delivery_report=delivery_report,
                         )
                     try:
+                        server_self._retain_socket_write_deadline(connection)
                         connection.sendall(len(payload).to_bytes(4, "big") + payload)
-                    except OSError:
-                        server_self._mark_socket_delivery(delivery_report, written=False)
+                    except OSError as exc:
+                        server_self._mark_socket_delivery(delivery_report, written=False, error=exc)
                         raise
                     server_self._mark_socket_delivery(delivery_report, written=True)
                 except OSError:
@@ -3594,14 +3746,33 @@ class WorkerSocketServer:
         if self._path.exists():
             self._path.unlink()
 
+    def wait_for_handlers(self) -> bool:
+        """Drain admitted handlers only within their existing remaining windows."""
+
+        while True:
+            with self._state.lock:
+                if self._state.worker_handlers_inflight == 0:
+                    return True
+                deadline = max(admission.completion_deadline
+                               for admission in self._admissions.values())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+
 
 def _http_error_body(code: str) -> bytes:
     return json.dumps({"error": {"code": str(code)}}, sort_keys=True).encode("utf-8")
 
 
-def _recv_exact(connection: socket.socket, size: int) -> bytes:
+def _recv_exact(connection: socket.socket, size: int, *, deadline: Optional[float] = None) -> bytes:
     output = bytearray()
     while len(output) < size:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("worker capture read deadline")
+            connection.settimeout(remaining)
         chunk = connection.recv(min(65536, size - len(output)))
         if not chunk:
             raise OSError("connection closed")
@@ -3788,20 +3959,29 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
             if state.worker_observations_pending or state.worker_handlers_inflight:
                 state.worker_observations.failures.add("capture_incomplete")
             document = state.worker_observations.document()
+            document["failures"] = training_observations.failure_tags_for_lease(
+                document["failures"], lease)
         summary.update(observation_count=document["observation_count"],
                        local_refusal_count=document["local_refusal_count"], complete=document["complete"])
         send = getattr(config.api, "training_observations", None)
         if not callable(send):
             return summary
+        expected_digest = contracts.document_hash(training_observations._validate_payload(
+            document, secrets=(lease_token,),
+        ))
         for attempt in range(2):
             try:
                 result = send(str(lease["run_id"]), lease_token, document)
                 if (not isinstance(result, Mapping) or result.get("status") != "stored"
-                        or not isinstance(result.get("payload_sha256"), str) or not contracts.SHA256_RE.fullmatch(result["payload_sha256"])):
+                        or getattr(result, "http_status", 200) != 200
+                        or result.get("payload_sha256") != expected_digest):
                     raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
                 return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
             except Exception:
                 if attempt:
+                    verify = getattr(config.api, "verify_training_observations", None)
+                    if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
+                        return {**summary, "status": "stored", "payload_sha256": expected_digest}
                     raise
     except Exception as exc:
         try:
@@ -3815,10 +3995,13 @@ class _ObservationJournal:
     """Best-effort serial uploads of bounded, immutable worker-only deltas."""
 
     FLUSH_SECONDS = 10.0
+    STOP_TIMEOUT_SECONDS = 30.0
+    FINAL_FLUSH_ATTEMPTS = 2
 
     def __init__(self, api: ArenaApiClient, lease: Mapping[str, Any], token: str, state: RunState) -> None:
         self.api, self.lease, self.token, self.state = api, lease, token, state
         self.stop_event = threading.Event()
+        self.stop_deadline: Optional[float] = None
         self.thread = threading.Thread(target=self._work, name="arena-observation-journal", daemon=True)
         self.number = 0
         self.previous_sha256: Optional[str] = None
@@ -3829,16 +4012,42 @@ class _ObservationJournal:
         self.pending: Optional[Tuple[dict, str, int, int, int, set[int]]] = None
 
     def start(self) -> None:
-        if (callable(getattr(self.api, "training_observation_segment", None))
+        if (not self.stop_event.is_set()
+                and callable(getattr(self.api, "training_observation_segment", None))
                 and isinstance(self.lease.get("claim_request_hash"), str)
                 and contracts.SHA256_RE.fullmatch(self.lease["claim_request_hash"])
                 and type(self.lease.get("lease_generation")) is int):
             self.thread.start()
 
     def stop(self) -> None:
+        # The same uploader owns the final delta and any ambiguous retry.
+        # An already admitted segment has its existing ten-second transport
+        # window; at most two further requests fit this fixed stop allowance.
+        if self.stop_deadline is None:
+            self.stop_deadline = time.monotonic() + self.STOP_TIMEOUT_SECONDS
         self.stop_event.set()
         if self.thread.ident is not None:
-            self.thread.join(0.05)
+            self.thread.join(max(0.0, self.stop_deadline - time.monotonic()))
+
+    def _flush_stopping(self) -> None:
+        for _ in range(self.FINAL_FLUSH_ATTEMPTS):
+            # Do not give a final segment a fresh lifetime after the stop
+            # allowance. A timed-out uploader may finish its immutable send,
+            # but cannot prepare another delta after the snapshot freezes.
+            if (not self.stop_event.is_set() or self.stop_deadline is None
+                    or self.stop_deadline - time.monotonic() < TRAINING_CAPTURE_TIMEOUT_SECONDS):
+                return
+            with self.state.lock:
+                if self.state.worker_observations_frozen:
+                    return
+            if self.pending is None and not self._prepare():
+                return
+            with self.state.lock:
+                if self.state.worker_observations_frozen:
+                    return
+            if self.stop_deadline - time.monotonic() < TRAINING_CAPTURE_TIMEOUT_SECONDS:
+                return
+            self._send_pending()
 
     def _prepare(self) -> bool:
         if self.number >= training_observations.MAX_SEGMENTS:
@@ -3854,7 +4063,7 @@ class _ObservationJournal:
                        if row["ordinal"] in self.prepared_receipts and row["write_state"] != "prepared"][:64]
             counts = (buffer.attempted, buffer.local_refusals,
                       buffer.response_receipt_count, buffer.agent_observation_count)
-            failures = sorted(buffer.failures)
+            failures = training_observations.failure_tags_for_lease(buffer.failures, self.lease)
         if not (observations or receipts or agents or changed or tuple(failures) != self.last_failures):
             return False
         while True:
@@ -3902,6 +4111,15 @@ class _ObservationJournal:
         return True
 
     def _work(self) -> None:
+        try:
+            self._upload_loop()
+        finally:
+            try:
+                self._flush_stopping()
+            except Exception:
+                pass  # Capture faults cannot change completion or shutdown.
+
+    def _upload_loop(self) -> None:
         while not self.stop_event.wait(self.FLUSH_SECONDS):
             while not self.stop_event.is_set():
                 if self.pending is None:
@@ -3910,6 +4128,11 @@ class _ObservationJournal:
                             break
                     except Exception:
                         return  # Capture faults cannot stop the run.
+                if self.stop_event.is_set():
+                    break  # The bounded terminal flush owns this pending send.
+                with self.state.lock:
+                    if self.state.worker_observations_frozen:
+                        return
                 if not self._send_pending():
                     break  # Retry the exact same bytes at the next tick.
                 with self.state.lock:
@@ -4116,8 +4339,15 @@ class AssignmentExecutor:
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
 
-    def execute(self, lease: Mapping[str, Any], lease_token: str, icp: Mapping[str, Any]) -> Dict[str, Any]:
-        """Run one leased ICP end to end and return the completion envelope."""
+    def execute(
+        self, lease: Mapping[str, Any], lease_token: str, icp: Mapping[str, Any],
+        *, before_finished: Optional[Callable[[Mapping[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run one ICP; let its owner retain the signed result before telemetry.
+
+        Runner requires ``before_finished`` for production delivery. Direct
+        embedded callers can inspect the returned envelope without delivery.
+        """
 
         config = self._config
         state = RunState(lease=dict(lease), lease_token=lease_token)
@@ -4308,6 +4538,11 @@ class AssignmentExecutor:
                     input_document["provider_operations"] = sorted(
                         set(operations.OPERATIONS) | set(operations.CATALOG_OPERATIONS)
                     )
+            if (lease.get("kind") == "execute"
+                    and lease.get("reasoning_capture_policy") == shim.FULL_THINKING_POLICY):
+                # The shim needs a local parse hint; the worker's lease remains
+                # the authority for the same request after it crosses the socket.
+                extra_environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
             _record_training_input(config, lease, lease_token, input_document)
             staged_agent_entrypoint = (
@@ -4423,20 +4658,6 @@ class AssignmentExecutor:
                 runtime_entered = True
                 result = config.sandbox_runtime.run_icp(spec)
                 if not scoring_run:
-                    capture_summary = getattr(result, "automatic_capture_summary", None)
-                    if capture_summary is not None:
-                        # The exit report survives a blocked asynchronous sender.
-                        # It remains reported training evidence, not run authority.
-                        with state.lock:
-                            state.worker_observations.append_agent_observation({
-                                "id": len(state.worker_observations.agent_observations),
-                                "kind": "state_snapshot", "observed_at": _timestamp(config.clock),
-                                "after_action_sequence": state.action_sequence - 1 if state.action_sequence else None,
-                                "depends_on": [], "data": {
-                                    "name": "automatic_capture_summary", "value": capture_summary,
-                                },
-                                "privacy": {"redacted": False, "redactions": []},
-                            }, secrets=(state.lease_token,))
                     execution_diagnostic = _execution_diagnostic_from_stderr(
                         result.stderr
                     )
@@ -4594,7 +4815,7 @@ class AssignmentExecutor:
                 and exc.launch_exit_code < 0
                 and not exc.launch_timed_out
                 and isinstance(exc.checkpoint_bytes, bytes)
-                and len(exc.checkpoint_bytes) <= runtime.MAX_OUTPUT_BYTES
+                and len(exc.checkpoint_bytes) <= scoring.MAX_SCORING_OUTPUT_BYTES
             ):
                 try:
                     checkpoint = scoring.scoring_output_from_bytes(exc.checkpoint_bytes)
@@ -4619,6 +4840,48 @@ class AssignmentExecutor:
                 server.stop()
             except Exception as exc:
                 stop_exception = exc
+            else:
+                # stop() closes ingress but daemon handlers may still finish a
+                # settled call. Keep the journal and final buffer open only
+                # until the already-admitted handlers' existing deadlines.
+                # This extra evidence wait cannot turn a valid result into an
+                # abandoned run; stop() failure keeps its existing fatal path.
+                try:
+                    server.wait_for_handlers()
+                except Exception:
+                    with state.lock:
+                        state.worker_observations.failures.add("capture_incomplete")
+            if not scoring_run and result is not None:
+                # Runtime copied these bounded bytes before cleanup. Import
+                # after admitted socket handlers settle, including a cleanup
+                # error carrying a result, before final journal/snapshot freeze.
+                if result.automatic_capture_handoff_invalid:
+                    with state.lock:
+                        state.worker_observations.failures.add("capture_incomplete")
+                for raw in result.automatic_capture_handoff:
+                    if not server._allow_training_frame(len(raw)):
+                        break
+                    reply = server._handle_training_control(raw, replayed=True)
+                    try:
+                        recorded = json.loads(reply).get("recorded") is True
+                    except (TypeError, ValueError, UnicodeError):
+                        recorded = False
+                    if not recorded:
+                        with state.lock:
+                            state.worker_observations.failures.add("capture_incomplete")
+                capture_summary = result.automatic_capture_summary
+                if capture_summary is not None:
+                    # The exit report remains evidence, never run authority.
+                    with state.lock:
+                        state.worker_observations.append_agent_observation({
+                            "id": len(state.worker_observations.agent_observations),
+                            "kind": "state_snapshot", "observed_at": _timestamp(config.clock),
+                            "after_action_sequence": None,
+                            "depends_on": [], "data": {
+                                "name": "automatic_capture_summary", "value": capture_summary,
+                            },
+                            "privacy": {"redacted": False, "redactions": []},
+                        }, secrets=(state.lease_token,))
             if journal is not None:
                 try:
                     journal.stop()
@@ -4685,10 +4948,14 @@ class AssignmentExecutor:
                     latest_operation_calls, recovered_responses_retries
                 )
             )
+            # A scorer can recover the same tool before a later judge failure.
+            # Keep execution's historical account-failure precedence unchanged.
+            credential_calls = latest_operation_calls if scoring_run else completed_calls
             miner_credentials_failed = any(
                 call.get("funding_source") == "miner_key"
                 and call.get("error_code") == "miner_credentials_unavailable"
-                for call in completed_calls
+                and (not scoring_run or call.get("call_identity") not in recovered_responses_retries)
+                for call in credential_calls
             )
             miner_scoring_funding_failed = scoring_run and any(
                 call.get("funding_source") == "miner_key"
@@ -4957,12 +5224,7 @@ class AssignmentExecutor:
             except trajectory.TrajectoryError:
                 # Keep the original lifecycle event if optional metadata reaches its cap.
                 pass
-        _record_trajectory(config, lease, lease_token, [
-            *_provider_error_events(state), *(
-                _decision_events_and_summary(state, finished_at)
-                if not scoring_run else []
-            ), finished_event, *_runtime_log_events(result, lease_token, finished_at)])
-        return contracts.build_signed_request(
+        envelope = contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,
             round_id=round_id,
             hotkey=config.identity.hotkey,
@@ -4970,6 +5232,14 @@ class AssignmentExecutor:
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
+        if before_finished is not None:
+            before_finished(envelope)
+        _record_trajectory(config, lease, lease_token, [
+            *_provider_error_events(state), *(
+                _decision_events_and_summary(state, finished_at)
+                if not scoring_run else []
+            ), finished_event, *_runtime_log_events(result, lease_token, finished_at)])
+        return envelope
 
 
 def _partial_company_judgment_output(document, lease):
@@ -5419,9 +5689,11 @@ class Runner:
                         raise ValueError("recovered lease expired")
                 except (KeyError, TypeError, ValueError, OverflowError):
                     raise RunnerError("recovered lease expired or invalid before dispatch") from None
-            envelope = self._executor.execute(lease, str(lease["lease_token"]), lease["icp"])
-            phase = "completion"
-            result = self._complete_with_retries(envelope)
+            def completion_started() -> None:
+                nonlocal phase
+                phase = "completion"
+
+            result = self._execute_and_complete(lease, before_completion=completion_started)
             self.completed.append({"run_id": lease["run_id"], "result": result})
             if log is not None:
                 log.state(progress=True, last_completion_at=self._config.clock().isoformat())
@@ -5459,6 +5731,35 @@ class Runner:
                 log.activity(-1)
             self._slots.release()
             self._report_capacity()
+
+    def _execute_and_complete(
+        self, lease: Mapping[str, Any], *, before_completion: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Retain the signed result before terminal telemetry and through delivery."""
+        with ExitStack() as retained:
+            pending_path = None
+            pending_hash = None
+
+            def before_finished(envelope: Mapping[str, Any]) -> None:
+                nonlocal pending_path, pending_hash
+                if before_completion is not None:
+                    before_completion()
+                if pending_path is not None:
+                    raise RunnerError("completion retention was repeated")
+                pending_path = retained.enter_context(self._retain_completion(envelope))
+                pending_hash = contracts.document_hash(envelope)
+
+            envelope = self._executor.execute(
+                lease, str(lease["lease_token"]), lease["icp"],
+                before_finished=before_finished,
+            )
+            if pending_path is None or contracts.document_hash(envelope) != pending_hash:
+                raise RunnerError("completion differs from its retained receipt")
+            # Keep the retained inode locked through terminal telemetry and
+            # delivery so a concurrent replay cannot take over between them.
+            result = self._deliver_completion_with_retries(envelope)
+            self._acknowledge_completion(pending_path, result)
+            return result
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         with self._retain_completion(envelope) as path:

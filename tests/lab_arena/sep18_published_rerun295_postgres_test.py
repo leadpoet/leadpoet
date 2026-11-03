@@ -32,7 +32,16 @@ from tests.lab_arena.per_icp_cost_admission_postgres_test import (
     _settle as _settle_cost_call,
 )
 from tests.lab_arena.sep18_open_quota287_postgres_test import _configuration
-from tests.lab_arena.test_lab_arena_service_round import Harness
+from tests.lab_arena.test_lab_arena_service_round import Harness as ServiceHarness
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
+
+class Harness(HistoricalStoreHarnessMixin, ServiceHarness):
+    """The Sep18/19/20 migration family keeps its exact historical SQL."""
+
+    def objects_key(self):
+        return "historical-rerun-" + self.tmp.name
+
 
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/295-arena-2026-09-18-published-baseline-rerun.sql.template"

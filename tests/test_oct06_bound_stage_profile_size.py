@@ -48,6 +48,7 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
     elif mutation == "bad_status":
         payload["result"]["data"]["status"] = 404
     fetches = []
+    current_fetches = []
     investigated = []
 
     async def provider(**_kwargs):
@@ -64,8 +65,13 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
             domain, url, payload
         )
 
-    async def unexpected_profile_fetch(*_args, **_kwargs):
-        pytest.fail("The mismatched model profile must not trigger a size fetch")
+    async def current_profile_fetch(url, **kwargs):
+        # The independent homepage anchor permits its exact profile fetch.
+        # The model's marqeta-inc citation must never select the request.
+        assert url == "https://www.linkedin.com/company/marqeta"
+        assert kwargs["expected_company_identity"]["linkedin_company_slug"] == "marqeta"
+        current_fetches.append(url)
+        return {"outcome": "insufficient_evidence", "url": url}
 
     async def ground_attribute(verdict, **_kwargs):
         # Attribute grounding is a separate gate, outside this size regression.
@@ -83,7 +89,7 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
         lead_scorer, "fetch_structured_linkedin_company_size", structured_fetch
     )
     monkeypatch.setattr(
-        lead_scorer, "fetch_current_linkedin_company_size", unexpected_profile_fetch
+        lead_scorer, "fetch_current_linkedin_company_size", current_profile_fetch
     )
     monkeypatch.setattr(
         lead_scorer, "_run_targeted_company_evidence_investigation", investigate
@@ -113,9 +119,12 @@ def test_public_stage_fetch_retains_exact_bound_size(monkeypatch, mutation, expe
         )
     )
     assert fetches == [("marqeta.com", "https://www.linkedin.com/company/marqeta")]
+    assert current_fetches == ["https://www.linkedin.com/company/marqeta"] * 2
     assert result.details["dimension_decisions"]["employee_size"] == expected
     assert investigated
-    assert ("headcount" in investigated[0]) == (expected != "match")
+    # A bound structured mismatch is a measured decision, not missing proof
+    # to reopen. Only an unavailable size needs the evidence investigator.
+    assert ("headcount" in investigated[0]) == (expected == "unavailable")
     # A stored Public Company label remains insufficient for current stage.
     assert result.details["dimension_decisions"]["stage"] == "unavailable"
     if expected != "unavailable":

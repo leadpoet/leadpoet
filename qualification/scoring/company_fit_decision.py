@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import re
 from typing import Any, Final, Iterable, Literal, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 
 COMPANY_FIT_DECISION_CONTRACT_ID: Final = "company-fit-decision:v1"
@@ -131,6 +131,18 @@ def _canonical_domain(value: Any) -> str:
         return ""
 
 
+def observed_linkedin_ampersand_slug(value: str) -> str:
+    """Canonicalize one observed path component, without miner admission."""
+
+    slug = unquote(value).casefold()
+    if (
+        "&" not in slug
+        or re.fullmatch(r"[a-z0-9][a-z0-9_.&-]{0,99}", slug, re.ASCII) is None
+    ):
+        return ""
+    return quote(slug, safe="._-")
+
+
 def _linkedin_slug(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -150,6 +162,9 @@ def _linkedin_slug(value: Any) -> str:
     ):
         return ""
     slug = parts[1].casefold()
+    ampersand_slug = observed_linkedin_ampersand_slug(slug)
+    if ampersand_slug:
+        return ampersand_slug
     return slug if _LINKEDIN_SLUG_RE.fullmatch(slug) else ""
 
 
@@ -416,6 +431,23 @@ def company_quality_receipt_matches_claim(
     raw_aliases = receipt.get("verified_legal_name_aliases")
     if not isinstance(raw_aliases, list) or len(raw_aliases) > 3:
         return False
+    if receipt.get("reason_code") == "verified_homepage_brand_alias":
+        brand = verified_homepage_brand_name({
+            "normalized_name": claimed_name,
+            "verified_brand_name": receipt.get("verified_brand_name"),
+            "verified_legal_name_aliases": raw_aliases,
+        })
+        return bool(
+            receipt.get("evidence_source") == "company_web_reverification"
+            and receipt.get("verified_homepage_brand_alias") is True
+            and brand and _company_name(brand) == observed_name
+            and raw_aliases
+            and all(
+                isinstance(alias, str) and alias.strip() and len(alias.strip()) <= 200
+                and _company_name(alias) == claimed_name
+                for alias in raw_aliases
+            )
+        )
     return any(
         isinstance(alias, str)
         and bool(alias.strip())

@@ -20,6 +20,7 @@ import posixpath
 import re
 import shutil
 import socket
+import stat
 import tarfile
 import tempfile
 import threading
@@ -926,18 +927,32 @@ def _rootfs_filter(member: tarfile.TarInfo, dest_path: str) -> Optional[tarfile.
     if not raw_name or "\x00" in raw_name or raw_name.startswith("/") or name in ("", ".", "..") or name.startswith("../"):
         raise ImageError(RULE_LAYER_INVALID, "layer member path escapes the root filesystem")
     root_real = os.path.realpath(dest_path)
-    destination = os.path.realpath(os.path.join(root_real, name))
-    if not _inside(root_real, destination):
+    destination = os.path.join(root_real, name)
+    # A symlink member replaces the existing final symlink itself. Only that
+    # case may ignore the old target; all its ancestors must remain contained.
+    checked_path = (
+        os.path.dirname(destination)
+        if member.issym() and os.path.islink(destination) else destination
+    )
+    if (
+        not _inside(root_real, os.path.realpath(os.path.dirname(destination)))
+        or not _inside(root_real, os.path.realpath(checked_path))
+    ):
         raise ImageError(RULE_LAYER_INVALID, "layer member path escapes the root filesystem")
     if member.islnk():
         linkname = str(member.linkname).replace("\\", "/")
-        if not linkname or "\x00" in linkname:
+        if not linkname or "\x00" in linkname or linkname.startswith("/"):
             raise ImageError(RULE_LAYER_INVALID, "hardlink target is invalid")
-        target = os.path.realpath(os.path.join(root_real, linkname.lstrip("/")))
+        target_path = os.path.join(root_real, linkname)
+        target = os.path.realpath(target_path)
         if not _inside(root_real, target):
             raise ImageError(RULE_LAYER_INVALID, "hardlink escapes the root filesystem")
+        if not stat.S_ISREG(os.lstat(target_path).st_mode):
+            raise ImageError(RULE_LAYER_INVALID, "hardlink target is not a regular file")
     filtered = copy.copy(member)
     filtered.name = name
+    if member.islnk():
+        filtered.linkname = linkname
     filtered.mode = int(member.mode) & 0o0777  # clear setuid, setgid, sticky, and non-permission bits
     return filtered
 
@@ -1022,10 +1037,26 @@ def _apply_layer(
             try:
                 filtered = _rootfs_filter(member, str(rootfs))
                 if filtered is not None:
-                    # Calling the local filter immediately before each extract
-                    # keeps this safe on Python 3.8, where tarfile has no
-                    # extraction_filter argument.
-                    archive.extract(filtered, path=str(rootfs), set_attrs=True, numeric_owner=True)
+                    destination = rootfs / filtered.name
+                    if filtered.issym() and destination.is_symlink():
+                        # Never let extraction write or apply attributes through
+                        # the previous layer's final-component symlink.
+                        destination.unlink()
+                    if filtered.islnk():
+                        # Tarfile can fall back to an unfiltered archive member
+                        # when link creation fails. Link only the validated,
+                        # existing regular file, and fail closed on any error.
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        if destination.is_file() or destination.is_symlink():
+                            destination.unlink()
+                        os.link(rootfs / filtered.linkname, destination, follow_symlinks=False)
+                        archive.chown(filtered, str(destination), numeric_owner=True)
+                        archive.chmod(filtered, str(destination))
+                        archive.utime(filtered, str(destination))
+                    else:
+                        # The local filter keeps Python 3.8 safe without the
+                        # newer tarfile extraction_filter argument.
+                        archive.extract(filtered, path=str(rootfs), set_attrs=True, numeric_owner=True)
             except ImageError:
                 raise
             except (tarfile.TarError, OSError, EOFError, ValueError) as exc:

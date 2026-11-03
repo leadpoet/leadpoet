@@ -1,5 +1,6 @@
-"""Exact issuer listing formats from October 24 retained scoring evidence."""
+"""Exact issuer listing formats from retained scoring evidence."""
 
+import json
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
@@ -29,6 +30,19 @@ HEARTLAND_QUOTE = (
     "Title of each class Trading Symbol(s) Name of each exchange on which "
     "registered Common Stock, $0.01 par value HTLD NASDAQ"
 )
+RACKSPACE_URL = (
+    "https://www.rackspace.com/newsroom/"
+    "rackspace-and-uniphore-announce-strategic-partnership"
+)
+# Actual P18 submitted source quote. The U+00AE is separated from the issuer;
+# removing that character alone made the old shared public-stage path pass.
+RACKSPACE_QUOTE = (
+    "San Antonio, TX, March 10, 2026 -- Rackspace Technology ® (NASDAQ: RXT), "
+    "a leading hybrid multicloud and AI solutions company, today announced a "
+    "strategic partnership with Uniphore, the Business AI leader backed by "
+    "NVIDIA and AMD, to deliver the industry's first Infrastructure-to-Agents "
+    "architecture, offered as an outcomes-based service."
+)
 
 
 def validate(name, domain, url, quote, *, page=None):
@@ -52,6 +66,65 @@ def decision(finding):
          "stage_evidence_quote": finding["evidence_quote"]},
         "public", validated_stage_finding=finding,
     )
+
+
+def test_actual_rackspace_registered_mark_keeps_grounded_quote_through_shared_stage_paths():
+    finding = validate('Rackspace Technology', 'rackspace.com', RACKSPACE_URL, RACKSPACE_QUOTE)
+    assert finding['status'] == 'VERIFIED', finding['reason']
+    assert finding['evidence_quote'] == RACKSPACE_QUOTE
+    assert decision(json.loads(json.dumps(finding))) == lead_scorer.COMPANY_FIT_MATCH
+    verdict = {'observed_company_name': 'Rackspace Technology',
+        'observed_company_website': 'https://www.rackspace.com/',
+        'observed_company_stage': 'Public', 'stage_matches': True,
+        'stage_evidence_url': RACKSPACE_URL, 'stage_evidence_quote': RACKSPACE_QUOTE}
+    assert lead_scorer._stage_quote_supports_observation('public', RACKSPACE_QUOTE)
+    assert lead_scorer._public_quote_has_bound_market_locator(RACKSPACE_QUOTE, ('Rackspace Technology',))
+    assert lead_scorer._decision_from_observed_stage(verdict, 'public') == lead_scorer.COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize('decoration', [' ', ' ® ', '® ', ' ™ ', '™ ', ' ℠ ', '℠ ', '\u00a0®\u00a0'])
+def test_issuer_trademark_punctuation_does_not_change_listing_authority(decoration):
+    quote = f'Acme{decoration}(NASDAQ: ACM) announced current quarterly results.'
+    finding = validate('Acme', 'acme.example', 'https://acme.example/investors', quote)
+    assert finding['status'] == 'VERIFIED', finding['reason']
+    assert finding['evidence_quote'] == quote
+    assert decision(finding) == lead_scorer.COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize('quote', [
+    'OtherCo ® (NASDAQ: OTHR) announced a partnership with Acme.',
+    'Acme is a subsidiary of OtherCo ® (NASDAQ: OTHR).',
+    "Acme's subsidiary OtherCo ® (NASDAQ: OTHR) announced results.",
+    'Acme ® (NASDAQ: ACM) completed its initial public offering in 2018.',
+    'Acme ® (NASDAQ: ACM) was delisted yesterday.',
+    'Acme ® (NASDAQ: ACM) was taken private yesterday.',
+    'Acme ® (NASDAQ: ACM) is no longer listed.',
+    'Acme plans to list ® (NASDAQ: ACM) next year.',
+    '® (NASDAQ: ACM)',
+    'Acme ® (NASDAQ: 123) announced results.',
+    'Acme ® (Nasdaq Private Market: ACM) announced results.',
+])
+def test_trademark_does_not_rescue_other_issuer_or_invalid_listing(quote):
+    finding = validate('Acme', 'acme.example', 'https://acme.example/investors', quote)
+    assert finding['status'] == 'UNPROVEN'
+    assert decision(finding) == lead_scorer.COMPANY_FIT_UNAVAILABLE
+
+
+def test_registered_mark_does_not_relax_exact_source_quote_grounding():
+    finding = validate('Rackspace Technology', 'rackspace.com', RACKSPACE_URL,
+        RACKSPACE_QUOTE, page='A different company announced a private transaction.')
+    assert finding['status'] == 'UNPROVEN'
+    assert decision(finding) == lead_scorer.COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize('identity_missing,flag', [(True, True), (False, False), (False, None)])
+def test_registered_mark_does_not_override_missing_issuer_or_saved_stage_flag(identity_missing, flag):
+    verdict = {'observed_company_website': 'https://www.rackspace.com/',
+        'observed_company_stage': 'Public', 'stage_matches': flag,
+        'stage_evidence_url': RACKSPACE_URL, 'stage_evidence_quote': RACKSPACE_QUOTE}
+    if not identity_missing:
+        verdict['observed_company_name'] = 'Rackspace Technology'
+    assert lead_scorer._decision_from_observed_stage(verdict, 'public') == lead_scorer.COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize("name,domain,url,quote", [

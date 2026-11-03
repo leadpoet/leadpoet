@@ -1709,7 +1709,32 @@ def _write_artifact(path: Path, document: Mapping[str, Any]) -> None:
 
 
 def _tick(service: Any, round_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    advance = service.advance_round(round_id)
+    from lab_arena.store import ArenaStoreError, FUNCTION_SIGNATURES
+
+    try:
+        advance = service.advance_round(round_id)
+    except ArenaStoreError as exc:
+        # A canonical restart can acquire its hold after advance_round's
+        # precheck. The SQL trigger rolls back the transition. Keep the API
+        # available for authenticated completions and retry the normal step.
+        # Other 55000 errors, including failed final guards, remain fatal.
+        metadata = getattr(exc, "store_error", {})
+        resource = metadata.get("resource")
+        if not (
+            metadata.get("operation") == "rpc"
+            and resource in FUNCTION_SIGNATURES
+            and metadata.get("http_status") == 500
+            and metadata.get("code") == "55000"
+            and str(exc) == (
+                "rpc %s failed: HTTP 500 code=55000 "
+                "message=lab_arena_round_progression_paused" % resource
+            )
+        ):
+            raise
+        row = service.store.get_round(round_id)
+        if row is None:
+            raise
+        advance = {"status": "paused", "round_status": row["status"]}
     reconciliation = service.reconcile_closed_provider_costs()
     return advance, reconciliation
 

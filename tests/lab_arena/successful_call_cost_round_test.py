@@ -12,7 +12,7 @@ import pytest
 from lab_arena import broker as br, contracts, runtime, scoring, shim, submission_runtime
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 
 class ChargedTransport(fixtures.FakeProviderTransport):
@@ -42,7 +42,9 @@ class CostHarness(fixtures.Harness):
 
     def build_service(self):
         service = super().build_service()
-        service.config.defaults = replace(service.config.defaults, cost_per_company_microusd=25, rewards_enabled=True)
+        # Five qualified companies per ICP give a 500-microusd allowance:
+        # confirmed successful calls fit, but total charged failures do not.
+        service.config.defaults = replace(service.config.defaults, cost_per_company_microusd=5, rewards_enabled=True)
         payer = submission_runtime.SubmissionProviderKeys(
             store=service.store, credentials=fixtures.FakeCredentialManager(), organizer_keys=fixtures.CANARY_KEYS,
         )
@@ -62,7 +64,7 @@ class CostHarness(fixtures.Harness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def test_successful_call_cost_survives_publication_restart_and_promotion(database, tmp_path):

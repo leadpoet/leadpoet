@@ -1703,7 +1703,9 @@ def test_bridge_worker_broker_chain_uses_the_600_second_responses_timeout(
     assert reply.status_code == 200
     assert "event: response.completed" in reply.text
     assert len(transport.sent) == len(store.calls) == 1
-    assert transport.sent[0]["timeout"] == pytest.approx(600)
+    # Dispatch subtracts elapsed monotonic time from the 600-second budget.
+    # Allow scheduling overhead without accepting the old 300-second cap.
+    assert 599 <= transport.sent[0]["timeout"] <= 600
     assert next(iter(store.calls.values()))["kind"] == "settlement"
 
 
@@ -1908,7 +1910,12 @@ def test_codex_in_real_gvisor(monkeypatch):
         (work / "source/harness.py").write_text(
             "import lab_arena_codex\n"
             "def run_icp(icp):\n"
-            "    result = lab_arena_codex.run('Run the requested tool, then finish.', model='openai/gpt-4o-mini', cwd='/tmp', timeout_seconds=60)\n"
+            # Even this fake-provider smoke must leave 65 seconds of host
+            # overhead plus the bridge's two-second response margin.
+            "    try:\n"
+            "        result = lab_arena_codex.run('Run the requested tool, then finish.', model='openai/gpt-4o-mini', cwd='/tmp', timeout_seconds=90)\n"
+            "    except lab_arena_codex.CodexRuntimeError as exc:\n"
+            "        raise AssertionError('Synthetic Codex fixture failed: ' + exc.diagnostics[-8192:]) from None\n"
             "    assert 'ARENA_CODEX_OK' in result\n"
             "    return []\n"
         )
@@ -1922,7 +1929,7 @@ def test_codex_in_real_gvisor(monkeypatch):
             agent_entrypoint_path=work / "agent_entrypoint.py", checkpoint_module_path=work / "lab_arena_checkpoint.py",
             codex_module_path=work / "lab_arena_codex.py", web_bridge_path=work / "web_egress_bridge.py",
             entry_command=runtime.AGENT_ENTRY_COMMAND, working_dir=runtime.AGENT_WORKING_DIR,
-            evaluation_date="2026-09-15", random_seed=1, wall_clock_seconds=90,
+            evaluation_date="2026-09-15", random_seed=1, wall_clock_seconds=120,
         )
         result = runtime.RunscRuntime(runtime.RuntimeConfig(
             runsc_path=Path(os.environ.get("ARENA_TEST_RUNSC", "/usr/local/bin/runsc")), work_dir=work / "runtime",

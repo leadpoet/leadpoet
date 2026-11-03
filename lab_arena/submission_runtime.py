@@ -28,8 +28,8 @@ class SubmissionProviderKeys:
         round_id = str(row.get("round_id") or "")
         if row.get("submission_id") != "baseline-" + round_id.removeprefix("arena-"):
             return False
-        round_row = self._store.get_round(round_id)
-        configured_hotkey = ((round_row or {}).get("configuration_doc") or {}).get("baseline_hotkey")
+        # Runs for every provider call; read only the key, never the round row.
+        configured_hotkey = self._store.get_round_baseline_hotkey(round_id)
         return bool(configured_hotkey and row.get("miner_hotkey") == configured_hotkey and row.get("is_king"))
 
     def funding_source_for(self, context: RunContext) -> str:
@@ -90,6 +90,15 @@ class SubmissionProviderKeys:
 
         return context.kind == "execute" and self._is_baseline(
             self._submission(context)
+        )
+
+    def champion_score_for(self, context: RunContext) -> bool:
+        """Keep the promoted baseline's scorer routes when its payer changes."""
+
+        if context.kind != "score":
+            return False
+        return self._is_baseline(self._submission(context)) and (
+            self._provider_funding(context, "deepline")["champion_funding"] is True
         )
 
     def provider_restart_required_for(

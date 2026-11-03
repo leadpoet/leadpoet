@@ -17,7 +17,6 @@ records, split and manifest hash.
 from __future__ import annotations
 
 import copy
-import hashlib
 import re
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -47,6 +46,8 @@ TRAINING_PERMISSION = {
     "status": "unconfirmed",
     "reason": "Submission consent records public rerun only; confirm training use before training.",
 }
+DEFAULT_SPLIT_SEED = "arena-agent-steps-v1"
+SPLIT_GROUPING = "shared_source_episode_company_icp_request_v1"
 
 
 @dataclass(frozen=True)
@@ -54,12 +55,12 @@ class Rules:
     """Selection rules, recorded verbatim in the manifest."""
 
     eval_percent: int = 20
-    seed: str = "leadpoet-arena-dataset-v1"
+    seed: str = DEFAULT_SPLIT_SEED
     production_rounds_only: bool = True
     scorer_image_digest: Optional[str] = None
     scorer_policy_hash: Optional[str] = None
 
-    eval_mode: str = "company"
+    eval_mode: str = "company_and_icp"
     eval_after: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -525,24 +526,196 @@ class _Clusters:
                 self.parent[max(first, second)] = min(first, second)
 
 
-def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
+def _episode_key(record: Mapping[str, Any]) -> Optional[str]:
+    """Use original execution coordinates, independently of retry/judge IDs."""
+    meta = record.get("meta") or {}
+    return _source_episode_key(meta)
+
+
+def _source_episode_key(meta: Mapping[str, Any]) -> Optional[str]:
+    if (not isinstance(meta, Mapping)
+            or any(not isinstance(meta.get(key), str) or not meta[key].strip()
+            for key in ("round_id", "submission_id"))
+            or type(meta.get("stage")) is not int or meta["stage"] not in (1, 2)
+            or type(meta.get("icp_position")) is not int
+            or not 0 <= meta["icp_position"] < contracts.MAX_BENCHMARK_ICP_COUNT):
+        return None
+    return "episode:" + _hash({key: meta[key] for key in (
+        "round_id", "submission_id", "stage", "icp_position")})
+
+
+def _split_source_valid(example: Mapping[str, Any], *, production_rounds_only: bool) -> bool:
+    return bool(
+        isinstance(example, Mapping)
+        and example.get("schema_version") == EXAMPLE_SCHEMA_VERSION
+        and example.get("example_hash") == _hash({key: value for key, value in example.items()
+                                                    if key != "example_hash"})
+        and (not production_rounds_only or (
+            _PRODUCTION_ROUND_RE.fullmatch(str(example.get("round_id") or ""))
+            and example.get("round_status") == "published"))
+    )
+
+
+def _split_company_rows(example: Mapping[str, Any]) -> Optional[List[Mapping[str, Any]]]:
+    rows = example.get("companies")
+    if isinstance(rows, list) and rows:
+        return [row for row in rows if isinstance(row, Mapping)
+                and isinstance(row.get("company"), Mapping)]
+    output = example.get("output") or {}
+    companies = output.get("companies") if isinstance(output, Mapping) else None
+    if companies is None:
+        return []
+    if not isinstance(companies, list):
+        return []
+    return [{"company": company, "judgment": None} for company in companies
+            if isinstance(company, Mapping)]
+
+
+def _split_model_request_links(example: Mapping[str, Any]) -> List[str]:
+    """Link exact main-execution model inputs before target admission or dedup."""
+    links = []
+    for call in example.get("provider_calls") or []:
+        capture = call.get("request_capture") if isinstance(call, Mapping) else None
+        gaps = call.get("evidence_gaps") if isinstance(call, Mapping) else None
+        if (not isinstance(call, Mapping) or call.get("run_id") != example.get("run_id")
+                or call.get("provider") != "openrouter"
+                or call.get("operation_id") not in {"openrouter.chat", "openrouter.responses"}
+                or isinstance(capture, Mapping) and bool(capture.get("redacted"))
+                or isinstance(gaps, list) and set(value for value in gaps if isinstance(value, str)) & {
+                    "full_request_unavailable", "request_privacy_nonexact",
+                    "worker_observation_request_mismatch", "worker_observation_link_invalid"}):
+            continue
+        operation = call["operation_id"]
+        request = call.get("request") or {}
+        if not isinstance(request, Mapping):
+            continue
+        outbound = request.get("outbound") or {}
+        if not isinstance(outbound, Mapping):
+            continue
+        body, digest = outbound.get("body"), outbound.get("body_sha256")
+        path = "/api/v1/responses" if operation == "openrouter.responses" else "/api/v1/chat/completions"
+        if (request.get("operation_id") != operation
+                or request.get("request_hash") != call.get("request_hash")
+                or not isinstance(request.get("hashed_parameters"), Mapping)
+                or _hash(request["hashed_parameters"]) != call.get("request_hash")
+                or not isinstance(body, Mapping) or not isinstance(digest, str)
+                or contracts.SHA256_RE.fullmatch(digest) is None or _hash(body) != digest
+                or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
+                or outbound.get("path") != path):
+            continue
+        links.append("model-input:" + operation + ":" + digest)
+    return links
+
+
+class _SourceSplitGroups:
+    """Shared, in-memory source graph for all offline target builders."""
+
+    def __init__(self) -> None:
+        self.clusters = _Clusters()
+        self.source_dates: Dict[str, set[Optional[str]]] = {}
+        self.source_hashes: set[str] = set()
+
+    def add(self, example: Mapping[str, Any], *, production_rounds_only: bool,
+            eval_mode: str) -> Optional[str]:
+        if not _split_source_valid(example, production_rounds_only=production_rounds_only):
+            return None
+        episode = _source_episode_key(example)
+        rows = _split_company_rows(example)
+        if episode is None:
+            return None
+        links = [episode]
+        icp = example.get("icp")
+        if eval_mode == "company_and_icp" and isinstance(icp, Mapping) and icp:
+            try:
+                links.append("icp:" + integrity.requirement_fingerprint(
+                    icp, contacts_required=_contacts(example.get("configuration") or {})))
+            except (TypeError, ValueError, KeyError, AttributeError):
+                pass  # A bad optional ICP link cannot erase a valid episode.
+        for row in rows:
+            try:
+                keys = _company_keys(row["company"], row.get("judgment"))
+            except (TypeError, ValueError, KeyError, AttributeError):
+                continue
+            links.extend("company:" + key for key in keys if not _REDACTION_RE.search(key))
+        links.extend(_split_model_request_links(example))
+        self.clusters.union(links)
+        self.source_dates.setdefault(episode, set()).add(_date(example.get("evaluation_date")))
+        self.source_hashes.add(example["example_hash"])
+        return episode
+
+    def group(self, episode: str) -> str:
+        return self.clusters.find(episode)
+
+    def future_groups(self, cutoff: Optional[str]) -> set[str]:
+        if cutoff is None:
+            return set()
+        return {self.group(episode) for episode, dates in self.source_dates.items()
+                if any(value is not None and value > cutoff for value in dates)}
+
+    def assignment(self, episode: str, *, seed: str, eval_percent: int,
+                   eval_after: Optional[str] = None,
+                   future_groups: Optional[set[str]] = None) -> tuple[str, Optional[str]]:
+        group = self.group(episode)
+        if eval_after is not None:
+            dates = self.source_dates[episode]
+            if len(dates) != 1 or None in dates:
+                return "analysis", "temporal_date_missing_or_invalid"
+            date = next(iter(dates))
+            if date <= eval_after and group in (future_groups if future_groups is not None
+                                                else self.future_groups(eval_after)):
+                return "analysis", "temporal_group_purged_from_train"
+            return ("eval" if date > eval_after else "train"), None
+        bucket = int(contracts.document_hash({"seed": seed, "group": group}).split(":")[-1][:8], 16) % 100
+        return ("eval" if bucket < eval_percent else "train"), None
+
+
+def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
+          curation_metadata: Optional[dict] = None,
+          split_sources: Optional[Iterable[Mapping[str, Any]]] = None) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
     """Return ({train, eval, analysis}: records) and the dataset manifest."""
 
     sources, records, privacy_filtered = [], [], 0
+    clusters, source_groups = _Clusters(), _SourceSplitGroups()
+    if split_sources is not None:
+        for source in split_sources:
+            source_groups.add(source, production_rounds_only=rules.production_rounds_only,
+                              eval_mode=rules.eval_mode)
+            # Release each raw export before the source iterator parses the next.
+            del source
     for example in examples:
+        # Link every verified source before label, cohort, privacy and dedup
+        # gates can remove the only bridge between two original episodes.
+        if split_sources is None:
+            source_groups.add(example, production_rounds_only=rules.production_rounds_only,
+                              eval_mode=rules.eval_mode)
         reason = example_exclusion(example, rules)
         sources.append({"example_id": example.get("example_id"), "example_hash": example.get("example_hash"),
                         "run_id": example.get("run_id"), "round_id": example.get("round_id"),
                         "used": reason is None, "exclusion": reason})
         if reason is None:
+            judgments = ({row.get("company_index"): row.get("judgment")
+                          for row in example.get("companies") or () if isinstance(row, Mapping)}
+                         if curation_metadata is not None else {})
             for record in records_from_example(example):
+                # Keep all original episode/alias links before privacy selection
+                # and deduplication can remove a bridge between executions.
+                handles = [key for key in record["group_keys"]["company_keys"]
+                           if not _REDACTION_RE.search(key)] or [record["record_id"]]
+                clusters.union(handles)
                 # Redaction elsewhere in the run, mostly URL tokens in fetched
                 # pages, never reaches these fields. One inside the record's
                 # own input would train on a placeholder, so that record goes.
                 if _REDACTION_RE.search(contracts.canonical_json(record["input"])):
                     privacy_filtered += 1
                     continue
+                if curation_metadata is not None:
+                    from lab_arena.training_curation import project_judgment
+                    curation_metadata[record["record_id"]] = project_judgment(
+                        judgments.get(record["meta"]["company_index"]))
                 records.append(record)
+        # The input iterator may parse a large next episode before assigning
+        # this loop variable again. Retain only the derived records above.
+        del example
     # Identical ICP requirements, evaluation date and claim: replays, retries
     # and cached judgments count once. The date is part of the input because
     # intent recency depends on it. Only verdicts can conflict; a claim judged
@@ -561,55 +734,40 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
             conflicts += 1
             continue
         kept.append(min(group, key=lambda item: (
-            bool(_evidence_gap(item)) if item["label"]["class"] in TRAINABLE else False,
+            (bool(_evidence_gap(item)) or _episode_key(item) is None)
+            if item["label"]["class"] in TRAINABLE else False,
             item["record_id"], _hash(item))))
         duplicates += len(group) - 1
     cohorts = {(record["meta"]["scorer_policy_hash"], record["meta"]["scorer_image_digest"])
-               for record in kept if record["label"]["class"] in TRAINABLE and not _evidence_gap(record)}
+               for record in kept if record["label"]["class"] in TRAINABLE
+               and not _evidence_gap(record) and _episode_key(record) is not None}
     if len(cohorts) > 1:
         raise ValueError("mixed_scorer_cohorts")
-    clusters = _Clusters()
-    for record in kept:
-        clusters.union(record["group_keys"]["company_keys"] or [record["record_id"]])
-    split_clusters = _Clusters()
-    for record in kept:
-        handles = list(record["group_keys"]["company_keys"]) or [record["record_id"]]
-        if rules.eval_mode == "company_and_icp":
-            handles.append("icp:" + record["group_keys"]["icp_fingerprint"])
-        split_clusters.union(handles)
-    def split_group(record):
-        handles = record["group_keys"]["company_keys"] or [record["record_id"]]
-        return split_clusters.find(handles[0])
-    future_groups = {split_group(record) for record in kept
-                     if rules.eval_after and _date(record["input"]["evaluation_date"])
-                     and record["input"]["evaluation_date"] > rules.eval_after
-                     and record["label"]["class"] in TRAINABLE and not _evidence_gap(record)}
+    future_groups = source_groups.future_groups(rules.eval_after)
     splits: Dict[str, List[dict]] = {"train": [], "eval": [], "analysis": []}
     evidence_exclusions: Dict[str, int] = {}
     for record in kept:
-        handles = record["group_keys"]["company_keys"] or [record["record_id"]]
+        handles = [key for key in record["group_keys"]["company_keys"]
+                   if not _REDACTION_RE.search(key)] or [record["record_id"]]
         cluster = clusters.find(handles[0])
         record["group_keys"]["company_cluster"] = cluster
         evidence_gap = _evidence_gap(record) if record["label"]["class"] in TRAINABLE else None
+        episode = _episode_key(record)
+        if record["label"]["class"] in TRAINABLE and evidence_gap is None and (
+                episode is None or episode not in source_groups.source_dates):
+            evidence_gap = "episode_identity_unverified"
         if record["label"]["class"] not in TRAINABLE or evidence_gap:
             if evidence_gap:
                 record["selection_exclusion"] = evidence_gap
                 evidence_exclusions[evidence_gap] = evidence_exclusions.get(evidence_gap, 0) + 1
             splits["analysis"].append(record)
             continue
-        group = split_group(record)
-        if rules.eval_after:
-            observed = _date(record["input"]["evaluation_date"])
-            reason = ("temporal_date_missing_or_invalid" if observed is None else
-                      "temporal_group_purged_from_train" if observed <= rules.eval_after and group in future_groups else None)
-            if reason:
-                record["selection_exclusion"] = reason
-                splits["analysis"].append(record)
-            else:
-                splits["eval" if observed > rules.eval_after else "train"].append(record)
-            continue
-        bucket = int(hashlib.sha256((rules.seed + "\x00" + group).encode("utf-8")).hexdigest(), 16) % 100
-        splits["eval" if bucket < rules.eval_percent else "train"].append(record)
+        split, split_reason = source_groups.assignment(
+            episode, seed=rules.seed, eval_percent=rules.eval_percent,
+            eval_after=rules.eval_after, future_groups=future_groups)
+        if split_reason:
+            record["selection_exclusion"] = split_reason
+        splits[split].append(record)
     for name in splits:
         splits[name].sort(key=lambda item: item["record_id"])
     counts = {name: {} for name in splits}
@@ -622,9 +780,8 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         if source["exclusion"]:
             exclusions[source["exclusion"]] = exclusions.get(source["exclusion"], 0) + 1
     rule_document = asdict(rules)
-    # Keep the established default dataset identity and record bytes.
-    if rules.eval_mode == "company":
-        rule_document.pop("eval_mode")
+    rule_document["split_grouping"] = SPLIT_GROUPING
+    # Preserve record contents while binding the mandatory grouping policy.
     if rules.eval_after is None:
         rule_document.pop("eval_after")
     manifest = {
@@ -633,6 +790,7 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         "sources": sorted(sources, key=lambda item: (str(item["example_id"]),
                                                     str(item["example_hash"]),
                                                     str(item["run_id"]), str(item["round_id"]))),
+        "split_source_hashes": sorted(source_groups.source_hashes),
         "counts": {"examples_used": sum(source["used"] for source in sources),
                    "examples_excluded": exclusions, "records_by_split_and_label": counts,
                    "records_privacy_filtered": privacy_filtered,
@@ -641,7 +799,8 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         "record_hashes": {name: [_hash(record) for record in items] for name, items in splits.items()},
     }
     manifest["dataset_version"] = _hash({key: manifest[key] for key in (
-        "schema_version", "record_schema_version", "rules", "sources", "record_hashes")})
+        "schema_version", "record_schema_version", "rules", "sources",
+        "split_source_hashes", "record_hashes")})
     manifest["evaluation_checks"] = evaluation_checks(splits, rules)
     return splits, manifest
 
@@ -653,13 +812,19 @@ def evaluation_checks(splits, rules):
                 if record["group_keys"].get(key)}
     overlaps = {key: len(values("train", key) & values("eval", key))
                 for key in ("company_cluster", "icp_fingerprint", "source_family")}
+    episodes = {name: {_episode_key(record) for record in splits[name]} - {None}
+                for name in ("train", "eval")}
+    overlaps["episode"] = len(episodes["train"] & episodes["eval"])
     ranges = {}
     for name, records in splits.items():
         dates = sorted(filter(None, (_date(record["input"]["evaluation_date"]) for record in records)))
         ranges[name] = {"min": dates[0] if dates else None, "max": dates[-1] if dates else None,
                         "missing_or_invalid": len(records) - len(dates)}
     reasons = ["empty_" + name for name in ("train", "eval") if not splits[name]]
-    if overlaps["company_cluster"] or (rules.eval_mode == "company_and_icp" and overlaps["icp_fingerprint"]):
+    if any(_episode_key(record) is None for name in ("train", "eval") for record in splits[name]):
+        reasons.append("episode_identity_unverified")
+    if overlaps["company_cluster"] or overlaps["episode"] or (
+            rules.eval_mode == "company_and_icp" and overlaps["icp_fingerprint"]):
         reasons.append("group_overlap")
     return {"split_viable": not reasons, "insufficient_split_reasons": reasons,
             "date_ranges": ranges, "train_eval_group_overlap_counts": overlaps,

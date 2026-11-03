@@ -140,14 +140,20 @@ An operator configures or rotates both secret copies with one hidden prompt:
 
 ```bash
 cd /Users/pranav/Downloads/Election_Analysis/Bittensor-subnet
-python3 scripts/configure_sentry_api_token.py
+python3 scripts/configure_sentry_api_token.py --aws-profile leadpoet-lab
 ```
 
 The utility preserves each document's existing format, creates a new immutable
-Secrets Manager version through the host's narrowly scoped AWS role, verifies
+Secrets Manager version through the named temporary local operator profile, verifies
 that exact version is `AWSCURRENT`, retains the prior version for rollback, and
 performs a constant-time readback comparison. It never places the token in a
-command argument or local file. No gateway or validator restart is required
+command argument, SSH connection or local file. Both documents receive read-only
+preflight checks before the first possible write. `--check` performs only those
+checks. `--timeout-seconds` bounds each SDK connection/read timeout to 5–45
+seconds. An error after a partial apply reports the completed target count;
+inspect version stages before retrying. EC2/container credential providers are
+rejected; the explicit existing recovery profile remains available when needed.
+No gateway or validator restart is required
 for `query_sentry_api.py`, because that helper reads Secrets Manager directly.
 
 ## Allowed data

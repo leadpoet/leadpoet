@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture, training_coverage
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -283,6 +283,25 @@ def _promotion_margin_from_environment() -> float:
     return value
 
 
+def _training_coverage_from_environment() -> int:
+    raw = os.environ.get("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", "").strip()
+    try:
+        value = int(raw) if raw else training_coverage.NEW_ROUND_PERCENT
+        return training_coverage.percent_from_configuration({training_coverage.SETTING: value})
+    except ValueError:
+        raise ServiceError("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT must be an integer within 1..100", 500) from None
+
+
+def _missing_reasoning_from_environment() -> int:
+    raw = os.environ.get("LAB_ARENA_TRAINING_MAXIMUM_MISSING_REASONING_PERCENT", "").strip()
+    try:
+        value = int(raw) if raw else training_coverage.NEW_MISSING_REASONING_PERCENT
+        return training_coverage.missing_reasoning_percent_from_configuration(
+            {training_coverage.MISSING_REASONING_SETTING: value})
+    except ValueError:
+        raise ServiceError("LAB_ARENA_TRAINING_MAXIMUM_MISSING_REASONING_PERCENT must be an integer within 0..100", 500) from None
+
+
 def _rewards_enabled_from_environment() -> bool:
     """Freeze LAB_ARENA_REWARDS_ENABLED into each new live round."""
 
@@ -541,6 +560,11 @@ def build_service_from_environment(mode: str):
         company_judgment_from=os.environ.get("LAB_ARENA_COMPANY_JUDGMENT_FROM") or None,
         signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
+        reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
+        training_minimum_icp_coverage_percent=_training_coverage_from_environment(),
+        training_maximum_missing_reasoning_percent=_missing_reasoning_from_environment(),
+        reasoning_baseline_source_sha256=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256") or None,
+        reasoning_baseline_source_url=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         execution_sequence_from=os.environ.get(
             "LAB_ARENA_EXECUTION_SEQUENCE_FROM"
@@ -581,7 +605,9 @@ def build_service_from_environment(mode: str):
         )
         if (route_requested or frozen_route_marker) and host_shadow_route_round_id is None:
             raise broker_module.BrokerError("broker_unavailable")
-        judge_models = sorted({str(model) for model in ((configuration.get("scorer_policy") or {}).get("judge_models") or {}).values() if model})
+        # Preserve the frozen role map: only newly opted-in industry review
+        # uses its bounded regional route. Old rounds keep their own routing.
+        judge_models = dict((configuration.get("scorer_policy") or {}).get("judge_models") or {})
         return broker_module.Broker(
             store=store, key_for=key_for, judge_models=judge_models,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
@@ -592,6 +618,7 @@ def build_service_from_environment(mode: str):
             provider_funding_source_for=(
                 submission_keys.provider_funding_source_for
             ),
+            champion_score_for=submission_keys.champion_score_for,
             retry_miner_credential_for=(
                 submission_keys.retry_miner_credential_for
             ),
@@ -635,10 +662,15 @@ def build_service_from_environment(mode: str):
         del active_at  # the database function uses its own UTC statement time
         return store.current_daily_icp_set(set_id)
 
+    # The current paid reviewer must not start against a database that lacks
+    # atomic route selection and bounded refusal-recovery reservations.
+    store.code_review_schema(require_refusal_fallback=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
         deepline_catalog_source=deepline_catalog_source,
+        # Approved routes are pinned locally and never inferred from a live catalog.
+        reasoning_registry_source=reasoning_capture.load_registry,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
         credential_manager=credential_manager,

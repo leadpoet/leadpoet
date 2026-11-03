@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,7 +28,8 @@ def _round(round_id: str, status: str, **policies: str) -> dict:
         "status": status,
         "configuration_doc": {
             "mode": "shadow",
-            "schedule": {"submission_cutoff": "2026-09-15T12:00:00Z"},
+            "schedule": {"submission_open": "2026-09-13T00:00:00Z",
+                         "submission_cutoff": "2026-09-15T12:00:00Z"},
             "private_icps": ["PRIVATE ICP MUST NOT LEAK"],
             "runner_hotkeys": ["PRIVATE RUNNER MUST NOT LEAK"],
             **policies,
@@ -39,6 +41,7 @@ def _round(round_id: str, status: str, **policies: str) -> dict:
 
 def _service(rows: list[dict]) -> ArenaService:
     service = ArenaService.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 14, tzinfo=timezone.utc)
     by_id = {row["round_id"]: row for row in rows}
 
     class Store:

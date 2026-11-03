@@ -9,10 +9,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 from lab_arena import contracts
 from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
+from tests.lab_arena.historical_service import pin_pre470_baseline_service, seed_pre428_initial_reward
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
 from tests.lab_arena.sep18_schedule_capacity288_postgres_test import (
     _configuration as fixture_configuration,
 )
@@ -53,6 +56,18 @@ NEW_DATES = {
 }
 base_database = recovery.database
 
+
+
+class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
+    """Only this module's pinned SQL uses the historical client and judge date."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-10-07")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
 
 @pytest.fixture(scope="module")
 def database(base_database):
@@ -309,7 +324,7 @@ def test_verbatim_candidate_exact_protected_round_and_80_targets(database):
 
 
 
-def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(database,tmp_path):
+def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(database,tmp_path, request):
     """Real service/signed runner/SQL transitions with fake provider + judge.
 
     A smaller 10-ICP/2-participant round keeps this focused gate bounded.
@@ -320,10 +335,13 @@ def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(dat
     import re
     psycopg,dsn=database
     connect=lambda:psycopg.connect(**dsn)
+    # Install current public readers before seeding or taking migration seals.
+    prepare_current_service_reads(connect)
     with connect() as conn,conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')
         cur.execute('TRUNCATE public.lab_arena_rounds CASCADE')
-    h=QualityHarness(connect,tmp_path,challengers=['PublicBaselineAlternate'],runners=['alpha','beta'])
+    h=_FrozenQualityHarness(connect,tmp_path,challengers=['PublicBaselineAlternate'],runners=['alpha','beta'])
+    request.addfinalizer(h.service.store.close)
     h.service.config.defaults=replace(h.service.config.defaults,benchmark_icp_count=10,runner_slot_ceiling=4,company_quality_from=None,intent_details_from='2026-01-01T00:00:00Z',contacts_from=None,execution_sequence_from='2026-01-01T00:00:00Z',per_icp_cost_policy=True,rewards_enabled=True)
     h.service.config.daily_icp_source=lambda **kwargs:{'status':'ready','set_id':int(kwargs['set_id']),'icps':copy.deepcopy(daily_icps()[:10])}
     observed=_install_company_only_sandbox(h)
@@ -332,6 +350,7 @@ def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(dat
     h.submit('PublicBaselineAlternate',ROUND)
     h.clock.advance_to(h.schedule()['submission_cutoff'])
     assert h.service.advance_round(ROUND)['status']=='ok'
+    pin_pre470_baseline_service(h.service, connect, round_id=ROUND)
     participants=h.service.store.get_round(ROUND)['participants']
     for participant in participants: h.flavors.setdefault(participant['submission_id'],'PublicBaseline')
     h.clock.advance_to(h.schedule()['stage_1_start'])
@@ -431,7 +450,7 @@ def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(dat
     assert contracts.document_hash(old_config)!=contracts.document_hash(new_config)
     assert contracts.document_hash(old_config['scorer_policy'])==contracts.document_hash(new_config['scorer_policy'])
     assert published['publication_doc'] and published['publication_doc']['final_ranking']
-    assert h.service.activate_reward(ROUND)['status']=='activated'
+    assert seed_pre428_initial_reward(h.service, connect, round_id=ROUND, expected_evaluation_date=published['evaluation_date'])['status']=='activated'
     assert observed=={'execute':20,'score':20}
     assert all(r['status']=='accepted' for r in final['lab_arena_runs'] if r['run_id'] not in {r['run_id'] for r in targets})
     costs=store.submission_costs(old_lease['submission_id'])

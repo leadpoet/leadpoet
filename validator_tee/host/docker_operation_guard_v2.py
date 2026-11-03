@@ -100,7 +100,12 @@ def _operation_kind(process: ProcessInfo) -> str | None:
         return "docker_builder"
     if command == "nitro-cli" and "build-enclave" in args:
         return "nitro_enclave_build"
-    if command not in {"docker", "sudo"}:
+    if command.startswith("python") and "--reclaim-stale" in args and (
+        any(Path(arg).name == "docker_live_restore_reconciler_v2.py" for arg in args)
+        or "validator_tee.host.docker_live_restore_reconciler_v2" in args
+    ):
+        return "docker_maintenance"
+    if command not in {"docker", "docker-compose", "sudo"}:
         return None
 
     tokens = args
@@ -109,12 +114,44 @@ def _operation_kind(process: ProcessInfo) -> str | None:
             docker_index = next(
                 index
                 for index, token in enumerate(tokens)
-                if Path(token).name == "docker"
+                if Path(token).name in {"docker", "docker-compose"}
             )
         except StopIteration:
             return None
+        executable = Path(tokens[docker_index]).name
         tokens = tokens[docker_index + 1 :]
+        if executable == "docker-compose":
+            tokens = ("compose", *tokens)
+    elif command == "docker-compose":
+        tokens = ("compose", *tokens)
 
+    tokens = list(tokens)
+    while tokens and tokens[0].startswith("-"):
+        option = tokens.pop(0)
+        if option in {"--host", "-H", "--context", "-c", "--config", "--log-level", "-l"}:
+            if not tokens:
+                return "docker_mutation"
+            tokens.pop(0)
+    if tokens and tokens[0] == "compose":
+        compose = tokens[1:]
+        while compose and compose[0].startswith("-"):
+            option = compose.pop(0)
+            if option in {"-f", "--file", "-p", "--project-name", "--project-directory",
+                          "--env-file", "--profile", "--ansi", "--progress", "--parallel"}:
+                if not compose:
+                    return "docker_mutation"
+                compose.pop(0)
+        if compose and compose[0] in {"up", "down", "run", "start", "stop", "rm", "restart",
+                                      "create", "kill", "pull", "push", "build"}:
+            return "docker_build" if compose[0] == "build" or "--build" in compose else "docker_mutation"
+    if tokens and (
+        tokens[0] in {"export", "create", "rm", "rmi", "load", "import", "cp", "pull",
+                      "tag", "run", "start", "stop", "restart", "kill", "commit", "save"}
+        or (len(tokens) > 1 and tokens[0] in {"image", "container", "volume", "network"}
+            and tokens[1] in {"export", "create", "rm", "load", "import", "cp", "pull",
+                              "tag", "run", "start", "stop", "restart", "kill", "commit", "save"})
+    ):
+        return "docker_mutation"
     joined = " ".join(tokens)
     if (
         "buildx build" in joined

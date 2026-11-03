@@ -1,0 +1,1325 @@
+{
+  "schema_version": 1,
+  "audited_at": "2026-10-24T00:58:54.333148+00:00",
+  "scope": "Synthetic real OpenRouter calls; actual local PostgreSQL, object storage, worker socket/SDK. Not deployed production or a complete labeled trajectory.",
+  "production_activation": false,
+  "zdr_relaxed": false,
+  "unique_models_tested": 13,
+  "wire_responses": 85,
+  "priced_responses": 74,
+  "raw_usage_reported_cost_usd": "0.0225049626",
+  "budget_state": {
+    "cap_usd": "8",
+    "reserved_usd": "5.277604",
+    "spent_usd": "0.0221727126"
+  },
+  "budget_note": "Unknown/unpriced failures and early probe exceptions retain conservative bounds. Raw usage includes two priced responses not settled by an early harness; their bounds remain reserved. No invoice reconciliation claim.",
+  "current_export_views_verified": 36,
+  "stored_calls_verified": 84,
+  "verification": {
+    "raw_visible_reasoning_preserved": true,
+    "usage_preserved": true,
+    "readable_source_paths_and_hashes_verified": true
+  },
+  "source_sha256": {
+    "lab_arena/operations.py": "c8c8a11c12735172784a7d4841fa9194ccd156ea7b8a7af68654b22e5ae448a6",
+    "lab_arena/broker.py": "6e03eb93d01602d787ca3cee8b40b4790e2d6fefc2d4eae45f5bd83fb929e82b",
+    "lab_arena/training_capture.py": "402f65bbe5f2341d6744ad6bc4fa59f3bd53f60c7387b53c16c2729f48951824",
+    "lab_arena/training_export.py": "18eb26a9f1650aa8cb0f70a4f157542bd954dea1fad5cc4d0dc37a5b094bcce2",
+    "lab_arena/training_thinking.py": "6877064d5e5b3fcaaa072afb2c7482ad3212639d3615bf32bf56c85ee26f3761",
+    "scripts/verify_arena_live_capture.py": "78a324ea9cf4cf586057bd2c9ffc1c3ba467b138a41a26ebd601609342d1b606",
+    "scripts/render_arena_training_trace.py": "03cbf0ee148893aed6b1996eba0b94bfe6d8c01adb07ff6d335c7daed4599054"
+  },
+  "runs": [
+    {
+      "artifact": "complex-deepseek--deepseek-v4.1-flash-1017",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "provider": "fireworks",
+      "mode": "full",
+      "original_report_sha256": "7b9e0e769d88bd3b04fec9d9d5414d447b7c485fb4ba9bb4ed7dcd88d9fe3f09",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.0003158568",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "f3c36e6d824edf43b07fc370e29bf1276eacfd883043110b24f09bbda251092c",
+      "readable_json_sha256": "4b4901972bb31ff62f9c7757f66aad75004239199ff9d3602ca9a0b2c0aea461",
+      "readable_markdown_sha256": "11bc25f8e54ff48371bafecead189800a043b61ff9d33e4c63837c4e8030ead1",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 22,
+          "reasoning_tokens": 6,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 223,
+          "reasoning_tokens": 53,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-google--gemma-4-31b-it",
+      "model": "google/gemma-4-31b-it",
+      "provider": "coreweave/fp4",
+      "mode": "full",
+      "original_report_sha256": "be045c59f90eee1a8cd075ea1a9851f9d0f5c80115ef3f952e87ec6014d167f5",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00027308",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "a169130b0cd84a6aff56d025cda97651bb8ef588cdafc63130a6623fd6729c8c",
+      "readable_json_sha256": "4f946abfdbf4d901f28a1ca9b98f45d1b4b293ba3906ce39bcc057e71c66edef",
+      "readable_markdown_sha256": "c7cc59e473a79d9c099a6d755a3cec7417967b00eacb318a0d3dcaed15cac719",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 572,
+          "reasoning_tokens": 159,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 186,
+          "reasoning_tokens": 67,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 682,
+          "reasoning_tokens": 212,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-minimax--minimax-m3.1-flash",
+      "model": "minimax/minimax-m3.1-flash",
+      "provider": "inference-net/fp4",
+      "mode": "full",
+      "original_report_sha256": "6c6675f45a1a42a13ff56aaa1b5dee5347882dc3ab67787710ad55a5c710e8ff",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00011374",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "1c96f5a84bfb8ce89f93ee7e4aa562a002d49f3ddd7d34a99e3fc17df4b495ef",
+      "readable_json_sha256": "677367be1f8d369b51d5c2b7d200783c4fda3218c3ff172ba172201c23350bb0",
+      "readable_markdown_sha256": "190957605d77f7104b9dc83e98971a02e784a1f3dcec8ebeba4970ca495fbd45",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-mistralai--mistral-large-4-0",
+      "model": "mistralai/mistral-large-4-0",
+      "provider": "mistral/zdr",
+      "mode": "full",
+      "original_report_sha256": "461a56ca8a0e69ad5664e076648a20e75f568e653f4af6ed52720f76a5e674e8",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00305454",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "8ec29c83e1b0940410f26534e5304cb091459cc3f1a8fb754eacbab373ff8ddb",
+      "readable_json_sha256": "5c9eae26434f927bd346d24e9b86ed4b70216734266516b00d181f506ef65487",
+      "readable_markdown_sha256": "56efd4f56f8ecd31296ab71c82519f4185d23d9ad300df3f69d9c080a15d6943",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 1824,
+          "reasoning_tokens": 449,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-mistralai--mistral-small-2603",
+      "model": "mistralai/mistral-small-2603",
+      "provider": "mistral/zdr",
+      "mode": "full",
+      "original_report_sha256": "54a830df9145ea54f746aa5f9f5ddd8517e5267fbe6083858a3971e06a259de7",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0.000048",
+      "priced_responses": 1,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": "ValueError",
+      "readback_failure": null,
+      "raw_export_sha256": "c5f9e5793d7300f247fda28e9410617a49db0029577f2ce9ed269cf9426a0498",
+      "readable_json_sha256": "05a92d238f5ef37c9e214d1e1cccba1bf734a25c826f0e85cd937b3d6cd0dafd",
+      "readable_markdown_sha256": "c59c88461fb7fca6567844a681fcad00eebd9ea0350a88cd9def35e6776523a7",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-openai--gpt-oss-120b",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "f3a5f3c129d8275ef15148f76f240689aaeb8fee8f84cb6b0327c93fcb4b63f6",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.000185027",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "600633bf155ce8f99fcd56e1dd55dba0cf435ba150bafc082154f8bc6a4281c2",
+      "readable_json_sha256": "2f0a98c81241a4880e4ee8f266a5534f007047b359c3b492c1be8aa8429c9a3b",
+      "readable_markdown_sha256": "39903ff4e97047127119d1cc7a3665dd124606b386509b471a687be11461b894",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 1486,
+          "reasoning_tokens": 372,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 341,
+          "reasoning_tokens": 86,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 1007,
+          "reasoning_tokens": 254,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-openai--gpt-oss-20b",
+      "model": "openai/gpt-oss-20b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "8e4f859bb38238af2617f5c2ca4bdfcd5b99b595cbe83654bd928ccb7a56cea8",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00030123",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "8f72102cf76a911c6b5bb1fbfd917130f9fa7bafa00f08f679a436a7166216ce",
+      "readable_json_sha256": "9c8a4258d9b7c52a15c2555acd01dde53f89ab8ad1b6f6651183b450e3f62816",
+      "readable_markdown_sha256": "d5e2687df89d1ab28fff0fa721c50609f6c7a84e4c4a1ab0aec42f3e362cc24b",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 4655,
+          "reasoning_tokens": 1179,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 678,
+          "reasoning_tokens": 171,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 1076,
+          "reasoning_tokens": 273,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "complex-reflection--beam-1.0-501b-a23b",
+      "model": "reflection/beam-1.0-501b-a23b",
+      "provider": "nebius/fp8",
+      "mode": "full",
+      "original_report_sha256": "57451ca5ea51f884e56ff1bae06a17d02b5150c36a02811d81993f31caebbfb3",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00053740",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": "ValueError",
+      "readback_failure": null,
+      "raw_export_sha256": "d56bf58fced073bd2446af04b8f3413b5fd950a7a9f75f3794eed56bf5b9837b",
+      "readable_json_sha256": "bdb07abe206b40062dc43bf082693e50f1a11234f7e955bcb5c7b49462eaa165",
+      "readable_markdown_sha256": "bfedf43e338bcddefb0acaeac3f9711d5c83d5bad2ae0cac46a4a29ca107162a",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 348,
+          "reasoning_tokens": 89,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 51,
+          "reasoning_tokens": 19,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 637,
+          "reasoning_tokens": 162,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-cohere--command-a-plus",
+      "model": "cohere/command-a-plus",
+      "provider": "cohere",
+      "mode": "full",
+      "original_report_sha256": "5140fe9ec32c2e291e413662fdb87cb9e1b2e3ba47bcdeef905eca4a3206a3c8",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "1898b1e06983432e22d3145ecc0af1d754c94ad6549c72122f4e57b620d1092d",
+      "readable_json_sha256": "0c51efa1e549be2b985f668da3f4affc95fdf1572f8411fdd3a5bcc120d8d1f1",
+      "readable_markdown_sha256": "62272f6a58fc79bdcc6b6801d3fd7cf4f9de7d90282da97b60696e5173cfbe78",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-deepseek--deepseek-v4.1-flash-1017",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "provider": "fireworks",
+      "mode": "full",
+      "original_report_sha256": "11dbcf74373efdad32b5a1a52f9f15b556301246c52ae3d792e8817483c82699",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.0002313948",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "92502682c6cae0be2dac1d35cf67c19c0e4916ddb69277854607e3bb3b95b078",
+      "readable_json_sha256": "5da012bdb9e8beaa5246b96e16bbe9a8a695b532ca68896980a7e5513dd91da5",
+      "readable_markdown_sha256": "34d78af8e2ee9b214bb02c7480ee5d39277c688e4731d9f83713b18774d3e82f",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 19,
+          "reasoning_tokens": 5,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 99,
+          "reasoning_tokens": 29,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-google--gemma-4-31b-it",
+      "model": "google/gemma-4-31b-it",
+      "provider": "coreweave/fp4",
+      "mode": "full",
+      "original_report_sha256": "c030a5165ab2aa60517e1a86cab069f0d813b767ff6e4684d15ba3285b58851b",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00023754",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "ee9620104eb0432c72124e820bff092c2c640f9ae16275453ebf5b429dfc560a",
+      "readable_json_sha256": "3ff85c9e8d77d137edb3de08f04e1d8bb5f0e7904ecbaf6b6e46cef3b3370417",
+      "readable_markdown_sha256": "5b1f04b75a1deebfdb5f549f942b00ad82bff63ff0ca4f0dfc686cf3fc943f68",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 596,
+          "reasoning_tokens": 170,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 228,
+          "reasoning_tokens": 69,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 342,
+          "reasoning_tokens": 111,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-minimax--minimax-m3.1-flash",
+      "model": "minimax/minimax-m3.1-flash",
+      "provider": "inference-net/fp4",
+      "mode": "full",
+      "original_report_sha256": "c850a4ece9a01d6538760204a1e98edb2fd263c2f5a9d74207c96d7ff05b966d",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00012778",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "45444f31e00b69e6be59d1dd16a9fca3c1f825ee483e59693cdf0b5bc03817c6",
+      "readable_json_sha256": "fefac35062da48da589b49abb67346fd5cfe12e937111ea3f1cf4d31fe9b36b4",
+      "readable_markdown_sha256": "02a7637878225e90f2502f708732b5aa198af40c8b8cd40c8cdb608bac656e20",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-mistralai--mistral-large-4-0",
+      "model": "mistralai/mistral-large-4-0",
+      "provider": "mistral/zdr",
+      "mode": "full",
+      "original_report_sha256": "088d26fc1f06db1ec466c4c0065412054df083d0b5464b43637fd384a830c19b",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00182374",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "24ebcb34fdd30dbe471085e0818c850d90fc4df86ceb4ba63914301565ab2644",
+      "readable_json_sha256": "61a0e7692795241c0d7bd3198a38271432262c13df4b4ee3b0836c4b0e5b71fa",
+      "readable_markdown_sha256": "32990d6d77780acfac9d6b6cb82b011022070a23823fc08fbf5abfbdf6c77e62",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 661,
+          "reasoning_tokens": 172,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-mistralai--mistral-small-2603",
+      "model": "mistralai/mistral-small-2603",
+      "provider": "mistral/zdr",
+      "mode": "full",
+      "original_report_sha256": "d71f58c3ef3f707bf70d6eba60eaa6d6fd5189930f850c72cd3b7ae4cebeb692",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": "ValueError",
+      "raw_export_sha256": null,
+      "readable_json_sha256": null,
+      "readable_markdown_sha256": null,
+      "current_coverage": null
+    },
+    {
+      "artifact": "live-nvidia--nemotron-3.5-lightning",
+      "model": "nvidia/nemotron-3.5-lightning",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "d7d827b204523bda196cb4c1854afd4d78bfada72562db51ab635ccdda5a6ebe",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "14c071bfcbadab36939ce4553d4c675d1566d1560ed0ed150c9eb7741513685f",
+      "readable_json_sha256": "6645a54e710ffb5cca89f9ce32056fc2a509a42e7844c9351c5ca46b618063a2",
+      "readable_markdown_sha256": "3266e1e0e5d1c505c995e0ef36c45c8918fad4de51ad6ced758fb430b7289628",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-openai--gpt-oss-120b",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "9e868461cb0e491e230dcb7a3cde34885ac8167bb533ad1c6d92e6072fbb3799",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.000162759",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "871ced78f3e032017d5cb35de42b278a4035b83a0d90c4e47d3add65548327c3",
+      "readable_json_sha256": "0d70bc4a73c307581cf449d6ee0e7c1d1e3ca1b998825b783e5f5ba44eb9e6d8",
+      "readable_markdown_sha256": "a15316eafcf2d5d09c0bc7065b6145611a52b55a5793f7c48c0dff7019592eed",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 1382,
+          "reasoning_tokens": 347,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 252,
+          "reasoning_tokens": 64,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 710,
+          "reasoning_tokens": 181,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-openai--gpt-oss-20b",
+      "model": "openai/gpt-oss-20b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "66dfa1ea8e6b6f0c1b7fc523c8de104727e787d5563464a09c293219bc8931ad",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00027404",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "29486b8330db562d8f46267567b2e997f5ea59320cf7bd584c090f1c88335e5b",
+      "readable_json_sha256": "33bc362ed96a771ad7b20a6d5cf6526a81fc1434f12bf9d87ae20d696b0e7a46",
+      "readable_markdown_sha256": "5bb5c985d1113eac6d7e72df893a51bed6eed0545b2aafc699062be439656c12",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 4130,
+          "reasoning_tokens": 1051,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 713,
+          "reasoning_tokens": 183,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 793,
+          "reasoning_tokens": 201,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "live-reflection--beam-1.0-501b-a23b",
+      "model": "reflection/beam-1.0-501b-a23b",
+      "provider": "nebius/fp8",
+      "mode": "full",
+      "original_report_sha256": "00de12f11e7b11b037e95dc4178ffe623bb020a7c23868722e6df8377dd5b080",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00055475",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "d77b7848120b8b7b48720f115163dfeef117b58583b25ec8e2fd08e8752d69a1",
+      "readable_json_sha256": "1b0acc93af2b6bd5d115db8f36c493321ba2f75bad53c2efddf55d2b540b250e",
+      "readable_markdown_sha256": "ae7720e74054ef733addcc3c087530c426424a0eaa5e0d406be56aa3c0119f39",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 445,
+          "reasoning_tokens": 118,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 88,
+          "reasoning_tokens": 26,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 413,
+          "reasoning_tokens": 122,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "summary-anthropic--claude-sonnet-5.5",
+      "model": "anthropic/claude-sonnet-5.5",
+      "provider": "google-vertex/global",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "ff54b7b38bb003cf9a0d14f1c52d7820f7f28e69db1e7cd1298a8edc6cc51b84",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "3b01331575c7ebc1eb64af88a7bb0ef8feaaa80fa0691219405a2e346212fc58",
+      "readable_json_sha256": "b075886f1b4e143ae045670d43f64bd1ffd60aea4d1f26167c1eb6618ec80a8e",
+      "readable_markdown_sha256": "04a91b36768c7f07e84f55a933bba335f4d440b0a8cb74186da38a403b36e172",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "summary-google--gemini-3.5-flash-lite",
+      "model": "google/gemini-3.5-flash-lite",
+      "provider": "google-vertex/global",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "6f26529226fc21fea27f74dadb19ebc20d8696b27496f32e6127c5f3dbaa16e6",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.0021874",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "ca8ae6c7723aa9191f0af13816c87bb986dd28ad88d25996132edd334907ae9a",
+      "readable_json_sha256": "87995f957a72f858e91f6cb79dfa2af32c46b1e631127b6f2b9ffc97c7756b60",
+      "readable_markdown_sha256": "ccd8ed0a2dcfe7c2cc80c02698a8a20d20ae5a75eed797be434efdde91d69cc8",
+      "current_coverage": [
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 166,
+          "requested": true,
+          "contains_opaque": true
+        },
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 31,
+          "requested": true,
+          "contains_opaque": true
+        },
+        {
+          "returned": "unproved_text",
+          "characters": 265,
+          "reasoning_tokens": 506,
+          "requested": true,
+          "contains_opaque": true
+        }
+      ]
+    },
+    {
+      "artifact": "summary-openai--gpt-5.6-luna",
+      "model": "openai/gpt-5.6-luna",
+      "provider": "azure",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "3a247361f66a4f87bea8c3bb98c98e549c1b697906ab97c255f66c01e679f412",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": false,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "17eed7ad4494f7d454a745acb302f8488fc8b0b0756a1085e2e215a8a6b341c9",
+      "readable_json_sha256": "f05aeef2613f293e0b3011a231b07cb356f7bd7965e71e23dfca652524a17110",
+      "readable_markdown_sha256": "4a1a21a0a856d01c47447225cd572f4c073543e721e413fa04259a9ad6830bf2",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-deepseek--deepseek-v4.1-flash-1017",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "provider": "fireworks",
+      "mode": "full",
+      "original_report_sha256": "153dd075e2a0303962c0c910a44ff5430533d46c966f45a32a3b7c0ef8a9d294",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "e2bb16bfd0ebda5f863bd2a4cb163c6b9b7f21930af73c38afc6a814d1ecae20",
+      "readable_json_sha256": "bd202315efb5a70b3a8265ba3dc836e4d53e570a728f7bcb94c6592c425c6aca",
+      "readable_markdown_sha256": "0bfed7b4bdc4685d57d56d893b6f79fceefe8d8c691ae759943aff1e900e900f",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-final-deepseek--deepseek-v4.1-flash-1017",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "provider": "fireworks",
+      "mode": "full",
+      "original_report_sha256": "fa6eb9fd461d9e719ec259a99ae307b5bd99c372b341b2b7e7f356a2fcd8c432",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.0003390240",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "174f08cbd413f5df900df9c18510b7b302db8181479c3bcb2e5b52585cbc010e",
+      "readable_json_sha256": "a3c2309e8efdf9a16d228ff2cb38b3f5880bfb771ea36fb4a6327c34b5ac867e",
+      "readable_markdown_sha256": "a3e447511b57ffa91d5269084e572125557d65be7556e6918a9bf00e6661ba05",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 168,
+          "reasoning_tokens": 40,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 29,
+          "reasoning_tokens": 7,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 260,
+          "reasoning_tokens": 60,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-final-google--gemma-4-31b-it",
+      "model": "google/gemma-4-31b-it",
+      "provider": "coreweave/fp4",
+      "mode": "full",
+      "original_report_sha256": "f618456f205aaea60cc5d76715b2f38572862307e9db4e76acaa1987be157ef8",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00024410",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "f1cdbb9df73aabfd779299cc1135b1b35843d40050ebdf122c58b3dbdd9ac7f1",
+      "readable_json_sha256": "c76f7596466be085ec69bf4f11a6d9aa190b0c08c1541ed2b935b918237790dd",
+      "readable_markdown_sha256": "ab8307f4a9749d16b14aa6ce39ef5f97900de183bcb7c117d3f9361c247f5499",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 484,
+          "reasoning_tokens": 142,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 48,
+          "reasoning_tokens": 20,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 657,
+          "reasoning_tokens": 214,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-final-mistralai--mistral-large-4-0",
+      "model": "mistralai/mistral-large-4-0",
+      "provider": "mistral/zdr",
+      "mode": "full",
+      "original_report_sha256": "618fadf26aa8cc42e91190ee3eba2d4a8f934e6fc9aa0f2d2676ccb856052989",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00190086",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "2dcf343de8e3b25531e55572200a7c30649646455b90462b8b440ee7e5eeee51",
+      "readable_json_sha256": "7b78c74d673651ad74f8966f2ce8065d7339c3019f4bb0794d3378d82466a206",
+      "readable_markdown_sha256": "ab1449f2198311930108125627a216c434bef10fa9f8c9c012b2512cbec5c8c7",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 811,
+          "reasoning_tokens": 173,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-final-openai--gpt-oss-120b",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "f919f6ba8fd708d3eabf6fb92b99a196dcf3aea781e3dfff14dcfab91dad9b1a",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.000260231",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "fe48bb259fb3c78420907e70d841ab7561d2e3297761a6a431c25fbdd2226832",
+      "readable_json_sha256": "ae72180d2dbe199e3c1563e08f0fd372e683e1bddf5fe3aa966f124090e7b9e9",
+      "readable_markdown_sha256": "7e4c238210786647a84e0ede645bb8345bf637736bab4833f2953765c9c45541",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 2942,
+          "reasoning_tokens": 738,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 299,
+          "reasoning_tokens": 75,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 980,
+          "reasoning_tokens": 248,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-final-openai--gpt-oss-20b",
+      "model": "openai/gpt-oss-20b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "449ac84502a745f9ab3d4a121791ca5a351696fd938c191fc791aed583b86ac8",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00031697",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "314560b2e0acc20ee4321d1e6b6a7732edc5cb918d18f8a10036f52f20a90a10",
+      "readable_json_sha256": "0bb32b27338fccd0ec9d78e9fb9df1371d3eb09c3c0d51e618d5a139a58b4697",
+      "readable_markdown_sha256": "17d76e5569e2e3bd062c83255bc27e94403ac1c306884d42ade91dbe1a36ae63",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 5307,
+          "reasoning_tokens": 1343,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 463,
+          "reasoning_tokens": 117,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 1035,
+          "reasoning_tokens": 262,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-final-reflection--beam-1.0-501b-a23b",
+      "model": "reflection/beam-1.0-501b-a23b",
+      "provider": "nebius/fp8",
+      "mode": "full",
+      "original_report_sha256": "04e712f646d5f8c14a507b66ebb12049161bfef4ed12d66a159da020c38c0f7c",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.00056620",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "e9d4b892a404743eaa753f7818e1774ac64aa099fa80677ff0abb2f58db3110b",
+      "readable_json_sha256": "e9c4a4402da6b4f70e32bae2e4a9ad649e382b26b3ed82e14e415200032d0ddf",
+      "readable_markdown_sha256": "5aeca30d7f1ec1b05c1527469b9fef9cfb5b8b13a3584817c43518d629f34bc5",
+      "current_coverage": [
+        {
+          "returned": "full_thinking",
+          "characters": 227,
+          "reasoning_tokens": 65,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 51,
+          "reasoning_tokens": 19,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "full_thinking",
+          "characters": 970,
+          "reasoning_tokens": 278,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-google--gemma-4-31b-it",
+      "model": "google/gemma-4-31b-it",
+      "provider": "coreweave/fp4",
+      "mode": "full",
+      "original_report_sha256": "57b3b99081c0a546dd289b7bd54a2f5da34593e578e222ecd5415f0f5dc0f3b5",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "74ac1b1f72c5e2f02736c3b620517fa4d91d9baf98324ee75ac398d908b7d306",
+      "readable_json_sha256": "b81d01833907a4102358e518df76b4c5eec21cfe0ae6e4612362060c8c5f2dd5",
+      "readable_markdown_sha256": "6fb40601ee875e7093b24cf4c1ae071e2b3ebf79781ad53c91a20ea0d4110272",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-mistralai--mistral-large-4-0",
+      "model": "mistralai/mistral-large-4-0",
+      "provider": "mistral/zdr",
+      "mode": "full",
+      "original_report_sha256": "d615b07bc28de6c39368040bedb71a7aeb4e331960bccbb407f2d799d5becd15",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "b9304c8c614c2634b484ae022c889896f06c2c9afa1dddb7bc91455fd2999e48",
+      "readable_json_sha256": "694eebfc892dd70ebf9ae4055d1592ba907285b5a0cf086cc2dc4539841a8f19",
+      "readable_markdown_sha256": "264abbf19c352b4c447b349b2e43d72443fa893a3187f85070fbc5f03cdfe6f7",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-openai--gpt-oss-120b",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "66fe53461aaa67c55c343526ab2fe64f15de1b9b8ea3cd6c0ca5d005e9395562",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "4e97c253ffb831ebd3810300c5fc25c7aeaefa179c614de18eda10b4307a15f7",
+      "readable_json_sha256": "897b1ccb0bf171b8948976d9030692cfbd8f576cf8bb0e24ed6a9f6d3ad5865c",
+      "readable_markdown_sha256": "7eb394c0a5fb250c78a5f6f0adea608d658cec4de3590ae3e6a9e517edd68d53",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-openai--gpt-oss-20b",
+      "model": "openai/gpt-oss-20b",
+      "provider": "deepinfra/bf16",
+      "mode": "full",
+      "original_report_sha256": "f972618c8784ee94cfc6eabaf47165957c855953036a8a7f41f578c75b2e1610",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "c997a1a0ab06ccb68dd231a86a1af97bfd58ee197b96fd87722b381d064e21bf",
+      "readable_json_sha256": "09706eb2f20fa3b9a0751300ee7805323dc4f6a7d40603cc27f2a1554561d8e6",
+      "readable_markdown_sha256": "abbab9eb9bb84753ef4f4f108ff7931c34fb9f0030a2e8276d8fcbd93cc78c82",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-reflection--beam-1.0-501b-a23b",
+      "model": "reflection/beam-1.0-501b-a23b",
+      "provider": "nebius/fp8",
+      "mode": "full",
+      "original_report_sha256": "6966aa9df171e671f2ea0f43a45e54fe494ef4e0a23b42d53ce48d61cb0c48e1",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0",
+      "priced_responses": 0,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "9269d7c19ed0e796a8f74c91c9b1d81755e6218a912c8ee503dc55fc51c7eb4e",
+      "readable_json_sha256": "51e18baf25592b17ddbc6168eb00135e0a7c00f94d26dac167f94c4a2da5ce9d",
+      "readable_markdown_sha256": "24093971508300cc1383b20029a7aef2b6634d12ff65fa37148ee5c7ed0e919c",
+      "current_coverage": [
+        {
+          "returned": "interrupted",
+          "characters": 0,
+          "reasoning_tokens": null,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-summary-anthropic--claude-sonnet-5.5",
+      "model": "anthropic/claude-sonnet-5.5",
+      "provider": "google-vertex/global",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "7f6561e4d74e0b562bb37fa2e24543f38bd33cfd0e1a235b501fd7dd11fdf61c",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.005162",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "d931135acd55ed085e4fbb3f9d284aa5adad1f20379c918b962170427bb27505",
+      "readable_json_sha256": "496743f59f390e4c64d523056d48ab52c6ebe82285a4b496b0e00cb5cc1d57e2",
+      "readable_markdown_sha256": "e16a476a6051b56db0306f938a2b581cebf7ecd75dff62641c0f187a56ce8f98",
+      "current_coverage": [
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        },
+        {
+          "returned": "requested_empty",
+          "characters": 0,
+          "reasoning_tokens": 0,
+          "requested": true,
+          "contains_opaque": false
+        }
+      ]
+    },
+    {
+      "artifact": "worker-summary-fixed-openai--gpt-5.6-luna",
+      "model": "openai/gpt-5.6-luna",
+      "provider": "azure",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "b95fd233495c6bfa8039fe05172f0dd27635dc1a486e19556121513caec98795",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.0004452",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "e5da999cff9b2d48cbab4d7e56e1d293dc05f9618c582807fa7f37b6672c2148",
+      "readable_json_sha256": "4c0850dafff22c0ad3d3c6d54237d013874c02b753516acde6382376ae00222c",
+      "readable_markdown_sha256": "ebfd6d1eabc01b8ada841faa35d5650c4ddf7bdebddcbb8f61f0fd17555c4ba4",
+      "current_coverage": [
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 28,
+          "requested": true,
+          "contains_opaque": true
+        },
+        {
+          "returned": "summary",
+          "characters": 381,
+          "reasoning_tokens": 81,
+          "requested": true,
+          "contains_opaque": true
+        },
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 55,
+          "requested": true,
+          "contains_opaque": true
+        }
+      ]
+    },
+    {
+      "artifact": "worker-summary-google--gemini-3.5-flash-lite",
+      "model": "google/gemini-3.5-flash-lite",
+      "provider": "google-vertex/global",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "9e86056ee79d66d635d1251c0df4fda4879304aaecf690092c90f04cdd423ac8",
+      "wire_responses": 3,
+      "raw_usage_reported_cost_usd": "0.0027521",
+      "priced_responses": 3,
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true,
+      "probe_failure": null,
+      "readback_failure": null,
+      "raw_export_sha256": "2270d3ed63f65b465ac5cfe1e97aa5d72c5fcc9daba7b70eab3eef8cd5675697",
+      "readable_json_sha256": "565b1990641dd6495f4b7b8f4af031cfdb9afdfcba081347c34048e139ff7fda",
+      "readable_markdown_sha256": "5bb044f45ef4db378741756e2075e6554f8a52dbf0239f32c73a91077ed8da59",
+      "current_coverage": [
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 165,
+          "requested": true,
+          "contains_opaque": true
+        },
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 82,
+          "requested": true,
+          "contains_opaque": true
+        },
+        {
+          "returned": "unproved_text",
+          "characters": 407,
+          "reasoning_tokens": 676,
+          "requested": true,
+          "contains_opaque": true
+        }
+      ]
+    },
+    {
+      "artifact": "worker-summary-openai--gpt-5.6-luna",
+      "model": "openai/gpt-5.6-luna",
+      "provider": "azure",
+      "mode": "summary_diagnostic",
+      "original_report_sha256": "cb5ebafffeaaeacc6ac8d6c175f198753a7ad3ca2c9defbfdcde16688647de12",
+      "wire_responses": 1,
+      "raw_usage_reported_cost_usd": "0.00009",
+      "priced_responses": 1,
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true,
+      "probe_failure": "ShimProviderError",
+      "readback_failure": null,
+      "raw_export_sha256": "cbec672dad3d821a4b452653a5232edc7d9b5e5d60c81a0f3cc562b1d11b5c8e",
+      "readable_json_sha256": "1d5cf03af212c309d7286851ad479ce052f3d0ad732d81016df7bb9ef235b478",
+      "readable_markdown_sha256": "8e4206876d18920c2f3532b76ae802e0eec31a3c3086fa0a3d9129eedee2d158",
+      "current_coverage": [
+        {
+          "returned": "opaque",
+          "characters": 0,
+          "reasoning_tokens": 28,
+          "requested": true,
+          "contains_opaque": true
+        }
+      ]
+    }
+  ]
+}

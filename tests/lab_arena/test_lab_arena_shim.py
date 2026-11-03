@@ -111,6 +111,7 @@ def test_typed_socket_timeout_covers_provider_and_billing_windows(
         operations.BUDGET_ADMISSION_MAX_SECONDS
         + min(requested_timeout_ms / 1000.0, float(operation.timeout_seconds))
         + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
         + shim.SOCKET_GRACE_SECONDS
     )
 
@@ -659,7 +660,9 @@ def test_company_verification_routed_failure_stays_explicit_and_bounded(
 
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.passed is False
-    assert result.reason == "website returned HTTP 502"
+    # Main now preserves an unproven provider failure as a retryable fetch
+    # error, rather than presenting it as an authoritative website status.
+    assert result.reason == "website fetch error: Arena provider response unavailable"
     # One paid request is followed by bounded saved-response reads, including
     # one same-action worker recovery lookup. No new paid request is sent.
     assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET", "GET", "GET"]

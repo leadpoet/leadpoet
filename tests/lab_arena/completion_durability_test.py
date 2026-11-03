@@ -17,7 +17,7 @@ import pytest
 from lab_arena import contracts, runner as rn
 from tests.lab_arena.test_lab_arena_runner import (
     BridgingRuntime, FakeApi, ROUND, RUNNER, completion_envelope,
-    lease, make_config, sign, valid_company, verify,
+    lease, make_config, scoring_lease, sign, valid_company, verify,
 )
 
 
@@ -67,6 +67,163 @@ def test_real_success_pipeline_leaves_no_pending_files(tmp_path):
         assert list((cfg.work_dir / "pending-completions").iterdir()) == []
     finally:
         worker.close()
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("failure", ["finished_ack_crash", "lost_completion_reply"])
+def test_finished_boundary_replays_exact_signed_completion(tmp_path, kind, failure):
+    class Crash(BaseException):
+        pass
+
+    class CrashAfterFinished(Api):
+        def __init__(self, request):
+            super().__init__(leases=[request])
+            self.finished = []
+
+        def trajectory(self, run_id, lease_token, events):
+            self.finished.extend(event for event in events if event["kind"] == "runtime.finished")
+            if self.finished and failure == "finished_ack_crash":
+                raise Crash()
+            return {"accepted": len(events)}
+
+        def complete(self, document):
+            super().complete(document)
+            raise rn.RunnerError("controlled lost completion reply", http_status=503)
+
+    request = scoring_lease() if kind == "score" else lease()
+    api = CrashAfterFinished(request)
+    cfg = config(tmp_path, api)
+    cfg.work_dir.mkdir()
+    first = rn.Runner(cfg)
+    try:
+        if failure == "finished_ack_crash":
+            with pytest.raises(Crash):
+                first.run_once()
+        else:
+            assert first.run_once() == 1 and first.abandoned == 1
+    finally:
+        first.close()
+    assert len(api.finished) == 1
+    assert len(api.attempts) == (1 if failure == "lost_completion_reply" else 0)
+    pending = list((cfg.work_dir / "pending-completions").glob("*.json"))
+    assert len(pending) == 1
+    original = json.loads(pending[0].read_text())
+    assert original["body"]["run_id"] == request["run_id"]
+    assert verify(original["hotkey"], original["signature"], contracts.signed_request_message(original))
+    assert stat.S_IMODE(pending[0].stat().st_mode) == 0o600
+    if api.attempts:
+        assert api.attempts == [original]
+
+    replay_api = Api()
+    fresh_cfg = config(tmp_path, replay_api)
+    fresh = rn.Runner(fresh_cfg)
+    try:
+        assert fresh.run_once(max_claims=0) == 0
+        assert replay_api.attempts == [original]
+        assert fresh_cfg.sandbox_runtime.specs == [] and replay_api.provider_frames == []
+        assert not pending[0].exists()
+    finally:
+        fresh.close()
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("fsync_stage", ["file", "directory"])
+def test_persistence_failure_does_not_publish_finished_or_complete(tmp_path, monkeypatch, kind, fsync_stage):
+    request = scoring_lease() if kind == "score" else lease()
+
+    class ObservedApi(Api):
+        def __init__(self):
+            super().__init__(leases=[request])
+            self.events = []
+
+        def trajectory(self, run_id, lease_token, events):
+            self.events.extend(events)
+            return {"accepted": len(events)}
+
+    api = ObservedApi()
+    cfg = config(tmp_path, api)
+    cfg.work_dir.mkdir()
+    worker = rn.Runner(cfg)
+
+    real_fsync = rn.os.fsync
+
+    def fail_fsync(descriptor):
+        directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        if directory == (fsync_stage == "directory"):
+            raise OSError("controlled persistence failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(rn.os, "fsync", fail_fsync)
+    try:
+        assert worker.run_once() == 1
+        assert worker.abandoned == 1 and api.attempts == []
+        assert not any(event["kind"] == "runtime.finished" for event in api.events)
+        pending = list((cfg.work_dir / "pending-completions").iterdir())
+        assert len(pending) == (1 if fsync_stage == "directory" else 0)
+        if pending:
+            assert json.loads(pending[0].read_text())["body"]["run_id"] == request["run_id"]
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("violation", ["missing_hook", "changed_envelope"])
+def test_production_runner_requires_exact_retained_executor_receipt(tmp_path, violation):
+    api = Api(leases=[lease()])
+    cfg = config(tmp_path, api)
+    original = envelope(cfg)
+    worker = rn.Runner(cfg)
+
+    def invalid_execute(_lease, _token, _icp, *, before_finished):
+        if violation == "missing_hook":
+            return original
+        before_finished(original)
+        return {**original, "timestamp": original["timestamp"] + 1}
+
+    worker._executor.execute = invalid_execute
+    try:
+        assert worker.run_once() == 1
+        assert worker.abandoned == 1 and api.attempts == []
+        pending = list((cfg.work_dir / "pending-completions").glob("*.json"))
+        assert len(pending) == (1 if violation == "changed_envelope" else 0)
+        if pending:
+            assert json.loads(pending[0].read_text()) == original
+    finally:
+        worker.close()
+
+
+def test_finished_publication_holds_outbox_lock_until_original_delivery(tmp_path):
+    entered, finish = threading.Event(), threading.Event()
+
+    class BlockedFinished(Api):
+        def trajectory(self, run_id, lease_token, events):
+            if any(event["kind"] == "runtime.finished" for event in events):
+                entered.set()
+                assert finish.wait(5)
+            return {"accepted": len(events)}
+
+    api = BlockedFinished(leases=[lease()])
+    cfg = config(tmp_path, api)
+    cfg.work_dir.mkdir()
+    worker = rn.Runner(cfg)
+    other_api = Api()
+    other = rn.Runner(config(tmp_path, other_api))
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            active = pool.submit(worker.run_once)
+            try:
+                assert entered.wait(5)
+                pending = list((cfg.work_dir / "pending-completions").glob("*.json"))
+                assert len(pending) == 1 and api.attempts == []
+                other.run_once(max_claims=0)
+                assert other_api.attempts == [] and pending[0].exists()
+            finally:
+                finish.set()
+            assert active.result(timeout=5) == 1
+        assert len(api.attempts) == 1 and not pending[0].exists()
+    finally:
+        finish.set()
+        worker.close()
+        other.close()
 
 
 @pytest.mark.parametrize("response", [rn.RunnerError("offline", http_status=503), {"status": "accounting_open"}])
@@ -293,15 +450,17 @@ def test_active_run_once_replays_exhausted_completion_before_healthy_work_ends(t
     worker = rn.Runner(cfg)
     monkeypatch.setattr(rn.time, "monotonic", lambda: clock[0])
 
-    def execute(leased, *args):
+    def execute(leased, *args, before_finished):
         if leased["run_id"] == "second":
             second_active.set()
             assert second_finish.wait(5)
         original = envelope(cfg, ("a" if leased["run_id"] == "first" else "b") * 32)
         original["body"]["run_id"] = leased["run_id"]
-        return contracts.build_signed_request(scope=contracts.SCOPE_COMPLETE, round_id=ROUND,
+        document = contracts.build_signed_request(scope=contracts.SCOPE_COMPLETE, round_id=ROUND,
             hotkey=RUNNER.ss58_address, body=original["body"], timestamp=original["timestamp"],
             request_id=original["request_id"], sign_message=sign)
+        before_finished(document)
+        return document
 
     def complete(document):
         attempts.append(copy.deepcopy(document))

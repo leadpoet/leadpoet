@@ -25,6 +25,14 @@ def test_committed_protected_manifest_matches_current_source():
     verify_manifest(ROOT, load_manifest(MANIFEST_PATH))
 
 
+def test_ci_verifies_protected_manifest_before_dependency_installation():
+    workflow = (ROOT / ".github/workflows/deploy-checks.yml").read_text()
+    verification = workflow.index("      - name: Verify protected workflow manifest\n")
+    dependencies = workflow.index("      - name: Install Python dependencies\n")
+    assert verification < dependencies
+    assert "python gateway/tee/protected_workflows.py --root ." in workflow[verification:dependencies]
+
+
 def test_protected_hashes_are_cross_version_and_fail_closed():
     python312 = shutil.which("python3.12")
     if python312 is None:
@@ -131,6 +139,15 @@ def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):
     expected = sum(not path.startswith("gateway/") for path in PROTECTED_SYMBOLS)
     assert stage_external_protected_sources(ROOT, staged_root) == expected
     verify_manifest(enclave_root, load_manifest(MANIFEST_PATH))
+    # Updating scorer hashes must not allow changes to another protected AST.
+    identity_path = enclave_root / "tee/runtime_identity_v2.py"
+    tree = ast.parse(identity_path.read_text())
+    identity = next(node for node in tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == "RuntimeIdentityV2")
+    identity.body.append(ast.Pass())
+    identity_path.write_text(ast.unparse(ast.fix_missing_locations(tree)))
+    with pytest.raises(ProtectedWorkflowError, match="runtime_identity_v2.py:RuntimeIdentityV2"):
+        verify_manifest(enclave_root, load_manifest(MANIFEST_PATH))
 
 
 def test_protected_manifest_detects_policy_constant_change(
@@ -173,10 +190,15 @@ def test_extracted_investigation_settlement_remains_ast_protected(tmp_path, monk
         and node.name == "_settle_completed_company_investigation"
     )
     segment = ast.get_source_segment(source, settlement)
-    assert segment.count(guard) == 1
-    target.write_text(source.replace(segment, segment.replace(guard, 'and True', 1), 1))
-    with pytest.raises(ProtectedWorkflowError, match="_settle_completed_company_investigation"):
-        verify_manifest(tmp_path, manifest)
+    assert guard in segment
+    start = 0
+    # Each optional-profile finality branch must retain its completion guard.
+    while (offset := segment.find(guard, start)) != -1:
+        changed = segment[:offset] + 'and True' + segment[offset + len(guard):]
+        target.write_text(source.replace(segment, changed, 1))
+        with pytest.raises(ProtectedWorkflowError, match="_settle_completed_company_investigation"):
+            verify_manifest(tmp_path, manifest)
+        start = offset + len(guard)
 
 
 def test_final_company_fit_wrapper_remains_ast_protected(tmp_path, monkeypatch):

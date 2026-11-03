@@ -716,6 +716,35 @@ def test_openrouter_chat_accepts_common_agent_tool_and_reasoning_fields():
     assert normalized["tool_choice"] == "auto" and normalized["reasoning_effort"] == "medium"
 
 
+@pytest.mark.parametrize("message,legacy_hash", [
+    ({"role": "assistant", "content": None,
+      "tool_calls": [{"id": "call-1", "type": "function",
+                      "function": {"name": "search", "arguments": "{}"}}]},
+     "sha256:b9fe7b55bf5d5f0dc74faf7d11aada0a62b2481e89c12e80cb7ce26cc044a36c"),
+    ({"role": "assistant", "content": None},
+     "sha256:45657bddee69fcab42727094e630c1ca63a701ce830c752fc861a4ec75198f36"),
+    ({"role": "user"},
+     "sha256:3b644cd364fb2d128c60679b8d0474a5908e04adc5d4acf7ea8dfb7cd4399258"),
+])
+def test_openrouter_chat_policy_off_keeps_legacy_message_normalization(message, legacy_hash):
+    request = {"model": "openai/gpt-4o-mini", "messages": [message]}
+    expected = {"model": request["model"], "messages": [
+        {key: value for key, value in message.items() if value is not None}
+    ], "max_tokens": ops.OPENROUTER_MAX_OUTPUT_TOKENS}
+    normalized = ops.validate_operation_request("openrouter.chat", request,
+                                                allow_full_thinking=False)
+    assert normalized == expected
+    assert contracts.document_hash(normalized) == legacy_hash
+    assert json.loads(ops.build_outbound_request("openrouter.chat", request).body)["messages"] == expected["messages"]
+
+
+def test_openrouter_chat_policy_off_rejects_full_thinking_history():
+    request = {"model": "openai/gpt-4o-mini", "messages": [
+        {"role": "assistant", "content": "answer", "reasoning_content": "thought"}
+    ]}
+    reject("openrouter.chat", request, "unknown_field")
+
+
 def test_openrouter_chat_total_size_is_bounded():
     big = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "x" * 32_000}] * 40}
     reject("openrouter.chat", big, "request_too_large")

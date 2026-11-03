@@ -61,6 +61,114 @@ validator can lose its final buffered runtime output; provider events already
 stored by the gateway remain available. This first version adds no log viewer
 or automatic retention deletion.
 
+## Capture summary reader
+
+Leadpoet's admin Data capture tab reads captured competition model usage for
+one submission. Public round data shows verified reasoning only for runs that
+pass the training check, so the site needs this private aggregate.
+
+Migration `593-lab-arena-capture-summary-reader.sql` adds the NOLOGIN role
+`leadpoet_capture_reader` with a 60 s role statement timeout and no explicit
+table grants. Its explicit EXECUTE grant is one SECURITY DEFINER function,
+`lab_arena_capture_summary_v1(p_round_id, p_submission_id)`. The function
+returns one row of counts for the submission's execute runs: runs, ICP
+positions, completed OpenRouter calls, calls whose saved body reports reasoning
+tokens, the token sum, and the first and last call times. It returns no hotkeys,
+credentials, prompts, bodies or model output. Score runs and other submissions
+are excluded. Counting uses the training export's terminal and token rules:
+the latest terminal must be a saved 2xx success, and the reasoning count is the
+largest non-negative integer with 1 to 19 digits at `usage.reasoning_tokens`,
+`usage.completion_tokens_details.reasoning_tokens`
+or `usage.output_tokens_details.reasoning_tokens`. A body that cannot be decoded
+counts as a call without reported usage. If the token sum exceeds BIGINT's
+maximum, the sum is NULL (unknown); the usage call count remains available.
+These provider-reported counts do not prove export completeness or training
+eligibility. The reader does not run the exporter's privacy or structure
+sanitizer.
+
+Existing database `PUBLIC` grants also apply to this role. `NOINHERIT` does not
+remove them, and revoking a grant from the reader cannot override `PUBLIC`.
+Review and record that effective surface; do not revoke unrelated shared grants
+as part of this rollout. The distinct opaque reader key is restricted at nginx
+to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 after
+the additive rollout below), with JSON
+arguments in the body. Other methods, paths, query strings, non-public schema
+profiles and method/path override headers return 403. Explicit `public` profiles
+are allowed. Both the normalized URI and original request target must match.
+This is an HTTP boundary, not a claim of database-level one-function isolation.
+The backend must remain loopback-only and its internal role JWT must remain
+private (`deploy/aws/subnet-api/README.md`).
+
+### Additive v2 usage and model mix
+
+Migration `598-lab-arena-capture-summary-v2.sql` adds
+`lab_arena_capture_summary_v2(p_round_id TEXT, p_submission_id TEXT)`.
+It leaves v1 (including migration 595's called-ICP selection) unchanged and
+uses the same reader role and key. Deploy the renderer's exact v2 POST allowlist
+along with the migration; v1 remains available while the website migrates.
+No new authenticator membership, environment setting or credential is needed.
+
+The response retains every v1 column and adds `input_tokens BIGINT`,
+`output_tokens BIGINT`, `cached_input_tokens BIGINT`, `token_calls INTEGER`,
+and `models JSONB`. Token totals use nonnegative whole numbers only, with up to
+19 digits. Missing totals and BIGINT overflow return NULL; reported zero remains
+zero. `token_calls` counts calls with both input and output usage. Prefer the
+first valid value in prompt/input, completion/output, and prompt/input cached
+field order. Output tokens include reported reasoning; nothing is subtracted.
+
+`models` contains only `model`, `calls`, `input_tokens`, `output_tokens`, and
+`reasoning_tokens`, sorted by call count descending and model name for ties.
+Names come only from the response's model field and must match
+`^[A-Za-z0-9.\_:/@+-]{1,200}$`; invalid or absent names become `unknown`.
+The array has at most 50 entries, with excess models combined into `other`.
+No cost attribution, request/response body, output, hotkey or credential is returned.
+
+Apply the exact committed migration through the same owner path as 593/595,
+read back the definition and permissions, and verify v1/v2 parity on retained
+baseline and miner submissions. Preserve PUBLIC privileges; verify the opaque
+key denies all routes except the two canonical POSTs. To roll back v2, remove
+only its allowlist route and revoke its EXECUTE from `leadpoet_capture_reader`;
+v1 and the existing reader key remain unchanged.
+
+To enable the original v1 reader:
+
+1. Apply 593 through the configured repository migration helper. It is
+   idempotent and changes no stored row, table ACL or existing function. It
+   grants the role to a role named `authenticator` only if one exists.
+2. Review direct, inherited and `PUBLIC` privileges with the read-only queries
+   in `deploy/aws/subnet-api/README.md`. Verify the reader-only HTTP restriction,
+   private backend and exact summary function before granting the role to the
+   reviewed RDS authenticator. A stopped permission review is not permission to
+   activate the key. Do not rerun 593 after an unknown commit without readback.
+
+   ```sql
+   GRANT leadpoet_capture_reader TO <reviewed_authenticator>
+     WITH INHERIT FALSE, SET TRUE;
+   ```
+
+3. Generate a new random `sb_secret_` key for the site only. Add it as
+   `capture_reader_key` to the private renderer input, render both files and
+   restart the pair as an explicit key rotation (README, "Private
+   configuration"). The other keys stay unchanged.
+4. Store the key as the site's `LEADPOET_ARENA_CAPTURE_KEY` (leadpoet-site
+   `docs/runbooks/aws-ecs-cutover.md`, "Read the arena call ledger"). Never
+   reuse the Arena, gateway or public key.
+5. Verify with the new key: `POST /rest/v1/rpc/lab_arena_capture_summary_v1`
+   with `{"p_round_id": ..., "p_submission_id": ...}` returns one row, and a
+   table read such as `GET /rest/v1/lab_arena_ledger?limit=1` returns 403.
+   Prove other methods, aliases and a catalog-confirmed harmless PUBLIC RPC
+   are denied. Never invoke a mutating legacy RPC to test the boundary.
+
+Rollback: remove `capture_reader_key` from the renderer input and restart the
+pair, which revokes the key. To also close the database path, run
+`REVOKE leadpoet_capture_reader FROM <reviewed_authenticator>` or
+`REVOKE EXECUTE ON FUNCTION public.lab_arena_capture_summary_v1(text, text)
+FROM leadpoet_capture_reader`. Neither step touches Arena data.
+
+A call reads each completed call's saved body, so cost grows with the
+submission's total response size. Local timing was about 2 ms per 20 KB body.
+The role timeout ends an unusually large request instead of letting it run on.
+
 ## Competition boundary
 
 A miner submits one local source directory. The helper:
@@ -81,11 +189,16 @@ Only `code_review_status=passed` can freeze a miner into evaluation. The source
 must be complete UTF-8 text and fit in the 1M-token judge context, including
 output headroom. Requests disable context compression. Missing file coverage,
 truncated output, malformed verdicts, and unknown charges are incomplete reviews.
-Explicit HTTP 408/429/5xx, transport, and temporary preparation failures allow
-at most six attempts, with backoffs of 60, 120, 240, 480, and 900 seconds.
+Explicit HTTP 408/429/5xx, transport, temporary preparation failures, unusable
+reviewer responses, and inconclusive research assessments retry within the
+existing admission window. Attempts are an audit count, not a rejection rule.
+Backoffs are 60, 120, 240, 480, then 900 seconds after each failure. Each worker
+invocation can dispatch one request. A ninety-minute window permits at most
+nine starts per submission, even with zero provider latency.
 Credential, credit, request, and invalid-source errors do not retry. Unknown
-errors, malformed successful responses, and missing charges retain the legacy
-three-attempt limit and 60-second backoff. A live review claim expires after ten
+legacy errors and missing charges retain the legacy three-attempt limit and
+60-second backoff. Accounting uncertainty is not unfinished review recovery.
+A live review claim expires after ten
 minutes so a restart can recover. Claims start only after source replacement
 closes and before the existing benchmark deadline. A late result can settle
 its charge but cannot pass the review or admit a submission.
@@ -104,9 +217,41 @@ per-attempt ledger metadata retain only safe category codes, HTTP status, and
 retry flags, never provider prose, credentials, or submitted source.
 Unknown provider charges retain their reservation
 as uncertain; neither a worker crash nor a malformed response makes a free pass.
-Apply migration `263-lab-arena-code-review-recovery.sql` after migration 262
-before restarting the gateway. The gateway preflight checks the bounded retry
-capability as well as the existing review schema.
+Migration `585-lab-arena-review-deadline-recovery.sql` updates the existing
+review RPCs and widens the audit counter. It does not rewrite prior reviews,
+ledger charges, participants, or scores. Known reviewer failure codes are
+reclassified on read, including old diagnostics with a stale retry flag.
+The preflight requires the deadline retry capability.
+
+The applied deadline body retains its original 585 filename and exact bytes.
+Champion-baseline 585 is a separate applied migration; the numbering gate seals
+both full filenames and hashes. Publication 586 and atomic review guard 587
+remain separate later migrations. Install deadline 585 before atomic 587, and
+follow atomic 587's worker-quiescence prerequisite and bounded lock wait.
+
+Deploy this change as a controlled pair of database and service changes. Drain
+and stop the review worker through the canonical deployment workflow. Apply
+the exact deadline migration 585 before starting the candidate. The old service cannot
+pass its review preflight while the truthful v2 RPC schema is active.
+The rollback stays outside forward migration discovery as
+`585-lab-arena-review-deadline-recovery-rollback.sql.template`. If rollback is
+needed, preserve its exact bytes in a separately reviewed and committed SQL file
+with the next unused migration number. Stop and drain the candidate, apply that
+exact committed rollback, then restart the old release. This restores all three
+exact prior RPC definitions and their existing identities and grants. It keeps the widened audit storage and all review rows.
+After atomic 587 changes the dependent RPCs, this deadline rollback template
+fails closed on those new hashes. Do not edit its guards to force rollback;
+any rollback across that dependency needs its own exact reviewed plan.
+The old RPCs fail closed for an unfinished review above six attempts. Reapplying
+the exact deadline migration 585 restores recovery for that row while its admission window is open.
+Neither direction admits a closed-round or previously excluded submission.
+The rollback is a separately selected operator artifact. It is not part of the
+forward migration fixture or a bulk migration sequence.
+When combined with `585-lab-arena-champion-baseline-reasoning.sql`, the review
+rollback leaves that baseline contract installed. The fallback release must
+retain champion baseline continuity from PR 872. After a baseline capture
+snapshot freezes, do not use the older `a88f94b2` or `4b51d975` releases, which
+do not understand that snapshot.
 
 No Dockerfile, public registry, image tag, commit identity, receipt, source
 digest, or release manifest is part of miner admission. The service validates
@@ -446,6 +591,12 @@ through final receipt assembly. Its internal proof marker is set only after
 the existing settlement checks pass and is not copied to public or cached
 judgments. A stale homepage failure cannot discard that completed negative
 proof; incomplete investigations and unresolved source failures still retry.
+Version 2 also permits this settlement when headcount was already verified.
+Only the remaining incomplete facts must have completed, typed UNPROVEN
+findings. It applies the same settlement after schema repair, including reviews
+without a semantic dispute. The cached profile failure is retained for audit;
+it is not converted to a successful profile fetch. Real provider failures and
+unproved positive findings remain retryable.
 Unknown or partially corrected source fails closed. Independently verify the
 composed image and its affected paths before registering its runtime mapping.
 Only new lease generations select the registered runtime; existing leases and
@@ -468,6 +619,15 @@ files extracted from the pinned base and prior runtime images.
 Run `tests/test_arena_reviewer_identity_schema_seam.py` with those variables.
 Set `ARENA_IDENTITY_COMPOSED_SOURCE` to the scorer file from the new image to
 run all 14 identity controls against that exact composed verifier as well.
+
+For an optional first-party auxiliary whose submitted company name differs
+from the verified name, add `--auxiliary-source-name-binding` during build and
+`--verify-image`. This exact-function correction
+(`first_party_auxiliary_exact_name_binding_v1`) omits only the auxiliary that
+the unchanged paragraph reviewer already rejects. Shared source validation,
+verified signals and matched company evidence remain unchanged. Unknown source
+fails closed; an exactly corrected function is accepted without another change.
+Preserve the prior runtime's explicit correction options when adding this option.
 
 Deploy a verified composition through the trusted reviewer-runtime mapping.
 The mapping is separate from frozen round configuration. A score lease pins
@@ -509,6 +669,15 @@ validated findings must still complete. API authentication, credit, rate-limit,
 service errors and ambiguous or mismatched source responses remain failures.
 Verify the affected unfinished judgment through accepted completion and public
 publication, and compare its previously accepted outputs before and after.
+
+For a typed LinkedIn `source_blocked` diagnostic that becomes a generic fetch
+failure, build and verify with `--source-blocked-alias`. It records
+`typed_linkedin_source_blocked_alias_v1` and changes only the frozen investigator's
+diagnostic normalization to the existing `source_access_denied` class. Preserve
+all prior explicit correction options. The base must already contain the exact
+source-access correction above, or select that option first. Outer transport
+failures, ambiguous crawl failures, malformed evidence and required-search
+failures remain retryable. A completed `UNPROVEN` finding remains unproven.
 
 For the approved pending final-correction repair, also build and verify with
 `--pending-final-correction`. It changes only the frozen loop predicate so an
@@ -727,6 +896,24 @@ Concurrent branch changes fail closed; they are not overwritten or force-pushed.
 There is no sequential fallback when the remote does not support atomic pushes.
 The next baseline download and the winner's reward activation wait for promotion
 to complete. Existing frozen round bundles do not change during recovery.
+
+For full-thinking rounds, the baseline freeze selects the completed promotion's
+exact commit and freezes its original capture settings separately from the new
+challengers' settings. A capture-policy change cannot substitute the bootstrap
+for an existing champion. The bootstrap is used only before the first promoted
+champion. Historical frozen rounds are not repinned. Baseline cost limits,
+scoring, and reward rules remain those of the current round; the capture
+snapshot does not make legacy reasoning eligible for strict training exports.
+
+Apply `585-lab-arena-champion-baseline-reasoning.sql`, verify its function
+hashes, then deploy the matching
+gateway code before the next baseline freeze. The new code must not freeze a
+round against the older database function, which cannot save the capture
+snapshot. Verify that both the serving API and daily driver use that release;
+an older API ignores the separate capture snapshot. The new database function
+rejects an older driver's attempt to substitute the bootstrap before freeze.
+After the first round freezes the new snapshot, do not roll back to code that
+does not understand it. Use a corrected release that preserves the contract.
 
 Configure one repository-scoped host credential: `LAB_ARENA_GIT_SSH_KEY_PATH`
 for a write-enabled deploy key, or `LAB_ARENA_GITHUB_TOKEN`. Do not set both.

@@ -8,12 +8,12 @@ import pytest
 from lab_arena import capacity, contracts
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.contact_round_test import ContactHarness, _install_contact_sandbox
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 connect = fixtures.connect
@@ -21,7 +21,7 @@ connect = fixtures.connect
 
 @pytest.fixture()
 def self_dealing_database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture()
@@ -36,7 +36,8 @@ def test_default_admission_includes_all_miner_slots_with_one_planned_runner(conn
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
     configuration = harness.service.create_round(cutoff, round_id="arena-2098-01-01-capdefault")
     assert configuration["max_challengers"] == 256
-    assert capacity.daily_challenger_capacity(configuration) == 8
+    assert configuration["scoring_wall_clock_seconds"] == 1200
+    assert capacity.daily_challenger_capacity(configuration) == 6
     assert configuration["runner_slot_ceiling"] == 8
     assert configuration["max_attempts_per_assignment"] == 2
     monkeypatch.setattr(capacity, "daily_challenger_capacity", lambda *_args, **_kwargs: 0)

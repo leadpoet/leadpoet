@@ -133,7 +133,7 @@ def test_forward_alias_rejects_missing_unrelated_unsafe_or_malformed_redirect(fi
     assert fetch.await_count == 2
     assert resolved["observed_company_linkedin"] == CURRENT
     assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_FINAL not in resolved
-    assert _receipt(company, resolved)["decision"] == "mismatch"
+    assert _receipt(company, resolved)["decision"] == "unavailable"
 
 
 @pytest.mark.parametrize("error", [asyncio.TimeoutError, aiohttp.ClientError, ValueError])
@@ -146,7 +146,7 @@ def test_provider_errors_and_forged_transport_fields_cannot_prove_alias(error):
     assert fetch.await_count == 2
     assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_REQUESTED not in resolved
     assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_FINAL not in resolved
-    assert _receipt(_company(), resolved)["decision"] == "mismatch"
+    assert _receipt(_company(), resolved)["decision"] == "unavailable"
 
 
 @pytest.mark.parametrize("phase", ["__aenter__", "__aexit__"])
@@ -168,7 +168,7 @@ def test_session_context_failure_never_publishes_redirect_proof(phase, error):
     assert resolved["observed_company_linkedin"] == CURRENT
     assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_REQUESTED not in resolved
     assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_FINAL not in resolved
-    assert _receipt(_company(), resolved)["decision"] == "mismatch"
+    assert _receipt(_company(), resolved)["decision"] == "unavailable"
 
 
 @pytest.mark.parametrize("submitted,observed", [

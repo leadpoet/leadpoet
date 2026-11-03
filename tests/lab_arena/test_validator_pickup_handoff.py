@@ -32,6 +32,13 @@ def database():
     yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS)
 
 
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
+
+class HistoricalHarness(HistoricalStoreHarnessMixin, Harness):
+    pass
+
+
 def _http_runner(
     harness: Harness,
     http: TestClient,
@@ -83,7 +90,7 @@ def test_unplanned_validator_discovers_and_completes_work_while_primary_is_full(
 
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = Harness(
+    harness = HistoricalHarness(
         connect,
         tmp_path,
         challengers=["PickupCandidate"],
@@ -246,7 +253,7 @@ def test_unplanned_validator_discovers_and_completes_scoring_while_primary_is_fu
 
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = Harness(
+    harness = HistoricalHarness(
         connect,
         tmp_path,
         challengers=["PickupScoreCandidate"],

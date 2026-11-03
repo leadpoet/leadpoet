@@ -1,0 +1,355 @@
+{
+  "source_entry_id": 7004072,
+  "raw_response_sha256": "bc47290bd03f5d4eee646b7f5ffcbaaaa30db33380b319550469d16692e23312",
+  "retained_fields_only": true,
+  "payload": {
+    "status": 200,
+    "element": {
+      "name": "Baringa",
+      "website": "http://www.baringa.com",
+      "linkedinUrl": "https://www.linkedin.com/company/baringa/",
+      "locations": [
+        {
+          "country": "CH",
+          "city": "Zurich",
+          "geographicArea": null,
+          "line1": "Hardstrasse 201",
+          "line2": "FlexOffice",
+          "postalCode": "8005",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Zürich, Switzerland",
+            "countryCode": "CH",
+            "regionCode": null,
+            "country": "Switzerland",
+            "countryFull": "Switzerland",
+            "state": "Zürich",
+            "city": "Zürich"
+          }
+        },
+        {
+          "country": "BG",
+          "city": "Sofia",
+          "geographicArea": null,
+          "line1": "Puzl Coworking",
+          "line2": "blvd. \"Cherni Vruh\" 47A",
+          "postalCode": "1407",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Sofia, Bulgaria",
+            "countryCode": "BG",
+            "regionCode": null,
+            "country": "Bulgaria",
+            "countryFull": "Bulgaria",
+            "state": "Sofia City Province",
+            "city": "Sofia"
+          }
+        },
+        {
+          "country": "BE",
+          "city": "Brussels",
+          "geographicArea": "Brussels Region",
+          "line1": "Square de Meeûs 37",
+          "line2": "4th floor",
+          "postalCode": "1000",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Brussels, Belgium",
+            "countryCode": "BE",
+            "regionCode": null,
+            "country": "Belgium",
+            "countryFull": "Belgium",
+            "state": "Brussels-Capital Region",
+            "city": "Brussels"
+          }
+        },
+        {
+          "country": "GB",
+          "city": "London",
+          "geographicArea": "England",
+          "line1": "62 Buckingham Gate",
+          "line2": null,
+          "postalCode": "SW1E 6AJ",
+          "headquarter": true,
+          "description": null,
+          "parsed": {
+            "text": "London, United Kingdom",
+            "countryCode": "GB",
+            "regionCode": null,
+            "country": "UK",
+            "countryFull": "United Kingdom",
+            "state": "England",
+            "city": "London"
+          }
+        },
+        {
+          "country": "DE",
+          "city": "Berlin",
+          "geographicArea": null,
+          "line1": "Regus Unter Den Linder 21",
+          "line2": null,
+          "postalCode": "10117",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Berlin, Germany",
+            "countryCode": "DE",
+            "regionCode": null,
+            "country": "Germany",
+            "countryFull": "Germany",
+            "state": "Berlin",
+            "city": "Berlin"
+          }
+        },
+        {
+          "country": "DE",
+          "city": "Munich",
+          "geographicArea": "Bavaria",
+          "line1": "Theresienhöhe 28",
+          "line2": "Regus",
+          "postalCode": "80339",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Munich, Germany",
+            "countryCode": "DE",
+            "regionCode": null,
+            "country": "Germany",
+            "countryFull": "Germany",
+            "state": "Bavaria",
+            "city": "Munich"
+          }
+        },
+        {
+          "country": "DE",
+          "city": "Düsseldorf  ",
+          "geographicArea": "Germany",
+          "line1": "Immermannstr. 20",
+          "line2": null,
+          "postalCode": "40210",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Düsseldorf, Germany",
+            "countryCode": "DE",
+            "regionCode": null,
+            "country": "Germany",
+            "countryFull": "Germany",
+            "state": "North Rhine-Westphalia",
+            "city": "Düsseldorf"
+          }
+        },
+        {
+          "country": "IE",
+          "city": "Dublin",
+          "geographicArea": "County Dublin",
+          "line1": "77 Sir John Rogerson's Quay",
+          "line2": "Spaces South Docklands Block C",
+          "postalCode": "D02 VK60",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Dublin, Ireland",
+            "countryCode": "IE",
+            "regionCode": null,
+            "country": "Ireland",
+            "countryFull": "Ireland",
+            "state": "Leinster",
+            "city": "Dublin"
+          }
+        },
+        {
+          "country": "NL",
+          "city": "Amsterdam",
+          "geographicArea": null,
+          "line1": "Mr Treublaan 7",
+          "line2": null,
+          "postalCode": "1097 DP",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Amsterdam, Netherlands",
+            "countryCode": "NL",
+            "regionCode": null,
+            "country": "Netherlands",
+            "countryFull": "Netherlands",
+            "state": "North Holland",
+            "city": "Amsterdam"
+          }
+        },
+        {
+          "country": "SG",
+          "city": "Singapore",
+          "geographicArea": null,
+          "line1": "109 North Bridge Road",
+          "line2": "Funan 05-120",
+          "postalCode": "179097",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Singapore",
+            "countryCode": "SG",
+            "regionCode": null,
+            "country": "Singapore",
+            "countryFull": "Singapore"
+          }
+        },
+        {
+          "country": "ES",
+          "city": "Madrid",
+          "geographicArea": "Community of Madrid",
+          "line1": "Paseo de Recoletos, 5",
+          "line2": "Spaces Recoletos",
+          "postalCode": "28004",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Madrid, Spain",
+            "countryCode": "ES",
+            "regionCode": null,
+            "country": "Spain",
+            "countryFull": "Spain",
+            "state": "Madrid",
+            "city": "Madrid"
+          }
+        },
+        {
+          "country": "US",
+          "city": "Charlotte",
+          "geographicArea": "North Carolina",
+          "line1": "615 S College Street",
+          "line2": null,
+          "postalCode": "28202",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Charlotte, NC, United States",
+            "countryCode": "US",
+            "regionCode": null,
+            "country": "United States",
+            "countryFull": "United States of America",
+            "state": "North Carolina",
+            "city": "Charlotte"
+          }
+        },
+        {
+          "country": "US",
+          "city": "Chicago",
+          "geographicArea": "Illinois",
+          "line1": "448 North LaSalle Street",
+          "line2": null,
+          "postalCode": "60654",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Chicago, IL, United States",
+            "countryCode": "US",
+            "regionCode": null,
+            "country": "United States",
+            "countryFull": "United States of America",
+            "state": "Illinois",
+            "city": "Chicago"
+          }
+        },
+        {
+          "country": "US",
+          "city": "Houston",
+          "geographicArea": "Texas",
+          "line1": "2500 Citywest Blvd",
+          "line2": "Suite #150-121",
+          "postalCode": "TX 77042",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Houston, TX, United States",
+            "countryCode": "US",
+            "regionCode": null,
+            "country": "United States",
+            "countryFull": "United States of America",
+            "state": "Texas",
+            "city": "Houston"
+          }
+        },
+        {
+          "country": "US",
+          "city": "New York",
+          "geographicArea": "New York",
+          "line1": "10 Grand Central, 155 E 44th Street",
+          "line2": "22nd Floor",
+          "postalCode": "10017",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "New York City, NY, United States",
+            "countryCode": "US",
+            "regionCode": null,
+            "country": "United States",
+            "countryFull": "United States of America",
+            "state": "New York",
+            "city": "New York City"
+          }
+        },
+        {
+          "country": "AU",
+          "city": "Sydney",
+          "geographicArea": "New South Wales",
+          "line1": "225 George St",
+          "line2": "Level 34",
+          "postalCode": "2000",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Sydney, Australia",
+            "countryCode": "AU",
+            "regionCode": null,
+            "country": "Australia",
+            "countryFull": "Australia",
+            "state": "New South Wales",
+            "city": "Sydney"
+          }
+        },
+        {
+          "country": "AU",
+          "city": "Melbourne",
+          "geographicArea": "Victoria",
+          "line1": "90 Collins St",
+          "line2": "Level 8",
+          "postalCode": "3000",
+          "headquarter": false,
+          "description": null,
+          "parsed": {
+            "text": "Melbourne, Australia",
+            "countryCode": "AU",
+            "regionCode": null,
+            "country": "Australia",
+            "countryFull": "Australia",
+            "state": "Victoria",
+            "city": "Melbourne"
+          }
+        },
+        {
+          "country": "DK",
+          "city": "Copenhagen",
+          "geographicArea": "Capital Region of Denmark",
+          "line1": "Ny Carlsberg Vej 80",
+          "line2": "Copenhagen Spaces",
+          "postalCode": "1760",
+          "headquarter": false,
+          "description": "Copenhagen",
+          "parsed": {
+            "text": "Copenhagen, Denmark",
+            "countryCode": "DK",
+            "regionCode": null,
+            "country": "Denmark",
+            "countryFull": "Denmark",
+            "state": "Capital Region of Denmark",
+            "city": "Copenhagen"
+          }
+        }
+      ]
+    }
+  }
+}

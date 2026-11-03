@@ -1,0 +1,15 @@
+# This repository's release runner replaces inherited runner definitions.
+# No warm-pool label, persistent disk, cache extras, SSH, or inherited hooks.
+images: {}
+runners:
+  attested-v2-isolated:
+    cpu: [4]
+    ram: [16]
+    family: [m7i, m7a, m8i, m8a]
+    image: ubuntu24-full-x64
+    extras: []
+    ssh: false
+    spot: false
+    retry: 'false'
+    preinstall: 'true'
+    prerun: 'true'

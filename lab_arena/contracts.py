@@ -20,13 +20,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # Public V1 constants (labarena.md section 1)
 # ---------------------------------------------------------------------------
 
-# These constants are the historical defaults for callers without a frozen
-# round configuration. A round's stage counts are its count authority.
+# Stage counts retain historical defaults for callers without a frozen round.
+# DEFAULT_* values configure new rounds; each frozen round is its authority.
 STAGE_1_ICP_COUNT = 10
 STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
 DEFAULT_BENCHMARK_ICP_COUNT = 10
-DEFAULT_PROMOTION_MARGIN = 0.5
+DEFAULT_PROMOTION_MARGIN = 8.0
 MAX_BENCHMARK_ICP_COUNT = 100
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
@@ -125,6 +125,9 @@ CHECKPOINT_DEADLINE_PROFILES = {
     ),
 }
 CHECKPOINT_DEADLINE_POLICIES = tuple(CHECKPOINT_DEADLINE_PROFILES)
+# Historical wire identity, retained for strict older validators. Baseline
+# execution remains first; its judgments can continue alongside miner work.
+# Complete legitimate baseline scoring still gates all final authority.
 BASELINE_SCORED_FIRST_POLICY = "baseline_scored_first_v1"
 # A judge run reads pages and calls several models per company against live
 # providers; it gets its own wall clock, longer than a model's, under the same
@@ -247,6 +250,7 @@ PER_ICP_POLICY_BUDGET_STOP_REASONS = frozenset(
 )
 PER_ICP_EXECUTION_CAP_MICROUSD = 4_000_000
 PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD = 800_000
+FULL_THINKING_PER_ICP_CAP_MICROUSD = 6_000_000
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
@@ -339,6 +343,28 @@ SCORE_TERMINAL_CAUSES = ("accepted", "credential_error", "judge_error", "judge_t
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
 INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "result_rejected", "provider_error", "judge_error", "judge_timeout"})
 
+# Why a run failed, one step finer than the terminal cause: which stage of the
+# run raised, and which class of error it was. Both already travel on the
+# completion request as ``failure_diagnostic`` (below) and are stored in the
+# result document; naming them here lets the telemetry boundary export them
+# too, so a repeated judge failure can be read without the database.
+FAILURE_DIAGNOSTIC_STAGES = (
+    "sandbox",
+    "sandbox_output",
+    "scoring_output",
+    "scorer",
+    "provider_call",
+)
+FAILURE_DIAGNOSTIC_ERROR_CLASSES = (
+    "judge_timeout",
+    "sandbox_output_error",
+    "missing_output",
+    "execution_output_invalid",
+    "scoring_output_invalid",
+    "judge_error",
+    "provider_unavailable",
+)
+
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
     "reservation",
@@ -378,7 +404,19 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def sha256_json(value: Any) -> str:
-    return sha256_bytes(canonical_json(value).encode("utf-8"))
+    # Joined training histories can be much larger than an individual request.
+    # Hash the same canonical bytes without materializing the whole document.
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False, allow_nan=False)
+    try:
+        for chunk in encoder.iterencode(value):
+            digest.update(chunk.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ArenaContractError("value is not canonical JSON: %s" % exc) from exc
+    return "sha256:" + digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +460,15 @@ RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(
     max_depth=26,
     max_list_items=768,
 )
+# Full-thinking continuations may replay one provider-generated string up to
+# the existing operation request byte cap. Envelope/total limits do not change.
+FULL_THINKING_MAX_STRING_BYTES = 1_000_000
+FULL_THINKING_PROVIDER_FRAME_LIMITS = dataclasses.replace(
+    PROVIDER_FRAME_LIMITS, max_string_bytes=FULL_THINKING_MAX_STRING_BYTES,
+)
+FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(
+    RESPONSES_PROVIDER_FRAME_LIMITS, max_string_bytes=FULL_THINKING_MAX_STRING_BYTES,
+)
 OUTPUT_LIMITS = StrictLimits(
     max_depth=8,
     max_list_items=200,
@@ -437,9 +484,11 @@ PUBLICATION_LIMITS = StrictLimits(
     max_total_bytes=64 * 1_048_576,
 )
 # A completion can contain the judge's accepted 2 MiB scoring output. Keep one
-# small allowance for the signed request fields that wrap that output.
+# small allowance for the signed request fields that wrap that output, including
+# exactly two nesting levels for envelope.body.output. The output's own bound
+# remains PUBLICATION_LIMITS and is validated separately by the service.
 COMPLETION_REQUEST_LIMITS = StrictLimits(
-    max_depth=16,
+    max_depth=PUBLICATION_LIMITS.max_depth + 2,
     max_list_items=20_000,
     max_object_keys=512,
     max_string_bytes=65_536,
@@ -919,6 +968,20 @@ ROUND_CONFIGURATION_FIELDS = (
     ),
     F("infrastructure_retry_cost_policy", "str", required=False,
       choices=(INFRASTRUCTURE_RETRY_COST_POLICY,)),
+    # Agent model calls reason and return readable reasoning. Absence keeps
+    # every historical round's provider requests unchanged.
+    F("reasoning_capture_policy", "str", required=False,
+      choices=("full_generated_thinking_v1",)),
+    F("training_minimum_icp_coverage_percent", "int", required=False,
+      minimum=1, maximum=100),
+    F("training_maximum_missing_reasoning_percent", "int", required=False,
+      minimum=0, maximum=100),
+    F("reasoning_route_registry", "object", required=False),
+    F("baseline_reasoning_configuration", "object", required=False),
+    F("reasoning_baseline_source_sha256", "sha256", required=False),
+    F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
+    F("reasoning_activation_reason", "str", required=False,
+      choices=("registry_unavailable", "baseline_unready", "flat_policy_required")),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
@@ -987,14 +1050,17 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     ):
         if not is_integrity:
             raise ArenaContractError("per-ICP cost policy requires integrity receipts")
+        full_thinking = config.get("reasoning_capture_policy") == "full_generated_thinking_v1"
+        expected_icp_cap = (FULL_THINKING_PER_ICP_CAP_MICROUSD if full_thinking
+                            else PER_ICP_EXECUTION_CAP_MICROUSD)
         expected_company_cap = (
-            PER_ICP_EXECUTION_CAP_MICROUSD
-            if config["sourcing_cost_eligibility_policy"] == FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            expected_icp_cap if config["sourcing_cost_eligibility_policy"]
+            == FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
             else PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
         )
         if (
             config.get("execution_icp_cap_microusd")
-            != PER_ICP_EXECUTION_CAP_MICROUSD
+            != expected_icp_cap
             or config.get("cost_per_company_microusd")
             != expected_company_cap
         ):
@@ -1002,6 +1068,71 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if (config.get("infrastructure_retry_cost_policy") is not None
         and config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
+    capture_policy = config.get("reasoning_capture_policy")
+    if "baseline_reasoning_configuration" in config:
+        from lab_arena import baseline_reasoning
+        try:
+            baseline_reasoning.validate(config[baseline_reasoning.FIELD])
+        except ValueError as exc:
+            raise ArenaContractError("invalid baseline reasoning configuration") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("separate baseline reasoning requires full thinking round")
+    if "training_maximum_missing_reasoning_percent" in config:
+        from lab_arena import training_coverage
+        try:
+            training_coverage.missing_reasoning_percent_from_configuration(config)
+        except ValueError as exc:
+            raise ArenaContractError("invalid missing reasoning token allowance") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("missing reasoning allowance requires full thinking policy")
+    if "training_minimum_icp_coverage_percent" in config:
+        from lab_arena import training_coverage
+        try:
+            training_coverage.percent_from_configuration(config)
+        except ValueError as exc:
+            raise ArenaContractError("invalid training ICP coverage floor") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("training ICP coverage requires full thinking policy")
+    if ("reasoning_activation_status" in config) != ("reasoning_activation_reason" in config):
+        raise ArenaContractError("reasoning activation status and reason are frozen together")
+    if "reasoning_activation_status" in config and (
+        config["reasoning_activation_status"] != "not_ready"
+        or config["reasoning_activation_reason"] not in (
+            "registry_unavailable", "baseline_unready", "flat_policy_required")
+    ):
+        raise ArenaContractError("invalid reasoning activation status")
+    if "reasoning_activation_status" in config and capture_policy is not None:
+        raise ArenaContractError("active full thinking cannot be marked not ready")
+    if "reasoning_capture_policy" in config and capture_policy != "full_generated_thinking_v1":
+        raise ArenaContractError("invalid full thinking policy")
+    if capture_policy == "full_generated_thinking_v1":
+        if ("reasoning_route_registry" not in config
+            or "reasoning_baseline_source_sha256" not in config):
+            raise ArenaContractError("full thinking policy requires a frozen route registry")
+        if (not isinstance(config["reasoning_baseline_source_sha256"], str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", config["reasoning_baseline_source_sha256"]) is None):
+            raise ArenaContractError("full thinking requires a baseline source digest")
+        if re.fullmatch(
+            r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz",
+            config["baseline_source_url"],
+        ) is None:
+            raise ArenaContractError("full thinking requires a pinned baseline source URL")
+        if config.get("sourcing_cost_eligibility_policy") != FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+            raise ArenaContractError("full thinking requires flat per-ICP cost policy")
+        if config.get("execution_cap_microusd") != (
+            FULL_THINKING_PER_ICP_CAP_MICROUSD * benchmark_icp_count(config)
+        ):
+            raise ArenaContractError("full thinking requires the fixed total execution cap")
+        from lab_arena import reasoning_capture
+        try:
+            registry = reasoning_capture.validate_registry(config["reasoning_route_registry"])
+            if not registry["approved_routes"] or registry["baseline_route"] is None:
+                raise ValueError("no approved baseline route")
+        except ValueError as exc:
+            raise ArenaContractError("invalid full thinking route registry") from exc
+    elif ("reasoning_route_registry" in config
+          or "reasoning_baseline_source_sha256" in config):
+        raise ArenaContractError("reasoning policy and route metadata must be frozen together")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None
@@ -1516,30 +1647,8 @@ RUN_RESULT_FIELDS = (
         "object",
         required=False,
         fields=(
-            F(
-                "stage",
-                "str",
-                choices=(
-                    "sandbox",
-                    "sandbox_output",
-                    "scoring_output",
-                    "scorer",
-                    "provider_call",
-                ),
-            ),
-            F(
-                "error_class",
-                "str",
-                choices=(
-                    "judge_timeout",
-                    "sandbox_output_error",
-                    "missing_output",
-                    "execution_output_invalid",
-                    "scoring_output_invalid",
-                    "judge_error",
-                    "provider_unavailable",
-                ),
-            ),
+            F("stage", "str", choices=FAILURE_DIAGNOSTIC_STAGES),
+            F("error_class", "str", choices=FAILURE_DIAGNOSTIC_ERROR_CLASSES),
             F(
                 "reason",
                 "str",

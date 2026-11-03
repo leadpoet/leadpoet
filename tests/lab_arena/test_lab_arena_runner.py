@@ -237,8 +237,15 @@ def fake_exporter(reference, digest, target):
     (target / "rootfs").mkdir()
 
 
+class FakeExportImageCache(rn.ImageCache):
+    """The empty fake exporter downloads and extracts no physical image."""
+
+    def _reserve_export_space_locked(self):
+        pass
+
+
 def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
-    cache = rn.ImageCache(tmp_path / "images", fake_exporter)
+    cache = FakeExportImageCache(tmp_path / "images", fake_exporter)
     source_cache = rn.SourceCache(
         tmp_path / "sources", api.source, dependency_installer=lambda _requirements, _target: None
     )
@@ -248,6 +255,15 @@ def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
         evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
         claim_retry_seconds=(0.0, 0.0), completion_retry_seconds=(0.0, 0.0),
     )
+
+
+def test_fake_image_fixture_does_not_require_physical_export_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+
+    config = make_config(tmp_path, FakeApi([]), BridgingRuntime(output={}))
+    with config.image_cache.acquire(IMAGE) as rootfs:
+        assert rootfs.is_dir()
+        assert list(rootfs.iterdir()) == []
 
 
 def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path):
@@ -2364,7 +2380,7 @@ def test_worker_socket_disconnect_cancels_temporary_hold_retry(monkeypatch, tmp_
         shutil.rmtree(socket_dir)
 
 
-def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path):
+def test_worker_socket_refuses_extra_provider_frames_at_its_fixed_provider_bound(tmp_path):
     socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
     server = rn.WorkerSocketServer(
         socket_dir / "worker.sock",
@@ -2382,6 +2398,7 @@ def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path
         time.sleep(0.05)
         second.settimeout(1)
         second.connect(str(socket_dir / "worker.sock"))
+        second.sendall(b"\x00\x00\x00\x02")  # overflow cannot read an ordinary provider body
         assert second.recv(1) == b""
     finally:
         first.close()
@@ -3827,7 +3844,7 @@ def test_empty_image_cache_fails_runner_startup_before_api_or_claim(tmp_path, mo
     monkeypatch.setattr(
         wiring, "prepare_validator_scoring",
         lambda *_args, **_kwargs: SimpleNamespace(
-            parallelism=1, verified_proxies=SimpleNamespace(webshare_worker_count=0),
+            parallelism=1, verified_proxies=SimpleNamespace(webshare_worker_count=0, excluded_workers=()),
         ),
     )
     monkeypatch.setattr(proxy_workers, "ProxyWorkerPool", lambda _value: object())

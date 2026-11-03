@@ -130,6 +130,7 @@ def _complete_verdict(*, name="Acme", website="https://acme.example.com"):
         verdict[f"{dimension}_evidence_quote"] = (
             "Acme completed its Series A funding round."
             if dimension == "stage"
+            else "Acme has 51-200 employees." if dimension == "employee_size"
             else f"Verified {dimension}."
         )
     return verdict
@@ -992,6 +993,7 @@ def test_identity_conflict_repair_preserves_a_real_dimension_mismatch(
             ),
             observed_employee_count="201-500",
             employee_size_matches=False,
+            employee_size_evidence_quote="Acme has 201-500 employees.",
         )
         return verdict, ""
 

@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_chain_epoch_reads_survive_without_a_lead_database(monkeypatch):
+    from gateway.utils.epoch import HistoricalEpochUnavailable
+
     chain = ModuleType("gateway.utils.epoch")
 
     async def status():
@@ -30,6 +32,7 @@ def test_chain_epoch_reads_survive_without_a_lead_database(monkeypatch):
     chain.get_current_epoch_context_async = context
     chain.get_current_epoch_info_from_snapshot = lambda value: {"epoch": 123}
     chain.get_epoch_info_async = info
+    chain.HistoricalEpochUnavailable = HistoricalEpochUnavailable
     monkeypatch.setitem(sys.modules, "gateway.utils.epoch", chain)
     app = FastAPI()
     app.include_router(epoch.router)
@@ -41,6 +44,47 @@ def test_chain_epoch_reads_survive_without_a_lead_database(monkeypatch):
         assert client.get("/epoch/current").json()["current_epoch_id"] == 123
         assert client.get("/epoch/123/info").json() == {"epoch": 123}
         assert client.get("/epoch/123/leads").status_code == 404
+
+
+def test_asking_for_a_historical_epoch_is_a_client_error_not_a_server_error(monkeypatch):
+    from gateway.utils.epoch import HistoricalEpochUnavailable
+
+    chain = ModuleType("gateway.utils.epoch")
+
+    async def info(epoch_id):
+        raise HistoricalEpochUnavailable(
+            "historical epoch details require the persisted boundary ledger"
+        )
+
+    chain.get_epoch_info_async = info
+    chain.HistoricalEpochUnavailable = HistoricalEpochUnavailable
+    monkeypatch.setitem(sys.modules, "gateway.utils.epoch", chain)
+    app = FastAPI()
+    app.include_router(epoch.router)
+    with TestClient(app) as client:
+        response = client.get("/epoch/41/info")
+    assert response.status_code == 404
+    # The public endpoint must not echo internal failure text.
+    assert "boundary ledger" not in response.text
+
+
+def test_an_epoch_read_failure_is_a_server_error_without_internal_detail(monkeypatch):
+    from gateway.utils.epoch import HistoricalEpochUnavailable
+
+    chain = ModuleType("gateway.utils.epoch")
+
+    async def info(epoch_id):
+        raise RuntimeError("subtensor endpoint wss://internal-host:9944 refused")
+
+    chain.get_epoch_info_async = info
+    chain.HistoricalEpochUnavailable = HistoricalEpochUnavailable
+    monkeypatch.setitem(sys.modules, "gateway.utils.epoch", chain)
+    app = FastAPI()
+    app.include_router(epoch.router)
+    with TestClient(app) as client:
+        response = client.get("/epoch/123/info")
+    assert response.status_code == 500
+    assert "internal-host" not in response.text
 
 
 def test_gateway_cannot_start_or_register_the_retired_lead_pipeline():

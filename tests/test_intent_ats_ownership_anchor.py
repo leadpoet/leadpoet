@@ -71,7 +71,10 @@ def test_follows_only_observed_official_careers_link_within_three_sources():
     responses = [{"results": [home], "statuses": []}, {"results": [careers], "statuses": []}]
     with mock.patch.object(intent, "_fetch_sd_then_exa", mock.AsyncMock(side_effect=responses)) as fetch:
         receipt = asyncio.run(intent._resolve_ats_employer_ownership({"results": [], "statuses": []}, [ASHBY], IDENTITY, [ASHBY]))
-    assert fetch.await_args_list == [mock.call(["https://usefluency.com/"]), mock.call(["https://usefluency.com/careers"])]
+    assert fetch.await_args_list == [mock.call(["https://usefluency.com/"]), mock.call(
+        ["https://usefluency.com/careers"], prefer_dynamic_job_index=True,
+        trusted_company_domain="usefluency.com", trusted_company_name="",
+    )]
     assert receipt["resolved"] is True
     assert receipt["source_count"] == 3
 
@@ -97,7 +100,10 @@ def test_reuses_fetched_homepage_observed_careers_route():
     careers = page("https://usefluency.com/careers", '<a href="https://jobs.ashbyhq.com/fluency">Open positions</a>')
     with mock.patch.object(intent, "_fetch_sd_then_exa", mock.AsyncMock(return_value={"results": [careers], "statuses": []})) as fetch:
         receipt = asyncio.run(intent._resolve_ats_employer_ownership({"results": [home], "statuses": []}, [ASHBY], IDENTITY, [ASHBY, "https://usefluency.com/"]))
-    fetch.assert_awaited_once_with(["https://usefluency.com/careers"])
+    fetch.assert_awaited_once_with(
+        ["https://usefluency.com/careers"], prefer_dynamic_job_index=True,
+        trusted_company_domain="usefluency.com", trusted_company_name="",
+    )
     assert receipt["resolved"] is True
     assert receipt["source_count"] == 3
 

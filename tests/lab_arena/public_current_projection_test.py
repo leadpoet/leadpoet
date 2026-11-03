@@ -258,8 +258,9 @@ def test_reward_paging_filters_and_signed_metadata_match_full_read():
             key: value for key, value in original.items() if key != "configuration_doc"
         }
         assert candidate["configuration_doc"] == {
-            key: value for key, value in original["configuration_doc"].items()
-            if key in PUBLIC_CONFIGURATION_FIELDS
+            **{key: value for key, value in original["configuration_doc"].items()
+               if key in PUBLIC_CONFIGURATION_FIELDS},
+            "baseline_champion_source_frozen": False,
         }
     for original, candidate in zip(full_queries, transport.calls):
         assert {key: value for key, value in candidate.items() if key != "columns"} == {key: value for key, value in original.items() if key != "columns"}

@@ -1,14 +1,16 @@
 """Database authority for terminal signal evidence and live reservations."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import tempfile
 
 import pytest
 
-from lab_arena import contact_policy, contracts
+from lab_arena import contact_policy, contracts, runner, shim, signal_cache_control
 from lab_arena.service import ArenaService, LocalObjectStore, ServiceError
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, hash_lease_token
 from tests.lab_arena import legacy_company_cache501_postgres_test as prior
@@ -159,6 +161,43 @@ def _store_terminal(service, leased, token, request, judgment):
         "judgment": judgment,
     })["status"] == "stored"
     return miss
+
+
+def test_full_thinking_capture_worker_claim_reaches_real_signal_service(store, database, tmp_path, monkeypatch):
+    from scripts.verify_arena_full_thinking_e2e import FullThinkingCaptureApi
+    rid = "arena-2026-09-11-capture503"
+    participants, _ = prior.open_new(store, round_id=rid, markers_by_submission=[["one"]])
+    _enable_round(database, rid)
+    baseline_hotkey = _make_baseline(database, rid, participants)
+    leased, token, _, _ = company.claim(store, rid, baseline_hotkey, excluded=[baseline_hotkey])
+    service, request, _judgment = _signal_service(store, leased, tmp_path)
+    state = runner.RunState(lease={"run_id": leased["run_id"], "kind": "score",
+                                   "scorer_policy": {"signal_judgment_policy": signal_cache_control.POLICY}},
+                            lease_token=token)
+    api = FullThinkingCaptureApi(service)
+    with tempfile.TemporaryDirectory(prefix="signal-", dir="/tmp") as directory:
+        path = Path(directory) / "worker.sock"
+        worker = runner.WorkerSocketServer(path, api, state)
+        worker.start()
+        monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(path))
+        monkeypatch.setenv(shim.TRUSTED_SCORER_ENV, "1")
+        try:
+            claim = asyncio.run(signal_cache_control.exchange({**request, "operation": "claim"}))
+            complete = asyncio.run(signal_cache_control.exchange({
+                **request, "operation": "complete", "reference": claim["reference"],
+                "judgment": None,
+            }))
+        finally:
+            worker.stop()
+    assert claim["status"] == "miss"
+    assert claim["reference"]["schema_version"] == "leadpoet.lab_arena.signal_judgment_reference.v1"
+    assert complete == {"status": "released", "reference": claim["reference"]}
+    assert state.action_sequence == 0 and state.calls == []
+    assert api.quota_usage(leased["run_id"], token) == service.handle_quota_snapshot(
+        leased["run_id"], token)
+    assert api.quota_usage(leased["run_id"], token,
+                           include_sourcing_cost=True) == {
+                               "status": "rejected", "code": "quota_unavailable"}
 
 
 def test_same_score_lease_reuses_its_terminal_signal(store, database, tmp_path):

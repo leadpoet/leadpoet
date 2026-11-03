@@ -18,15 +18,31 @@ def test_invalid_count_fails_before_round_creation_or_generation(monkeypatch, ra
     with pytest.raises(ServiceError): wiring._benchmark_icp_count_from_environment()
     with pytest.raises(ValueError): configured_benchmark_icp_count()
 
-@pytest.mark.parametrize("raw,expected", [("",.5),("0.5",.5),("1",1),("0",0)])
+@pytest.mark.parametrize("raw,expected", [("",8),("0.5",.5),("1",1),("0",0)])
 def test_margin_override_and_new_defaults(monkeypatch, raw, expected):
     monkeypatch.setenv("LAB_ARENA_PROMOTION_MARGIN", raw)
     assert wiring._promotion_margin_from_environment() == expected
     assert RoundDefaults().benchmark_icp_count == 10
-    assert RoundDefaults().promotion_margin == .5
+    assert RoundDefaults().promotion_margin == 8
     assert contracts.promotion_margin({}) == 1
 
 @pytest.mark.parametrize("raw", ["NaN","inf","-1","101","true"])
 def test_invalid_margin_fails_before_round_creation(monkeypatch, raw):
     monkeypatch.setenv("LAB_ARENA_PROMOTION_MARGIN", raw)
     with pytest.raises(ServiceError): wiring._promotion_margin_from_environment()
+
+
+@pytest.mark.parametrize("raw,expected", [(None,80),("",80),("80",80),("90",90),("100",100),("1",1)])
+def test_training_coverage_override(monkeypatch, raw, expected):
+    monkeypatch.delenv("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", raw)
+    assert wiring._training_coverage_from_environment() == expected
+    assert RoundDefaults().training_minimum_icp_coverage_percent == 80
+
+
+@pytest.mark.parametrize("raw", ["0","101","80.5","true","-1"])
+def test_invalid_training_coverage_override(monkeypatch, raw):
+    monkeypatch.setenv("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", raw)
+    with pytest.raises(ServiceError):
+        wiring._training_coverage_from_environment()

@@ -15,8 +15,9 @@ HOME = "https://www.nium.com/"
 CONTACT = "https://www.nium.com/contact-us"
 ABOUT = "https://www.nium.com/about-us"
 STAGE = "https://www.nium.com/newsroom/series-e"
-HQ_TEXT = ("Nium headquarters: San Francisco, California, United States. "
-           "(harvestapi_get_company locations.headquarter=true)")
+HQ_TEXT = json.dumps({"name": "Nium", "linkedinUrl": PROFILE, "locations": [{
+    "headquarter": True, "country": "United States", "city": "San Francisco", "geographicArea": "California",
+}]}, separators=(",", ":"))
 HQ_QUOTE = "Nium is co-headquartered in Singapore and San Francisco."
 IDENTITY = {"normalized_name": "nium", "registrable_dns_domain": "nium.com",
             "linkedin_company_slug": "nium-global"}

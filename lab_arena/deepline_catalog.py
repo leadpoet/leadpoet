@@ -11,6 +11,7 @@ import itertools
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, urlsplit
@@ -20,8 +21,17 @@ from jsonschema import Draft202012Validator
 SCHEMA_VERSION = "leadpoet.lab_arena.deepline_catalog.v1"
 POLICY_VERSION = "leadpoet.lab_arena.deepline_company_research.v1"
 CATALOG_URL = "https://code.deepline.com/api/v2/tools?compact=false"
+# Allow provider growth without relaxing the independent byte/schema/policy
+# limits. Keep the commit-RPC count bound in migration600 aligned with this.
+MAX_CATALOG_TOOLS = 16_384
 MAX_METADATA_READ_WORKERS = 4
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+# Reviewed direct model-product invocation family, across model and output
+# variants. "AI", "prompt", provider descriptions and research labels alone
+# do not distinguish model inference from source-grounded research tools.
+_DATAFORSEO_LIVE_LLM_SCRAPER = re.compile(
+    r"(?:dataforseo_)?ai_optimization_[a-z][a-z0-9_]*_llm_scraper_live_[a-z][a-z0-9_]*"
+)
 _CATEGORY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _COMPANY_CATEGORIES = frozenset({"company_search", "company_enrich", "research", "smb"})
 _PEOPLE_CATEGORIES = frozenset({"people_search", "people_enrich", "email_finder", "email_verify", "phone_finder", "phone_verify", "reverse_lookup"})
@@ -372,7 +382,7 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
     if not isinstance(document, dict):
         raise CatalogError("invalid_catalog")
     rows = document.get("tools")
-    if not isinstance(rows, list) or not rows or len(rows) > 4096 or type(allow_people) is not bool:
+    if not isinstance(rows, list) or not rows or len(rows) > MAX_CATALOG_TOOLS or type(allow_people) is not bool:
         raise CatalogError("invalid_catalog")
     seen = set()
     tools = []
@@ -498,19 +508,75 @@ def _validated(encoded: str) -> dict[str, Any]:
 
 def validate_catalog(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """Verify hash and authority once per exact snapshot; return a fresh copy."""
-    return _copy(_validated(_encoded(snapshot)))
+    return _copy(_validated_snapshot(snapshot))
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _PreparedCatalog(Mapping[str, Any]):
+    """Request-owned immutable bytes, never a reference to caller or cached data."""
+
+    encoded: str
+
+    def __post_init__(self) -> None:
+        if type(self.encoded) is not str:
+            raise CatalogError("invalid_catalog_snapshot")
+        if len(self.encoded) > 67_108_864:
+            raise CatalogError("catalog_too_large")
+        # Direct construction grants no authority. Keep the full exact-byte
+        # schema, hash and policy validator, including after LRU eviction.
+        try:
+            _validated(self.encoded)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise CatalogError("invalid_catalog_snapshot") from exc
+
+    def __getitem__(self, key: str) -> Any:
+        return _copy(_validated(self.encoded)[key])
+
+    def __iter__(self):
+        return iter(_validated(self.encoded))
+
+    def __len__(self) -> int:
+        return len(_validated(self.encoded))
+
+
+def prepare_catalog(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Bind a request to validated immutable bytes without changing stored JSON."""
+    if type(snapshot) is _PreparedCatalog:
+        return snapshot
+    return _PreparedCatalog(_encoded(snapshot))
+
+
+def _validated_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    # Only the exact immutable type can avoid serialization. Mutable mappings
+    # still use their complete current content, never a hash or object identity.
+    encoded = snapshot.encoded if type(snapshot) is _PreparedCatalog else _encoded(snapshot)
+    return _validated(encoded)
 
 
 def tool_entry(snapshot: Mapping[str, Any], tool_id: str) -> dict[str, Any]:
-    snapshot = _validated(_encoded(snapshot))
+    snapshot = _validated_snapshot(snapshot)
     for row in snapshot["tools"]:
         if row["tool_id"] == tool_id:
             return _copy(row)
     raise CatalogError("tool_not_approved")
 
 
+def is_direct_inference_tool(snapshot: Mapping[str, Any], tool_id: str) -> bool:
+    """Classify reviewed operation semantics without altering frozen catalog data.
+
+    This covers the reviewed named-model scraper family, not arbitrary future
+    inference products. Canonical names and aliases come from the hash-bound
+    entry; caller payload text grants no authority.
+    """
+    entry = tool_entry(snapshot, tool_id)
+    return entry["provider"] == "dataforseo" and any(
+        _DATAFORSEO_LIVE_LLM_SCRAPER.fullmatch(name)
+        for name in (entry["tool_id"], *entry["operation_aliases"])
+    )
+
+
 def allowed_tool_ids(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(row["tool_id"] for row in _validated(_encoded(snapshot))["tools"])
+    return tuple(row["tool_id"] for row in _validated_snapshot(snapshot)["tools"])
 
 
 def _public_pricing(pricing: Mapping[str, Any]) -> dict[str, Any]:
@@ -622,7 +688,7 @@ def fetch_catalog(*, read_json: Callable[[str, Mapping[str, str]], Mapping[str, 
     if not isinstance(document, dict):
         raise CatalogError("invalid_catalog")
     rows = document.get("tools")
-    if not isinstance(rows, list) or len(rows) > 4096:
+    if not isinstance(rows, list) or len(rows) > MAX_CATALOG_TOOLS:
         raise CatalogError("invalid_catalog")
     detail_requests = []
     planned_rows = []

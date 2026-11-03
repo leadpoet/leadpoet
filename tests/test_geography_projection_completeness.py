@@ -53,10 +53,13 @@ def test_repair_projection_cannot_fill_an_unproved_state_from_broad_verdict():
     projected = project(broad_matching_state(), finding, candidate, request)
     assert projected["observed_hq_country"] == "Hong Kong"
     assert projected["geography_evidence_url"] == FIXTURE["headquarters"]["url"]
-    assert scorer._decision_from_observed_geography(
-        projected, request, company=candidate, company_quality=True,
+    result = scorer._reverify_decision(
+        projected, "", "", icp=request, company=candidate, company_quality=True,
+        verified_homepage_identity=IDENTITY, verified_homepage_transport_domain="airwallex.com",
         validated_geography_finding=finding,
-    ) == "mismatch"
+        structured_profile_headquarters_evidence=FIXTURE["headquarters"],
+    )
+    assert result.details["dimension_decisions"]["geography"] == "mismatch"
 
 
 def test_incomplete_us_finding_keeps_initial_linkedin_projection():

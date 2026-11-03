@@ -112,6 +112,34 @@ _COST_REASONS = frozenset(
         "cost_per_company_exceeded",
     }
 )
+_FINAL_ELIGIBILITY_REASONS = _COST_REASONS | {"training_data_incomplete"}
+_TRAINING_REASONS = frozenset({
+    "source_review_not_passed", "source_archive_hash_missing",
+    "model_directed_source_unverified", "submission_evidence_missing",
+    "selected_execution_coverage_incomplete", "training_evidence_check_failed",
+    "selected_runs_invalid", "selected_run_export_missing",
+    "selected_run_identity_unverified", "trajectory_evidence_incomplete",
+    "input_or_output_unavailable", "readable_trace_incomplete",
+    "execution_model_call_missing", "full_thinking_route_unverified",
+    "readable_full_thinking_unverified", "full_thinking_unavailable",
+    "full_thinking_call_missing", "selected_run_evidence_invalid",
+    "training_coverage_incomplete", "provider_response_truncated", "provider_output_untrainable",
+    "accepted_output_unavailable",
+    "missing_reasoning_share_exceeded", "selected_artifact_temporarily_unavailable",
+    "baseline_reasoning_not_required",
+})
+_TRAINING_COUNT_KEYS = {
+    "source_review": frozenset({"enabled", "reviewed"}),
+    "capture": frozenset({
+        "enabled", "selected_runs", "checked_runs", "model_calls",
+        "full_thinking_calls", "tool_only_empty_calls",
+        "required_complete_runs", "complete_runs", "incomplete_runs",
+        "minimum_coverage_percent",
+        "completed_untruncated_verified_reasoning_tokens", "missing_reasoning_tokens",
+        "missing_reasoning_calls", "unknown_reasoning_usage_calls", "truncated_model_calls",
+        "verified_failed_model_attempts", "maximum_missing_reasoning_percent",
+    }),
+}
 _COST_COUNTER_KEYS = (
     "settled_microusd",
     "reserved_or_uncertain_microusd",
@@ -130,10 +158,11 @@ _SUCCESSFUL_CALL_COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation"
+    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation,"
+    "champion_funding_frozen,champion_submission_id,champion_hotkey"
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
-    "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
+    ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
 ).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1") + ",status_generation"
 
 
@@ -238,6 +267,42 @@ def _cost_bucket(
     return projected
 
 
+def _training_eligibility_projection(ranking: Mapping[str, Any]) -> dict:
+    """Show bounded gate outcomes only; never publish review or trace records."""
+
+    def project(value: Any, *, section: Optional[str] = None) -> Optional[dict]:
+        if not isinstance(value, Mapping) or not isinstance(value.get("eligible"), bool):
+            return None
+        reasons = value.get("reasons")
+        if (not isinstance(reasons, list) or len(reasons) > len(_TRAINING_REASONS)
+                or any(not isinstance(reason, str) or reason not in _TRAINING_REASONS
+                       for reason in reasons)):
+            return None
+        result = {"eligible": value["eligible"], "reasons": sorted(set(reasons))}
+        if section is not None and isinstance(value.get("counts"), Mapping):
+            counts = value["counts"]
+            allowed = _TRAINING_COUNT_KEYS[section]
+            projected = {key: _safe_integer(counts[key]) for key in allowed if key in counts}
+            if any(number is None for number in projected.values()):
+                return None
+            result["counts"] = projected
+        return result
+
+    raw = ranking.get("training_data_eligibility")
+    if raw == {"status": "not_assessed", "eligible": None, "reasons": []}:
+        return {"training_data_eligibility": {
+            "status": "not_assessed", "eligible": None, "reasons": []}}
+    result = project(raw)
+    if result is None:
+        return {}
+    for section in ("source_review", "capture"):
+        if section in raw:
+            nested = project(raw[section], section=section)
+            if nested is not None:
+                result[section] = nested
+    return {"training_data_eligibility": result}
+
+
 def _cost_projection(
     ranking: Mapping[str, Any], *, sourcing_cost_eligibility_policy: Any = None,
     configuration: Optional[Mapping[str, Any]] = None,
@@ -246,7 +311,8 @@ def _cost_projection(
 
     eligible = ranking.get("eligible")
     reason = ranking.get("eligibility_reason")
-    if not isinstance(eligible, bool) or reason not in _COST_REASONS:
+    if (not isinstance(eligible, bool) or reason not in _FINAL_ELIGIBILITY_REASONS
+            or (reason == "training_data_incomplete" and eligible)):
         return {}
     summary = ranking.get("cost_summary")
     if summary is None and (
@@ -257,6 +323,7 @@ def _cost_projection(
             "cost_summary": None,
             "eligible": eligible,
             "eligibility_reason": str(reason),
+            **_training_eligibility_projection(ranking),
             **({"status": ranking["evaluation_status"], "score_status": "not_evaluated",
                 "evaluation_reason": ranking["evaluation_reason"]}
                 if (reason == "execution_incomplete" and not eligible
@@ -334,6 +401,7 @@ def _cost_projection(
             "cost_summary": projected_summary,
             "eligible": eligible,
             "eligibility_reason": str(reason),
+            **_training_eligibility_projection(ranking),
         }
     scalar_keys = (
         "returned_company_count",
@@ -375,6 +443,7 @@ def _cost_projection(
         "cost_summary": projected_summary,
         "eligible": eligible,
         "eligibility_reason": str(reason),
+        **_training_eligibility_projection(ranking),
     }
 
 
@@ -444,6 +513,15 @@ def _mark_recovery_excluded(entry: dict, status: str, *, reason: Optional[str] =
         entry["evaluation_reason"] = reason
     if "evaluation" in entry:
         entry["evaluation"]["state"] = status
+        if status == "evaluation_incomplete":
+            evaluation = entry["evaluation"]
+            counts = evaluation.get("counts")
+            if isinstance(counts, dict):
+                unfinished = sum(counts.get(key, 0) for key in ("queued", "active", "retrying"))
+                counts["failed"] = counts.get("failed", 0) + unfinished
+                counts["queued"] = counts["active"] = counts["retrying"] = 0
+                evaluation["active_count"] = 0
+                evaluation["validators"] = []
         if entry.get("evaluation_reason") == "openrouter_zdr_route_unavailable":
             reasons = set(entry["evaluation"].get("failure_reasons") or ())
             entry["evaluation"]["failure_reasons"] = sorted(
@@ -514,6 +592,27 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
+def _defending_champion(row: Mapping[str, Any]) -> Optional[dict]:
+    # Name the defender only when the baseline provably ran its code. The
+    # champion-baseline freeze (migration 585) runs the frozen champion's
+    # promoted source and copies that champion's reasoning contract. Older
+    # freezes could fund a legacy champion while the baseline ran another
+    # source. An empty contract still proves the legacy champion's source was
+    # frozen. Compact reads carry only the derived boolean, never its routes.
+    submission_id = str(row.get("champion_submission_id") or "")
+    miner_hotkey = str(row.get("champion_hotkey") or "")
+    configuration = row.get("configuration_doc")
+    configuration = configuration if isinstance(configuration, Mapping) else {}
+    contract = configuration.get("baseline_reasoning_configuration")
+    source_frozen = (isinstance(contract, Mapping)
+                     if "baseline_reasoning_configuration" in configuration
+                     else configuration.get("baseline_champion_source_frozen") is True)
+    if (not submission_id or not miner_hotkey
+            or row.get("champion_funding_frozen") is not True or not source_frozen):
+        return None
+    return {"submission_id": submission_id, "miner_hotkey": miner_hotkey}
+
+
 def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[str, Any]] = None) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
@@ -553,6 +652,7 @@ def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[
         "baseline": baseline,
         "champion": champion,
         "promotion_status": promotion_status,
+        "defending_champion": _defending_champion(row),
     }
 
 
@@ -779,10 +879,9 @@ def code_review_summary(
     }
     if "code_review_attempts" in row:
         result["attempts"] = row["code_review_attempts"]
-    if type(document.get("retryable")) is bool:
+    if type(document.get("retryable")) is bool or code_review_policy.transient_failure(document):
         result["retryable"] = (
-            document["retryable"]
-            and row.get("status") != "rejected"
+            row.get("status") != "rejected"
             and code_review_policy.review_retry_available(row)
         )
         if round_row is not None:

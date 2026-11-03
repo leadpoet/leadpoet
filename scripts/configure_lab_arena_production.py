@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Safely prepare or apply the fixed Lab Arena production environment.
 
-Secret documents are read and changed on their owning hosts. The complete
-documents and the scoped service key travel only on SSH stdin and stay in memory.
-The fixed validator credential KMS guard mode runs from a gateway checkout and
-uses the gateway's pinned IAM operator session; it does not use SSH.
+Secret documents are read and changed locally with a named temporary operator
+profile. Documents and scoped keys stay in memory and never travel through SSH.
+Only runner-wallet operations use SSH. The fixed validator credential KMS guard
+also permits its existing explicitly selected IAM role session.
 """
 
 from __future__ import annotations
@@ -19,8 +19,13 @@ import re
 import shlex
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Mapping, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 GATEWAY_HOST = "ec2-user@52.91.135.79"
 VALIDATOR_HOST = "ec2-user@100.59.201.156"
@@ -30,7 +35,6 @@ DEFAULT_SSH_KEY = Path.home() / ".ssh" / "leadpoet-2026-07-28.pem"
 AUTH_ENV = "LEADPOET_LAB_ARENA_PRODUCTION_APPLY"
 KNOWN_ACCOUNTS = frozenset({"187445349696", "493765492819"})
 IAM_ACCOUNT = "493765492819"
-IAM_CALLER_ARN = "arn:aws:iam::493765492819:user/pranav-main"
 VALIDATOR_IAM_ROLE = "leadpoet-validator-s3-cloudwatch-role"
 VALIDATOR_IAM_POLICY = "leadpoet-research-lab-kms-sign-and-trace"
 VALIDATOR_IAM_ROLE_ARN = f"arn:aws:iam::{IAM_ACCOUNT}:role/{VALIDATOR_IAM_ROLE}"
@@ -50,12 +54,12 @@ class ConfigurationError(RuntimeError):
     pass
 
 
-def _gateway_iam_session():
+def _gateway_iam_session(*, profile="leadpoet-lab"):
     try:
         from scripts.gateway_iam_session import gateway_iam_session
-        return gateway_iam_session()
-    except Exception as exc:
-        raise ConfigurationError("gateway IAM authority is unavailable") from exc
+        return gateway_iam_session(profile=profile)
+    except Exception:
+        raise ConfigurationError("gateway IAM authority is unavailable") from None
 
 
 def _policy_hash(document: Mapping[str, object]) -> str:
@@ -138,16 +142,17 @@ def _validator_policy_document(iam) -> dict[str, object]:
     return copy.deepcopy(dict(document))
 
 
-def _configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, object]:
-    session = _gateway_iam_session()
-    sts = session.client("sts")
-    iam = session.client("iam")
+def _configure_validator_credential_kms_guard(*, apply: bool, profile="leadpoet-lab") -> dict[str, object]:
+    from scripts.gateway_iam_session import AWS_CLIENT_CONFIG, validate_gateway_iam_identity
+
+    session = _gateway_iam_session(profile=profile)
+    sts = session.client("sts", region_name="us-east-1", config=AWS_CLIENT_CONFIG)
     identity = sts.get_caller_identity()
-    if (
-        str(identity.get("Account") or "") != IAM_ACCOUNT
-        or str(identity.get("Arn") or "") != IAM_CALLER_ARN
-    ):
-        raise ConfigurationError("gateway IAM caller identity differs")
+    try:
+        validate_gateway_iam_identity(identity)
+    except Exception:
+        raise ConfigurationError("gateway IAM caller identity differs") from None
+    iam = session.client("iam", region_name="us-east-1", config=AWS_CLIENT_CONFIG)
     before = _validator_policy_document(iam)
     desired, changed = _policy_with_credential_deny(before)
     result: dict[str, object] = {
@@ -179,13 +184,13 @@ def _configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, objec
     return result
 
 
-def configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, object]:
+def configure_validator_credential_kms_guard(*, apply: bool, profile="leadpoet-lab") -> dict[str, object]:
     try:
-        return _configure_validator_credential_kms_guard(apply=apply)
+        return _configure_validator_credential_kms_guard(apply=apply, profile=profile)
     except ConfigurationError:
         raise
-    except Exception as exc:
-        raise ConfigurationError("validator IAM guard operation failed") from exc
+    except Exception:
+        raise ConfigurationError("validator IAM guard operation failed") from None
 
 
 def _dotenv_key(line: str) -> str:
@@ -351,214 +356,220 @@ def _validate_service_key(service_key: str) -> None:
         raise ConfigurationError("scoped service key is malformed")
 
 
-_REMOTE = r'''
-import json, re, shlex, subprocess, sys, uuid
-from datetime import datetime
+def _configure_secret_request(request, *, client, account):
+    """Apply the existing bounded request protocol with local operator authority."""
+    def fail(code):
+        raise ConfigurationError(code)
 
-def fail(code):
-    print(json.dumps({"ok": False, "code": code}, separators=(",", ":")))
-    raise SystemExit(1)
+    if account not in request["allowed_accounts"]:
+        fail("account_not_allowed")
+    secret_id = request["secret_id"]
+    if secret_id not in {GATEWAY_SECRET, VALIDATOR_SECRET}:
+        fail("secret_scope_invalid")
 
-def aws(command, input_text=None):
-    result = subprocess.run(["aws"] + command, input=input_text, text=True,
-                            capture_output=True, check=False)
-    if result.returncode:
-        fail("aws_command_failed")
-    return result.stdout
+    def get(secret_id, version_id=""):
+        kwargs = {"SecretId": secret_id}
+        if version_id:
+            kwargs["VersionId"] = version_id
+        try:
+            value = client.get_secret_value(**kwargs)
+        except Exception:
+            fail("aws_command_failed")
+        try:
+            return str(value["VersionId"]), str(value["SecretString"])
+        except Exception:
+            fail("secret_read_invalid")
 
-def get(secret_id, version_id=""):
-    command = ["secretsmanager", "get-secret-value", "--secret-id", secret_id,
-               "--output", "json"]
-    if version_id:
-        command += ["--version-id", version_id]
-    try:
-        value = json.loads(aws(command))
-        return str(value["VersionId"]), str(value["SecretString"])
-    except Exception:
-        fail("secret_read_invalid")
+    before_id, raw = get(secret_id)
 
-request = json.loads(sys.stdin.read())
-identity = json.loads(aws(["sts", "get-caller-identity", "--output", "json"]))
-account = str(identity.get("Account") or "")
-if account not in request["allowed_accounts"]:
-    fail("account_not_allowed")
-secret_id = request["secret_id"]
-before_id, raw = get(secret_id)
-
-def key_of(line):
-    value = line.strip()
-    if value.startswith("export "):
-        value = value[7:].strip()
-    key = value.partition("=")[0].strip()
-    return key if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else ""
-
-try:
-    values = json.loads(raw)
-except Exception:
-    values = None
-occurrences = {}
-if isinstance(values, dict):
-    document_format = "json"
-    occurrences = {str(key): 1 for key in values}
-else:
-    if values is not None:
-        fail("secret_document_invalid")
-    document_format = "dotenv"
-    values = {}
-    for line in raw.replace("\x00", "\n").splitlines():
-        key = key_of(line)
-        if not key:
-            continue
+    def key_of(line):
         value = line.strip()
         if value.startswith("export "):
             value = value[7:].strip()
-        raw_value = value.split("=", 1)[1]
-        occurrences[key] = occurrences.get(key, 0) + 1
-        if key in values and values[key] != raw_value:
-            fail("secret_document_conflicting_duplicate")
-        values[key] = raw_value
+        key = value.partition("=")[0].strip()
+        return key if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else ""
 
-updates = dict(request["updates"])
-if request["role"] == "openrouter_concurrency_only":
-    if (
-        secret_id != "leadpoet/prod/gateway/env"
-        or set(updates) != {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"}
-        or request.get("aliases")
-        or request.get("service_key")
-    ):
-        fail("openrouter_concurrency_scope_invalid")
-    value = updates["LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"]
-    if not isinstance(value, str) or not re.fullmatch(r"(?:[1-9]|[1-9][0-9]|1[0-9][0-9]|200)", value):
-        fail("openrouter_concurrency_invalid")
-if request["role"] == "scorer_image_only":
-    if set(updates) != {"LAB_ARENA_SCORER_IMAGE"} or request.get("aliases") or request.get("service_key"):
-        fail("scorer_image_scope_invalid")
-if request["role"] == "benchmark_disclosure_only":
-    if (
-        set(updates) != {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"}
-        or request.get("aliases")
-        or request.get("service_key")
-    ):
-        fail("benchmark_disclosure_scope_invalid")
-    value = updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"]
-    if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
-        fail("benchmark_disclosure_timestamp_invalid")
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    if value:
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
+    try:
+        values = json.loads(raw)
+    except Exception:
+        values = None
+    occurrences = {}
+    if isinstance(values, dict):
+        document_format = "json"
+        occurrences = {str(key): 1 for key in values}
+    else:
+        if values is not None:
+            fail("secret_document_invalid")
+        document_format = "dotenv"
+        values = {}
+        for line in raw.replace("\x00", "\n").splitlines():
+            key = key_of(line)
+            if not key:
+                continue
+            value = line.strip()
+            if value.startswith("export "):
+                value = value[7:].strip()
+            raw_value = value.split("=", 1)[1]
+            occurrences[key] = occurrences.get(key, 0) + 1
+            if key in values and values[key] != raw_value:
+                fail("secret_document_conflicting_duplicate")
+            values[key] = raw_value
+
+    updates = dict(request["updates"])
+    if request["role"] == "openrouter_concurrency_only":
+        if (
+            secret_id != "leadpoet/prod/gateway/env"
+            or set(updates) != {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"}
+            or request.get("aliases")
+            or request.get("service_key")
+        ):
+            fail("openrouter_concurrency_scope_invalid")
+        value = updates["LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"]
+        if not isinstance(value, str) or not re.fullmatch(r"(?:[1-9]|[1-9][0-9]|1[0-9][0-9]|200)", value):
+            fail("openrouter_concurrency_invalid")
+    if request["role"] == "scorer_image_only":
+        if set(updates) != {"LAB_ARENA_SCORER_IMAGE"} or request.get("aliases") or request.get("service_key"):
+            fail("scorer_image_scope_invalid")
+    if request["role"] == "benchmark_disclosure_only":
+        if (
+            set(updates) != {"LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"}
+            or request.get("aliases")
+            or request.get("service_key")
+        ):
+            fail("benchmark_disclosure_scope_invalid")
+        value = updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"]
+        if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
             fail("benchmark_disclosure_timestamp_invalid")
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            fail("benchmark_disclosure_timestamp_invalid")
-    updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
-if request["role"] in (
-    "contacts_from_only", "company_quality_from_only", "intent_details_from_only",
-    "company_judgment_from_only", "signal_judgment_from_only",
-):
-    activation_key = {
-        "contacts_from_only": "LAB_ARENA_CONTACTS_FROM",
-        "company_quality_from_only": "LAB_ARENA_COMPANY_QUALITY_FROM",
-        "company_judgment_from_only": "LAB_ARENA_COMPANY_JUDGMENT_FROM",
-        "signal_judgment_from_only": "LAB_ARENA_SIGNAL_JUDGMENT_FROM",
-        "intent_details_from_only": "LAB_ARENA_INTENT_DETAILS_FROM",
-    }[request["role"]]
-    activation_error = request["role"][:-5]
-    if (
-        set(updates) != {activation_key}
-        or request.get("aliases")
-        or request.get("service_key")
-        or (request["role"] in {"company_judgment_from_only", "signal_judgment_from_only"}
-            and secret_id != "leadpoet/prod/gateway/env")
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        if value:
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                fail("benchmark_disclosure_timestamp_invalid")
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                fail("benchmark_disclosure_timestamp_invalid")
+        updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
+    if request["role"] in (
+        "contacts_from_only", "company_quality_from_only", "intent_details_from_only",
+        "company_judgment_from_only", "signal_judgment_from_only", "reasoning_capture_from_only",
     ):
-        fail(activation_error + "_scope_invalid")
-    value = updates[activation_key]
-    if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
-        fail(activation_error + "_timestamp_invalid")
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    if value:
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
+        activation_key = {
+            "contacts_from_only": "LAB_ARENA_CONTACTS_FROM",
+            "company_quality_from_only": "LAB_ARENA_COMPANY_QUALITY_FROM",
+            "company_judgment_from_only": "LAB_ARENA_COMPANY_JUDGMENT_FROM",
+            "signal_judgment_from_only": "LAB_ARENA_SIGNAL_JUDGMENT_FROM",
+            "intent_details_from_only": "LAB_ARENA_INTENT_DETAILS_FROM",
+            "reasoning_capture_from_only": "LAB_ARENA_REASONING_CAPTURE_FROM",
+        }[request["role"]]
+        activation_error = request["role"][:-5]
+        if (
+            set(updates) != ({activation_key, "LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256", "LAB_ARENA_REASONING_BASELINE_SOURCE_URL"}
+                             if request["role"] == "reasoning_capture_from_only" and updates.get(activation_key)
+                             else {activation_key})
+            or request.get("aliases")
+            or request.get("service_key")
+            or (request["role"] in {"company_judgment_from_only", "signal_judgment_from_only"}
+                and secret_id != "leadpoet/prod/gateway/env")
+        ):
+            fail(activation_error + "_scope_invalid")
+        value = updates[activation_key]
+        if not isinstance(value, str) or any(ch in value for ch in "\r\n\x00"):
             fail(activation_error + "_timestamp_invalid")
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            fail(activation_error + "_timestamp_invalid")
-    updates[activation_key] = value
-if request["role"] == "contacts_generation_only":
-    if (
-        set(updates) != {"LAB_ARENA_CONTACTS_GENERATION_ENABLED"}
-        or request.get("aliases")
-        or request.get("service_key")
-    ):
-        fail("contacts_generation_scope_invalid")
-    if updates["LAB_ARENA_CONTACTS_GENERATION_ENABLED"] not in {"true", "false"}:
-        fail("contacts_generation_scope_invalid")
-if request["role"] in ("gateway", "miner_credentials"):
-    for source, target in request["aliases"].items():
-        raw_value = str(values.get(source) or "").strip()
-        try:
-            parts = shlex.split("VALUE=" + raw_value, comments=True, posix=True)
-        except ValueError:
-            fail("required_existing_value_invalid")
-        if len(parts) != 1 or not parts[0].startswith("VALUE="):
-            fail("required_existing_value_invalid")
-        value = parts[0].split("=", 1)[1]
-        if not value.strip():
-            fail("required_existing_value_missing")
-        updates[target] = value
-if request["role"] == "gateway":
-    service_key = str(request.get("service_key") or "")
-    if not service_key.startswith("sb_secret_") or any(ch.isspace() for ch in service_key):
-        fail("service_key_malformed")
-    updates["LAB_ARENA_SERVICE_KEY"] = service_key
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        if value:
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                fail(activation_error + "_timestamp_invalid")
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                fail(activation_error + "_timestamp_invalid")
+        updates[activation_key] = value
+        if request["role"] == "reasoning_capture_from_only":
+            digest = updates.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256", "")
+            source_url = updates.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL", "")
+            if value and (not isinstance(digest, str)
+                          or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None):
+                fail("reasoning_baseline_source_sha256_invalid")
+            if value and (not isinstance(source_url, str)
+                          or re.fullmatch(r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz", source_url) is None):
+                fail("reasoning_baseline_source_url_invalid")
+            if not value:
+                updates["LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256"] = ""
+                updates["LAB_ARENA_REASONING_BASELINE_SOURCE_URL"] = ""
+    if request["role"] == "contacts_generation_only":
+        if (
+            set(updates) != {"LAB_ARENA_CONTACTS_GENERATION_ENABLED"}
+            or request.get("aliases")
+            or request.get("service_key")
+        ):
+            fail("contacts_generation_scope_invalid")
+        if updates["LAB_ARENA_CONTACTS_GENERATION_ENABLED"] not in {"true", "false"}:
+            fail("contacts_generation_scope_invalid")
+    if request["role"] in ("gateway", "miner_credentials"):
+        for source, target in request["aliases"].items():
+            raw_value = str(values.get(source) or "").strip()
+            try:
+                parts = shlex.split("VALUE=" + raw_value, comments=True, posix=True)
+            except ValueError:
+                fail("required_existing_value_invalid")
+            if len(parts) != 1 or not parts[0].startswith("VALUE="):
+                fail("required_existing_value_invalid")
+            value = parts[0].split("=", 1)[1]
+            if not value.strip():
+                fail("required_existing_value_missing")
+            updates[target] = value
+    if request["role"] == "gateway":
+        service_key = str(request.get("service_key") or "")
+        if not service_key.startswith("sb_secret_") or any(ch.isspace() for ch in service_key):
+            fail("service_key_malformed")
+        updates["LAB_ARENA_SERVICE_KEY"] = service_key
 
-for key in updates:
-    if occurrences.get(key, 0) > 1:
-        fail("target_key_duplicate")
+    for key in updates:
+        if occurrences.get(key, 0) > 1:
+            fail("target_key_duplicate")
 
-if document_format == "json":
-    merged = dict(values)
-    merged.update(updates)
-    updated = json.dumps(merged, separators=(",", ":"))
-else:
-    pending = dict(updates)
-    lines = []
-    for line in raw.replace("\x00", "\n").splitlines():
-        key = key_of(line)
-        if key in pending:
-            lines.append("export %s=%s" % (key, shlex.quote(pending.pop(key))))
-        else:
-            lines.append(line)
-    for key, value in pending.items():
-        lines.append("export %s=%s" % (key, shlex.quote(str(value))))
-    updated = "\n".join(lines) + "\n"
+    if document_format == "json":
+        merged = dict(values)
+        merged.update(updates)
+        updated = json.dumps(merged, separators=(",", ":"))
+    else:
+        pending = dict(updates)
+        lines = []
+        for line in raw.replace("\x00", "\n").splitlines():
+            key = key_of(line)
+            if key in pending:
+                lines.append("export %s=%s" % (key, shlex.quote(pending.pop(key))))
+            else:
+                lines.append(line)
+        for key, value in pending.items():
+            lines.append("export %s=%s" % (key, shlex.quote(str(value))))
+        updated = "\n".join(lines) + "\n"
 
-print_result = {"ok": True, "account": account, "format": document_format,
-                "changed_keys": sorted(updates), "applied": False,
-                "before_version": before_id}
-if updated == raw:
-    print_result["unchanged"] = True
-    print(json.dumps(print_result, separators=(",", ":")))
-    raise SystemExit(0)
-if not request["apply"]:
-    print(json.dumps(print_result, separators=(",", ":")))
-    raise SystemExit(0)
-candidate = str(uuid.uuid4())
-put = ["secretsmanager", "put-secret-value", "--secret-id", secret_id,
-       "--client-request-token", candidate, "--version-stages", "AWSCURRENT",
-       "--secret-string", "file:///dev/stdin", "--output", "json"]
-current_id, current_raw = get(secret_id)
-if current_id != before_id or current_raw != raw:
-    fail("version_race")
-aws(put, updated)
-after_id, after_raw = get(secret_id)
-if after_id != candidate or after_raw != updated:
-    fail("post_apply_mismatch")
-print_result.update({"applied": True, "after_version": candidate})
-print(json.dumps(print_result, separators=(",", ":")))
-'''
+    print_result = {"ok": True, "account": account, "format": document_format,
+                    "changed_keys": sorted(updates), "applied": False,
+                    "before_version": before_id}
+    if updated == raw:
+        print_result["unchanged"] = True
+        return print_result
+    if not request["apply"]:
+        return print_result
+    candidate = str(uuid.uuid4())
+    current_id, current_raw = get(secret_id)
+    if current_id != before_id or current_raw != raw:
+        fail("version_race")
+    try:
+        client.put_secret_value(SecretId=secret_id, ClientRequestToken=candidate,
+                                VersionStages=["AWSCURRENT"], SecretString=updated)
+    except Exception:
+        fail("aws_command_failed")
+    after_id, after_raw = get(secret_id)
+    if after_id != candidate or after_raw != updated:
+        fail("post_apply_mismatch")
+    print_result.update({"applied": True, "after_version": candidate})
+    return print_result
+
 
 
 _RUNNER_WALLET_REMOTE = r'''
@@ -643,26 +654,15 @@ def _read_fd(fd: int) -> str:
     return value
 
 
-def _ssh(host: str, key: Path, request: Mapping[str, object]) -> dict[str, object]:
-    result = subprocess.run(
-        ["ssh", "-i", str(key), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-         "-o", "ConnectTimeout=15", host, "python3 -c " + shlex.quote(_REMOTE)],
-        input=json.dumps(request, separators=(",", ":")), text=True,
-        capture_output=True, check=False, timeout=60,
-    )
-    if result.returncode != 0:
-        try:
-            code = json.loads(result.stdout).get("code", "remote_failed")
-        except Exception:
-            code = "remote_failed"
-        raise ConfigurationError("%s: %s" % (host, code))
+def _configure_secret(request, *, profile="leadpoet-lab"):
     try:
-        response = json.loads(result.stdout)
-    except ValueError as exc:
-        raise ConfigurationError("remote response is invalid") from exc
-    if not response.get("ok"):
-        raise ConfigurationError("remote operation failed")
-    return response
+        from scripts.production_secret_operator import secret_operator_client
+        client, account = secret_operator_client(profile=profile)
+        return _configure_secret_request(request, client=client, account=account)
+    except ConfigurationError:
+        raise
+    except Exception:
+        raise ConfigurationError("secret operator operation failed") from None
 
 
 def _prepare_runner_wallet(host: str, key: Path, *, apply: bool) -> dict[str, object]:
@@ -714,14 +714,20 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
     scope.add_argument("--openrouter-max-concurrency", type=int, choices=range(1, 201), default=None, help="configure only the gateway OpenRouter shared concurrency; activate with the canonical gateway restart")
-    scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
+    scope.add_argument("--validator-credential-kms-guard", action="store_true", help="check or add the exact validator deny using temporary AWS operator authority")
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")
     scope.add_argument("--company-quality-from", default=None, metavar="TIMESTAMP", help="set or clear company quality activation for future submission periods")
     scope.add_argument("--company-judgment-from", default=None, metavar="TIMESTAMP", help="set or clear company judgment reuse activation for future rounds without changing grading")
     scope.add_argument("--signal-judgment-from", default=None, metavar="TIMESTAMP", help="set or clear signal judgment reuse for future rounds without changing grading")
     scope.add_argument("--intent-details-from", default=None, metavar="TIMESTAMP", help="set or clear intent details activation for future submission periods")
+    scope.add_argument("--reasoning-capture-from", default=None, metavar="TIMESTAMP", help="set or clear agent reasoning capture for rounds whose intake opens at or after this time")
+    parser.add_argument("--reasoning-baseline-source-sha256", default=None, metavar="SHA256", help="tested baseline archive digest required for reasoning activation")
+    parser.add_argument("--reasoning-baseline-source-url", default=None, metavar="URL", help="immutable baseline commit archive URL required for reasoning activation")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
+    authority = parser.add_mutually_exclusive_group()
+    authority.add_argument("--aws-profile", default=None, help="named temporary operator profile for secret configuration or IAM guard (default: leadpoet-lab)")
+    authority.add_argument("--aws-instance-role", action="store_true", help="use the host IAM role credential chain for the validator IAM guard only")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -742,6 +748,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.aws_instance_role and not args.validator_credential_kms_guard:
+        raise ConfigurationError("instance role authority requires --validator-credential-kms-guard")
     accounts = set(args.allowed_account)
     if not accounts or not accounts <= KNOWN_ACCOUNTS:
         raise ConfigurationError("allowed account must be in the repository allowlist")
@@ -761,7 +769,30 @@ def _validate_args(args: argparse.Namespace) -> None:
         _validate_contacts_from(args.signal_judgment_from, label="signal judgment")
     if getattr(args, "intent_details_from", None) is not None:
         _validate_contacts_from(args.intent_details_from, label="intent details")
-    if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
+    if getattr(args, "reasoning_capture_from", None) is not None:
+        _validate_contacts_from(args.reasoning_capture_from, label="reasoning capture")
+        if args.reasoning_capture_from and (
+            args.reasoning_baseline_source_sha256 is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", args.reasoning_baseline_source_sha256) is None
+        ):
+            raise ConfigurationError("reasoning activation requires a tested baseline source sha256")
+        if args.reasoning_capture_from and (
+            args.reasoning_baseline_source_url is None
+            or re.fullmatch(r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz", args.reasoning_baseline_source_url) is None
+        ):
+            raise ConfigurationError("reasoning activation requires a pinned baseline source URL")
+        if args.apply and args.reasoning_capture_from:
+            from lab_arena import reasoning_capture
+            try:
+                registry = reasoning_capture.load_registry()
+            except (OSError, TypeError, ValueError) as exc:
+                raise ConfigurationError("approved reasoning route registry is unavailable") from exc
+            if not registry["approved_routes"] or registry["baseline_route"] is None:
+                raise ConfigurationError("approved baseline reasoning route is unavailable")
+    elif (getattr(args, "reasoning_baseline_source_sha256", None) is not None
+          or getattr(args, "reasoning_baseline_source_url", None) is not None):
+        raise ConfigurationError("baseline source URL and sha256 require --reasoning-capture-from")
+    if args.prepare_runner and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     narrow_scope = (
         args.prepare_runner
@@ -776,6 +807,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or getattr(args, "company_judgment_from", None) is not None
         or getattr(args, "signal_judgment_from", None) is not None
         or getattr(args, "intent_details_from", None) is not None
+        or getattr(args, "reasoning_capture_from", None) is not None
         or getattr(args, "contacts_generation", None) is not None
     )
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
@@ -801,7 +833,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_args(args)
         if args.validator_credential_kms_guard:
-            result = configure_validator_credential_kms_guard(apply=args.apply)
+            result = configure_validator_credential_kms_guard(apply=args.apply, profile=None if args.aws_instance_role else (args.aws_profile or "leadpoet-lab"))
             print(json.dumps(result, separators=(",", ":")))
             return 0
         if args.testnet_proxy is not None:
@@ -810,7 +842,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "apply": args.apply, "role": "testnet_proxy", "aliases": {},
                 "updates": {"LAB_ARENA_TESTNET_ENABLED": "true" if args.testnet_proxy == "enabled" else "false"},
             }
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if args.scorer_image_only:
@@ -819,7 +851,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "apply": args.apply, "role": "scorer_image_only", "aliases": {},
                 "updates": {"LAB_ARENA_SCORER_IMAGE": args.scorer_image},
             }
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if args.openrouter_max_concurrency is not None:
@@ -830,7 +862,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": str(args.openrouter_max_concurrency),
                 },
             }
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if args.benchmark_disclosure_from is not None:
@@ -843,7 +875,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 },
             }
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if (
@@ -852,10 +884,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             or args.company_judgment_from is not None
             or args.signal_judgment_from is not None
             or args.intent_details_from is not None
+            or args.reasoning_capture_from is not None
         ):
             quality_activation = args.company_quality_from is not None
             intent_details_activation = args.intent_details_from is not None
-            if args.signal_judgment_from is not None:
+            if args.reasoning_capture_from is not None:
+                role = "reasoning_capture_from_only"
+                key = "LAB_ARENA_REASONING_CAPTURE_FROM"
+                value = args.reasoning_capture_from
+                label = "reasoning capture"
+            elif args.signal_judgment_from is not None:
                 role = "signal_judgment_from_only"
                 key = "LAB_ARENA_SIGNAL_JUDGMENT_FROM"
                 value = args.signal_judgment_from
@@ -893,7 +931,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 },
             }
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            if role == "reasoning_capture_from_only" and value:
+                request["updates"]["LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256"] = (
+                    args.reasoning_baseline_source_sha256
+                )
+                request["updates"]["LAB_ARENA_REASONING_BASELINE_SOURCE_URL"] = (
+                    args.reasoning_baseline_source_url
+                )
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if args.contacts_generation is not None:
@@ -906,7 +951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 },
             }
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if args.miner_credentials_only:
@@ -918,7 +963,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.miner_credential_kms_key_id is not None:
                 request["aliases"] = {}
                 request["updates"] = {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": args.miner_credential_kms_key_id}
-            result = _ssh(args.gateway_host, args.ssh_key, request)
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
         if args.prepare_runner:
@@ -959,13 +1004,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         for host, request in requests:
             probe = dict(request)
             probe["apply"] = False
-            preflight.append(_ssh(host, args.ssh_key, probe))
+            preflight.append(_configure_secret(probe, profile=args.aws_profile or "leadpoet-lab"))
         results = preflight
         if args.apply:
             results = []
             for host, request in requests:
                 try:
-                    results.append(_ssh(host, args.ssh_key, request))
+                    results.append(_configure_secret(request, profile=args.aws_profile or "leadpoet-lab"))
                 except Exception as exc:
                     raise ConfigurationError(
                         "apply failed after %d target(s); inspect version stages before retry: %s"

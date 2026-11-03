@@ -54,7 +54,9 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     from lab_arena.contracts import CHECKPOINT_DEADLINE_PROFILES
 
     drain_timeout = int(re.search(r"--timeout-seconds (\d+)", drain_function).group(1))
-    assert drain_timeout == max(profile[1] for profile in CHECKPOINT_DEADLINE_PROFILES.values()) + 300
+    assert drain_timeout == max(
+        runtime + lease for runtime, lease in CHECKPOINT_DEADLINE_PROFILES.values()
+    ) + 300
     assert ')" || return 1' in drain_function
     assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
         script, "on_gateway_restart_exit"
@@ -73,6 +75,7 @@ def test_gateway_arena_drain_timeout_fails_before_recording_guard(
         "#!/bin/bash\nset -euo pipefail\n"
         f"CAPTURE={shlex.quote(str(capture))}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_RESTART_GUARD_SCOPE=all\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
         f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         "run_lab_arena_restart_guard() {\n"
@@ -94,7 +97,7 @@ def test_gateway_arena_drain_timeout_fails_before_recording_guard(
 
     assert completed.returncode == 0
     assert capture.read_text(encoding="utf-8").splitlines() == [
-        "/prepared", "drain", "--scope", "all", "--timeout-seconds", "6600",
+        "/prepared", "drain", "--scope", "all", "--timeout-seconds", "12000",
     ]
 
 
@@ -107,6 +110,7 @@ def test_gateway_arena_drain_records_generation_and_removes_report(tmp_path: Pat
         f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_RESTART_GUARD_SCOPE=all\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
         "LAB_ARENA_RESTART_DRAIN_PID=\n"
         "LAB_ARENA_RESTART_DRAIN_REPORT=\n"
@@ -194,6 +198,7 @@ def test_gateway_parent_signal_stops_drain_and_discovers_exact_guard(
         f"ABORT={shlex.quote(str(abort))}\n"
         f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_RESTART_GUARD_SCOPE=all\n"
         "GATEWAY_DEPLOY_STAGE=lab_arena_claim_drain\n"
         "GATEWAY_DESTRUCTIVE_PHASE_STARTED=0\n"
         "PREPARED_GATEWAY_SHA=" + "a" * 40 + "\n"
@@ -259,6 +264,7 @@ def test_gateway_restart_releases_owned_guard_only_after_final_checks(
         "#!/bin/bash\nset -euo pipefail\n"
         f"LEADPOET_REPO_ROOT={shlex.quote(str(tmp_path / 'release'))}\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=17\n"
+        "GATEWAY_PAIRED_RESTART=0\n"
         f"CAPTURE={shlex.quote(str(capture))}\n"
         f"RELEASE_STATUS={release_status}\n"
         "run_lab_arena_restart_guard() {\n"
@@ -861,7 +867,7 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
     assert 'pkill -KILL -f "docker build' not in script
     assert "ensure_docker_ready" in script
     assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in script
-    assert 'bash "$reclaim_script"' in script
+    assert 'bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"' in script
     assert "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1" in script
     assert "sudo nsenter -t 1 -m --" not in script
 
@@ -1836,7 +1842,8 @@ except BlockingIOError:
     assert "Stopping existing gateway" not in result.stdout
 
 
-def test_restart_recovers_lock_inherited_by_detached_relay(tmp_path: Path) -> None:
+@pytest.mark.parametrize("holder_module, recover", [("gateway.main", True), ("gateway.utils.tee_inter_enclave_relay", False)])
+def test_restart_recovers_only_the_allowed_gateway_lock_holder(tmp_path: Path, holder_module: str, recover: bool) -> None:
     if not Path("/proc/self/fd").exists() or shutil.which("flock") is None:
         return
 
@@ -1846,19 +1853,25 @@ import fcntl
 import sys
 import time
 
-with open(sys.argv[2], "w", encoding="utf-8") as handle:
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     print("ready", flush=True)
     time.sleep(30)
 """
+    # Start a real -m process so the controller sees the allowed entrypoint,
+    # not a marker hidden in the arguments of an arbitrary inline program.
+    holder_root = tmp_path / "holder"
+    module = holder_root.joinpath(*holder_module.split(".")).with_suffix(".py")
+    module.parent.mkdir(parents=True)
+    package = module.parent
+    while package != holder_root:
+        (package / "__init__.py").write_text("")
+        package = package.parent
+    module.write_text(holder_code)
     holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            holder_code,
-            "gateway.utils.tee_inter_enclave_relay",
-            str(lock_file),
-        ],
+        [sys.executable, "-m", holder_module, str(lock_file)],
+        cwd=holder_root,
+        env={**os.environ, "PYTHONPATH": str(holder_root)},
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -1872,7 +1885,7 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
             text=True,
             timeout=5,
             env={
-                **os.environ,
+                **_current_restart_environment(),
                 "GATEWAY_ROOT": str(tmp_path / "missing-gateway"),
                 "GATEWAY_RESTART_LOCK_FILE": str(lock_file),
                 "GATEWAY_RESTART_RECOVERY_LOCK_FILE": str(
@@ -1890,8 +1903,8 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
     assert (
         "Recovering gateway restart lock inherited by a detached runtime process"
         in result.stdout
-    )
-    assert "another gateway restart is already running" not in result.stderr
+    ) is recover
+    assert ("another gateway restart is already running" in result.stderr) is not recover
 
 
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
@@ -2148,3 +2161,14 @@ def test_pre_shutdown_cleanup_uses_candidate_helper_before_old_checkout_activati
         ("--max-candidates", "64"),
     ):
         assert args[args.index(option) + 1] == expected
+
+
+def _current_restart_environment():
+    """Model the controller's instance-role environment, not CI credentials."""
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AWS_") and key not in {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        }
+    }

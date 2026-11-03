@@ -100,7 +100,9 @@ def test_ineligible_retained_page_preserves_original_provider_failure(monkeypatc
     elif change == "extra_fields":
         pages[URL]["summary"] = "Model-authored summary"
     else:
-        pages[URL]["text"] = TEXT + "x" * 24_000
+        from qualification.scoring import company_evidence_investigator as investigator
+        maximum = getattr(investigator, 'MAX_SOURCE_CHARACTERS', investigator.MAX_PAGE_CHARACTERS)
+        pages[URL]["text"] = TEXT + "x" * maximum
     result, fetch, judge, paragraphs = _run(monkeypatch, pages=pages)
     assert result.final_score == 0 and "unavailable" in result.failure_reason.lower()
     assert fetch.await_count == 1
@@ -152,12 +154,12 @@ def test_retained_source_does_not_replace_normal_event_and_date_judgment(monkeyp
 
 def test_private_source_projection_binds_identity_and_requested_resource():
     project = verifier._verified_submitted_source_pages
-    assert project(PAGES, [URL], IDENTITY, company_name="Amdocs") == PAGES
-    assert project({URL: {**PAGES[URL], "summary": "untrusted"}}, [URL], IDENTITY, company_name="Amdocs") == {}
-    assert project(PAGES, [URL + "?other=1"], IDENTITY, company_name="Amdocs") == {}
-    assert project(PAGES, [URL], {**IDENTITY, "observed_domain": "other.example"}, company_name="Amdocs") == {}
-    assert project(PAGES, [URL], IDENTITY, company_name="OtherCo") == {}
-    assert project(PAGES, [URL], {**IDENTITY, "observed_linkedin_slug": ""}, company_name="Amdocs") == {}
+    assert project(PAGES, [URL], IDENTITY, company_name="Amdocs", claim=CLAIM) == PAGES
+    assert project({URL: {**PAGES[URL], "summary": "untrusted"}}, [URL], IDENTITY, company_name="Amdocs", claim=CLAIM) == {}
+    assert project(PAGES, [URL + "?other=1"], IDENTITY, company_name="Amdocs", claim=CLAIM) == {}
+    assert project(PAGES, [URL], {**IDENTITY, "observed_domain": "other.example"}, company_name="Amdocs", claim=CLAIM) == {}
+    assert project(PAGES, [URL], IDENTITY, company_name="OtherCo", claim=CLAIM) == {}
+    assert project(PAGES, [URL], {**IDENTITY, "observed_linkedin_slug": ""}, company_name="Amdocs", claim=CLAIM) == {}
 
 
 def test_hiring_retains_existing_fresh_fetch_with_listing_metadata(monkeypatch):
@@ -343,7 +345,7 @@ def test_existing_absence_and_bundle_paths_are_not_replaced(monkeypatch, case):
 
 
 def test_final_query_is_part_of_exact_resource_binding():
-    assert verifier._verified_submitted_source_pages({URL: {"final_url": URL + "?different=1", "text": TEXT}}, [URL], IDENTITY, company_name="Amdocs") == {}
+    assert verifier._verified_submitted_source_pages({URL: {"final_url": URL + "?different=1", "text": TEXT}}, [URL], IDENTITY, company_name="Amdocs", claim=CLAIM) == {}
 
 
 @pytest.mark.parametrize("shape", ["declared", "url"])
@@ -467,3 +469,87 @@ def test_grounded_standalone_dateline_quote_may_accompany_event_quote(monkeypatc
     result, fetch, judge, paragraphs = _run(monkeypatch, answer=response, company_quality=False)
     assert result.final_score > 0
     assert fetch.await_count == judge.await_count == len(paragraphs) == 1
+
+
+def test_long_retained_body_projects_one_continuous_claim_window_and_keeps_real_verdict(monkeypatch):
+    body = 'Amdocs archive context. ' + '\u9060' * 12_000 + TEXT
+    assert len(body) < 24_000 and len(body[:body.index(TEXT)].encode()) > 24_000
+    pages = {URL: {'final_url': URL, 'text': body}}
+    effective = verifier._verified_submitted_source_pages(
+        pages, [URL], IDENTITY, company_name='Amdocs', claim=CLAIM,
+    )
+    assert effective[URL]['text'] in body and TEXT in effective[URL]['text']
+    assert len(effective[URL]['text'].encode()) <= 24_000
+    result, fetch, judge, paragraphs = _run(monkeypatch, pages=pages, answer=_real_primary_response())
+    assert result.final_score > 0 and paragraphs
+    assert fetch.await_count == judge.await_count == 1
+    assert effective[URL]['text'] in judge.await_args.args[2]
+    assert pages[URL]['text'] == body
+
+
+def test_contrary_retained_passage_still_requires_affirmative_source_judgment(monkeypatch):
+    contrary = 'Amdocs and VEON did not enter the claimed strategic agreement.'
+    body = 'Amdocs earlier material. ' + '\u9060' * 12_000 + TEXT + ' ' + contrary
+    response = _real_primary_response()
+    item = response['answer']['signal_evaluations'][0]
+    item.update(signal_status='unable_to_verify', contradicting_quotes=[contrary],
+                unsupported_parts=['The loaded source contradicts the claimed agreement.'])
+    result, fetch, judge, paragraphs = _run(
+        monkeypatch, pages={URL: {'final_url': URL, 'text': body}}, answer=response,
+    )
+    assert contrary in judge.await_args.args[2]
+    assert result.final_score == 0 and 'unavailable' in result.failure_reason.lower()
+    assert fetch.await_count == judge.await_count == 1 and not paragraphs
+
+
+def test_event_date_outside_effective_passage_cannot_date_retained_claim(monkeypatch):
+    event = TEXT.replace('[October 7, 2026]', '[Date unavailable]')
+    body = 'October 7, 2026. Amdocs historical document. ' + '\u9060' * 12_000 + event
+    response = _real_primary_response()
+    event_quote = "Amdocs will run and continuously modernize VEON's core technology operations"
+    response['answer']['signal_evaluations'][0]['supporting_quotes'] = [event_quote]
+    result, fetch, judge, paragraphs = _run(
+        monkeypatch, pages={URL: {'final_url': URL, 'text': body}}, answer=response,
+    )
+    # The submitted date is in the prompt, but cannot replace exact source proof.
+    projected = verifier._verified_submitted_source_pages(
+        {URL: {'final_url': URL, 'text': body}}, [URL], IDENTITY, company_name='Amdocs', claim=CLAIM,
+    )[URL]['text']
+    assert event_quote in projected and 'October 7, 2026' not in projected
+    assert result.final_score == 0 and 'unavailable' in result.failure_reason.lower()
+    assert fetch.await_count == judge.await_count == 1 and not paragraphs
+
+
+def test_retained_bundle_is_not_projected_even_when_both_sources_are_bound():
+    other = URL + '?second=1'
+    pages = {**PAGES, other: {'final_url': other, 'text': TEXT}}
+    assert verifier._verified_submitted_source_pages(
+        pages, [URL, other], IDENTITY, company_name='Amdocs', claim=CLAIM,
+    ) == {}
+
+
+def test_unicode_source_projection_and_maximum_funding_context_cross_real_control_frame(monkeypatch):
+    from tests.lab_arena import signal_cache_control_test as controls
+    from lab_arena import contracts, signal_cache_control
+
+    from qualification.scoring import company_evidence_investigator as investigator
+    source_limit = getattr(investigator, 'MAX_SOURCE_CHARACTERS', investigator.MAX_PAGE_CHARACTERS)
+    body = TEXT + '\U0001f30d' * (source_limit - len(TEXT))
+    pages = {URL: {'final_url': URL, 'text': body}}
+    effective = verifier._verified_submitted_source_pages(
+        pages, [URL], IDENTITY, company_name='Amdocs', claim=CLAIM,
+    )
+    assert len(effective[URL]['text'].encode()) <= 24_000
+    assert effective[URL]['text'] in body and TEXT in effective[URL]['text']
+    request = controls.request()
+    request['verified_company_identity'] = IDENTITY
+    request['verified_source_pages'] = effective
+    request['verified_funding_stage_context'] = [
+        {'dimension': 'stage', 'url': 'https://amdocs.com/funding', 'text': '\U0001f30d' * 24_000},
+        {'dimension': 'first_party_context', 'url': 'https://amdocs.com/about',
+         'final_url': 'https://amdocs.com/about', 'text': '\U0001f30d' * 96_000},
+    ]
+    frame = {'schema_version': signal_cache_control.SCHEMA, 'request': request}
+    assert len(contracts.canonical_json(frame).encode()) < signal_cache_control.MAX_BYTES
+    monkeypatch.setattr(controls, 'request', lambda: copy.deepcopy(request))
+    controls.test_socket_to_gateway_has_no_provider_debit(monkeypatch)

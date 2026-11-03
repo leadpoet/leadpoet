@@ -334,3 +334,39 @@ def test_restart_preserves_exact_role_artifacts_until_verified_restore_or_build(
         'RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"'
         in builder
     )
+
+
+def test_role_builder_saves_verified_canonical_image_identity(tmp_path):
+    builder = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text()
+    start = builder.index("    sudo python3 \\\n")
+    end = builder.index("    sudo nitro-cli build-enclave", start)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sudo = fake_bin / "sudo"
+    canonical_id = "sha256:" + "b" * 64
+    store_id = "sha256:" + "a" * 64
+    sudo.write_text(
+        '#!/bin/sh\ncase "$1" in\n'
+        f'python3) printf "%s\\n" "{canonical_id}" ;;\n'
+        f'docker) printf "%s\\n" "{store_id}" ;;\n'
+        '*) exit 91 ;;\nesac\n'
+    )
+    sudo.chmod(0o700)
+    result = subprocess.run(
+        ["bash", "-e", "-c", builder[start:end]],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "GATEWAY_ROOT": str(ROOT / "gateway"),
+            "BUILD_EIF_ROOT": str(tmp_path),
+            "raw_image": "raw:test",
+            "image": "normalized:test",
+            "role": "gateway_coordinator",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "enclave-image-gateway_coordinator.txt").read_text() == (
+        canonical_id + "\n"
+    )

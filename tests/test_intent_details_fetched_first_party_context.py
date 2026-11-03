@@ -169,6 +169,67 @@ def test_ryft_shaped_fetched_about_facts_reach_real_review_document():
                )
 
 
+@pytest.mark.parametrize("submitted_name,observed_name,admit_auxiliary", [
+    ("Ryft Ltd", "Ryft", False),
+    ("Ryft", "Ryft Ltd", False),
+    ("Ryft", "Ryft", True),
+    ("Ry-ft", "RYFT", True),
+])
+def test_auxiliary_producer_matches_reviewers_compact_name_requirement(
+    submitted_name, observed_name, admit_auxiliary,
+):
+    # Synthetic aliases reproduce a complete MATCH identity whose canonical
+    # name differs from the submitted name. Other bound evidence stays usable.
+    company, icp, fit, signals = _case()
+    company.company_name = submitted_name
+    fit.details["dimension_evidence"]["identity"]["web_identity_receipt"][
+        "observed_name"
+    ] = observed_name
+    pages = {
+        HOME: {"final_url": HOME, "text": HOME_QUOTE + " " + PRODUCT},
+        ABOUT: {"final_url": ABOUT, "text": (
+            "About " + submitted_name + ". " + PRODUCT + " " + REGULATION
+        )},
+    }
+    original_pages = json.dumps(pages, sort_keys=True)
+    if not admit_auxiliary:
+        # Shared source validation still permits aliases for its other uses;
+        # the unchanged paragraph consumer has the narrower auxiliary rule.
+        identity = fit.details["dimension_evidence"]["identity"][
+            "web_identity_receipt"
+        ]
+        auxiliary = lead_scorer._validated_first_party_source_context(
+            ABOUT, pages[ABOUT], identity, company_name=submitted_name,
+        )
+        assert auxiliary is not None
+        with pytest.raises(ValueError, match="invalid company source context"):
+            intent_details.review_evidence(
+                company, icp, signals, fit.receipt("company_fit"),
+                company_source_contexts=[auxiliary],
+            )
+    contexts = lead_scorer._matched_company_source_contexts(
+        fit, None, None, pages, paragraph=company.intent_details,
+        company=company,
+        verified_signal_source_urls=lead_scorer._verified_signal_context_urls(
+            signals,
+        ),
+    )
+    expected_dimensions = ["industry"]
+    if admit_auxiliary:
+        expected_dimensions.append("first_party_context")
+    assert [context["dimension"] for context in contexts] == expected_dimensions
+    document = intent_details.review_evidence(
+        company, icp, signals, fit.receipt("company_fit"),
+        company_source_contexts=contexts,
+    )
+    admitted_urls = {
+        source.get("source_url") for source in document["admitted_evidence"]
+    }
+    assert (ABOUT in admitted_urls) == admit_auxiliary
+    assert HOME in admitted_urls and INVESTOR in admitted_urls
+    assert json.dumps(pages, sort_keys=True) == original_pages
+
+
 def test_fetched_about_page_survives_intermediate_fit_until_final_match():
     company, _icp, final_fit, signals = _case()
     intermediate = company_fit_unavailable(

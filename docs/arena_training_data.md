@@ -129,6 +129,16 @@ are corroborating views; neither proves collection completeness.
 | Available intermediate state | Model messages/tool results plus optional diagnostic decision/log excerpts | Full broker-visible state is retained; optional decision/log excerpts are explicitly excluded from full-process proof |
 
 The input capture preserves the exact JSON value, not incidental file whitespace.
+The API admits two training-input captures at a time before they acquire a shared
+worker. Waiting captures use no worker. This bounds simultaneous privacy scans,
+hashing and compression while a second capture can progress if one storage call
+is slow. An admitted capture retains its permit until its worker finishes, even
+if its request task is cancelled. Provider calls retain their separate limit of
+32 within the shared 64-worker pool. After the body is read, a disconnect
+listener cancels capture work still waiting for either worker queue. Active
+capture workers finish before their permits return. Authorization, schema
+checks, stored bytes, privacy rules, client deadlines and existing retries stay
+unchanged.
 Request objects record a **planned** outbound request; dispatch receipts determine
 whether the provider was called. A `referenced` pointer is not proof of storage.
 The exporter must read and hash-check its object before it accepts it.
@@ -160,7 +170,28 @@ entries, and typed response summaries or text. The alias is retained only in
 provider responses; request copies and opaque values remain redacted.
 Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
-remain redacted. This change does not ask providers for additional reasoning.
+remain redacted.
+
+Future rounds can opt in to `full_generated_thinking_v1`. This policy uses the
+reviewed, exact model/provider/API registry in `lab_arena/reasoning_models.json`.
+It requests full provider-generated thinking, preserves tool history, and records
+what the provider actually returned. Summaries and encrypted state do not meet
+this policy. The gateway applies it to miner and baseline execution calls,
+including subagents; judges and already-created rounds keep their existing rules.
+
+The future policy sets both execution admission and competition cost eligibility
+to $6 per ICP. Admission counts confirmed charges only. Pending charges do not
+create monetary admission holds; recovery records them when confirmed.
+Active provider calls still block final publication.
+Scoring keeps its existing successful-call and infrastructure-failure distinctions.
+No capture failure or empty thinking response stops scoring or publication.
+If activation prerequisites are missing, round creation continues with its old
+policy and a visible frozen `not_ready` reason. Activation is off by default.
+
+The [full-thinking policy](arena-full-thinking-policy.md) lists tested routes,
+protocol boundaries, export rules, and the remaining activation checks. Provider
+text must be present, complete, and tied to stored request/response evidence to
+enter the strict dataset. This cannot recover thinking that was never returned.
 Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries
@@ -274,6 +305,30 @@ returns the original observation ID if the first attempt already committed;
 separate fetches still remain separate events. The token is not stored in the
 artifact. This runs on the existing background sender and does not retry a
 provider call. Process death can still lose evidence that has not been uploaded.
+
+New captures distinguish `optional_capture_incomplete` from the existing generic
+`capture_incomplete` failure in the same stored failure list. The optional tag
+applies only to validated partial web/header observations or a fully attributed
+HTTP recorder summary. Balanced `response_received` checkpoint transport failures
+(`timeout`, `transport_error`, or `socket_unavailable`) also receive the optional
+tag because client read reports are optional diagnostics in the new host-result
+policy. Rejected, invalid or unknown callback failures and unfinished queues keep
+the generic tag. Both tags retain `complete: false`. Only validated
+new frozen host-result policies can exclude the optional tag from provider-visible
+training checks, after every affected run passes full snapshot, count, privacy
+and exact host-result checks. Old generic failures are never reclassified.
+The serving gateway advertises `training_observation_optional_failure_tag: true`
+in execute and score leases. A runner uses the optional tag only for literal
+`true`; absent, false or malformed values select the original
+`capture_incomplete` tag. This projection happens before journal hashes and final
+snapshot serialization. Raw observations, receipts and the worker's original
+failure attribution stay unchanged, and pending segment retries keep identical
+bytes. Both forms retain `complete: false`; generic failures stay conservative.
+Deploy readers before producers when possible. Old producers need no capability,
+and old readers remain supported when their leases omit it. A rollback to an old
+reader must first drain leases that advertised the new tag. Historical artifacts
+and frozen round rules do not change, and provider-visible eligibility does not
+claim complete web capture.
 
 The existing mounted `lab_arena_checkpoint` module still provides `record_web_fetch`,
 `record_response_received` and `record_state_snapshot`. They are best-effort calls:
@@ -407,10 +462,19 @@ turns exported executions into company-qualification records. It reads the
 exports only and writes a new private directory: `train.jsonl`, `eval.jsonl`,
 `analysis.jsonl` and `manifest.json`.
 
-The shared example reader accepts one export of up to 256 MiB at a time. Larger
-exports are rejected explicitly; a valid worker snapshot plus other export data
-can exceed this limit. Parsing and hash verification use additional memory.
-The readiness report also keeps its separate 256 MiB total input-batch limit.
+The shared example reader accepts plain `.json` and gzip `.json.gz` exports.
+It checks the complete JSON without shortening source strings. The default
+limit is 256 MiB of decompressed bytes per export. All three preparation commands
+accept `--max-example-bytes` to set an explicit larger input budget. For example,
+`--max-example-bytes 536870912` permits a native episode below 512 MiB.
+Parsing and hash verification need additional memory; a 504 MB native export
+used about 3.05 GiB of resident memory during parsing. Preparation processes one
+raw episode at a time. Full-thinking candidates keep the shared global company,
+ICP and episode split checks and candidate deduplication.
+
+The readiness report accepts the same option. Its budget also bounds the total
+decompressed input batch, because it checks all raw cohort members together.
+The 256 MiB default remains. Raise this budget explicitly for a larger report.
 
 A final verified company-fit `mismatch` or `unavailable` verdict can have no
 signal detail even when signal work was attempted. The exporter retains those
@@ -511,17 +575,33 @@ training filter. Incomplete investigations and older records retain their gaps.
 
 The agent-step exporter prepares **observed next-response candidates**, not a
 complete agent imitation dataset. It supports self-contained text and local
-function-call contexts in managed chat and Responses requests. Each candidate
-retains the actual outbound context, the acknowledged assistant reply, and exact
-source references. It verifies the request, worker artifact, host write, agent
-read acknowledgment, and matching stored response. A later billing recovery
-cannot substitute an unreceived reply. Judge calls and future judgments never
+function-call contexts in managed Chat Completions and Responses requests,
+plus exposed hosted-search output in Responses.
+Each candidate retains the actual outbound context, provider reply, and exact
+source references. It verifies the request, worker artifact, host write, and
+matching stored response. This generic export uses the existing host evidence
+for historical and new rounds. It does not require miner callbacks or prove
+client consumption. Any saved read report must still match the host evidence.
+Each source reference declares `provider_visible_request_result` capture and
+`client_consumption: not_proved`. The frozen strict full-thinking and champion
+checks keep their separate historical read-proof requirements; this export
+does not change round policy, source records, or training permission.
+Generic candidates can retain readable native reasoning history and empty
+provider transport fields under the existing closed replay schema. This does
+not establish full-thinking semantics for an unreviewed route.
+A later billing recovery cannot substitute a response without
+matching host-write evidence. Judge calls and future judgments never
 enter the input. A whole run can be incomplete while one independently verified
 model call is usable as a candidate.
 
-Unsupported shapes, hosted tools, unresolved history, streams, truncated replies,
-missing acknowledgments, and privacy-filtered context or targets are excluded
-with reasons. Provider reasoning summaries stay in separate teacher metadata.
+Unsupported shapes, unresolved history, streams, truncated replies, missing
+required evidence, and privacy-filtered context or targets are excluded with
+reasons. Hosted search retains the exposed event order and citations as a
+`provider_executed_trajectory`. It does not supply unseen internal prompts or
+search content, or make the whole result a reproducible local next-action
+example. These records count toward provider-visible capture coverage; training
+consumers must use their declared scope. Provider reasoning summaries stay in
+separate teacher metadata.
 An otherwise exact visible answer can be retained when only opaque reasoning
 was removed from the response; its metadata says exact provider replay is false.
 Encrypted reasoning is never emitted. This does not request extra reasoning.

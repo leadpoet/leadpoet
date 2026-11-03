@@ -230,7 +230,7 @@ def test_full_partial_publication_preserves_baseline_and_peer_authority(database
     baseline=next(p for p in row['participants'] if p['is_king'])
     with pg.connect(**dsn) as conn,conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')
-        cur.execute("UPDATE public.lab_arena_rounds SET evaluation_date='2099-10-15',configuration_doc=jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((clock_timestamp()-interval '1 minute')::text)) WHERE round_id=%s",(harness.round_id,))
+        cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((clock_timestamp()-interval '1 minute')::text)) WHERE round_id=%s",(harness.round_id,))
         cur.execute("SELECT run_id FROM public.lab_arena_runs WHERE submission_id=%s AND kind='execute' AND status='accepted' ORDER BY icp_position LIMIT 1",(miner['submission_id'],));source=cur.fetchone()[0]
         cur.execute("SELECT run_id,judgment_cache_key FROM public.lab_arena_runs WHERE scored_run_id=%s AND kind='score' AND status='accepted'",(source,));judge,cache=cur.fetchone()
         cur.execute('UPDATE public.lab_arena_runs SET per_icp_score=NULL,qualification_doc=NULL WHERE run_id=%s',(source,))
@@ -249,6 +249,16 @@ def test_full_partial_publication_preserves_baseline_and_peer_authority(database
         cur.execute("UPDATE public.lab_arena_rounds SET status='stage2_judged' WHERE round_id=%s",(harness.round_id,))
         cur.execute('SET LOCAL session_replication_role=origin')
     assert harness.service.score_stage(harness.round_id,2)['status']=='ok'
+    retained_baseline = harness.service.store.list_runs(harness.round_id,submission_id=baseline['submission_id'])
+    # The final scoring window ends retry admission. Publication separately
+    # retains the frozen deadline before omitting any incomplete participant.
+    assert harness.service.publish(harness.round_id) == {
+        'status':'retry','round_status':'scored','reason':'execution_infrastructure_incomplete'}
+    held=harness.service.store.get_round(harness.round_id)
+    assert held['publication_doc'] is None and held['reward_activated_at'] is None
+    assert harness.service.store.get_run(source)['per_icp_score'] is None
+    assert harness.service.store.list_runs(harness.round_id,submission_id=baseline['submission_id']) == retained_baseline
+    harness.clock.advance_to(row['configuration_doc']['schedule']['publication_deadline'])
     # The full normal service publishes the NULL/ineligible miner while the
     # complete measured baseline keeps its ordinary outcome.
     assert harness.service.publish(harness.round_id)['status']=='ok'
@@ -256,6 +266,7 @@ def test_full_partial_publication_preserves_baseline_and_peer_authority(database
     ranking=next(r for r in published['publication_doc']['final_ranking'] if r['submission_id']==miner['submission_id'])
     assert ranking['final_score'] is None and ranking['eligible'] is False and ranking['eligibility_reason']=='execution_incomplete'
     assert harness.service.store.get_run(source)['per_icp_score'] is None
+    assert harness.service.store.list_runs(harness.round_id,submission_id=baseline['submission_id']) == retained_baseline
     # A missing baseline score must still reject exactly the same publication.
     with pg.connect(**dsn) as conn,conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')

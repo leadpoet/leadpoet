@@ -231,3 +231,54 @@ def test_exact_host_gateway_cli_rejects_non_finite_scan_deadlines(
         main()
 
     assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize('argv', [
+    ('docker', 'export', 'container'), ('docker', 'create', 'image'),
+    ('sudo', 'docker', 'cp', 'container:/source', '/target'),
+    ('docker', '--context', 'default', 'container', 'rm', 'old'),
+    ('docker', 'image', 'load', '-i', 'archive'), ('docker', 'volume', 'create', 'volume'),
+    ('docker', 'compose', 'up', '-d'), ('docker', 'compose', '-f', 'file.yml', 'down'),
+    ('docker-compose', '--project-name', 'test', 'run', 'service'),
+    ('sudo', '/usr/bin/docker-compose', 'restart'), ('docker', 'compose', '--profile=test', 'stop'),
+])
+def test_guard_detects_mutating_lifecycle_commands(tmp_path, argv):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    _process(proc, pid=11, parent_pid=1, argv=('python3', 'guard.py'))
+    _process(proc, pid=21, parent_pid=1, argv=argv)
+    assert len(find_foreign_docker_operations(proc_root=proc, current_pid=11)) == 1
+
+
+@pytest.mark.parametrize('argv', [
+    ('docker', 'ps', '-aq'), ('docker', 'image', 'inspect', 'image'),
+    ('docker', 'volume', 'inspect', 'volume'), ('docker', 'info'),
+    ('docker', 'compose', 'ps'), ('docker-compose', 'config'),
+])
+def test_guard_preserves_readonly_inventory(tmp_path, argv):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    _process(proc, pid=11, parent_pid=1, argv=('python3', 'guard.py'))
+    _process(proc, pid=21, parent_pid=1, argv=argv)
+    assert find_foreign_docker_operations(proc_root=proc, current_pid=11) == []
+
+
+def test_guard_excludes_own_parent_wrapper(tmp_path):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    _process(proc, pid=10, parent_pid=1, argv=('sudo', 'docker', 'export', 'owned'))
+    _process(proc, pid=11, parent_pid=10, argv=('python3', 'guard.py'))
+    assert find_foreign_docker_operations(proc_root=proc, current_pid=11) == []
+
+
+@pytest.mark.parametrize('argv', [
+    ('python3', '/release/validator_tee/host/docker_live_restore_reconciler_v2.py', '--reclaim-stale'),
+    ('python3', '-m', 'validator_tee.host.docker_live_restore_reconciler_v2', '--reclaim-stale'),
+])
+def test_guard_blocks_orphan_live_reclaim_but_excludes_own_helper(tmp_path, argv):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    _process(proc, pid=11, parent_pid=1, argv=argv)
+    _process(proc, pid=21, parent_pid=1, argv=argv)
+    assert find_foreign_docker_operations(proc_root=proc, current_pid=11) == [
+        {'pid': 21, 'command': 'python3', 'kind': 'docker_maintenance'}]

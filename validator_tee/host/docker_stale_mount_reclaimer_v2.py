@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -262,7 +262,7 @@ def _inspect_documents(
     return document  # type: ignore[return-value]
 
 
-def _require_empty_build_cache(runner: CommandRunner) -> None:
+def _build_cache_counts(runner: CommandRunner) -> tuple[int, int]:
     output = _checked_output(
         runner,
         ["docker", "system", "df", "--format", "{{json .}}"],
@@ -295,6 +295,13 @@ def _require_empty_build_cache(runner: CommandRunner) -> None:
         raise DockerStaleMountReclaimerV2Error(
             "Docker build-cache inventory contains invalid counts"
         ) from exc
+    if total < 0 or active < 0 or active > total:
+        raise DockerStaleMountReclaimerV2Error("Docker build-cache counts are invalid")
+    return total, active
+
+
+def _require_empty_build_cache(runner: CommandRunner) -> None:
+    total, active = _build_cache_counts(runner)
     if total != 0 or active != 0:
         raise DockerStaleMountReclaimerV2Error(
             "refusing orphan reclaim while Docker build-cache references remain"
@@ -1021,6 +1028,8 @@ def reclaim_stale_docker_overlay_mounts_v2(
     *,
     runner: CommandRunner = _run,
     expected_root: Path = Path("/var/lib/docker"),
+    pre_mutation_check: Optional[Callable[[], None]] = None,
+    mutation_started: Optional[Callable[[], None]] = None,
 ) -> DockerMountReclaimResult:
     """Remove only Docker overlay state unreachable from live inventory."""
 
@@ -1028,7 +1037,13 @@ def reclaim_stale_docker_overlay_mounts_v2(
     stale_mounts = sorted(
         before.mounted_overlay_targets - before.active_mount_targets
     )
+    if pre_mutation_check is not None:
+        pre_mutation_check()
+    if _inventory(runner=runner, expected_root=expected_root) != before:
+        raise DockerStaleMountReclaimerV2Error("Docker inventory changed before stale unmount")
     for target in stale_mounts:
+        if mutation_started is not None:
+            mutation_started()
         result = runner(["umount", "--", target])
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
@@ -1060,19 +1075,35 @@ def reclaim_stale_docker_overlay_mounts_v2(
                 + ",".join(conflicts)
             )
 
+    if pre_mutation_check is not None:
+        pre_mutation_check()
+    expected = replace(before, mounted_overlay_targets=(
+        before.mounted_overlay_targets - frozenset(stale_mounts)
+    ))
+    if _inventory(runner=runner, expected_root=expected_root) != expected:
+        raise DockerStaleMountReclaimerV2Error("Docker inventory changed before stale deletion")
+
     layerdb_root = before.docker_root / "image" / "overlay2" / "layerdb"
     overlay_root = before.docker_root / "overlay2"
     for path in before.stale_layer_records:
+        if mutation_started is not None:
+            mutation_started()
         _remove_directory(path, root=layerdb_root / "sha256")
     for path in before.stale_mount_records:
+        if mutation_started is not None:
+            mutation_started()
         _remove_directory(path, root=layerdb_root / "mounts")
     for path in before.stale_overlay_links:
         if path.parent != overlay_root / "l" or not path.is_symlink():
             raise DockerStaleMountReclaimerV2Error(
                 f"refusing malformed stale overlay link: {path}"
             )
+        if mutation_started is not None:
+            mutation_started()
         path.unlink()
     for path in before.stale_overlay_dirs:
+        if mutation_started is not None:
+            mutation_started()
         _remove_directory(path, root=overlay_root)
 
     after = _inventory(runner=runner, expected_root=expected_root)

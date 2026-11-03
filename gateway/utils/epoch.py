@@ -25,6 +25,17 @@ from gateway.utils.subnet_epoch_archive import (
     validate_cutover_anchor_from_archive,
 )
 
+
+class HistoricalEpochUnavailable(SubnetEpochError):
+    """The caller asked for an epoch other than the current settlement epoch.
+
+    This is a client-correctable condition, not a gateway or chain failure: the
+    gateway only serves the current epoch and keeps no persisted boundary
+    ledger. It is a dedicated subclass so the API layer can answer 404 while
+    every other ``SubnetEpochError`` still surfaces as a server error.
+    """
+
+
 BITTENSOR_BLOCK_TIME_SECONDS = 12
 
 # Network for epoch tracking (from environment variable)
@@ -64,7 +75,7 @@ def _fixed_public_cutover_authority_enabled(
 ) -> bool:
     """Return whether this process is the production SN71 runtime.
 
-    The repository's fixed public Supabase project is production authority for
+    The repository's fixed public database HTTP API is production authority for
     Finney subnet 71 only.
     """
 
@@ -132,7 +143,7 @@ def _read_cutover_state_from_db_sync(
             # Validators and public auditors must not receive the service-role
             # secret. The cutover singleton contains no secrets and migration
             # 101 grants anon read-only access under RLS specifically for this
-            # cross-runtime safety gate. Pin the public project authority rather
+            # cross-runtime safety gate. Pin the public API authority rather
             # than trusting caller-provided endpoint/key overrides.
             public_value = call_public_rpc(
                 _CUTOVER_PUBLIC_STATE_RPC,
@@ -564,7 +575,7 @@ async def get_epoch_info_async(epoch_id: int) -> dict:
     snapshot = await get_current_subnet_epoch_snapshot_async(finalized=True)
     current_epoch = _settlement_epoch_id(snapshot)
     if int(epoch_id) != current_epoch:
-        raise SubnetEpochError(
+        raise HistoricalEpochUnavailable(
             "historical epoch details require the persisted boundary ledger"
         )
     return get_current_epoch_info_from_snapshot(snapshot)

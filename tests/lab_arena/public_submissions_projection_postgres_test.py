@@ -1,6 +1,7 @@
 """Exercise the submissions projection and authorities against real PostgreSQL."""
 
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -8,14 +9,17 @@ from lab_arena import source_disclosure
 from lab_arena.store import ArenaStore, PsycopgTransport, PUBLIC_CONFIGURATION_FIELDS
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.public_submissions_projection_test import _row, _service
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    for database in current_service_database():
+        with database[0].connect(**database[1]) as connection, connection.cursor() as cursor:
+            cursor.execute((Path(__file__).parents[2] / "scripts/601-lab-arena-defending-champion-proof.sql").read_text())
+        yield database
 
 
 def test_real_projection_keeps_rankings_validation_disclosure_and_fresh_generation(database):
@@ -45,8 +49,9 @@ def test_real_projection_keeps_rankings_validation_disclosure_and_fresh_generati
         assert compact["publication_doc"] == full["publication_doc"]
         assert len(compact["publication_doc"]["final_ranking"]) == 3
         assert compact["configuration_doc"] == {
-            key: deepcopy(value) for key, value in full["configuration_doc"].items()
-            if key in PUBLIC_CONFIGURATION_FIELDS + ("scorer_policy",)
+            **{key: deepcopy(value) for key, value in full["configuration_doc"].items()
+               if key in PUBLIC_CONFIGURATION_FIELDS + ("scorer_policy",)},
+            "baseline_champion_source_frozen": False,
         }
         for key in ("participants", "benchmark_ref", "published_at", "icp_set_date",
                     "evaluation_date", "cancel_reason", "status", "status_generation"):

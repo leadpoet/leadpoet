@@ -137,11 +137,19 @@ def test_matching_private_source_metadata_never_grants_redirect_authority():
     assert captured.value.trusted_response_url is None
 
 
-@pytest.mark.parametrize("status", [301, 401, 403, 404, 429, 500])
+@pytest.mark.parametrize("status", [301, 404])
 def test_non_success_target_placeholder_has_no_redirect_exception(status):
     result = adapt(route(), firecrawl_document(status=status))
     assert result[0] == status
     assert result[2] == b"[REDACTED]"
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+def test_target_infrastructure_failure_preserves_only_validated_redirect_authority(status):
+    with pytest.raises(compat.CompatibilityResponseError,
+                       match="firecrawl_source_content_unavailable") as captured:
+        adapt(route(), firecrawl_document(status=status))
+    assert captured.value.trusted_response_url == OBSERVED_FINAL
 
 
 def test_provider_header_cannot_supply_or_replace_validated_redirect_authority():

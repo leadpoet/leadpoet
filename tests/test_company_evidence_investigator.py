@@ -4509,10 +4509,27 @@ def test_complete_identity_binds_exact_unnamed_first_party_industry_quote():
     assert result["industry"]["activity_role"] == "supplier_operator"
 
 
+@pytest.mark.parametrize(("observed_url", "expected_status"), [
+    ("https://www.linkedin.com/company/rapid7", "VERIFIED"),
+    ("https://www.linkedin.com/company/rapid7/life", "VERIFIED"),
+    ("https://www.linkedin.com/company/rapid7/about", "VERIFIED"),
+    ("https://www.linkedin.com/company/rapid7/jobs", "VERIFIED"),
+    ("https://www.linkedin.com/company/other-company/life", "UNPROVEN"),
+    ("https://www.linkedin.com/in/rapid7", "UNPROVEN"),
+    ("https://www.linkedin.com/showcase/rapid7", "UNPROVEN"),
+    ("https://www.linkedin.com.evil.example/company/rapid7/life", "UNPROVEN"),
+    ("https://user@www.linkedin.com/company/rapid7/life", "UNPROVEN"),
+    ("https://www.linkedin.com:bad/company/rapid7/life", "UNPROVEN"),
+    ("https://www.linkedin.com:99999/company/rapid7/life", "UNPROVEN"),
+    ("https://www.linked\nin.com/company/rapid7/life", "UNPROVEN"),
+    ("https://www.linkedin.com/company/rap\nid7/life", "UNPROVEN"),
+])
+@pytest.mark.parametrize("target", ["industry", "required_attribute"])
 def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
-    monkeypatch,
+    monkeypatch, observed_url, expected_status, target,
 ):
     finding = _unnamed_rapid7_industry_finding()
+    finding["target"] = target
     page = (
         "Review Identity Analysis | Cloud Security Documentation. Identity "
         "Analysis provides a unified location to explore cloud accounts and "
@@ -4546,7 +4563,7 @@ def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
             "website": "https://www.rapid7.com/",
             "linkedin": "",
         },
-        targets=("industry",),
+        targets=(target,),
         requested_industry="Cloud Security",
         requested_subindustry="Identity Protection",
         requested_product_service="Cloud security platform",
@@ -4555,9 +4572,7 @@ def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
         prior_observations={
             "observed_company_name": "rapid7",
             "observed_company_website": "https://rapid7.com",
-            "observed_company_linkedin": (
-                "https://www.linkedin.com/company/rapid7"
-            ),
+            "observed_company_linkedin": observed_url,
             "submitted_source_urls": [finding["evidence_url"]],
         },
         verified_homepage_identity={
@@ -4573,15 +4588,17 @@ def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
         },
     ))
 
-    assert result["claims"]["industry"]["status"] == "VERIFIED"
-    assert result["claims"]["industry"]["evidence_quote"] == (
-        finding["evidence_quote"]
+    assert result["claims"][target]["status"] == expected_status
+    assert result["claims"][target]["evidence_quote"] == (
+        finding["evidence_quote"] if expected_status == "VERIFIED" else ""
     )
-    assert _core_usage(result["usage"]) == {
-        "reasoning_turns": 1,
-        "search_calls": 0,
-        "fetch_calls": 0,
-    }
+    usage = _core_usage(result["usage"])
+    assert usage["search_calls"] == usage["fetch_calls"] == 0
+    assert 1 <= usage["reasoning_turns"] <= (
+        investigator.MAX_REASONING_TURNS + investigator.MAX_INCOMPLETE_SUBMIT_RETRIES
+    )
+    if expected_status == "VERIFIED":
+        assert usage["reasoning_turns"] == 1
     input_document = json.loads(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
@@ -5419,7 +5436,9 @@ def test_mislabeled_pdf_body_is_rejected_before_plain_text_extraction(
 
     assert len(pdf_body) > 1_200_000
     assert investigator._plain_text(pdf_body) == ""
-    assert result == {"ok": False, "error": "unsupported_binary_content"}
+    assert result == {
+        "ok": False, "error": "unsupported_binary_content", "_pdf_document": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -7645,6 +7664,14 @@ def test_acquisition_alone_is_not_rebrand_but_explicit_rebrand_can_coexist():
 def test_cross_domain_rebrand_locator_flows_through_bounded_investigator(
     monkeypatch,
 ):
+    async def no_linkedin_redirect(_session, url, **_kwargs):
+        assert url in {
+            "https://www.linkedin.com/company/mittihq",
+            "https://www.linkedin.com/company/safetyculturehq",
+        }
+        return 200, url, ""
+
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", no_linkedin_redirect)
     request_url = "https://safetyculture.com/"
     final_url = "https://mitti.com/"
     page_text = (
@@ -16738,6 +16765,14 @@ def test_real_reserve_completed_judgment_and_faults_through_arena_score(
 def test_unproven_alias_completion_and_fault_classification_through_lab_scorer(
     monkeypatch, cross_domain, missing_submitted_linkedin, review_state,
 ):
+    async def no_linkedin_redirect(_session, url, **_kwargs):
+        assert url in {
+            "https://www.linkedin.com/company/abacus-group",
+            "https://www.linkedin.com/company/abacus-technology",
+        }
+        return 200, url, ""
+
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", no_linkedin_redirect)
     submitted_name = "Abacus" if cross_domain else "DBS"
     submitted_domain = (
         "abacustechnology.com" if cross_domain else "dbs.com"

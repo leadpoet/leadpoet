@@ -1,9 +1,9 @@
 """Miner-funded scoring routes for legacy judge provider calls.
 
 The pinned judge still issues a small set of ScrapingDog-shaped requests.
-Only a miner-funded scoring run translates those requests to the miner's
-Deepline workspace.  Host-funded scoring and miner model execution do not use
-this module's routes.
+Miner-funded scoring and verified promoted-baseline scoring translate those
+requests to Deepline, using the frozen payer for that provider. Ordinary
+host-funded scoring and miner model execution do not use these routes.
 
 The broker keeps the requested operation identity in the ledger.  This module
 only supplies the effective Deepline request and converts the bounded raw
@@ -24,6 +24,9 @@ from lab_arena import deepline_catalog, operations
 
 
 COMPATIBILITY_VERSION = "miner-score-deepline-compat:v1"
+# A changed fixed header profile needs a new wire version. Existing keyed v1
+# reservations must continue to reproduce their original header-free payload.
+SOURCE_HTTP_COMPATIBILITY_VERSION = "miner-score-deepline-source-http:v2"
 EFFECTIVE_OPERATION_ID = "deepline.execute"
 SHADOW_REPLAY_ROUTE_PREFIX = (
     "https://arena.invalid/saved-output-replay/miner-score-route/"
@@ -80,10 +83,11 @@ class MinerScoreRoute:
     adapter: str
     requested_parameters: Mapping[str, Any]
     evaluation_date: Optional[date] = None
+    compatibility_version: str = COMPATIBILITY_VERSION
 
     def summary(self) -> dict[str, str]:
         return {
-            "compatibility_version": COMPATIBILITY_VERSION,
+            "compatibility_version": self.compatibility_version,
             "effective_operation_id": self.effective_operation_id,
             "adapter": self.adapter,
         }
@@ -181,6 +185,7 @@ def route_for(
     parameters: Mapping[str, Any],
     timeout_ms: Optional[int] = None,
     allow_host_shadow_score: bool = False,
+    allow_champion_score: bool = False,
     source_content_fallback: bool = False,
     source_content_response_url: Optional[str] = None,
     frozen_catalog: Optional[Mapping[str, Any]] = None,
@@ -189,7 +194,9 @@ def route_for(
 
     if kind != "score" or not (
         funding_source == "miner_key"
-        or (funding_source == "host" and allow_host_shadow_score is True)
+        or (funding_source == "host" and (
+            allow_host_shadow_score is True or allow_champion_score is True
+        ))
     ):
         return None
     # The upstream must finish before the broker stops reading its response.
@@ -245,20 +252,34 @@ def route_for(
             )
             if not response_url:
                 raise operations.OperationRequestError("invalid_url", "response_url")
+            effective_parameters = {
+                "tool": GENERIC_HTTP_TOOL,
+                "payload": {
+                    "url": response_url,
+                    "method": "GET",
+                    "follow_redirects": True,
+                    "timeout_ms": upstream_timeout_ms,
+                },
+            }
+            wire_version = SOURCE_HTTP_COMPATIBILITY_VERSION
+            if frozen_catalog is not None:
+                try:
+                    operations.build_outbound_request(
+                        EFFECTIVE_OPERATION_ID, effective_parameters,
+                        deepline_catalog=frozen_catalog, source_html_profile=True,
+                    )
+                except operations.OperationError:
+                    # A frozen tool may admit the original GET but not these
+                    # fixed headers. Keep its existing v1 route; normal caller
+                    # validation still precedes any reservation or dispatch.
+                    wire_version = COMPATIBILITY_VERSION
             return MinerScoreRoute(
                 requested_operation_id=operation_id,
                 effective_operation_id=EFFECTIVE_OPERATION_ID,
-                effective_parameters={
-                    "tool": GENERIC_HTTP_TOOL,
-                    "payload": {
-                        "url": response_url,
-                        "method": "GET",
-                        "follow_redirects": True,
-                        "timeout_ms": upstream_timeout_ms,
-                    },
-                },
+                effective_parameters=effective_parameters,
                 adapter="generic_http_raw_html",
                 requested_parameters=requested,
+                compatibility_version=wire_version,
             )
         payload = {
             "url": requested["url"],
@@ -268,6 +289,17 @@ def route_for(
             "timeout": upstream_timeout_ms,
             "storeInCache": False,
         }
+        if frozen_catalog is not None:
+            try:
+                # This route promises raw HTML. PDF extraction uses the
+                # judge's bounded exact-URL document recovery instead of
+                # Firecrawl's default per-page parser. Older frozen schemas
+                # that lack this option keep their original request shape.
+                payload = deepline_catalog.validate_payload(
+                    frozen_catalog, FIRECRAWL_TOOL, {**payload, "parsers": []},
+                )
+            except deepline_catalog.CatalogError:
+                pass  # The broker still validates the original route.
         return MinerScoreRoute(
             requested_operation_id=operation_id,
             effective_operation_id=EFFECTIVE_OPERATION_ID,
@@ -319,7 +351,7 @@ def route_for(
     return None
 
 
-def _envelope_data(body: bytes) -> Any:
+def _envelope_data(body: bytes, *, source_json: bool = False) -> Any:
     try:
         document = json.loads(bytes(body).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -330,6 +362,22 @@ def _envelope_data(body: bytes) -> Any:
     data = result.get("data") if isinstance(result, Mapping) else None
     if not isinstance(data, (Mapping, list)):
         raise CompatibilityResponseError("missing_deepline_result")
+    if (
+        source_json and isinstance(data, Mapping)
+        and isinstance(data.get("rawHtml"), (Mapping, list))
+    ):
+        # Only the new structured-source lane needs this additional native
+        # failure proof. Keys inside rawHtml belong to the source JSON itself.
+        for node in (document, result, data):
+            node_status = node.get("status")
+            if (
+                node.get("error") is not None or node.get("tool_error") is not None
+                or ("isError" in node and node["isError"] is not False)
+                or ("success" in node and node["success"] is not True)
+                or (node_status is not None and not isinstance(node_status, str))
+                or node_status in {"failed", "cancelled", "canceled", "error"}
+            ):
+                raise CompatibilityResponseError("invalid_deepline_envelope")
     return data
 
 
@@ -401,7 +449,15 @@ def _firecrawl_response(
 ) -> tuple[int, dict[str, str], bytes, str]:
     raw_html = data.get("rawHtml")
     metadata = data.get("metadata")
-    if not isinstance(raw_html, str) or not isinstance(metadata, Mapping):
+    if not isinstance(metadata, Mapping):
+        raise CompatibilityResponseError("missing_firecrawl_raw_html")
+    content_type = metadata.get("contentType")
+    structured_json = (
+        isinstance(raw_html, (Mapping, list))
+        and isinstance(content_type, str)
+        and content_type.split(";", 1)[0].strip().casefold() == "application/json"
+    )
+    if not isinstance(raw_html, str) and not structured_json:
         raise CompatibilityResponseError("missing_firecrawl_raw_html")
     requested_url = str(route.requested_parameters.get("url") or "")
     if str(metadata.get("sourceURL") or "") != requested_url:
@@ -422,6 +478,31 @@ def _firecrawl_response(
     status = metadata.get("statusCode")
     if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
         raise CompatibilityResponseError("missing_firecrawl_target_status")
+    if structured_json:
+        # Firecrawl can preserve a JSON source as parsed data even in rawHtml.
+        # Match the generic transport's JSON contract after the same source,
+        # final-URL and target-status proof. Never expose a failed target body
+        # or let the legacy text sanitizer truncate a JSON document.
+        if not 200 <= status < 300:
+            raise CompatibilityResponseError("missing_firecrawl_raw_html")
+        if not _safe_public_source_https_url(requested_url):
+            raise CompatibilityResponseError("invalid_firecrawl_source_url")
+        if not _safe_public_source_https_url(final_url):
+            raise CompatibilityResponseError("invalid_firecrawl_final_url")
+        encoded = _json_bytes(raw_html)
+        if len(encoded) > operations.OPERATIONS[route.requested_operation_id].max_response_bytes:
+            raise CompatibilityResponseError("firecrawl_json_body_too_large")
+        return (
+            status, {"content-type": "application/json; charset=utf-8"},
+            encoded, final_url,
+        )
+    if (
+        isinstance(content_type, str)
+        and content_type.split(";", 1)[0].strip().casefold() == "application/pdf"
+    ) or raw_html.lstrip("\ufeff\t\r\n ").startswith(("%PDF-", "JVBERi0")):
+        # Do not present binary/base64 or provider-parsed documents as HTML.
+        # The existing unavailable-source path can recover exact document text.
+        raise CompatibilityResponseError("missing_firecrawl_raw_html")
     if operations.provider_status_is_infrastructure(status) or (
         200 <= status < 300 and (
             not raw_html.strip()
@@ -820,7 +901,7 @@ def adapt_response_with_trusted_url(
         raise CompatibilityResponseError("deepline_http_error")
     if route.adapter == "generic_http_raw_html":
         return _generic_http_raw_html_response(route, body)
-    data = _envelope_data(body)
+    data = _envelope_data(body, source_json=route.adapter == "firecrawl_raw_html")
     if route.adapter.startswith("generic_ats_json:"):
         response_status, response_headers, response_body = _generic_ats_response(
             route, data

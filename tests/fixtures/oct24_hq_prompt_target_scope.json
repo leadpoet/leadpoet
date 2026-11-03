@@ -1,0 +1,917 @@
+{
+  "source_input_sha256": "51dfe2e0161b6b1d83239a62573dd733a818b8de1e8d514f4fa456b27cc05bc5",
+  "source_frozen_plan_sha256": "78d6a88731f21a0a1fe2fbceb5badcf096d31e27b42dcb0d051e1fc4302c6ccb",
+  "main_system_sha256": "565d345a8f107d4e9e1549ffc4692f937df790726821cac37a7d82bd7f59d71c",
+  "main_system_characters": 31626,
+  "five_ac_system_sha256": "e48d489e9162e2a39ad61774da775589e706b2395e6b1221885651c454eb0034",
+  "five_ac_system_characters": 31918,
+  "old_paragraph": "Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or server-fetched \"harvestapi_get_company\nlocations.headquarter=true\" projection, never generic profile locations.",
+  "new_paragraph": "Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or the server-fetched harvestapi_get_company literal selected\nprovider record, never generic profile locations. For that record, quote the\ncomplete bounded JSON containing name, the company profile URL and the selected\nlocations entry with headquarter=true and its country/locality fields. A city fragment\nalone does not prove headquarters. The ordinary identity, source and exact-quote\nchecks still apply.",
+  "cases": [
+    {
+      "slot_id": "unavailable:1:dgmatrix.com",
+      "source_request_hash": "sha256:e755dfa0c121e7661289aec69aa702cde0bbc534e67c8c2a9cc5807471237d04",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:hephaeet.com",
+      "source_request_hash": "sha256:0c54d90642fb9af0086cfe8c5110b5e523d33dabb1465109715e5a3ba364dee7",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:ada.cx",
+      "source_request_hash": "sha256:9beef027fa94460d3b8599e6ee083b8f3d90bbac29e941c2d95949c2682d6edb",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:qualifiedhealthai.com",
+      "source_request_hash": "sha256:a62cb545ab47688771a43bb99e07c06dec45fb204d6495a816123152f9cd134c",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:doctronic.ai",
+      "source_request_hash": "sha256:75005030ae6bb59193fa2253b19398eed6982005f2903d92c1e1c2e09a541a1c",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:luminai.com",
+      "source_request_hash": "sha256:6ad1f78c934c9fd060d403908de929b599a502638fb2e20f76c51e9885aacfb0",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:generalmedicine.com",
+      "source_request_hash": "sha256:d928253077c651a5b88aec5628e2f2a25e572d6dbc00de8ac3c643cbe498b3a4",
+      "requested_targets": [
+        "stage",
+        "rebrand",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:nextdoor.com",
+      "source_request_hash": "sha256:ca4e57180303fe9b331ce98e6ca923db615b6935ac57ef01fae18ecec4035236",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:netomi.com",
+      "source_request_hash": "sha256:14b26d87d04fd98907c088c9b5e2b4e285b993381a07ceff3fdf242f6ca1e326",
+      "requested_targets": [
+        "stage",
+        "required_attribute",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:velaura.ai",
+      "source_request_hash": "sha256:725f80b632c3fc3ef2f1fcad5c139e643487625536a04a7b894c8530501fa588",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:river.ai",
+      "source_request_hash": "sha256:01c2d1720e79e6849b00247d0179f69cbd1cf5f9e7792c5d637b190c7d01aca3",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:rackspace.com",
+      "source_request_hash": "sha256:d1d2919d5980a28cc49ca938c208c9e790f3efd1933499b594edba5fb303d3c8",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:griddynamics.com",
+      "source_request_hash": "sha256:eca1d100484b3c7f3fbe6c8c05d16f8b69b62532138d2ea8c9b269060b844c8f",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:cognizant.com",
+      "source_request_hash": "sha256:0aa8ee81a8604d4363cdb901385c5396dd14162262c04879b3d078043914cf51",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "geography",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:richardsbuildingsupply.com",
+      "source_request_hash": "sha256:6877d9b5607d1cbced6ed348dcc084e29d24750ed401d63b94230669f25a9d35",
+      "requested_targets": [
+        "stage",
+        "rebrand",
+        "headcount",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:climaterobotics.com",
+      "source_request_hash": "sha256:2b74a3961f30eb6c2be65cb6c2b75818c588d7267c16cd9f8d2aea3ea36d9fe8",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:r3lithium.com",
+      "source_request_hash": "sha256:c94f99b24ca8db5caa69f4728c9348210e6300c6ef53033054dcadff49c06d2b",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:fleetzero.com",
+      "source_request_hash": "sha256:1a246124e8179b47733ca1721a0874629e79c405464d4c5ee5795989bbacad89",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:astonpower.com",
+      "source_request_hash": "sha256:ed23746a741547359317ae4f1fc4fff7f8875be8f35c8b499dc314c2d78d1c7a",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:3:rlcarriers.com",
+      "source_request_hash": "sha256:036a98758d97c9bcec95ebaff21ec0ef0b483435090b53ddf006dac8c54e954c",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "required_attribute",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:conexiom.com",
+      "source_request_hash": "sha256:53c9b641c2c493ff0855749c89d0aad244a0aa503382c5b710126414efc7f5fa",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:augusthealth.com",
+      "source_request_hash": "sha256:b02e202cbe9630bf4c2902d4df282604b34cf75216d31830b2724dc69565e108",
+      "requested_targets": [
+        "stage",
+        "required_attribute",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:alaffiahealth.com",
+      "source_request_hash": "sha256:042c8587209236ef08c95e8a52d829b40a0f1e1ce0d03aba7f01a1c65ae5841d",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:liveramp.com",
+      "source_request_hash": "sha256:ccb5a0ef2ac5e3239d875f2542d7113b058e260186996330a45cd1b55cfb67fb",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:magnite.com",
+      "source_request_hash": "sha256:a5c6e8ab3e475de77833c570927f1df0331d466515353d480f2a8b360ba08a90",
+      "requested_targets": [
+        "stage",
+        "geography",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:vapi.ai",
+      "source_request_hash": "sha256:df4e1ce542b58171ef4174572693989cf82add3fedd11ee3dcd20b819cbc7f0e",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:actively.ai",
+      "source_request_hash": "sha256:9ce11f4c939f8fab8ccee3f9d56a186dea14c5360bcaf6d4356d13914850df12",
+      "requested_targets": [
+        "stage",
+        "required_attribute",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:neuron7.ai",
+      "source_request_hash": "sha256:ee48f544c873f6ec704cbff2b8c88cbc6d33881aeb2244c21fba2830128de618",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:serval.com",
+      "source_request_hash": "sha256:d03056cf90d99777cd1d3b1a20cf229a507dc1fd3ce3075e33d98887ec0f5735",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "industry",
+        "geography",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:powerlatticeinc.com",
+      "source_request_hash": "sha256:2c806a5d2154975eda6a9ca9d7051abeacf0ec71a8c90c9340186724fb91da37",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:caci.com",
+      "source_request_hash": "sha256:065009ea07ed03977421693449ae2f1e3539a30a87c754ef88bd630a876baaef",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:conduent.com",
+      "source_request_hash": "sha256:2d2f3183daab89387d6b3a8ae359d11ebcc1c6aa9ff99059c84b86a4bff4bc6c",
+      "requested_targets": [
+        "stage",
+        "required_attribute",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:maximus.com",
+      "source_request_hash": "sha256:3067bcb52c8bbd01ac98a7badb86d45686a4d8b33cef870f58f201c2cd8fbd0c",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:vytexwindows.com",
+      "source_request_hash": "sha256:3a3ca011f3922da3ad714499a711018741b2c3f37dc2764c95380eb2ee851785",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:nitra.com",
+      "source_request_hash": "sha256:a7ba45692ecccb1647350428c28cff3d940da536cf49b637f9580c034175a3bd",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:arintra.com",
+      "source_request_hash": "sha256:1d351e0f42baba63b217960d9f559e4103d1f77cbec2ab1ac79773b8e25f7da4",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:exlservice.com",
+      "source_request_hash": "sha256:2ef4cbb2f6ba144eee413c40cd4a9f16b52094dd4f61297c3ffffb9590ade729",
+      "requested_targets": [
+        "stage",
+        "rebrand",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:inteplast.com",
+      "source_request_hash": "sha256:6d58b8d94e12ee1c8b31736946535fc75a0a6db9cb0d996c00f4c6390982c310",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:primesourcebp.com",
+      "source_request_hash": "sha256:18b35440575b1a074f572a013d2065e459518d27720bdb7a76af14024f8fd9ce",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:scalvy.com",
+      "source_request_hash": "sha256:a167d4fa038fe46fc8f739ef9e4ea87f22ada73debaeccd4dc340395e6359683",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:ritten.io",
+      "source_request_hash": "sha256:1a00b84510a904cb24a19b091777e599e18043d0efc260a12aa15927bc1ee6db",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:greatergoodhealth.com",
+      "source_request_hash": "sha256:92c0631ad84b9fc22d173bbf919a2111d1571681b361ac5d08aa09ad881553c6",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:roku.com",
+      "source_request_hash": "sha256:93f8bf7e332e65482080fe70860f03ad74ef52cd12a0aeb13661e2c7f3dc443f",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:redo.com",
+      "source_request_hash": "sha256:15ef211c2835d88d9e52e412f47704c946125db83990f27063fb660f351761f3",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:nutanix.com",
+      "source_request_hash": "sha256:d3057a5c9266257e1a65cbff46abd8469cf6319d7b70432b84d5a43527d680a9",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:matrixadhesives.com",
+      "source_request_hash": "sha256:5e1262b18c6f59ed881442849da45a66462502c1f7e5541a1596cbf68f405958",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:herthametals.com",
+      "source_request_hash": "sha256:1decb74396cae8c45ff3d091d9ca3bc8b52164687952b15226e353fa0fa84cda",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:slang.ai",
+      "source_request_hash": "sha256:cc42472c0693e8426294601825619bee196910c75387542e1f357955b5680534",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:leidos.com",
+      "source_request_hash": "sha256:0eb5d7bbd4f8a3a17be5911e91e8f4f324f1cac6ffbd7edafea945ad5594b485",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:lumen.com",
+      "source_request_hash": "sha256:4db93624dfa4a989a2ccb584e2b79cfdd3d3b5098e722428682be84b3803fa3f",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:nanotechmaterials.com",
+      "source_request_hash": "sha256:70e1bcb06546fab9cb9a21d3196fe7bcfef0488719d1fb24552a3c088acec15d",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:courierhealth.com",
+      "source_request_hash": "sha256:f39e7e7fb44fa44b25c181fe0cc301affc18e0e7f14c009839a8b8badd7602d5",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:1:lazarusenergy.com",
+      "source_request_hash": "sha256:66ec4c5a70652518d3815c96769ceb83ad6aebf1e35cbd1431f3547cebefedab",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:omnidesigntech.com",
+      "source_request_hash": "sha256:ddd4d03c3ffc63c8bd06ac12641ca3223480656ff209ef42f248b340664f275c",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:digitalrealty.com",
+      "source_request_hash": "sha256:4708e0356ae2d5216c4145b51bcbb1754101215aeb2a9d5c481ba0e11629c960",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:technimark.com",
+      "source_request_hash": "sha256:346d21fa7d231f7a86ab01d1ea1a24e5de07c9002f3a70a47e5b37abefefef11",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:canopyworks.com",
+      "source_request_hash": "sha256:736d004b18c0bc49f2de14e6ce62f86428a73e27b33b6671b87ea49879efb36f",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:town.com",
+      "source_request_hash": "sha256:fba8853641d9a9a37ba3c4591d9cb8633289b6a0511abcbabff2fcd3c1dd4e77",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:cognichip.ai",
+      "source_request_hash": "sha256:b0c1e807d17efe1662ab1a45ce568f7957789139d6a6ce096992b835876c3def",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:peakcommerce.com",
+      "source_request_hash": "sha256:d9adbe4fcab2afd9116f2f87df77433a98c5ab45dc691089c55396172819a87a",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:gethealthie.com",
+      "source_request_hash": "sha256:91958ec43130ee3fc42c63da969d2cc73f42bcfde29b7ce11c6fc6f8d18c056e",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:genpact.com",
+      "source_request_hash": "sha256:690d05a365484af6c6e5d142b490c643ea55a0a42ec127aa59761ba9e94c8705",
+      "requested_targets": [
+        "stage",
+        "geography",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:benchsci.com",
+      "source_request_hash": "sha256:a8ce45982eb775e504556c497093ad59b652d07a919ff8ff0f970efa795eb033",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:insight.com",
+      "source_request_hash": "sha256:2f5f7e2cd7d8a5b917702f88559e51700b3f8e9f76a9307bbea7362a05efb269",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "geography",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:xcures.com",
+      "source_request_hash": "sha256:a5d7d5d4ddca59a27b3d42a4f8344e7d0349168b91f999267086b81a05e717ed",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:3:universallogistics.com",
+      "source_request_hash": "sha256:c2410148185f7459eee512553502fa29ae08d804d18980ad8208f7e903a6a5e0",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:clio.com",
+      "source_request_hash": "sha256:8b4c4223cc62d25d10fdcbbeaf673e1ec98cf7243ce19fbe1a5241d5c5caf176",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:weareroku.com",
+      "source_request_hash": "sha256:f886eec61dfdf7fa78d9e6217b5b2128136e117646941911fd258b48f54549b4",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:oxmiq.ai",
+      "source_request_hash": "sha256:c9e955fa55d6f0c6c35ae0e526c71ca09e7545ba7e9dedc9c316fb2d9fa3cf30",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:eridu.ai",
+      "source_request_hash": "sha256:0d721d9692ac12ebc40c0d2775013689ba8ce80de624d3e9cb88ffda48c37f9d",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:ahfproducts.com",
+      "source_request_hash": "sha256:5e149b63fecec00a4cad6fa8a64775b5b53e6409e6634c509f39b45b289fa045",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:mkbcompany.com",
+      "source_request_hash": "sha256:73b2c1546a6eecbfdeda9239caba6361f538cb1228e6fb0fcdc2ae037e0c3f91",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:hwp.com",
+      "source_request_hash": "sha256:9add800ffd7c4ff6ec3f5c89ae5ac1eb85d2a5d5cc0425870d9d389f81262e88",
+      "requested_targets": [
+        "stage",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:3:centraltransport.com",
+      "source_request_hash": "sha256:a945a9700f29b8e3325dbec0fc95aa7a9659f56d2af3b0bd56e45ea2cf052f32",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "required_attribute",
+        "industry"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:apella.io",
+      "source_request_hash": "sha256:8516fe1243bb20a3caaf8c271a074bf12b1a669969623fc7f1e247cf38bffca2",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:palantir.com",
+      "source_request_hash": "sha256:a4c240fc491e1602e05d4eb4cbe31748c0be07f331f72e0647f5f3484a9fb013",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:visier.com",
+      "source_request_hash": "sha256:5abb861d817504ff69e146d204dece98b306f99dd6911f8a504210f449798ee5",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:meta.com",
+      "source_request_hash": "sha256:a2c6781e958ecdaf446de651506b0b8fc08da7fc19d56628c95f682ee1d114de",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:xcelerium.com",
+      "source_request_hash": "sha256:06524daa6534a621cbcd66ad5c5d5e5822731e13ba05fcf1c4b6a79e2b4a257e",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:mueon.com",
+      "source_request_hash": "sha256:c913310995f0505a0b73061233b611b84fef754dfe7ee20bcfa4eaf6408d99b3",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:frtw.com",
+      "source_request_hash": "sha256:467d6194e052a5a31ff4b2721be84820578701d7e0c3b048c7ecbccde485a31c",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:geotab.com",
+      "source_request_hash": "sha256:c5b2b67f5fbb1d07f51aa60eefae085f47b2eeb8d938f1475ecd33797bf91438",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "geography",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:5:triomics.com",
+      "source_request_hash": "sha256:8436a8242e11d3479cdd49f039b472dad72a7afe8e1319779fa7e99af6239906",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:system1.com",
+      "source_request_hash": "sha256:548fe4866d737a0e8908b970c6725687f5c7fbb67c1e2ebe306f0c03f3564e7b",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:snap.com",
+      "source_request_hash": "sha256:2905e67198ed050922e354f98deff0c3a47bad68fa20abb91ad519ee88ce5e84",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:synnexcorp.com",
+      "source_request_hash": "sha256:5ba3a31750ae8ad5c0e6624a802b27111cd5b9ccd9f6d78faa5576048eebe8ac",
+      "requested_targets": [
+        "stage",
+        "rebrand",
+        "headcount",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:f5.com",
+      "source_request_hash": "sha256:e8862bc455a06589407fa6f3123f90ba23478015af61175696919632631c0744",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:unity.com",
+      "source_request_hash": "sha256:b725aecfd2b0dc188d34f4b95c36a611175c89b1a3a3ce3328406bd812e512c7",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:6:applovin.com",
+      "source_request_hash": "sha256:e77255f08abb243239c871d033a0e23916cd28766e31d7d288855b6d2f14a799",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "geography",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:amentum.com",
+      "source_request_hash": "sha256:46602e9b4a3961f9d382da6de8d0184a78c19b110117ac3f34fd63b778a618c3",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:9:boozallen.com",
+      "source_request_hash": "sha256:307058db1f8c7ee51af0ebb9f11d242d13766de598662f6fc6587f0122ea7916",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:0:cascadewindows.com",
+      "source_request_hash": "sha256:53c69cd113f79aeb1ad8edbcab491710dd15d2635cb203dd53ef65012f96f92e",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:4:vendasta.com",
+      "source_request_hash": "sha256:08da5786745bc43b3cec28d3c79e7ccca8d5b9e3d3da23be41a78463477d1eb3",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:getredo.com",
+      "source_request_hash": "sha256:360708f936eef1e3d6b9c519ec1ca467ef491c43d42ca23f0ae6ad786d09ac02",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:curbwaste.com",
+      "source_request_hash": "sha256:69f7538a0e7a8c9cb5beee7a72d8ba0eaf22f9146ec01ccc029f5cf5b841f241",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:stuut.ai",
+      "source_request_hash": "sha256:b1d46429749030c3c854fdfaa8e57890c8bb6a553808d263e044df0224d3ccc7",
+      "requested_targets": [
+        "stage",
+        "headcount",
+        "industry",
+        "geography",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:7:opus1.io",
+      "source_request_hash": "sha256:7604346d5fddd29176559aed84ce778335d832c4e10b7e0ad2da02692498f1da",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    },
+    {
+      "slot_id": "unavailable:8:wici.ai",
+      "source_request_hash": "sha256:30286c84524357e9a1830d2ea3774b3c668a14a3400b8504d744cca24892d5da",
+      "requested_targets": [
+        "stage",
+        "industry",
+        "required_attribute"
+      ]
+    }
+  ]
+}

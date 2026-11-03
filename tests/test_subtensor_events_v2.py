@@ -46,6 +46,7 @@ CURRENT_RUNTIME_FIXTURES = {
     482: ROOT / "tests" / "fixtures" / "subtensor_events_spec482_block9334846.json",
     483: ROOT / "tests" / "fixtures" / "subtensor_events_spec483_block9342766.json",
     484: ROOT / "tests" / "fixtures" / "subtensor_events_spec484_block9348526.json",
+    486: ROOT / "tests" / "fixtures" / "subtensor_events_spec486_block9369766.json",
 }
 
 
@@ -282,6 +283,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "6bb2f87cc01db758f9e8d05c8e221a696dd40cd0a7e853e56c5d41895ae3ba71",
             "0x23041f50d3529b359e9be3b90f3ca40474678e834e97f49fb401d0c691097760",
             270,
+        ),
+        (
+            486,
+            "142e2f2735d9585567fd71e080554a2a0ec10d4ad0bcedb4993e87e473ddd852",
+            "0x49781ac4cfda0ac6cf6e53cfceea7c728394d9c28da7881f47e3fbfbc239800f",
+            248,
         ),
     ),
 )
@@ -579,7 +586,7 @@ def test_spec477_measured_current_epoch_reveal_is_exact():
         _proof(validated, fixture, events_raw + b"\x00", count_raw)
 
 
-@pytest.mark.parametrize("spec_version,previous_spec", [(478, 477), (479, 478), (481, 479), (482, 481), (483, 482), (484, 483)])
+@pytest.mark.parametrize("spec_version,previous_spec", [(478, 477), (479, 478), (481, 479), (482, 481), (483, 482), (484, 483), (486, 484)])
 def test_recent_missing_or_wrong_profile_fails_closed(monkeypatch, spec_version, previous_spec):
     fixture = json.loads(CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8"))
     with pytest.raises(SubtensorEventsV2Error, match="observed spec version differs"):
@@ -846,7 +853,7 @@ def test_profile_tampering_and_unreachable_types_fail_closed():
     "exact", "owner", "uid", "event_count", "trailing", "metadata",
     "code", "genesis", "spec", "transaction", "phase", "duplicate",
 ])
-@pytest.mark.parametrize("spec_version", [482, 483, 484])
+@pytest.mark.parametrize("spec_version", [482, 483, 484, 486])
 def test_recent_reveal_requires_exact_runtime_and_event_pair(control, spec_version):
     fixture = json.loads(CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8"))
     profile = load_subtensor_events_profile_v2(spec_version=spec_version)
@@ -857,6 +864,7 @@ def test_recent_reveal_requires_exact_runtime_and_event_pair(control, spec_versi
         482: (9334846, "0xffb4cc331f6dd0f74bdb11e530c32e7c70619822b5f3da8e84793d7d885b0892", 155, (38, 39)),
         483: (9342766, "0xef0cd18806882a8fb1edb5d6084388ed239cd47cff670d1ed0019aa3f98de9a1", 0, (38, 39)),
         484: (9348526, "0x81e118fd13ce93cebedafa206457f0b297c548c50b42a33fd20bc070cc4f9bc9", 0, (40, 41)),
+        486: (9369766, "0x497f30c4e5773fc89c606a0d222a75a953e0a68602efab254ff8575dd47e6e9e", 0, (43, 44)),
     }[spec_version]
     assert fixture["block_number"] == expected_block
     assert fixture["block_hash"] == expected_hash

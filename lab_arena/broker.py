@@ -16,6 +16,7 @@ import asyncio
 import base64
 from collections import deque
 import contextvars
+import copy
 import hashlib
 import hmac
 import json
@@ -35,9 +36,10 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 import httpx
 
-from lab_arena import contracts, deepline_catalog, operations, provider_costs, scoring_provider_compat
+from lab_arena import contracts, deepline_catalog, operations, provider_costs, reasoning_capture, scoring_provider_compat
 from lab_arena import telemetry, training_capture
 from lab_arena.contracts import ArenaContractError
+from lab_arena.lab_arena_codex import replayable_search_shape
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable, safe_store_error_metadata
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
@@ -47,6 +49,7 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
 OPENROUTER_GPT6_LUNA_RESPONSES_MODEL = "openai/gpt-6-luna"
+OPENROUTER_INDUSTRY_REVIEW_MODEL = "openai/gpt-6.1-sol"
 OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS = frozenset(
     (OPENROUTER_LUNA_RESPONSES_MODEL, OPENROUTER_GPT6_LUNA_RESPONSES_MODEL)
 )
@@ -76,6 +79,14 @@ DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
 )
 PRICED_COMPONENTS = ("prompt", "completion", "request", "image", "web_search", "internal_reasoning")
+# These routes charge the catalog's search fee once per request, even without
+# a tools field (https://openrouter.ai/perplexity/sonar and /sonar-pro).
+# Do not infer this billing unit from a nonzero optional-tool price or extend
+# it to Deep Research: that route charges for multiple searches and additional
+# provider-owned citation/reasoning tokens, without a caller-controlled bound.
+OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS = frozenset({
+    "perplexity/sonar", "perplexity/sonar-pro",
+})
 MAX_PRICE_TABLE_BYTES = 8 * 1024 * 1024
 MICROUSD = Decimal(1_000_000)
 # Conservative input-token bound: no production tokenizer emits more tokens
@@ -189,8 +200,9 @@ _CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
 # The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
 _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
-# Completed key lookups include the original Firecrawl response envelope.
-_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES + 16_384
+# Billing key lookups retain even source replies rejected by the 16 MiB cap.
+# Read their bill within a separate fixed bound; never return that source body.
+_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = 32 * 1024 * 1024
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
@@ -721,7 +733,7 @@ def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, par
     if pricing is None:
         raise BrokerError("model_not_allowed")
     return _max_openrouter_cost_for_pricing(
-        pricing, parameters, max_output_tokens=max_output_tokens
+        pricing, parameters, max_output_tokens=max_output_tokens, model=model
     )
 
 
@@ -730,6 +742,7 @@ def _max_openrouter_cost_for_pricing(
     parameters: Mapping[str, Any],
     *,
     max_output_tokens: int,
+    model: Optional[str] = None,
 ) -> int:
     input_tokens = bounded_input_tokens(parameters)
     output_tokens = int(max_output_tokens)
@@ -742,12 +755,22 @@ def _max_openrouter_cost_for_pricing(
         Decimal(pricing["web_search"]),
         OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL,
     ) if web_search_enabled else Decimal("0")
+    if (model if model is not None else parameters.get("model")) in OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS:
+        # Operation validation forbids plugins/web_search_options, so these
+        # are the unchanged default native-search requests. Their search is
+        # intrinsic, not the optional bounded server tool above.
+        intrinsic_search_price = Decimal(pricing["web_search"])
+        if intrinsic_search_price <= 0:
+            raise BrokerError("broker_unavailable")
+    else:
+        intrinsic_search_price = Decimal("0")
     usd = (
         Decimal(pricing["prompt"]) * input_tokens
         + Decimal(pricing["completion"]) * output_tokens
         + Decimal(pricing["internal_reasoning"]) * output_tokens
         + Decimal(pricing["request"])
         + web_search_price * web_search_calls
+        + intrinsic_search_price
     )
     return _microusd_ceiling(usd)
 
@@ -765,6 +788,7 @@ def _openrouter_web_search_enabled(parameters: Mapping[str, Any]) -> bool:
 class OpenRouterHostRoute:
     provider_policy: Mapping[str, Any]
     reservation_pricing: Mapping[str, str]
+    industry_schema_order: bool = False
 
 
 def _json_decimal_number(value: Decimal) -> Any:
@@ -781,10 +805,15 @@ def _openrouter_host_route(
     model: str,
     pricing: Mapping[str, Any],
     parameters: Mapping[str, Any],
+    industry_review_model: Optional[str] = None,
 ) -> Optional[OpenRouterHostRoute]:
-    """Return the one source-controlled execution route that differs by model."""
+    """Return a source-controlled route for an opted-in model and run role."""
 
-    if (
+    industry_route = (
+        kind == "score" and operation_id == "openrouter.chat"
+        and model == industry_review_model == OPENROUTER_INDUSTRY_REVIEW_MODEL
+    )
+    if not industry_route and (
         kind != "execute"
         or operation_id != "openrouter.responses"
         or model not in OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS
@@ -795,7 +824,21 @@ def _openrouter_host_route(
         * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER
         for component in PRICED_COMPONENTS
     }
-    if bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS:
+    long_context = bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS
+    if industry_route:
+        # These are the published Sol Azure US/EU prices, not the cheaper
+        # Flex price that may occupy the public model catalog row. Keep a
+        # conservative cache-write ceiling and its published long-input tier.
+        regional = {
+            component: Decimal(str(pricing[component])) for component in PRICED_COMPONENTS
+        }
+        regional["prompt"] = max(
+            regional["prompt"], Decimal("0.0000044" if long_context else "0.0000022")
+        )
+        regional["completion"] = max(
+            regional["completion"], Decimal("0.0000165" if long_context else "0.000011")
+        )
+    elif long_context:
         if model == OPENROUTER_GPT6_LUNA_RESPONSES_MODEL:
             long_prompt_price = OPENROUTER_GPT6_LUNA_LONG_CONTEXT_PROMPT_PRICE
             long_completion_price = (
@@ -835,6 +878,7 @@ def _openrouter_host_route(
     }
     return OpenRouterHostRoute(
         provider_policy=provider_policy,
+        industry_schema_order=industry_route,
         reservation_pricing={
             component: format(value.normalize(), "f")
             for component, value in regional.items()
@@ -860,28 +904,102 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 
 
 
-def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
+def openrouter_normalized(parameters: Mapping[str, Any], *, allow_full_thinking: bool = False) -> Dict[str, Any]:
     """The OpenRouter body the broker hashes and sends: the output cap is always explicit."""
 
     token_field = "max_output_tokens" if "input" in parameters else "max_tokens"
     requested = parameters.get(token_field)
     cap = (operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
-           if token_field == "max_output_tokens" else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
+           if token_field == "max_output_tokens" or allow_full_thinking else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
+    if allow_full_thinking and requested is not None and (type(requested) is not int or requested > cap):
+        raise BrokerError("invalid_request")
     max_tokens = operations.OPENROUTER_MAX_OUTPUT_TOKENS if requested is None else min(int(requested), cap)
     if max_tokens < 1:
         raise BrokerError("invalid_request")
     normalized = dict(parameters)
     normalized[token_field] = max_tokens
+    if allow_full_thinking and isinstance(parameters.get("input"), list):
+        # Codex replays the native type name. OpenRouter requires its provider
+        # alias for this completed search shape. Preserve every other field;
+        # never invent an ID or restore sources omitted by the client.
+        normalized["input"] = []
+        for item in parameters["input"]:
+            if (isinstance(item, Mapping) and item.get("type") == "web_search_call"
+                    and replayable_search_shape(item)):
+                item = copy.deepcopy(dict(item))
+                item["type"] = "openrouter:web_search"
+            normalized["input"].append(item)
     return normalized
 
 
-def normalized_request(operation_id: str, parameters: Mapping[str, Any]) -> Dict[str, Any]:
-    """Validate and normalize a request exactly as ``Broker.execute`` does."""
+def normalized_request(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    reasoning_capture_policy: Optional[str] = None,
+    reasoning_route_registry: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and normalize a request exactly as ``Broker.execute`` does.
 
-    normalized = operations.validate_operation_request(operation_id, parameters)
+    The reasoning arguments reproduce an agent run under a frozen round policy.
+    """
+
+    normalized = operations.validate_operation_request(
+        operation_id, parameters,
+        allow_full_thinking=reasoning_capture_policy == reasoning_capture.POLICY,
+    )
     if operations.OPERATIONS[operation_id].provider == "openrouter":
-        normalized = openrouter_normalized(normalized)
+        normalized = openrouter_normalized(
+            normalized, allow_full_thinking=reasoning_capture_policy == reasoning_capture.POLICY)
+        normalized, _ = agent_reasoning_parameters(
+            operation_id, normalized, policy=reasoning_capture_policy,
+            registry=reasoning_route_registry,
+        )
     return normalized
+
+
+def agent_reasoning_parameters(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    policy: Optional[str],
+    registry: Optional[Mapping[str, Any]] = None,
+    deepline_catalog: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Apply a round's frozen reasoning policy to one validated agent call.
+
+    The full-thinking policy admits only an exact reviewed route. Explicit
+    enabled reasoning settings and output limits remain the caller's choice.
+    """
+
+    try:
+        updated, annotation = reasoning_capture.apply(
+            operation_id, parameters, policy=policy,
+            registry=registry,
+        )
+    except ValueError as exc:
+        code = "invalid_request" if str(exc) in {"reasoning_route_unsupported", "reasoning_headroom_unavailable", "reasoning_controls_invalid"} else "broker_unavailable"
+        raise BrokerError(code) from exc
+    if annotation is None:
+        return dict(parameters), annotation
+    try:
+        # Validate schema and encoded-size limits on the provider-compatible
+        # representation that will be hashed and sent.
+        if policy == reasoning_capture.POLICY:
+            updated = openrouter_normalized(updated, allow_full_thinking=True)
+        updated = operations.validate_operation_request(
+            operation_id, updated, deepline_catalog=deepline_catalog,
+            allow_full_thinking=policy == reasoning_capture.POLICY,
+        )
+        if policy != reasoning_capture.POLICY:
+            updated = openrouter_normalized(updated)
+    except (operations.OperationError, BrokerError) as exc:
+        raise BrokerError("invalid_request") from exc
+    if policy == reasoning_capture.POLICY:
+        output_field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
+        if bounded_input_tokens(updated) + updated[output_field] > annotation["context_tokens"]:
+            raise BrokerError("invalid_request")
+    return updated, annotation
 
 
 def deepline_cost_microusd(body: bytes) -> Optional[int]:
@@ -1120,6 +1238,9 @@ class ProviderResponse:
     # Broker-internal provenance for a synthetic generic response. Never
     # forwarded as a provider header or model-visible response field.
     internal_provenance: Optional[str] = None
+    # Set only by the authenticated, request-bound completed-execution lookup.
+    # This is not provider content or synthetic-response provenance.
+    deepline_completed_execution: bool = False
 
 
 def _response_contains_credential(response: ProviderResponse, secret: str) -> bool:
@@ -1355,6 +1476,41 @@ def _deepline_job_request_id(document: Any) -> Optional[str]:
     return present[0]
 
 
+def _deepline_terminal_failure(
+    response: ProviderResponse, document: Any, *, execution_key: Optional[str],
+    operation: Optional[str] = None, operation_aliases: Sequence[str] = (),
+) -> bool:
+    """Prove a complete failed execution independently of its pending bill."""
+    if (response.internal_provenance is not None
+        or type(response.status) is not int or not 400 <= response.status <= 599
+        or not isinstance(document, Mapping)
+        or not isinstance(execution_key, str)
+        or _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None
+        or document.get("status") not in (None, "completed", "failed", "cancelled")
+        or document.get("result") is not None):
+        return False
+    error = document.get("error") or document.get("tool_error")
+    if not ((isinstance(error, str) and error.strip())
+            or (isinstance(error, Mapping) and error)):
+        return False
+    native_id = _deepline_job_request_id(document)
+    if (native_id is None or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
+        or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None):
+        return False
+    if any(value != native_id for name, value in response.headers.items()
+           if name.lower() == "x-deepline-request-id"):
+        return False
+    if any(document[key] not in (operation, *operation_aliases)
+           for key in ("operation", "toolId") if key in document):
+        return False
+    if response.deepline_completed_execution is True:
+        return True
+    recovery = document.get("executionRecovery")
+    return (isinstance(recovery, Mapping)
+            and recovery.get("idempotencyKey") == execution_key
+            and recovery.get("state") == "completed")
+
+
 def _deepline_insufficient_credit_response(response: ProviderResponse, document: Any) -> bool:
     """Identify an authenticated payment refusal, without proving its charge."""
 
@@ -1474,91 +1630,143 @@ def _deepline_execution_response_readback(
         recovery_deadline = deadline if recovery_deadline is None else min(deadline, recovery_deadline)
         if time.monotonic() >= recovery_deadline:
             return None
-    try:
-        lookup = transport.send(
-            method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
-            headers={"accept": "application/json", "authorization": "Bearer " + secret,
-                     "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
-            timeout_seconds=(min(DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
-                max(0.001, recovery_deadline - time.monotonic()))
-                if recovery_deadline is not None else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
-            max_response_bytes=max_response_bytes + 16_384,
-        )
-    except ProviderTransportError:
-        return None
-    if (lookup.status != 200 or lookup.internal_provenance is not None
-        or len(lookup.body) > max_response_bytes + 16_384
-        or [value for name, value in lookup.headers.items()
-            if name.lower() == "x-deepline-idempotency-supported"] != ["true"]
-        or _response_contains_credential(lookup, secret)):
-        return None
-    try:
-        document = json.loads(lookup.body.decode("utf-8"))
-        recovery = document.get("executionRecovery") if isinstance(document, Mapping) else None
-        native_id = document.get("requestId") if isinstance(document, Mapping) else None
-        saved = document.get("response") if isinstance(document, Mapping) else None
-        status = document.get("responseStatus") if isinstance(document, Mapping) else None
-        if (resume_request is not None and isinstance(recovery, Mapping)
-            and recovery.get("idempotencyKey") == execution_key
-            and recovery.get("state") == "running"
-            and document.get("toolId") in (operation, *operation_aliases)
-            and isinstance(native_id, str)
-            and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id)
-            and not _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id)):
-            # The observed workspace key already owns this execution. An
-            # identical POST can continue its declared lifecycle, not launch
-            # a new paid request. Unknown/missing keys never reach this branch.
-            if resume_request.get("headers", {}).get("idempotency-key") != execution_key:
+    # Registration can lag the first POST: a 404 is not proof of no dispatch.
+    # Wait with GETs only, and only when the caller retained the original
+    # request/deadline. Other errors and unbound/malformed proofs fail closed.
+    attempts = _DEEPLINE_BILLING_MAX_ATTEMPTS if resume_request is not None else 1
+    awaiting_native_id: Optional[str] = None
+    for attempt in range(attempts):
+        if recovery_deadline is not None:
+            remaining = recovery_deadline - time.monotonic()
+            if remaining <= 0:
                 return None
-            if recovery_deadline is None or time.monotonic() >= recovery_deadline:
-                return None
-            try:
-                resumed = transport.send(**dict(resume_request,
-                    timeout_seconds=max(0.001, recovery_deadline - time.monotonic())))
-            except ProviderTransportError:
-                return None
-            if (resumed.internal_provenance is not None
-                or len(resumed.body) > max_response_bytes
-                or _response_contains_credential(resumed, secret)):
-                return None
-            resumed_document = json.loads(resumed.body.decode("utf-8"))
-            resumed_recovery = (resumed_document.get("executionRecovery")
-                                if isinstance(resumed_document, Mapping) else None)
-            if (_deepline_job_request_id(resumed_document) != native_id
-                or not isinstance(resumed_document, Mapping)
-                or resumed_document.get("status") != "completed"
-                or (resumed_recovery is not None and (
-                    not isinstance(resumed_recovery, Mapping)
-                    or resumed_recovery.get("idempotencyKey") != execution_key
-                    or resumed_recovery.get("state") != "completed"))
-                or (observed_status is not None and resumed.status != observed_status)):
-                return None
-            # Retain the standard execute envelope, but hide the recovery key.
-            if isinstance(resumed_document, Mapping):
-                resumed_document = dict(resumed_document)
-                resumed_document.pop("executionRecovery", None)
-            body = json.dumps(resumed_document, ensure_ascii=False, allow_nan=False,
-                              separators=(",", ":")).encode("utf-8")
-            return ProviderResponse(resumed.status, resumed.headers, body)
-        # A Vercel trace hint can differ from the keyed native billing ID.
-        # The authenticated saved key/tool/body binding is stronger authority.
-        if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
-            or recovery.get("state") != "completed" or document.get("toolId") not in (operation, *operation_aliases)
-            or not isinstance(native_id, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
-            or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None
-            or type(status) is not int or not 200 <= status <= 599
-            or (observed_status is not None and observed_status != status)
-            or not isinstance(saved, Mapping) or _deepline_job_request_id(saved) != native_id):
+            if attempt:
+                time.sleep(min(_DEEPLINE_BILLING_POLL_SECONDS, remaining))
+                if time.monotonic() >= recovery_deadline:
+                    return None
+        try:
+            lookup = transport.send(
+                method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
+                headers={"accept": "application/json", "authorization": "Bearer " + secret,
+                         "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
+                timeout_seconds=(min(DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+                    max(0.001, recovery_deadline - time.monotonic()))
+                    if recovery_deadline is not None else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
+                max_response_bytes=max_response_bytes + 16_384,
+            )
+        except ProviderTransportError:
             return None
-        saved = dict(saved)
-        saved.pop("executionRecovery", None)
-        body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-    except (UnicodeError, ValueError, TypeError, RecursionError):
-        return None
-    response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body)
-    if len(body) > max_response_bytes or _response_contains_credential(response, secret):
-        return None
-    return response
+        if lookup.status == 404:
+            if (lookup.internal_provenance is not None
+                or len(lookup.body) > max_response_bytes + 16_384
+                or _response_contains_credential(lookup, secret)):
+                return None
+            continue
+        if recovery_deadline is not None and time.monotonic() >= recovery_deadline:
+            return None
+        if (lookup.status != 200 or lookup.internal_provenance is not None
+            or len(lookup.body) > max_response_bytes + 16_384
+            or [value for name, value in lookup.headers.items()
+                if name.lower() == "x-deepline-idempotency-supported"] != ["true"]
+            or _response_contains_credential(lookup, secret)):
+            return None
+        try:
+            document = json.loads(lookup.body.decode("utf-8"))
+            recovery = document.get("executionRecovery") if isinstance(document, Mapping) else None
+            native_id = document.get("requestId") if isinstance(document, Mapping) else None
+            saved = document.get("response") if isinstance(document, Mapping) else None
+            status = document.get("responseStatus") if isinstance(document, Mapping) else None
+            if awaiting_native_id is not None and native_id != awaiting_native_id:
+                return None
+            if ((resume_request is not None or awaiting_native_id is not None)
+                and isinstance(recovery, Mapping)
+                and (observed_status is None or 200 <= observed_status < 300)
+                and recovery.get("idempotencyKey") == execution_key
+                and recovery.get("state") == "running"
+                and document.get("toolId") in (operation, *operation_aliases)
+                and isinstance(native_id, str)
+                and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id)
+                and not _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id)):
+                if awaiting_native_id is not None:
+                    # The sole continuation conflicted; only GETs may follow.
+                    continue
+                # The observed workspace key already owns this execution. An
+                # identical POST can continue its declared lifecycle, not launch
+                # a new paid request. Unknown/missing keys never reach this branch.
+                if resume_request.get("headers", {}).get("idempotency-key") != execution_key:
+                    return None
+                if recovery_deadline is None or time.monotonic() >= recovery_deadline:
+                    return None
+                try:
+                    resumed = transport.send(**dict(resume_request,
+                        timeout_seconds=max(0.001, recovery_deadline - time.monotonic())))
+                except ProviderTransportError:
+                    return None
+                if (time.monotonic() >= recovery_deadline
+                    or resumed.internal_provenance is not None
+                    or len(resumed.body) > max_response_bytes
+                    or _response_contains_credential(resumed, secret)):
+                    return None
+                resumed_document = json.loads(resumed.body.decode("utf-8"))
+                resumed_recovery = (resumed_document.get("executionRecovery")
+                                    if isinstance(resumed_document, Mapping) else None)
+                if resumed.status == 409:
+                    # A same-key continuation can conflict while the original
+                    # execution is still finishing. The conflict proves no
+                    # result: await independently authenticated saved content
+                    # for the already-bound native ID, with no further POST.
+                    if (not isinstance(resumed_document, Mapping)
+                        or any(resumed_document[name] != native_id
+                               for name in ("job_id", "request_id", "requestId")
+                               if name in resumed_document)
+                        or ("toolId" in resumed_document
+                            and resumed_document["toolId"] not in (operation, *operation_aliases))
+                        or (resumed_recovery is not None and (
+                            not isinstance(resumed_recovery, Mapping)
+                            or resumed_recovery.get("idempotencyKey") != execution_key
+                            or resumed_recovery.get("state") != "running"))):
+                        return None
+                    awaiting_native_id = native_id
+                    resume_request = None
+                    continue
+                if (_deepline_job_request_id(resumed_document) != native_id
+                    or not isinstance(resumed_document, Mapping)
+                    or resumed_document.get("status") != "completed"
+                    or (resumed_recovery is not None and (
+                        not isinstance(resumed_recovery, Mapping)
+                        or resumed_recovery.get("idempotencyKey") != execution_key
+                        or resumed_recovery.get("state") != "completed"))
+                    or (observed_status is not None and resumed.status != observed_status)):
+                    return None
+                # Retain the standard execute envelope, but hide the recovery key.
+                if isinstance(resumed_document, Mapping):
+                    resumed_document = dict(resumed_document)
+                    resumed_document.pop("executionRecovery", None)
+                body = json.dumps(resumed_document, ensure_ascii=False, allow_nan=False,
+                                  separators=(",", ":")).encode("utf-8")
+                return ProviderResponse(resumed.status, resumed.headers, body,
+                                        deepline_completed_execution=True)
+            # A Vercel trace hint can differ from the keyed native billing ID.
+            # The authenticated saved key/tool/body binding is stronger authority.
+            if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
+                or recovery.get("state") != "completed" or document.get("toolId") not in (operation, *operation_aliases)
+                or not isinstance(native_id, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
+                or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None
+                or type(status) is not int or not 200 <= status <= 599
+                or (observed_status is not None and observed_status != status)
+                or not isinstance(saved, Mapping) or _deepline_job_request_id(saved) != native_id):
+                return None
+            saved = dict(saved)
+            saved.pop("executionRecovery", None)
+            body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except (UnicodeError, ValueError, TypeError, RecursionError):
+            return None
+        response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body,
+                                    deepline_completed_execution=True)
+        if len(body) > max_response_bytes or _response_contains_credential(response, secret):
+            return None
+        return response
+    return None
 
 
 
@@ -1673,6 +1881,27 @@ def _deepline_exact_readback(
             ):
                 return None, None
             native_id = recovered_id
+            saved = document.get("response")
+            inline = saved.get("billing") if isinstance(saved, Mapping) else None
+            if (
+                lookup_max_response_bytes == _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
+                and operation == "firecrawl_scrape"
+                and recovery.get("state") == "completed"
+                and type(document.get("responseStatus")) is int
+                and document["responseStatus"] == 200
+                and _deepline_job_request_id(saved) == native_id
+                and saved.get("status") == "completed"
+                and isinstance(inline, Mapping)
+                and inline.get("pricing_status") == "final"
+            ):
+                # Recover a large Firecrawl reply's bill without admitting its
+                # source body. Other tools retain their existing recovery and
+                # final-usage checks, including malformed/conflicting receipts.
+                cost = provider_costs.deepline_cost(saved)
+                if cost is not None and not (
+                    inline.get("billing_mode") == "async_hold" and cost.units == 0
+                ):
+                    return native_id, cost
             # Key recovery is a read, not a polling interval. Read the charge
             # within this same deadline before the next paced poll.
             remaining = deadline - time.monotonic()
@@ -1929,6 +2158,10 @@ class RunContext:
     judgment_cache_scope: Optional[Mapping[str, Any]] = None
     # Gateway-owned, hash-bound tool and pricing snapshot for this round.
     deepline_catalog: Optional[Mapping[str, Any]] = None
+    # Gateway-owned frozen round policy and catalog profiles for readable
+    # agent reasoning. Absent on every round created without the policy.
+    reasoning_capture_policy: Optional[str] = None
+    reasoning_route_registry: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -2223,6 +2456,9 @@ def _retain_upstream_response_receipt(
     try:
         # Default whitespace and ASCII escaping conservatively bound JSONB text.
         for candidate_receipt in (receipt, {"status": "unavailable", "reason": "response_size_limit"}):
+            observations = broker_observations(document)
+            if observations:
+                candidate_receipt = dict(candidate_receipt, broker_observations=observations)
             candidate = dict(document, upstream_response_receipt=candidate_receipt)
             if len(json.dumps(candidate).encode("utf-8")) <= 4 * 1024 * 1024:
                 document["upstream_response_receipt"] = candidate_receipt
@@ -2399,7 +2635,8 @@ def _judgment_requires_own_call(request: Mapping[str, Any]) -> bool:
     return isinstance(inputs, list) and any(
         isinstance(item, Mapping) and item.get("type") in {
             "function_call", "function_call_output", "custom_tool_call",
-            "custom_tool_call_output", "web_search_call", "additional_tools",
+            "custom_tool_call_output", "web_search_call", "openrouter:web_search",
+            "additional_tools",
         } for item in inputs
     )
 
@@ -2600,6 +2837,19 @@ def _complete_declared_tool_calls(message: Mapping[str, Any], request: Mapping[s
     return True
 
 
+def _paragraph_cache_protocol_conflict(value: Mapping[str, Any], schema_name: Any) -> bool:
+    """Do not share a new paragraph verdict that its native parser must retry."""
+
+    if schema_name != "arena_intent_details_review_v3" or value.get("facts_supported") is not False:
+        return False
+    units = value.get("unit_grounding")
+    if not isinstance(units, list):
+        return False  # The declared-schema shape check owns malformed fields.
+    factual = [unit for unit in units if isinstance(unit, Mapping)
+               and unit.get("contains_factual_claim") is True]
+    return all(unit.get("status") == "VERIFIED" for unit in factual)
+
+
 def _complete_judgment_response(
     operation_id: str,
     request: Mapping[str, Any],
@@ -2607,6 +2857,7 @@ def _complete_judgment_response(
     status: int,
     body: bytes,
     call_succeeded: bool,
+    shared_cache: bool = True,
 ) -> bool:
     """Cache a complete model answer only; never freeze a retryable failure."""
 
@@ -2668,6 +2919,8 @@ def _complete_judgment_response(
                     )
                 ):
                     return False
+                if shared_cache and _paragraph_cache_protocol_conflict(parsed, declared.get("name")):
+                    return False
                 if declared.get("name") == "verification":
                     evaluations = parsed.get("signal_evaluations")
                     if (
@@ -2725,6 +2978,8 @@ def _complete_judgment_response(
                 )
             ):
                 return False
+            if shared_cache and _paragraph_cache_protocol_conflict(parsed, format_doc.get("name")):
+                return False
         else:
             return False
         return True
@@ -2757,6 +3012,44 @@ def _has_successful_terminal_response(document: Any) -> bool:
     )
 
 
+def broker_observations(document: Mapping[str, Any]) -> Dict[str, Any]:
+    """Read bounded private evidence without changing the response contract.
+
+    Legacy draft records stored these fields at the terminal's top level. New
+    records use the private receipt envelope that the previous release accepts.
+    Neither location can supply response bytes or accounting authority.
+    """
+    fields = {"transport_elapsed_ms", "timing_scope", "reasoning_route_observation"}
+    receipt = document.get("upstream_response_receipt")
+    nested = receipt.get("broker_observations", {}) if isinstance(receipt, Mapping) else {}
+    if not isinstance(nested, Mapping) or not set(nested) <= fields:
+        raise BrokerError("broker_unavailable")
+    result = dict(nested)
+    for field in fields & set(document):
+        if field in result and (
+            type(result[field]) is not type(document[field]) or result[field] != document[field]
+        ):
+            raise BrokerError("broker_unavailable")
+        result[field] = document[field]
+    if ("transport_elapsed_ms" in result or "timing_scope" in result) and (
+        type(result.get("transport_elapsed_ms")) is not int
+        or not 0 <= result["transport_elapsed_ms"] <= 3_600_000
+        or result.get("timing_scope") != "initial_provider_transport_send"
+    ):
+        raise BrokerError("broker_unavailable")
+    if ("reasoning_route_observation" in result
+            and not reasoning_capture.valid_route_observation(result["reasoning_route_observation"])):
+        raise BrokerError("broker_unavailable")
+    return result
+
+
+def _retain_broker_observations(document: Dict[str, Any], observations: Mapping[str, Any]) -> None:
+    receipt = document.get("upstream_response_receipt")
+    receipt = dict(receipt) if isinstance(receipt, Mapping) else {}
+    receipt["broker_observations"] = dict(broker_observations(document), **observations)
+    document["upstream_response_receipt"] = receipt
+
+
 def _decode_terminal(
     document: Any,
     *,
@@ -2777,9 +3070,12 @@ def _decode_terminal(
         "deepline_response_missing_reason",
         "compatibility_failure_code",
         "upstream_response_receipt",  # Private evidence has no replay authority.
+        "reasoning_route_observation",  # Bounded diagnostic; never changes the saved response.
+        "transport_elapsed_ms", "timing_scope",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
+    broker_observations(document)  # Validate both the legacy and rollback-safe evidence shapes.
     compatibility_failure_code = document.get("compatibility_failure_code")
     if "compatibility_failure_code" in document and (
         not isinstance(compatibility_failure_code, str)
@@ -3575,7 +3871,7 @@ class Broker:
         store: CallStore,
         key_for: Callable[[str], str],
         price_table: Mapping[str, Any],
-        judge_models: Sequence[str] = (),
+        judge_models: Sequence[str] | Mapping[str, str] = (),
         transport: ProviderTransport,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         lease_ttl_seconds: int = contracts.LEASE_TTL_SECONDS,
@@ -3584,6 +3880,7 @@ class Broker:
         provider_funding_source_for: Optional[
             Callable[[RunContext, str], str]
         ] = None,
+        champion_score_for: Optional[Callable[[RunContext], bool]] = None,
         retry_miner_credential_for: Optional[
             Callable[[RunContext], bool]
         ] = None,
@@ -3606,6 +3903,7 @@ class Broker:
         self._credential_for = credential_for
         self._funding_source_for = funding_source_for
         self._provider_funding_source_for = provider_funding_source_for
+        self._champion_score_for = champion_score_for
         self._retry_miner_credential_for = retry_miner_credential_for
         self._mark_provider_fallback = mark_provider_fallback
         self._provider_restart_required_for = provider_restart_required_for
@@ -3617,7 +3915,10 @@ class Broker:
         self._price_table = validate_price_table(price_table)
         # Judge models are what scoring runs may call; they are pinned by the
         # scorer policy and priced from the same table.
-        self._judge_models = tuple(str(model) for model in judge_models)
+        self._judge_model_roles = dict(judge_models) if isinstance(judge_models, Mapping) else {}
+        self._judge_models = tuple(str(model) for model in (
+            self._judge_model_roles.values() if isinstance(judge_models, Mapping) else judge_models
+        ))
         for model in self._judge_models:
             if model not in self._price_table["models"]:
                 raise ArenaContractError("judge model %s is missing from the price table" % model)
@@ -3656,13 +3957,14 @@ class Broker:
                 time.sleep(min(backoff, remaining))
                 backoff = min(backoff * 2, _ACCOUNTING_STORE_MAX_BACKOFF_SECONDS)
 
-    def _openrouter_parameters(self, parameters: Mapping[str, Any], *, kind: str = "execute") -> Tuple[Dict[str, Any], int]:
+    def _openrouter_parameters(self, parameters: Mapping[str, Any], *, kind: str = "execute",
+                               allow_full_thinking: bool = False) -> Tuple[Dict[str, Any], int]:
         model = str(parameters.get("model") or "")
         if kind == "score" and model not in self._judge_models:
             raise BrokerError("model_not_allowed")
         if model not in self._price_table["models"]:
             raise BrokerError("model_not_allowed")
-        normalized = openrouter_normalized(parameters)
+        normalized = openrouter_normalized(parameters, allow_full_thinking=allow_full_thinking)
         return normalized, int(normalized.get("max_output_tokens", normalized.get("max_tokens")))
 
     def reconcile_openrouter_cost(
@@ -3955,7 +4257,9 @@ class Broker:
             snapshot = self._store.run_quota_snapshot(context.run_id, context.lease_token_hash)
             if not isinstance(snapshot, Mapping) or snapshot.get("status") == "stale":
                 return _error_result("lease_stale", summary)
-            catalog = deepline_catalog.validate_catalog(context.deepline_catalog)
+            catalog = (deepline_catalog.prepare_catalog(context.deepline_catalog)
+                       if operation.operation_id == "deepline.tools.get"
+                       else deepline_catalog.validate_catalog(context.deepline_catalog))
             if operation.operation_id == "deepline.tools.get":
                 document = deepline_catalog.public_tool_definition(
                     deepline_catalog.tool_entry(catalog, parameters["tool"])
@@ -4121,6 +4425,17 @@ class Broker:
                 "broker_unavailable", {"operation_id": str(operation_id)},
                 setup_diagnostics=diagnostics,
             )
+        operation = (operations.OPERATIONS.get(operation_id)
+                     or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
+        if (operation is not None and operation.provider == "deepline"
+                and (bool(operation.deepline_tool)
+                     or operation_id in {"deepline.execute", "deepline.tools.get"})
+                and context.deepline_catalog is not None):
+            try:
+                context = replace(context, deepline_catalog=deepline_catalog.prepare_catalog(
+                    context.deepline_catalog))
+            except deepline_catalog.CatalogError:
+                return _error_result("invalid_request", {"operation_id": operation_id})
         last_result: Optional[BrokerResult] = None
         attempt_trace: list[Dict[str, Any]] = []
 
@@ -4379,9 +4694,28 @@ class Broker:
         try:
             normalized = operations.validate_operation_request(
                 operation_id, parameters, deepline_catalog=context.deepline_catalog,
+                allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
+                                     and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
             )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
+        if (getattr(context, "kind", "execute") == "execute"
+            and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY
+            and operation_id == "deepline.execute" and context.deepline_catalog is not None):
+            try:
+                direct_inference = deepline_catalog.is_direct_inference_tool(
+                    context.deepline_catalog, normalized["tool"],
+                )
+            except deepline_catalog.CatalogError:
+                return _error_result("broker_unavailable", {"operation_id": operation_id})
+            if direct_inference:
+                # These native model endpoints have no approved reasoning
+                # route/capture adapter. Refuse before funding or ledger work.
+                return _error_result("invalid_request", {
+                    "operation_id": operation_id, "reason": "reasoning_route_unsupported",
+                    "outcome": "not_dispatched",
+                    "supported_reasoning_apis": sorted(reasoning_capture.OPERATIONS),
+                })
         requested_normalized = normalized
         if isinstance(action_sequence, bool) or not isinstance(action_sequence, int) or action_sequence < 0:
             return _error_result("invalid_request", {"operation_id": operation_id})
@@ -4477,16 +4811,29 @@ class Broker:
                 parameters=normalized,
                 timeout_ms=route_timeout_ms,
                 allow_host_shadow_score=host_shadow_score_compat,
+                allow_champion_score=(
+                    getattr(context, "kind", "execute") == "score"
+                    and funding_source == "host"
+                    and operation.provider == "scrapingdog"
+                    and self._champion_score_for is not None
+                    and self._champion_score_for(context)
+                ),
                 source_content_fallback=source_content_fallback,
                 source_content_response_url=source_content_response_url,
                 frozen_catalog=context.deepline_catalog,
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
+            source_html_profile = (
+                route is not None and route.adapter == "generic_http_raw_html"
+                and route.compatibility_version == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+            )
             effective_operation = operations.OPERATIONS[effective_operation_id]
             try:
                 effective_normalized = operations.validate_operation_request(
                     effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
+                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
+                                         and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
                 )
             except operations.OperationError:
                 # Distinguish an absent frozen score route from malformed input.
@@ -4509,6 +4856,15 @@ class Broker:
                         })
                 raise
             setup_phase = "credential_resolution"
+            # Compatibility routes can change the billed provider. Resolve its
+            # immutable payer before selecting its credential and reserving cost.
+            if (effective_operation.provider != operation.provider
+                    and self._provider_funding_source_for is not None):
+                funding_source = self._provider_funding_source_for(
+                    context, effective_operation.provider
+                )
+                if funding_source not in ("host", "miner_key"):
+                    raise BrokerError("broker_unavailable")
             secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
                 raise BrokerError("miner_credentials_unavailable" if funding_source == "miner_key" else "broker_unavailable")
@@ -4550,16 +4906,30 @@ class Broker:
         reservation_cost: Optional[provider_costs.ProviderCost] = None
         reserve_remaining_budget = False
         openrouter_host_route: Optional[OpenRouterHostRoute] = None
+        reasoning_annotation: Optional[Dict[str, Any]] = None
         try:
             if effective_operation.provider == "openrouter":
-                # Record the request's price bound; current SQL admission uses
-                # confirmed spend and stores a zero-dollar lifecycle record.
-                effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
+                # Record the request's price bound. Full-thinking admission
+                # holds this amount; historical policies keep their rules.
+                effective_normalized, max_output_tokens = self._openrouter_parameters(
+                    effective_normalized, kind=getattr(context, "kind", "execute"),
+                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
+                        and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY))
+                if getattr(context, "kind", "execute") == "execute":
+                    # Before hashing: identity, capture and the sent body all
+                    # bind the reasoning parameters actually requested.
+                    effective_normalized, reasoning_annotation = agent_reasoning_parameters(
+                        effective_operation_id, effective_normalized,
+                        policy=getattr(context, "reasoning_capture_policy", None),
+                        registry=getattr(context, "reasoning_route_registry", None),
+                        deepline_catalog=context.deepline_catalog,
+                    )
+                    max_output_tokens = int(effective_normalized.get(
+                        "max_output_tokens", effective_normalized.get("max_tokens")))
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
                 # passes that are absent from the caller body. Keep this
-                # dynamic-price marker for historical reservation policies;
-                # current SQL admission does not hold the remaining budget.
+                # dynamic-price marker for existing reservation policies.
                 reserve_remaining_budget = _openrouter_web_search_enabled(
                     normalized
                 )
@@ -4570,7 +4940,36 @@ class Broker:
                     model=normalized["model"],
                     pricing=pricing,
                     parameters=normalized,
+                    industry_review_model=self._judge_model_roles.get("industry_evidence_review"),
                 )
+                if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
+                    # Exact tested provider only. OpenRouter must neither pick
+                    # a different provider nor fail over within a model family.
+                    route_prices = {
+                        component: max(
+                            Decimal(str(pricing[component])),
+                            Decimal(str(reasoning_annotation["price_ceiling"].get(
+                                component, pricing[component],
+                            ))),
+                        ) for component in PRICED_COMPONENTS
+                    }
+                    openrouter_host_route = OpenRouterHostRoute(
+                        provider_policy={
+                            "data_collection": "deny", "zdr": True,
+                            "only": [reasoning_annotation["provider_route"]],
+                            "allow_fallbacks": False,
+                            "require_parameters": True,
+                            "max_price": {
+                                "prompt": _json_decimal_number(route_prices["prompt"] * OPENROUTER_PRICE_PER_MILLION),
+                                "completion": _json_decimal_number((route_prices["completion"] + route_prices["internal_reasoning"]) * OPENROUTER_PRICE_PER_MILLION),
+                                "request": _json_decimal_number(route_prices["request"]),
+                            },
+                        },
+                        reservation_pricing={
+                            component: format(value.normalize(), "f")
+                            for component, value in route_prices.items()
+                        },
+                    )
                 amount = _max_openrouter_cost_for_pricing(
                     (
                         openrouter_host_route.reservation_pricing
@@ -4579,6 +4978,7 @@ class Broker:
                     ),
                     normalized,
                     max_output_tokens=max_output_tokens,
+                    model=normalized["model"],
                 )
             elif effective_operation.provider == "scrapingdog":
                 reservation_cost = provider_costs.scrapingdog_cost(
@@ -4685,7 +5085,10 @@ class Broker:
         prepared_capture: Optional[training_capture.PreparedRequest] = None
         request_capture = {}
         capture_request = getattr(self, "_capture_request", None)
-        if capture_request is not None:
+
+        def prepare_request_capture() -> None:
+            nonlocal captured_outbound, prepared_capture, request_capture
+            captured_outbound, prepared_capture, request_capture = None, None, {}
             try:
                 # Construct only a credential-free plan. Successful construction
                 # is reused below; failed observation leaves the original path
@@ -4693,10 +5096,13 @@ class Broker:
                 captured_outbound = operations.build_outbound_request(
                     effective_operation_id, effective_normalized,
                     deepline_catalog=context.deepline_catalog,
+                    source_html_profile=source_html_profile,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
                     ),
+                    allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
                 )
                 prepared = capture_request({
                     "operation_id": operation_id,
@@ -4705,7 +5111,11 @@ class Broker:
                     "admitted_parameters": parameters,
                     "normalized_parameters": requested_normalized,
                     "effective_operation_id": effective_operation_id,
-                    "effective_parameters": effective_normalized,
+                    "effective_parameters": ({
+                        **effective_normalized,
+                        "payload": json.loads(captured_outbound.body)["payload"],
+                    } if source_html_profile else effective_normalized),
+                    **({"reasoning_capture": reasoning_annotation} if reasoning_annotation is not None else {}),
                     "route": route.summary() if route is not None else {},
                     "outbound": {
                         "method": captured_outbound.target.method,
@@ -4726,6 +5136,9 @@ class Broker:
                     request_capture = training_capture.unavailable()
             except Exception:
                 request_capture = training_capture.unavailable()
+
+        if capture_request is not None:
+            prepare_request_capture()
         reservation_arguments = dict(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
@@ -4734,7 +5147,7 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **({"reasoning_capture": reasoning_annotation} if reasoning_annotation is not None else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         if source_content_fallback:
@@ -4756,10 +5169,12 @@ class Broker:
                     effective_operation_id,
                     effective_normalized,
                     deepline_catalog=context.deepline_catalog,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
                     ),
+                    allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
                 )
             except operations.OperationError:
                 return _error_result("invalid_request", summary)
@@ -4902,6 +5317,13 @@ class Broker:
                 )
             except ArenaStoreUnavailable as exc:
                 if getattr(exc, "transaction_rolled_back", False) is True or reserve_readback_used:
+                    if reserve_readback_used and prepared_capture is not None:
+                        # A lost reserve response may leave its request pointer
+                        # committed even when the same-identity readback fails.
+                        try:
+                            prepared_capture.persist()
+                        except Exception:
+                            pass  # Capture must not replace the admission error.
                     # The RPC already exhausted its bounded rollback retries;
                     # only an ambiguous response needs reservation readback.
                     raise
@@ -4958,10 +5380,23 @@ class Broker:
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
+        reservation_readback_rows = None
         if source_content_fallback and reserved.get("idempotent") is True and status in {
             "reserved", "dispatched", "settled", "uncertain", "recovered",
         }:
-            rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if reserved.get("call_identity") != call_identity:
+                return _error_result("broker_unavailable", summary)
+            try:
+                rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+            except ArenaStoreUnavailable:
+                if reserve_readback_used and prepared_capture is not None:
+                    # The first reserve may already reference these exact
+                    # sanitized bytes, before fallback proof can be rebuilt.
+                    try:
+                        prepared_capture.persist()
+                    except Exception:
+                        pass  # Preserve the original proof-read failure.
+                raise
             if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
                 return _error_result("broker_unavailable", summary)
             reservations = [row for row in rows if isinstance(row, Mapping)
@@ -4974,6 +5409,17 @@ class Broker:
             if type(saved_timeout) is not int or not 1 <= saved_timeout <= 60_000:
                 return _error_result("broker_unavailable", summary)
             saved_doc = reservations[0]["entry_doc"]
+            saved_version = saved_doc.get("compatibility_version")
+            if saved_version not in (
+                scoring_provider_compat.COMPATIBILITY_VERSION,
+                scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION,
+            ):
+                return _error_result("broker_unavailable", summary)
+            # Capture is optional. The existing durable route version, URL and
+            # timeout reproduce the exact body under this idempotency key.
+            source_html_profile = saved_version == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+            reservation_arguments["call_doc"]["compatibility_version"] = saved_version
+            summary["compatibility_version"] = saved_version
             if "source_content_fallback_url" in saved_doc:
                 saved_url = saved_doc["source_content_fallback_url"]
                 if (
@@ -4995,47 +5441,76 @@ class Broker:
                 confirmed_cost_admission=True, ledger_entries=rows,
             ):
                 return _error_result("broker_unavailable", summary)
+            reservation_readback_rows = rows
             effective_normalized = {
                 **effective_normalized,
                 "payload": {**effective_normalized["payload"], "timeout_ms": saved_timeout,
                             "url": saved_url},
             }
-            route = replace(route, effective_parameters=effective_normalized)
+            route = replace(route, effective_parameters=effective_normalized,
+                            compatibility_version=saved_version)
             captured_outbound = None
+            if capture_request is not None:
+                # Repair only a blob named by the existing durable pointer.
+                # Rebuild its original version/URL/timeout before comparing it.
+                prepare_request_capture()
+                reservation_arguments["call_doc"]["request_capture"] = request_capture
         # Terminal admission replies such as stale and refused do not create a
         # reservation. Preserve their normal classification. A response-loss
         # state, and an idempotent reservation that could still dispatch, must
         # match the exact replayed call. Completed states keep replaying their
         # saved terminal response without a new provider request.
         if (
-            (
-                reserve_readback_used
-                and status in {
-                    "reserved", "dispatched", "settled", "uncertain", "recovered",
-                }
-                or reserved.get("idempotent") is True and status == "reserved"
-            )
-            and not _reservation_readback_matches(
+            reserve_readback_used
+            and status in {
+                "reserved", "dispatched", "settled", "uncertain", "recovered",
+            }
+            or reserved.get("idempotent") is True and status == "reserved"
+        ):
+            if reserved.get("call_identity") != call_identity:
+                return _error_result("broker_unavailable", summary)
+            try:
+                rows = (reservation_readback_rows if reservation_readback_rows is not None
+                        else self._store.list_ledger(call_identity=call_identity, limit=64))
+            except ArenaStoreUnavailable:
+                if reserve_readback_used and prepared_capture is not None:
+                    # Admission remains unverified, but the first reserve may
+                    # already reference this prepared, sanitized request.
+                    try:
+                        prepared_capture.persist()
+                    except Exception:
+                        pass
+                raise
+            if rows is None or not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved,
                 confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
-            )
-        ):
-            return _error_result("broker_unavailable", summary)
+                ledger_entries=rows,
+            ):
+                return _error_result("broker_unavailable", summary)
+            reservation_readback_rows = rows
         if status == "stale":
             return _error_result("lease_stale", summary)
-        if prepared_capture is not None and status == "reserved":
+        if prepared_capture is not None and (status == "reserved" or (
+                status == "refused" and reasoning_annotation is not None
+                and reasoning_annotation.get("policy") == reasoning_capture.POLICY)):
             try:
-                capture_authorized = reserved.get("idempotent") is False
+                capture_authorized = status == "reserved" and reserved.get("idempotent") is False
                 if not capture_authorized:
                     # Replays can repair a missing blob only when the exact
                     # existing receipt references the prepared content.
-                    rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+                    rows = (reservation_readback_rows if reservation_readback_rows is not None
+                            else self._store.list_ledger(call_identity=call_identity, limit=64))
                     capture_authorized = any(
-                        row.get("entry_kind") == "reservation"
+                        row.get("entry_kind") == ("refusal" if status == "refused" else "reservation")
                         and row.get("run_id") == context.run_id
                         and row.get("call_identity") == call_identity
                         and isinstance(row.get("entry_doc"), Mapping)
-                        and row["entry_doc"].get("request_capture") == request_capture
+                        and (row["entry_doc"].get("call", {}) if status == "refused"
+                             else row["entry_doc"]).get("request_capture") == request_capture
+                        and (status != "refused" or (
+                            row.get("amount_microusd") == 0
+                            and row["entry_doc"].get("reason") in {"per_icp_quota", "stage_quota", "money_cap"}
+                            and row["entry_doc"]["call"].get("request_hash") == request_hash))
                         for row in rows if isinstance(row, Mapping)
                     )
                 if capture_authorized:
@@ -5137,6 +5612,122 @@ class Broker:
                 "response_hash": contracts.hash_bytes(cached_body),
             })
             return BrokerResult(cached_status, cached_headers, cached_body, summary)
+        billing_terminal = reserved.get("terminal_response")
+        delayed_generation_settlement = (
+            status == "settled" and isinstance(billing_terminal, Mapping)
+            and not _has_successful_terminal_response(billing_terminal)
+            and isinstance(billing_terminal.get("provider_cost"), Mapping)
+            and billing_terminal["provider_cost"].get("basis") == "openrouter_generation_cost"
+        )
+        if effective_operation.provider == "openrouter" and (status == "uncertain" or delayed_generation_settlement):
+            # Billing-only reconciliation changes the ledger head, not the error
+            # already delivered to the worker. Reuse the existing terminal shape
+            # from bound uncertainty history; raw upstream receipts have no replay
+            # authority. Old records without this optional reply keep their path.
+            ledger_entries = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if not isinstance(ledger_entries, Sequence) or isinstance(ledger_entries, (str, bytes)):
+                return _error_result("broker_unavailable", summary)
+            if (status == "uncertain" and ledger_entries
+                and isinstance(ledger_entries[-1], Mapping)
+                and ledger_entries[-1].get("entry_kind") == "settlement"):
+                # The exact bill can arrive after reserve but before this read.
+                # Refresh the same identity once, then validate the entire
+                # observed history against the refreshed authoritative head.
+                reserved = self._store.reserve_call(**reservation_arguments)
+                status = reserved.get("status")
+            # A paid response can be structurally replayable for its own call
+            # while failing the new shared-cache paragraph protocol. SQL does
+            # not expose noneligible pending replies as shared authority.
+            own_pending_replies = [
+                entry.get("entry_doc", {}).get("call", {}).get("judgment_cache_response")
+                for entry in ledger_entries
+                if isinstance(entry, Mapping) and entry.get("entry_kind") == "uncertain"
+                and isinstance(entry.get("entry_doc"), Mapping)
+                and isinstance(entry["entry_doc"].get("call"), Mapping)
+                and isinstance(entry["entry_doc"]["call"].get("judgment_cache_response"), Mapping)
+                and entry["entry_doc"]["call"]["judgment_cache_response"].get("judgment_cache_eligible") is not True
+            ]
+            if own_pending_replies:
+                if (not judgment_cache_key or len(own_pending_replies) != 1
+                    or status not in {"uncertain", "settled"}
+                    or not _reservation_readback_matches(
+                        self._store, reservation_arguments, reserved,
+                        confirmed_cost_admission=True, ledger_entries=ledger_entries,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                own_terminal = own_pending_replies[0]
+                try:
+                    own_status, own_headers, own_body = _decode_terminal(own_terminal, secret=secret)
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                if ("judgment_cache_source_call_identity" in own_terminal
+                    or not _complete_judgment_response(
+                        effective_operation_id, effective_normalized,
+                        status=own_status, body=own_body,
+                        call_succeeded=own_terminal.get("call_succeeded") is True,
+                        shared_cache=False,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                summary.update(outcome=status, idempotent=True, status=own_status,
+                               response_hash=contracts.hash_bytes(own_body))
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                return BrokerResult(own_status, own_headers, own_body, summary)
+            saved_errors = []
+            for entry in ledger_entries:
+                entry_doc = entry.get("entry_doc") if isinstance(entry, Mapping) else None
+                saved_call = entry_doc.get("call") if isinstance(entry_doc, Mapping) else None
+                if (isinstance(entry, Mapping) and entry.get("entry_kind") == "uncertain" and isinstance(saved_call, Mapping)
+                    and "openrouter_terminal_response" in saved_call):
+                    saved_errors.append(saved_call)
+            if saved_errors:
+                if len(saved_errors) != 1 or not _reservation_readback_matches(
+                    self._store, reservation_arguments, reserved,
+                    confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
+                    ledger_entries=ledger_entries,
+                ):
+                    return _error_result("broker_unavailable", summary)
+                saved_call = saved_errors[0]
+                saved_terminal = saved_call["openrouter_terminal_response"]
+                generation = saved_call.get("openrouter_generation_id")
+                try:
+                    if (saved_call.get("reason") != "missing_provider_cost"
+                        or saved_call.get("call_succeeded") is not False
+                        or saved_call.get("provider_status") not in (400, 401, 402, 403, 404, 422, 429)
+                        or saved_call.get("openrouter_generation_present") is not True
+                        or (generation is not None and (
+                            not isinstance(generation, str)
+                            or _OPENROUTER_GENERATION_ID_RE.fullmatch(generation) is None))
+                        or saved_call.get("credential_fingerprint") != _credential_fingerprint(secret)
+                        or not isinstance(saved_terminal, Mapping)
+                        or type(saved_terminal.get("status")) is not int
+                        or saved_terminal.get("call_succeeded") is not False):
+                        raise BrokerError("broker_unavailable")
+                    saved_status, saved_headers, saved_body = _decode_terminal(saved_terminal, secret=secret)
+                    if (saved_status not in (400, 402, 403, 404, 422, 502)
+                        or _response_contains_credential(ProviderResponse(saved_status, saved_headers, saved_body), secret)):
+                        raise BrokerError("broker_unavailable")
+                    evidence = _validated_account_failure_evidence(saved_terminal.get("account_failure_evidence"))
+                    if evidence is not None and not _account_failure_matches_call(
+                        evidence, base_call_identity=base_call_identity,
+                        provider_attempt=provider_attempt, action_sequence=action_sequence,
+                    ):
+                        raise BrokerError("broker_unavailable")
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                summary.update(outcome=status, idempotent=True, status=saved_status,
+                    provider_status=saved_call["provider_status"], response_hash=contracts.hash_bytes(saved_body))
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                if evidence is not None:
+                    summary["account_failure_evidence"] = dict(evidence)
+                try:
+                    error_code = json.loads(saved_body).get("error", {}).get("code")
+                except (ValueError, AttributeError):
+                    error_code = None
+                if isinstance(error_code, str) and error_code in GENERIC_ERRORS:
+                    summary["error_code"] = error_code
+                return BrokerResult(saved_status, saved_headers, saved_body, summary)
         deepline_recovery_response: Optional[ProviderResponse] = None
         deepline_response_recovery = False
         terminal_document = reserved.get("terminal_response")
@@ -5231,6 +5822,7 @@ class Broker:
                     recovery_outbound = operations.build_outbound_request(
                         effective_operation_id, effective_normalized,
                         deepline_catalog=context.deepline_catalog,
+                        source_html_profile=source_html_profile,
                     )
                     recovery_url, recovery_headers = inject_credential(recovery_outbound, secret)
                     recovery_headers["idempotency-key"] = request_accounting["deepline_execution_key"]
@@ -5417,6 +6009,7 @@ class Broker:
                     effective_operation_id, effective_normalized,
                     status=terminal_status, body=terminal_body,
                     call_succeeded=terminal_document.get("call_succeeded") is True,
+                    shared_cache=False,
                 ):
                     return _error_result("broker_unavailable", summary)
                 summary.update({
@@ -5490,6 +6083,19 @@ class Broker:
                 billing_deadline
                 - operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
             )
+        if route is not None and route.adapter == "generic_http_raw_html" and captured_outbound is None:
+            try:
+                # Restore the saved wire version before this check. An older
+                # reservation must not require the new profile's schema.
+                captured_outbound = operations.build_outbound_request(
+                    effective_operation_id, effective_normalized,
+                    deepline_catalog=context.deepline_catalog,
+                    source_html_profile=source_html_profile,
+                )
+            except operations.OperationError:
+                return _error_result("capability_unavailable", {
+                    **summary, "outcome": "not_dispatched", "actual_microusd": 0,
+                })
         dispatched = ({"status": "dispatched", "idempotent": False}
             if deepline_response_recovery else self._store.mark_dispatched(
                 run_id=context.run_id,
@@ -5510,11 +6116,14 @@ class Broker:
             effective_operation_id,
             effective_normalized,
             deepline_catalog=context.deepline_catalog,
+            source_html_profile=source_html_profile,
+            industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
             openrouter_provider_policy=(
                 openrouter_host_route.provider_policy
                 if openrouter_host_route is not None
                 else None
             ),
+            allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
         )
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
@@ -5541,6 +6150,16 @@ class Broker:
         openrouter_completed_rate_limit_proven = False
         openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
+        transport_elapsed_ms: Optional[int] = None
+
+        def retain_transport_timing(document: Dict[str, Any]) -> None:
+            if (getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY
+                    and transport_elapsed_ms is not None):
+                _retain_broker_observations(document, {
+                    "transport_elapsed_ms": transport_elapsed_ms,
+                    "timing_scope": "initial_provider_transport_send",
+                })
+
         try:
             url, headers = inject_credential(outbound, secret)
             if deepline_request_id is not None:
@@ -5555,23 +6174,39 @@ class Broker:
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 try:
-                    response = deepline_recovery_response or self._transport.send(
-                        method=outbound.target.method,
-                        url=url,
-                        headers=headers,
-                        body=outbound.body,
-                        timeout_seconds=timeout_seconds,
-                        **(
-                            {
-                                "max_response_bytes": (
-                                    _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                                )
-                            }
-                            if route is not None
-                            and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
-                            else {}
-                        ),
-                    )
+                    if deepline_recovery_response is not None:
+                        response = deepline_recovery_response
+                    else:
+                        try:
+                            transport_started = time.monotonic()
+                        except Exception:
+                            transport_started = None
+                        try:
+                            response = self._transport.send(
+                                method=outbound.target.method,
+                                url=url,
+                                headers=headers,
+                                body=outbound.body,
+                                timeout_seconds=timeout_seconds,
+                                **(
+                                    {
+                                        "max_response_bytes": (
+                                            _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                        )
+                                    }
+                                    if route is not None
+                                    and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
+                                    else {}
+                                ),
+                            )
+                        finally:
+                            try:
+                                elapsed = ((time.monotonic() - transport_started) * 1000
+                                           if transport_started is not None else float("nan"))
+                                if math.isfinite(elapsed):
+                                    transport_elapsed_ms = max(0, min(int(elapsed), 3_600_000))
+                            except Exception:
+                                pass  # Observation cannot change the provider outcome.
                 except ProviderTransportError as transport_error:
                     recovered = (
                         _deepline_execution_response_readback(
@@ -5584,7 +6219,14 @@ class Broker:
                                 if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                                 else effective_operation.max_response_bytes),
                             observed_status=transport_error.observed_status,
-                            deadline=source_content_deadline,
+                            deadline=request_deadline,
+                            resume_request=(dict(method=outbound.target.method, url=url,
+                                headers=dict(headers), body=outbound.body,
+                                timeout_seconds=max(0.0, request_deadline - time.monotonic()),
+                                max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                    if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
+                                    else effective_operation.max_response_bytes))
+                                if deepline_catalog_entry is not None or route is not None else None),
                         )
                         if effective_operation.provider == "deepline" else None
                     )
@@ -5773,16 +6415,6 @@ class Broker:
                         deepline_async_poll_accepted = _deepline_async_response_accepted(
                             response, raw_document,
                         )
-                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
-                        effective_normalized, response.status, raw_document,
-                        catalog_entry=deepline_catalog_entry,
-                    )
-                    if deepline_known_free_cost is None:
-                        deepline_known_free_cost = (
-                            provider_costs.deepline_payment_refusal_cost(
-                                response.status, raw_document
-                            )
-                        )
                     response_request_id = _deepline_job_request_id(raw_document)
                     body_identity_present = isinstance(raw_document, Mapping) and any(
                         name in raw_document for name in ("job_id", "request_id", "requestId")
@@ -5804,6 +6436,23 @@ class Broker:
                     # The pre-dispatch ID remains on the immutable reservation
                     # and is used if the transport loses that receipt.
                     deepline_response_request_id = response_request_id
+
+                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
+                        effective_normalized, response.status, raw_document,
+                        catalog_entry=deepline_catalog_entry,
+                        request_refused=bool(
+                            response.internal_provenance is None
+                            and response_request_id is not None
+                            and _deepline_generic_http_request_refusal(effective_normalized, response)
+                            and raw_document.get("credential_owner") == "none"
+                            and raw_document.get("credential_source") == "none"
+                            and raw_document["tool_error"].get("requestId") == response_request_id
+                        ),
+                    )
+                    if deepline_known_free_cost is None:
+                        deepline_known_free_cost = provider_costs.deepline_payment_refusal_cost(
+                            response.status, raw_document
+                        )
 
                     if response_request_id is not None and isinstance(raw_document, Mapping) and (
                         (
@@ -5967,6 +6616,7 @@ class Broker:
                 uncertain_doc["transport_error_class"] = transport_error_class
                 if exc.observed_status is not None:
                     uncertain_doc["observed_provider_status"] = exc.observed_status
+                retain_transport_timing(uncertain_doc)
                 if (
                     deepline_readback_cost is None
                     and scrapingdog_observed_success_status is None
@@ -6076,6 +6726,7 @@ class Broker:
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
+        judgment_response_replayable = False
         accounting_store_deadline = time.monotonic() + _ACCOUNTING_STORE_RECOVERY_SECONDS
         try:
             if effective_operation.provider == "openrouter":
@@ -6149,10 +6800,20 @@ class Broker:
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None
             )
+            # A tracking ID is not a charge or a no-bill proof. In particular,
+            # generation GET 404 can precede delayed billing for a failed call.
+            retained_openrouter_error = (
+                effective_operation.provider == "openrouter"
+                and openrouter_generation_present
+                and response.status in (400, 401, 402, 403, 404, 422, 429)
+                and not openrouter_canonical_response_error
+                and raw_actual is None
+            )
             missing_openrouter_cost = (
                 effective_operation.provider == "openrouter"
                 and (
                     openrouter_canonical_response_error
+                    or retained_openrouter_error
                     or response.status
                     not in (400, 401, 402, 403, 404, 422, 429)
                 )
@@ -6222,6 +6883,14 @@ class Broker:
                     call_succeeded=call_succeeded,
                 )
             )
+            judgment_response_replayable = judgment_cache_eligible or bool(
+                judgment_cache_key and not request_refused and not miner_credential_failure
+                and _complete_judgment_response(
+                    effective_operation_id, effective_normalized,
+                    status=sanitized_status, body=sanitized_body,
+                    call_succeeded=call_succeeded, shared_cache=False,
+                )
+            )
             if missing_deepline_cost or missing_openrouter_cost:
                 uncertain_doc = _missing_provider_cost_call_doc(
                     response,
@@ -6248,14 +6917,29 @@ class Broker:
                     uncertain_doc["account_failure_evidence"] = (
                         account_failure_evidence
                     )
-                if judgment_cache_eligible:
+                if retained_openrouter_error:
+                    # Malformed/conflicting provider IDs remain unknown, but
+                    # must never be sent to the exact-generation GET endpoint.
+                    uncertain_doc["openrouter_generation_present"] = True
+                    uncertain_doc["credential_fingerprint"] = provider_credential_fingerprint
+                    uncertain_doc["openrouter_terminal_response"] = _terminal_response_document(
+                        sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
+                        account_failure_evidence=account_failure_evidence,
+                    )
+                if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
                             sanitized_status, sanitized_headers, sanitized_body,
                             call_succeeded=True,
-                            judgment_cache_eligible=True,
+                            judgment_cache_eligible=judgment_cache_eligible,
                         )
                     )
+                if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
+                    _retain_broker_observations(uncertain_doc, {
+                        "reasoning_route_observation": reasoning_capture.route_observation(
+                            raw_document, reasoning_annotation),
+                    })
+                retain_transport_timing(uncertain_doc)
                 retain_upstream_response(uncertain_doc)
                 uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
                     deadline=accounting_store_deadline,
@@ -6294,6 +6978,20 @@ class Broker:
                         "provider_status": int(response.status),
                     }
                 )
+                if (effective_operation.provider == "deepline"
+                    and not deepline_lost_response
+                    and summary.get("transport_error_class") is None
+                    and _deepline_terminal_failure(
+                        upstream_response, raw_document,
+                        execution_key=deepline_execution_key,
+                        operation=deepline_operation,
+                        operation_aliases=(deepline_catalog_entry["operation_aliases"]
+                                           if deepline_catalog_entry else ()),
+                    )):
+                    # Worker delivery control only. The completed response is
+                    # already known to have failed; billing and raw receipts
+                    # above remain unchanged and eligible for reconciliation.
+                    summary["deepline_terminal_failure"] = True
                 if (effective_operation.provider == "deepline" and call_succeeded
                     and uncertain_state.get("status") == "settled"):
                     saved_actual = uncertain_state.get("amount_microusd", uncertain_state.get("actual_microusd"))
@@ -6331,6 +7029,17 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
+                if retained_openrouter_error and uncertain_state.get("status") in ("uncertain", "settled"):
+                    if uncertain_state["status"] == "settled":
+                        saved_actual = uncertain_state.get("amount_microusd", uncertain_state.get("actual_microusd"))
+                        if type(saved_actual) is not int or saved_actual < 0:
+                            return _error_result("broker_unavailable", summary)
+                        summary.update(outcome="settled", actual_microusd=saved_actual)
+                    summary["status"] = sanitized_status
+                    if (sanitized_status == operations.GENERIC_UNAVAILABLE_STATUS
+                        and sanitized_body == operations.GENERIC_UNAVAILABLE_BODY):
+                        return _error_result("provider_unavailable", summary)
+                    return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
                 if (deepline_host_payment_refusal
                     and uncertain_state.get("status") in ("uncertain", "settled")):
                     if uncertain_state.get("status") == "settled":
@@ -6402,6 +7111,12 @@ class Broker:
                 judgment_cache_eligible=judgment_cache_eligible,
                 account_failure_evidence=account_failure_evidence,
             )
+            retain_transport_timing(terminal)
+            if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
+                _retain_broker_observations(terminal, {
+                    "reasoning_route_observation": reasoning_capture.route_observation(
+                        raw_document, reasoning_annotation),
+                })
             if deepline_lost_response:
                 terminal["deepline_response_missing"] = True
                 terminal["deepline_response_missing_reason"] = "transport_failure"
@@ -6449,6 +7164,7 @@ class Broker:
                                 refused.status, refused.headers, refused.body,
                                 call_succeeded=False, provider_cost=cost_record,
                             )
+                            retain_transport_timing(compact_terminal)
                             if deepline_async_ids:
                                 compact_terminal["deepline_async_job_ids"] = list(deepline_async_ids)
                             settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6527,6 +7243,7 @@ class Broker:
                     provider_cost=cost_record,
                     compatibility_failure_code=compatibility_failure_code,
                 )
+                retain_transport_timing(terminal)
                 retain_upstream_response(terminal)
                 try:
                     settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6601,12 +7318,12 @@ class Broker:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:
                     uncertain_doc["provider_cost"] = cost_record
-                if judgment_cache_eligible:
+                if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
                             sanitized_status, sanitized_headers, sanitized_body,
                             call_succeeded=True,
-                            judgment_cache_eligible=True,
+                            judgment_cache_eligible=judgment_cache_eligible,
                         )
                     )
             if scrapingdog_observed_success_status is not None:
@@ -6614,6 +7331,7 @@ class Broker:
                     "observed_provider_status": scrapingdog_observed_success_status,
                     "transport_error_class": summary["transport_error_class"],
                 })
+            retain_transport_timing(uncertain_doc)
             retain_upstream_response(uncertain_doc)
             try:
                 self._persist_provider_accounting(self._store.mark_uncertain,

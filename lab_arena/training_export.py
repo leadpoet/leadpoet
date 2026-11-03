@@ -15,14 +15,18 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
-from lab_arena import company_judgments, contracts, contact_policy, integrity, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
+from lab_arena import company_judgments, contracts, contact_policy, integrity, operations, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
 MAX_RECEIPT_BYTES = 16 * 1024 * 1024
-# An example joins independently bounded inputs, requests and receipts. Its
-# final privacy pass needs a separate finite budget from a single request.
+# The final privacy pass bounds each joined call and input snapshot separately,
+# plus one shared envelope budget. Per-request/response limits remain unchanged.
 MAX_EXAMPLE_NODES = 2_000_000
+_RETAINED_ERROR_STATUSES = {
+    "openrouter": (400, 402, 403, 404, 422, 502),
+    "deepline": (400, 402, 403, 404, 422),
+}
 
 
 class ExportError(ValueError):
@@ -39,7 +43,8 @@ def _json_object(objects: Any, ref: str, limit: int) -> dict:
 
 def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
     """Copy a JSON value, omitting opaque reasoning while keeping readable text."""
-    from lab_arena.training_capture import empty_value, opaque_reasoning_field, readable_reasoning_item, reasoning_kind
+    from lab_arena.training_capture import (approved_history_reasoning_content, empty_value,
+                                            opaque_reasoning_field, readable_reasoning_item, reasoning_kind)
     removed = False
 
     def walk(item, path=()):
@@ -50,8 +55,19 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             for key, child in item.items():
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
-                if opaque_reasoning_field(normalized, child, kind, safe_config, path):
-                    removed = removed or not empty_value(child)
+                if (normalized == "reasoning_content" and isinstance(child, str)
+                        and approved_history_reasoning_content(value, path, item)):
+                    result[key] = walk(child, (*path, normalized))
+                elif opaque_reasoning_field(normalized, child, kind, safe_config, path, value):
+                    # Native readable history can include these empty optional
+                    # fields. Removing them changes the retained request hash,
+                    # although there are no private bytes to exclude.
+                    if (item.get("type") == "reasoning" and kind == "readable"
+                            and (key == "summary" and isinstance(child, list) and not child
+                                 or key == "encrypted_content" and child is None)):
+                        result[key] = walk(child, (*path, normalized))
+                    else:
+                        removed = removed or not empty_value(child)
                 else:
                     result[key] = walk(child, (*path, normalized))
             return result
@@ -74,7 +90,7 @@ class _Rows:
     """Minimal read-only store for the existing accepted-evidence validators."""
 
     def __init__(self, runs, submission, caches, companies, *, round_row,
-                 signal_uses, signal_rows):
+                 signal_uses, signal_rows, preserved_judgment_policy_reader=None):
         self.runs = runs
         self.submission = submission
         self.round_row = round_row
@@ -82,6 +98,8 @@ class _Rows:
         self.companies = {(row["cache_key"], row["authority_slot"]): row for row in companies}
         self.signal_uses = signal_uses
         self.signals = {(row["cache_key"], row["authority_slot"]): row for row in signal_rows}
+        self._preserved_policy_reader = preserved_judgment_policy_reader
+        self._preserved_policies = {}
         if len(self.caches) != len(caches) or len(self.companies) != len(companies):
             raise ExportError("ambiguous_cache_rows")
         if len(self.signals) != len(signal_rows):
@@ -101,6 +119,14 @@ class _Rows:
 
     def get_company_judgment(self, key, slot):
         return self.companies.get((key, slot))
+
+    def preserved_judgment_policy(self, round_id, judge_run_id, source_run_id, refs):
+        identity = (round_id, judge_run_id, source_run_id, contracts.document_hash(refs))
+        if identity not in self._preserved_policies:
+            self._preserved_policies[identity] = (
+                self._preserved_policy_reader(round_id, judge_run_id, source_run_id, refs)
+                if self._preserved_policy_reader is not None else None)
+        return copy.deepcopy(self._preserved_policies[identity])
 
     def signal_authority_exclusions(self, run_id):
         """Replay the immutable union in signal_authority_exclusions_v1."""
@@ -155,6 +181,8 @@ def _evidence_reader(store, objects):
         _validated_company_judgment_lease = ArenaService._validated_company_judgment_lease
         _company_judgment_evidence = ArenaService._company_judgment_evidence
         _round_from_context = ArenaService._round_from_context
+        _preserved_judgment_configuration = ArenaService._preserved_judgment_configuration
+        _score_generation_floor = staticmethod(ArenaService._score_generation_floor)
 
         def _round(self, round_id):
             # Offline assembly has one exact frozen round, with no service
@@ -509,10 +537,144 @@ def _call_order(call, run_order):
         return value if type(value) is int and value >= 0 else 2 ** 63
     return (run_order.get(call["run_id"], 2 ** 63),
             numeric(call.get("action_sequence")), numeric(call.get("provider_attempt", 1)),
-            call["reservation_entry_id"], call["call_identity"])
+            numeric(call.get("reservation_entry_id", call.get("refusal_entry_id"))), call["call_identity"])
+
+
+def response_entry_id(call):
+    """Select retained delivery evidence without changing the accounting head."""
+    terminal = call.get("terminal_entry_id")
+    if "response_entry_id" not in call:
+        return terminal
+    selected = call["response_entry_id"]
+    provider = call.get("provider")
+    receipts = [row for row in call.get("response_receipts", []) if row.get("entry_id") == selected]
+    if (provider not in _RETAINED_ERROR_STATUSES or type(selected) is not int
+        or type(terminal) is not int or not 0 < selected <= terminal or len(receipts) != 1):
+        raise ExportError("retained_provider_error_identity_invalid")
+    receipt = receipts[0]
+    if (receipt.get("terminal_source") != f"entry_doc.call.{provider}_terminal_response"
+        or receipt.get("entry_kind") != "uncertain"
+        or (receipt.get("metadata") or {}).get("call_succeeded") is not False
+        or (receipt.get("metadata") or {}).get("status") != call.get("response_status")
+        or call.get("response_status") not in _RETAINED_ERROR_STATUSES[provider]
+        or receipt.get("response_sha256") != call.get("response_sha256")
+        or receipt.get("response_ref") != {"field": "response", "entry_id": selected}):
+        raise ExportError("retained_provider_error_identity_invalid")
+    if selected != terminal:
+        heads = [row for row in call.get("lifecycle", []) if row.get("entry_id") == terminal]
+        if (len(heads) != 1 or heads[0].get("entry_kind") != "settlement"
+            or (heads[0].get("accounting") or {}).get(f"{provider}_delayed_reconciliation") is not True
+            or any(f"{name}_delayed_reconciliation" in (heads[0].get("accounting") or {})
+                   for name in _RETAINED_ERROR_STATUSES if name != provider)
+            or (heads[0].get("accounting") or {}).get("reconciled_uncertainty_entry_id") != selected):
+            raise ExportError("retained_provider_error_identity_invalid")
+    return selected
+
+
+def recovered_response_ref(call):
+    """Validate the separate saved Deepline response; it is not a ledger row."""
+    ref = call.get("recovered_response_ref")
+    if ref is None:
+        return None
+    if not isinstance(ref, Mapping) or not isinstance(ref.get("metadata"), Mapping):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    metadata = ref["metadata"]
+    terminals = [row for row in call.get("lifecycle", [])
+                 if row.get("entry_kind") in {"settlement", "uncertain", "recovery", "refusal"}]
+    reservations = [row for row in call.get("lifecycle", []) if row.get("entry_kind") == "reservation"]
+    request = call.get("request") or {}
+    parameters = request.get("effective_parameters") or {}
+    operation = operations.get_operation(call.get("operation_id"))
+    tool = (operation.deepline_tool or parameters.get("tool")) if operation is not None else None
+    provider_cost = metadata.get("provider_cost") or {}
+    if (ref.get("table") != "lab_arena_deepline_call_responses"
+        or call.get("provider") != "deepline"
+        or operation is None or operation.provider != "deepline"
+        or any(ref.get(key) != call.get(key) for key in
+               ("call_identity", "reservation_entry_id", "run_id", "terminal_entry_id", "request_hash"))
+        or type(ref.get("reservation_entry_id")) is not int
+        or type(ref.get("terminal_entry_id")) is not int
+        or len(reservations) != 1 or reservations[0].get("entry_id") != ref["reservation_entry_id"]
+        or not terminals or max(row["entry_id"] for row in terminals) != ref["terminal_entry_id"]
+        or not any(row.get("entry_id") == ref["terminal_entry_id"]
+                   and row.get("entry_kind") in {"settlement", "uncertain"} for row in terminals)
+        or not isinstance(ref.get("created_at"), str) or not ref["created_at"]
+        or not isinstance(ref.get("request_id"), str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", ref["request_id"]) is None
+        or re.fullmatch(r"ctx-tool-[0-9a-f]{32}", ref["request_id"]) is not None
+        or not isinstance(ref.get("tool"), str) or not ref["tool"]
+        or tool != ref["tool"]
+        or request.get("request_hash") != ref["request_hash"]
+        or metadata.get("call_succeeded") is not True
+        or type(metadata.get("status")) is not int or not 200 <= metadata["status"] < 300
+        or metadata["status"] != call.get("response_status")
+        or "body_b64" in metadata
+        or any(provider_cost.get(key) != ref[field] for key, field in
+               (("request_id", "request_id"), ("operation", "tool")) if key in provider_cost)
+        or ref.get("response_ref") != {"field": "response"}
+        or ref.get("response_sha256") != call.get("response_sha256")
+        or contracts.document_hash(call.get("response")) != ref.get("response_sha256")
+        or ref.get("privacy_redactions") != call.get("response_privacy_redactions")
+        or type(ref.get("wire_body_bytes")) is not int or ref["wire_body_bytes"] < 0
+        or not isinstance(ref.get("wire_body_sha256"), str)
+        or contracts.SHA256_RE.fullmatch(ref["wire_body_sha256"]) is None):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    return ref
+
+
+def _ledger_recovered_response(entries, reserve):
+    saved = [(row, row["training_recovered_response"]) for row in entries
+             if row.get("training_recovered_response") is not None]
+    if not saved:
+        return None
+    row, ref = saved[0]
+    entry = reserve.get("entry_doc") or {}
+    if not isinstance(ref, Mapping) or not isinstance(ref.get("terminal_response"), Mapping):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    terminal = ref["terminal_response"]
+    cost = (row.get("terminal_response") or {}).get("provider_cost") or {}
+    recovered_cost = terminal.get("provider_cost") or {}
+    if (len(saved) != 1
+        or reserve.get("provider") != "deepline"
+        or row["entry_kind"] not in {"settlement", "uncertain"}
+        or row["entry_id"] != max(item["entry_id"] for item in entries)
+        or ref.get("table") != "lab_arena_deepline_call_responses"
+        or any(ref.get(key) != reserve.get(key) for key in ("call_identity", "run_id"))
+        or ref.get("reservation_entry_id") != reserve["entry_id"]
+        or ref.get("terminal_entry_id") != row["entry_id"]
+        or ref.get("request_hash") != entry.get("request_hash")
+        or ref.get("tool") != entry.get("tool")
+        or not ref.get("request_id") or not ref.get("created_at")
+        or terminal.get("call_succeeded") is not True
+        or type(terminal.get("status")) is not int or not 200 <= terminal["status"] < 300
+        or row["entry_kind"] == "settlement" and cost.get("request_id") != ref.get("request_id")
+        or any(recovered_cost.get(key) != ref.get(field) for key, field in
+               (("request_id", "request_id"), ("operation", "tool")) if key in recovered_cost)):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    if terminal == row.get("terminal_response"):
+        return None  # The ledger already retains the exact delivered reply.
+    return ref
+
+
+def recovered_response_for_write(call, write):
+    """Join a host receipt to the exact separately retained successful reply."""
+    ref = recovered_response_ref(call)
+    if (ref is not None and ref["wire_body_sha256"] == write.get("body_sha256")
+        and ref["wire_body_bytes"] == write.get("body_bytes")
+        and ref["metadata"]["status"] == write.get("status")):
+        return ref
+    return None
 
 
 def _calls(rows, run_ids, objects, run_order):
+    from lab_arena.broker import BrokerError, _decode_terminal, broker_observations
+
+    def observations(document):
+        try:
+            return broker_observations(document)
+        except BrokerError as exc:
+            raise ExportError("broker_observation_invalid") from exc
+
     grouped, calls, reasons = {}, [], set()
     if len({row.get("entry_id") for row in rows}) != len(rows):
         raise ExportError("duplicate_ledger_entry")
@@ -531,18 +693,79 @@ def _calls(rows, run_ids, objects, run_order):
         dispatches = [row for row in entries if row.get("entry_kind") == "dispatch"]
         terminals = [row for row in entries if row.get("entry_kind") in
                      {"settlement", "uncertain", "recovery", "refusal"}]
-        if len(reserves) != 1 or len(dispatches) > 1:
+        response_terminals = terminals
+        retained = []
+        provider = reserves[0].get("provider") if reserves else None
+        if provider in _RETAINED_ERROR_STATUSES:
+            terminal_field = f"{provider}_terminal_response"
+            for row in terminals:
+                saved = (row.get("entry_doc") or {}).get("call") or {}
+                if row["entry_kind"] != "uncertain" or terminal_field not in saved:
+                    continue
+                terminal = saved[terminal_field]
+                try:
+                    status, _, body = _decode_terminal(terminal)
+                    if (saved.get("reason") != "missing_provider_cost"
+                        or saved.get("call_succeeded") is not False
+                        or terminal.get("call_succeeded") is not False
+                        or status not in _RETAINED_ERROR_STATUSES[provider]
+                        or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
+                        raise BrokerError("broker_unavailable")
+                    if provider == "deepline" and status == 402:
+                        from lab_arena.operations import GENERIC_UNAVAILABLE_BODY
+                        if (reserves[0].get("funding_source") != "host"
+                            or saved.get("deepline_host_payment_refusal") is not True
+                            or saved.get("provider_status") != 402
+                            or body != GENERIC_UNAVAILABLE_BODY):
+                            raise BrokerError("broker_unavailable")
+                except BrokerError as exc:
+                    raise ExportError("retained_provider_error_invalid") from exc
+                retained.append(dict(row, terminal_response=terminal,
+                    retained_terminal_source=f"entry_doc.call.{terminal_field}"))
+            if retained:
+                if len(retained) != 1:
+                    raise ExportError("retained_provider_error_ambiguous")
+                saved = retained[0]
+                for row in terminals:
+                    accounting = row.get("entry_doc") or {}
+                    markers = {f"{name}_delayed_reconciliation" for name in _RETAINED_ERROR_STATUSES
+                               if f"{name}_delayed_reconciliation" in accounting}
+                    if markers and (
+                        markers != {f"{provider}_delayed_reconciliation"}
+                        or accounting.get(f"{provider}_delayed_reconciliation") is not True
+                        or accounting.get("reconciled_uncertainty_entry_id") != saved["entry_id"]):
+                        raise ExportError("retained_provider_error_identity_invalid")
+                # A delayed bill's generic 502 is an accounting placeholder,
+                # not another response delivered to the model. Its immutable
+                # cost and lifecycle remain authoritative below.
+                response_terminals = [saved] + [row for row in terminals
+                    if row["entry_id"] != saved["entry_id"]
+                    and not ((row.get("entry_doc") or {}).get(f"{provider}_delayed_reconciliation") is True
+                        and (row.get("entry_doc") or {}).get("reconciled_uncertainty_entry_id") == saved["entry_id"])]
+        standalone_refusal = (not reserves and not dispatches and len(entries) == 1
+                              and entries[0].get("entry_kind") == "refusal"
+                              and entries[0].get("amount_microusd") == 0
+                              and (entries[0].get("entry_doc") or {}).get("reason")
+                                  in {"per_icp_quota", "stage_quota", "money_cap"}
+                              and isinstance((entries[0].get("entry_doc") or {}).get("call"), Mapping))
+        if not standalone_refusal and (len(reserves) != 1 or len(dispatches) > 1):
             reasons.add("ambiguous_call_lifecycle")
             continue
-        reserve = reserves[0]
+        reserve = entries[0] if standalone_refusal else reserves[0]
         if any(any(row.get(key) != reserve.get(key) for key in
                    ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
             raise ExportError("ledger_membership_mismatch")
-        entry = reserve.get("entry_doc") or {}
+        recovered = _ledger_recovered_response(entries, reserve)
+        entry = ((reserve.get("entry_doc") or {}).get("call") if standalone_refusal
+                 else reserve.get("entry_doc")) or {}
         call = {"call_identity": identity, "run_id": reserve["run_id"],
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
-                "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
+                "funding_source": reserve.get("funding_source"),
+                **({"refusal_entry_id": reserve["entry_id"], "refusal_receipt": copy.deepcopy(reserve)}
+                   if standalone_refusal else {"reservation_entry_id": reserve["entry_id"]}),
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+        if isinstance(entry.get("reasoning_capture"), Mapping):
+            call["reasoning_capture"] = copy.deepcopy(entry["reasoning_capture"])
         call_reasons = set()
         upstream_receipts = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
@@ -550,10 +773,17 @@ def _calls(rows, run_ids, objects, run_order):
             terminal = row.get("terminal_response") or {}
             captured = (saved_call.get("upstream_response_receipt")
                         if isinstance(saved_call, Mapping) else None)
-            captured = captured or terminal.get("upstream_response_receipt")
+            captured = (captured or terminal.get("upstream_response_receipt")
+                        or (row.get("entry_doc") or {}).get("upstream_response_receipt"))
             if not captured:
                 continue
+            if isinstance(captured, Mapping) and "broker_observations" in captured:
+                observations({"upstream_response_receipt": captured})
+                if set(captured) == {"broker_observations"}:
+                    continue  # Timing/route evidence does not claim an upstream body exists.
             if isinstance(captured, Mapping) and captured.get("status") == "unavailable":
+                if captured.get("reason") in {"response_capture_failed", "response_size_limit"}:
+                    call["upstream_response_capture"] = {"status": "unavailable", "reason": captured["reason"]}
                 if captured.get("reason") == "response_size_limit":
                     call_reasons.add("upstream_response_size_limit")
                 call_reasons.add("upstream_response_capture_unavailable")
@@ -598,6 +828,7 @@ def _calls(rows, run_ids, objects, run_order):
                     "wire_body_bytes": captured["wire_body_bytes"],
                     "provenance": "private_upstream_response_receipt",
                     "delivery_to_worker": "not_proved",
+                    "response_sha256": contracts.document_hash(response),
                 })
                 if redactions:
                     call_reasons.add("upstream_response_privacy_nonexact")
@@ -611,43 +842,68 @@ def _calls(rows, run_ids, objects, run_order):
                              "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
-                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost"}
+                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
+                             "transport_elapsed_ms", "timing_scope"}
         call["lifecycle"] = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
             metadata = {key: copy.deepcopy(row[key]) for key in
                         ("entry_id", "entry_kind", "created_at", "funding_source", "amount_microusd") if key in row}
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
+            if (row.get("entry_kind") == "recovery"
+                    and (row.get("entry_doc") or {}).get("reason") == "attempt_completed_before_dispatch"):
+                metadata["accounting"]["reason"] = "attempt_completed_before_dispatch"
+            metadata["accounting"].update({key: copy.deepcopy(value) for key, value in
+                observations(row.get("entry_doc") or {}).items() if key in accounting_fields})
             recorded_call = (row.get("entry_doc") or {}).get("call")
             if isinstance(recorded_call, Mapping):
                 call_accounting = {key: copy.deepcopy(value) for key, value in recorded_call.items() if key in accounting_fields}
+                call_accounting.update({key: copy.deepcopy(value) for key, value in
+                    observations(recorded_call).items() if key in accounting_fields})
                 if call_accounting:
                     metadata["accounting"]["call"] = call_accounting
             call["lifecycle"].append(metadata)
         call["response_receipts"] = []
-        latest_id = max((int(row["entry_id"]) for row in terminals), default=None)
-        latest_terminal = next((row.get("terminal_response") or {} for row in terminals if row["entry_id"] == latest_id), {})
+        if standalone_refusal:
+            terminals = []  # Admission denial has no provider terminal or generation.
+            response_terminals = []
+        latest_id = max((int(row["entry_id"]) for row in response_terminals), default=None)
+        latest_terminal = next((row.get("terminal_response") or {} for row in response_terminals if row["entry_id"] == latest_id), {})
         latest_response, latest_redactions, latest_digest = None, [], None
         try:
             latest_response, latest_redactions = _response_value(latest_terminal, reserve.get("provider"))
             latest_digest = contracts.document_hash(latest_response)
         except Exception:
             pass  # Missing receipt is recorded below; no failed proof is hidden.
+        recovered_value, recovered_redactions, recovered_digest = None, [], None
+        if recovered is not None:
+            recovered_terminal = recovered["terminal_response"]
+            recovered_value, recovered_redactions = _response_value(recovered_terminal, reserve.get("provider"))
+            recovered_digest = contracts.document_hash(recovered_value)
         saved_bodies = {}
-        for row in sorted(terminals, key=lambda row: int(row["entry_id"])):
+        for row in sorted(response_terminals, key=lambda row: int(row["entry_id"])):
             terminal = row.get("terminal_response") or {}
             receipt = {"entry_id": row["entry_id"], "entry_kind": row["entry_kind"],
                        "created_at": row.get("created_at"),
                        "metadata": {key: copy.deepcopy(value) for key, value in terminal.items()
                                     if key not in {"body_b64", "upstream_response_receipt"}}}
+            if row.get("retained_terminal_source"):
+                receipt["terminal_source"] = row["retained_terminal_source"]
+            receipt["metadata"].update(copy.deepcopy(observations(terminal)))
             try:
-                response, redactions = _response_value(terminal, reserve.get("provider"))
+                # The latest receipt references the response already validated
+                # above. Keep wire proof and every other receipt's checks.
+                reuse_latest = terminal is latest_terminal and latest_digest is not None
+                if reuse_latest:
+                    response, redactions = latest_response, latest_redactions
+                else:
+                    response, redactions = _response_value(terminal, reserve.get("provider"))
                 wire_body = base64.b64decode(terminal["body_b64"], validate=True)
                 receipt["wire_body_sha256"] = contracts.hash_bytes(wire_body)
                 receipt["wire_body_bytes"] = len(wire_body)
-                digest = contracts.document_hash(response)
+                digest = latest_digest if reuse_latest else contracts.document_hash(response)
                 receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
-                if digest == latest_digest:
+                if digest == (recovered_digest if recovered is not None else latest_digest):
                     receipt["response_ref"] = {"field": "response", "entry_id": latest_id}
                 elif digest in saved_bodies:
                     receipt["response_ref"] = {"entry_id": saved_bodies[digest]}
@@ -677,7 +933,11 @@ def _calls(rows, run_ids, objects, run_order):
         except Exception:
             call.pop("request", None)
             call_reasons.add("full_request_unavailable")
-        if not terminals:
+        if standalone_refusal:
+            call["accounting_state"] = "refusal"
+            call["actual_microusd"] = 0
+            call["response_provenance"]["source"] = "stored_admission_refusal"
+        elif not terminals:
             call_reasons.add("provider_call_inflight")
         else:
             # A later recovery can settle a previous uncertain entry. The
@@ -700,12 +960,32 @@ def _calls(rows, run_ids, objects, run_order):
                 call["response_sha256"] = latest_digest
                 call["response_hidden_reasoning_removed"] = "hidden_reasoning" in latest_redactions
                 call["response_privacy_redactions"] = latest_redactions
-                call["response_status"] = terminal.get("status")
-            else:
+                call["response_status"] = latest_terminal.get("status")
+                if retained and latest_id == retained[0]["entry_id"]:
+                    call["response_entry_id"] = latest_id
+            elif recovered is None:
                 call_reasons.add("full_response_unavailable")
             for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
                 if key in terminal:
                     call[key] = terminal[key]
+            if recovered is not None:
+                wire = base64.b64decode(recovered_terminal["body_b64"], validate=True)
+                call.update(response=recovered_value, response_sha256=recovered_digest,
+                            response_status=recovered_terminal["status"],
+                            response_hidden_reasoning_removed="hidden_reasoning" in recovered_redactions,
+                            response_privacy_redactions=recovered_redactions)
+                call.pop("response_entry_id", None)
+                call["recovered_response_ref"] = {
+                    **{key: copy.deepcopy(value) for key, value in recovered.items() if key != "terminal_response"},
+                    "metadata": {key: copy.deepcopy(value) for key, value in recovered_terminal.items()
+                                 if key not in {"body_b64", "upstream_response_receipt"}},
+                    "wire_body_sha256": contracts.hash_bytes(wire), "wire_body_bytes": len(wire),
+                    "response_sha256": recovered_digest, "privacy_redactions": recovered_redactions,
+                    "response_ref": {"field": "response"}}
+                recovered_response_ref(call)
+                call["response_provenance"]["source"] = "lab_arena_deepline_call_responses"
+                if "credential" in recovered_redactions:
+                    call_reasons.add("response_privacy_nonexact")
         call["evidence_gaps"] = sorted(call_reasons)
         reasons.update(call_reasons)
         calls.append(call)
@@ -732,7 +1012,95 @@ def _reported_phase_coverage(payload):
                 "state_record_errors", "state_local_errors", "state_overflow_rows", "state_overflow_manifests")))
 
 
-def _link_worker_receipts(run, paid, snapshot):
+def _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger_rows):
+    """Prove counted local broker errors without creating provider ledger calls."""
+    from lab_arena import training_coverage, training_observations
+    if ledger_rows is None or not training_coverage.uses_host_result_evidence(configuration or {}):
+        return {}
+    payload = snapshot.get("payload") or {}
+    candidates = [row for row in payload.get("observations") or []
+                  if (row.get("outcome") or {}).get("broker_disposition")]
+    if not candidates:
+        return {}
+    try:
+        if (snapshot.get("schema_version") != training_observations.SCHEMA_VERSION
+                or snapshot.get("run_id") != run["run_id"] or snapshot.get("kind") != run["kind"]
+                or snapshot.get("payload_sha256") != contracts.document_hash(payload)):
+            return {}
+        found = {}
+        observations = payload["observations"]
+        # Both callers validate the full hash-bound host payload. The runner
+        # stamps callbacks with its latest started action, which can advance
+        # while an earlier call is in flight. Only host rows in this snapshot
+        # can corroborate that frontier; callbacks cannot corroborate themselves.
+        host_sequences = {item["action_sequence"]
+                          for rows in (observations, payload["response_receipts"]) for item in rows
+                          if type(item.get("action_sequence")) is int}
+        for row in candidates:
+            identity, sequence = row.get("call_identity"), row.get("action_sequence")
+            disposition = row["outcome"]["broker_disposition"]
+            if (training_observations.clean_observation(row) != row
+                    or row["kind"] != "nonstandard_response"
+                    or row["contributes_to_provider_call_count"] is not True
+                    or not isinstance(identity, str) or contracts.SHA256_RE.fullmatch(identity) is None
+                    or type(sequence) is not int or sequence < 0
+                    or disposition != {"outcome": "not_dispatched", "reason": disposition.get("reason")}
+                    or disposition.get("reason") not in training_observations.BROKER_NOT_DISPATCHED_REASONS
+                    or not training_observations._expected_not_dispatched_response(row["outcome"].get("response"))
+                    or sum(item.get("call_identity") == identity for item in observations) != 1
+                    or sum(item.get("action_sequence") == sequence for item in observations) != 1
+                    or any(call.get("call_identity") == identity or call.get("base_call_identity") == identity
+                           or call.get("action_sequence") == sequence for call in paid)):
+                continue
+            # Supplied raw rows remain authority even if no paid call could be
+            # assembled from them. A broker tag cannot erase accounting.
+            collision = False
+            for entry in ledger_rows:
+                doc = entry.get("entry_doc") or {}
+                call = doc.get("call") or {}
+                if (entry.get("call_identity") == identity
+                        or doc.get("base_call_identity") == identity
+                        or call.get("base_call_identity") == identity
+                        or entry.get("run_id") == run["run_id"] and (
+                            doc.get("action_sequence") == sequence or call.get("action_sequence") == sequence)):
+                    collision = True
+                    break
+            if collision:
+                continue
+            writes = [item for item in payload["response_receipts"]
+                      if item.get("call_identity") == identity or item.get("ordinal") == row["ordinal"]
+                      or item.get("action_sequence") == sequence]
+            if len(writes) != 1:
+                continue
+            write = writes[0]
+            response = row["outcome"]["response"]
+            raw = base64.b64decode(response["body_b64"], validate=True)
+            if (training_observations.clean_response_receipt(write) != write
+                    or any(write[key] != row[key] for key in ("ordinal", "action_sequence", "operation_id", "call_identity"))
+                    or write["protocol"] != row["outcome"]["protocol"]
+                    or write["write_state"] != "socket_written" or write["status"] != response["status"]
+                    or write["body_bytes"] != len(raw) or write["body_sha256"] != contracts.hash_bytes(raw)):
+                continue
+            reads = [item for item in payload["agent_observations"] if item.get("kind") == "response_received"
+                     and (item.get("data") or {}).get("call_identity") == identity]
+            # Host-result rounds do not require cooperative miner callbacks.
+            # Every callback that is present must still agree with the write.
+            if any(training_observations.clean_agent_observation(read) != read
+                   or read["privacy"] != {"redacted": False, "redactions": []}
+                   or type(read["after_action_sequence"]) is not int
+                   or read["after_action_sequence"] < sequence
+                   or read["after_action_sequence"] not in host_sequences
+                   or any(read["data"].get(key) != write[key]
+                          for key in ("call_identity", "status", "body_sha256", "body_bytes"))
+                   for read in reads):
+                continue
+            found[identity] = row
+        return found
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return {}
+
+
+def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True, require_client_ack=True, configuration=None, ledger_rows=None, update_provenance=True):
     """Join host writes and cooperative read acknowledgments without guessing.
 
     A host write is not consumption. An SDK acknowledgment is an agent report,
@@ -741,11 +1109,17 @@ def _link_worker_receipts(run, paid, snapshot):
     """
     payload = snapshot["payload"]
     errors, linked = set(), {}
-    by_identity = {call["call_identity"]: call for call in paid}
+    not_dispatched = _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger_rows)
+    by_identity = {call["call_identity"]: call if update_provenance else {
+        **call, "response_provenance": copy.deepcopy(call.get("response_provenance") or {})}
+        for call in paid}
     error_observations = {row["ordinal"]: row for row in payload.get("observations", [])
                           if row.get("call_identity") is not None}
     for receipt in payload.get("response_receipts", []):
         call = by_identity.get(receipt["call_identity"])
+        if call is None and receipt["call_identity"] in not_dispatched:
+            linked[receipt["call_identity"]] = receipt
+            continue
         if (call is None or call.get("action_sequence") != receipt["action_sequence"]
                 or call.get("operation_id") != receipt["operation_id"]):
             errors.add("worker_response_receipt_link_invalid")
@@ -754,6 +1128,7 @@ def _link_worker_receipts(run, paid, snapshot):
                    if item.get("wire_body_sha256") == receipt["body_sha256"]
                    and item.get("wire_body_bytes") == receipt["body_bytes"]
                    and item.get("metadata", {}).get("status") == receipt["status"]]
+        recovered = recovered_response_for_write(call, receipt)
         observed = error_observations.get(receipt["ordinal"])
         worker_error_body = False
         if observed is not None:
@@ -769,10 +1144,10 @@ def _link_worker_receipts(run, paid, snapshot):
                                       or contracts.hash_bytes(base64.b64decode(response["body_b64"], validate=True))
                                       == receipt["body_sha256"]))
         identity = receipt["call_identity"]
-        if (not matches and not worker_error_body) or identity in linked:
+        if (not matches and recovered is None and not worker_error_body) or identity in linked:
             errors.add("worker_response_receipt_link_invalid")
             continue
-        if worker_error_body and not matches and any(
+        if worker_error_body and not matches and recovered is None and any(
                 item.get("wire_body_sha256") for item in call["response_receipts"]):
             errors.add("worker_provider_response_mismatch")
         linked[identity] = receipt
@@ -782,9 +1157,14 @@ def _link_worker_receipts(run, paid, snapshot):
                                    "payload_sha256": snapshot["payload_sha256"]},
             "agent_receipt": "not_reported",
             "worker_received_receipt_entry_ids": sorted(item["entry_id"] for item in matches),
-            "worker_body_source": "ledger_terminal" if matches else "worker_error_observation",
-            "worker_body_exact_in_artifact": bool(matches or worker_error_body and not observed["privacy"]["redacted"]),
+            "worker_body_source": ("lab_arena_deepline_call_responses" if recovered is not None
+                                   else "ledger_terminal" if matches else "worker_error_observation"),
+            "worker_body_exact_in_artifact": bool(matches or recovered is not None
+                                                   or worker_error_body and not observed["privacy"]["redacted"]),
         })
+        if recovered is not None:
+            call["response_provenance"]["worker_recovered_response_ref"] = {
+                "table": recovered["table"], "call_identity": recovered["call_identity"]}
         if worker_error_body:
             call["response_provenance"]["worker_error_observation_ref"] = {
                 "run_id": run["run_id"], "ordinal": observed["ordinal"],
@@ -797,7 +1177,7 @@ def _link_worker_receipts(run, paid, snapshot):
             errors.add("binary_privacy_review_required")
         for reference in row["depends_on"]:
             if reference.startswith("sha256:"):
-                dependency = by_identity.get(reference)
+                dependency = by_identity.get(reference) or not_dispatched.get(reference)
                 if (dependency is None or type(dependency.get("action_sequence")) is not int
                         or type(row["after_action_sequence"]) is not int
                         or dependency["action_sequence"] > row["after_action_sequence"]):
@@ -810,41 +1190,72 @@ def _link_worker_receipts(run, paid, snapshot):
                 or any(receipt[key] != data[key] for key in ("status", "body_sha256", "body_bytes"))):
             errors.add("agent_response_receipt_link_invalid")
             continue
+        if data["call_identity"] in not_dispatched:
+            acknowledged.add(data["call_identity"])
+            continue
         call = by_identity[data["call_identity"]]
         ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
         call["response_provenance"].setdefault("agent_receipt_refs", []).append(ref)
         call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
-        latest_acknowledged = call.get("terminal_entry_id") in call["response_provenance"]["worker_received_receipt_entry_ids"]
+        latest_acknowledged = (recovered_response_for_write(call, receipt) is not None
+                               or response_entry_id(call) in call["response_provenance"]["worker_received_receipt_entry_ids"])
         call["response_provenance"]["selected_response_acknowledged"] = latest_acknowledged
         if not latest_acknowledged and call["response_provenance"].get("worker_body_source") == "worker_error_observation":
             call["response_provenance"]["worker_error_body_acknowledged"] = True
         elif not latest_acknowledged:
             errors.add("agent_selected_response_unacknowledged")
         acknowledged.add(data["call_identity"])
+    # The caller sets this flag only for the selected accepted execution.
+    # Related judge attempts may stop before delivery; every present link
+    # still passes the unconditional identity and byte checks above.
+    if not require_client_ack and require_completed_phases:
+        from lab_arena import training_thinking
+        proof = {"run_id": run["run_id"], "configuration": configuration or {},
+                 "provider_calls": paid, "worker_observation_artifacts": {run["run_id"]: snapshot}}
+        if any(call["call_identity"] not in linked
+               and not training_thinking.verified_recovered_provider_retry(proof, call)
+               and not training_thinking.verified_undispatched_transport(
+                   proof, call, require_observation_ref=False) for call in paid):
+            errors.add("worker_response_receipt_link_invalid")
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid
-                    if type(call.get("response_status")) is int and
+                    if call.get("accounting_state") == "refusal" or
+                    type(call.get("response_status")) is int and
                     (200 <= call["response_status"] < 300 or call["call_identity"] in linked)}
-        if expected - acknowledged:
+        if require_client_ack and expected - acknowledged:
             errors.add("agent_response_receipts_unverified")
-        if paid and not _reported_phase_coverage(payload):
+        if require_client_ack and paid and require_completed_phases and not _reported_phase_coverage(payload):
             errors.add("agent_task_state_unverified")
     return errors
 
 
-def _worker_evidence(related, calls, objects):
+def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=None, ledger_rows=None):
     from lab_arena import training_observations
-    artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
+    from lab_arena import training_coverage
+    require_client_ack = not training_coverage.uses_host_result_evidence(configuration or {})
+    artifacts, partial_artifacts, unverified_artifacts = {}, {}, {}
+    errors, counts = set(), {}
+    per_run_errors, verified_counts = {}, {}
+    selected = next((row for row in related if row["run_id"] == selected_run_id
+                     and row["kind"] == "execute" and row.get("status") == "accepted"), {})
+
+    def record_error(code, run_id):
+        errors.add(code)
+        per_run_errors.setdefault(run_id, set()).add(code)
     for run in related:
         run_id = run["run_id"]
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
         capture = summary.get("worker_observations")
         paid = [call for call in calls if call["run_id"] == run_id]
+        # A failed predecessor can stop before admission/final states. Its
+        # receipts and observations still pass through every check below.
+        require_completed_phases = (run_id == selected_run_id and run["kind"] == "execute"
+                                    and run.get("status") == "accepted")
         sequences = {call["action_sequence"] for call in paid if type(call.get("action_sequence")) is int}
         counts[run_id] = set(sequences)
         local_refusals = summary.get("provider_local_refusal_count")
         if type(local_refusals) is not int or local_refusals < 0:
-            errors.add("worker_local_refusals_unverified")
+            record_error("worker_local_refusals_unverified", run_id)
         needed = (type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != len(sequences)
                   or type(local_refusals) is int and local_refusals > 0
                   or any("full_response_unavailable" in call["evidence_gaps"] for call in paid))
@@ -859,56 +1270,105 @@ def _worker_evidence(related, calls, objects):
                     run.get("claim_request_hash"))
                 if partial is not None:
                     partial_artifacts[run_id] = {
+                        "schema_version": training_observations.JOURNAL_SCHEMA_VERSION,
+                        "run_id": run_id, "kind": run["kind"],
+                        "lease_generation": run["lease_generation"],
+                        "claim_request_hash": run["claim_request_hash"],
                         "complete": False, "payload": partial,
+                        "payload_sha256": contracts.document_hash(partial),
                         "segment_refs": [training_observations.segment_ref(
                             run_id, run["lease_generation"], run["claim_request_hash"],
                             segment["number"]) for segment in segments],
                         "segment_sha256": [segment["segment_sha256"] for segment in segments],
                     }
-                    errors.add("worker_observations_incomplete")
+                    record_error("worker_observations_incomplete", run_id)
+                    if not require_client_ack:
+                        # The reader verified every retained segment and its
+                        # lease-bound chain. Link only its persisted writes;
+                        # this prefix cannot establish the absent final tail.
+                        prefix = partial_artifacts[run_id]
+                        for error in _link_worker_receipts(
+                                run, paid, prefix, require_completed_phases=False,
+                                require_client_ack=False, configuration=configuration,
+                                ledger_rows=ledger_rows):
+                            record_error(error, run_id)
+                        for call in paid:
+                            ref = (call.get("response_provenance") or {}).get("worker_receipt_ref")
+                            if ref is not None:
+                                ref["artifact_field"] = "partial_worker_observation_artifacts"
                 if journal_error:
-                    errors.add("worker_observation_journal_unavailable")
+                    record_error("worker_observation_journal_unavailable", run_id)
             except NotImplementedError:
                 pass
             except Exception:
-                errors.add("worker_observation_journal_unavailable")
-            if needed or capture is not None:
-                errors.add("worker_observations_unavailable")
+                record_error("worker_observation_journal_unavailable", run_id)
+            if needed or capture is not None or (paid and not require_client_ack):
+                record_error("worker_observations_unavailable", run_id)
             if run["kind"] == "execute" and paid:
-                errors.update({"agent_response_receipts_unverified", "agent_task_state_unverified"})
+                if require_client_ack:
+                    record_error("agent_response_receipts_unverified", run_id)
+                if require_client_ack and require_completed_phases:
+                    record_error("agent_task_state_unverified", run_id)
             continue
         payload = snapshot["payload"]
+        # Native host-result proof comes from this exact immutable, validated
+        # snapshot. An unavailable upload acknowledgement is not a conflicting
+        # claim about its bytes. Require every supplied claim to agree, and
+        # keep the legacy acknowledgement policy unchanged.
+        unconfirmed_native_capture = (
+            not require_client_ack and isinstance(capture, dict)
+            and set(capture) <= {"status", "payload_sha256", "observation_count", "local_refusal_count", "complete"}
+            and capture.get("status") == "unavailable"
+            and ("payload_sha256" not in capture or capture["payload_sha256"] == snapshot["payload_sha256"])
+            and all(type(capture.get(key)) is int and capture[key] == payload[key]
+                    for key in ("observation_count", "local_refusal_count"))
+            and type(capture.get("complete")) is bool and capture["complete"] == payload["complete"])
         if capture is not None and (not isinstance(capture, dict)
                 or capture.get("status") != "stored" or capture.get("payload_sha256") != snapshot["payload_sha256"]
                 or capture.get("observation_count") != payload["observation_count"]
                 or capture.get("local_refusal_count") != payload["local_refusal_count"]
-                or capture.get("complete") != payload["complete"]):
-            errors.add("worker_observation_summary_invalid")
+                or capture.get("complete") != payload["complete"]) and not unconfirmed_native_capture:
+            # The object passed identity, hash, schema and privacy validation.
+            # Retain it for inspection, but a failed or conflicting completion
+            # summary cannot authorize receipt links or verified counters.
+            # Journal prefixes have separate eligibility semantics, so keep
+            # this unconfirmed snapshot outside their partial collection.
+            # Outer completeness describes that unverified audit status; the
+            # original payload and its claimed completeness remain unchanged.
+            unverified_artifacts[run_id] = {
+                **snapshot, "complete": False,
+                "unverified_reasons": ["worker_observation_summary_invalid"],
+            }
+            record_error("worker_observation_summary_invalid", run_id)
             continue
         if not payload["complete"]:
-            errors.add("worker_observations_incomplete")
+            record_error("worker_observations_incomplete", run_id)
         if payload["local_refusal_count"] != local_refusals:
-            errors.add("worker_local_refusals_unverified")
+            record_error("worker_local_refusals_unverified", run_id)
         artifacts[run_id] = snapshot
-        errors.update(_link_worker_receipts(run, paid, snapshot))
+        for error in _link_worker_receipts(
+                run, paid, snapshot, require_completed_phases=require_completed_phases,
+                require_client_ack=require_client_ack, configuration=configuration, ledger_rows=ledger_rows):
+            record_error(error, run_id)
+        not_dispatched = _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger_rows)
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:
-                errors.add("worker_observation_privacy_nonexact")
+                record_error("worker_observation_privacy_nonexact", run_id)
             sequence, identity = observation["action_sequence"], observation["call_identity"]
             matches = [call for call in paid if call.get("action_sequence") == sequence]
             if identity is not None:
                 sequence_matches = matches
                 matches = [call for call in matches if call["call_identity"] == identity]
                 if not matches and (sequence_matches or any(call["call_identity"] == identity for call in paid)):
-                    errors.add("worker_observation_link_invalid")
+                    record_error("worker_observation_link_invalid", run_id)
                     continue
             if matches:
                 if len(matches) != 1 or matches[0]["operation_id"] != observation["operation_id"] or not observation["contributes_to_provider_call_count"]:
-                    errors.add("worker_observation_link_invalid")
+                    record_error("worker_observation_link_invalid", run_id)
                     continue
                 call = matches[0]
                 if isinstance(call.get("request"), dict) and call["request"].get("admitted_parameters") != observation["request"]["admitted_parameters"]:
-                    errors.add("worker_observation_request_mismatch")
+                    record_error("worker_observation_request_mismatch", run_id)
                     continue
                 call["worker_observation_ref"] = {"run_id": run_id, "ordinal": observation["ordinal"], "payload_sha256": snapshot["payload_sha256"]}
                 # Only a returned bridge response can fill the missing-response
@@ -918,12 +1378,42 @@ def _worker_evidence(related, calls, objects):
                     call["evidence_gaps"] = [gap for gap in call["evidence_gaps"] if gap != "full_response_unavailable"]
             elif observation["contributes_to_provider_call_count"]:
                 if type(sequence) is not int:
-                    errors.add("worker_observation_link_invalid")
+                    record_error("worker_observation_link_invalid", run_id)
                     continue
                 counts[run_id].add(sequence)
-                if observation["kind"] != "local_catalog":
-                    errors.add("worker_call_accounting_unverified")
-    return artifacts, partial_artifacts, errors, counts
+                if observation["kind"] != "local_catalog" and identity not in not_dispatched:
+                    record_error("worker_call_accounting_unverified", run_id)
+        # A lease can expire after the immutable capture upload but before the
+        # completion summary. Only an earlier failed execution in a validated
+        # host-result round may use exact complete capture for absent counters.
+        # Present counters remain independent checks, including invalid values
+        # and contradictions.
+        run_errors = per_run_errors.get(run_id, set())
+        missing_local = "provider_local_refusal_count" not in summary
+        expected_calls = summary.get("provider_call_count", len(counts[run_id]))
+        if (not require_client_ack and run_id != selected_run_id
+                and run["kind"] == "execute" and run.get("status") == "failed"
+                and type(run.get("attempt")) is int and type(selected.get("attempt")) is int
+                and 0 < run["attempt"] < selected["attempt"]
+                and payload["complete"] and "response_receipts" in payload
+                and not run_errors - ({"worker_local_refusals_unverified"} if missing_local else set())
+                and type(expected_calls) is int and expected_calls == len(counts[run_id])
+                and ledger_rows is not None
+                and {row["entry_id"] for row in ledger_rows if row.get("run_id") == run_id}
+                    == {entry["entry_id"] for call in paid for entry in call["lifecycle"]}
+                and all(type(call.get("action_sequence")) is int and call["action_sequence"] >= 0
+                        and type(call.get("actual_microusd")) is int and call["actual_microusd"] >= 0
+                        and not call["evidence_gaps"]
+                        and not call.get("response_hidden_reasoning_removed")
+                        and not call.get("response_privacy_redactions")
+                        and call["response_provenance"].get("worker_receipt_ref")
+                        and call["response_provenance"].get("delivery_to_worker") == "socket_written"
+                        for call in paid)):
+            verified_counts[run_id] = len(counts[run_id])
+            if missing_local:
+                run_errors.discard("worker_local_refusals_unverified")
+    errors = set().union(*per_run_errors.values()) if per_run_errors else set()
+    return artifacts, partial_artifacts, errors, counts, per_run_errors, verified_counts, unverified_artifacts
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
@@ -935,6 +1425,11 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
     """
 
     policy = configuration.get("sourcing_cost_eligibility_policy")
+    coverage_percent = configuration.get("training_minimum_icp_coverage_percent")
+    confirmed_full_thinking_cost = (
+        configuration.get("reasoning_capture_policy") == "full_generated_thinking_v1"
+        and type(coverage_percent) is int and 1 <= coverage_percent <= 100
+    )
     unavailable = lambda reason: {"status": "unavailable", "reason": reason,
                                   "policy": policy if isinstance(policy, str) else None}
     if policy not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES:
@@ -992,6 +1487,18 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                     or successful != sum(execution[key] for key in split)):
                 raise ValueError("execution cost split is invalid")
             successful = execution["competition_successful_microusd"]
+        confirmed = execution.get("settled_microusd")
+        if confirmed_full_thinking_cost:
+            if type(confirmed) is not int or confirmed < 0:
+                raise ValueError("confirmed cost is invalid")
+            settled_split = ("competition_settled_microusd",
+                             "excluded_infrastructure_settled_microusd")
+            if any(key in execution for key in settled_split):
+                if (any(type(execution.get(key)) is not int or execution[key] < 0
+                        for key in settled_split)
+                        or confirmed != sum(execution[key] for key in settled_split)):
+                    raise ValueError("confirmed competition cost split is invalid")
+                confirmed = execution["competition_settled_microusd"]
         numbers = (
             "competition_sourcing_microusd", "execution_icp_cap_microusd",
             "cost_per_company_cap_microusd", "eligibility_cap_microusd",
@@ -1007,6 +1514,7 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                        for key in ("successful_microusd", "success_unresolved_microusd",
                                    "inflight_calls", "success_unresolved_calls"))
                 or snapshot["competition_sourcing_microusd"] != (
+                    confirmed if confirmed_full_thinking_cost else
                     successful + execution["success_unresolved_microusd"])
                 or snapshot["execution_icp_cap_microusd"] != configuration.get("execution_icp_cap_microusd")
                 or snapshot["cost_per_company_cap_microusd"] != configuration.get("cost_per_company_microusd")
@@ -1024,7 +1532,8 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 or snapshot["eligible"] != (
                     snapshot["competition_sourcing_microusd"]
                     <= snapshot["eligibility_cap_microusd"])
-                or execution["inflight_calls"] or execution["success_unresolved_calls"]):
+                or execution["inflight_calls"]
+                or (execution["success_unresolved_calls"] and not confirmed_full_thinking_cost)):
             raise ValueError("cost snapshot decision is not final")
         return {
             "status": "available", "scope": "export_time_per_icp_sourcing",
@@ -1053,6 +1562,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                      signal_source_ledger_rows: Sequence[Mapping[str, Any]] = (),
                      input_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
                      scoring_policy_history: Mapping[str, Any] | None = None,
+                     preserved_judgment_policy_reader: Callable[..., Mapping[str, Any] | None] | None = None,
                      cost_eligibility_reader: Callable[..., Mapping[str, Any]] | None = None) -> dict:
     """Assemble one exact execution. Missing evidence produces explicit gaps.
 
@@ -1074,6 +1584,34 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     config = round_row.get("configuration_doc") or {}
     policy_versions = _scoring_policy_versions(round_row, scoring_policy_history)
     generation_floor = round_row.get("scoring_generation_floor", 0)
+    reader = _evidence_reader(_Rows(
+        by_id, submission_row, cache_rows, company_judgment_rows,
+        round_row=round_row, signal_uses=signal_judgment_uses,
+        signal_rows=signal_judgment_rows,
+        preserved_judgment_policy_reader=preserved_judgment_policy_reader,
+    ), objects)
+    preserved_policies = {}
+
+    def score_configuration(row):
+        preserved = reader._preserved_judgment_configuration(row, round_row)
+        if preserved is None:
+            refs = row.get("company_judgment_refs")
+            if (row.get("round_id") == "arena-2026-11-03"
+                    and row.get("status") == "accepted" and isinstance(refs, list)
+                    and any(not isinstance(ref, Mapping) or any(
+                        (ref.get("scope_doc") or {}).get(key) != config.get(key)
+                        for key in ("scorer_image_digest", "scorer_image_reference"))
+                        for ref in refs)):
+                raise ExportError("preserved_judgment_policy_missing")
+            return config
+        preserved_policies[row["run_id"]] = {
+            key: copy.deepcopy(preserved[key]) for key in (
+                "operation", "scoring_generation_floor", "scorer_policy",
+                "scorer_image_digest", "scorer_image_reference",
+                "current_scorer_image_digest", "current_scorer_image_reference")}
+        return {**config, **{key: copy.deepcopy(preserved[key]) for key in
+                            ("scorer_policy", "scorer_image_digest", "scorer_image_reference")}}
+
     reasons = {name: set() for name in ("context", "source_identity", "input_output_label", "exact_inputs", "costs", "research_process")}
     example = {"schema_version": SCHEMA_VERSION,
                "example_id": contracts.document_hash({"schema_version": SCHEMA_VERSION, "run_id": run_id}),
@@ -1083,6 +1621,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
+    from lab_arena import baseline_reasoning
+    if (baseline_reasoning.FIELD in config
+            and submission_row.get("is_king") is True):
+        example[baseline_reasoning.EXPORT_FIELD] = baseline_reasoning.for_run(round_row, run)
     if generation_floor:
         example["scoring_generation_floor"] = generation_floor
         example["scoring_policy_history"] = copy.deepcopy(scoring_policy_history)
@@ -1129,8 +1671,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         if run.get("status") != "accepted" or run.get("terminal_cause") != "accepted":
             raise ExportError("execution_not_accepted")
         example["output"] = output
-        example["output_identity"] = {"ref": expected_output_ref, "document_hash": output_hash,
-                                      "recorded_hash_present": recorded_hash not in (None, "")}
+        example["output_identity"] = {
+            "ref": expected_output_ref, "document_hash": output_hash,
+            "normalized_document_hash": contracts.document_hash(output),
+            "recorded_hash_present": recorded_hash not in (None, ""),
+        }
     except ExportError as exc:
         output = None
         reasons["input_output_label"].add(str(exc))
@@ -1143,13 +1688,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         reasons["input_output_label"].add("final_judge_unavailable")
     elif output is not None and icp is not None:
         try:
-            policy = config["scorer_policy"]
+            judge_config = score_configuration(judge)
+            policy = judge_config["scorer_policy"]
             sliced = verify.slice_first_n(output["companies"], verify.icp_company_goal(icp))
-            reader = _evidence_reader(_Rows(
-                by_id, submission_row, cache_rows, company_judgment_rows,
-                round_row=round_row, signal_uses=signal_judgment_uses,
-                signal_rows=signal_judgment_rows,
-            ), objects)
             breakdowns = reader._verified_breakdowns(judge, icp=icp, companies=sliced, policy=policy)
             result = verify.scored_row(run["submission_id"], run["icp_position"], run_id, icp, output["companies"], breakdowns, policy)
             if run.get("per_icp_score") is None or abs(Decimal(str(result["per_icp_score"])) - Decimal(str(run["per_icp_score"]))) > Decimal("0.000001"):
@@ -1159,6 +1700,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                                    "runtime": _runtime(judge),
                                    "judgment_cache_source_run_id": judge.get("judgment_cache_source_run_id"),
                                    "company_judgment_refs": judge.get("company_judgment_refs")}
+            if judge["run_id"] in preserved_policies:
+                example["judgment"]["preserved_judgment_policy"] = copy.deepcopy(preserved_policies[judge["run_id"]])
             if judge.get("company_judgment_refs") is not None:
                 needed = {(row["cache_key"], row["authority_slot"]) for row in
                           ((judge.get("claim_response") or {}).get("company_judgment_cache") or {}).get("hits", [])}
@@ -1193,11 +1736,24 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
-    observations, partial_observations, observation_gaps, observed_actions = _worker_evidence(related, calls, objects)
+    (observations, partial_observations, observation_gaps, observed_actions,
+     worker_gaps_by_run, verified_worker_counts, unverified_observations) = _worker_evidence(
+        related, calls, objects, selected_run_id=run_id, configuration=config, ledger_rows=ledger_rows)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
     gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}
     gaps.update(gap for call in calls for gap in call["evidence_gaps"])
+    related_gaps = {row["run_id"]: {"research_process": set(), "costs": set()}
+                    for row in related}
+    for source_id, source_gaps in worker_gaps_by_run.items():
+        related_gaps[source_id]["research_process"].update(source_gaps)
+        related_gaps[source_id]["costs"].update(source_gaps & {"worker_call_accounting_unverified"})
+    for call in calls:
+        source_gaps = set(call["evidence_gaps"])
+        related_gaps[call["run_id"]]["research_process"].update(source_gaps)
+        related_gaps[call["run_id"]]["costs"].update(source_gaps & {
+            "provider_call_inflight", "provider_cost_unresolved", "ambiguous_call_lifecycle",
+            "ledger_call_identity_missing"})
     example["provider_calls"] = calls
     reasons["research_process"].update(gaps | observation_gaps)
     reasons["costs"].update(observation_gaps & {"worker_call_accounting_unverified"})
@@ -1238,7 +1794,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     scoring_generation_floor=revision,
                     scoring_policy_hash=contracts.document_hash(attempt_policy))
             try:
-                identity = _reviewer_runtime_identity(by_id[selected_id], config)
+                attempt_config = score_configuration(by_id[selected_id])
+                if selected_id in preserved_policies:
+                    attempt_policy = attempt_config["scorer_policy"]
+                    attempt_by_id[selected_id].update(
+                        stage_generation=generation, scoring_generation_floor=revision,
+                        scoring_policy_hash=contracts.document_hash(attempt_policy))
+                identity = _reviewer_runtime_identity(by_id[selected_id], attempt_config)
                 attempt_by_id[selected_id]["runtime_identity"] = identity
                 if selected_id == example.get("score_run_id"):
                     example["judgment"]["runtime_identity"] = copy.deepcopy(identity)
@@ -1284,6 +1846,15 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     or document.get("scorer_policy") != attempt_policy
                     or document.get("evaluation_date") != round_row.get("evaluation_date")):
                 reasons["exact_inputs"].add("judge_input_context_mismatch")
+                if (round_row.get("round_id") == "arena-2026-11-03"
+                        and document.get("scorer_policy") != attempt_policy):
+                    # Contradictory saved inputs cannot establish that an old
+                    # receipt ran under the current round's grading identity.
+                    attempt_by_id[selected_id].pop("runtime_identity", None)
+                    if selected_id == example.get("score_run_id"):
+                        example["judgment"].pop("runtime_identity", None)
+                    dimension = "source_identity" if selected_id in selected_ids else "research_process"
+                    reasons[dimension].add("reviewer_runtime_identity_unverified")
             if isinstance(document, dict) and icp is not None:
                 actual_icp = dict(document.get("icp") or {})
                 expected_icp = integrity.agent_visible_icp(icp, contacts_required=contact_policy.enabled(config)) if integrity.enabled(config) else dict(icp)
@@ -1310,7 +1881,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 scoring_input=snapshots[judge["run_id"]]["input"],
                 uses=signal_judgment_uses, authority_rows=signal_judgment_rows,
                 company_rows=company_judgment_rows, runs=by_id,
-                round_row=round_row,
+                round_row={**round_row, "configuration_doc": score_configuration(judge)},
             )
             example["judgment"]["signal_authority_evidence"] = evidence
             # Keep persisted actions as process evidence even when the final
@@ -1370,11 +1941,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             pass
         elif not isinstance(web, dict) or type(web.get("connection_count")) is not int or web["connection_count"] < 0:
             reasons["research_process"].add("direct_web_usage_unverified")
+            related_gaps[row["run_id"]]["research_process"].add("direct_web_usage_unverified")
         elif web["connection_count"]:
             reported_pages = (observations.get(row["run_id"], {}).get("payload", {}).get("agent_observations", []))
-            reasons["research_process"].add("direct_web_coverage_unverified" if any(
+            web_gap = "direct_web_coverage_unverified" if any(
                 item["kind"] in {"web_fetch", "web_fetch_binary"}
-                for item in reported_pages) else "direct_web_content_not_captured")
+                for item in reported_pages) else "direct_web_content_not_captured"
+            reasons["research_process"].add(web_gap)
+            related_gaps[row["run_id"]]["research_process"].add(web_gap)
         logical_calls = set()
         for call in calls:
             if call["run_id"] != row["run_id"]:
@@ -1387,12 +1961,16 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 logical_calls.add(("base", base))
             else:
                 reasons["research_process"].add("logical_call_identity_unverified")
+                related_gaps[row["run_id"]]["research_process"].add("logical_call_identity_unverified")
                 logical_calls.add(("unproved", call["call_identity"]))
         logical_calls.update(("action", sequence) for sequence in observed_actions.get(row["run_id"], set()))
         captured = len(logical_calls)
-        if type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != captured:
+        expected_count = summary.get("provider_call_count", verified_worker_counts.get(row["run_id"]))
+        if type(expected_count) is not int or expected_count != captured:
             reasons["research_process"].add("provider_capture_count_unverified")
             reasons["costs"].add("provider_capture_count_unverified")
+            related_gaps[row["run_id"]]["research_process"].add("provider_capture_count_unverified")
+            related_gaps[row["run_id"]]["costs"].add("provider_capture_count_unverified")
     reasons["research_process"].update(reasons["exact_inputs"])
     reasons["research_process"].update(reasons["input_output_label"])
     if reasons["context"]:
@@ -1400,13 +1978,18 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     # Diagnostic logs and model-reported decisions are deliberately excluded.
     example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
     from lab_arena.training_capture import sanitize_training_value
-    example, redactions = sanitize_training_value(example, max_nodes=MAX_EXAMPLE_NODES)
+    example, redactions = sanitize_training_value(
+        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True)
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations
     if partial_observations:
         clean["partial_worker_observation_artifacts"] = partial_observations
-    observation_redactions = {reason for artifact in list(observations.values()) + list(partial_observations.values())
+    if unverified_observations:
+        clean["unverified_worker_observation_artifacts"] = unverified_observations
+    worker_artifacts = (list(observations.values()) + list(partial_observations.values())
+                        + list(unverified_observations.values()))
+    observation_redactions = {reason for artifact in worker_artifacts
                              for item in artifact["payload"]["observations"] + artifact["payload"].get("agent_observations", [])
                              for reason in item["privacy"]["redactions"]}
     hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(
@@ -1428,5 +2011,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              "dimensions": {key: not value for key, value in reasons.items()},
                              "incomplete_reasons": sorted({reason for values in reasons.values() for reason in values}),
                              "reasons_by_dimension": {key: sorted(value) for key, value in reasons.items()}}
+    clean["related_run_gap_attribution"] = {
+        row["run_id"]: {"kind": row["kind"], "status": row["status"],
+                        "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
+                        "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
+        for row in related}
     clean["example_hash"] = contracts.document_hash(clean)
-    return json.loads(contracts.canonical_json(clean))
+    # The privacy pass normalized context, and worker artifacts came from
+    # validated JSON. Keep caller isolation without expanding shared history
+    # strings into a second serialized document and then parsing it again.
+    return copy.deepcopy(clean)

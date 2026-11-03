@@ -11,8 +11,11 @@ The gateway must already have the exact committed `gw_restart.sh` bytes
 installed by its canonical controller. The paired command checks its hash,
 owner, mode and type before starting. A controller that lacks paired support
 is refused before deployment. First installation needs one ordinary canonical
-controller installation at a safe time; this command does not bootstrap or
-silently upgrade the installed controller. An application-only subsequent
+controller installation at a safe time. For a confirmed predecessor preparation
+fault, pass `--bootstrap-controller-commit <installed-full-sha>` to run the exact
+candidate's full canonical bootstrap with an explicit paired guard under the
+same deployment lock. This installs only through successful canonical startup;
+it does not pre-install or shorten the controller. An application-only subsequent
 release can use the pair if its controller bytes are unchanged.
 
 The opt-in gateway path acquires the existing `all` guard, drains once, and

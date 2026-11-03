@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from scripts.arena_reviewer_source_access_seam import (
     FINALITY_DELTAS, INVESTIGATOR_DELTAS, SourceAccessSeamError,
@@ -21,7 +22,9 @@ CASES = [
 
 
 def _sources(path, deltas):
-    current = (ROOT / path).read_bytes()
+    # These converters preserve historical grading bytes. Current source
+    # timeout and scoped-finality handling no longer use their old blocks.
+    current = frozen_source("native_industry_budget", path)
     original = current
     for _, old, new in deltas:
         assert original.count(new.encode()) == 1

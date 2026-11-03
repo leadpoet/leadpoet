@@ -92,6 +92,56 @@ select_validator_python() {
     || fail "installed validator start and preflight commands differ"
 }
 
+validate_validator_stop_policy() {
+  # systemctl stop uses the loaded old unit, not the candidate installed later.
+  # Keep this separate from interpreter selection, including explicit overrides.
+  local metadata key value seen="|" count=0 load_state="" kill_mode="" kill_signal="" stop_timeout=""
+  metadata="$(systemctl show "$SERVICE" --all --property=LoadState,KillMode,KillSignal,TimeoutStopUSec)" \
+    || fail "cannot inspect installed validator stop policy"
+  while IFS='=' read -r key value; do
+    [[ "$seen" != *"|$key|"* ]] || fail "ambiguous installed validator stop policy"
+    seen+="$key|"; count=$((count + 1))
+    case "$key" in
+      LoadState) load_state="$value" ;;
+      KillMode) kill_mode="$value" ;;
+      KillSignal) kill_signal="$value" ;;
+      TimeoutStopUSec) stop_timeout="$value" ;;
+      *) fail "unexpected installed validator stop policy" ;;
+    esac
+  done <<< "$metadata"
+  # A first installation has no old service to stop.
+  [ "$load_state" != not-found ] || return 0
+  [ "$count" -eq 4 ] && [ "$load_state" = loaded ] && [ "$kill_mode" = mixed ] \
+    && { [ "$kill_signal" = 15 ] || [ "$kill_signal" = SIGTERM ]; } \
+    || fail "installed validator stop policy cannot safely drain workers"
+  # systemctl formats TimeoutStopUSec as a compound duration. Require at least
+  # the committed unit's 9300-second drain budget; unknown formats fail closed.
+  "$PYTHON" - "$stop_timeout" <<'PY' \
+    || fail "installed validator stop timeout is insufficient or invalid"
+import re
+import sys
+from fractions import Fraction
+
+duration = sys.argv[1].strip()
+if duration == "infinity":
+    raise SystemExit(0)
+units = {"us": Fraction(1, 1000000), "µs": Fraction(1, 1000000),
+         "μs": Fraction(1, 1000000), "ms": Fraction(1, 1000), "s": 1,
+         "min": 60, "h": 3600, "d": 86400, "w": 604800}
+if not duration or len(duration) > 256:
+    raise SystemExit(1)
+end = 0
+seconds = Fraction(0)
+for match in re.finditer(r"([0-9]+(?:\.[0-9]+)?)(us|µs|μs|ms|s|min|h|d|w)", duration):
+    if duration[end:match.start()].strip():
+        raise SystemExit(1)
+    seconds += Fraction(match[1]) * units[match[2]]
+    end = match.end()
+if not end or duration[end:].strip() or seconds < 9300:
+    raise SystemExit(1)
+PY
+}
+
 cleanup() {
   status=$?
   trap - EXIT
@@ -226,6 +276,7 @@ ROLLBACK="$(mktemp -d "$RELEASE_ROOT/.rollback.XXXXXX")"
 if sudo test -f "$SERVICE_ENV"; then sudo install -m 0600 "$SERVICE_ENV" "$ROLLBACK/service.env"; fi
 if sudo test -f "$UNIT_PATH"; then sudo install -m 0644 "$UNIT_PATH" "$ROLLBACK/service.unit"; fi
 sudo systemctl is-active --quiet "$SERVICE" && OLD_ACTIVE=1
+validate_validator_stop_policy
 # The paired coordinator supplies only a private nonce-bound permit, never
 # gateway service credentials. Validate/consume after all normal preflight and
 # immediately before the destructive step. The default standalone path is unchanged.

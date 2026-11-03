@@ -1,0 +1,452 @@
+{
+  "budget": {
+    "cap_usd": "8",
+    "reserved_usd": "0.011323",
+    "spent_usd": "0.3881845396"
+  },
+  "complete_export_replay": {
+    "complete_context_passed": true,
+    "live_production_qualification": false,
+    "missing_ack_rejected": true,
+    "missing_context_rejected": true,
+    "missing_request_rejected": true,
+    "provider_evidence": "saved actual live ledger, response bodies, requests, worker receipts, and agent acknowledgments",
+    "reviewed_source_hash_matched": true,
+    "source": "tests/fixtures/research_review/live_replay",
+    "synthetic_context": [
+      "benchmark",
+      "input",
+      "output",
+      "judgment",
+      "task phases"
+    ]
+  },
+  "date": "2026-10-24",
+  "funding": "Gateway OpenRouter key expressly authorized for tests only; production reviewer funding remains miner key.",
+  "limits": [
+    "GPT-OSS120B and20B DeepInfra routes blocked by gateway account ignored providers; restrictions not changed.",
+    "10 synthetic source labels are not a measured general reviewer accuracy rate.",
+    "No private hidden reasoning reconstructed.",
+    "No production round changed, merged, or deployed."
+  ],
+  "live_fixture_runs": [
+    {
+      "case": "adaptive_json",
+      "finding": "continue",
+      "full_thinking_observed": true,
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "pass": true,
+      "provider": "fireworks",
+      "readback_count": 3,
+      "source_archive_sha256": "sha256:c7efb616fa9e81ba14b66abe83fc2d9bb330f6a5f1dfb60b9ce7884444620187",
+      "tool_calls": [
+        {
+          "arguments": {
+            "query": "software companies"
+          },
+          "name": "search"
+        },
+        {
+          "arguments": {
+            "url": "https://example.com/evidence"
+          },
+          "name": "fetch"
+        }
+      ],
+      "worker_receipts_proved": true
+    },
+    {
+      "case": "adaptive_json",
+      "finding": "sufficient",
+      "full_thinking_observed": true,
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "pass": true,
+      "provider": "fireworks",
+      "readback_count": 2,
+      "source_archive_sha256": "sha256:c7efb616fa9e81ba14b66abe83fc2d9bb330f6a5f1dfb60b9ce7884444620187",
+      "tool_calls": [
+        {
+          "arguments": {
+            "query": "software companies"
+          },
+          "name": "search"
+        }
+      ],
+      "worker_receipts_proved": true
+    },
+    {
+      "case": "fixed_extractor",
+      "finding": "sufficient",
+      "full_thinking_observed": true,
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "pass": true,
+      "provider": "fireworks",
+      "readback_count": 1,
+      "source_archive_sha256": "sha256:23f97e18e52e23ad877565997bf6fd6cd26304b97d09a141302d20077de99679",
+      "tool_calls": [
+        {
+          "arguments": {
+            "query": "software"
+          },
+          "name": "search"
+        },
+        {
+          "arguments": {
+            "url": "https://example.com/evidence"
+          },
+          "name": "fetch"
+        }
+      ],
+      "worker_receipts_proved": true
+    },
+    {
+      "case": "posthoc_explanation",
+      "finding": "sufficient",
+      "full_thinking_observed": true,
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "pass": true,
+      "provider": "fireworks",
+      "readback_count": 1,
+      "source_archive_sha256": "sha256:135e6df8f8f3f870950a9339ad0442c1ac2578375f9d94b116bddaa6732ae6b9",
+      "tool_calls": [
+        {
+          "arguments": {
+            "query": "software"
+          },
+          "name": "search"
+        },
+        {
+          "arguments": {
+            "url": "https://example.com/evidence"
+          },
+          "name": "fetch"
+        }
+      ],
+      "worker_receipts_proved": true
+    }
+  ],
+  "local_verification": {
+    "broad": {
+      "passed": 1424,
+      "skipped": 2
+    },
+    "final_eligibility_publication_dashboard_sql_replay": {
+      "passed": 84
+    },
+    "saved_live_capture_replay_and_helper": {
+      "passed": 17
+    }
+  },
+  "private_evidence_hashes": {
+    "capture-deepseek_deepseek-v4.1-flash-1017/diagnostic-export.json": "57124628bc72d772fa142530230df23e718de53c6aace7da03400875625fa801",
+    "capture-deepseek_deepseek-v4.1-flash-1017/ledger-readback.json": "a8ca4f63e5c4f7136819af4651ecb6abdd4ba01b5e52d982bedb4529fc30c32f",
+    "capture-deepseek_deepseek-v4.1-flash-1017/readable-trace.json": "86a4faa4d61d886ac1f47161a527daa09243866d629d87af9a91f339435344b3",
+    "capture-deepseek_deepseek-v4.1-flash-1017/report.json": "5d6ce485d49d78870e9774918556c6d03d13a91aefdf5a4e5e58b7311dc1b4ac",
+    "capture-google_gemma-4-31b-it/diagnostic-export.json": "17f786e618995d3a0a1493afd6a3e845853a322231ca5c157c0a4688fdbe3b42",
+    "capture-google_gemma-4-31b-it/ledger-readback.json": "2db33a27964c14f45da7ee32f82e0502d68df967e7527cd5b056a6b22bdab047",
+    "capture-google_gemma-4-31b-it/readable-trace.json": "01901420d568edd3b664a5157d5d85948e504b662f4248bd201ab4206f0f8123",
+    "capture-google_gemma-4-31b-it/report.json": "f563a37e677818e8c6e12ee69bfcee0a13326ee7b5cef2fd47de846f21c4b7bb",
+    "capture-mistralai_mistral-large-4-0/diagnostic-export.json": "7eb8362f4305a9314598ede1544e723dbe09ded3e63d6394b58cb0898bed0060",
+    "capture-mistralai_mistral-large-4-0/ledger-readback.json": "c37f372c8e1afb961c314568b6d51d35c064c20986c4f8da367fecca10a11b3b",
+    "capture-mistralai_mistral-large-4-0/readable-trace.json": "c470dd90487af44030c49ea8eb14dc19c53011f5ec016c0cede80905bc61788e",
+    "capture-mistralai_mistral-large-4-0/report.json": "c6505e5b0318274be5ba620cc237ba48b6721860a04bdd68956f03e5a990fc78",
+    "capture-openai_gpt-oss-120b/diagnostic-export.json": "ab41d86583bf43bfe89c3cdf7a93ed3d2a653f72629ea240c7d25b9191edc9ba",
+    "capture-openai_gpt-oss-120b/ledger-readback.json": "4f3b41b24da7ccebe3ff346e0818f10e63262e43a72fe3424b21f40aac7853d4",
+    "capture-openai_gpt-oss-120b/readable-trace.json": "97d307236ceb79a7fae61ec67c9ed2beedc3b46c480e30b4708a43c40bf6a3d8",
+    "capture-openai_gpt-oss-120b/report.json": "6c5fa0e2be101e4100b46b642f9008cb8e6956c0d9bc54ade705b9999f9cc943",
+    "capture-openai_gpt-oss-20b/diagnostic-export.json": "cf05d3a89265606fa1a2852cd018663d1e9e33912efbe20917cf983d60b78f93",
+    "capture-openai_gpt-oss-20b/ledger-readback.json": "3848f61bd4cd06cb3ad7cde968ce6525b875a360969c07744aaa7ccb5e457f8b",
+    "capture-openai_gpt-oss-20b/readable-trace.json": "fc92b09c3c186c0a428ae4f38ce490554e7fcfe87551317489ad28e665dcc7b0",
+    "capture-openai_gpt-oss-20b/report.json": "ead253a3aba75fe9725ee4f8ce056c35ab079d11db12867cfe753e5b489bec48",
+    "capture-reflection_beam-1.0-501b-a23b/diagnostic-export.json": "816f276da96e52fb0ef3b1792d10cfd0a9d29ad4c59bcc5e2e2f81731f0d9858",
+    "capture-reflection_beam-1.0-501b-a23b/ledger-readback.json": "d89c5b1a1e0d7ac80d6a016481e570a16f15b9ccc348868baec8bee517dc47e8",
+    "capture-reflection_beam-1.0-501b-a23b/readable-trace.json": "ee6146ffd43e33495192ff3471c079e6afa1d3f188954847a070ffa20a67f195",
+    "capture-reflection_beam-1.0-501b-a23b/report.json": "bc92c3d6628018dae7ce9d1094bc5e1e32962f3b6b712a32eb811935e89ec28b",
+    "fixture-adaptive_json-continue/diagnostic-export.json": "20b86fe30a5cc6643a314f9778d8426956bd958a631fcba31fe6392ab9db15e4",
+    "fixture-adaptive_json-continue/ledger-readback.json": "e6b964f12cf3ab96e45a18a42805282caa1423dc613b2c050c70f78dd19809b5",
+    "fixture-adaptive_json-continue/readable-trace.json": "b3f463dac6bb71aeded9a6b5ce9e3187e3372afa53aecf8a0284076e2a7b4c0c",
+    "fixture-adaptive_json-continue/report.json": "c8cb01c991a4f9188206865f14b8ed48c5697d0b6a5ad47774d6302bbee85868",
+    "fixture-adaptive_json-sufficient/diagnostic-export.json": "1f610453f0bb8812034764927c219b454f6e37b6cd1572503b15d52942ad32b0",
+    "fixture-adaptive_json-sufficient/ledger-readback.json": "176a4e47b632d77908cfb6b881820c5c70dc04b93e2507283801d88114776f91",
+    "fixture-adaptive_json-sufficient/readable-trace.json": "ba577fb67beb25bd8d7db159511e09f83ed0f6ebf27894c1c1581c3cd18c31bc",
+    "fixture-adaptive_json-sufficient/report.json": "346e87d6a8050382c0fa934654d437114c3adb7dde1be8c8eb17ea278838b10a",
+    "fixture-fixed_extractor-sufficient/diagnostic-export.json": "85eda67402c62de746e0ede44748724bf0e6a8fa1cb1264196f9a3dc3fbf6556",
+    "fixture-fixed_extractor-sufficient/ledger-readback.json": "7b576515713ecb538642aea93eadcb6f6499f98f9a5dc83704569a58ffc4c5fd",
+    "fixture-fixed_extractor-sufficient/readable-trace.json": "2d42483285dc0090a006d17979e640ffd81d408c8c746ed4c653beca0d3bacd7",
+    "fixture-fixed_extractor-sufficient/report.json": "804a224485243219b7c8fdb11ee4a85ed4505260f54d229bc8ab25d2788d1ae2",
+    "fixture-posthoc_explanation-sufficient/diagnostic-export.json": "00af1510b9ee1071551c9ca4f4c679c9bb2c7a46fa9d86625fc66d92bcc8ad8f",
+    "fixture-posthoc_explanation-sufficient/ledger-readback.json": "38ab3e775ce24062e718567b802c5ce614bb5cb1bab165a9583c264bfc774da4",
+    "fixture-posthoc_explanation-sufficient/readable-trace.json": "56dd4e8455d0be9c1dbd9da0b33d4ba7c13e40ea7dee8da3994d4e1068761652",
+    "fixture-posthoc_explanation-sufficient/report.json": "710c31bed0164b76aac91c1e5303d08fe93e283c83e513080d97391872ee124a",
+    "reviews/adaptive_json.response.json": "488c8b21a9846ec7ece9dae8ed80124e44ea06549e911b96bff64f32f58c3aed",
+    "reviews/adaptive_json.summary.json": "4a3fdd7960cfd62569f9187622abb72e5702ea6144eaadb2bf9ea462191888a3",
+    "reviews/bounded_hybrid.response.json": "21a5b2e6e8deb2403c42ae9dcc7ca8cdfa01e08309f3baaafe151bcfefc540b4",
+    "reviews/bounded_hybrid.summary.json": "c5acb4e8220fdfc21d76bf4eafc69d5986f7c5a5e88a00f7ba9eaa0dd4373f1d",
+    "reviews/dynamic_helper.response.json": "59679ffca334c7089bea975a112e045cfc64116c5bccc5be5e948309e9a19182",
+    "reviews/dynamic_helper.summary.json": "a64534cd3159b5421efa6badcf49e0c01483ee56a9d85813f9022be3063da061",
+    "reviews/fixed_extractor.response.json": "4455f642a93f6024012529723692adc4bd1bea18c5ce24d77477cffa36fc8676",
+    "reviews/fixed_extractor.summary.json": "aed2f9dc77ebdf87cd598a9316f82e5d29f85806dd3ecd73279c7bd6e8147f08",
+    "reviews/fixed_query_plan.response.json": "5fd0d50c846036e307121951d86576ceadce598001527bb87c4afb97b48f4fae",
+    "reviews/fixed_query_plan.summary.json": "63e72cd23161bc45eab49c4375a8515bf262684e3fc38a975b805f059ab5de77",
+    "reviews/forced_tool_decoy.response.json": "fc84260e3e6b279d6d017030467b815c069f2f41a4eef7db43e00131cc4dbb6f",
+    "reviews/forced_tool_decoy.summary.json": "abd905fb5980fc679f18b72bd4c9f6165ce95fc503cbd8c159bed0abe020b09d",
+    "reviews/ignored_model_decoy.response.json": "a43afc37cce1584064013be1db6d280e1a63a59259668605929928e599ce72c2",
+    "reviews/ignored_model_decoy.summary.json": "b70baef92917669a2ef8f8fdfb38ab81b33580116b45ac63e3a03d20f1913254",
+    "reviews/native_tools.response.json": "d7f720134e422a28680094b4706d90752db434a8510e30b284b9be5505fbc043",
+    "reviews/native_tools.summary.json": "d696384d449e8afe38bf093dd9492e86fe7d44a930355a4c2e673f616d98056f",
+    "reviews/posthoc_explanation.response.json": "c49cb03d0e8549ac83a71281c0225f2585bfdb888bda1935a5f198a6e83fabd1",
+    "reviews/posthoc_explanation.summary.json": "e19446032c0d7a020b548eb4cd3c373b06a0080368cc25f1b13c0b3f64e451d4",
+    "reviews/unreachable_adaptive.response.json": "bc72b25e1e695cbd2539bbc157ae8932fa8fe27455d068516bde94ff41a01626",
+    "reviews/unreachable_adaptive.summary.json": "237b48a77a8c2bc6f8bd0d203911e03f2226d26412cd3228cd5d8dcd658db131"
+  },
+  "reviewer_cases": [
+    {
+      "actual_cost_microusd": 38458,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 1,
+      "case": "adaptive_json",
+      "causal_check": "passed",
+      "classification": "model_directed",
+      "cost_status": "settled",
+      "evidence_count": 3,
+      "expected": "model_directed",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 260730,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:c7efb616fa9e81ba14b66abe83fc2d9bb330f6a5f1dfb60b9ce7884444620187",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 38248,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 1,
+      "case": "bounded_hybrid",
+      "causal_check": "passed",
+      "classification": "model_directed",
+      "cost_status": "settled",
+      "evidence_count": 3,
+      "expected": "model_directed",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 260588,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:70671a9fb0a2bb75206765cf05f78346f7171398bfbf2beac0f8f72fc781dcf2",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 36218,
+      "actual_tool_count_first": 0,
+      "actual_tool_count_second": 1,
+      "case": "dynamic_helper",
+      "causal_check": "passed",
+      "classification": "unverified",
+      "cost_status": "settled",
+      "evidence_count": 1,
+      "expected": "unverified",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 258442,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:4e03f2a765879b3538559766f9641d38266fbbc8e08472c2cbd598c820b4e45c",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 37664,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 2,
+      "case": "fixed_extractor",
+      "causal_check": "passed",
+      "classification": "workflow",
+      "cost_status": "settled",
+      "evidence_count": 2,
+      "expected": "workflow",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 258806,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:23f97e18e52e23ad877565997bf6fd6cd26304b97d09a141302d20077de99679",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 37554,
+      "actual_tool_count_first": 4,
+      "actual_tool_count_second": 4,
+      "case": "fixed_query_plan",
+      "causal_check": "passed",
+      "classification": "workflow",
+      "cost_status": "settled",
+      "evidence_count": 2,
+      "expected": "workflow",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 259160,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:ecddffa284ebefe71dbb7602d0bfcedf013698d94575360c67b3caebb3d0e8ae",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 38282,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 2,
+      "case": "forced_tool_decoy",
+      "causal_check": "passed",
+      "classification": "workflow",
+      "cost_status": "settled",
+      "evidence_count": 3,
+      "expected": "workflow",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 259154,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:1fef6745cbff8467b1bb77af9cf72342d90eb4fff8a211590a25d6d6c75bfd1e",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 39276,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 2,
+      "case": "ignored_model_decoy",
+      "causal_check": "passed",
+      "classification": "workflow",
+      "cost_status": "settled",
+      "evidence_count": 3,
+      "expected": "workflow",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 258998,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:97c9148f3d3be2d1a8fd53dd12be06c916613afaa7696f8a8adf36a72c1baa8e",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 40154,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 1,
+      "case": "native_tools",
+      "causal_check": "passed",
+      "classification": "model_directed",
+      "cost_status": "settled",
+      "evidence_count": 3,
+      "expected": "model_directed",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 262684,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:1fa2c6efb590e314bacc3cb2984f039304b4f81dc0c9b2171e58b4e5f639563a",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 38026,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 2,
+      "case": "posthoc_explanation",
+      "causal_check": "passed",
+      "classification": "workflow",
+      "cost_status": "settled",
+      "evidence_count": 2,
+      "expected": "workflow",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 258776,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:135e6df8f8f3f870950a9339ad0442c1ac2578375f9d94b116bddaa6732ae6b9",
+      "status": "reviewed"
+    },
+    {
+      "actual_cost_microusd": 38310,
+      "actual_tool_count_first": 2,
+      "actual_tool_count_second": 2,
+      "case": "unreachable_adaptive",
+      "causal_check": "passed",
+      "classification": "workflow",
+      "cost_status": "settled",
+      "evidence_count": 2,
+      "expected": "workflow",
+      "expected_match": true,
+      "misconduct_verdict": "pass",
+      "policy_hash": "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c",
+      "provider_http_status": 200,
+      "reservation_microusd": 260604,
+      "reviewed_file_count": 2,
+      "source_archive_sha256": "sha256:bbf1d46cedfc52e36b6bf9a37abdf573a1fb14575ed733e43dcbc778fee441b0",
+      "status": "reviewed"
+    }
+  ],
+  "route_capture": [
+    {
+      "classification": "full_thinking_observed",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "provider": "fireworks",
+      "provider_reported_spend_usd": "0.0003354624",
+      "still_reserved_or_unpriced_usd": "0.000000",
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true
+    },
+    {
+      "classification": "full_thinking_observed",
+      "model": "google/gemma-4-31b-it",
+      "provider": "coreweave/fp4",
+      "provider_reported_spend_usd": "0.00024822",
+      "still_reserved_or_unpriced_usd": "0.000000",
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true
+    },
+    {
+      "classification": "full_thinking_observed",
+      "model": "mistralai/mistral-large-4-0",
+      "provider": "mistral/zdr",
+      "provider_reported_spend_usd": "0.00267834",
+      "still_reserved_or_unpriced_usd": "0.000000",
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true
+    },
+    {
+      "classification": "incomplete_or_unproved",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "provider_reported_spend_usd": "0",
+      "still_reserved_or_unpriced_usd": "0.006243",
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true
+    },
+    {
+      "classification": "incomplete_or_unproved",
+      "model": "openai/gpt-oss-20b",
+      "provider": "deepinfra/bf16",
+      "provider_reported_spend_usd": "0",
+      "still_reserved_or_unpriced_usd": "0.005080",
+      "tool_continuations_and_final_json": false,
+      "worker_receipts_proved": true
+    },
+    {
+      "classification": "full_thinking_observed",
+      "model": "reflection/beam-1.0-501b-a23b",
+      "provider": "nebius/fp8",
+      "provider_reported_spend_usd": "0.00063350",
+      "still_reserved_or_unpriced_usd": "0.000000",
+      "tool_continuations_and_final_json": true,
+      "worker_receipts_proved": true
+    }
+  ],
+  "schema_version": 1,
+  "scope": "Synthetic source classification and actual provider capture in disposable PostgreSQL; no production activation or completed scored ICP claim."
+}

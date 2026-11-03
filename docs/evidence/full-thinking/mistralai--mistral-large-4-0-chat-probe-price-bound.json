@@ -1,0 +1,513 @@
+{
+  "probe_id": "full-thinking-mistralai-mistral-large-4-0-mistral-zdr",
+  "verified_at": "2026-10-23T23:44:44.427292+00:00",
+  "model": "mistralai/mistral-large-4-0",
+  "provider": "mistral/zdr",
+  "api": "openrouter.chat",
+  "zdr": true,
+  "checks": {
+    "two_tool_continuations": true,
+    "final_json": true,
+    "returned_text": true,
+    "no_truncation": true
+  },
+  "attempts": [
+    {
+      "status": 200,
+      "seconds": 0.719,
+      "request": {
+        "model": "mistralai/mistral-large-4-0",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "mistral/zdr"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 1.36,
+            "completion": 4.18,
+            "request": 0
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_evidence",
+              "description": "Read synthetic company evidence by ID.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "evidence_id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ]
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup_evidence"
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799081-tU0v2qjFbxyPcjCHzl3Q",
+        "object": "chat.completion",
+        "created": 1792799081,
+        "model": "mistralai/mistral-large-4-0",
+        "provider": "Mistral",
+        "system_fingerprint": null,
+        "service_tier": "default",
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "tool_calls",
+            "native_finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "refusal": null,
+              "reasoning": null,
+              "tool_calls": [
+                {
+                  "type": "function",
+                  "index": 0,
+                  "id": "yJZ26VUfN",
+                  "function": {
+                    "name": "lookup_evidence",
+                    "arguments": "{\"evidence_id\": \"profile\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 178,
+          "completion_tokens": 15,
+          "total_tokens": 193,
+          "cost": 0.00030478,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.00030478,
+            "upstream_inference_prompt_cost": 0.00024208,
+            "upstream_inference_completions_cost": 6.27e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "mistralai/mistral-large-4-0",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=Mistral",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 3,
+            "available": [
+              {
+                "provider": "Mistral",
+                "model": "mistralai/mistral-large-4-0-20261006",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 636
+        }
+      },
+      "request_sha256": "093d03f0c96714599c4f58fce43149a1e2afb3db51a659b456d14ea32a3c5ee8",
+      "response_sha256": "67eaf24c01bdb55964c4f4dd6f0974edbbcc86ceccd7a2375c4ecf31a8e56e6e",
+      "turn": 0,
+      "thinking_fields": {}
+    },
+    {
+      "status": 200,
+      "seconds": 0.715,
+      "request": {
+        "model": "mistralai/mistral-large-4-0",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": null,
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "yJZ26VUfN",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\"evidence_id\": \"profile\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "yJZ26VUfN",
+            "content": "{\"business\":\"B2B software\",\"company\":\"Acme Test\",\"country\":\"US\",\"evidence_id\":\"profile\"}"
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "mistral/zdr"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 1.36,
+            "completion": 4.18,
+            "request": 0
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_evidence",
+              "description": "Read synthetic company evidence by ID.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "evidence_id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ]
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup_evidence"
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799082-ibncut93EO6LuqYGpAqg",
+        "object": "chat.completion",
+        "created": 1792799082,
+        "model": "mistralai/mistral-large-4-0",
+        "provider": "Mistral",
+        "system_fingerprint": null,
+        "service_tier": "default",
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "tool_calls",
+            "native_finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "refusal": null,
+              "reasoning": null,
+              "tool_calls": [
+                {
+                  "type": "function",
+                  "index": 0,
+                  "id": "KxNUMnFv7",
+                  "function": {
+                    "name": "lookup_evidence",
+                    "arguments": "{\"evidence_id\": \"headcount\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 219,
+          "completion_tokens": 16,
+          "total_tokens": 235,
+          "cost": 0.00036472,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.00036472,
+            "upstream_inference_prompt_cost": 0.00029784,
+            "upstream_inference_completions_cost": 6.688e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "mistralai/mistral-large-4-0",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=Mistral",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 3,
+            "available": [
+              {
+                "provider": "Mistral",
+                "model": "mistralai/mistral-large-4-0-20261006",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 618
+        }
+      },
+      "request_sha256": "c1d1f1b39160102f4f72d06ac168bc53f166953e821d3663b7f83aefce9461a7",
+      "response_sha256": "a54a0f433756b18af78c1c6b1c4c7c479dc65f4fe76fa577f7459bf0fb3e0ece",
+      "turn": 1,
+      "thinking_fields": {}
+    },
+    {
+      "status": 200,
+      "seconds": 1.19,
+      "request": {
+        "model": "mistralai/mistral-large-4-0",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": null,
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "yJZ26VUfN",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\"evidence_id\": \"profile\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "yJZ26VUfN",
+            "content": "{\"business\":\"B2B software\",\"company\":\"Acme Test\",\"country\":\"US\",\"evidence_id\":\"profile\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": null,
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "KxNUMnFv7",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\"evidence_id\": \"headcount\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "KxNUMnFv7",
+            "content": "{\"employees\":80,\"evidence_id\":\"headcount\"}"
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "mistral/zdr"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 1.36,
+            "completion": 4.18,
+            "request": 0
+          }
+        },
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "qualification",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "company": {
+                  "type": "string"
+                },
+                "qualified": {
+                  "type": "boolean"
+                },
+                "evidence_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "company",
+                "qualified",
+                "evidence_ids"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799083-sc6JcCuvI16CIynAdApo",
+        "object": "chat.completion",
+        "created": 1792799083,
+        "model": "mistralai/mistral-large-4-0",
+        "provider": "Mistral",
+        "system_fingerprint": null,
+        "service_tier": "default",
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "stop",
+            "native_finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "{\"company\":\"Acme Test\",\"evidence_ids\":[\"profile\",\"headcount\"],\"qualified\":true}",
+              "refusal": null,
+              "reasoning": "Now I need to evaluate:\n- Company: Acme Test\n- Is it a US B2B software company? Yes: country=US, business=B2B software\n- Does it have 50-200 employees? Yes: 80 employees, which is between 50-200\n\nSo it qualifies. The evidence_ids used are 'profile' and 'headcount'.\n\nThe output should be strict JSON only, no markdown, no extra text.",
+              "reasoning_details": [
+                {
+                  "type": "reasoning.text",
+                  "text": "Now I need to evaluate:\n- Company: Acme Test\n- Is it a US B2B software company? Yes: country=US, business=B2B software\n- Does it have 50-200 employees? Yes: 80 employees, which is between 50-200\n\nSo it qualifies. The evidence_ids used are 'profile' and 'headcount'.\n\nThe output should be strict JSON only, no markdown, no extra text.",
+                  "format": "unknown",
+                  "index": 0
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 234,
+          "completion_tokens": 116,
+          "total_tokens": 350,
+          "cost": 0.00080312,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 0.00080312,
+            "upstream_inference_prompt_cost": 0.00031824,
+            "upstream_inference_completions_cost": 0.00048488
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 93,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "mistralai/mistral-large-4-0",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=Mistral",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 3,
+            "available": [
+              {
+                "provider": "Mistral",
+                "model": "mistralai/mistral-large-4-0-20261006",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 1102
+        }
+      },
+      "request_sha256": "267d7837a97e00919f9228230f20a2d96e8275f163be6ff6390db9ccb7815c00",
+      "response_sha256": "9112232b5aaee563bec59fc6b3851edcece58303e116c4a4723d4fecc261f838",
+      "turn": 2,
+      "thinking_fields": {
+        "reasoning": 333,
+        "reasoning_details.text": 333
+      }
+    }
+  ],
+  "reported_cost_usd": "0.00147262",
+  "approval_granted": false,
+  "limitation": "Synthetic compatibility evidence only; requires semantic review, gateway/export tests, and ICP evaluation."
+}

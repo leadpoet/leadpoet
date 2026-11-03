@@ -21,8 +21,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations
-from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, signal_judgments, trajectory, validator_events
+from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_coverage, training_eligibility, training_reader, baseline_reasoning
+from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -59,7 +59,7 @@ _OBSERVATION_FINALIZATION_GRACE = timedelta(seconds=180)
 
 
 class _PublicResultEvidenceReads(dict):
-    """One response's evidence and bounded raw reads; never shared by requests."""
+    """One validation call's evidence and bounded raw reads; never shared."""
 
     MAX_IDENTITIES = 128
     MAX_BYTES = 8 * 1024 * 1024
@@ -192,6 +192,33 @@ def _telemetry_tool(operation_id: str, parameters: Mapping[str, Any]) -> str:
     return tool if tool in operations.DEEPLINE_TOOLS else telemetry.NO_TOOL
 
 
+def _telemetry_model(operation_id: str, parameters: Any, *,
+                     price_table: Any = None, registry: Any = None) -> str:
+    """Name a requested OpenRouter model only from host-owned model IDs.
+
+    A syntactically valid caller string is not evidence of a model identity.
+    The broker validates its catalog; run context holds the frozen registry.
+    Neither source establishes that this request reached a provider endpoint.
+    """
+    operation = operations.get_operation(operation_id)
+    if (operation is None or operation.provider != "openrouter"
+            or not isinstance(parameters, Mapping)):
+        return telemetry.NO_MODEL
+    model = parameters.get("model")
+    if (not isinstance(model, str)
+            or operations._MODEL_ID_RE.fullmatch(model) is None):
+        return telemetry.NO_MODEL
+    models = price_table.get("models") if isinstance(price_table, Mapping) else None
+    if isinstance(models, Mapping) and model in models:
+        return model
+    routes = registry.get("approved_routes") if isinstance(registry, Mapping) else None
+    if isinstance(routes, list) and any(
+            isinstance(route, Mapping) and route.get("model_id") == model
+            and route.get("api") == operation_id for route in routes):
+        return model
+    return telemetry.NO_MODEL
+
+
 def _provider_telemetry_fields(
     call: Mapping[str, Any], http_status: Any, attempts: int
 ) -> Dict[str, Any]:
@@ -309,6 +336,9 @@ ACTIVE_ROUND_STATUSES = tuple(
 )
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/leadpoet-sales-agent/archive/refs/heads/lab.tar.gz"
+FULL_THINKING_BASELINE_URL_RE = re.compile(
+    r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz"
+)
 DEFAULT_EXECUTION_CAP_MICROUSD = 80_000_000
 DEFAULT_COST_PER_COMPANY_MICROUSD = contracts.PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
 DEFAULT_EXECUTION_ICP_CAP_MICROUSD = contracts.PER_ICP_EXECUTION_CAP_MICROUSD
@@ -659,6 +689,14 @@ class RoundDefaults:
     company_judgment_from: Optional[str] = None
     signal_judgment_from: Optional[str] = None
     intent_details_from: Optional[str] = None
+    # Opt-in for future intake windows only; existing rounds keep their policy.
+    reasoning_capture_from: Optional[str] = None
+    training_minimum_icp_coverage_percent: int = training_coverage.NEW_ROUND_PERCENT
+    training_maximum_missing_reasoning_percent: int = training_coverage.NEW_MISSING_REASONING_PERCENT
+    # Operator declaration for the tested baseline archive. The fetched
+    # archive must match before baseline admission in a full-thinking round.
+    reasoning_baseline_source_sha256: Optional[str] = None
+    reasoning_baseline_source_url: Optional[str] = None
     # Frozen only into newly created integrity rounds. Existing rounds keep
     # their original policy, including after a gateway restart.
     normalize_intent_scale: bool = True
@@ -696,6 +734,7 @@ class ServiceConfig:
     pinned_round_id: Optional[str] = None
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     deepline_catalog_source: Optional[Callable[..., Mapping[str, Any]]] = None
+    reasoning_registry_source: Optional[Callable[[], Mapping[str, Any]]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
     code_reviewer: Optional[Any] = None
@@ -817,6 +856,11 @@ class ServiceConfig:
                 raise ServiceError(
                     "benchmark_disclosure_activation_invalid", 500
                 ) from exc
+        if self.defaults.reasoning_capture_from is not None:
+            try:
+                _activation_time(self.defaults.reasoning_capture_from)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ServiceError("reasoning_capture_activation_invalid", 500) from exc
         if self.mode not in MODES:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
@@ -844,6 +888,14 @@ def _parse_iso(value: str) -> datetime:
         "%Y-%m-%dT%H:%M:%S.%f%z" if "." in value else "%Y-%m-%dT%H:%M:%S%z"
     )
     return datetime.strptime(value, timestamp_format).astimezone(timezone.utc)
+
+
+def _activation_time(value: str) -> datetime:
+    """Read a timezone-aware operator activation timestamp."""
+    moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        raise ValueError("missing timezone")
+    return moment
 
 
 def _partial_baseline_transition_deadline(
@@ -889,6 +941,7 @@ class _PublicationReads:
     icps: Optional[Sequence[Mapping[str, Any]]] = None
     judges_by_stage: Dict[int, Dict[str, Mapping[str, Any]]] = field(default_factory=dict)
     outputs_by_ref: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    raw_outputs_by_ref: Dict[str, bytes] = field(default_factory=dict)
     qualified_by_submission: Dict[str, Dict[int, int]] = field(default_factory=dict)
     costs_by_position: Dict[Tuple[str, int], Dict[str, Any]] = field(default_factory=dict)
 
@@ -912,6 +965,10 @@ class _PublicationReads:
             except (UnicodeDecodeError, ValueError) as exc:
                 raise OutputInvalid("accepted output is not valid JSON") from exc
             self.outputs_by_ref[ref] = validate_output_document(document)
+            # Retain the exact bytes already verified during this publication
+            # attempt. Training export can revalidate them if a later read
+            # finds the immutable object temporarily unavailable.
+            self.raw_outputs_by_ref[ref] = raw
         return self.outputs_by_ref[ref]
 
     def qualified_counts(self, submission_id: str, positions: Sequence[int]) -> Dict[int, int]:
@@ -1123,6 +1180,7 @@ class ArenaService:
                 raise ValueError("company judgment scorer policy mismatch")
             company_judgments.enabled(configuration)
             intent_details_enabled = intent_details_policy.enabled(configuration)
+            reasoning_capture.enabled(configuration)
             scorer_quality = quality_policy.scorer_enabled(configuration.get("scorer_policy") or {})
             scorer_intent_details = intent_details_policy.scorer_enabled(
                 configuration.get("scorer_policy") or {}
@@ -1463,10 +1521,24 @@ class ArenaService:
         configuration["call_quotas"] = {**configuration["call_quotas"], "deepline": 0}
         configuration["scoring_call_quotas"] = {**configuration["scoring_call_quotas"], "deepline": 0}
 
+    def _existing_round_configuration_for_create(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        configuration = dict(self._require_round_mode(row).get("configuration_doc") or {})
+        if configuration.get("reasoning_activation_status") == "not_ready":
+            raise ServiceError(
+                "reasoning_capture_activation_not_ready:%s" % (
+                    configuration.get("reasoning_activation_reason") or "unknown"
+                ), 503,
+            )
+        return configuration
+
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
         round_id = round_id or round_id_for_cutoff(cutoff)
         self._require_round_ownership(round_id)
+        # Frozen rounds do not depend on today's registry or provider catalog.
+        existing = self._store.get_round(round_id)
+        if existing is not None:
+            return self._existing_round_configuration_for_create(existing)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
         checkpoint_policy = contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
         checkpoint_wall, checkpoint_lease = contracts.CHECKPOINT_DEADLINE_PROFILES[
@@ -1610,13 +1682,58 @@ class ArenaService:
             document["benchmark_disclosure_policy"] = (
                 icp_disclosure.CUTOFF_PUBLIC_POLICY
             )
+        if (defaults.reasoning_capture_from is not None
+            and _parse_iso(document["schedule"]["submission_open"])
+            >= _activation_time(defaults.reasoning_capture_from)):
+            source = getattr(self._config, "reasoning_registry_source", None)
+            baseline_digest = defaults.reasoning_baseline_source_sha256
+            unready_reason = None
+            try:
+                registry = reasoning_capture.validate_registry(
+                    source() if source is not None else reasoning_capture.load_registry()
+                )
+                if not registry.get("approved_routes") or not isinstance(registry.get("baseline_route"), Mapping):
+                    unready_reason = "registry_unavailable"
+            except Exception as exc:
+                registry = None
+                unready_reason = "registry_unavailable"
+                logger.warning("arena_full_thinking_registry_unavailable round_id=%s error=%s",
+                               round_id, type(exc).__name__)
+            if unready_reason is None and (
+                not isinstance(baseline_digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_digest) is None
+                or not isinstance(defaults.reasoning_baseline_source_url, str)
+                or FULL_THINKING_BASELINE_URL_RE.fullmatch(defaults.reasoning_baseline_source_url) is None
+            ):
+                unready_reason = "baseline_unready"
+            if unready_reason is None and not defaults.flat_per_icp_cost_policy:
+                unready_reason = "flat_policy_required"
+            if unready_reason is None:
+                document["reasoning_capture_policy"] = reasoning_capture.POLICY
+                document[training_coverage.SETTING] = defaults.training_minimum_icp_coverage_percent
+                document[training_coverage.MISSING_REASONING_SETTING] = defaults.training_maximum_missing_reasoning_percent
+                document["reasoning_route_registry"] = registry
+                document["reasoning_baseline_source_sha256"] = baseline_digest
+                document["baseline_source_url"] = defaults.reasoning_baseline_source_url
+                per_icp_cap = contracts.FULL_THINKING_PER_ICP_CAP_MICROUSD
+                document["execution_icp_cap_microusd"] = per_icp_cap
+                document["cost_per_company_microusd"] = per_icp_cap
+                document["execution_cap_microusd"] = (
+                    per_icp_cap * contracts.benchmark_icp_count(document)
+                )
+            else:
+                logger.warning("arena_full_thinking_not_ready round_id=%s reason=%s",
+                               round_id, unready_reason)
+                raise ServiceError(
+                    "reasoning_capture_activation_not_ready:%s" % unready_reason, 503,
+                )
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
         if result.get("status") not in ("created", "existing"):
             raise ServiceError("round_create_failed", 500)
         if result.get("status") == "existing":
-            return dict(self._round(round_id).get("configuration_doc") or {})
+            return self._existing_round_configuration_for_create(self._round(round_id))
         return configuration
 
     def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -1856,7 +1973,7 @@ class ArenaService:
             return False
 
     def _due_daily_round_opening(self, round_id: str) -> bool:
-        """Identify only the missing canonical round near its UTC opening."""
+        """Identify the due canonical intake round, including its early grace."""
 
         if self._pinned_round_id() is not None:
             return False
@@ -1867,17 +1984,18 @@ class ArenaService:
         opening = now.replace(hour=int(hour), minute=0, second=0, microsecond=0)
         if now < opening:
             opening -= timedelta(days=1)
-        # This only describes the bounded scheduler cutover, not a permanent
-        # alternative admission path if daily creation fails. The window spans
-        # the opening in both directions: miners racing the cutoff name the
-        # next canonical round moments before it is created, and a terminal
-        # 404 there loses a submission that a short retry would have placed.
+        # A missing due round is unavailable while daily creation can still
+        # give it the configured minimum submission window. A brief creation
+        # delay cannot make its canonical identity unknown.
+        # Keep the early grace only for miners racing the next opening. This
+        # classifies the refusal; the driver still owns round creation.
         next_opening = opening + timedelta(days=1)
+        earliest = now + timedelta(hours=max(0, int(self._config.defaults.min_submission_hours)))
         grace = timedelta(seconds=90)
         return (
-            (opening <= now < opening + grace
-             and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
+            (next_opening >= earliest and round_id == round_id_for_cutoff(next_opening))
             or (next_opening - grace <= now < next_opening
+                and next_opening + timedelta(days=1) >= earliest
                 and round_id == round_id_for_cutoff(next_opening + timedelta(days=1)))
         )
 
@@ -2076,8 +2194,16 @@ class ArenaService:
         row = self._store.get_submission(submission_id)
         if row is None:
             raise ServiceError("submission_missing", 404)
-        if not self._is_daily_baseline(row, round_row) and row.get("code_review_status") != "passed":
-            raise ServiceError("code_review_required", 409)
+        if not self._is_daily_baseline(row, round_row):
+            if row.get("code_review_status") != "passed":
+                raise ServiceError("code_review_required", 409)
+            # A frozen entrant must be allowed to finish after a restart or
+            # review-policy change. Recheck its current proof at publication;
+            # do not turn a data-eligibility gap into a stuck execution lease.
+            if row.get("status") != "frozen" and not training_eligibility.assess_source(
+                row, enabled=self._full_thinking_required(round_row),
+            )["eligible"]:
+                raise ServiceError("code_review_required", 409)
 
     def review_pending_submissions(
         self, *, should_continue: Optional[Callable[[], bool]] = None,
@@ -2097,12 +2223,16 @@ class ArenaService:
                 for row in self._store.list_submissions(round_row["round_id"], status=status):
                     if self._is_daily_baseline(row, round_row) or row.get("code_review_status") in ("passed", "rejected"):
                         continue
-                    candidates.append(row)
-        def review_if_active(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+                    candidates.append((row, round_row))
+        def review_if_active(candidate) -> Optional[Dict[str, Any]]:
             # A queued task has not reserved review spend yet. TERM or the
             # restart guard can defer it while the four active calls finish.
             if should_continue is not None and not should_continue():
                 return None
+            row, round_row = candidate
+            review_in_round = getattr(reviewer, "review_with_frozen_round", None)
+            if callable(review_in_round):
+                return review_in_round(row, round_row)
             return reviewer.review(row)
 
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="arena-code-review") as pool:
@@ -2515,6 +2645,81 @@ class ArenaService:
 
     # -- participant freeze and benchmark (sections 7.1, 8) --------------------
 
+    def _verify_full_thinking_baseline_source(
+        self, configuration: Mapping[str, Any], baseline: Mapping[str, Any]
+    ) -> None:
+        """Check the selected stored baseline against this round's frozen archive."""
+
+        if configuration.get("reasoning_capture_policy") != reasoning_capture.POLICY:
+            return
+        source_ref = baseline.get("source_ref")
+        if not isinstance(source_ref, str) or not source_ref:
+            raise ServiceError("baseline_source_not_ready", 503)
+        try:
+            payload = self._objects.get_bounded(
+                source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+            )
+        except Exception as exc:
+            raise ServiceError("baseline_source_not_ready", 503) from exc
+        actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
+            raise ServiceError("reasoning_baseline_source_mismatch", 503)
+
+    def _freeze_full_thinking_baseline(
+        self, round_id: str, round_row: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        """Freeze the exact promoted source and its original capture contract."""
+
+        if round_row.get("champion_funding_frozen") is True:
+            return {"status": "existing"}
+        configuration = round_row.get("configuration_doc") or {}
+        source_url = str(configuration["baseline_source_url"])
+        source_sha256 = str(configuration["reasoning_baseline_source_sha256"])
+        network_name, netuid = self._chain_scope()
+        promoted = self._store.latest_promoted_champion(
+            network_name=network_name, netuid=netuid
+        )
+        promotion_round_id = winner_id = commit = None
+        if promoted is not None:
+            promotion_round_id = str(promoted.get("round_id") or "")
+            winner_id = str(promoted.get("winner_submission_id") or "")
+            commit = str(promoted.get("commit") or "")
+            if (not promotion_round_id or not winner_id
+                    or re.fullmatch(r"[0-9a-f]{40}", commit) is None):
+                raise ServiceError("baseline_promotion_invalid", 500)
+            source_url = (
+                "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                + commit + ".tar.gz"
+            )
+            fetcher = self._config.baseline_source_fetcher
+            if fetcher is None:
+                raise ServiceError("baseline_source_fetcher_missing", 500)
+            try:
+                payload = bytes(fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
+                source_bundle.validate_source_archive(payload)
+            except source_bundle.SourceBundleError as exc:
+                raise ServiceError("baseline_source_invalid:%s" % exc.code, 500) from exc
+            except Exception as exc:
+                raise ServiceError("baseline_source_not_ready", 503) from exc
+            source_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+        result = self._store.freeze_full_thinking_baseline(
+            round_id,
+            expected_promotion_round_id=promotion_round_id,
+            expected_winner_submission_id=winner_id,
+            expected_commit=commit,
+            expected_source_url=str(configuration["baseline_source_url"]),
+            expected_source_sha256=str(configuration["reasoning_baseline_source_sha256"]),
+            source_url=source_url,
+            source_sha256=source_sha256,
+        )
+        if result.get("status") == "promotion_pending":
+            raise ServiceError("baseline_promotion_pending", 503)
+        if result.get("status") == "stale":
+            raise ServiceError("baseline_source_not_ready", 503)
+        if result.get("status") not in ("frozen", "existing"):
+            raise ServiceError("champion_funding_freeze_failed", 503)
+        return result
+
     def _initial_baseline(self, round_row: Mapping[str, Any]) -> Dict[str, Any]:
         """Download and freeze the public baseline through the source path."""
 
@@ -2531,6 +2736,7 @@ class ArenaService:
         submission_id = "baseline-%s" % round_id.removeprefix("arena-")
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
         row = self._store.get_submission(submission_id)
+        reused = row is not None
         if row is None:
             fetcher = self._config.baseline_source_fetcher
             if fetcher is None:
@@ -2547,7 +2753,8 @@ class ArenaService:
                     if str(configuration.get("mode") or self._config.mode) == "live":
                         if self._pending_promotion_blocks():
                             raise ServiceError("baseline_promotion_pending", 503)
-                        selected_source_url = DEFAULT_BASELINE_SOURCE_URL
+                        if configuration.get("reasoning_capture_policy") != reasoning_capture.POLICY:
+                            selected_source_url = DEFAULT_BASELINE_SOURCE_URL
                     source_observation = (
                         selected_source_url
                         if selected_source_url == DEFAULT_BASELINE_SOURCE_URL
@@ -2560,6 +2767,10 @@ class ArenaService:
                         )
                     )
                     facts = source_bundle.validate_source_archive(payload)
+                    if configuration.get("reasoning_capture_policy") == reasoning_capture.POLICY:
+                        actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+                        if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
+                            raise ServiceError("reasoning_baseline_source_mismatch", 503)
                     self._objects.put(source_ref, payload)
                 except ServiceError:
                     raise
@@ -2576,6 +2787,10 @@ class ArenaService:
                     raise ServiceError(
                         "baseline_source_invalid:%s" % exc.code, 500
                     ) from exc
+            if configuration.get("reasoning_capture_policy") == reasoning_capture.POLICY:
+                actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+                if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
+                    raise ServiceError("reasoning_baseline_source_mismatch", 503)
             logger.info(
                 "arena_baseline_source_frozen round_id=%s source=%s source_commit=%s",
                 round_id,
@@ -2603,6 +2818,8 @@ class ArenaService:
             or not row.get("is_king")
         ):
             raise ServiceError("baseline_submission_invalid", 500)
+        if reused:
+            self._verify_full_thinking_baseline_source(configuration, row)
         status = str(row.get("status") or "")
         if status == "uploading":
             try:
@@ -2629,7 +2846,11 @@ class ArenaService:
         # champion. Freeze that identity before any baseline submission or run
         # can be created. The RPC is idempotent, so recovery keeps the same
         # original submission even if repository ownership changes later.
-        funding = self._store.freeze_champion_funding(round_id)
+        if (self._full_thinking_required(round_row)
+                and (round_row.get("configuration_doc") or {}).get("mode") == "live"):
+            funding = self._freeze_full_thinking_baseline(round_id, round_row)
+        else:
+            funding = self._store.freeze_champion_funding(round_id)
         if funding.get("status") not in ("frozen", "existing"):
             raise ServiceError("champion_funding_freeze_failed", 503)
         round_row = self._round(round_id)
@@ -2644,7 +2865,8 @@ class ArenaService:
             and row.get("code_review_status") not in ("passed", "rejected")
             and (
                 row.get("code_review_status") == "reviewing"
-                or int(row.get("code_review_attempts") or 0) < code_review_policy.review_attempt_limit(row)
+                or row.get("code_review_status") == "pending"
+                or code_review_policy.review_retry_available(row)
             )
         ]
         if unresolved:
@@ -2670,6 +2892,10 @@ class ArenaService:
             or not baseline.get("is_king")
         ):
             raise ServiceError("baseline_submission_invalid", 500)
+        if frozen_kings:
+            self._verify_full_thinking_baseline_source(
+                round_row["configuration_doc"], baseline
+            )
         if any(
             row.get("is_king") and row.get("submission_id") != baseline_id
             for row in accepted
@@ -2681,7 +2907,10 @@ class ArenaService:
         frozen_count = sum(1 for row in frozen if not row.get("is_king"))
         for row in accepted:
             is_king = row["submission_id"] == baseline_id
-            if not is_king and row.get("code_review_status") != "passed":
+            if not is_king and (row.get("code_review_status") != "passed"
+                    or not training_eligibility.assess_source(
+                        row, enabled=self._full_thinking_required(round_row),
+                    )["eligible"]):
                 rule = "code_review_rejected" if row.get("code_review_status") == "rejected" else "code_review_incomplete"
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": rule})
                 continue
@@ -3232,6 +3461,9 @@ class ArenaService:
         runs = self._store.list_runs(round_id, stage=1, kind="execute")
         judges = self._store.list_runs(round_id, stage=1, kind="score")
         if (not self._score_generation_floor(row)
+            and not (_judge_continuation_enabled(row)
+                and (row.get("configuration_doc") or {}).get("execution_sequence_policy")
+                    == contracts.BASELINE_SCORED_FIRST_POLICY)
             and not any(self._is_baseline_recovery(r, runs + judges, row) for r in runs + judges)):
             return
         plan = self._baseline_recovery_plan(row, runs, judges)
@@ -3256,8 +3488,12 @@ class ArenaService:
         if stage == 2:
             if (row.get("configuration_doc") or {}).get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY:
                 original = self._store.list_runs(round_id, stage=1)
+                # Ordinary first attempts also continue while miners execute.
+                # Keep the same scoring-floor fence as every other judgment.
                 runs += [r for r in original if self._is_baseline_recovery(r, original, row)
-                         or (self._score_generation_floor(row) > 0 and r.get("kind") == "score")]
+                         or (r.get("kind") == "score" and (
+                             _judge_continuation_enabled(row)
+                             or self._score_generation_floor(row) > 0))]
         return self._current_score_runs(row, runs)
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
@@ -3329,7 +3565,7 @@ class ArenaService:
         """Read and fully bind one immutable company judgment variant."""
 
         reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
-        # Only public_results supplies this response-local map. Keep invalid
+        # Public results and publication supply this call-local map. Keep invalid
         # argument types on the original validation path (bool/float slots
         # must not alias an already validated integer slot).
         identity = (
@@ -3726,6 +3962,19 @@ class ArenaService:
         evidence_reads: Optional[_CompanyEvidenceReads] = None,
         round_context: Optional[Mapping[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        preserved = self._preserved_judgment_configuration(run, round_context)
+        if preserved is not None:
+            policy = contracts.validate_scorer_policy(preserved["scorer_policy"])
+        elif (run.get("round_id") == "arena-2026-11-03"
+              and run.get("status") == "accepted"
+              and isinstance(run.get("company_judgment_refs"), list)):
+            current = self._round_from_context(str(run["round_id"]), round_context)
+            configuration = (current or {}).get("configuration_doc") or {}
+            if any(not isinstance(ref, Mapping) or any(
+                (ref.get("scope_doc") or {}).get(key) != configuration.get(key)
+                for key in ("scorer_image_digest", "scorer_image_reference"))
+                for ref in run["company_judgment_refs"]):
+                raise scoring.ScoringError("preserved judgment authority is missing")
         if run.get("company_judgment_refs") is not None:
             return self._company_quality_breakdowns(
                 run, icp=icp, companies=companies, policy=policy,
@@ -3962,7 +4211,10 @@ class ArenaService:
                 "ineligible_submissions": [],
                 "finalists": finalists,
             }
-        self._score_recovered_baseline(round_row)
+        # Continuation judgments are materialized by publish in the scored
+        # phase. Its guarded writer selects only missing projections.
+        if not _judge_continuation_enabled(round_row):
+            self._score_recovered_baseline(round_row)
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
         return {
             "status": transition.get("status"),
@@ -4226,6 +4478,10 @@ class ArenaService:
         evidence_reads: Optional[_PublicResultEvidenceReads] = None,
     ) -> Dict[int, int]:
         """Count qualified entities per ICP in one judgment/object pass."""
+        # Keep immutable proof reuse within this participant qualification call,
+        # rather than retaining company evidence across the whole publication.
+        if publication_reads is not None and evidence_reads is None:
+            evidence_reads = _PublicResultEvidenceReads()
         policy = round_row["configuration_doc"]["scorer_policy"]
         round_id = str(round_row["round_id"])
         icps = (
@@ -4478,6 +4734,32 @@ class ArenaService:
             "eligibility_reason": reason,
         }
 
+    def _preserved_judgment_configuration(self, judge, round_row=None):
+        """Use original policy only for the audited completed November 3 rows."""
+        if (judge.get("round_id") != "arena-2026-11-03"
+            or judge.get("status") != "accepted"
+            or judge.get("terminal_cause") != "accepted"
+            or not isinstance(judge.get("company_judgment_refs"), list)):
+            return None
+        row = self._round_from_context(str(judge["round_id"]), round_row)
+        configuration = (row or {}).get("configuration_doc") or {}
+        refs = judge["company_judgment_refs"]
+        if refs and all(isinstance(ref, Mapping) and all((ref.get("scope_doc") or {}).get(key) == configuration.get(key)
+                   for key in ("scorer_image_digest", "scorer_image_reference"))
+               for ref in refs):
+            return None
+        preserved = self._store.preserved_judgment_policy(
+            str(judge["round_id"]), str(judge["run_id"]),
+            str(judge.get("scored_run_id") or ""), refs)
+        if preserved is None:
+            return None
+        if (preserved.get("operation") != "nov03_forward_only_verifier_v1"
+            or preserved.get("scoring_generation_floor") != self._score_generation_floor(row)
+            or any(preserved.get("current_" + key) != configuration.get(key)
+                   for key in ("scorer_image_digest", "scorer_image_reference"))):
+            raise ServiceError("preserved_judgment_policy_invalid", 500)
+        return preserved
+
     def _judgment_matches_execution(
         self, row: Mapping[str, Any], judge: Mapping[str, Any],
         source: Mapping[str, Any],
@@ -4519,10 +4801,14 @@ class ArenaService:
             # Legacy scoring assignments have no judgment-cache scope. Their
             # accepted output and execution membership are the final authority.
             return True
-        return all(scope.get("round_id") == round_id and all(
+        matches = lambda configuration: all(scope.get("round_id") == round_id and all(
             scope.get(key) == configuration.get(key)
             for key in ("scorer_image_digest", "scorer_image_reference")
         ) for scope in scopes)
+        if matches(configuration):
+            return True
+        preserved = self._preserved_judgment_configuration(judge, row)
+        return preserved is not None and matches(preserved)
 
     def _terminal_miner_credit_judgment(self, source_id: str) -> bool:
         """Only the database's bound credit proof can end an unmeasured judge."""
@@ -4676,6 +4962,113 @@ class ArenaService:
     def _empty_execution_infrastructure_failure(self, reads: _PublicationReads) -> bool:
         return bool(self._execution_infrastructure_failures(reads))
 
+    @staticmethod
+    def _full_thinking_required(round_row: Mapping[str, Any]) -> bool:
+        return ((round_row.get("configuration_doc") or {}).get("reasoning_capture_policy")
+                == reasoning_capture.POLICY)
+
+    def _submission_training_eligibility(
+        self, round_row: Mapping[str, Any], submission_id: str,
+        runs: Sequence[Mapping[str, Any]],
+        *, publication_reads: Optional[_PublicationReads] = None,
+    ) -> Dict[str, Any]:
+        """Read persisted evidence only. A capture failure cannot cancel a round."""
+        try:
+            submission = self._store.get_submission(submission_id)
+            if not submission:
+                return {"eligible": False, "reasons": ["submission_evidence_missing"]}
+            baseline = self._is_daily_baseline(submission, round_row)
+            if (baseline and baseline_reasoning.FIELD in (round_row.get("configuration_doc") or {})
+                    and not reasoning_capture.enabled(baseline_reasoning.for_run(
+                        round_row, dict(submission, kind="execute")))):
+                return {"eligible": False, "reasons": ["baseline_reasoning_not_required"],
+                        "exemption": "champion_baseline"}
+            source = (training_eligibility.assess_source(submission, enabled=True)
+                      if not baseline else {"eligible": True, "reasons": [],
+                                            "exemption": "organizer_baseline"})
+            selected = self._selected_accepted_execution_runs(runs, submission_id)
+            positions = set(range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))))
+            if set(selected) - positions:
+                return {"eligible": False, "reasons": ["selected_execution_coverage_incomplete"],
+                        "source_review": source}
+            run_ids = [str(selected[position]["run_id"]) for position in sorted(selected)]
+            unavailable_outputs = {}
+            unavailable_artifacts = {}
+            unavailable_exports = {}
+
+            def export_example(run_id):
+                output_ref = "arena/%s/outputs/%s.json" % (round_row["round_id"], run_id)
+                fallback = {}
+                if publication_reads is not None and output_ref in publication_reads.outputs_by_ref:
+                    cached = publication_reads.raw_outputs_by_ref.get(output_ref)
+                    if cached is not None:
+                        fallback[output_ref] = cached
+                read_view = training_reader.AvailabilityReadView(self._objects, fallback)
+                # Failed reconstruction contributes no usable data. Keep the
+                # failure local to this ICP and continue checking the others.
+                try:
+                    example = training_reader.export_run(self._store, read_view, run_id)
+                except Exception as exc:
+                    unavailable_exports[run_id] = type(exc).__name__[:64]
+                    return None
+                transient_artifacts = {kind: ref for kind, ref in read_view.artifact_refs.items()
+                                       if read_view.transient_failures.get(ref) == "transient"}
+                if transient_artifacts:
+                    unavailable_artifacts[run_id] = transient_artifacts
+                if read_view.unavailable in ({output_ref: "missing"},
+                                             {output_ref: "transient"}):
+                    unavailable_outputs[run_id] = output_ref
+                return example
+
+            class Exports(Mapping):
+                """Load one exact example on demand; never retain its graph."""
+
+                def __iter__(self):
+                    return iter(run_ids)
+
+                def __len__(self):
+                    return len(run_ids)
+
+                def __getitem__(self, run_id):
+                    if run_id not in run_ids:
+                        raise KeyError(run_id)
+                    return export_example(run_id)
+
+                def get(self, run_id, default=None):
+                    # Mapping.get would swallow an exporter's KeyError and
+                    # misclassify corrupt evidence as a missing-example gap.
+                    return self[run_id] if run_id in run_ids else default
+
+            capture = training_eligibility.assess_capture(
+                submission, Exports(), run_ids, enabled=True,
+                expected_run_count=len(positions),
+                minimum_coverage_percent=training_coverage.percent_from_configuration(
+                    round_row.get("configuration_doc") or {}),
+                maximum_missing_reasoning_percent=(
+                    training_coverage.missing_reasoning_percent_from_configuration(
+                        round_row.get("configuration_doc") or {})),
+                unavailable_exports=unavailable_exports,
+                unavailable_outputs=unavailable_outputs,
+                unavailable_artifacts=unavailable_artifacts,
+            )
+            if positions - set(selected):
+                capture["counts"]["missing_icp_positions"] = sorted(positions - set(selected))
+            return {"eligible": source["eligible"] and capture["eligible"],
+                    "reasons": sorted(set(source["reasons"] + capture["reasons"])),
+                    "source_review": source, "capture": capture}
+        except Exception as exc:
+            # Keep diagnostics useful without exposing stored data, object refs,
+            # provider exception text or tracebacks. Identity hashes are bounded.
+            round_id = round_row.get("round_id")
+            logger.warning(
+                "arena_training_evidence_check_failed round_id_hash=%s submission_id_hash=%s error_class=%s",
+                contracts.hash_bytes(round_id.encode("utf-8", "replace")) if isinstance(round_id, str) else "unavailable",
+                contracts.hash_bytes(submission_id.encode("utf-8", "replace")) if isinstance(submission_id, str) else "unavailable",
+                type(exc).__name__[:64],
+            )
+            # The data check affects eligibility only, not publication availability.
+            return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
+
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
@@ -4774,6 +5167,41 @@ class ArenaService:
             # the same final cost consequence to the baseline that challengers
             # face. Other fail-closed cost states do not invent a zero score.
             king_entry["final_score"] = 0.0
+        if self._full_thinking_required(round_row):
+            # Keep full source and capture proof for every cost-eligible
+            # challenger that can cross the frozen baseline margin. Other
+            # training evidence stays explicitly unassessed.
+            qualifier_audit = (
+                integrity.enabled(configuration)
+                and configuration.get("sourcing_cost_eligibility_policy")
+                in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
+            )
+            for entry in effective_final_entries:
+                submission_id = str(entry["submission_id"])
+                if qualifier_audit and (
+                    entry["is_king"] or not eligibility[submission_id]["eligible"]
+                    or verify.king_decision([entry], king_entry, configuration)["outcome"] != "crowned"
+                ):
+                    eligibility[submission_id]["training_data_eligibility"] = {
+                        "status": "not_assessed", "eligible": None, "reasons": []}
+                    continue
+                # Refresh before actual assessments, not skipped rows. The
+                # final compare-and-swap still protects every publication.
+                current = self._round(round_id)
+                if current["status"] != "scored":
+                    return {"status": "stale", "round_status": current["status"]}
+                training = self._submission_training_eligibility(
+                    round_row, submission_id, publication_reads.runs,
+                    publication_reads=publication_reads,
+                )
+                eligibility[submission_id]["training_data_eligibility"] = training
+                if not training["eligible"]:
+                    if eligibility[submission_id]["eligible"]:
+                        eligibility[submission_id]["eligibility_reason"] = "training_data_incomplete"
+                    eligibility[submission_id]["eligible"] = False
+            # The organizer baseline remains a measured comparison, never a
+            # contender. Its missing training data must not halt publication or
+            # prevent a verified challenger from competing against its score.
         decision = verify.king_decision(
             [
                 entry
@@ -4784,6 +5212,22 @@ class ArenaService:
             king_entry,
             configuration=configuration,
         )
+        if self._full_thinking_required(round_row) and qualifier_audit and decision["outcome"] == "crowned":
+            # A crowned round still needs the organizer's original training
+            # result: reward activation reads its published eligibility.
+            current = self._round(round_id)
+            if current["status"] != "scored":
+                return {"status": "stale", "round_status": current["status"]}
+            baseline_id = str(king_entry["submission_id"])
+            training = self._submission_training_eligibility(
+                round_row, baseline_id, publication_reads.runs,
+                publication_reads=publication_reads,
+            )
+            eligibility[baseline_id]["training_data_eligibility"] = training
+            if not training["eligible"]:
+                if eligibility[baseline_id]["eligible"]:
+                    eligibility[baseline_id]["eligibility_reason"] = "training_data_incomplete"
+                eligibility[baseline_id]["eligible"] = False
         published_at = _iso(self.now())
         final_ranking = verify.final_ranking(effective_final_entries)
         for row in final_ranking:
@@ -5590,6 +6034,9 @@ class ArenaService:
         # Describes the gateway serving this lease, not the frozen scorer image.
         # No admission, accounting or completion decision depends on this value.
         lease["gateway_source_commit"] = runtime_version.SOURCE_METADATA["validator_source_commit"]
+        # Reader support is independent of the frozen scoring/capture policy.
+        # Older gateways omit this field, so new runners use legacy failure tags.
+        lease[training_observations.OPTIONAL_FAILURE_TAG_CAPABILITY] = True
         lease["icp_wall_clock_seconds"] = int(configuration.get(
             "icp_wall_clock_seconds", contracts.ICP_WALL_CLOCK_SECONDS
         ))
@@ -5597,6 +6044,11 @@ class ArenaService:
             "scoring_wall_clock_seconds", contracts.SCORING_WALL_CLOCK_SECONDS
         ))
         lease["lease_ttl_seconds"] = int(configuration["lease_ttl_seconds"])
+        capture_configuration = baseline_reasoning.for_run(round_row, response)
+        if response.get("kind") == "execute" and reasoning_capture.enabled(capture_configuration):
+            # The worker's request validator receives the frozen round policy
+            # through the gateway lease, never through a miner operation frame.
+            lease["reasoning_capture_policy"] = reasoning_capture.POLICY
         if configuration.get("deepline_catalog") is not None:
             lease["deepline_catalog"] = configuration["deepline_catalog"]
         checkpoint_policy = configuration.get("checkpoint_deadline_policy")
@@ -5750,6 +6202,7 @@ class ArenaService:
                 "scorer_image_reference": configuration.get("scorer_image_reference"),
                 "scorer_policy": configuration.get("scorer_policy"),
             }
+        capture_configuration = baseline_reasoning.for_run(row, run)
         return run, broker_module.RunContext(
             run_id=run_id, assignment_id=run["assignment_id"],
             attempt=int(run["attempt"]), icp_position=int(run["icp_position"]),
@@ -5759,6 +6212,8 @@ class ArenaService:
             round_id=str(run.get("round_id") or ""),
             judgment_cache_scope=judgment_cache_scope,
             deepline_catalog=configuration.get("deepline_catalog"),
+            reasoning_capture_policy=capture_configuration.get("reasoning_capture_policy"),
+            reasoning_route_registry=capture_configuration.get("reasoning_route_registry"),
         )
 
     def handle_signal_judgment(
@@ -6102,6 +6557,26 @@ class ArenaService:
                 "ref": ref, "lease_generation": snapshot["lease_generation"],
                 "claim_request_hash": snapshot["claim_request_hash"],
                 "payload_sha256": snapshot["payload_sha256"]}
+
+    def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> str:
+        """Confirm only the exact final snapshot under this owned lease identity."""
+
+        run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
+        if not isinstance(payload_sha256, str) or not contracts.SHA256_RE.fullmatch(payload_sha256):
+            raise ServiceError("training_observations_invalid", 400)
+        objects = self._config.training_object_store
+        if objects is None:
+            raise ServiceError("training_observations_unavailable", 503)
+        try:
+            snapshot = training_observations.read_snapshot(
+                objects, run_id, str(run.get("kind") or "execute"),
+                run.get("lease_generation"), run.get("claim_request_hash"),
+            )
+        except training_observations.ObservationError:
+            raise ServiceError("training_observations_unavailable", 503) from None
+        if not hmac.compare_digest(snapshot["payload_sha256"], payload_sha256):
+            raise ServiceError("training_observations_digest_mismatch", 412)
+        return snapshot["payload_sha256"]
 
     def handle_training_observation_segment(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
         run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
@@ -6536,8 +7011,17 @@ class ArenaService:
             raise ServiceError("frame_invalid", 400)
         limits = (contracts.RESPONSES_PROVIDER_FRAME_LIMITS
                   if frame["operation_id"] == "openrouter.responses" else contracts.PROVIDER_FRAME_LIMITS)
-        contracts.check_strict_document(frame, limits)
+        # Decode only a bounded candidate before resolving its existing lease.
+        # The frozen execute policy, never a caller hint, admits larger history.
+        candidate_limits = limits
+        if frame["operation_id"] in ("openrouter.chat", "openrouter.responses"):
+            candidate_limits = (contracts.FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS
+                if frame["operation_id"] == "openrouter.responses" else contracts.FULL_THINKING_PROVIDER_FRAME_LIMITS)
+        contracts.check_strict_document(frame, candidate_limits)
         run, context = self._run_context(run_id, lease_token)
+        if not (getattr(context, "kind", "execute") == "execute"
+                and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY):
+            contracts.check_strict_document(frame, limits)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])
         operation = operations.get_operation(operation_id)
@@ -6584,6 +7068,7 @@ class ArenaService:
             # or the result returned to the worker.
             _warn_trajectory_failure("provider_request", exc)
         started = time.monotonic()
+        provider_start_ns = time.time_ns()
         try:
             result = broker.execute(
                 context,
@@ -6630,7 +7115,13 @@ class ArenaService:
                 error_type=type(exc).__name__,
                 store_error=store_error or None,
                 tool=_telemetry_tool(operation_id, frame["parameters"]),
+                model=_telemetry_model(
+                    operation_id, frame["parameters"],
+                    price_table=getattr(broker, "_price_table", None),
+                    registry=getattr(context, "reasoning_route_registry", None),
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                start_ns=provider_start_ns,
                 run_identity=run_identity,
             )
             raise
@@ -6657,7 +7148,14 @@ class ArenaService:
                     call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
                     frame["parameters"],
                 ),
+                model=_telemetry_model(
+                    call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
+                    frame["parameters"],
+                    price_table=getattr(broker, "_price_table", None),
+                    registry=getattr(context, "reasoning_route_registry", None),
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                start_ns=provider_start_ns,
                 run_identity=run_identity,
                 **provider_fields,
             )
@@ -6993,8 +7491,16 @@ class ArenaService:
         # one run outcome to telemetry.
         expected_status = "accepted" if terminal_status == "accepted" else "failed"
         if result.get("status") == expected_status and result.get("idempotent") is False:
+            # The runner's own diagnostic, already validated against the
+            # frozen vocabularies by the completion contract. Without it a
+            # repeated judge_error says only that scoring failed, never why.
+            diagnostic = run_result.get("failure_diagnostic")
+            if not isinstance(diagnostic, Mapping):
+                diagnostic = {}
             telemetry.record_run(
-                kind, terminal_status, run_identity=_telemetry_run_identity(run)
+                kind, terminal_status, run_identity=_telemetry_run_identity(run),
+                failure_stage=str(diagnostic.get("stage") or "-"),
+                failure_error_class=str(diagnostic.get("error_class") or "-"),
             )
         return result
 
@@ -7117,22 +7623,23 @@ class ArenaService:
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)
+            if (status in ("stage1_scoring", "stage1_judged")
+                and round_row["configuration_doc"].get("execution_sequence_policy")
+                    == contracts.BASELINE_SCORED_FIRST_POLICY
+                and _judge_continuation_enabled(round_row)):
+                # The database checks every accepted baseline execution under
+                # the round lock. A pre-migration database returns stale and
+                # continues its existing sequential path.
+                with telemetry.stage("advance_open_stage"):
+                    opened = self.open_stage(round_id, 2)
+                if opened.get("status") == "ok":
+                    return opened
             if status in ("stage2", "stage2_closed", "stage2_scoring"):
                 self._recover_baseline(round_row)
             if status in ("stage1", "stage2"):
                 stage = int(status[-1])
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
-                if (stage == 2 and self._score_generation_floor(round_row) > 0
-                    and round_row["configuration_doc"].get("execution_sequence_policy")
-                        == contracts.BASELINE_SCORED_FIRST_POLICY
-                    and self._baseline_recovery_plan(round_row,
-                        self._store.list_runs(round_id, stage=1, kind="execute"),
-                        self._store.list_runs(round_id, stage=1, kind="score")) is None):
-                    if now >= _parse_iso(schedule["publication_deadline"]):
-                        return self._hold_incomplete_evaluation(round_row, reason="baseline_incomplete")
-                    return {"status": "waiting", "round_status": status,
-                            "reason": "baseline_current_judgments"}
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     with telemetry.stage("advance_close_stage"):
                         return self.close_stage(round_id, stage)
@@ -7853,6 +8360,16 @@ class ArenaService:
             **({"company_quality_policy": quality_policy.POLICY} if quality_policy.enabled(configuration) else {}),
             **({"company_judgment_policy": company_judgments.POLICY} if configuration.get("company_judgment_policy") else {}),
             **({"intent_details_policy": intent_details_policy.POLICY} if intent_details_policy.enabled(configuration) else {}),
+            **({"reasoning_capture_policy": configuration["reasoning_capture_policy"],
+                training_coverage.SETTING: training_coverage.percent_from_configuration(configuration),
+                training_coverage.MISSING_REASONING_SETTING: training_coverage.missing_reasoning_percent_from_configuration(configuration)}
+               if reasoning_capture.enabled(configuration) else {}),
+            **({"baseline_reasoning_capture_policy": baseline_reasoning.validate(
+                configuration[baseline_reasoning.FIELD]).get("reasoning_capture_policy")}
+               if baseline_reasoning.FIELD in configuration else {}),
+            **({"reasoning_activation_status": configuration["reasoning_activation_status"],
+                "reasoning_activation_reason": configuration["reasoning_activation_reason"]}
+               if configuration.get("reasoning_activation_status") == "not_ready" else {}),
         }
 
     def public_round(self, round_id: str) -> Dict[str, Any]:

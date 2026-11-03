@@ -1,27 +1,33 @@
 """Real broker, queue, scoring, final eligibility and publication share cost credit."""
-import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from urllib.parse import urlsplit
 
 from lab_arena import runtime, scoring, shim
-from lab_arena.contact_evidence import source_key
 from lab_arena.runtime_host import RuntimeHostError
-from qualification.scoring.competition import apply_company_judgment_context, _merge_contact_breakdown
+from qualification.scoring.competition import apply_company_judgment_context
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.contact_round_test import _claim, _contact_result
-from tests.lab_arena.infrastructure_retry_cost478_postgres_test import database
+import pytest
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.per_icp_cost_round_test import PerIcpHarness
 from tests.test_arena_company_quality_policy import _positive_breakdown
+
+
+@pytest.fixture
+def database():
+    # Full service integration uses current SQL and the current company-cache
+    # judge. The separate478 migration module retains its exact old schema.
+    yield from current_service_database()
 
 
 def test_both_roles_keep_cost_credit_through_real_judge_and_publication(database, tmp_path):
     connect = lambda: database[0].connect(**database[1])
     h = PerIcpHarness(connect, tmp_path, challengers=['Healthy'], runners=['alpha'])
     h.service.config.defaults = replace(h.service.config.defaults, benchmark_icp_count=2, rewards_enabled=False,
-        execution_sequence_from='2026-01-01T00:00:00Z', company_quality_from=None)
+        execution_sequence_from='2026-01-01T00:00:00Z', company_quality_from=None,
+        contacts_from=None, company_judgment_from='2026-01-01T00:00:00Z')
     original_source = h.service.config.daily_icp_source
     h.service.config.daily_icp_source = lambda **kw: {**original_source(**kw), 'icps': original_source(**kw)['icps'][:2]}
     class CurrentApi(fixtures.InProcessApi):
@@ -47,16 +53,15 @@ def test_both_roles_keep_cost_credit_through_real_judge_and_publication(database
                     score = 30.0 if name.startswith('PublicBaseline') else 60.0
                     raw.update(final_score=score, intent_signal_raw=score, intent_signal_final=score)
                     raw['intent_signals_detail'][0].update(raw=score, after_decay=score)
-                    evidence = doc['contact_source_evidence'][source_key(company)]
-                    _merge_contact_breakdown(raw, asyncio.run(_contact_result(company, buyer, evidence)))
                     rows.append(raw)
-                return apply_company_judgment_context(companies, rows, contacts_required=True)
-            judge.integrity_policy = judge.contacts_required = True
+                return apply_company_judgment_context(companies, rows, company_quality=False)
+            judge.integrity_policy = True
             judge.company_quality = False
-            full = scoring.score_work_item({'scored_run_id': doc['scored_run_id']},
-                icp=doc['icp'], companies=doc['companies'], scorer=judge)
+            full, new = scoring.score_quality_work_item({'scored_run_id': doc['scored_run_id']},
+                icp=doc['icp'], companies=doc['companies'], scorer=judge,
+                cache_context=doc['company_judgment_cache'])
             return runtime.fake_result(exit_code=0, output_bytes=json.dumps(
-                scoring.build_scoring_output(doc['scored_run_id'], full)).encode())
+                scoring.build_scoring_output(doc['scored_run_id'], full, company_judgments=new)).encode())
         # The fixed model-output fixture performs unrelated free discovery.
         # Control that boundary; the charged OpenRouter calls below use the
         # complete broker and immutable SQL accounting path.
@@ -67,7 +72,6 @@ def test_both_roles_keep_cost_credit_through_real_judge_and_publication(database
         position = int(doc['icp']['icp_id'].rsplit('_', 1)[-1]) - 1
         for company in rows:
             company.update(company_linkedin='https://linkedin.com/company/' + company['company_name'].lower().replace(' ', '-'), state='CA')
-            company['contact'] = _claim(company, valid_role=True)
         if position == 0:
             rows = rows[:1]
             role = rows[0]['company_name'].split(' Company ', 1)[0]
@@ -93,8 +97,12 @@ def test_both_roles_keep_cost_credit_through_real_judge_and_publication(database
     observed_host_errors = []
     def workers(count=1):
         scheduled = h.clock.now
-        h.clock.now = datetime.now(timezone.utc)
+        # Model startup crossing a second after the driver's frozen clock.
+        # A real runner timestamps trajectory events with a live wall clock;
+        # using the frozen driver clock can predate the SQL lease's lower bound.
+        h.clock.now = datetime.now(timezone.utc) - timedelta(seconds=2)
         runner = h.runner(0, parallel=1)
+        runner._config.clock = lambda: datetime.now(timezone.utc)
         from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verified_test_pool
         runner._config.proxy_worker_pool = _verified_test_pool(2)
         try:
@@ -117,7 +125,11 @@ def test_both_roles_keep_cost_credit_through_real_judge_and_publication(database
         return original_create(round_id, legacy)
     h.service.store.create_round = legacy_create
     fixtures._start_round(h, day=19, epoch=31819)
-    cfg = h.service.store.get_round(h.round_id)['configuration_doc']
+    committed = h.service.store.get_round(h.round_id)
+    assert committed['evaluation_date'] >= '2026-10-14'
+    cfg = committed['configuration_doc']
+    assert cfg['company_judgment_policy'] == 'company_judgment_v1'
+    assert 'contact_policy' not in cfg
     assert cfg['infrastructure_retry_cost_policy'] == 'trusted_infrastructure_v1'
     h.advance_until('published', runners=1)
     saved = h.service.store.get_round(h.round_id)
@@ -136,3 +148,11 @@ def test_both_roles_keep_cost_credit_through_real_judge_and_publication(database
                         (h.round_id, json.dumps(rank)))
             assert cur.fetchone()[0] is True
     assert saved['reward_activated_at'] is None
+    retries = [run for run in h.service.store.list_runs(h.round_id, kind='execute')
+               if run['status'] == 'accepted' and run['attempt'] == 2]
+    assert len(retries) == 2
+    with connect() as conn, conn.cursor() as cur:
+        for run in retries:
+            cur.execute('SELECT public.lab_arena_execution_attempt_count(r) '
+                        'FROM public.lab_arena_runs r WHERE run_id=%s', (run['run_id'],))
+            assert cur.fetchone() == (1,)

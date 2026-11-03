@@ -155,6 +155,7 @@ def test_new_live_round_keeps_configured_admission_limit(max_challengers, slots,
     service._require_round_ownership = lambda _round_id: None
     stored = []
     service._store = SimpleNamespace(
+        get_round=lambda _round_id: None,
         create_round=lambda _id, config: stored.append(config) or {"status": "created"},
     )
     monkeypatch.setattr(

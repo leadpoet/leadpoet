@@ -38,7 +38,8 @@ class NativeTransport:
         if '/executions/by-key/' in request['url']:
             doc = {'requestId': NATIVE, 'toolId': self.tool,
                    'executionRecovery': {'idempotencyKey': self.key,
-                                         'state': 'completed' if self.complete else 'running'}}
+                                         # This billing-only fixture has no resumable running proof.
+                                         'state': 'completed' if self.complete else 'outcome_unknown'}}
             if self.complete:
                 data = {'results': [{'url': 'https://example.com/', 'title': 'Synthetic', 'text': 'Synthetic page'}]}
                 if self.tool == 'firecrawl_scrape':

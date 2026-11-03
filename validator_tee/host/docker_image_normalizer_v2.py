@@ -7,9 +7,10 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from typing import Any, Optional, Sequence
@@ -91,22 +92,123 @@ def _normalized_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
         for key, value in member.pax_headers.items()
         if key not in {"atime", "ctime", "mtime"}
     }
+    path = PurePosixPath(member.name)
+    if (
+        not path.is_absolute() and ".." not in path.parts
+        and path.name.startswith(".wh.") and path.name[4:] not in {"", ".", ".."}
+        and member.type in {tarfile.REGTYPE, tarfile.AREGTYPE} and member.size == 0
+    ):
+        # Docker overlay exports use 0600 and can retain a stale Linkname.
+        # OCI consumes these deletion markers without creating regular files;
+        # neither permission bits nor REGTYPE Linkname affect the deletion.
+        normalized.mode = 0
+        normalized.linkname = ""
     return normalized
 
 
-def normalize_layer_archive(source: Path, destination: Path) -> str:
+def normalize_layer_archive(
+    source: Path,
+    destination: Path,
+    *,
+    inherited_directories: Optional[dict[str, tuple[Any, ...]]] = None,
+) -> str:
     """Rewrite one uncompressed Docker layer with canonical tar metadata."""
 
     # Docker's containerd image store emits gzip-compressed layer blobs while
     # the classic image store emits plain tar layers. Always rewrite either
     # representation as one canonical uncompressed tar stream.
+    emitted_ancestors: set[str] = set()
+    emitted_directories: set[str] = set()
     with tarfile.open(source, "r:*") as original, tarfile.open(
         destination, "w:"
     ) as output:
-        for member in sorted(original.getmembers(), key=lambda item: item.name):
+        members = sorted(original.getmembers(), key=lambda item: item.name)
+        selected_members: list[tarfile.TarInfo] = []
+        eligible_directories: set[str] = set()
+        directory_counts: dict[str, int] = {}
+        for member in members:
+            path = PurePosixPath(member.name)
+            if member.isdir():
+                name = path.as_posix()
+                directory_counts[name] = directory_counts.get(name, 0) + 1
+        if inherited_directories is not None:
+            # OCI whiteouts affect lower layers only and precede same-layer
+            # creations, even when aliases sort before the whiteout record.
+            for member in members:
+                path = PurePosixPath(member.name)
+                if path.is_absolute() or ".." in path.parts:
+                    inherited_directories.clear()
+                    continue
+                if path.name == ".wh..wh..opq":
+                    parent = path.parent.as_posix()
+                    prefix = "" if parent == "." else parent + "/"
+                    for old in list(inherited_directories):
+                        if old != parent and old.startswith(prefix):
+                            del inherited_directories[old]
+                elif path.name.startswith(".wh."):
+                    target = (path.parent / path.name[4:]).as_posix()
+                    for old in list(inherited_directories):
+                        if old == target or old.startswith(target + "/"):
+                            del inherited_directories[old]
+                elif not member.isdir():
+                    # Resolve type replacement before testing aliases of any
+                    # descendant directory for inherited metadata equality.
+                    name = path.as_posix()
+                    for old in list(inherited_directories):
+                        if old == name or old.startswith(name + "/"):
+                            del inherited_directories[old]
+        for member in members:
             normalized = _normalized_member(member)
-            content = original.extractfile(member) if member.isfile() else None
+            if inherited_directories is not None:
+                path = PurePosixPath(normalized.name)
+                if path.is_absolute() or ".." in path.parts:
+                    # Keep unfamiliar paths and discard comparison state.
+                    inherited_directories.clear()
+                else:
+                    name = path.as_posix()
+                    basename = path.name
+                    if basename.startswith(".wh."):
+                        pass  # Already applied to inherited state, not this layer.
+                    elif normalized.isdir():
+                        metadata = tuple(getattr(normalized, field) for field in (
+                            "mode", "uid", "gid", "size", "mtime", "type",
+                            "linkname", "uname", "gname", "devmajor", "devminor",
+                        )) + (tuple(sorted(normalized.pax_headers.items())),)
+                        eligible = (
+                            directory_counts[name] == 1
+                            and inherited_directories.get(name) == metadata
+                        )
+                        if eligible:
+                            eligible_directories.add(name)
+                        inherited_directories[name] = metadata
+                    else:
+                        # A file, symlink, or device replaces any old directory.
+                        for old in list(inherited_directories):
+                            if old == name or old.startswith(name + "/"):
+                                del inherited_directories[old]
+            selected_members.append(normalized)
+        # A parent header is required for every retained child operation, but
+        # not when all descendants are themselves proven directory no-ops.
+        required_ancestors: set[str] = set()
+        for member in selected_members:
+            path = PurePosixPath(member.name)
+            if not member.isdir() or path.as_posix() not in eligible_directories:
+                required_ancestors.update(parent.as_posix() for parent in path.parents)
+        redundant_directories = eligible_directories - required_ancestors
+        for normalized in selected_members:
+            if normalized.isdir() and PurePosixPath(normalized.name).as_posix() in redundant_directories:
+                continue
+            content = original.extractfile(normalized) if normalized.isfile() else None
             output.addfile(normalized, content)
+            path = PurePosixPath(normalized.name)
+            emitted_ancestors.update(parent.as_posix() for parent in path.parents)
+            if normalized.isdir():
+                emitted_directories.add(path.as_posix())
+    if inherited_directories is not None:
+        # A child-only layer can change an inherited parent's mtime. Without
+        # an emitted header restoring it, a later matching header is required.
+        for parent in emitted_ancestors - emitted_directories:
+            inherited_directories.pop(parent, None)
     return _sha256_file(destination)
 
 
@@ -152,26 +254,28 @@ def normalize_saved_image(
             raise DockerImageNormalizationError("Docker image manifest is incomplete")
 
         normalized_layers: list[str] = []
-        normalized_by_source: dict[str, str] = {}
+        inherited_directories: dict[str, tuple[Any, ...]] = {}
+        source_layers: set[Path] = set()
         for layer_name in layers:
             if not isinstance(layer_name, str):
                 raise DockerImageNormalizationError("Docker layer path is invalid")
-            if layer_name in normalized_by_source:
-                normalized_layers.append(normalized_by_source[layer_name])
-                continue
             source = root / layer_name
+            source_layers.add(source)
             temporary_layer = root / (
                 "normalized-layer-%d.tar" % len(normalized_layers)
             )
-            layer_hash = normalize_layer_archive(source, temporary_layer)
+            layer_hash = normalize_layer_archive(
+                source, temporary_layer, inherited_directories=inherited_directories
+            )
             normalized_name = "blobs/sha256/%s" % layer_hash
             normalized_path = root / normalized_name
             normalized_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(temporary_layer), str(normalized_path))
-            if source != normalized_path:
-                source.unlink(missing_ok=True)
-            normalized_by_source[layer_name] = normalized_name
             normalized_layers.append(normalized_name)
+        # A repeated source layer can normalize differently after earlier
+        # layers change inherited state. Keep every source until all uses end.
+        for source in source_layers - {root / name for name in normalized_layers}:
+            source.unlink(missing_ok=True)
 
         config_path = root / config_name
         config = _load_json(config_path, "Docker image config")
@@ -234,6 +338,33 @@ def normalize_saved_image(
         return "sha256:" + config_hash
 
 
+def _saved_image_config_hash(archive_path: Path) -> str:
+    """Read the exact config bytes exported by Docker after loading an image."""
+
+    try:
+        with tarfile.open(archive_path, "r:*") as archive:
+            manifest = json.load(archive.extractfile("manifest.json"))
+            if (
+                not isinstance(manifest, list)
+                or len(manifest) != 1
+                or not isinstance(manifest[0], dict)
+            ):
+                raise DockerImageNormalizationError("loaded Docker manifest is invalid")
+            config_name = manifest[0].get("Config")
+            if not isinstance(config_name, str) or not config_name:
+                raise DockerImageNormalizationError("loaded Docker config path is invalid")
+            config = archive.extractfile(config_name)
+            if config is None:
+                raise DockerImageNormalizationError("loaded Docker config is unavailable")
+            digest = hashlib.sha256()
+            with config:
+                for chunk in iter(lambda: config.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return "sha256:" + digest.hexdigest()
+    except (OSError, KeyError, ValueError, TypeError, tarfile.TarError) as exc:
+        raise DockerImageNormalizationError("loaded Docker config is invalid") from exc
+
+
 def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
     """Save, canonicalize, and reload a Docker image under a stable tag."""
 
@@ -245,6 +376,7 @@ def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
         root = Path(temporary)
         original = root / "original.tar"
         normalized = root / "normalized.tar"
+        reloaded = root / "reloaded.tar"
         _run(["docker", "save", "-o", str(original), source_image])
         canonical_config_id = normalize_saved_image(
             archive_path=original,
@@ -258,13 +390,22 @@ def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
         ).stdout.strip()
         if not observed_id.startswith("sha256:"):
             raise DockerImageNormalizationError("normalized Docker image ID is invalid")
-        # With Docker's classic store, .Id is the canonical config digest.
-        # With the containerd store, .Id can be a generated manifest digest.
-        # Both are acceptable build identities and are compared across all
-        # repeated builds; the canonical config remains bound into the image.
+        # .Id can be a config digest in the classic store or a generated
+        # manifest digest in the containerd store. Compare the exact loaded
+        # config instead: it binds all config fields and ordered layer hashes.
         if not canonical_config_id.startswith("sha256:"):
             raise DockerImageNormalizationError("canonical Docker config ID is invalid")
-        return observed_id
+        original.unlink()
+        normalized.unlink()
+        _run(["docker", "save", "-o", str(reloaded), normalized_image])
+        if _saved_image_config_hash(reloaded) != canonical_config_id:
+            raise DockerImageNormalizationError("loaded Docker config differs from canonical config")
+        print(
+            "Verified canonical Docker config %s (store image %s)"
+            % (canonical_config_id, observed_id),
+            file=sys.stderr,
+        )
+        return canonical_config_id
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

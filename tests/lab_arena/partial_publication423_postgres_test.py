@@ -1,6 +1,7 @@
 """Publication permits only proof-backed unfinished Arena assignments."""
 
 from pathlib import Path
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import copy
@@ -9,6 +10,7 @@ import json
 import pytest
 
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+from tests.lab_arena.historical_service import start_pre470_round
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge,
     _enable_verified_proxy_runtime,
@@ -82,7 +84,7 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
     connect = lambda: psycopg2.connect(**dsn)
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(MIGRATION.read_text())
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=["PartialMiner"], runners=["alpha"]
     )
     harness.service.config.defaults = replace(
@@ -92,7 +94,7 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
     )
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-    assert fixtures._start_round(harness, day=27, epoch=62_427) == 2
+    assert start_pre470_round(harness, round_id="arena-2026-09-27", epoch=62_427) == 2
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     harness.advance_until("stage1_scored", runners=1)
     harness.service.advance_round(harness.round_id)
@@ -235,3 +237,15 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
         attempt(incomplete_baseline=False, null_score=False)
     with pytest.raises(psycopg2.Error):
         attempt(incomplete_baseline=False, incomplete_reason=False)
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    """The lifecycle belongs to this file's pinned SQL and original judge."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-27")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service

@@ -29,6 +29,9 @@ def database():
         with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
             cur.execute(SQL.read_text())
             cur.execute(SQL.read_text())
+            # Current public dashboard reads require this additive computed
+            # projection. Keep the 540 transition/preimage checks unchanged.
+            cur.execute((SQL.parent / '541-lab-arena-public-execution-failure-reason.sql').read_text())
         yield db
     finally:
         gen.close()
@@ -37,6 +40,10 @@ def database():
 @pytest.fixture(scope='module')
 def completed(database, tmp_path_factory):
     pg, dsn = database
+    # Current dashboard reads require the additive diagnostic reader. Keep the
+    # migration-only database fixture at 540 so its upgrade checks stay exact.
+    with pg.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute((SQL.parent / '541-lab-arena-public-execution-failure-reason.sql').read_text())
     harness = IntegrityHarness(lambda: pg.connect(**dsn), tmp_path_factory.mktemp('isolation540'),
         challengers=['Complete', 'MissingJudge', 'HistoricalRoute', 'FailedRoute'], runners=['alpha'])
     harness.service.config.defaults = replace(harness.service.config.defaults,

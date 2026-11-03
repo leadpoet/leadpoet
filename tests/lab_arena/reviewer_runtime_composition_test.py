@@ -8,12 +8,20 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 from scripts import build_arena_reviewer_runtime as composer
 
 from scripts.build_arena_reviewer_runtime import (
     CompositionError, verify_image_configuration, verify_overlay,
 )
 ROOT = composer.ROOT
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
+)
 
 
 def test_build_tag_retains_distinct_repairs_within_docker_limit():
@@ -135,6 +143,11 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
+    original[composer.GRADER_FILE] = _FROZEN_GRADER
+    if composer.FINALITY_FILE in original:
+        original[composer.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", composer.FINALITY_FILE,
+        )
     # Model a frozen pre-correction image without depending on Git history.
     for name, deltas in ((builder.GRADER_FILE, INVESTIGATOR_DELTAS),
                          (builder.FINALITY_FILE, FINALITY_DELTAS)):
@@ -161,11 +174,14 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
 
 @pytest.mark.parametrize("negative_finality", [False, True])
 @pytest.mark.parametrize("source_access", [False, True])
+@pytest.mark.parametrize("reserved_industry_turns", [False, True])
 def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
-    negative_finality, source_access,
+    negative_finality, source_access, reserved_industry_turns,
 ):
     from scripts import build_arena_reviewer_runtime as builder
-    from scripts.arena_reviewer_budget_seam import _OLD, _NEW, convert_budget_seam
+    from scripts.arena_reviewer_budget_seam import (
+        _OLD, _NEW, _NATIVE_OLD, _NATIVE_NEW, convert_budget_seam,
+    )
 
     names = [builder.GRADER_FILE, *builder.ENTRYPOINT_FILES]
     if negative_finality or source_access:
@@ -175,6 +191,16 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    original[composer.GRADER_FILE] = _FROZEN_GRADER
+    if composer.FINALITY_FILE in original:
+        original[composer.FINALITY_FILE] = frozen_source(
+            "native_industry_budget", composer.FINALITY_FILE,
+        )
+    if reserved_industry_turns:
+        _OLD, _NEW = _NATIVE_OLD, _NATIVE_NEW
+    else:
+        original[builder.GRADER_FILE] = original[builder.GRADER_FILE].replace(
+            _NATIVE_NEW.encode(), _NEW.encode(), 1)
     # Reproduce the original frozen loop; do not import current grading behavior.
     assert original[builder.GRADER_FILE].count(_NEW.encode()) == 1
     original[builder.GRADER_FILE] = original[builder.GRADER_FILE].replace(
@@ -198,12 +224,13 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
     from scripts import build_arena_reviewer_runtime as builder
     from scripts.arena_reviewer_investigation_finality_seam import (
         DELTAS, HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
     corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
     original = corrected.replace(HELPER.encode(), b'', 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
-    )
+    ).replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1)
     for old, new in DELTAS:
         assert original.count(new.encode()) == 1
         original = original.replace(new.encode(), old.encode(), 1)
@@ -214,6 +241,7 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
                               if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
+    sources[composer.GRADER_FILE] = _FROZEN_GRADER
     sources[builder.FINALITY_FILE] = original
     prior = builder.expected_overlay(sources, complete_negative_finality=True)
     repaired = builder.expected_overlay(
@@ -230,19 +258,69 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
 def test_completed_investigation_upgrades_existing_runtime_finality_only():
     from scripts.arena_reviewer_investigation_finality_seam import (
         HELPER, LEGACY_HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
     corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
     legacy = corrected.replace(HELPER.encode(), LEGACY_HELPER.encode(), 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
-    )
+    ).replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1)
     assert convert_investigation_finality_seam(legacy) == corrected
     before, after = ast.parse(legacy), ast.parse(corrected)
     for tree in (before, after):
         tree.body = [node for node in tree.body if getattr(node, 'name', '') not in {
             '_settle_completed_company_investigation', '_verify_company_fit',
+            '_llm_reverify_company',
         }]
     assert ast.dump(before) == ast.dump(after)
+
+
+def test_completed_review_recovers_headcount_on_prior_frozen_runtime():
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, PREVIOUS_HELPER, _POST_REPAIR_NEW, _POST_REPAIR_OLD,
+        convert_investigation_finality_seam,
+    )
+    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    prior = corrected.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1).replace(
+        _POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1,
+    )
+    actual = convert_investigation_finality_seam(prior)
+    assert actual == corrected
+    assert convert_investigation_finality_seam(actual) == actual
+    # The two narrow edits are the entire frozen-source correction.
+    assert actual.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1).replace(
+        _POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1,
+    ) == prior
+
+
+def test_completed_profile_obligations_upgrade_exact_v2_helper_only():
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, PREVIOUS_HELPER_V2, convert_investigation_finality_seam,
+    )
+    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    prior = corrected.replace(HELPER.encode(), PREVIOUS_HELPER_V2.encode(), 1)
+    assert prior != corrected
+    assert convert_investigation_finality_seam(prior) == corrected
+    assert convert_investigation_finality_seam(corrected) == corrected
+    assert corrected.replace(HELPER.encode(), PREVIOUS_HELPER_V2.encode(), 1) == prior
+
+
+@pytest.mark.parametrize('fault', ['partial_helper', 'unknown_call', 'duplicate_call'])
+def test_completed_review_rejects_partial_or_unknown_postrepair_source(fault):
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, PREVIOUS_HELPER, _POST_REPAIR_NEW,
+        InvestigationFinalitySeamError, convert_investigation_finality_seam,
+    )
+    source = (ROOT / composer.FINALITY_FILE).read_bytes()
+    if fault == 'partial_helper':
+        source = source.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1)
+    elif fault == 'unknown_call':
+        source = source.replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_NEW.replace(
+            'settled is not None', 'settled is None').encode(), 1)
+    else:
+        source = source.replace(_POST_REPAIR_NEW.encode(), (_POST_REPAIR_NEW * 2).encode(), 1)
+    with pytest.raises(InvestigationFinalitySeamError):
+        convert_investigation_finality_seam(source)
 
 
 def test_actual_frozen_base_and_existing_runtime_compose_to_identical_bytes():
@@ -340,6 +418,7 @@ def _numeric_alias_sources():
                        if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (composer.GRADER_FILE, composer.FINALITY_FILE, *composer.ENTRYPOINT_FILES)
     }
+    sources[composer.GRADER_FILE] = _FROZEN_GRADER
 
     from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CHANGES
     # This fixture represents the prior approved correction, before the new
@@ -411,6 +490,7 @@ def test_numeric_homepage_alias_rejects_unreviewed_identity_bypass(fault):
 
 
 def test_numeric_homepage_alias_builder_flag_and_receipt(monkeypatch, capsys):
+    monkeypatch.setattr(composer, '_managed_docker_host', lambda: False)
     import json
     from scripts import arena_reviewer_structured_homepage_alias_seam as seam
     sources = _numeric_alias_sources()

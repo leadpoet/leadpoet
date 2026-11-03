@@ -3,11 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.reviewer_frozen_sources import frozen_source
 
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from scripts.arena_reviewer_admission_seam import (
     AdmissionSeamError, _CORRECTION_ELIGIBILITY_ARGUMENT, _REPLACEMENTS,
     convert_admission_seam,
+)
+
+
+# Exact CI-green native-budget postimage; historical overlays must not track
+# the evolving current investigator or require Git history in test installs.
+_FROZEN_GRADER = frozen_source(
+    "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
 )
 
 
@@ -86,12 +94,11 @@ def test_final_correction_does_not_extend_serialization_retry_grace():
 
 
 def _hooked_source():
-    return (Path(__file__).resolve().parents[1] / "qualification/scoring"
-            / "company_evidence_investigator.py").read_bytes()
+    return _FROZEN_GRADER
 
 
 def _unhooked_source(*, repaired):
-    # Construct both reviewed statement shapes from the real current module.
+    # Construct both reviewed shapes from the exact historical postimage.
     # This keeps the fixture small and does not substitute any grading body.
     text = _hooked_source().decode()
     for index, (alternatives, replacement) in enumerate(_REPLACEMENTS):
@@ -109,6 +116,17 @@ def test_both_admission_shapes_convert_to_exact_same_source(repaired):
 
 def test_hooked_source_is_returned_byte_for_byte():
     assert convert_admission_seam(_hooked_source()) == _hooked_source()
+
+
+@pytest.mark.parametrize("followup_state", ["False", "industry_gap_search_needed"])
+def test_admission_conversion_does_not_own_industry_followup_state(followup_state):
+    source = _unhooked_source(repaired=False).replace(
+        b"industry_followup_pending = industry_gap_search_needed",
+        ("industry_followup_pending = " + followup_state).encode(), 1)
+    expected = _hooked_source().replace(
+        b"industry_followup_pending = industry_gap_search_needed",
+        ("industry_followup_pending = " + followup_state).encode(), 1)
+    assert convert_admission_seam(source) == expected
 
 
 def test_complete_hook_receives_only_existing_correction_eligibility():
@@ -149,3 +167,18 @@ def test_converter_rejects_unknown_partial_or_ambiguous_shapes(corruption):
         source += b"\nimport aiohttp\n\n"
     with pytest.raises(AdmissionSeamError):
         convert_admission_seam(source)
+
+
+def test_native_budget_fixture_is_exact_and_current_unreviewed_shape_stays_rejected():
+    import hashlib
+    from scripts.arena_reviewer_budget_seam import _NATIVE_NEW
+    assert hashlib.sha256(_FROZEN_GRADER).hexdigest() == "fa65d603c7acc9d2363594061eb40812256c1be3c2490f16549c00b084b4cf94"
+    assert _FROZEN_GRADER.count(_NATIVE_NEW.encode()) == 1
+    assert convert_admission_seam(_FROZEN_GRADER) == _FROZEN_GRADER
+    current = (Path(__file__).resolve().parents[1] / "qualification/scoring"
+               / "company_evidence_investigator.py").read_bytes()
+    assert current != _FROZEN_GRADER
+    # The production converter still cannot rewrite an unreviewed source
+    # shape. Pinning historical test data grants no new composition authority.
+    with pytest.raises(AdmissionSeamError, match="unrecognized reviewer admission block"):
+        convert_admission_seam(current)

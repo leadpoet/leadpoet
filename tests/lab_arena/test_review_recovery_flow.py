@@ -12,6 +12,9 @@ import pytest
 from lab_arena import broker, code_review, contracts, source_bundle
 from lab_arena.service import ServiceError
 from lab_arena.store import new_lease_token
+from tests.lab_arena.lab_arena_pg_harness import (
+    current_service_database,
+)
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_KEYS,
     CANARY_OPENROUTER_KEY,
@@ -19,10 +22,14 @@ from tests.lab_arena.test_lab_arena_service_round import (
     FakeProviderTransport,
     Harness,
     connect,
-    database,
     flavor_source_archive,
     keypair,
 )
+
+
+@pytest.fixture(scope="module")
+def database():
+    yield from current_service_database()
 
 
 def _iso(moment: datetime) -> str:
@@ -33,6 +40,9 @@ def _signed_reserve(harness: Harness, round_id: str, flavor: str, miner_label: s
     """Reserve an upload through the same signed API used by a real miner."""
 
     miner = keypair("svc-miner-" + miner_label)
+    # Positive admission fixtures are registered miners; request validation stays real.
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(flavor)
     facts = source_bundle.validate_source_archive(payload)
     request = contracts.build_signed_request(
@@ -161,6 +171,16 @@ class RecoveryReviewTransport(FakeProviderTransport):
                 )
             if attempt in (2, 4):
                 raise broker.ProviderTransportError("controlled transport failure")
+            if attempt in (5, 6, 7):
+                response = super().send(**request)
+                document = json.loads(response.body.decode("utf-8"))
+                if attempt == 6:
+                    document["choices"][0]["message"]["content"] = "incomplete JSON"
+                else:
+                    document["choices"][0]["finish_reason"] = "length"
+                return broker.ProviderResponse(
+                    response.status, response.headers, json.dumps(document).encode("utf-8"),
+                )
         if flavor == "PermanentAuthFailure":
             return broker.ProviderResponse(
                 401,
@@ -187,14 +207,12 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     reviewer = harness.service.config.code_reviewer
     reviewer._transport = transport
     harness.review_transport = transport
-    assert harness.service.store.code_review_schema()["max_transient_attempts"] == 6
+    assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
 
-    # A UTC-midnight round fixes the source replacement boundary at 23:00.
+    # Leave two real hours for admission, including in the last UTC hour.
     now = datetime.now(timezone.utc)
     harness.clock.now = now
-    cutoff = (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    cutoff = now + timedelta(hours=2)
     # The test later brings the cutoff into the current UTC day so PostgreSQL
     # can exercise retry timing without sleep. Keep the daily ID on that day.
     round_id = "arena-" + now.date().isoformat()
@@ -203,7 +221,9 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     replacement_freeze = harness.service._submission_replacement_cutoff(
         {"configuration_doc": configuration}
     )
-    assert (replacement_freeze.hour, replacement_freeze.minute) == (23, 0)
+    assert replacement_freeze == datetime.fromisoformat(
+        configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")
+    ) - timedelta(hours=1)
 
     original_reserved = _signed_reserve(
         harness, round_id, "SupersededOriginal", "review-recovery"
@@ -319,28 +339,28 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         connect, round_id, "benchmark_deadline", original_deadline
     )
 
-    # Attempts 2-4 are retryable transport/503 failures. Attempt 5 passes,
-    # proving recovery beyond the former three-attempt limit and below cap 6.
+    # Recover transport/503 failures and unusable JSON/unfinished responses.
+    # Attempt 8 passes, beyond both former caps, then reaches publication below.
     outcomes = []
-    for _attempt in range(2, 6):
+    for _attempt in range(2, 9):
         _make_review_retry_ready(connect, replacement_id)
         outcome = reviewer.review(
             harness.service.store.get_submission(replacement_id)
         )
         outcomes.append(outcome["status"])
-    assert outcomes == ["error", "error", "error", "passed"]
+    assert outcomes == ["error"] * 6 + ["passed"]
     recovered = harness.service.store.get_submission(replacement_id)
     assert recovered["code_review_status"] == "passed"
-    assert recovered["code_review_attempts"] == 5
+    assert recovered["code_review_attempts"] == 8
     assert recovered["code_review_doc"]["cost_status"] == "settled"
     assert recovered["code_review_doc"]["cost_microusd"] == 0
     assert recovered["code_review_doc"]["review_cost_microusd"] > 0
-    assert transport.attempts["RecoveredReplacement"] == 5
+    assert transport.attempts["RecoveredReplacement"] == 8
     recovered_kinds = _ledger_kinds(harness, replacement_id)
-    assert recovered_kinds.count("reservation") == 5
-    assert recovered_kinds.count("dispatch") == 5
+    assert recovered_kinds.count("reservation") == 8
+    assert recovered_kinds.count("dispatch") == 8
     assert reviewer.review(recovered)["status"] == "existing"
-    assert transport.attempts["RecoveredReplacement"] == 5
+    assert transport.attempts["RecoveredReplacement"] == 8
     assert _ledger_kinds(harness, replacement_id) == recovered_kinds
 
     permanent = reviewer.review(
@@ -445,3 +465,15 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         404,
     )
     assert run_reads == []
+
+
+@pytest.mark.parametrize("cutoff", [
+    "2026-10-29T00:00:00Z", "2026-11-01T00:00:00Z",
+    "2027-01-01T00:00:00Z", "2028-03-01T00:00:00Z",
+])
+def test_midnight_replacement_freeze_remains_2300_across_date_boundaries(cutoff):
+    row = {"configuration_doc": {"schedule": {"submission_cutoff": cutoff}}}
+    from lab_arena.service import ArenaService
+    freeze = ArenaService._submission_replacement_cutoff(row)
+    assert (freeze.hour, freeze.minute) == (23, 0)
+    assert freeze + timedelta(hours=1) == datetime.fromisoformat(cutoff.replace("Z", "+00:00"))

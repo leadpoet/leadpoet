@@ -1,0 +1,221 @@
+def _targeted_company_investigation_dimensions(
+    result: CompanyFitDecisionResult,
+    *,
+    icp_stage: str,
+    employee_size_conflict: bool,
+    company: Optional[CompanyOutput] = None,
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
+    verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    verified_structured_identity: Optional[Mapping[str, Any]] = None,
+    verified_transport_domain: str = "",
+    homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+) -> tuple[str, ...]:
+    """Select only fact gaps and unsupported semantic company disputes."""
+
+    details = result.details if isinstance(result.details, Mapping) else {}
+    raw_dimensions = details.get("dimension_decisions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
+    targets: list[str] = []
+    provider_observations = details.get("provider_observations")
+    observations = (
+        provider_observations
+        if isinstance(provider_observations, Mapping)
+        else {}
+    )
+    submitted_stage_conflict = bool(
+        company
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+        and _submitted_intent_stage_conflicts(company, icp_stage)
+    )
+    current_public_stage_check = bool(
+        _normalize_company_stage(icp_stage) == "public"
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
+    current_venture_stage_check = bool(
+        _normalize_company_stage(icp_stage)
+        in {"seed", "series a", "series b", "series c+"}
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
+    if (
+        icp_stage
+        and (
+            dimensions.get("stage")
+            in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+            or submitted_stage_conflict
+            or current_public_stage_check
+            or current_venture_stage_check
+        )
+    ):
+        targets.append("stage")
+    identity = details.get("identity_receipt")
+    homepage_alias_slug = str(
+        (verified_homepage_identity or {}).get("linkedin_company_slug") or ""
+    ).casefold()
+    structured_alias_slug = (
+        _bound_structured_legal_brand_alias_slug(
+            identity, verified_structured_identity, verified_transport_domain,
+        )
+        if isinstance(identity, Mapping) else ""
+    )
+    if homepage_alias_slug and homepage_alias_slug != structured_alias_slug:
+        structured_alias_slug = ""
+    if details.get("identity_decision") != COMPANY_FIT_MATCH and (
+        bool(verified_rebrand_redirect)
+        or (
+            isinstance(identity, Mapping)
+            and (
+                (
+                    identity.get("submitted_domain")
+                    and identity.get("observed_domain")
+                    and identity.get("submitted_domain")
+                    != identity.get("observed_domain")
+                )
+                or (
+                    identity.get("evidence_source")
+                    == "company_web_reverification"
+                    and _same_domain_name_alias({
+                        **identity,
+                        "verified_linkedin_slug": (
+                            homepage_alias_slug or structured_alias_slug
+                        ),
+                    })
+                )
+            )
+        )
+    ):
+        targets.append("rebrand")
+    conflict_receipt = details.get("employee_size_conflict_receipt")
+    linkedin_primary = bool(
+        isinstance(conflict_receipt, Mapping)
+        and conflict_receipt.get("resolution")
+        == "structured_linkedin_employee_count_range_primary"
+    )
+    if not linkedin_primary and (
+        employee_size_conflict
+        or dimensions.get("employee_size")
+        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+    ):
+        targets.append("headcount")
+    dimension_evidence = details.get("dimension_evidence")
+    industry_evidence = (
+        dimension_evidence.get("industry", {})
+        if isinstance(dimension_evidence, Mapping)
+        else {}
+    )
+    reviewable_industry_mismatch = bool(
+        dimensions.get("industry") == COMPANY_FIT_MISMATCH
+        and (
+            (
+                observations.get("industry_activity_role") == "unresolved"
+                and observations.get("industry_matches") is False
+            )
+            or (
+                observations.get("industry_activity_role")
+                in _NON_SUPPLIER_INDUSTRY_ACTIVITY_ROLES
+                and observations.get("industry_matches") in {True, False}
+            )
+        )
+        and isinstance(industry_evidence, Mapping)
+        and industry_evidence.get("url")
+        and industry_evidence.get("quote")
+    )
+    if (
+        dimensions.get("industry") == COMPANY_FIT_UNAVAILABLE
+        or reviewable_industry_mismatch
+    ):
+        targets.append("industry")
+    # A proven outside-region headquarters remains terminal. Research is used
+    # only when the broad verifier did not establish a usable headquarters.
+    if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE:
+        targets.append("geography")
+    elif dimensions.get("geography") == COMPANY_FIT_MATCH:
+        # A third-party HQ match cannot bypass a known first-party contact or
+        # about page. The locator is only a fetch target, never an HQ claim.
+        raw_evidence = (
+            details.get("dimension_evidence", {}).get("geography", {})
+            if isinstance(details.get("dimension_evidence"), Mapping)
+            else {}
+        )
+        web_evidence = (
+            raw_evidence.get("web_evidence") or raw_evidence
+            if isinstance(raw_evidence, Mapping)
+            else {}
+        )
+        evidence_url = (
+            _valid_web_evidence_url(web_evidence.get("url"))
+            if isinstance(web_evidence, Mapping)
+            else ""
+        )
+        anchor = (
+            verified_homepage_identity
+            if isinstance(verified_homepage_identity, Mapping)
+            else {}
+        )
+        first_party_domain = str(
+            anchor.get("registrable_dns_domain") or ""
+        ).strip().casefold()
+        evidence_domain = _registrable_domain(evidence_url) if evidence_url else ""
+        if (
+            details.get("identity_decision") == COMPANY_FIT_MATCH
+            and first_party_domain
+            and evidence_domain
+            and evidence_domain != first_party_domain
+            and _priority_headquarters_navigation_source(
+                ("geography",),
+                _validated_homepage_navigation_locators(
+                    homepage_navigation_locators,
+                    positive_semantic_review=False,
+                    headquarters_review=True,
+                    verified_homepage_identity=anchor,
+                ),
+            )
+        ):
+            targets.append("geography")
+    return tuple(targets)
+
+def _positive_semantic_review_needed(
+    result: CompanyFitDecisionResult,
+    icp: ICPPrompt,
+    investigation_targets: Sequence[str],
+) -> bool:
+    """Audit a narrow positive that could still become an eligible company."""
+
+    active_attribute = str(
+        getattr(icp, "required_attribute", "") or ""
+    ).strip()
+    if not active_attribute:
+        return False
+    details = result.details if isinstance(result.details, Mapping) else {}
+    raw_dimensions = details.get("dimension_decisions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
+    if dimensions.get("industry") != COMPANY_FIT_MATCH:
+        return False
+    attribute_decision = details.get("required_attribute_decision")
+    if attribute_decision not in {
+        COMPANY_FIT_MATCH,
+        COMPANY_FIT_UNAVAILABLE,
+    }:
+        return False
+    if result.decision in {COMPANY_FIT_MATCH, COMPANY_FIT_UNAVAILABLE}:
+        return True
+
+    target_dimensions = {
+        {
+            "stage": "stage",
+            "headcount": "employee_size",
+            "rebrand": "identity",
+            "industry": "industry",
+            "geography": "geography",
+        }[target]
+        for target in investigation_targets
+    }
+    mismatches = {
+        dimension
+        for dimension, decision in dimensions.items()
+        if decision == COMPANY_FIT_MISMATCH
+    }
+    if details.get("identity_decision") == COMPANY_FIT_MISMATCH:
+        mismatches.add("identity")
+    if details.get("required_attribute_decision") == COMPANY_FIT_MISMATCH:
+        mismatches.add("required_attribute")
+    return bool(mismatches) and mismatches.issubset(target_dimensions)

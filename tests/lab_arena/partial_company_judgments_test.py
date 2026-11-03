@@ -285,7 +285,7 @@ def test_timeout_partial_survives_provider_or_credential_override(tmp_path, cred
 
 
 @pytest.mark.parametrize("change", [
-    "valid", "execute", "accepted", "wrong_run", "wrong_slot", "absent",
+    "valid", "large_valid", "execute", "accepted", "wrong_run", "wrong_slot", "absent",
     "malformed", "nested", "oversized", "cleanup", "worker_cleanup", "stale",
 ])
 def test_signaled_scorer_reports_only_strict_failed_company_checkpoint(
@@ -312,14 +312,17 @@ def test_signaled_scorer_reports_only_strict_failed_company_checkpoint(
     elif change == "wrong_slot":
         output["company_judgments"][0]["authority_slot"] += 1
     checkpoint_bytes = json.dumps(output).encode()
-    if change == "absent":
+    if change == "large_valid":
+        checkpoint_bytes += b" " * runtime.MAX_OUTPUT_BYTES
+        assert len(checkpoint_bytes) < scoring.MAX_SCORING_OUTPUT_BYTES
+    elif change == "absent":
         checkpoint_bytes = None
     elif change == "malformed":
         checkpoint_bytes = b'{"unfinished":'
     elif change == "nested":
         checkpoint_bytes = b"[" * 2000 + b"]" * 2000
     elif change == "oversized":
-        checkpoint_bytes = b"x" * (runtime.MAX_OUTPUT_BYTES + 1)
+        checkpoint_bytes = b"x" * (scoring.MAX_SCORING_OUTPUT_BYTES + 1)
 
     class Interrupted:
         def run_icp(self, spec, **_kwargs):
@@ -354,9 +357,9 @@ def test_signaled_scorer_reports_only_strict_failed_company_checkpoint(
     if change != "cleanup":
         assert any(event["content"].get("runtime_host_reason") == "sandbox_launcher_signaled"
                    and event["content"].get("status") == (
-                       "judge_error" if change in {"valid", "stale"} else "abandoned"
+                       "judge_error" if change in {"valid", "large_valid", "stale"} else "abandoned"
                    ) for event in host_errors)
-    if change in {"valid", "stale"}:
+    if change in {"valid", "large_valid", "stale"}:
         assert worker.abandoned == 0
         assert len(api.completions) == 1
         body = api.completions[0]["body"]
@@ -373,8 +376,9 @@ def test_signaled_scorer_reports_only_strict_failed_company_checkpoint(
 
 
 @pytest.mark.parametrize("failed_cleanup", [None, "delete", "umount"])
+@pytest.mark.parametrize("large_checkpoint", [False, True])
 def test_real_signaled_runtime_checkpoint_reaches_only_failed_completion(
-    tmp_path, failed_cleanup,
+    tmp_path, failed_cleanup, large_checkpoint,
 ):
     import signal
     from lab_arena import runtime
@@ -388,6 +392,10 @@ def test_real_signaled_runtime_checkpoint_reaches_only_failed_completion(
     )
     rows = [_new(_refs(document)[0])]
     output = scoring.build_scoring_failure("r1", "judge_error", company_judgments=rows)
+    checkpoint_bytes = json.dumps(output).encode()
+    if large_checkpoint:
+        checkpoint_bytes += b" " * runtime.MAX_OUTPUT_BYTES
+        assert len(checkpoint_bytes) < scoring.MAX_SCORING_OUTPUT_BYTES
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     host_config = make_config(host_dir)
@@ -398,7 +406,7 @@ def test_real_signaled_runtime_checkpoint_reaches_only_failed_completion(
             assert spec.entry_command == runtime.SCORER_ENTRY_COMMAND
 
             def launch(argv):
-                spec.output_path.write_bytes(json.dumps(output).encode())
+                spec.output_path.write_bytes(checkpoint_bytes)
                 return FakeProcess(argv, clock=clock, finish_at=clock(), returncode=-signal.SIGINT)
 
             return runtime.run_sandbox(

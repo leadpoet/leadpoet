@@ -31,14 +31,42 @@ _SENSITIVE_KEY_RE = re.compile(
     r"password|passwd|secret|client_secret|access_token|refresh_token|cookie|set_cookie)$",
     re.IGNORECASE,
 )
-_BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_BASIC_RE = re.compile(r"(?i)\bbasic\s+([A-Za-z0-9._~+/=-]+)")
+_QUOTED_SENSITIVE_CONTEXT_RE = re.compile(
+    r"(?i)((?:\\*[\"'])(?:api[-_ ]?key|x[-_]api[-_]key|(?:proxy[-_])?authorization|"
+    r"password|passwd|secret|client[-_]secret|access[-_ ]?token|refresh[-_ ]?token|"
+    r"lease(?:[-_ ]?token)?|cookie|set[-_]cookie|credentials?|private[-_]key|"
+    r"secret[-_]key|session[-_]token|x[-_]amz[-_](?:credential|signature|security[-_]token))"
+    r"(?:\\*[\"'])\s*:\s*(?:\\*[\"']))"
+)
+_QUOTED_SENSITIVE_VALUE_RE = re.compile(_QUOTED_SENSITIVE_CONTEXT_RE.pattern + r"([^\\\"'\r\n]+)")
+_PRIVATE_BASIC_RE = re.compile(r"(?i)\bbasic\s+[A-Za-z0-9._~+/=-]{8,}")
+_AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)(\b(?:authorization|proxy[-_]authorization)\s*[:=]\s*)"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:(?:basic|bearer)\s+)?[^\s,;\"']+)"
+)
+_ATTACHED_AUTH_MARKER_RE = re.compile(
+    r"(?i)\b(?:bearer|basic)\s+(?:\\*[\"'])?"
+    r"(?:\[REDACTED\]|%5BREDACTED%5D)"
+    r"(?P<suffix>(?:\\(?!\\*[\"'])|[^\s\"'\\])*)"
+)
 _KEY_VALUE_RE = re.compile(
-    r"(?i)\b(api[-_ ]?key|authorization|password|secret|access[-_ ]?token|"
-    r"refresh[-_ ]?token|lease[-_ ]?token)\s*[:=]\s*([^\s,;]{4,})"
+    r"(?i)\b(api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
+    r"refresh[-_ ]?token|lease[-_ ]?token)\s*[:=]\s*((?:basic|bearer)\s+[^\s,;]+|[^\s,;]{4,})"
+)
+# A closing delimiter after an existing marker is markup, not secret material.
+# Any other suffix still follows the ordinary credential-redaction path.
+_REDACTED_VALUE_RE = re.compile(
+    r'''(?:\[REDACTED\]|"\[REDACTED\]"|'\[REDACTED\]')[\])}]*'''
 )
 _QUOTED_KEY_VALUE_RE = re.compile(
-    r"(?i)([\"'](?:api[-_ ]?key|authorization|password|secret|access[-_ ]?token|"
-    r"refresh[-_ ]?token|lease[-_ ]?token)[\"']\s*:\s*)([\"'])([^\"']{4,})([\"'])"
+    r"(?i)([\"'](?:api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
+    r"refresh[-_ ]?token|lease[-_ ]?token)[\"']\s*:\s*)([\"'])([^\"']{1,})([\"'])"
+)
+_ESCAPED_QUOTED_KEY_VALUE_RE = re.compile(
+    r'(?i)((?:\\+["\'])(?:api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|'
+    r'refresh[-_ ]?token|lease[-_ ]?token)(?:\\+["\'])\s*:\s*)(\\+["\'])([^"\'\\]{1,})(\\+["\'])'
 )
 _BARE_API_KEY_RE = re.compile(
     r"\b(?:sk-or-v1-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,})\b"
@@ -66,6 +94,45 @@ class TrajectoryError(ValueError):
     """One trajectory event violated the bounded private contract."""
 
 
+def redact_auth_schemes(text: str) -> str:
+    """Keep Basic prose; redact credentials and explicit sensitive values."""
+
+    # A serialized string containing a declared private field retains the
+    # previous conservative Basic mask, including after escaped quotes/slashes.
+    private_context = _QUOTED_SENSITIVE_CONTEXT_RE.search(text) is not None
+    text = _QUOTED_SENSITIVE_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
+
+    def redact_authorization_value(match: re.Match[str]) -> str:
+        value = match[0][len(match[1]):]
+        if _REDACTED_VALUE_RE.fullmatch(value):
+            return match[0]
+        return match[1] + "[REDACTED]"
+
+    text = _AUTHORIZATION_VALUE_RE.sub(redact_authorization_value, text)
+    text = _BEARER_RE.sub("[REDACTED]", text)
+    if private_context:
+        text = _PRIVATE_BASIC_RE.sub("[REDACTED]", text)
+
+    def basic(match: re.Match[str]) -> str:
+        token = match[1]
+        # Preserve the existing fence for a credential token glued to a URL.
+        # A public URL immediately after the scheme is ordinary text.
+        if text[match.end():match.end() + 3] == "://" and token.lower() not in {"http", "https"}:
+            return "[REDACTED]"
+        try:
+            unpadded = token.rstrip("=")
+            raw = base64.b64decode(unpadded + "=" * (-len(unpadded) % 4), validate=True)
+        except ValueError:
+            return match[0]
+        # Decoded user:password bytes need no text/locale inference. Ignore
+        # padding spelling: a decodable credential must remain private.
+        if b":" in raw:
+            return "[REDACTED]"
+        return match[0]
+
+    return _BASIC_RE.sub(basic, text)
+
+
 def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = True) -> str:
     """Redact exact known secrets and common credential forms from one stream."""
 
@@ -84,8 +151,28 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         ),
         text,
     )
-    text = _BEARER_RE.sub("[REDACTED]", text)
-    text = _KEY_VALUE_RE.sub(lambda match: "%s=[REDACTED]" % match.group(1), text)
+    text = _ESCAPED_QUOTED_KEY_VALUE_RE.sub(
+        lambda match: match.group(0) if match.group(3) == "[REDACTED]"
+        else "%s%s[REDACTED]%s" % (
+            match.group(1), match.group(2), match.group(4)
+        ),
+        text,
+    )
+    text = _ATTACHED_AUTH_MARKER_RE.sub(
+        lambda match: "[REDACTED]" if match.group("suffix") else match.group(0),
+        text,
+    )
+    text = redact_auth_schemes(text)
+    def redact_key_value(match: re.Match[str]) -> str:
+        # A provider may already supply this literal marker in a public
+        # example. Reformatting its separator would falsely mark exact
+        # training evidence as credential-filtered. A longer value still
+        # contains material that must be removed.
+        if _REDACTED_VALUE_RE.fullmatch(match.group(2)):
+            return match.group(0)
+        return "%s=[REDACTED]" % match.group(1)
+
+    text = _KEY_VALUE_RE.sub(redact_key_value, text)
     text = _BARE_API_KEY_RE.sub("[REDACTED]", text)
     return text
 

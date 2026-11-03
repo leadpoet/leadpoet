@@ -67,3 +67,34 @@ def test_exact_frozen_promotion_boundary(margin, expected):
     miner = {"submission_id": "miner", "hotkey": "miner-key", "is_king": False, "final_score": 70.5}
     assert verify.king_decision([miner], baseline, configuration)["outcome"] == expected
     assert verify.king_decision([miner], baseline)["outcome"] == "no_king"
+
+
+@pytest.mark.parametrize(
+    "improvement,expected",
+    [(7.999, "no_king"), (8, "crowned"), (8.001, "crowned")],
+)
+def test_eight_point_frozen_boundary_is_inclusive(improvement, expected):
+    baseline = {"submission_id": "baseline", "hotkey": "baseline-key", "is_king": True, "final_score": 40}
+    miner = {"submission_id": "miner", "hotkey": "miner-key", "is_king": False, "final_score": 40 + improvement}
+    assert verify.king_decision([miner], baseline, {"promotion_margin": 8})["outcome"] == expected
+
+
+def test_actual_score_gap_uses_new_frozen_margin_but_keeps_old_rounds():
+    baseline = {"submission_id": "baseline", "hotkey": "baseline-key", "is_king": True, "final_score": 4.925}
+    miner = {"submission_id": "miner", "hotkey": "miner-key", "is_king": False, "final_score": 10.625}
+    assert verify.king_decision([miner], baseline, {"promotion_margin": 8})["outcome"] == "no_king"
+    assert verify.king_decision([miner], baseline, {"promotion_margin": 0.5})["outcome"] == "crowned"
+
+
+@pytest.mark.parametrize("baseline_score,miner_score", [(None, 48), (40, None)])
+def test_eight_point_margin_does_not_crown_without_valid_scores(baseline_score, miner_score):
+    baseline = {"submission_id": "baseline", "hotkey": "baseline-key", "is_king": True, "final_score": baseline_score}
+    miner = {"submission_id": "miner", "hotkey": "miner-key", "is_king": False, "final_score": miner_score}
+    assert verify.king_decision([miner], baseline, {"promotion_margin": 8})["outcome"] == "no_king"
+
+
+def test_eight_point_margin_does_not_crown_without_baseline_or_eligible_finalist():
+    miner = {"submission_id": "miner", "hotkey": "miner-key", "is_king": False, "final_score": 48}
+    assert verify.king_decision([miner], None, {"promotion_margin": 8})["outcome"] == "no_king"
+    baseline = {"submission_id": "baseline", "hotkey": "baseline-key", "is_king": True, "final_score": 40}
+    assert verify.king_decision([], baseline, {"promotion_margin": 8})["outcome"] == "no_king"

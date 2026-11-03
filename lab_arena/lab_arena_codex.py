@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -572,6 +573,29 @@ def _standalone_search_request(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_free_serial_request(document: Mapping[str, Any]) -> bool:
+    """Keep native compaction's empty tool contract, without prompt heuristics.
+
+    Additional tool declarations are active even when root tools are empty.
+    Historical calls/results and message text do not declare callable tools.
+    The broker still validates every input item before provider admission.
+    """
+    value = document.get("input")
+    return (
+        document.get("tools") == []
+        and document.get("parallel_tool_calls") is False
+        and document.get("tool_choice", "auto") in ("auto", "none")
+        and (isinstance(value, str) or isinstance(value, list) and all(
+            isinstance(item, Mapping) and item.get("type", "message") in (
+                "message", "function_call", "function_call_output",
+                "custom_tool_call", "custom_tool_call_output", "reasoning",
+                "web_search_call", "openrouter:web_search",
+            )
+            for item in value
+        ))
+    )
+
+
 def _standalone_search_output(document: Any) -> bytes:
     if not isinstance(document, dict):
         return b'{"output":"The web lookup returned an invalid result. No source evidence was retrieved."}'
@@ -639,13 +663,39 @@ def _standalone_search_output(document: Any) -> bytes:
     return json.dumps({"output": "\n\n".join(text)}, ensure_ascii=False).encode()
 
 
-def response_events(document: dict[str, Any]) -> Iterator[bytes]:
-    """Replay terminal Responses items without translating their tool protocol."""
+def replayable_search_shape(item: Any) -> bool:
+    """Shape shared by native SSE adaptation and provider alias replay.
+
+    This is not request admission. The broker still validates the complete
+    item; unsupported provider items remain intact in its raw receipt.
+    """
+    action = item.get("action") if isinstance(item, Mapping) else None
+    return bool(isinstance(item, Mapping) and item.get("status") == "completed"
+                and isinstance(item.get("id"), str) and 1 <= len(item["id"]) <= 256
+                and isinstance(action, Mapping) and action.get("type") == "search"
+                and (action.get("query") or action.get("queries")))
+
+
+def response_events(document: dict[str, Any], *, native_web_search: bool = False) -> Iterator[bytes]:
+    """Replay terminal items, optionally using Codex's native search type name."""
 
     if (not isinstance(document, dict) or document.get("object") != "response"
             or document.get("status") not in ("completed", "incomplete", "failed")
             or not isinstance(document.get("output"), list)):
         raise CodexRuntimeError("invalid Responses reply")
+    if native_web_search:
+        # Codex 0.154 recognizes the native item name only. Adapt a transport
+        # copy, never the broker receipt. Its normal typed history decides
+        # which provider fields are replayed on the next request. Keep this
+        # adaptation on the observed st_tmp_ IDs preserved by 0.154; arbitrary
+        # IDs can be omitted by its typed history. Other items stay unadapted,
+        # rather than creating history without the ID needed for alias replay.
+        document = dict(document, output=[
+            dict(item, type="web_search_call")
+            if (isinstance(item, dict) and item.get("type") == "openrouter:web_search"
+                and replayable_search_shape(item) and item['id'].startswith('st_tmp_'))
+            else item for item in document["output"]
+        ])
     sequence = 0
 
     def event(kind: str, **fields: Any) -> bytes:
@@ -723,7 +773,15 @@ class ResponsesBridge:
             def log_message(self, *args: Any) -> None:
                 pass
 
+            def _release_active(self) -> None:
+                if getattr(self, "_owns_active", False):
+                    self._owns_active = False
+                    owner._active.release()
+
             def reply(self, status: int, body: bytes, content_type: str = "application/json") -> None:
+                # Processing is complete. Publish no reply while still owning
+                # admission: its client can immediately send the next request.
+                self._release_active()
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
@@ -746,6 +804,7 @@ class ResponsesBridge:
                 if not acquired:
                     self.reply(429, b'{"error":{"message":"request already in progress"}}')
                     return
+                self._owns_active = True
                 def client_closed() -> bool:
                     try:
                         readable, _, _ = select.select(
@@ -847,7 +906,7 @@ class ResponsesBridge:
                     if web_tools and (
                             owner._web_search != "live" or len(web_tools) != 1):
                         raise _BridgeRequestError("web_search_unavailable")
-                    if owner._web_search == "live":
+                    if owner._web_search == "live" and not _tool_free_serial_request(body):
                         if len(web_tools) > 1:
                             raise _BridgeRequestError("web_search_unavailable")
                         if web_tools:
@@ -913,7 +972,14 @@ class ResponsesBridge:
                         self.reply(status, _standalone_search_output(json.loads(response)))
                     elif 200 <= status < 300 and streaming:
                         try:
-                            response = b"".join(response_events(json.loads(response)))
+                            response = b"".join(response_events(
+                                json.loads(response),
+                                # The runner supplies this parse hint only for
+                                # opted-in execution. Keep historical SSE exact.
+                                native_web_search=os.environ.get(
+                                    "LAB_ARENA_REASONING_CAPTURE_POLICY"
+                                ) == "full_generated_thinking_v1",
+                            ))
                         except (ValueError, TypeError, KeyError, CodexRuntimeError):
                             raise CodexRuntimeError("invalid Responses reply") from None
                         self.reply(status, response, "text/event-stream")
@@ -935,7 +1001,7 @@ class ResponsesBridge:
                 except (OSError, CodexRuntimeError):
                     self.reply(502, b'{"error":{"message":"Arena broker unavailable"}}')
                 finally:
-                    owner._active.release()
+                    self._release_active()
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

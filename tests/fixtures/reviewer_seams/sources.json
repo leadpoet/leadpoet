@@ -1,0 +1,59 @@
+{
+  "homepage_brand": {
+    "commit": "00725d7839a5b68b56c92774f415c173c3fd8d60",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "homepage_brand-lead_scorer.py.gz",
+        "sha256": "1daa87943bbd8aaa857cf177884899a4cad26d5c6220e7c2af1764bd23a2ea2d"
+      },
+      "qualification/scoring/company_fit_decision.py": {
+        "fixture": "homepage_brand-company_fit_decision.py.gz",
+        "sha256": "5f8f990f7719b98f7fc84ecf7236992db46c97a099c64f2d01a13d200d6e17d0"
+      },
+      "qualification/scoring/company_evidence_investigator.py": {
+        "fixture": "homepage_brand-company_evidence_investigator.py.gz",
+        "sha256": "22519946a9355e9374261d39fdc5099452d531c13e4d821f57eb349e513535c5"
+      }
+    }
+  },
+  "attribute_source": {
+    "commit": "f6d066e30e0d6de0381241c8231d2e2270bec485",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "attribute_source-lead_scorer.py.gz",
+        "sha256": "d896af06e516c6001948998f722a70415bbf8c74d9f740ee4f64fc0eb49eefc4"
+      }
+    }
+  },
+  "negative_finality": {
+    "commit": "77db393b0bf899c888edd7d3a495aeb0f5f78820",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "negative_finality-lead_scorer.py.gz",
+        "sha256": "1d2f64ccd8defa1dab4ca28f18955d766881f0de382a0d7a5f1b32beb21c5f92"
+      }
+    }
+  },
+  "archive_https": {
+    "commit": "b3d19fdb2293d275cd267d184a30dcdfcffe6983",
+    "files": {
+      "qualification/scoring/intent_verification_three_stage.py": {
+        "fixture": "archive_https-intent_verification_three_stage.py.gz",
+        "sha256": "c14e0c66fee5c08d4e896bc1dc83dcfd18e7debfa659437103a52e67abf3c0c2"
+      }
+    }
+  },
+  "native_industry_budget": {
+    "commit": "654c07032ef6b87ebf1e1fda20c452151e9f2841",
+    "files": {
+      "qualification/scoring/company_evidence_investigator.py": {
+        "fixture": "native_industry_budget-company_evidence_investigator.py.gz",
+        "sha256": "fa65d603c7acc9d2363594061eb40812256c1be3c2490f16549c00b084b4cf94"
+      },
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "native_industry_budget-lead_scorer.py.gz",
+        "sha256": "3928db13fbc3b37dbd8cc56b0085abf142310a44b2ab883e91db16368c3dfe5c"
+      }
+    }
+  }
+}

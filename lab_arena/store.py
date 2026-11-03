@@ -12,7 +12,7 @@ exercises the production function contract.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import secrets
@@ -68,6 +68,11 @@ READ_RETRY_TRANSPORT_ERRORS = (
 )
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_nov03_review_recovery_authorized_v1": (("p_submission_id", "text"),),
+    "lab_arena_preserved_judgment_policy_v1": (
+        ("p_round_id", "text"), ("p_judge_run_id", "text"),
+        ("p_source_run_id", "text"), ("p_refs", "jsonb"),
+    ),
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
     "lab_arena_claim_signal_judgment_v1": (
@@ -86,6 +91,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_runtime_image_digest", "text"), ("p_runtime_image_reference", "text"),
     ),
     "lab_arena_restart_guard_state_v1": (),
+    "lab_arena_review_guard_state_v1": (),
     "lab_arena_append_validator_events_v1": (
         ("p_validator_hotkey", "text"), ("p_network", "text"),
         ("p_netuid", "integer"), ("p_events", "jsonb"),
@@ -116,6 +122,19 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_after_entry_id", "bigint"),
     ),
     "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
+    "lab_arena_latest_promoted_champion_v1": (
+        ("p_network_name", "text"), ("p_netuid", "integer"),
+    ),
+    "lab_arena_freeze_full_thinking_baseline_v1": (
+        ("p_round_id", "text"),
+        ("p_expected_promotion_round_id", "text"),
+        ("p_expected_winner_submission_id", "text"),
+        ("p_expected_commit", "text"),
+        ("p_expected_source_url", "text"),
+        ("p_expected_source_sha256", "text"),
+        ("p_source_url", "text"),
+        ("p_source_sha256", "text"),
+    ),
     "lab_arena_provider_funding": (("p_run_id", "text"), ("p_provider", "text")),
     "lab_arena_run_quota_snapshot_v1": (
         ("p_run_id", "text"),
@@ -370,6 +389,8 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
 )
 # Fixed computed projections for direct SQL and PostgREST transports.
 _RUNTIME_JSON_COLUMNS = {
+    "training_recovered_response:lab_arena_training_deepline_response_v1":
+        "public.lab_arena_training_deepline_response_v1(lab_arena_ledger) AS training_recovered_response",
     "execution_attempt:lab_arena_execution_attempt_count":
         "public.lab_arena_execution_attempt_count(lab_arena_runs) AS execution_attempt",
     PUBLIC_CONFIGURATION_COLUMN:
@@ -401,7 +422,7 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
-# Stage creation, scoring queue creation, and score batches can
+# Stage creation, lease recovery, stage/round closure, and score batches can
 # take longer than an ordinary RPC. Let their bounded database work return a
 # result before giving up on the response.
 BULK_ROUND_RPC_READ_TIMEOUT_SECONDS = 65.0
@@ -631,6 +652,10 @@ class PostgrestTransport(StoreTransport):
             "lab_arena_open_scoring_v2",
             "lab_arena_open_scoring_v3",
             "lab_arena_record_run_scores",
+            "lab_arena_expire_leases",
+            "lab_arena_close_stage",
+            "lab_arena_close_scoring",
+            "lab_arena_cancel_round",
         }:
             read_timeout = BULK_ROUND_RPC_READ_TIMEOUT_SECONDS
         elif (
@@ -688,10 +713,13 @@ class PostgrestTransport(StoreTransport):
                     and code == "55P03"
                     and function in {
                         "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
+                        "lab_arena_mark_dispatched",
                     }
                 ):
-                    # An explicit reservation lock timeout rolls back the RPC.
-                    # Repeat its exact identity before any provider dispatch.
+                    # A proved lock timeout rolls back these pre-dispatch RPCs.
+                    # Repeat the exact identity; an existing dispatch marker
+                    # returns idempotent into the broker's uncertain branch.
+                    # Settlement and ambiguous failures stay outside this bound.
                     self.deadlock_retries += 1
                     deadlock_attempts += 1
                     time.sleep(0.01 * deadlock_attempts)
@@ -1174,6 +1202,25 @@ class ArenaStore:
             "lab_arena_freeze_champion_funding", {"p_round_id": round_id}
         ), "freeze_champion_funding")
 
+    def freeze_full_thinking_baseline(
+        self, round_id: str, *, expected_promotion_round_id: Optional[str],
+        expected_winner_submission_id: Optional[str], expected_commit: Optional[str],
+        expected_source_url: str, expected_source_sha256: str,
+        source_url: str, source_sha256: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_freeze_full_thinking_baseline_v1", {
+                "p_round_id": round_id,
+                "p_expected_promotion_round_id": expected_promotion_round_id,
+                "p_expected_winner_submission_id": expected_winner_submission_id,
+                "p_expected_commit": expected_commit,
+                "p_expected_source_url": expected_source_url,
+                "p_expected_source_sha256": expected_source_sha256,
+                "p_source_url": source_url,
+                "p_source_sha256": source_sha256,
+            },
+        ), "freeze_full_thinking_baseline")
+
     def provider_funding(self, run_id: str, provider: str) -> Dict[str, Any]:
         """Read the run's immutable payer, including historical billing calls."""
         return _require_mapping(self._transport.rpc(
@@ -1308,6 +1355,16 @@ class ArenaStore:
             "lab_arena_scoring_policy_history_v1", {"p_round_id": round_id}
         ), "scoring_policy_history")
 
+    def preserved_judgment_policy(self, round_id, judge_run_id, source_run_id, refs):
+        """Read the exact November 3 completed-judgment preservation proof."""
+        result = self._transport.rpc("lab_arena_preserved_judgment_policy_v1", {
+            "p_round_id": round_id, "p_judge_run_id": judge_run_id,
+            "p_source_run_id": source_run_id, "p_refs": refs,
+        })
+        if result is None:
+            return None
+        return _require_mapping(result, "preserved_judgment_policy")
+
     def whoami(self) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_whoami", {}), "whoami")
 
@@ -1335,7 +1392,7 @@ class ArenaStore:
             "current_daily_icp_set",
         )
 
-    def code_review_schema(self) -> Dict[str, Any]:
+    def code_review_schema(self, *, require_refusal_fallback: bool = False) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
         result = _require_mapping(
@@ -1352,8 +1409,9 @@ class ArenaStore:
             raise ArenaStoreError("code review schema mismatch")
         retry_policy = result.get("retry_policy")
         if (
-            retry_policy != "bounded_transient_v1"
-            or result.get("max_transient_attempts") != 6
+            retry_policy != "deadline_transient_v2"
+            or "max_transient_attempts" not in result
+            or result["max_transient_attempts"] is not None
             or result.get("transient_retry_backoff_seconds")
                 != [60, 120, 240, 480, 900]
             or result.get("legacy_max_attempts") != 3
@@ -1361,6 +1419,14 @@ class ArenaStore:
                 != "replacement_freeze_to_benchmark_deadline"
         ):
             raise ArenaStoreError("code review schema mismatch")
+        if require_refusal_fallback and result.get("refusal_fallback") != {
+            "primary_model": "anthropic/claude-sonnet-5.5",
+            "alternate_model": "openai/gpt-6.1-sol",
+            "max_primary_refusal_claims": 2,
+            "max_alternate_claims": 2,
+            "legacy_structured_refusal_recovery": True,
+        }:
+            raise ArenaStoreError("code review fallback schema mismatch")
         return result
 
     def validator_scoring_authority_schema(self) -> Dict[str, Any]:
@@ -1699,9 +1765,31 @@ class ArenaStore:
         )
         return rows
 
+    def latest_promoted_champion(
+        self, *, network_name: str, netuid: int
+    ) -> Optional[Dict[str, Any]]:
+        """Use the same completed winner ordering as champion funding."""
+        result = self._transport.rpc(
+            "lab_arena_latest_promoted_champion_v1",
+            {"p_network_name": str(network_name), "p_netuid": int(netuid)},
+        )
+        return None if result is None else _require_mapping(
+            result, "latest_promoted_champion"
+        )
+
     def get_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
+
+    def get_round_baseline_hotkey(self, round_id: str) -> Any:
+        """Read one configured key, not the multi-megabyte round configuration."""
+
+        rows = self._transport.select(
+            "lab_arena_rounds", filters={"round_id": round_id}, limit=1,
+            columns="cfg_baseline_hotkey:configuration_doc->baseline_hotkey::text",
+        )
+        value = rows[0].get("cfg_baseline_hotkey") if rows else None
+        return None if value is None else json.loads(value)
 
     def get_public_submissions_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         """Keep every ranking and disclosure authority without frozen catalogs."""
@@ -2037,7 +2125,35 @@ class ArenaStore:
 
     def get_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)
-        return rows[0] if rows else None
+        return self._hydrate_legacy_review(rows[0]) if rows else None
+
+    def _hydrate_legacy_review(self, row):
+        from lab_arena import code_review_policy
+        if not code_review_policy.legacy_refusal_candidate(row):
+            return row
+        round_row = self.get_round(str(row["round_id"]))
+        if not round_row:
+            return row
+        schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
+        deadline = schedule.get("benchmark_deadline")
+        if not deadline and schedule.get("submission_cutoff"):
+            deadline = datetime.fromisoformat(str(schedule["submission_cutoff"]).replace("Z", "+00:00")) + timedelta(minutes=30)
+        admission_open = (round_row.get("status") == "open" and deadline
+            and datetime.fromisoformat(str(deadline).replace("Z", "+00:00")) > datetime.now(timezone.utc))
+        if not admission_open:
+            if (row.get("round_id") != "arena-2026-11-03"
+                or not self.nov03_review_recovery_authorized(str(row["submission_id"]))):
+                return row
+        entries = self.list_ledger(submission_id=row["submission_id"], operation_id="openrouter.code_review", limit=1000)
+        return dict(code_review_policy.legacy_refusal_from_ledger(row, entries))
+
+    def nov03_review_recovery_authorized(self, submission_id: str) -> bool:
+        result = self._transport.rpc("lab_arena_nov03_review_recovery_authorized_v1", {
+            "p_submission_id": submission_id,
+        })
+        if not isinstance(result, bool):
+            raise ArenaStoreError("November 3 review recovery authority is malformed")
+        return result
 
     def list_submissions(
         self,
@@ -2049,12 +2165,13 @@ class ArenaStore:
         filters: Dict[str, Any] = {"round_id": round_id}
         if status:
             filters["status"] = status
-        return self._transport.select(
+        rows = self._transport.select(
             "lab_arena_submissions",
             filters=filters,
             order="created_at",
             columns=columns,
         )
+        return [self._hydrate_legacy_review(row) for row in rows]
 
     # -- stages and assignments -------------------------------------------
 
@@ -2927,6 +3044,7 @@ class ArenaStore:
         operation_id: Optional[str] = None,
         after_entry_id: Optional[int] = None,
         limit: Optional[int] = None,
+        training_responses: bool = False,
     ) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {}
         if run_id:
@@ -2951,6 +3069,8 @@ class ArenaStore:
             "filters": filters or None,
             "order": "entry_id",
         }
+        if training_responses:
+            arguments["columns"] = "*,training_recovered_response:lab_arena_training_deepline_response_v1"
         if limit is not None:
             arguments["limit"] = limit
         if after_entry_id is not None:

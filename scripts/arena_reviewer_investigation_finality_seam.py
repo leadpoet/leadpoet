@@ -6,7 +6,7 @@ inside the existing verifier; unknown or partially applied source fails closed.
 from __future__ import annotations
 import ast
 
-CORRECTION_ID = "completed_investigation_source_finality_v1"
+CORRECTION_ID = "completed_investigation_source_finality_v3"
 
 class InvestigationFinalitySeamError(ValueError):
     pass
@@ -151,11 +151,62 @@ LEGACY_HELPER = _HELPER_HEADER + "".join(
     line[4:] if line.startswith("    ") else line
     for line in SETTLEMENT_BLOCK.splitlines(keepends=True)
 ) + "\n\n"
-HELPER = LEGACY_HELPER.replace(
+PREVIOUS_HELPER = LEGACY_HELPER.replace(
     '                **({"investigation_receipt": {',
     '                # Internal proof only; final receipt assembly does not copy it.\n'
     '                "_completed_investigation_settled": True,\n'
     '                **({"investigation_receipt": {', 1,
+)
+PREVIOUS_HELPER_V2 = PREVIOUS_HELPER.replace(
+    '        and "employee_size" in incomplete\n', '', 1,
+)
+
+
+# Exact reviewed negative-finality delta; no current grader is imported.
+_RESOLVED_PROFILE_OBLIGATIONS = '''    # A source-local optional profile miss no longer blocks a completed
+    # negative review after the existing verifier resolved every obligation
+    # that could depend on that profile. This never clears the cache or changes
+    # identity, source proof, a qualification decision, or a provider fault.
+    resolved_profile_obligations = bool(
+        refresh_outcome == "retryable_failure"
+        and current_profile_cache.get("structured_failure") is True
+        and current_profile_cache.get("structured_failure_reason") == SOURCE_BLOCKED_FAILURE_REASON
+        and current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY) == SOURCE_BLOCKED_FAILURE_REASON
+        and isinstance(current_profile, Mapping)
+        and current_profile.get("outcome") == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+        and result.details.get("identity_decision") == COMPANY_FIT_MATCH
+        and result.details.get("dimension_decisions", {}).get("employee_size") == COMPANY_FIT_MATCH
+        and result.details.get("dimension_decisions", {}).get("geography") == COMPANY_FIT_MATCH
+        and receipt.get("gate") == "company_evidence_investigation"
+        and receipt.get("completed_submitted_findings") is True
+        and receipt.get("failure_reason") == ""
+        and all(
+            target in (receipt.get("targets") or ())
+            and isinstance(review_claims.get(target), Mapping)
+            and review_claims[target].get("target") == target
+            and review_claims[target].get("status") == "UNPROVEN"
+            and review_claims[target].get("evidence_url") == ""
+            and review_claims[target].get("evidence_quote") == ""
+            for target in (
+                {"identity": "rebrand", "employee_size": "headcount", "stage": "stage",
+                 "industry": "industry", "required_attribute": "required_attribute", "geography": "geography"}[dimension]
+                for dimension in incomplete
+            )
+        )
+    )
+'''
+HELPER = PREVIOUS_HELPER_V2.replace(
+    '    # A malformed optional structured profile',
+    _RESOLVED_PROFILE_OBLIGATIONS + '    # A malformed optional structured profile', 1,
+).replace(
+    'if malformed_profile_exhausted else refresh_outcome',
+    'if malformed_profile_exhausted or resolved_profile_obligations else refresh_outcome', 1,
+).replace(
+    '                        MALFORMED_RESPONSE_FAILURE_REASON\n',
+    '                        str(current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY) or "")\n', 1,
+).replace(
+    '}} if malformed_profile_exhausted else {}),',
+    '}} if malformed_profile_exhausted or resolved_profile_obligations else {}),', 1,
 )
 
 WRAPPER_GUARD_OLD = '''            and web_identity_decision == COMPANY_FIT_UNAVAILABLE
@@ -207,6 +258,23 @@ DELTAS = (
     (_EARLY_1_OLD, _EARLY_1_NEW),
     (_EARLY_2_OLD, _EARLY_2_NEW),
 )
+
+_POST_REPAIR_OLD = '''            investigation_targets = post_repair_investigation_targets
+            claims = post_repair_claims
+    repaired_incomplete = _incomplete_company_reverify_dimensions(
+'''
+_POST_REPAIR_NEW = '''            investigation_targets = post_repair_investigation_targets
+            claims = post_repair_claims
+            settled = _settle_completed_company_investigation(
+                repaired_result, repaired_verdict,
+                investigation_targets=investigation_targets,
+                icp=icp, icp_attribute=icp_attribute, icp_stage=icp_stage,
+                current_profile_cache=current_profile_cache,
+            )
+            if settled is not None and settled.details.get("_completed_investigation_settled") is True:
+                return settled
+    repaired_incomplete = _incomplete_company_reverify_dimensions(
+'''
 
 
 def _named_bindings(module: ast.Module, name: str) -> list[ast.AST]:
@@ -275,6 +343,14 @@ def convert_investigation_finality_seam(source: bytes) -> bytes:
             raise InvestigationFinalitySeamError("unrecognized correction block")
     if len(states) != 1:
         raise InvestigationFinalitySeamError("partially corrected grading source")
+    post_repair_counts = (
+        original.replace(_POST_REPAIR_NEW, '').count(_POST_REPAIR_OLD),
+        original.count(_POST_REPAIR_NEW),
+    )
+    if post_repair_counts not in {(1, 0), (0, 1)}:
+        raise InvestigationFinalitySeamError("unrecognized post-repair finality")
+    if post_repair_counts == (1, 0):
+        corrected = corrected.replace(_POST_REPAIR_OLD, _POST_REPAIR_NEW, 1)
     if states == {"corrected"}:
         if len(helpers) != 1:
             raise InvestigationFinalitySeamError("corrected source is missing its exact helper")
@@ -282,18 +358,29 @@ def convert_investigation_finality_seam(source: bytes) -> bytes:
         if actual.rstrip("\n") == HELPER.rstrip("\n"):
             if wrapper_counts != (0, 1):
                 raise InvestigationFinalitySeamError("partial final result correction")
-            return source
-        if (actual.rstrip("\n") != LEGACY_HELPER.rstrip("\n")
-                or wrapper_counts != (1, 0)):
-            raise InvestigationFinalitySeamError("unrecognized settlement helper")
-        changes = [(helpers[0].lineno - 1, helpers[0].end_lineno,
-                    HELPER.rstrip("\n") + "\n")]
+            if post_repair_counts == (0, 1):
+                return source
+            changes = []
+        else:
+            expected_prior_helpers = {
+                (LEGACY_HELPER.rstrip("\n"), (1, 0), (1, 0)),
+                (PREVIOUS_HELPER.rstrip("\n"), (0, 1), (1, 0)),
+                (PREVIOUS_HELPER_V2.rstrip("\n"), (0, 1), (1, 0)),
+                (PREVIOUS_HELPER_V2.rstrip("\n"), (0, 1), (0, 1)),
+            }
+            if (actual.rstrip("\n"), wrapper_counts, post_repair_counts) not in expected_prior_helpers:
+                raise InvestigationFinalitySeamError("unrecognized settlement helper")
+            changes = [(helpers[0].lineno - 1, helpers[0].end_lineno,
+                        HELPER.rstrip("\n") + "\n")]
+        if post_repair_counts == (1, 0):
+            changes.append((node.lineno - 1, node.end_lineno, corrected))
     else:
-        if helpers or wrapper_counts != (1, 0):
+        if helpers or wrapper_counts != (1, 0) or post_repair_counts != (1, 0):
             raise InvestigationFinalitySeamError("partial settlement helper")
         changes = [(node.lineno - 1, node.end_lineno, HELPER + corrected)]
-    changes.append((wrapper.lineno - 1, wrapper.end_lineno,
-                    wrapper_source.replace(WRAPPER_GUARD_OLD, WRAPPER_GUARD_NEW, 1)))
+    if wrapper_counts == (1, 0):
+        changes.append((wrapper.lineno - 1, wrapper.end_lineno,
+                        wrapper_source.replace(WRAPPER_GUARD_OLD, WRAPPER_GUARD_NEW, 1)))
     for start, end, replacement in sorted(changes, reverse=True):
         lines[start:end] = [replacement]
     result = "".join(lines)

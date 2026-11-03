@@ -196,7 +196,7 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
         0 if mode == "no_round" else 2 if mode == "cached" else 1
     )
     assert document["investigation_limits"]["remaining_fetch_calls"] == (
-        3 if mode == "cached" else 1 if mode == "hq" else 2
+        investigator.MAX_FETCH_CALLS - result["usage"]["fetch_calls"]
     )
     assert any(
         source["url"] == OVERVIEW_URL and source["text"] == TIMELINE
@@ -219,7 +219,7 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
     "valid", "missing_identity", "wrong_domain", "dispute", "wrong_path",
 ])
 @pytest.mark.parametrize("stage_article_prefetched", [True, False])
-def test_observed_homepage_overview_after_hq_priority_uses_two_of_three_calls(
+def test_observed_homepage_overview_after_hq_priority_uses_two_fetch_calls(
     monkeypatch, change, stage_article_prefetched,
 ):
     contact_url = f"https://{DOMAIN}/contact-us"
@@ -294,7 +294,7 @@ def test_observed_homepage_overview_after_hq_priority_uses_two_of_three_calls(
     if change == "valid":
         assert urls == [contact_url, OVERVIEW_URL]
         assert document["server_venture_stage_overview_fetch"]["ok"] is True
-        assert document["investigation_limits"]["remaining_fetch_calls"] == 1
+        assert document["investigation_limits"]["remaining_fetch_calls"] == investigator.MAX_FETCH_CALLS - 2
         assert any(item["url"] == OVERVIEW_URL for item in document["prefetched_sources"])
     else:
         assert OVERVIEW_URL not in urls

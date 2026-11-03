@@ -12602,6 +12602,8 @@ async def score_company_competition_intent(
                if funding_stage_context else {}),
             intent_terminal_retry_cache=intent_terminal_retry_cache,
             retry_evidence_context_key=retry_evidence_context_key,
+            **({"verified_source_pages": matched_company_source_cache}
+               if integrity_policy and matched_company_source_cache else {}),
         )
         if _intent_verifier_unavailable(
             signal_results, integrity_policy=integrity_policy
@@ -12964,6 +12966,7 @@ def _company_stage_matches(observed: str, requested: str) -> bool:
 def _intent_terminal_retry_key(
     context_key, verified_company_identity, evidence_group, target_signal,
     evidence_type, max_age_days, scoring_flags, verified_funding_stage_context=None,
+    verified_source_pages=None,
 ) -> str:
     return _semantic_hash({
         "schema_version": "leadpoet.intent_terminal_retry.v1",
@@ -12975,6 +12978,7 @@ def _intent_terminal_retry_key(
         "scoring_flags": dict(scoring_flags),
         **({"verified_funding_stage_context": verified_funding_stage_context}
            if verified_funding_stage_context else {}),
+        **({"verified_source_pages": verified_source_pages} if verified_source_pages else {}),
     })
 
 
@@ -13073,6 +13077,7 @@ async def score_company_competition_intent_signal(
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -13177,6 +13182,11 @@ async def score_company_competition_intent_signal(
                     }
                 )
         evidence_urls = [item.url for item in evidence_group]
+        from qualification.scoring.intent_verification_three_stage import _verified_submitted_source_pages
+        signal_source_pages = _verified_submitted_source_pages(
+            verified_source_pages, evidence_urls, verified_company_identity,
+            company_name=company.company_name, claim=str(signal.description or ""),
+        ) if integrity_policy and _evidence_type_for(matched_idx) != "HIRING" else {}
         funding_stage_context = (
             verified_funding_stage_context
             if integrity_policy and _evidence_type_for(matched_idx) == "FUNDING"
@@ -13204,7 +13214,7 @@ async def score_company_competition_intent_signal(
                     "no_time_decay": no_time_decay,
                     "integrity_policy": integrity_policy,
                     "company_quality": company_quality,
-                }, funding_stage_context,
+                }, funding_stage_context, signal_source_pages,
             )
             if terminal_cache_key in intent_terminal_retry_cache:
                 cached = intent_terminal_retry_cache[terminal_cache_key]
@@ -13227,6 +13237,8 @@ async def score_company_competition_intent_signal(
                 "verified_funding_stage_context": deepcopy(
                     list(funding_stage_context or [])
                 ),
+                **({"verified_source_pages": deepcopy(signal_source_pages)}
+                   if signal_source_pages else {}),
             }
             response = await invoke_exchange(signal_exchange, exchange_request)
             if not isinstance(response, Mapping) or response.get("reference") is None:
@@ -13271,6 +13283,7 @@ async def score_company_competition_intent_signal(
                 verdict_out=signal_verdicts,
                 **({"verified_funding_stage_context": funding_stage_context}
                    if funding_stage_context else {}),
+                **({"verified_source_pages": signal_source_pages} if signal_source_pages else {}),
                 **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
             )
@@ -13808,6 +13821,7 @@ async def _score_single_intent_signal(
     verdict_out: Optional[List[dict]] = None,
     evidence_signals: Optional[Sequence["IntentSignal"]] = None,
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -14093,6 +14107,7 @@ async def _score_single_intent_signal(
                 buyer_max_age_days=buyer_max_age_days,
                 **({"verified_funding_stage_context": verified_funding_stage_context}
                    if verified_funding_stage_context else {}),
+                **({"verified_source_pages": verified_source_pages} if verified_source_pages else {}),
                 **({"evidence_bundle": [
                     {"url": item.url, "description": item.description,
                      "date": item.date, "snippet": item.snippet}

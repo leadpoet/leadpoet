@@ -11,9 +11,7 @@ from qualification.scoring import lead_scorer
 from lab_arena.operations import validate_operation_request
 
 
-# Google Cloud, March 11, 2026. Source and pre-prediction truth packet:
-# /Users/pranav/Downloads/Arena_Verifier_Accuracy_20261103/
-# stage-threshold-independent-review/frozen-source-packet.json
+# Google Cloud, March 11, 2026. Exact primary-source acquisition statement.
 WIZ_URL = "https://cloud.google.com/blog/products/identity-security/google-completes-acquisition-of-wiz"
 WIZ_QUOTE = (
     "I am proud to announce today that Google has completed its acquisition of "
@@ -70,10 +68,16 @@ def test_synthetic_short_name_preserves_adverse_controls(quote):
     assert not lead_scorer._acquired_stage_quote_supports_names(("Wiz",), quote)
 
 
-def test_real_wiz_investigator_does_not_enter_false_citation_correction(monkeypatch):
+@pytest.mark.parametrize(("requested_stage", "expected_status", "expected_decision"), [
+    ("Acquired", "VERIFIED", "match"),
+    ("Series C+", "CONTRADICTED", "mismatch"),
+])
+def test_real_wiz_investigator_does_not_enter_false_citation_correction(
+    monkeypatch, requested_stage, expected_status, expected_decision,
+):
     """The real investigator protocol with supplied model output, not model accuracy."""
     finding = dict(
-        target="stage", status="CONTRADICTED", observed_value="Acquired",
+        target="stage", status=expected_status, observed_value="Acquired",
         evidence_url=WIZ_URL, evidence_quote=WIZ_QUOTE,
         reason="Google completed its acquisition of Wiz after its venture rounds.",
     )
@@ -96,7 +100,7 @@ def test_real_wiz_investigator_does_not_enter_false_citation_correction(monkeypa
     monkeypatch.setattr(investigator, "_fetch_page", AsyncMock(side_effect=AssertionError("No live fetch")))
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Wiz", "website": "https://www.wiz.io"},
-        targets=("stage",), requested_stage="Series C+",
+        targets=("stage",), requested_stage=requested_stage,
         positive_semantic_review=True,
         prior_observations={"submitted_source_urls": [WIZ_URL]},
         prefetched_pages={WIZ_URL: {"final_url": WIZ_URL, "text": WIZ_QUOTE}},
@@ -104,15 +108,16 @@ def test_real_wiz_investigator_does_not_enter_false_citation_correction(monkeypa
     ))
     assert len(requests) == 1
     validated = result["_validated_stage_finding"]
-    assert validated["status"] == "CONTRADICTED"
+    assert validated["status"] == expected_status
     assert validated["evidence_quote"] == WIZ_QUOTE
-    projected = lead_scorer._project_investigator_stage({}, validated, icp_stage="series c+")
+    normalized_stage = lead_scorer._normalize_company_stage(requested_stage)
+    projected = lead_scorer._project_investigator_stage({}, validated, icp_stage=normalized_stage)
     retained = json.loads(json.dumps(projected))
     from tests.test_company_evidence_investigator import _company
     company = _company(name="Wiz", website="https://www.wiz.io")
     assert lead_scorer._decision_from_observed_stage(
-        retained, "series c+", company=company, evidence_attributed=True,
-    ) == "mismatch"
+        retained, normalized_stage, company=company, evidence_attributed=True,
+    ) == expected_decision
 
 
 @pytest.mark.parametrize("name", ["wiz", "box", "arm", "adt"])

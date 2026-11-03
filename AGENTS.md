@@ -1057,6 +1057,17 @@ independent review, exact image build/verification and push, safe merge, prospec
 scorer-default configuration and canonical rollout for newly frozen rounds.
 Preserve current committed round configurations and existing leased images.
 
+## Scoped authorization: November 3 closed-cost lookup performance
+
+The user authorized permanent fixes and deployment during the full November 3
+Arena watch. This scope covers one reviewed concurrent covering index for the
+unchanged closed-provider cost selectors, exact committed SQL through the existing
+verified RDS session bridge, and live query-plan and monitoring verification.
+Preserve selector definitions, billing records, accepted work, scoring, deadlines,
+privacy and rewards. Add no retry layer, dependency or service. Internal agents
+may test and review; the coordinator owns merge and production application and
+must preserve the other active task's runtime release ownership.
+
 ## Scoped authorization: November 3 prospective verifier accuracy
 
 The user authorized narrow prospective verifier accuracy fixes and bounded

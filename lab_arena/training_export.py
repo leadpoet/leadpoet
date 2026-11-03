@@ -81,7 +81,9 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
                 else:
                     kept.append(walk(child, (*path, str(index))))
             return kept
-        return item
+        # Ordinary JSON scalars are immutable. Accepted scalar subclasses can
+        # carry mutable attributes, so detach them while copying the context.
+        return item if item is None or type(item) in (str, bool, int, float) else copy.deepcopy(item)
 
     return walk(value), removed
 
@@ -2017,7 +2019,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
         for row in related}
     clean["example_hash"] = contracts.document_hash(clean)
-    # The privacy pass normalized context, and worker artifacts came from
-    # validated JSON. Keep caller isolation without expanding shared history
-    # strings into a second serialized document and then parsing it again.
-    return copy.deepcopy(clean)
+    # Both privacy walks own their context containers. Worker artifacts and
+    # journal prefixes come from freshly decoded JSON, with no caller-owned
+    # containers in their metadata. Return that owned tree without copying it.
+    return clean

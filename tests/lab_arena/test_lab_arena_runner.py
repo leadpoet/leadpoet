@@ -876,11 +876,12 @@ def test_committed_dispatch_response_loss_maps_real_broker_run_to_provider_error
     assert next(iter(store.calls.values()))["kind"] == "dispatch"
 
 
-def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
+def test_run_once_respects_max_claims_and_images_export_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
     leases = [lease("r%d" % i, i) for i in range(5)]
     api = FakeApi(leases)
     exports = []
-    cache = rn.ImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
+    cache = FakeExportImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
     config.image_cache = cache

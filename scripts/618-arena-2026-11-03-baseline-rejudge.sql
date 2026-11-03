@@ -96,7 +96,7 @@ DECLARE rid CONSTANT TEXT:='arena-2026-11-03'; request CONSTANT TEXT:='nov03-bas
  r public.lab_arena_rounds; n public.lab_arena_rounds; c public.lab_arena_restart_claim_control;
  h public.lab_arena_scoring_supersessions; source public.lab_arena_runs; old_judge public.lab_arena_runs;
  item JSONB; work JSONB:='[]'; originals JSONB:='{}'; projections JSONB:='{}';
- revision BIGINT; request_hash TEXT; actual_hashes JSONB; before_ledger JSONB; next_attempt INTEGER;
+ revision BIGINT; request_hash TEXT; actual_hashes JSONB; next_attempt INTEGER;
 BEGIN
  PERFORM pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
  SELECT * INTO STRICT c FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;
@@ -120,7 +120,7 @@ BEGIN
   OR r.scoring_generation_floor<>0 OR r.published_at IS NULL OR r.publication_doc IS NULL
   OR r.reward_activated_at IS NULL OR r.reward_basis_doc IS NULL
   OR encode(extensions.digest(to_jsonb(r)::TEXT,'sha256'),'hex') IS DISTINCT FROM manifest->>'round_sha256'
-  OR clock_timestamp()>='2026-11-03T23:45:00Z'::TIMESTAMPTZ
+  OR clock_timestamp()>='2026-11-04T00:10:00Z'::TIMESTAMPTZ
   OR jsonb_typeof(manifest->'work_items') IS DISTINCT FROM 'array'
   OR jsonb_array_length(manifest->'work_items')<>9
   OR EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE round_id=rid AND status IN('pending','leased','submitted')) THEN
@@ -134,13 +134,11 @@ BEGIN
  IF actual_hashes IS DISTINCT FROM manifest->'accepted_run_hashes'
   OR (SELECT count(*) FROM jsonb_object_keys(actual_hashes))<>210 THEN
   RAISE EXCEPTION 'Nov03 rejudge accepted history differs'; END IF;
- SELECT jsonb_build_object('count',count(*),'max',max(entry_id)) INTO before_ledger
- FROM public.lab_arena_ledger WHERE round_id=rid;
  n:=r; n.status:='scored'; n.status_generation:=r.status_generation+1;
  n.publication_doc:=NULL; n.published_at:=NULL; n.king_outcome:=NULL; n.king_hotkey:=NULL;
  n.configuration_doc:=jsonb_set(jsonb_set(r.configuration_doc,
-  '{schedule,final_scoring_close}','"2026-11-03T23:45:00Z"'),
-  '{schedule,publication_deadline}','"2026-11-03T23:59:00Z"');
+  '{schedule,final_scoring_close}','"2026-11-04T00:25:00Z"'),
+  '{schedule,publication_deadline}','"2026-11-04T00:29:00Z"');
  FOR item IN SELECT value FROM jsonb_array_elements(manifest->'work_items') LOOP
   SELECT * INTO STRICT source FROM public.lab_arena_runs WHERE run_id=item->>'scored_run_id' FOR UPDATE;
   SELECT * INTO STRICT old_judge FROM public.lab_arena_runs WHERE run_id=item->>'old_run_id' FOR UPDATE;
@@ -205,9 +203,9 @@ BEGIN
     WHERE a.run_id=item->>'new_run_id') THEN
    RAISE EXCEPTION 'Nov03 rejudge new continuation invalid'; END IF;
  END LOOP;
- IF (SELECT jsonb_build_object('count',count(*),'max',max(entry_id))
-   FROM public.lab_arena_ledger WHERE round_id=rid) IS DISTINCT FROM before_ledger
-  OR (SELECT to_jsonb(control) FROM public.lab_arena_restart_claim_control control WHERE singleton)
+ -- No ledger mutation occurs here. Keep billing safety in the exact
+ -- per-assignment judge-call checks above; do not scan all ledger history.
+ IF (SELECT to_jsonb(control) FROM public.lab_arena_restart_claim_control control WHERE singleton)
     IS DISTINCT FROM to_jsonb(c)
   OR (SELECT count(*) FROM public.lab_arena_runs WHERE round_id=rid)<>
      (SELECT count(*)+9 FROM jsonb_object_keys(manifest->'run_hashes'))

@@ -7,7 +7,10 @@ superseded, and queues native judging of the same saved executions. Preserve
 baseline ICP8, all miner judgments, executions, source, model/scorer policy,
 provider records, costs and signed historical reward authority. Clear only the
 nine source score projections and the current publication decision, and extend
-only judge/publication deadlines to the approved November 3 cutoff. Internal
+only judge/publication deadlines within the user’s three-hour correction window,
+ending before the November 4 baseline freezes at 00:30 UTC. Remove only the
+redundant full-ledger count/max scans that caused the first atomic attempt to
+time out; preserve indexed assignment billing checks and all source/history guards. Internal
 agents implement and test only. The coordinator owns independent review, merge,
 exact migration application, canonical release and deployed verification.
 

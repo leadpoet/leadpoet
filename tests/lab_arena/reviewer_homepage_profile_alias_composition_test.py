@@ -95,6 +95,7 @@ def test_exact_composed_alias_modules_execute_proof_and_transport_controls(monke
     '--bound-homepage-legal-alias', '--numeric-profile-legal-self-name', '--archive-snapshot-https',
     '--greenhouse-api-source', '--auxiliary-source-name-binding', '--homepage-linkedin-conflict-repair',
     '--observed-linkedin-ampersand', '--verified-homepage-brand-alias',
+    '--verified-display-brand',
 ])
 def test_four_file_mode_rejects_other_corrections_before_image_access(monkeypatch, flag):
     monkeypatch.setattr(builder.sys, 'argv', ['compose', '--grading-image',

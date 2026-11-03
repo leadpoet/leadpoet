@@ -1,3 +1,13 @@
+## Scoped authorization: November 3 verified display-brand composition
+
+The coordinator authorized the exact five-file --verified-display-brand runtime
+composition. Reuse the four-file homepage canonical-alias/native-denial repair
+and add only the approved 84463c66a company_evidence_investigator delta from its
+exact frozen source. Preserve the grading base, matching-host requirement, all
+other source bytes, process configuration, costs, deadlines and completed work.
+Internal agents may implement, test and commit only. The coordinator owns
+independent review, push, merge, image publication and production operations.
+
 ## Scoped authorization: November 3 remaining-work recovery
 
 The user authorized one mixed-verifier exception: preserve completed November 3

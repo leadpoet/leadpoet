@@ -105,6 +105,7 @@ def test_unknown_shim_source_fails_closed(change):
     '--verified-homepage-brand-alias',
     '--intent-target-denial',
     '--homepage-profile-alias',
+    '--verified-display-brand',
 ])
 def test_shim_only_rejects_every_grading_option_before_image_access(monkeypatch, flag):
     monkeypatch.setattr(builder.sys, 'argv', ['compose', '--grading-image',

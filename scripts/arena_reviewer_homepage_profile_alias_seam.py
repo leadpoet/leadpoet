@@ -6,7 +6,7 @@ import hashlib
 from scripts import arena_reviewer_intent_target_denial_seam as intent
 
 CORRECTION_ID = "exact_old_homepage_linkedin_canonical_alias_v1"
-HOST_VALIDATOR_REQUIREMENT = "matching_gateway_and_normal_validator_identity_and_target_denial_v1"
+HOST_VALIDATOR_REQUIREMENT = "matching_gateway_and_executing_validators_target_denial_v1"
 ALIAS_FILES = ("qualification/scoring/lead_scorer.py", "qualification/scoring/linkedin_company_size.py")
 FILES = (*ALIAS_FILES, *intent.FILES)
 ALIAS_ORIGINAL_SHA256 = {'qualification/scoring/lead_scorer.py': '203272ceb209a4b44f6ef91643cd819776486ea4a9cb894921488a7918f90c15', 'qualification/scoring/linkedin_company_size.py': '9c74e7da3d036ea550b2f4b84d6d4615b13d490d71cf200ab3c1cea1ffabc725'}

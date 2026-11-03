@@ -597,8 +597,10 @@ modules: the two native target-denial files above and the two exact canonical
 profile lookup/validation files. It retains both target-denial corrections,
 copies no current runtime package and rejects unknown or partial source pairs.
 The old homepage URL must receive its own authoritative canonical response;
-a prior reply for the current profile cannot be relabeled. Deploy the matching
-gateway and normal-validator consumers before registering this verified runtime.
+a prior reply for the current profile cannot be relabeled. Retain the matching
+gateway and executing-validator target-denial consumers required above. The
+identity receipt is compatible with the existing f69461adb host; this alias
+repair does not require a second host restart.
 The grading image, cache identity, prior leases and completed judgments stay fixed.
 
 For a frozen grader whose unresolved semantic-review return bypasses its

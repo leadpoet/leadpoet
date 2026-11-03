@@ -336,10 +336,14 @@ def _strict_linkedin_company_profile_url(value: Any) -> str:
     return f"https://www.linkedin.com/company/{slug}"
 
 
-def _structured_company_elements(value: Any) -> list[Mapping[str, Any]]:
+def _structured_company_elements(value: Any, *, strict_main: bool = False) -> list[Mapping[str, Any]]:
     current = value
     for _ in range(8):
         if not isinstance(current, Mapping):
+            return []
+        if strict_main and _structured_provider_reported_error(current):
+            return []
+        if strict_main and "element" in current and "elements" in current:
             return []
         element = current.get("element")
         if isinstance(element, Mapping):
@@ -350,7 +354,15 @@ def _structured_company_elements(value: Any) -> list[Mapping[str, Any]]:
         if isinstance(elements, list):
             if type(current.get("status")) is not int or current["status"] != 200:
                 return []
+            if strict_main and (len(elements) != 1 or not isinstance(elements[0], Mapping)):
+                return []
             return [item for item in elements[:10] if isinstance(item, Mapping)]
+        if strict_main and ("element" in current or "elements" in current):
+            return []
+        if strict_main and sum(isinstance(current.get(key), Mapping) for key in (
+            "toolResponse", "rawV2", "raw", "result", "data", "output",
+        )) > 1:
+            return []
         for key in ("toolResponse", "rawV2", "raw", "result", "data", "output"):
             child = current.get(key)
             if isinstance(child, Mapping) and child is not current:
@@ -489,7 +501,7 @@ def project_structured_linkedin_company_identity(
     allow_website_redirect: bool = False,
     preserve_identity_website: bool = False,
 ) -> Optional[dict[str, str]]:
-    """Project one exact main profile, including a proved numeric-ID alias."""
+    """Project one exact main profile, including a bound canonical alias."""
 
     domain = _canonical_company_domain(requested_domain)
     profile_url = _strict_linkedin_company_profile_url(requested_profile_url)
@@ -541,6 +553,31 @@ def project_structured_linkedin_company_identity(
         company_id = raw_company_id
     else:
         company_id = ""
+    if not requested_slug.isdigit():
+        # An exact old vanity lookup can return the main profile's canonical
+        # URL. Require its full independent identity; a same-domain name or
+        # description alone cannot bind two different company-page slugs.
+        if (
+            not requested_slug.isascii()
+            or not observed_slug or observed_slug.isdigit()
+            or returned_profile != observed_profile
+            or element.get("universalName") != observed_slug
+            or not re.fullmatch(r"[1-9][0-9]*", company_id)
+            or _company_name(name) != _company_name(expected_company_name)
+            or not _company_name(expected_company_name)
+            or not website_matches
+            or _structured_company_elements(payload, strict_main=True) != [element]
+        ):
+            return None
+        return {
+            "name": name,
+            "provider": STRUCTURED_PROFILE_PROVIDER,
+            "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+            "url": returned_profile,
+            "website": f"https://{domain}/",
+            "company_id": company_id,
+            "requested_url": profile_url,
+        }
     identity_name = name
     identity_source_field = STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
     name_matches = _company_name(name) == _company_name(expected_company_name)

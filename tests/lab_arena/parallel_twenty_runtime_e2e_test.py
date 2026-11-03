@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,6 +43,12 @@ def bounded_socket_shutdown_poll(monkeypatch):
         return serve_forever(server, poll_interval=min(poll_interval, 0.005))
 
     monkeypatch.setattr(socketserver.BaseServer, "serve_forever", serve_with_short_poll)
+
+
+@pytest.fixture()
+def fake_export_disk_capacity(monkeypatch):
+    """Keep tiny export fixtures independent of physical host capacity."""
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
 
 
 @pytest.fixture()
@@ -364,7 +371,7 @@ def _published_signature(harness: CostHarness) -> dict:
 
 
 def test_baseline_first_lease_keeps_verified_web_and_codex_runtime(
-    database, tmp_path
+    database, tmp_path, fake_export_disk_capacity
 ):
     """The sequence policy changes scheduling, not the trusted execute runtime."""
 
@@ -554,7 +561,7 @@ def _run_published_case(
 
 
 def test_real_parallel_runtime_matches_sequential_score_publication_and_cost(
-    database, tmp_path, monkeypatch
+    database, tmp_path, monkeypatch, fake_export_disk_capacity
 ):
     """Ten and twenty workers preserve all outputs, scores, costs, and retry isolation."""
 
@@ -607,6 +614,7 @@ def test_real_parallel_runtime_matches_sequential_score_publication_and_cost(
 def test_mixed_external_validator_claims_use_each_local_capacity_below_round_cap(
     database,
     tmp_path,
+    fake_export_disk_capacity,
     round_cap,
     small_claims,
     large_claims,

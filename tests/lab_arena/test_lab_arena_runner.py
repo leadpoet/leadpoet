@@ -1346,7 +1346,8 @@ def test_claim_retry_exhaustion_fails_closed_and_releases_slot(
     runner_._slots.release()
 
 
-def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_path):
+def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     first = "sha256:" + "1" * 64
     second = "sha256:" + "2" * 64
 

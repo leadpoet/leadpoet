@@ -1462,6 +1462,7 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
         return f"http_{status_code}"
     if status_code != 200:
         return f"http_{status_code}"
+    body = _without_browser_pdf_frames(body)
     if not body or len(body) < 500:
         return "body_too_short"
     if _has_empty_html_body(body):
@@ -2205,7 +2206,7 @@ def _wayback_original_url(url: str) -> str:
 
 
 class _WaybackErrorParser(HTMLParser):
-    """Locate complete archive-service error documents, including iframe HTML."""
+    """Locate archive UI and browser-owned PDF frames, including expanded HTML."""
 
     _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
                        "input", "link", "meta", "param", "source", "track", "wbr"})
@@ -2218,6 +2219,31 @@ class _WaybackErrorParser(HTMLParser):
         self.frames: list[dict] = []
         self.errors: list[tuple[int, int]] = []
         self.toolbars: list[tuple[int, int]] = []
+        self.browser_frames: list[tuple[int, int]] = []
+
+    @staticmethod
+    def _browser_pdf_frame(tag: str, attributes: dict) -> bool:
+        frame_tag = str(attributes.get("data-original-tag") or tag).casefold()
+        if frame_tag not in {"iframe", "object", "embed"}:
+            return False
+        mime = str(attributes.get("type") or "").casefold()
+        if mime not in {"application/pdf", "application/x-google-chrome-pdf"}:
+            return False
+        try:
+            return urlsplit(str(attributes.get("src") or attributes.get("data") or "")).scheme in {
+                "chrome-extension", "moz-extension",
+            }
+        except ValueError:
+            return False
+
+    def close(self) -> None:
+        super().close()
+        # A truncated capture can end inside a known browser-owned frame.
+        # Its remaining DOM is still UI, not an independently closed source.
+        self.browser_frames.extend(
+            (start, len(self.body)) for tag, attributes, start, _frame in self.nodes
+            if self._browser_pdf_frame(tag, attributes)
+        )
 
     def _offset(self) -> int:
         line, column = self.getpos()
@@ -2231,6 +2257,9 @@ class _WaybackErrorParser(HTMLParser):
         if not self.frames:
             return
         frame, attributes = self.frames[-1], dict(attrs)
+        if tag in self._VOID and self._browser_pdf_frame(tag, attributes):
+            start = self._offset()
+            self.browser_frames.append((start, start + len(self.get_starttag_text())))
         if tag == "body" and "navia" in str(attributes.get("class") or "").split():
             frame["service_body"] = True
         if tag == "form":
@@ -2268,6 +2297,8 @@ class _WaybackErrorParser(HTMLParser):
             return
         end = self.body.find(">", self._offset()) + 1
         for node_tag, attributes, start, frame in reversed(self.nodes[index:]):
+            if self._browser_pdf_frame(node_tag, attributes):
+                self.browser_frames.append((start, end))
             if attributes.get("id") in {"wm-ipp-base", "wm-ipp-print"}:
                 self.toolbars.append((start, end))
             if node_tag == "html":
@@ -2280,6 +2311,28 @@ class _WaybackErrorParser(HTMLParser):
         del self.nodes[index:]
 
 
+def _without_html_ranges(body: str, ranges: list[tuple[int, int]]) -> str:
+    remaining, offset = [], 0
+    for start, end in sorted(ranges):
+        if start > offset:
+            remaining.append(body[offset:start])
+        offset = max(offset, end)
+    return "".join([*remaining, body[offset:]])
+
+
+def _without_browser_pdf_frames(body: str) -> str:
+    """Remove browser extension UI, preserving source text outside its frame."""
+    if not _HTML_DOCUMENT_RE.search(body):
+        return body
+    document = _WaybackErrorParser(body)
+    try:
+        document.feed(body)
+        document.close()
+    except (ValueError, TypeError, RecursionError):
+        return body
+    return _without_html_ranges(body, document.browser_frames)
+
+
 def _has_wayback_error_body(body: str) -> bool:
     """Reject archive error/chrome only when no independent source body remains."""
     if not _HTML_DOCUMENT_RE.search(body):
@@ -2290,14 +2343,11 @@ def _has_wayback_error_body(body: str) -> bool:
         document.close()
     except (ValueError, TypeError, RecursionError):
         return False
-    if not (document.errors or document.toolbars):
+    if not (document.errors or document.toolbars or document.browser_frames):
         return False
-    remaining, offset = [], 0
-    for start, end in sorted([*document.errors, *document.toolbars]):
-        if start > offset:
-            remaining.append(body[offset:start])
-        offset = max(offset, end)
-    cleaned = "".join([*remaining, body[offset:]])
+    cleaned = _without_html_ranges(
+        body, [*document.errors, *document.toolbars, *document.browser_frames],
+    )
     if not _HTML_DOCUMENT_RE.search(cleaned):
         cleaned = "<html><body>" + cleaned + "</body></html>"
     if _has_empty_html_body(cleaned):
@@ -2386,6 +2436,7 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                             else "archive error without source body"
                         ),
                         **({"archive_failure": bound_failure} if bound_failure else {})}
+            body = _without_browser_pdf_frames(body)
             snapshot_url = str(r.url)
             ownership_meta = {}
             source_publication_date = ""
@@ -2491,6 +2542,7 @@ async def _scrape_sd_hardened(
                     _safe_sd_request_id(r),
                 )
                 if verdict == "ok":
+                    body = _without_browser_pdf_frames(body)
                     listing_text = ""
                     listing_receipt: Optional[_CareersIndexReceipt] = None
                     same_host_event_links = _same_host_event_links(body, url)
@@ -3377,12 +3429,9 @@ def _published_date_from_html(
             archive_document.close()
         except (ValueError, TypeError, RecursionError):
             return ""
-        remaining, offset = [], 0
-        for start, end in sorted(archive_document.toolbars):
-            if start > offset:
-                remaining.append(html[offset:start])
-            offset = max(offset, end)
-        html = "".join([*remaining, html[offset:]])
+        html = _without_html_ranges(
+            html, [*archive_document.toolbars, *archive_document.browser_frames],
+        )
     candidates: set[str] = set()
     head_document = _parse_html_shell(html)
     if head_document is not None and head_document.head_closed:

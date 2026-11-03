@@ -2277,7 +2277,10 @@ class _WaybackErrorParser(HTMLParser):
             return
         frame = self.frames[-1]
         nodes = [node for node in self.nodes if node[3] is frame]
-        if any(node[0] in _HTMLShellParser._HIDDEN for node in self.nodes):
+        if any(
+            node[0] in _HTMLShellParser._HIDDEN or self._browser_pdf_frame(node[0], node[1])
+            for node in self.nodes
+        ):
             return
         ids = {node[1].get("id") for node in nodes}
         if any(node[0] == "title" for node in nodes):

@@ -175,3 +175,33 @@ def test_direct_archive_chrome_with_pdf_frame_preserves_independent_article(monk
     result = asyncio.run(intent._scrape_sd_hardened(SOURCE))
     assert result['stage'] == 'sd:baseline' and QUOTE in result['content']
     assert 'Extracting text from PDF' not in result['content']
+
+
+def _archive_error_with_browser_frame(*, article=''):
+    error = (Path(__file__).parent / 'fixtures/amdocs_wayback_error_iframe.html').read_text()
+    start = error.index('<html lang="en">')
+    error = error[start:error.index('</html>', start) + len('</html>')]
+    # Expanded frame captures need not insert a second html/body pair.
+    viewer = VIEWER.replace('<html><body>', '').replace('</body></html>', '')
+    return error.replace('<div id="errorBorder">', article + viewer + '<div id="errorBorder">')
+
+
+def test_owned_viewer_text_cannot_turn_archive_error_into_source(monkeypatch):
+    body = _archive_error_with_browser_frame()
+    assert intent._has_wayback_error_body(body)
+    responses(monkeypatch, direct_status=502, archive=body)
+    fallback = AsyncMock(return_value={'ok': True, 'stage': 'exa_scraped', 'content': QUOTE,
+                                       'error': None})
+    monkeypatch.setattr(intent, '_scrape_exa', fallback)
+    result = asyncio.run(intent._fetch_sd_then_exa([SOURCE]))
+    fallback.assert_awaited_once_with(SOURCE)
+    assert result['results'][0]['text'] == QUOTE
+
+
+def test_real_sibling_source_still_survives_archive_error_and_owned_viewer(monkeypatch):
+    body = _archive_error_with_browser_frame(article=ARTICLE)
+    assert intent._has_wayback_error_body(body) is False
+    responses(monkeypatch, archive=body)
+    result = asyncio.run(intent._try_wayback(SOURCE))
+    assert result['ok'] is True and QUOTE in result['content']
+    assert 'Extracting text from PDF' not in result['content']

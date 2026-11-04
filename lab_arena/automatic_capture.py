@@ -471,7 +471,17 @@ class Recorder:
     def _readinto_bytes(self, body, args, kwargs, size):
         try:
             buffer = args[0] if args else kwargs.get("b", kwargs.get("buffer"))
-            body.add(memoryview(buffer)[:size])
+            # readinto returns bytes; writable buffer elements can be wider.
+            view = memoryview(buffer)
+            if size:
+                if view.c_contiguous:
+                    body.add(view.cast("B")[:size])
+                elif view.ndim == 1 and view.itemsize == 1:
+                    for start in range(0, size, 64 * 1024):
+                        body.add(view[start:min(size, start + 64 * 1024)].tobytes())
+                else:
+                    raise ValueError("unsupported readinto buffer layout")
+            return view.nbytes
         except Exception:
             body.truncated = True
             self._count("adapter_failure")
@@ -501,17 +511,19 @@ class Recorder:
                     raise
                 finally:
                     _ACTIVE.reset(token)
+                amount = args[0] if args else kwargs.get("amt", kwargs.get("size", -1))
                 if readinto:
-                    if isinstance(value, int) and value > 0:
-                        self._safe(self._readinto_bytes, body, args, kwargs, value)
+                    amount = None
+                    if isinstance(value, int) and value >= 0:
+                        amount = self._safe(self._readinto_bytes, body, args, kwargs, value)
                 elif isinstance(value, list):
                     for part in value:
                         self._safe(body.add, part)
                 else:
                     self._safe(body.add, value)
-                amount = args[0] if args else kwargs.get("amt", kwargs.get("size", -1))
                 done = (whole and (amount is None or amount == -1))
-                done = done or ((value == b"" or (readinto and value == 0)) and amount != 0)
+                # A zero-capacity read returns zero without observing EOF.
+                done = done or ((value == b"" or (readinto and value == 0 and amount is not None)) and amount != 0)
                 if eof is not None:
                     done = done or bool(self._safe(eof, response))
                 if done:

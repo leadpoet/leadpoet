@@ -247,21 +247,30 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                             segments.append({"source_path": ["output", oi, field, pi, "text"],
                                              "field": "output.content.reasoning_text" if field == "content" and part.get("type") == "reasoning_text" else "output.unproved",
                                              "text": part["text"]})
-    # Providers can repeat one generated string in an alias and a typed block.
-    # Keep both source locations but train and count the text once.
-    unique = []
-    by_text = {}
+    # Chat can expose the same ordered text in alternative representation
+    # fields. Match their complete sequences within one message, not equal
+    # strings anywhere in a response. Repeated typed occurrences, summaries
+    # and distinct native Responses items remain separate evidence.
+    alias_fields = {"reasoning", "reasoning_content", "reasoning_details.text"}
+    groups = {}
     for segment in segments:
-        existing = by_text.get(segment["text"])
+        segment["source_paths"] = [segment.pop("source_path")]
+        if operation == "openrouter.chat" and segment["field"] in alias_fields:
+            message_path = tuple(segment["source_paths"][0][:3])
+            groups.setdefault((message_path, segment["field"]), []).append(segment)
+    equivalents, omitted = {}, set()
+    for (message_path, field), sequence in groups.items():
+        key = (message_path, tuple(segment["text"] for segment in sequence))
+        existing = equivalents.get(key)
         if existing is None:
-            segment["source_paths"] = [segment.pop("source_path")]
-            by_text[segment["text"]] = segment
-            unique.append(segment)
+            equivalents[key] = sequence
         else:
-            existing["source_paths"].append(segment["source_path"])
-            if existing["field"] != segment["field"]:
-                existing.setdefault("alias_fields", []).append(segment["field"])
-    return unique, summary, opaque
+            for retained, alias in zip(existing, sequence):
+                retained["source_paths"].extend(alias["source_paths"])
+                retained.setdefault("alias_fields", []).append(field)
+                omitted.add(tuple(alias["source_paths"][0]))
+    return [segment for segment in segments
+            if tuple(segment["source_paths"][0]) not in omitted], summary, opaque
 
 
 def _route_observation(call: Mapping[str, Any]) -> Any:

@@ -17,6 +17,15 @@ An observed-locator option adds only single-decoded ampersand company slugs.
 A separate brand option requires its matching host receipt validator deployment.
 No option imports today's complete grading implementation.
 
+The exclusive --intent-target-denial mode adds only the reviewed native Exa
+target-denial alias to two exact frozen modules. It copies no runtime package.
+The exclusive --homepage-profile-alias mode retains that correction and adds
+only the reviewed exact old-profile canonicalization in two more frozen files.
+
+The exclusive --verified-display-brand mode retains that four-file repair and
+adds only exact verified ownership display-brand quote attribution in a fifth
+frozen module. It keeps the matching host-validator requirement.
+
 The mutually exclusive --shim-only mode appends only the exact-source socket
 return-margin repair. It does not import the current runtime package or grading
 converters and can be selected as a prospective scorer default after verification.
@@ -241,6 +250,9 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
 def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
     shim_only: bool = False,
+    intent_target_denial: bool = False,
+    homepage_profile_alias: bool = False,
+    verified_display_brand: bool = False,
     source_access_denied: bool = False,
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
@@ -275,6 +287,15 @@ def extract_frozen_sources(
             names += (ARCHIVE_FILE,)
         if shim_only:
             names = ("lab_arena/shim.py", "lab_arena/operations.py")
+        if intent_target_denial:
+            from scripts.arena_reviewer_intent_target_denial_seam import FILES
+            names = FILES
+        if homepage_profile_alias:
+            from scripts.arena_reviewer_homepage_profile_alias_seam import FILES
+            names = FILES
+        if verified_display_brand:
+            from scripts.arena_reviewer_verified_display_brand_seam import FILES
+            names = FILES
         for name in dict.fromkeys(names):
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -448,6 +469,18 @@ def main() -> int:
         help="append only the reviewed frozen shim return-margin repair; excludes all grading corrections",
     )
     parser.add_argument(
+        "--intent-target-denial", action="store_true",
+        help="add only the reviewed native exact-target Exa denial alias to two frozen modules; excludes other corrections",
+    )
+    parser.add_argument(
+        "--homepage-profile-alias", action="store_true",
+        help="compose only exact old-homepage profile canonicalization and native target denial in four frozen files; excludes other corrections",
+    )
+    parser.add_argument(
+        "--verified-display-brand", action="store_true",
+        help="compose only the reviewed four-file homepage/native-denial repairs plus verified display-brand attribution in five frozen files; excludes other corrections",
+    )
+    parser.add_argument(
         "--complete-negative-finality", action="store_true",
         help="apply only the approved PR483 terminal-negative correction; use the same option for --verify-image",
     )
@@ -527,6 +560,15 @@ def main() -> int:
     if args.shim_only and any(value is True for name, value in vars(args).items()
                               if name not in {"shim_only", "push"}):
         raise CompositionError("shim-only mode cannot include grading corrections")
+    if args.intent_target_denial and any(value is True for name, value in vars(args).items()
+                                        if name not in {"intent_target_denial", "push"}):
+        raise CompositionError("intent-target-denial mode cannot include other corrections")
+    if args.homepage_profile_alias and any(value is True for name, value in vars(args).items()
+                                         if name not in {"homepage_profile_alias", "push"}):
+        raise CompositionError("homepage-profile-alias mode cannot include other corrections")
+    if args.verified_display_brand and any(value is True for name, value in vars(args).items()
+                                         if name not in {"verified_display_brand", "push"}):
+        raise CompositionError("verified-display-brand mode cannot include other corrections")
     if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
         raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
@@ -547,7 +589,25 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.shim_only:
+        if args.verified_display_brand:
+            from scripts.arena_reviewer_verified_display_brand_seam import convert_verified_display_brand_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", verified_display_brand=True,
+            )
+            files = convert_verified_display_brand_files(original)
+        elif args.homepage_profile_alias:
+            from scripts.arena_reviewer_homepage_profile_alias_seam import convert_homepage_profile_alias_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", homepage_profile_alias=True,
+            )
+            files = convert_homepage_profile_alias_files(original)
+        elif args.intent_target_denial:
+            from scripts.arena_reviewer_intent_target_denial_seam import convert_intent_target_denial_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", intent_target_denial=True,
+            )
+            files = convert_intent_target_denial_files(original)
+        elif args.shim_only:
             from scripts.arena_reviewer_shim_response_window_seam import (
                 SHIM_FILE, OPERATIONS_FILE, convert_shim_response_window,
             )
@@ -627,6 +687,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-observed-linkedin-ampersand" if args.observed_linkedin_ampersand else "")
             + ("-verified-homepage-brand" if args.verified_homepage_brand_alias else "")
             + ("-shim-only" if args.shim_only else "")
+            + ("-intent-target-denial" if args.intent_target_denial else "")
+            + ("-homepage-profile-alias" if args.homepage_profile_alias else "")
+            + ("-verified-display-brand" if args.verified_display_brand else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -653,6 +716,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.intent_target_denial or args.homepage_profile_alias or args.verified_display_brand:
+            from scripts.arena_reviewer_intent_target_denial_seam import CORRECTION_ID as INTENT_TARGET_DENIAL_CORRECTION_ID
+            corrections.append(INTENT_TARGET_DENIAL_CORRECTION_ID)
         if args.source_access_denied:
             from scripts.arena_reviewer_source_access_seam import CORRECTION_ID as SOURCE_ACCESS_CORRECTION_ID
             corrections.append(SOURCE_ACCESS_CORRECTION_ID)
@@ -705,6 +771,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             from scripts.arena_reviewer_observed_linkedin_ampersand_seam import CORRECTION_ID as OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID
             corrections.append(OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID)
         host_requirements = {}
+        if args.homepage_profile_alias or args.verified_display_brand:
+            from scripts.arena_reviewer_homepage_profile_alias_seam import (
+                CORRECTION_ID as PROFILE_ALIAS_CORRECTION_ID, HOST_VALIDATOR_REQUIREMENT,
+            )
+            corrections.append(PROFILE_ALIAS_CORRECTION_ID)
+            host_requirements["host_validator_requirement"] = HOST_VALIDATOR_REQUIREMENT
+        if args.verified_display_brand:
+            from scripts.arena_reviewer_verified_display_brand_seam import CORRECTION_ID as DISPLAY_BRAND_CORRECTION_ID
+            corrections.append(DISPLAY_BRAND_CORRECTION_ID)
         if args.verified_homepage_brand_alias:
             from scripts.arena_reviewer_homepage_brand_alias_seam import (
                 CORRECTION_ID as BRAND_CORRECTION_ID, HOST_VALIDATOR_REQUIREMENT,

@@ -1178,7 +1178,8 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:completed|completes|closed)\s+(?:(?:the|its|an?)\s+)?"
+        r"\b(?:completed|completes|closed|announced\s+(?:today\s+)?the\s+completion\s+of)"
+        r"\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
         r'(?:\s+\((?P<alias>"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)'
@@ -1445,7 +1446,10 @@ def _acquired_stage_quote_supports_names(
     company_names: Sequence[Any],
     quote: str,
 ) -> bool:
-    """Require completed acquisition/current-parent proof for named entities."""
+    """Require completed acquisition/current-parent proof for named entities.
+
+    Callers must bind short identities to submitted/verified or proven aliases.
+    """
 
     if not isinstance(quote, str) or not quote.strip():
         return False
@@ -1456,7 +1460,7 @@ def _acquired_stage_quote_supports_names(
         for name in company_names
     }
     normalized_names = {
-        name for name in normalized_names if name and len("".join(name)) >= 4
+        name for name in normalized_names if name
     }
     if not normalized_names:
         return False
@@ -1534,8 +1538,12 @@ def _acquired_stage_quote_supports_company(
 
     if company is None:
         return False
+    # The submitted identity can be short; an unverified observed alias cannot
+    # introduce a new short company identity into saved-stage proof.
     return _acquired_stage_quote_supports_names(
-        (company.company_name, observed_company_name),
+        (company.company_name, observed_company_name)
+        if len(_compact_company_name(observed_company_name)) >= 4
+        else (company.company_name,),
         quote,
     )
 
@@ -4903,6 +4911,46 @@ def _unresolved_homepage_web_identity_conflict(
     name = str(organization.get("normalized_name") or "")
     domain = str(organization.get("registrable_dns_domain") or "")
     slug = str(organization.get("linkedin_company_slug") or "")
+    proof = web_receipt.get("structured_profile_identity")
+    if (
+        (
+            (slug.isascii() and slug.isdigit()
+             and observed.get("reason_code") == "identity_linkedin_alias_unresolved")
+            or (slug.isascii() and slug and not slug.isdigit()
+                and observed.get("reason_code") in {"identity_not_proven", "identity_linkedin_alias_unresolved"})
+        )
+        and isinstance(proof, Mapping)
+        and set(proof) == {
+            "name", "provider", "source_field", "url", "website",
+            "company_id", "requested_url",
+        }
+        and all(isinstance(value, str) for value in proof.values())
+        and proof.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and proof.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and (
+            (slug.isdigit() and proof.get("company_id") == slug)
+            or (not slug.isdigit()
+                and re.fullmatch(r"[1-9][0-9]*", proof.get("company_id", "")))
+        )
+        and linkedin_company_page_slug(proof.get("requested_url")) == slug
+        and _strict_linkedin_company_profile_url(proof.get("requested_url"))
+        and _strict_linkedin_company_profile_url(proof.get("url"))
+        and linkedin_company_page_slug(proof.get("url"))
+        == web_receipt.get("submitted_linkedin_slug")
+        == web_receipt.get("observed_linkedin_slug")
+        and not str(web_receipt.get("observed_linkedin_slug") or "").isdigit()
+        and _company_name(proof.get("name"))
+        == web_receipt.get("submitted_name") == web_receipt.get("observed_name")
+        and _canonical_company_domain(proof.get("website"))
+        == domain == observed.get("observed_domain")
+        == web_receipt.get("submitted_domain") == web_receipt.get("observed_domain")
+        and slug == observed.get("observed_linkedin_slug")
+        and name == observed.get("observed_name")
+    ):
+        # The exact old-locator main profile proves its canonical web identity.
+        # A short homepage brand name cannot turn that independently bound
+        # alias into an unresolved conflict.
+        return False
     return bool(
         name and domain and slug
         and name == observed.get("observed_name")
@@ -4913,6 +4961,40 @@ def _unresolved_homepage_web_identity_conflict(
         and name != web_receipt.get("observed_name")
         and slug != web_receipt.get("observed_linkedin_slug")
     )
+
+
+def _conflicting_homepage_numeric_profile_lookup(
+    homepage: Optional[CompanyFitDecisionResult], web_receipt: Mapping[str, Any],
+) -> dict[str, str]:
+    """Locate exact numeric or old-vanity proof; the lookup grants no match."""
+    if homepage is None or not _unresolved_homepage_web_identity_conflict(homepage, web_receipt):
+        return {}
+    observed = homepage.details.get("identity") or {}
+    slug = str(observed.get("observed_linkedin_slug") or "")
+    vanity = str(web_receipt.get("observed_linkedin_slug") or "")
+    numeric_locator = (
+        slug.isascii() and slug.isdigit()
+        and observed.get("reason_code") == "identity_linkedin_alias_unresolved"
+    )
+    vanity_locator = (
+        slug.isascii() and slug and not slug.isdigit()
+        and _strict_linkedin_company_profile_url(f"https://www.linkedin.com/company/{slug}")
+        and observed.get("reason_code") in {"identity_not_proven", "identity_linkedin_alias_unresolved"}
+    )
+    if (
+        not (numeric_locator or vanity_locator)
+        or not vanity or vanity.isdigit()
+        or vanity != web_receipt.get("submitted_linkedin_slug")
+        or web_receipt.get("submitted_name") != web_receipt.get("observed_name")
+    ):
+        return {}
+    return {
+        "normalized_name": str(web_receipt["observed_name"]),
+        "registrable_dns_domain": str(web_receipt["observed_domain"]),
+        "linkedin_company_slug": vanity,
+        "requested_profile_url": f"https://www.linkedin.com/company/{slug}",
+        "observed_profile_url": f"https://www.linkedin.com/company/{vanity}",
+    }
 
 
 def _schema_repair_changes_grounded_identity(
@@ -6921,6 +7003,20 @@ def _reverify_decision(
             COMPANY_FIT_UNAVAILABLE,
         }:
             identity_decision = COMPANY_FIT_UNAVAILABLE
+        if (
+            isinstance(structured_profile_identity_evidence, Mapping)
+            and set(structured_profile_identity_evidence) == {
+                "name", "provider", "source_field", "url", "website",
+                "company_id", "requested_url",
+            }
+            and all(isinstance(value, str) and len(value) <= 2048
+                    for value in structured_profile_identity_evidence.values())
+        ):
+            # Keep the fetched numeric alias proof with the identity receipt;
+            # the final homepage-conflict gate revalidates every binding.
+            identity_receipt["structured_profile_identity"] = dict(
+                structured_profile_identity_evidence
+            )
 
     entity_attribution_conflicts: list[str] = []
     if icp is None:
@@ -10167,6 +10263,19 @@ async def _llm_reverify_company(
         web_identity_receipt,
         verified_transport_domain,
     )
+    numeric_conflict_lookup = (
+        _conflicting_homepage_numeric_profile_lookup(
+            verified_homepage_identity, web_identity_receipt,
+        ) if require_company_fit_dimensions else {}
+    )
+    if numeric_conflict_lookup:
+        # Reuse the invocation's one structured profile request, addressing
+        # the homepage's numeric locator so its returned ID must prove the
+        # observed vanity URL. No model-authored alias can satisfy this.
+        profile_identity = numeric_conflict_lookup
+        await _fetch_structured_linkedin_profile_once(
+            profile_identity, current_profile_cache, collect_identity=True,
+        )
     investigation_identity = verified_identity
     if not profile_identity:
         lookup_receipt: Mapping[str, Any] = web_identity_receipt
@@ -12517,6 +12626,8 @@ async def score_company_competition_intent(
                if funding_stage_context else {}),
             intent_terminal_retry_cache=intent_terminal_retry_cache,
             retry_evidence_context_key=retry_evidence_context_key,
+            **({"verified_source_pages": matched_company_source_cache}
+               if integrity_policy and matched_company_source_cache else {}),
         )
         if _intent_verifier_unavailable(
             signal_results, integrity_policy=integrity_policy
@@ -12879,6 +12990,7 @@ def _company_stage_matches(observed: str, requested: str) -> bool:
 def _intent_terminal_retry_key(
     context_key, verified_company_identity, evidence_group, target_signal,
     evidence_type, max_age_days, scoring_flags, verified_funding_stage_context=None,
+    verified_source_pages=None,
 ) -> str:
     return _semantic_hash({
         "schema_version": "leadpoet.intent_terminal_retry.v1",
@@ -12890,6 +13002,7 @@ def _intent_terminal_retry_key(
         "scoring_flags": dict(scoring_flags),
         **({"verified_funding_stage_context": verified_funding_stage_context}
            if verified_funding_stage_context else {}),
+        **({"verified_source_pages": verified_source_pages} if verified_source_pages else {}),
     })
 
 
@@ -12988,6 +13101,7 @@ async def score_company_competition_intent_signal(
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -13092,6 +13206,11 @@ async def score_company_competition_intent_signal(
                     }
                 )
         evidence_urls = [item.url for item in evidence_group]
+        from qualification.scoring.intent_verification_three_stage import _verified_submitted_source_pages
+        signal_source_pages = _verified_submitted_source_pages(
+            verified_source_pages, evidence_urls, verified_company_identity,
+            company_name=company.company_name, claim=str(signal.description or ""),
+        ) if integrity_policy and _evidence_type_for(matched_idx) != "HIRING" else {}
         funding_stage_context = (
             verified_funding_stage_context
             if integrity_policy and _evidence_type_for(matched_idx) == "FUNDING"
@@ -13119,7 +13238,7 @@ async def score_company_competition_intent_signal(
                     "no_time_decay": no_time_decay,
                     "integrity_policy": integrity_policy,
                     "company_quality": company_quality,
-                }, funding_stage_context,
+                }, funding_stage_context, signal_source_pages,
             )
             if terminal_cache_key in intent_terminal_retry_cache:
                 cached = intent_terminal_retry_cache[terminal_cache_key]
@@ -13142,6 +13261,8 @@ async def score_company_competition_intent_signal(
                 "verified_funding_stage_context": deepcopy(
                     list(funding_stage_context or [])
                 ),
+                **({"verified_source_pages": deepcopy(signal_source_pages)}
+                   if signal_source_pages else {}),
             }
             response = await invoke_exchange(signal_exchange, exchange_request)
             if not isinstance(response, Mapping) or response.get("reference") is None:
@@ -13186,6 +13307,7 @@ async def score_company_competition_intent_signal(
                 verdict_out=signal_verdicts,
                 **({"verified_funding_stage_context": funding_stage_context}
                    if funding_stage_context else {}),
+                **({"verified_source_pages": signal_source_pages} if signal_source_pages else {}),
                 **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
             )
@@ -13723,6 +13845,7 @@ async def _score_single_intent_signal(
     verdict_out: Optional[List[dict]] = None,
     evidence_signals: Optional[Sequence["IntentSignal"]] = None,
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -14008,6 +14131,7 @@ async def _score_single_intent_signal(
                 buyer_max_age_days=buyer_max_age_days,
                 **({"verified_funding_stage_context": verified_funding_stage_context}
                    if verified_funding_stage_context else {}),
+                **({"verified_source_pages": verified_source_pages} if verified_source_pages else {}),
                 **({"evidence_bundle": [
                     {"url": item.url, "description": item.description,
                      "date": item.date, "snippet": item.snippet}

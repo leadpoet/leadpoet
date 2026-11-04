@@ -1462,6 +1462,10 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
         return f"http_{status_code}"
     if status_code != 200:
         return f"http_{status_code}"
+    cleaned = _without_browser_pdf_frames(body)
+    if cleaned != body and _has_wayback_error_body(cleaned):
+        return "html_empty_body"
+    body = cleaned
     if not body or len(body) < 500:
         return "body_too_short"
     if _has_empty_html_body(body):
@@ -2205,7 +2209,7 @@ def _wayback_original_url(url: str) -> str:
 
 
 class _WaybackErrorParser(HTMLParser):
-    """Locate complete archive-service error documents, including iframe HTML."""
+    """Locate archive UI and browser-owned PDF frames, including expanded HTML."""
 
     _VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img",
                        "input", "link", "meta", "param", "source", "track", "wbr"})
@@ -2218,6 +2222,37 @@ class _WaybackErrorParser(HTMLParser):
         self.frames: list[dict] = []
         self.errors: list[tuple[int, int]] = []
         self.toolbars: list[tuple[int, int]] = []
+        self.browser_frames: list[tuple[int, int]] = []
+
+    @staticmethod
+    def _browser_pdf_frame(tag: str, attributes: dict) -> bool:
+        frame_tag = str(attributes.get("data-original-tag") or tag).casefold()
+        if frame_tag not in {"iframe", "object", "embed"}:
+            return False
+        mime = str(attributes.get("type") or "").casefold()
+        if mime not in {"application/pdf", "application/x-google-chrome-pdf"}:
+            return False
+        try:
+            viewer = urlsplit(str(attributes.get("src") or attributes.get("data") or ""))
+            # Chromium's kPdfExtensionId identifies this UI producer. Other
+            # extension viewers can expose usable rendered document text.
+            return bool(
+                viewer.scheme == "chrome-extension"
+                and viewer.hostname == "mhjfbmdgcfjbbpaeojofohoefgiehjai"
+                and viewer.username is None and viewer.password is None
+                and viewer.port is None
+            )
+        except ValueError:
+            return False
+
+    def close(self) -> None:
+        super().close()
+        # A truncated capture can end inside a known browser-owned frame.
+        # Its remaining DOM is still UI, not an independently closed source.
+        self.browser_frames.extend(
+            (start, len(self.body)) for tag, attributes, start, _frame in self.nodes
+            if self._browser_pdf_frame(tag, attributes)
+        )
 
     def _offset(self) -> int:
         line, column = self.getpos()
@@ -2231,6 +2266,9 @@ class _WaybackErrorParser(HTMLParser):
         if not self.frames:
             return
         frame, attributes = self.frames[-1], dict(attrs)
+        if tag in self._VOID and self._browser_pdf_frame(tag, attributes):
+            start = self._offset()
+            self.browser_frames.append((start, start + len(self.get_starttag_text())))
         if tag == "body" and "navia" in str(attributes.get("class") or "").split():
             frame["service_body"] = True
         if tag == "form":
@@ -2245,7 +2283,10 @@ class _WaybackErrorParser(HTMLParser):
             return
         frame = self.frames[-1]
         nodes = [node for node in self.nodes if node[3] is frame]
-        if any(node[0] in _HTMLShellParser._HIDDEN for node in self.nodes):
+        if any(
+            node[0] in _HTMLShellParser._HIDDEN or self._browser_pdf_frame(node[0], node[1])
+            for node in self.nodes
+        ):
             return
         ids = {node[1].get("id") for node in nodes}
         if any(node[0] == "title" for node in nodes):
@@ -2268,6 +2309,8 @@ class _WaybackErrorParser(HTMLParser):
             return
         end = self.body.find(">", self._offset()) + 1
         for node_tag, attributes, start, frame in reversed(self.nodes[index:]):
+            if self._browser_pdf_frame(node_tag, attributes):
+                self.browser_frames.append((start, end))
             if attributes.get("id") in {"wm-ipp-base", "wm-ipp-print"}:
                 self.toolbars.append((start, end))
             if node_tag == "html":
@@ -2280,6 +2323,28 @@ class _WaybackErrorParser(HTMLParser):
         del self.nodes[index:]
 
 
+def _without_html_ranges(body: str, ranges: list[tuple[int, int]]) -> str:
+    remaining, offset = [], 0
+    for start, end in sorted(ranges):
+        if start > offset:
+            remaining.append(body[offset:start])
+        offset = max(offset, end)
+    return "".join([*remaining, body[offset:]])
+
+
+def _without_browser_pdf_frames(body: str) -> str:
+    """Remove browser extension UI, preserving source text outside its frame."""
+    if not _HTML_DOCUMENT_RE.search(body):
+        return body
+    document = _WaybackErrorParser(body)
+    try:
+        document.feed(body)
+        document.close()
+    except (ValueError, TypeError, RecursionError):
+        return body
+    return _without_html_ranges(body, document.browser_frames)
+
+
 def _has_wayback_error_body(body: str) -> bool:
     """Reject archive error/chrome only when no independent source body remains."""
     if not _HTML_DOCUMENT_RE.search(body):
@@ -2290,14 +2355,11 @@ def _has_wayback_error_body(body: str) -> bool:
         document.close()
     except (ValueError, TypeError, RecursionError):
         return False
-    if not (document.errors or document.toolbars):
+    if not (document.errors or document.toolbars or document.browser_frames):
         return False
-    remaining, offset = [], 0
-    for start, end in sorted([*document.errors, *document.toolbars]):
-        if start > offset:
-            remaining.append(body[offset:start])
-        offset = max(offset, end)
-    cleaned = "".join([*remaining, body[offset:]])
+    cleaned = _without_html_ranges(
+        body, [*document.errors, *document.toolbars, *document.browser_frames],
+    )
     if not _HTML_DOCUMENT_RE.search(cleaned):
         cleaned = "<html><body>" + cleaned + "</body></html>"
     if _has_empty_html_body(cleaned):
@@ -2386,6 +2448,7 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                             else "archive error without source body"
                         ),
                         **({"archive_failure": bound_failure} if bound_failure else {})}
+            body = _without_browser_pdf_frames(body)
             snapshot_url = str(r.url)
             ownership_meta = {}
             source_publication_date = ""
@@ -2491,6 +2554,7 @@ async def _scrape_sd_hardened(
                     _safe_sd_request_id(r),
                 )
                 if verdict == "ok":
+                    body = _without_browser_pdf_frames(body)
                     listing_text = ""
                     listing_receipt: Optional[_CareersIndexReceipt] = None
                     same_host_event_links = _same_host_event_links(body, url)
@@ -2732,6 +2796,7 @@ _EXA_TARGET_CRAWL_FAILURES = {
     ("CRAWL_LIVECRAWL_TIMEOUT", 504),
     ("CRAWL_UNKNOWN_ERROR", 500),
     ("SOURCE_NOT_AVAILABLE", 403),
+    ("CRAWL_HTTP_403", 403),
 }
 
 
@@ -3377,12 +3442,9 @@ def _published_date_from_html(
             archive_document.close()
         except (ValueError, TypeError, RecursionError):
             return ""
-        remaining, offset = [], 0
-        for start, end in sorted(archive_document.toolbars):
-            if start > offset:
-                remaining.append(html[offset:start])
-            offset = max(offset, end)
-        html = "".join([*remaining, html[offset:]])
+        html = _without_html_ranges(
+            html, [*archive_document.toolbars, *archive_document.browser_frames],
+        )
     candidates: set[str] = set()
     head_document = _parse_html_shell(html)
     if head_document is not None and head_document.head_closed:
@@ -5127,6 +5189,34 @@ def _same_event_resolution_outcome(
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _verified_submitted_source_pages(
+    source_pages: Any, source_urls: Sequence[str], identity: Any, *, company_name: str, claim: str,
+) -> Dict[str, Dict[str, str]]:
+    """Project bounded private fetched text for the exact submitted resource only."""
+    from qualification.scoring.lead_scorer import (
+        _max_retained_investigator_contexts, _validated_first_party_source_context,
+    )
+    from qualification.scoring.intent_details import _continuous_source_window
+    from qualification.scoring.company_evidence_investigator import MAX_PAGE_CHARACTERS
+
+    if (not isinstance(source_pages, Mapping)
+            or len(source_pages) > _max_retained_investigator_contexts()
+            or len(source_urls) != 1):
+        return {}
+    pages = {}
+    for url in source_urls:
+        entry = source_pages.get(url)
+        context = _validated_first_party_source_context(
+            url, entry, identity, company_name=company_name,
+        )
+        if context and _normalize_url(context["final_url"]) == _normalize_url(url):
+            # Full bodies stay private. Bind the cache and the final judge to
+            # the same continuous, claim-relevant passage and existing byte cap.
+            text = _continuous_source_window(context["text"], MAX_PAGE_CHARACTERS, [], paragraph=claim)
+            pages[url] = {"final_url": context["final_url"], "text": text}
+    return pages
+
+
 async def verify_three_stage(
     client: httpx.AsyncClient,
     *,
@@ -5150,6 +5240,7 @@ async def verify_three_stage(
     buyer_max_age_days: Optional[int] = None,
     evidence_bundle: Optional[List[Dict[str, Any]]] = None,
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Intent verification using fetched evidence and a source-grounded judge.
 
@@ -5555,8 +5646,9 @@ async def verify_three_stage(
                     if item.get("source_publication_date")
                 ))
                 fetched_urls = {selected_key}
+    retained_fallback_original = None
     if not contents["results"] or incomplete_bundle:
-        return {
+        unavailable_result = {
             "client_ready": False,
             # Two independent fetch paths can establish that the exact source
             # URL is absent. That is a semantic failure to prove the claim, not
@@ -5592,6 +5684,25 @@ async def verify_three_stage(
                 }],
             },
         }
+
+        # This cache retains text, not HEAD or job metadata. Preserve every
+        # usable fresh result. An exact retained page can only recover an
+        # unavailable single-source read, subject to affirmative grounding below.
+        retained_pages = _verified_submitted_source_pages(
+            verified_source_pages, row["claimed_source_urls"], verified_company_identity,
+            company_name=company_name, claim=str(row["claim"]),
+        ) if (integrity_policy and not is_hiring_claim and not source_absent
+              and row.get("_declared_source") != "job_board"
+              and not _is_job_board_url(fetch_source_url)
+              and len(row["claimed_source_urls"]) == 1
+              and not contents["results"] and unavailable_source_resolution is None) else {}
+        if not retained_pages:
+            return unavailable_result
+        retained_fallback_original = unavailable_result
+        contents = {"results": [{"url": url, "text": page["text"],
+                                 "meta": {"final_url": page["final_url"]}}
+                                for url, page in retained_pages.items()],
+                    "statuses": contents.get("statuses") or []}
 
     # ── PRE-STAGE-3: deterministic domain-brand presence check ─────
     # A positive-only cost pre-filter, NOT the entity judge — Stage 3
@@ -5859,6 +5970,35 @@ async def verify_three_stage(
     s3_verdict_raw = (s3_envelope.get("answer") or {})
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
+    if retained_fallback_original is not None:
+        from qualification.scoring.arena_integrity import source_dates_from_verdict, source_grounded_date_verdict
+        from qualification.scoring.evaluation_clock import evaluation_date
+        grounded_quotes = [str(quote) for quote in s3_item.get("supporting_quotes") or []
+                           if _grounded_exact_text(combined_text, quote)]
+        event_date, _ = source_dates_from_verdict(s3_item)
+        date_verdict = source_grounded_date_verdict(
+            event_date=event_date, publication_dates=[],
+            buyer_cap_days=buyer_max_age_days or 365, evaluated_on=evaluation_date(),
+        )
+        # This is the original submitted resource, not a discovered alternate.
+        # A grounded model paraphrase needs no alternate-event marker.
+        if (date_verdict.verdict == "uncertain"
+            or _decision(s3_verdict, company_quality=company_quality,
+                         require_same_entity=require_ats_employer_identity) != "approve"
+            or not _has_grounded_source_event_date(s3_item, "\n".join(grounded_quotes))
+            or s3_item.get("verification_mode") != "source_grounded"
+            or s3_item.get("signal_id") != row["id"]
+            or s3_item.get("same_entity_check") != "pass"
+            or len(s3_verdict.get("signal_evaluations") or []) != 1
+            or s3_item.get("unsupported_parts") or s3_item.get("contradicting_quotes")
+            or not isinstance(s3_item.get("evidence_urls_used"), list)
+            or not s3_item.get("evidence_urls_used")
+            or not all(isinstance(cited, str) and _normalize_url(cited) == _normalize_url(fetch_source_url)
+                       for cited in s3_item["evidence_urls_used"])
+            or not grounded_quotes):
+            # Incomplete retained text cannot turn a failed read into a
+            # negative decision, or confer a guessed publication/event date.
+            return retained_fallback_original
     _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
     same_event_resolution = unavailable_source_resolution
     if unavailable_source_resolution is not None:

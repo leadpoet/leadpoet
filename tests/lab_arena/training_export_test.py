@@ -174,7 +174,7 @@ def test_prior_launched_judge_keeps_its_own_reviewer_runtime_identity():
     binding["lease_generation"] = 2
     result = assemble_example(**values)
     assert result["completeness"]["dimensions"]["source_identity"]
-    assert "reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
+    assert "prior_attempt_reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
 
 
 def test_failed_score_without_resource_summary_keeps_per_run_gap_attribution():

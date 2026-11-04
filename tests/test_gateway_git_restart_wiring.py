@@ -1064,28 +1064,66 @@ def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
     assert 'pkill -9 -f "/gateway/research_lab/worker_process[.]py"' not in script
 
 
+@pytest.mark.parametrize(
+    ("artifact_start_delay", "blocking_launch"),
+    [("0", False), ("1.1", False), ("0", True)],
+    ids=["immediate", "delayed-helper-start", "reject-blocking-launch"],
+)
 def test_gateway_offline_artifact_prepare_overlaps_release_and_fails_closed(
-    tmp_path: Path,
+    tmp_path: Path, artifact_start_delay: str, blocking_launch: bool,
 ) -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     helper_source = "\n\n".join(
         _shell_function_source(script, name)
         for name in (
             "wait_for_gateway_owned_process_group",
+            "cancel_gateway_owned_process_group",
             "start_gateway_offline_artifact_prepare",
             "wait_for_gateway_offline_artifact_prepare",
+            "cancel_gateway_offline_artifact_prepare",
         )
     )
+    if blocking_launch:
+        # A serialized launcher must fail the handshake, not satisfy the overlap
+        # assertions merely because both jobs eventually finish.
+        launch_marker = '  GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"'
+        assert helper_source.count(launch_marker) == 1
+        helper_source = helper_source.replace(
+            launch_marker,
+            launch_marker + '\n  wait "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"',
+        )
+    wait_for_marker = """wait_for_fake_marker() {
+  for _ in $(seq 1 100); do
+    if [ -e "$1" ]; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "Timed out waiting for fake marker: $1" >&2
+  return 91
+}
+"""
+    # Delay after the real launcher's process-group marker, as a loaded runner
+    # can do before exec reaches the helper. Always use the same fake ionice.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ionice = fake_bin / "ionice"
+    fake_ionice.write_text(
+        '#!/bin/bash\nset -euo pipefail\n'
+        'sleep "$FAKE_ARTIFACT_START_DELAY"\nshift 2\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_ionice.chmod(0o755)
     preflight_tree = tmp_path / "candidate"
     prepare_script = (
         preflight_tree / "gateway" / "tee" / "prepare_offline_enclave_dependencies.sh"
     )
     prepare_script.parent.mkdir(parents=True)
     prepare_script.write_text(
-        """#!/bin/bash
-set -euo pipefail
+        "#!/bin/bash\nset -euo pipefail\n" + wait_for_marker + """
 echo artifact-start >> "$CONCURRENCY_LOG"
-sleep "${FAKE_ARTIFACT_SECONDS}"
+touch "$FAKE_ARTIFACT_STARTED_MARKER"
+wait_for_fake_marker "$FAKE_RELEASE_STARTED_MARKER"
 echo artifact-end >> "$CONCURRENCY_LOG"
 echo artifact-ready
 exit "${FAKE_ARTIFACT_STATUS:-0}"
@@ -1098,20 +1136,33 @@ exit "${FAKE_ARTIFACT_STATUS:-0}"
     timing_log = tmp_path / "timing.log"
     concurrency_log = tmp_path / "concurrency.log"
     shutdown_marker = tmp_path / "shutdown"
+    artifact_started_marker = tmp_path / "artifact-started"
+    release_started_marker = tmp_path / "release-started"
+    environment = {
+        **os.environ,
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "CONCURRENCY_LOG": str(concurrency_log),
+        "FAKE_ARTIFACT_START_DELAY": artifact_start_delay,
+        "FAKE_ARTIFACT_STARTED_MARKER": str(artifact_started_marker),
+        "FAKE_RELEASE_STARTED_MARKER": str(release_started_marker),
+    }
     harness = f"""set -euo pipefail
 record_gateway_restart_timing() {{
   printf '%s:%s\\n' "$1" "${{2:-reached}}" >> "$TIMING_LOG"
 }}
 {helper_source}
+{wait_for_marker}
 GATEWAY_PREFLIGHT_TREE="$1"
 GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$2"
 GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="$3"
 GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
 TIMING_LOG="$4"
 SHUTDOWN_MARKER="$5"
+trap cancel_gateway_offline_artifact_prepare EXIT
 start_gateway_offline_artifact_prepare
 echo release-start >> "$CONCURRENCY_LOG"
-sleep "$FAKE_RELEASE_SECONDS"
+touch "$FAKE_RELEASE_STARTED_MARKER"
+wait_for_fake_marker "$FAKE_ARTIFACT_STARTED_MARKER"
 echo release-end >> "$CONCURRENCY_LOG"
 if wait_for_gateway_offline_artifact_prepare; then
   touch "$SHUTDOWN_MARKER"
@@ -1138,14 +1189,20 @@ fi
         check=False,
         capture_output=True,
         text=True,
-        timeout=4,
-        env={
-            **os.environ,
-            "CONCURRENCY_LOG": str(concurrency_log),
-            "FAKE_ARTIFACT_SECONDS": "1.0",
-            "FAKE_RELEASE_SECONDS": "1.0",
-        },
+        timeout=10,
+        env=environment,
     )
+    if blocking_launch:
+        assert success.returncode == 91, success.stderr
+        assert not shutdown_marker.exists()
+        assert not release_started_marker.exists()
+        assert concurrency_log.read_text(encoding="utf-8").splitlines() == [
+            "artifact-start"
+        ]
+        assert "Timed out waiting for fake marker" in artifact_log.read_text(
+            encoding="utf-8"
+        )
+        return
     assert success.returncode == 0, success.stderr
     concurrency_events = concurrency_log.read_text(encoding="utf-8").splitlines()
     assert concurrency_events.index("artifact-start") < concurrency_events.index(
@@ -1164,19 +1221,15 @@ fi
     shutdown_marker.unlink()
     timing_log.unlink()
     concurrency_log.unlink()
+    artifact_started_marker.unlink()
+    release_started_marker.unlink()
     failed = subprocess.run(
         command,
         check=False,
         capture_output=True,
         text=True,
-        timeout=3,
-        env={
-            **os.environ,
-            "CONCURRENCY_LOG": str(concurrency_log),
-            "FAKE_ARTIFACT_SECONDS": "0.05",
-            "FAKE_ARTIFACT_STATUS": "23",
-            "FAKE_RELEASE_SECONDS": "0.1",
-        },
+        timeout=10,
+        env={**environment, "FAKE_ARTIFACT_STATUS": "23"},
     )
     assert failed.returncode == 23
     assert not shutdown_marker.exists()

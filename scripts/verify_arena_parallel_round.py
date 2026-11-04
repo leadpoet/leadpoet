@@ -1198,8 +1198,16 @@ def _replay_score_route_ledger(
                 row.get("provider") == "deepline"
                 and row.get("funding_source") == "host"
                 and isinstance(doc, Mapping)
-                and doc.get("compatibility_version")
-                == scoring_provider_compat.COMPATIBILITY_VERSION
+                and (
+                    doc.get("compatibility_version")
+                    == scoring_provider_compat.COMPATIBILITY_VERSION
+                    or (
+                        doc.get("compatibility_version")
+                        == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+                        and row.get("operation_id") == "scrapingdog.scrape"
+                        and doc.get("adapter") == "generic_http_raw_html"
+                    )
+                )
                 and doc.get("effective_operation_id")
                 == scoring_provider_compat.EFFECTIVE_OPERATION_ID
                 and isinstance(doc.get("adapter"), str)

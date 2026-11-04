@@ -11,6 +11,71 @@ replay needs a separate explicit spending cap. Merge, scorer image selection and
 deployment need separate approval and belong to the coordinator. Do not overlap
 the in-progress industry verifier release. Keep both instruction files identical.
 
+## Scoped authorization: November 3 baseline judgment correction
+
+The user authorized superseding exactly the nine old-verifier November 3
+baseline judgments, positions 0-7 and 9. Migration618 retains each full original
+judgment in append-only supersession history, marks that comparison authority
+superseded, and queues native judging of the same saved executions. Preserve
+baseline ICP8, all miner judgments, executions, source, model/scorer policy,
+provider records, costs and signed historical reward authority. Clear only the
+nine source score projections and the current publication decision, and extend
+only judge/publication deadlines within the user’s three-hour correction window,
+ending before the November 4 baseline freezes at 00:30 UTC. Remove only the
+redundant full-ledger count/max scans that caused the first atomic attempt to
+time out; preserve indexed assignment billing checks and all source/history guards. Internal
+agents implement and test only. The coordinator owns independent review, merge,
+exact migration application, canonical release and deployed verification.
+
+## Scoped authorization: November 3 active Deepline filter pushdown
+
+The coordinator authorized exact migration616 to push only the implied round,
+provider, entry-kind and non-null call filters inside the existing V1/V2 OFFSET0
+fences, reusing validated index559. Preserve billing authority, latest-head,
+NULL/run/cursor semantics, frozen rules, scores, capture, costs and original data.
+Add no index, provider calls, timeout change, retry, dependency or unrelated work.
+Internal agents may implement, test and commit only. The coordinator owns
+independent review, push, merge, exact migration application and live verification.
+Internal agents must not change production or renew credentials.
+
+## Scoped authorization: November 3 verified display-brand composition
+
+The coordinator authorized the exact five-file --verified-display-brand runtime
+composition. Reuse the four-file homepage canonical-alias/native-denial repair
+and add only the approved 84463c66a company_evidence_investigator delta from its
+exact frozen source. Preserve the grading base, matching-host requirement, all
+other source bytes, process configuration, costs, deadlines and completed work.
+Internal agents may implement, test and commit only. The coordinator owns
+independent review, push, merge, image publication and production operations.
+
+## Scoped authorization: November 3 MyCHN checkpoint sixth
+
+The coordinator authorized exact migration612 to append one sixth judgment for
+sub-0df2d0295c950d907e094e258bf98905, stage2 ICP7, using the reviewed four-file
+runtime sha256:1b871e1c80e6d3c4095b14d73166dc5d37dde5f5002aa622583d4350b198fa4b.
+Keep the five failed attempts, completed company and signal judgments, costs,
+source, grading/cache identity, original deadlines and all other work unchanged.
+No automatic seventh, count reset, replay of completed work or new retry system is allowed.
+Internal agents implement and test only; the coordinator owns independent review,
+push, merge, exact committed migration application and live verification.
+
+## Scoped authorization: November 3 remaining-work recovery
+
+The user authorized one mixed-verifier exception: preserve completed November 3
+judgments, scores and costs; use the improved verifier only for unscored work.
+Review frozen originals 28594d902080fb5213f4344c09ffb531 and
+ba551886a9379aa4e00b6238567f211a with the bounded reviewer; admit only real passes.
+Recover baseline ICP 8 once after the confirmed identity-alias fix, preserving
+its five failed attempts and bills. After attempt six timed out, append one manual
+checkpoint-backed seventh using the two completed company judgments; permit no
+automatic eighth attempt and keep other jobs live.
+Keep sources, completed executions, deadlines, other rounds and published
+outcomes unchanged. The coordinator owns reviewed migrations, canonical release,
+resume and full dashboard verification. Internal agents implement and test only.
+No automatic approval, duplicate paid completed work or unrelated architecture.
+
+The coordinator also authorized one normal third execution for exactly the unfinished stage-2 ICPs 4, 5 and 6 of sub-f013f522a7c764e18df792e094e7b820; retain both expired attempts, all costs, the original $6 per-ICP and two-attempt call quotas, and permit no automatic fourth attempt. After the distinct November 3 G3 loss, the coordinator authorized one manual third for a4fe ICPs 2–9 and one manual fourth for these f013 ICPs 4–6, only after natural expiry, with original costs, sources, quotas and deadlines unchanged; no further automatic attempt.
+
 ## Scoped authorization: November 2 recovered Deepline training reader
 
 The user authorized the smallest fix for the confirmed omission of an existing
@@ -253,8 +318,8 @@ create recurring monitors is granted. Keep both instruction files identical.
 The user renewed this task on October 26. Continue researching and implementing
 an industry-fit improvement, compare all 167 fixed cases and independent
 controls, and preserve correct prior verdicts wherever possible. Do not stop
-because a candidate fails. Merge and deploy only after a rigorous improvement
-in accuracy and consistency is shown. The new, final OpenRouter allowance is
+because a candidate fails. Use the later October 27 net-improvement gate
+for deployment. The new, final OpenRouter allowance is
 at most $15 additional, including failed calls and reservations. Its immutable
 baseline and absolute limits are in the local approved budget artifact dated
 October 26. Do not spend other-provider credits in this phase. Preserve all
@@ -270,7 +335,7 @@ full 98 formerly unavailable and 69 prior-pass representative cases against
 original scoring and all coherent previous attempts. Use a simple general
 mechanism; no company exceptions, altered ICPs, fabricated evidence or release
 regressions. The user authorized implementation, safe merge and canonical
-deployment only after meaningful improvement in both error types is proven,
+deployment under the later October 27 net-improvement gate,
 with independent review and deployed-output verification. Preserve unrelated
 qualification, identity, supplier-role, billing, credentials, historical scores,
 published results, rewards, weights and concurrent work. Tests use isolated
@@ -1020,3 +1085,30 @@ recovery architecture, provider calls or credential renewal. The coordinator own
 independent review, exact image build/verification and push, safe merge, prospective
 scorer-default configuration and canonical rollout for newly frozen rounds.
 Preserve current committed round configurations and existing leased images.
+
+## Scoped authorization: November 3 closed-cost lookup performance
+
+The user authorized permanent fixes and deployment during the full November 3
+Arena watch. This scope covers one reviewed concurrent covering index for the
+unchanged closed-provider cost selectors, exact committed SQL through the existing
+verified RDS session bridge, and live query-plan and monitoring verification.
+Preserve selector definitions, billing records, accepted work, scoring, deadlines,
+privacy and rewards. Add no retry layer, dependency or service. Internal agents
+may test and review; the coordinator owns merge and production application and
+must preserve the other active task's runtime release ownership.
+
+## Scoped authorization: November 3 prospective verifier accuracy
+
+The user authorized narrow prospective verifier accuracy fixes and bounded
+organizer-funded tests. The current task budget is $16 total across all
+providers, including failed calls and unresolved reservations; the $0.50
+retrieval subcap is part of that total, not a new allowance. Preserve every
+previous charge and use the shared guarded task ledger. Preserve historical
+inputs, judgments, scores, rewards, frozen model policies and rejection rules.
+Keep PR981 numeric identity checks and the production release owner's work.
+Do not include the unproven PR929 wider-context experiment. Internal agents may
+implement, test and commit in this isolated checkout only; they must not push,
+merge, deploy, change production or renew credentials. The coordinator owns
+independent review and any later release after full native positive improvement,
+negative controls and the existing production owner's release handoff. Add no
+new judging system, dependency or unrelated architecture.

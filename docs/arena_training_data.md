@@ -129,6 +129,16 @@ are corroborating views; neither proves collection completeness.
 | Available intermediate state | Model messages/tool results plus optional diagnostic decision/log excerpts | Full broker-visible state is retained; optional decision/log excerpts are explicitly excluded from full-process proof |
 
 The input capture preserves the exact JSON value, not incidental file whitespace.
+The API admits two training-input captures at a time before they acquire a shared
+worker. Waiting captures use no worker. This bounds simultaneous privacy scans,
+hashing and compression while a second capture can progress if one storage call
+is slow. An admitted capture retains its permit until its worker finishes, even
+if its request task is cancelled. Provider calls retain their separate limit of
+32 within the shared 64-worker pool. After the body is read, a disconnect
+listener cancels capture work still waiting for either worker queue. Active
+capture workers finish before their permits return. Authorization, schema
+checks, stored bytes, privacy rules, client deadlines and existing retries stay
+unchanged.
 Request objects record a **planned** outbound request; dispatch receipts determine
 whether the provider was called. A `referenced` pointer is not proof of storage.
 The exporter must read and hash-check its object before it accepts it.
@@ -520,6 +530,11 @@ split and label, the missing-source yield, and a deterministic dataset version.
 Mixed eligible scorer image or policy cohorts fail dataset preparation. Use
 `--scorer-image-digest` and `--scorer-policy-hash` to select one exact cohort;
 analysis-only records from other cohorts do not block it.
+
+The November 3 preserved judgments keep their original grading image and policy
+for qualification records, cohort filters, and readiness reports. These tools
+use the exporter's verified preservation authority and selected score attempt.
+The export retains the current round configuration and the original verdicts.
 
 🔹 Training permission is not yet confirmed. Submission consent records only
 public rerun permission; confirm the terms before training on these records.

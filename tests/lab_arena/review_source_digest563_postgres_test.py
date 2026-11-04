@@ -23,6 +23,55 @@ from tests.postgres_migration_harness import SCRIPTS
 MIGRATION = SCRIPTS / "563-lab-arena-review-source-digest-reason.sql"
 PREIMAGE = "f8b5171ec7584721ae879a66e450136967e63a91e7a80c03ea9fb97e2d15c1d8"
 POSTIMAGE = "573ee0b15a4952e4d25e2943c79578e44993c5e8117d2fdcc2a208fbb623cba1"
+# This fixture ends at migration563; later error codes are covered by their
+# corresponding migration tests, including the current599 RPC contract.
+MIGRATION563_ERROR_CODES = frozenset({
+    'code_review_cost_unavailable',
+    'code_review_credential_echo',
+    'code_review_deadline_exceeded',
+    'code_review_preparation_unavailable',
+    'code_review_provider_authentication',
+    'code_review_provider_credit',
+    'code_review_provider_rate_limited',
+    'code_review_provider_request_rejected',
+    'code_review_provider_timeout',
+    'code_review_provider_unavailable',
+    'code_review_round_closed',
+    'code_review_source_digest_mismatch',
+    'code_review_source_size_mismatch',
+    'code_review_submission_ineligible',
+    'code_review_transport_error',
+    'harness_file_missing',
+    'harness_invalid',
+    'harness_too_large',
+    'review_context_limit_invalid',
+    'review_model_invalid',
+    'review_output_cannot_report_coverage',
+    'review_output_limit_invalid',
+    'review_response_invalid',
+    'review_source_empty',
+    'review_source_exceeds_context',
+    'review_source_incomplete',
+    'review_source_invalid',
+    'review_source_not_text',
+    'review_source_not_utf8',
+    'review_source_unreadable',
+    'source_archive_failed',
+    'source_archive_invalid',
+    'source_archive_too_large',
+    'source_archive_unsafe',
+    'source_contains_credentials',
+    'source_credentials_invalid',
+    'source_directory_missing',
+    'source_empty',
+    'source_entry_type_invalid',
+    'source_file_count_exceeded',
+    'source_git_automation_forbidden',
+    'source_license_invalid',
+    'source_path_invalid',
+    'source_unpacked_too_large',
+    'source_unreadable',
+})
 
 
 @pytest.fixture(scope="module")
@@ -75,13 +124,10 @@ def test_digest_error_fails_before_migration_then_settles_same_claim(context):
     assert row["code_review_doc"]["cost_microusd"] == 0
 
 
-@pytest.mark.parametrize("code", sorted(
-    code for code in code_review_policy.ERROR_CODES
-    if code != "code_review_research_unverified"
-))
+@pytest.mark.parametrize("code", sorted(MIGRATION563_ERROR_CODES))
 def test_every_canonical_error_code_persists_through_real_rpc(context, code):
     store, _ = context
-    assert len(code_review_policy.ERROR_CODES - {"code_review_research_unverified"}) == 45
+    assert len(MIGRATION563_ERROR_CODES) == 45
     submission, miner, token = _claimed(store, code)
     document = _document(code)
     assert store.finish_submission_review(

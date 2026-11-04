@@ -3,6 +3,7 @@
 import base64
 import copy
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -12,8 +13,12 @@ from tests.lab_arena.training_export_test import add_call, fixture
 
 
 def values_for(case):
-    # Source archive gzip metadata must be fixed for whole-export comparisons.
-    with patch("time.time", return_value=1_760_000_000):
+    # The whole-export hashes bind the original policy as well as gzip metadata.
+    # A new production model must not silently change this historical fixture.
+    policy = json.loads((Path(__file__).parents[1] / "fixtures" /
+                         "training_terminal_policy_6470d6bd8.json").read_text())
+    with patch("time.time", return_value=1_760_000_000), patch(
+            "lab_arena.scoring.build_scorer_policy", return_value=policy):
         values = fixture()
     add_call(values)
     rows = values["ledger_rows"]

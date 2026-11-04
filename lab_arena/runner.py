@@ -3926,28 +3926,32 @@ def _log_training_capture_failure(kind: str, exc: Exception) -> None:
 
 def _record_training_input(
     config: RunnerConfig, lease: Mapping[str, Any], lease_token: str,
-    document: Mapping[str, Any],
-) -> None:
-    """Best-effort input evidence; capture cannot change run/scoring results."""
+    document: Mapping[str, Any], *, max_attempts: int = 2,
+) -> Optional[bool]:
+    """Return True if stored, False if failed, or None if unavailable.
+
+    Input evidence cannot change run/scoring results.
+    """
     send = getattr(config.api, "training_input", None)
     if not callable(send):
         return
     try:
-        for attempt in range(2):
+        for attempt in range(max_attempts):
             try:
                 response = send(str(lease["run_id"]), lease_token, document)
             except Exception:
-                if attempt == 0:
+                if attempt + 1 < max_attempts:
                     continue
                 raise
             if not isinstance(response, Mapping) or response.get("status") != "stored":
                 raise RunnerError("training input capture rejected", http_status=getattr(response, "http_status", None))
-            break
+            return True
     except Exception as exc:
         try:
             _log_training_capture_failure("input", exc)
         except Exception:
             pass
+    return False
 
 
 def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any], lease_token: str, state: RunState) -> Dict[str, Any]:
@@ -3995,10 +3999,13 @@ class _ObservationJournal:
     """Best-effort serial uploads of bounded, immutable worker-only deltas."""
 
     FLUSH_SECONDS = 10.0
+    STOP_TIMEOUT_SECONDS = 30.0
+    FINAL_FLUSH_ATTEMPTS = 2
 
     def __init__(self, api: ArenaApiClient, lease: Mapping[str, Any], token: str, state: RunState) -> None:
         self.api, self.lease, self.token, self.state = api, lease, token, state
         self.stop_event = threading.Event()
+        self.stop_deadline: Optional[float] = None
         self.thread = threading.Thread(target=self._work, name="arena-observation-journal", daemon=True)
         self.number = 0
         self.previous_sha256: Optional[str] = None
@@ -4009,16 +4016,42 @@ class _ObservationJournal:
         self.pending: Optional[Tuple[dict, str, int, int, int, set[int]]] = None
 
     def start(self) -> None:
-        if (callable(getattr(self.api, "training_observation_segment", None))
+        if (not self.stop_event.is_set()
+                and callable(getattr(self.api, "training_observation_segment", None))
                 and isinstance(self.lease.get("claim_request_hash"), str)
                 and contracts.SHA256_RE.fullmatch(self.lease["claim_request_hash"])
                 and type(self.lease.get("lease_generation")) is int):
             self.thread.start()
 
     def stop(self) -> None:
+        # The same uploader owns the final delta and any ambiguous retry.
+        # An already admitted segment has its existing ten-second transport
+        # window; at most two further requests fit this fixed stop allowance.
+        if self.stop_deadline is None:
+            self.stop_deadline = time.monotonic() + self.STOP_TIMEOUT_SECONDS
         self.stop_event.set()
         if self.thread.ident is not None:
-            self.thread.join(0.05)
+            self.thread.join(max(0.0, self.stop_deadline - time.monotonic()))
+
+    def _flush_stopping(self) -> None:
+        for _ in range(self.FINAL_FLUSH_ATTEMPTS):
+            # Do not give a final segment a fresh lifetime after the stop
+            # allowance. A timed-out uploader may finish its immutable send,
+            # but cannot prepare another delta after the snapshot freezes.
+            if (not self.stop_event.is_set() or self.stop_deadline is None
+                    or self.stop_deadline - time.monotonic() < TRAINING_CAPTURE_TIMEOUT_SECONDS):
+                return
+            with self.state.lock:
+                if self.state.worker_observations_frozen:
+                    return
+            if self.pending is None and not self._prepare():
+                return
+            with self.state.lock:
+                if self.state.worker_observations_frozen:
+                    return
+            if self.stop_deadline - time.monotonic() < TRAINING_CAPTURE_TIMEOUT_SECONDS:
+                return
+            self._send_pending()
 
     def _prepare(self) -> bool:
         if self.number >= training_observations.MAX_SEGMENTS:
@@ -4082,6 +4115,15 @@ class _ObservationJournal:
         return True
 
     def _work(self) -> None:
+        try:
+            self._upload_loop()
+        finally:
+            try:
+                self._flush_stopping()
+            except Exception:
+                pass  # Capture faults cannot change completion or shutdown.
+
+    def _upload_loop(self) -> None:
         while not self.stop_event.wait(self.FLUSH_SECONDS):
             while not self.stop_event.is_set():
                 if self.pending is None:
@@ -4090,6 +4132,11 @@ class _ObservationJournal:
                             break
                     except Exception:
                         return  # Capture faults cannot stop the run.
+                if self.stop_event.is_set():
+                    break  # The bounded terminal flush owns this pending send.
+                with self.state.lock:
+                    if self.state.worker_observations_frozen:
+                        return
                 if not self._send_pending():
                     break  # Retry the exact same bytes at the next tick.
                 with self.state.lock:
@@ -4422,6 +4469,7 @@ class AssignmentExecutor:
         failure_detail: Any = ""
         provider_classification_ready = False
         output_document: Optional[Dict[str, Any]] = None
+        input_capture_stored: Optional[bool] = None
         result: Optional[runtime.SandboxResult] = None
         execution_diagnostic: Optional[Dict[str, Any]] = None
         checkpoint_transition: Optional[Dict[str, Any]] = None
@@ -4501,7 +4549,7 @@ class AssignmentExecutor:
                 # the authority for the same request after it crosses the socket.
                 extra_environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
-            _record_training_input(config, lease, lease_token, input_document)
+            input_capture_stored = _record_training_input(config, lease, lease_token, input_document)
             staged_agent_entrypoint = (
                 None
                 if scoring_run
@@ -4772,7 +4820,7 @@ class AssignmentExecutor:
                 and exc.launch_exit_code < 0
                 and not exc.launch_timed_out
                 and isinstance(exc.checkpoint_bytes, bytes)
-                and len(exc.checkpoint_bytes) <= runtime.MAX_OUTPUT_BYTES
+                and len(exc.checkpoint_bytes) <= scoring.MAX_SCORING_OUTPUT_BYTES
             ):
                 try:
                     checkpoint = scoring.scoring_output_from_bytes(exc.checkpoint_bytes)
@@ -4839,6 +4887,12 @@ class AssignmentExecutor:
                             },
                             "privacy": {"redacted": False, "redactions": []},
                         }, secrets=(state.lease_token,))
+            if input_capture_stored is False:
+                # Retry the exact retained runtime input once, while ordinary
+                # lease authorization still applies and before abandonment.
+                _record_training_input(
+                    config, lease, lease_token, input_document, max_attempts=1,
+                )
             if journal is not None:
                 try:
                     journal.stop()

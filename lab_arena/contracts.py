@@ -343,6 +343,28 @@ SCORE_TERMINAL_CAUSES = ("accepted", "credential_error", "judge_error", "judge_t
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
 INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "result_rejected", "provider_error", "judge_error", "judge_timeout"})
 
+# Why a run failed, one step finer than the terminal cause: which stage of the
+# run raised, and which class of error it was. Both already travel on the
+# completion request as ``failure_diagnostic`` (below) and are stored in the
+# result document; naming them here lets the telemetry boundary export them
+# too, so a repeated judge failure can be read without the database.
+FAILURE_DIAGNOSTIC_STAGES = (
+    "sandbox",
+    "sandbox_output",
+    "scoring_output",
+    "scorer",
+    "provider_call",
+)
+FAILURE_DIAGNOSTIC_ERROR_CLASSES = (
+    "judge_timeout",
+    "sandbox_output_error",
+    "missing_output",
+    "execution_output_invalid",
+    "scoring_output_invalid",
+    "judge_error",
+    "provider_unavailable",
+)
+
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
     "reservation",
@@ -382,7 +404,19 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def sha256_json(value: Any) -> str:
-    return sha256_bytes(canonical_json(value).encode("utf-8"))
+    # Joined training histories can be much larger than an individual request.
+    # Hash the same canonical bytes without materializing the whole document.
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=False, allow_nan=False)
+    try:
+        for chunk in encoder.iterencode(value):
+            digest.update(chunk.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ArenaContractError("value is not canonical JSON: %s" % exc) from exc
+    return "sha256:" + digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -450,9 +484,11 @@ PUBLICATION_LIMITS = StrictLimits(
     max_total_bytes=64 * 1_048_576,
 )
 # A completion can contain the judge's accepted 2 MiB scoring output. Keep one
-# small allowance for the signed request fields that wrap that output.
+# small allowance for the signed request fields that wrap that output, including
+# exactly two nesting levels for envelope.body.output. The output's own bound
+# remains PUBLICATION_LIMITS and is validated separately by the service.
 COMPLETION_REQUEST_LIMITS = StrictLimits(
-    max_depth=16,
+    max_depth=PUBLICATION_LIMITS.max_depth + 2,
     max_list_items=20_000,
     max_object_keys=512,
     max_string_bytes=65_536,
@@ -1611,30 +1647,8 @@ RUN_RESULT_FIELDS = (
         "object",
         required=False,
         fields=(
-            F(
-                "stage",
-                "str",
-                choices=(
-                    "sandbox",
-                    "sandbox_output",
-                    "scoring_output",
-                    "scorer",
-                    "provider_call",
-                ),
-            ),
-            F(
-                "error_class",
-                "str",
-                choices=(
-                    "judge_timeout",
-                    "sandbox_output_error",
-                    "missing_output",
-                    "execution_output_invalid",
-                    "scoring_output_invalid",
-                    "judge_error",
-                    "provider_unavailable",
-                ),
-            ),
+            F("stage", "str", choices=FAILURE_DIAGNOSTIC_STAGES),
+            F("error_class", "str", choices=FAILURE_DIAGNOSTIC_ERROR_CLASSES),
             F(
                 "reason",
                 "str",

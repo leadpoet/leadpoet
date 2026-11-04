@@ -24,6 +24,7 @@ from gateway.observability.otel_bootstrap import (
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
     ARENA_TOOL_NONE,
+    ARENA_MODEL_NONE,
     ARENA_RUN_SCOPE,
     ARENA_REVIEW_SCOPE,
     ARENA_RUNTIME_SCOPE,
@@ -486,6 +487,44 @@ def test_provider_span_names_the_deepline_tool():
     assert span.attributes["arena.operation"] == "deepline.execute"
 
 
+def test_provider_model_attribute_uses_the_exact_export_envelope():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider("openrouter", "openrouter.chat", "ok",
+                             model="deepseek/deepseek-v4.1-flash-1017")
+    recorder.record_provider("deepline", "exa.search", "ok")
+    model_span, other_span = exp.get_finished_spans()
+    assert set(model_span.attributes) == PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST
+    assert model_span.attributes["arena.model"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert other_span.attributes["arena.model"] == ARENA_MODEL_NONE
+
+
+@pytest.mark.parametrize("provider,operation,model", [
+    ("openrouter", "openrouter.chat", "ada@example.com"),
+    ("openrouter", "openrouter.chat", "private prompt text"),
+    ("deepline", "exa.search", "deepseek/deepseek-v4.1-flash-1017"),
+])
+def test_invalid_provider_model_attributes_are_dropped(provider, operation, model):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(provider, operation, "ok", model=model)
+    assert exp.get_finished_spans() == ()
+
+
+def test_service_model_projection_requires_trusted_membership_and_matching_api():
+    from lab_arena.service import _telemetry_model
+
+    model = "deepseek/deepseek-v4.1-flash-1017"
+    registry = {"approved_routes": [{"model_id": model, "api": "openrouter.chat"}]}
+    assert _telemetry_model("openrouter.chat", {"model": model}, registry=registry) == model
+    assert _telemetry_model("openrouter.responses", {"model": model}, registry=registry) == telemetry.NO_MODEL
+    assert _telemetry_model("openrouter.chat", {"model": model}) == telemetry.NO_MODEL
+    assert _telemetry_model("deepline.execute", {"model": model},
+                            price_table={"models": {model: {}}}) == telemetry.NO_MODEL
+    assert _telemetry_model("unknown", {"model": model},
+                            price_table={"models": {model: {}}}) == telemetry.NO_MODEL
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -821,7 +860,57 @@ def test_run_span_names_the_kind_and_the_terminal_cause():
         "arena.run_kind": "execute",
         "arena.terminal_cause": "budget_exhausted",
         "arena.outcome": "failed",
+        "arena.failure_stage": "-",
+        "arena.failure_error_class": "-",
     }
+
+
+def test_run_span_carries_the_runner_failure_diagnostic():
+    """A repeated judge failure must say which stage raised and why."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="provider_call",
+        failure_error_class="provider_unavailable",
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert dict(span.attributes) == {
+        "arena.run_kind": "score",
+        "arena.terminal_cause": "judge_error",
+        "arena.outcome": "failed",
+        "arena.failure_stage": "provider_call",
+        "arena.failure_error_class": "provider_unavailable",
+    }
+
+
+def test_run_span_with_a_diagnostic_outside_the_vocabulary_is_dropped_whole():
+    """The envelope stays frozen: a computed diagnostic never escapes."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error", failure_stage="scrapingdog timed out",
+    )
+    assert exp.get_finished_spans() == ()
+
+
+def test_every_contract_failure_diagnostic_value_is_admitted():
+    """A diagnostic the contract can produce must be one the validator admits."""
+    from lab_arena import contracts
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    for stage in contracts.FAILURE_DIAGNOSTIC_STAGES:
+        for error_class in contracts.FAILURE_DIAGNOSTIC_ERROR_CLASSES:
+            recorder.record_run(
+                "score", "judge_error",
+                failure_stage=stage, failure_error_class=error_class,
+            )
+    assert len(exp.get_finished_spans()) == (
+        len(contracts.FAILURE_DIAGNOSTIC_STAGES)
+        * len(contracts.FAILURE_DIAGNOSTIC_ERROR_CLASSES)
+    )
 
 
 def test_every_contract_terminal_cause_is_admitted():

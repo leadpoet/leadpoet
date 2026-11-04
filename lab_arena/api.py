@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from functools import partial
 from typing import Any, Optional
 
 import anyio
+from anyio import to_thread
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -20,6 +22,34 @@ from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
 
 MAX_JSON_BODY_BYTES = 1_048_576
+
+# Provider calls hold their worker for the whole upstream model call, so they
+# are bounded separately from every other route.
+PROVIDER_WORKER_LIMIT = 32
+# Workers that must stay available to the non-provider routes while the
+# provider leg is at its limit. AnyIO's default pool is 40, which would leave
+# a reserve of 8; measured non-provider demand during a provider burst reaches
+# 10-20 concurrent workers, so the reserve is sized explicitly instead of
+# being whatever the default pool happens to leave over.
+NON_PROVIDER_WORKER_RESERVE = 32
+# Full input snapshots do CPU-heavy privacy, hashing and compression work.
+# Two captures can progress when one storage call is slow, without starting
+# every judge's snapshot work at once.
+TRAINING_INPUT_WORKER_LIMIT = 2
+
+
+def _ensure_worker_pool() -> None:
+    """Widen the shared worker pool so the non-provider reserve is real.
+
+    Must be called from an async context (AnyIO 3 and 4 both require one to
+    resolve the default limiter). Never shrinks a pool that is already large
+    enough.
+    """
+
+    limiter = to_thread.current_default_thread_limiter()
+    wanted = PROVIDER_WORKER_LIMIT + NON_PROVIDER_WORKER_RESERVE
+    if limiter.total_tokens < wanted:
+        limiter.total_tokens = wanted
 
 
 def _refuse_declared_oversize(request: Request, limit: int) -> None:
@@ -76,15 +106,27 @@ def _lease_header(value: Optional[str]) -> str:
 def create_app(service: ArenaService) -> FastAPI:
     app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
+    # Create this in an async context for AnyIO 3 as well as AnyIO 4. Each app
+    # admits at most PROVIDER_WORKER_LIMIT provider calls and keeps
+    # NON_PROVIDER_WORKER_RESERVE workers for every other route.
+    provider_limiter: Optional[anyio.CapacityLimiter] = None
+    training_input_limiter: Optional[anyio.CapacityLimiter] = None
+
     async def no_store_public_call(
-        call: Any, *args: Any, **kwargs: Any
+        call: Any, *args: Any, _worker_limiter: Optional[anyio.CapacityLimiter] = None,
+        **kwargs: Any,
     ) -> JSONResponse:
         headers = {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         }
         try:
-            content = await run_in_threadpool(call, *args, **kwargs)
+            if _worker_limiter is None:
+                content = await run_in_threadpool(call, *args, **kwargs)
+            else:
+                content = await to_thread.run_sync(
+                    partial(call, *args, **kwargs), limiter=_worker_limiter,
+                )
         except ServiceError as exc:
             telemetry.note_denial(exc.code)
             if exc.code == "validator_events_rate_limited":
@@ -127,7 +169,16 @@ def create_app(service: ArenaService) -> FastAPI:
                 "even if upload or validation fails. This hotkey has already used its attempt. "
                 "The last accepted submission is unchanged."
             )
-        headers = {"Retry-After": "2"} if exc.code == "round_opening" else None
+        admission_route = getattr(request.scope.get("route"), "path", None) in {
+            "/arena/v1/submissions/presign",
+            "/arena/v1/submissions/{submission_id}/finalize",
+        }
+        headers = None
+        if exc.code == "round_opening":
+            headers = {"Retry-After": "2"}
+        elif exc.status == 503 and admission_route:
+            # Pace the existing signed retry below the six-per-minute intake limit.
+            headers = {"Retry-After": "15"}
         return JSONResponse(status_code=exc.status, content=content, headers=headers)
 
     @app.exception_handler(ArenaContractError)
@@ -257,6 +308,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.post("/arena/v1/runs/{run_id}/provider")
     async def provider(run_id: str, request: Request, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
+        nonlocal provider_limiter
         lease_token = _lease_header(x_lab_arena_lease)
         # Decode within the largest admitted provider frame. The service then
         # applies the operation-specific and frozen-policy bounds before spend.
@@ -265,13 +317,20 @@ def create_app(service: ArenaService) -> FastAPI:
         def disconnected() -> bool:
             return bool(anyio.from_thread.run(request.is_disconnected))
 
-        return await run_in_threadpool(
-            service.handle_provider,
-            run_id,
-            lease_token,
-            frame,
-            disconnected,
-        )
+        def call_provider() -> Any:
+            # A request can disconnect while waiting for either limiter. Check
+            # before entering any service/provider reservation path.
+            if disconnected():
+                raise HTTPException(status_code=499, detail="client disconnected")
+            return service.handle_provider(run_id, lease_token, frame, disconnected)
+
+        if provider_limiter is None:
+            _ensure_worker_pool()
+            provider_limiter = anyio.CapacityLimiter(PROVIDER_WORKER_LIMIT)
+        # Acquire before the shared worker token: queued providers consume no
+        # workers, and these calls still count against the shared pool total.
+        async with provider_limiter:
+            return await run_in_threadpool(call_provider)
 
     @app.post("/arena/v1/runs/{run_id}/signal-judgment")
     async def signal_judgment(
@@ -314,6 +373,7 @@ def create_app(service: ArenaService) -> FastAPI:
         run_id: str, request: Request,
         x_lab_arena_lease: Optional[str] = Header(default=None),
     ) -> JSONResponse:
+        nonlocal training_input_limiter
         lease_token = _lease_header(x_lab_arena_lease)
         document = await _read_json(request, limits=contracts.StrictLimits(
             max_depth=64, max_list_items=250_000, max_object_keys=250_000,
@@ -324,9 +384,51 @@ def create_app(service: ArenaService) -> FastAPI:
             # as competition amounts; all structural/finite limits still apply.
             max_abs_int=None,
         ))
-        return await no_store_public_call(
-            service.handle_training_input, run_id, lease_token, document,
-        )
+
+        if training_input_limiter is None:
+            _ensure_worker_pool()
+            training_input_limiter = anyio.CapacityLimiter(TRAINING_INPUT_WORKER_LIMIT)
+        response: Optional[JSONResponse] = None
+        error: Optional[BaseException] = None
+        disconnected = False
+
+        async def capture() -> None:
+            nonlocal response, error
+            try:
+                # Use the existing two-input bound directly for dispatch.
+                # Unrelated default-worker demand cannot starve this lane.
+                response = await no_store_public_call(
+                    service.handle_training_input, run_id, lease_token, document,
+                    _worker_limiter=training_input_limiter,
+                )
+            except BaseException as exc:
+                # Preserve the original exception without a group envelope.
+                error = exc
+            finally:
+                group.cancel_scope.cancel()
+
+        async def watch_disconnect() -> None:
+            nonlocal disconnected
+            # The body is fully consumed. Keep receiving while queued so a
+            # paused HTTP transport can observe disconnect, without polling.
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    disconnected = True
+                    group.cancel_scope.cancel()
+                    return
+
+        # Cancellation removes queued work. An admitted synchronous capture
+        # remains shielded by the thread pool and retains its permit to finish.
+        async with anyio.create_task_group() as group:
+            group.start_soon(watch_disconnect)
+            group.start_soon(capture)
+        if disconnected:
+            raise HTTPException(status_code=499, detail="client disconnected")
+        if error is not None:
+            raise error
+        assert response is not None
+        return response
 
     @app.head("/arena/v1/runs/{run_id}/training-observations")
     async def authorize_training_observations(
@@ -437,5 +539,9 @@ def create_app(service: ArenaService) -> FastAPI:
         if not isinstance(body, dict) or str(body.get("run_id") or "") != run_id:
             raise HTTPException(status_code=400, detail="path run id does not match body")
         return await run_in_threadpool(service.handle_complete, envelope)
+
+    # Size the pool at startup where the host runs lifespan events; the
+    # provider route repeats it for hosts and test transports that do not.
+    app.router.add_event_handler("startup", _ensure_worker_pool)
 
     return app

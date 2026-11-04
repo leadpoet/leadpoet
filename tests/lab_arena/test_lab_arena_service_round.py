@@ -20,6 +20,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -40,6 +41,7 @@ from lab_arena.store import (
 )
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena.icp_fixtures import daily_icps
+from tests.lab_arena.test_lab_arena_runner import FakeExportImageCache
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_PROVIDER_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
@@ -292,6 +294,11 @@ PRICED_MODELS = (
 
 def price_table(models=PRICED_MODELS):
     rows = {model: {"prompt": "0.00000015", "completion": "0.0000006", "request": "0", "image": "0", "web_search": "0", "internal_reasoning": "0"} for model in models}
+    # Native Sonar search is charged without an explicit web-search tool.
+    # Keep this controlled catalog admissible for the real broker boundary.
+    for model in ("perplexity/sonar", "perplexity/sonar-pro"):
+        if model in rows:
+            rows[model]["web_search"] = "0.005"
     return br.validate_price_table({"schema_version": br.PRICE_TABLE_SCHEMA_VERSION, "fetched_at": "2026-09-02T00:00:00Z", "source": br.OPENROUTER_MODELS_URL, "models": rows})
 
 
@@ -774,7 +781,12 @@ class Harness:
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
         kp = keypair("svc-runner-" + ["alpha", "beta", "gamma"][index])
-        cache = rn.ImageCache(self.tmp / ("images-%d" % index), lambda reference, digest, target: (target / "rootfs").mkdir())
+        cache = FakeExportImageCache(
+            self.tmp / ("images-%d" % index),
+            lambda reference, digest, target: (target / "rootfs").mkdir(),
+            # This fixture exports empty roots, not production-sized images.
+            max_bytes=1024 * 1024,
+        )
         api = self.api_factory() if self.api_factory else InProcessApi(self.service)
         source_cache = rn.SourceCache(
             self.tmp / ("sources-%d" % index),
@@ -3227,7 +3239,7 @@ def test_rounds_overlap_and_every_request_names_its_round(isolated_lifecycle_con
         claim("arena-2099-01-01")
     assert bad_claim.value.code == "round_unknown"
 
-    cache = rn.ImageCache(
+    cache = FakeExportImageCache(
         harness.tmp / "images-follower",
         lambda reference, digest, target: (target / "rootfs").mkdir(),
     )
@@ -4267,3 +4279,23 @@ def test_current_sandbox_still_resolves_the_scorer_after_construction(monkeypatc
                         "deterministic_scorer", replacement)
     assert sandbox._score_companies(["company"], {"icp_id": "control"}) is rows
     assert calls == [(["company"], {"icp_id": "control"}, False)]
+
+
+def test_empty_image_round_fixture_does_not_require_physical_export_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    harness = object.__new__(Harness)
+    harness.tmp = tmp_path
+    harness.round_id = "arena-fixture-disk"
+    harness.api_factory = lambda: SimpleNamespace(source=lambda *_args: b"")
+    harness.sandbox = object()
+    harness.clock = FakeClock(datetime(2026, 9, 1, tzinfo=timezone.utc))
+
+    instance = harness.runner(0)
+    with instance._config.image_cache.acquire(SCORER_IMAGE_DIGEST, SCORER_IMAGE_REFERENCE) as rootfs:
+        assert rootfs.is_dir()
+        assert list(rootfs.iterdir()) == []
+
+    exports = []
+    with pytest.raises(rn.RunnerError, match="insufficient disk space for image export"):
+        rn.ImageCache(tmp_path / "real-image-guard", lambda *_args: exports.append(True))
+    assert exports == []

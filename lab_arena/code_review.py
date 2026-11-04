@@ -20,12 +20,17 @@ from lab_arena import contracts, source_bundle
 
 
 DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5.5"
-# Exact public catalog id -> canonical_slug, verified 2026-10-19:
+FALLBACK_REVIEW_MODEL = "openai/gpt-6.1-sol"
+FALLBACK_CONTEXT_WINDOW_TOKENS = 1_050_000
+FALLBACK_MAX_PROMPT_TOKENS = 922_000
+# Exact public catalog id -> canonical_slug, verified 2026-10-19 (Claude)
+# and 2026-11-02 (Sol):
 # https://openrouter.ai/api/v1/models?q=claude-sonnet-5.5
 # Router endpoint metadata may report this canonical identity rather than the
 # requested id. No other dates, suffixes, or model families are interchangeable.
 _REVIEW_MODEL_CANONICAL_SLUGS = {
     DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5.5-20260928",
+    FALLBACK_REVIEW_MODEL: "openai/gpt-6.1-sol-20260929",
     # Preserve validation for prepared reviews that selected the old model.
     "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
@@ -251,6 +256,22 @@ reject a model merely because it is simple, low quality, unusual, knows the
 public scoring criteria, or could fail at runtime. Infer intent from data flow
 and context rather than isolated words.
 
+For fabricated company facts, trace the reachable entrypoint, active defaults,
+cross-file helpers, and final or recovery-checkpoint output. An ICP describes
+what is requested; it is not evidence about a company. A search filter,
+tentative candidate label, or missing-data fallback is allowed when it is not
+reported as an established company fact, or when independent evidence must
+confirm the fact before any output containing it can be returned. Do not
+reject isolated fallback syntax, unused code, or a valid normalization of a
+supported fact. Conversely, substituting the requested country, stage, or
+industry for an unknown company fact and emitting it without a required
+independent check is fabricated_evidence. A later competition judge is not
+that check. Neither is optional verification that can be skipped, or a check
+that only compares the substituted value with the same ICP. Cite the source
+path that establishes both the unsupported substitution and its reachable
+output; do not infer a violation merely from a missing citation. Apply this
+same behavior test to every submission, regardless of author or prior review.
+
 The user message is a JSON document whose submission_files array is the entire
 validated archive. Inspect every item and return each supplied path exactly
 once, in the supplied order, in reviewed_files. A reject verdict requires at
@@ -388,6 +409,9 @@ def prepare_request(
         "transforms": [],
         "plugins": [{"id": "context-compression", "enabled": False}],
         "provider": {
+            # Admission chooses one approved full-source route per durable
+            # claim. Provider-internal fallback must not hide extra attempts.
+            "only": ["azure" if model == FALLBACK_REVIEW_MODEL else "google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
@@ -408,7 +432,10 @@ def prepare_request(
     )
     if max_output_tokens >= context_window_tokens:
         raise CodeReviewError("review_source_exceeds_context")
-    requires_context_integrity = input_bound + max_output_tokens > context_window_tokens
+    requires_context_integrity = (
+        model == FALLBACK_REVIEW_MODEL
+        or input_bound + max_output_tokens > context_window_tokens
+    )
 
     minimum_coverage_response = {
         "verdict": "pass",
@@ -488,6 +515,8 @@ def context_integrity_failure(
         return "selected_count"
     if selected[0]["model"] not in allowed_endpoint_models:
         return "selected_model"
+    if requested_model == FALLBACK_REVIEW_MODEL and selected[0]["provider"] != "Azure":
+        return "selected_provider"
     usage = response.get("usage")
     if not isinstance(usage, Mapping):
         return "usage_missing"
@@ -495,6 +524,8 @@ def context_integrity_failure(
     if type(prompt_tokens) is not int or prompt_tokens <= 0:
         return "prompt_tokens"
     if prompt_tokens + prepared.parameters["max_tokens"] > prepared.context_window_tokens:
+        return "context_budget"
+    if requested_model == FALLBACK_REVIEW_MODEL and prompt_tokens > FALLBACK_MAX_PROMPT_TOKENS:
         return "context_budget"
     return None
 
@@ -739,6 +770,9 @@ __all__ = [
     "DEFAULT_CONTEXT_WINDOW_TOKENS",
     "DEFAULT_MAX_OUTPUT_TOKENS",
     "DEFAULT_REVIEW_MODEL",
+    "FALLBACK_REVIEW_MODEL",
+    "FALLBACK_CONTEXT_WINDOW_TOKENS",
+    "FALLBACK_MAX_PROMPT_TOKENS",
     "RESEARCH_POLICY_ID",
     "RESEARCH_POLICY_HASH",
     "RESEARCH_REVIEWER_VERSION",

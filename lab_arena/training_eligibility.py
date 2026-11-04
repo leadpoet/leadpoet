@@ -154,7 +154,8 @@ def _verified_provider_output_fault(example, call, *, worker_proofs=None):
                 or not set(call.get("response_privacy_redactions") or []) <= {"hidden_reasoning"}):
             return False
         state = training_thinking.attempt_coverage(
-            call, example.get("role", "miner"), baseline_reasoning.for_example(example).get("reasoning_route_registry"))
+            call, example.get("role", "miner"), baseline_reasoning.for_example(example).get("reasoning_route_registry"),
+            worker_proofs=worker_proofs)
         if not state["route_reviewed"] or not state["provider_route_verified"]:
             return False
         try:
@@ -295,6 +296,11 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 try:
                     candidate = training_steps._candidate(example, call, worker_proofs=worker_proofs)
                 except ValueError as exc:
+                    if (new_policy and str(exc) == "response_privacy_nonexact"
+                            and training_thinking.verified_private_explicit_truncation(
+                                example, call, worker_proofs=worker_proofs)):
+                        reasoning_counts["truncated_model_calls"] += 1
+                        continue
                     if new_policy and _verified_provider_output_fault(example, call, worker_proofs=worker_proofs):
                         run_reasons.append("provider_output_untrainable")
                         continue
@@ -307,7 +313,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     # consume one incomplete ICP without excusing bad proof.
                     if str(exc) == "response_not_complete":
                         state = training_thinking.attempt_coverage(
-                            call, example.get("role", "miner"), registry)
+                            call, example.get("role", "miner"), registry, worker_proofs=worker_proofs)
                         if (state["returned"] == "truncated" and state["route_reviewed"]
                                 and state["provider_route_verified"]):
                             reasoning_counts["truncated_model_calls"] += 1
@@ -319,7 +325,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 delivered = training_thinking._delivered_response(call, digest)
                 full_segments, status = training_thinking.full_text_segments(
                     {**call, "response": delivered, "response_sha256": digest},
-                    example["role"], registry)
+                    example["role"], registry, worker_proofs=worker_proofs)
                 if not status["route_reviewed"] or not status["provider_route_verified"]:
                     run_reasons.append("full_thinking_route_unverified")
                     continue

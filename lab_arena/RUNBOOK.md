@@ -68,8 +68,8 @@ one submission. Public round data shows verified reasoning only for runs that
 pass the training check, so the site needs this private aggregate.
 
 Migration `593-lab-arena-capture-summary-reader.sql` adds the NOLOGIN role
-`leadpoet_capture_reader` with a 60 s role statement timeout and no table
-privileges. It may execute one SECURITY DEFINER function,
+`leadpoet_capture_reader` with a 60 s role statement timeout and no explicit
+table grants. Its explicit EXECUTE grant is one SECURITY DEFINER function,
 `lab_arena_capture_summary_v1(p_round_id, p_submission_id)`. The function
 returns one row of counts for the submission's execute runs: runs, ICP
 positions, completed OpenRouter calls, calls whose saved body reports reasoning
@@ -86,13 +86,60 @@ These provider-reported counts do not prove export completeness or training
 eligibility. The reader does not run the exporter's privacy or structure
 sanitizer.
 
-To enable it:
+Existing database `PUBLIC` grants also apply to this role. `NOINHERIT` does not
+remove them, and revoking a grant from the reader cannot override `PUBLIC`.
+Review and record that effective surface; do not revoke unrelated shared grants
+as part of this rollout. The distinct opaque reader key is restricted at nginx
+to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 after
+the additive rollout below), with JSON
+arguments in the body. Other methods, paths, query strings, non-public schema
+profiles and method/path override headers return 403. Explicit `public` profiles
+are allowed. Both the normalized URI and original request target must match.
+This is an HTTP boundary, not a claim of database-level one-function isolation.
+The backend must remain loopback-only and its internal role JWT must remain
+private (`deploy/aws/subnet-api/README.md`).
+
+### Additive v2 usage and model mix
+
+Migration `598-lab-arena-capture-summary-v2.sql` adds
+`lab_arena_capture_summary_v2(p_round_id TEXT, p_submission_id TEXT)`.
+It leaves v1 (including migration 595's called-ICP selection) unchanged and
+uses the same reader role and key. Deploy the renderer's exact v2 POST allowlist
+along with the migration; v1 remains available while the website migrates.
+No new authenticator membership, environment setting or credential is needed.
+
+The response retains every v1 column and adds `input_tokens BIGINT`,
+`output_tokens BIGINT`, `cached_input_tokens BIGINT`, `token_calls INTEGER`,
+and `models JSONB`. Token totals use nonnegative whole numbers only, with up to
+19 digits. Missing totals and BIGINT overflow return NULL; reported zero remains
+zero. `token_calls` counts calls with both input and output usage. Prefer the
+first valid value in prompt/input, completion/output, and prompt/input cached
+field order. Output tokens include reported reasoning; nothing is subtracted.
+
+`models` contains only `model`, `calls`, `input_tokens`, `output_tokens`, and
+`reasoning_tokens`, sorted by call count descending and model name for ties.
+Names come only from the response's model field and must match
+`^[A-Za-z0-9.\_:/@+-]{1,200}$`; invalid or absent names become `unknown`.
+The array has at most 50 entries, with excess models combined into `other`.
+No cost attribution, request/response body, output, hotkey or credential is returned.
+
+Apply the exact committed migration through the same owner path as 593/595,
+read back the definition and permissions, and verify v1/v2 parity on retained
+baseline and miner submissions. Preserve PUBLIC privileges; verify the opaque
+key denies all routes except the two canonical POSTs. To roll back v2, remove
+only its allowlist route and revoke its EXECUTE from `leadpoet_capture_reader`;
+v1 and the existing reader key remain unchanged.
+
+To enable the original v1 reader:
 
 1. Apply 593 through the configured repository migration helper. It is
    idempotent and changes no stored row, table ACL or existing function. It
    grants the role to a role named `authenticator` only if one exists.
-2. Grant the role to the exact reviewed RDS authenticator, then rerun the
-   read-only review queries in `deploy/aws/subnet-api/README.md`:
+2. Review direct, inherited and `PUBLIC` privileges with the read-only queries
+   in `deploy/aws/subnet-api/README.md`. Verify the reader-only HTTP restriction,
+   private backend and exact summary function before granting the role to the
+   reviewed RDS authenticator. A stopped permission review is not permission to
+   activate the key. Do not rerun 593 after an unknown commit without readback.
 
    ```sql
    GRANT leadpoet_capture_reader TO <reviewed_authenticator>
@@ -109,6 +156,8 @@ To enable it:
 5. Verify with the new key: `POST /rest/v1/rpc/lab_arena_capture_summary_v1`
    with `{"p_round_id": ..., "p_submission_id": ...}` returns one row, and a
    table read such as `GET /rest/v1/lab_arena_ledger?limit=1` returns 403.
+   Prove other methods, aliases and a catalog-confirmed harmless PUBLIC RPC
+   are denied. Never invoke a mutating legacy RPC to test the boundary.
 
 Rollback: remove `capture_reader_key` from the renderer input and restart the
 pair, which revokes the key. To also close the database path, run
@@ -529,6 +578,30 @@ admission/transport interface and scorer checkpoint/output IO. Unknown source
 shapes fail the build. The tool
 checks the actual added image layer and unchanged process configuration.
 For already separated graders, the grading file remains byte-identical.
+
+For the reviewed native Exa `CRAWL_HTTP_403` target-denial diagnostic, build and
+verify with `--intent-target-denial`. This exclusive mode adds only that exact
+403 alias to the two frozen intent retrieval/finality allowlists. It copies no
+current runtime package or other grader source. Unknown or partly repaired
+module pairs fail closed. Register the verified image through the existing
+reviewer-runtime command only after the gateway and each executing validator
+have the matching competition validator. Both hosts recheck retained source
+traces; an older host can reject the corrected runtime's terminal company judgment.
+New leases record the actual repair runtime separately;
+the frozen grading/cache identity, prompts, evidence criteria and score formula
+stay unchanged. Accepted work, existing leases, costs and deadlines stay unchanged.
+
+For the reviewed old-homepage LinkedIn vanity repair, build and verify with
+`--homepage-profile-alias`. This exclusive mode overlays exactly four frozen
+modules: the two native target-denial files above and the two exact canonical
+profile lookup/validation files. It retains both target-denial corrections,
+copies no current runtime package and rejects unknown or partial source pairs.
+The old homepage URL must receive its own authoritative canonical response;
+a prior reply for the current profile cannot be relabeled. Retain the matching
+gateway and executing-validator target-denial consumers required above. The
+identity receipt is compatible with the existing f69461adb host; this alias
+repair does not require a second host restart.
+The grading image, cache identity, prior leases and completed judgments stay fixed.
 
 For a frozen grader whose unresolved semantic-review return bypasses its
 completed-investigation settlement, explicitly add

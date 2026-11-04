@@ -51,7 +51,7 @@ def _exact(value, *, response=False, worker_proofs=None):
     return _exact_stateless(value, response=response)
 
 
-def _exact_stateless(value, *, response=False):
+def _exact_stateless(value, *, response=False, clean_text_digests=None):
     def comparable(item):
         if isinstance(item, dict):
             return {key: comparable(child) for key, child in item.items()
@@ -75,7 +75,8 @@ def _exact_stateless(value, *, response=False):
                     if field in msg and (msg[field] is None or msg[field] == '' or field == 'reasoning_details' and msg[field] == []):
                         msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
-    sanitized, redactions = training_capture.sanitize_training_value(value)
+    sanitized, redactions = training_capture.sanitize_training_value(
+        value, clean_text_digests=clean_text_digests)
     # A provider can return the marker literally. Callers verify capture and
     # receipt redaction flags plus request/response hashes separately.
     return not removed and not redactions and clean == value and sanitized == value
@@ -113,6 +114,8 @@ def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_
     _require(isinstance(messages, list) and messages, 'input_shape_unsupported')
     pending = set()
     seen, malformed_ids = set(), set()
+    # Keep the existing current-tool shape evaluation at this point. Only its
+    # membership test against historical failed calls is removed below.
     declared = [(tool.get('function') or {}).get('name') for tool in tools
                 if isinstance(tool, dict) and tool.get('type') == 'function']
     for msg in messages:
@@ -152,8 +155,9 @@ def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_
                     if allow_tool_error_history:
                         _require(identifier not in malformed_ids, 'tool_context_unresolved')
                         if malformed:
-                            _require(identifier not in seen and function['name'] in declared,
-                                     'tool_context_unresolved')
+                            # Current declarations govern new targets, not
+                            # closed failed calls retained from earlier turns.
+                            _require(identifier not in seen, 'tool_context_unresolved')
                             malformed_ids.add(identifier)
                     seen.add(identifier)
                 pending = {item['id'] for item in msg['tool_calls']}
@@ -187,8 +191,10 @@ def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_hi
         return
     pending = {}
     seen, malformed_ids = set(), set()
-    declared = (_response_tool_definitions({'input': value, 'tools': list(tools)})
-                if allow_tool_error_history else {})
+    if allow_tool_error_history:
+        # Retain declaration conflict/shape checks even though historical
+        # failed calls no longer need a declaration in this current turn.
+        _response_tool_definitions({'input': value, 'tools': list(tools)})
     for item in value:
         kind = item.get('type', 'message')
         if kind == 'message':
@@ -210,8 +216,8 @@ def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_hi
             if kind == 'function_call' and not _arguments(item['arguments']):
                 _require(allow_tool_error_history and item['call_id'] not in seen,
                          'tool_context_unresolved')
-                declaration = declared.get((item.get('namespace'), item['name'])) or {}
-                _require(declaration.get('type') == 'function', 'tool_context_unresolved')
+                # The paired call is historical input. Its tool can be absent
+                # from this turn's declarations; new targets are checked below.
                 malformed_ids.add(item['call_id'])
             seen.add(item['call_id'])
             pending[item['call_id']] = kind
@@ -311,8 +317,9 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         _require(isinstance(item, dict), 'response_shape_unsupported')
         kind = item.get('type')
         if kind == 'reasoning':
-            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status'}
+            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status', 'encrypted_content'}
                                       | ({'format'} if allow_reasoning_history else set())), 'reasoning_shape_unsupported')
+            _require(item.get('encrypted_content') is None, 'reasoning_shape_unsupported')
             _require('format' not in item or isinstance(item['format'], str)
                      and 1 <= len(item['format']) <= 128, 'reasoning_shape_unsupported')
             _require('id' not in item or isinstance(item['id'], str) and 1 <= len(item['id']) <= 256,
@@ -390,7 +397,8 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
     return target, reasoning
 
 
-def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False, worker_proofs=None):
+def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False, worker_proofs=None,
+                 allow_journal_prefix=False):
     """Resolve saved gateway bytes against one existing host socket write.
 
     The caller keeps route, cost, privacy-admission and target-schema policy.
@@ -398,7 +406,8 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
     an existing report must still agree. No consumption claim is synthesized.
     """
     return _host_response(example, call, write_state='socket_written',
-                          allow_privacy=allow_privacy, allow_worker_error=allow_worker_error, worker_proofs=worker_proofs)
+                          allow_privacy=allow_privacy, allow_worker_error=allow_worker_error, worker_proofs=worker_proofs,
+                          allow_journal_prefix=allow_journal_prefix)
 
 
 def _failed_host_result(example, call):
@@ -422,8 +431,43 @@ def _receipt_response(call, receipt):
     return value
 
 
+def _worker_artifact(example, call, *, allow_journal_prefix=False):
+    """Resolve explicit journal provenance without making it a final snapshot."""
+    from lab_arena import training_observations
+    run_id = call.get('run_id')
+    ref = (call.get('response_provenance') or {}).get('worker_receipt_ref') or {}
+    field = ref.get('artifact_field')
+    if field is None:
+        return (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    _require(field == 'partial_worker_observation_artifacts' and allow_journal_prefix
+             and training_coverage.uses_host_result_evidence(example.get('configuration') or {})
+             and run_id == example.get('run_id'), 'worker_journal_prefix_unavailable')
+    artifact = (example.get(field) or {}).get(run_id) or {}
+    hashes, refs = artifact.get('segment_sha256'), artifact.get('segment_refs')
+    _require(artifact.get('schema_version') == training_observations.JOURNAL_SCHEMA_VERSION
+             and artifact.get('run_id') == run_id and artifact.get('kind') == 'execute'
+             and artifact.get('complete') is False
+             and (artifact.get('payload') or {}).get('complete') is False
+             and isinstance(hashes, list) and isinstance(refs, list)
+             and 0 < len(refs) == len(hashes) <= training_observations.MAX_SEGMENTS
+             and all(isinstance(value, str) and contracts.SHA256_RE.fullmatch(value)
+                     for value in hashes), 'worker_journal_prefix_invalid')
+    _require(refs == [training_observations.segment_ref(
+        run_id, artifact.get('lease_generation'), artifact.get('claim_request_hash'), number)
+        for number in range(len(refs))], 'worker_journal_prefix_identity_mismatch')
+    snapshot = (example.get('input_snapshots') or {}).get(run_id) or {}
+    _require(all(snapshot.get(key) == artifact.get(key) for key in
+                 ('run_id', 'kind', 'lease_generation', 'claim_request_hash'))
+             and isinstance(snapshot.get('input'), dict)
+             and snapshot.get('input_sha256') == contracts.document_hash(snapshot['input'])
+             and (snapshot.get('privacy') or {}).get('redacted') is False
+             and (snapshot.get('privacy') or {}).get('redactions') == [],
+             'worker_journal_prefix_identity_mismatch')
+    return artifact
+
+
 def _host_response(example, call, *, write_state, allow_privacy=False, allow_worker_error=False,
-                   require_client_ack=None, worker_proofs=None):
+                   require_client_ack=None, worker_proofs=None, allow_journal_prefix=False):
     provenance = call.get('response_provenance') or {}
     run_id = call.get('run_id')
     request = call.get('request') or {}
@@ -437,7 +481,7 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
         _require(isinstance(request.get('hashed_parameters'), dict)
                  and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'),
                  'request_identity_mismatch')
-    artifact = (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    artifact = _worker_artifact(example, call, allow_journal_prefix=allow_journal_prefix)
     from lab_arena import training_observations
     attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == run_id]
     attempt = attempts[0] if len(attempts) == 1 else {}
@@ -445,7 +489,9 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
     _require(('run_id' not in artifact or artifact['run_id'] == run_id)
              and ('kind' not in artifact or artifact['kind'] == kind)
              and ('schema_version' not in artifact or artifact['schema_version'] in {
-                 training_observations.SCHEMA_VERSION, training_observations.LEGACY_SCHEMA_VERSION})
+                 training_observations.SCHEMA_VERSION, training_observations.LEGACY_SCHEMA_VERSION}
+                  or allow_journal_prefix and artifact['schema_version'] == training_observations.JOURNAL_SCHEMA_VERSION
+                  and (provenance.get('worker_receipt_ref') or {}).get('artifact_field') == 'partial_worker_observation_artifacts')
              and ('lease_generation' not in artifact or type(artifact['lease_generation']) is int
                   and artifact['lease_generation'] > 0)
              and ('claim_request_hash' not in artifact or isinstance(artifact['claim_request_hash'], str)
@@ -485,6 +531,17 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
         if not allow_privacy:
             _require(_exact(value, response=True, worker_proofs=worker_proofs), 'response_privacy_nonexact')
         values.append(value)
+    recovered = training_export.recovered_response_for_write(call, write)
+    if recovered is not None:
+        _require(provenance.get('worker_body_source') == 'lab_arena_deepline_call_responses'
+                 and provenance.get('worker_recovered_response_ref') == {
+                     'table': recovered['table'], 'call_identity': recovered['call_identity']},
+                 'worker_write_identity_mismatch')
+        if not allow_privacy:
+            _require(not recovered['privacy_redactions']
+                     and _exact(call.get('response'), response=True, worker_proofs=worker_proofs),
+                     'response_privacy_nonexact')
+        values.append(call['response'])
     if not values and allow_worker_error:
         error_ref = provenance.get('worker_error_observation_ref') or {}
         _require(not any(row.get('wire_body_sha256') for row in receipts)
@@ -532,7 +589,7 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
                  and provenance.get('selected_response_acknowledged') is not True
                  and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
     if provenance.get('selected_response_acknowledged') is True:
-        _require(training_export.response_entry_id(call) in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
+        _require(recovered is not None or training_export.response_entry_id(call) in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
     return {'response': values[0], 'write': write, 'receipts': matches}
 
 
@@ -604,7 +661,9 @@ def _model_request(example, call, *, worker_proofs=None):
     return op, body, tools
 
 
-def _candidate(example, call, *, host_observed=False, worker_proofs=None):
+def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False):
+    # Individual exporters may retain a proven prefix pair. The full-ICP
+    # eligibility caller keeps the default final-snapshot requirement.
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs)
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
@@ -615,8 +674,10 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None):
     if provider_visible:
         # Generic observed steps prove only the exact provider-visible pair.
         # Strict policy callers keep their existing frozen read-proof rules.
-        evidence = (_host_response(example, call, write_state='socket_written', require_client_ack=False, worker_proofs=worker_proofs)
-                    if host_observed else _host_result(example, call, worker_proofs=worker_proofs))
+        evidence = (_host_response(example, call, write_state='socket_written', require_client_ack=False,
+                                  worker_proofs=worker_proofs, allow_journal_prefix=allow_journal_prefix)
+                    if host_observed else _host_result(example, call, worker_proofs=worker_proofs,
+                                                       allow_journal_prefix=allow_journal_prefix))
         _require(evidence['write']['status'] == 200, 'agent_read_identity_mismatch')
         responses = [evidence['response']]
         matches = evidence['receipts']
@@ -696,6 +757,8 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None):
                                 if provider_visible else {}),
                              **target_provenance,
                              'delivered_response_sha256': contracts.document_hash(responses[0]),
+                             **({'worker_receipt_ref': copy.deepcopy(call['response_provenance']['worker_receipt_ref'])}
+                                if (call.get('response_provenance') or {}).get('worker_receipt_ref', {}).get('artifact_field') else {}),
                              'response_projection': {'opaque_reasoning_omitted': any('hidden_reasoning' in (r.get('privacy_redactions') or []) for r in matches), 'exact_provider_replay': not any(r.get('privacy_redactions') for r in matches)}, 'attempt': example.get('attempt'),
                              'round_id': example.get('round_id'), 'model': body['model'],
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
@@ -705,7 +768,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None):
 
 
 def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate=None):
-    """Keep strict policy evidence separate from generic host observations."""
+    """Export individual exact pairs; a journal prefix never proves a full ICP."""
     rules = rules or Rules()
     candidates, analysis, sources = {}, [], set()
     source_groups = training_dataset._SourceSplitGroups()
@@ -736,8 +799,8 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 analysis.append({'source_example_hash': source, 'call_ref_hash': None, 'reason': 'malformed_call'})
                 continue
             try:
-                record = (_candidate(example, call, host_observed=True) if host_observed
-                          else _candidate(example, call))
+                record = (_candidate(example, call, host_observed=True, allow_journal_prefix=True) if host_observed
+                          else _candidate(example, call, allow_journal_prefix=True))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])

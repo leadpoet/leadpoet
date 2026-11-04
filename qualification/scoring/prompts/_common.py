@@ -190,6 +190,18 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
       * Within the chosen alternative, retain every event or state, time
         window, threshold, scope qualifier, entity constraint, and factual
         condition. An alternative does not relax its own requirements.
+      * When a requirement qualifies a participant's role or type, bind that
+        qualifier to the participant actually filling that role in the claimed
+        event. If the target requires a partnership with a stated kind of
+        organization, the other party must meet that kind; the target's own
+        category cannot substitute. Preserve wording that instead permits
+        either participant or specifies a different role.
+        A co-mentioned organization or sponsor name inside a team, event,
+        product, or venue name is not by itself a participating counterparty.
+        Use full source context and reasonable semantic role inference; literal
+        category labels are not required when source facts establish the role
+        or type. Do not combine different actors' attributes to satisfy one
+        actor's requirements.
       * Preserve an explicit proof-source qualifier in the target. When it
         requires a press release, product page, or company announcement, an
         independent article is not itself one of those sources. Do not invent
@@ -352,7 +364,9 @@ PARTNERSHIP_BLOCK = """      * Apply this block only to a chosen partnership alt
         evidence affirmatively establishes a partnership or comparable
         collaborative commercial arrangement with concrete commitments by both
         named organizations. Do not reject it solely because the parties have
-        customer-supplier roles. An ordinary purchase or marketing partnership
+        customer-supplier roles. This does not waive an explicit counterparty
+        qualifier in the actual target; bind it to the other party under PART A.
+        An ordinary purchase or marketing partnership
         label alone is insufficient. Apply the exact
         relationship wording in the target: do not impose a strategic-partnership
         standard when the chosen ICP alternative asks for a different relationship.

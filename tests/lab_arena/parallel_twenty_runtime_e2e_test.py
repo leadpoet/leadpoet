@@ -103,6 +103,9 @@ def _http_runner(
     image_cache = rn.ImageCache(
         root / ("images-" + cache_key),
         lambda _reference, _digest, target: (target / "rootfs").mkdir(),
+        # The exporter creates an empty fixture, not a production image. Keep
+        # the real headroom guard with a cache limit sized for that fixture.
+        max_bytes=1024 * 1024,
     )
     source_cache = rn.SourceCache(
         root / ("sources-" + cache_key),
@@ -161,6 +164,25 @@ def test_http_runner_event_clock_advances_without_changing_schedule(tmp_path, mo
     assert runner._config.clock() == start
     assert runner._config.clock() == later
     assert harness.clock() == start
+
+
+@pytest.mark.parametrize("free_gib", [1, 3])
+def test_empty_fixture_image_cache_keeps_export_headroom_guard(tmp_path, monkeypatch, free_gib):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free_gib * 1024**3))
+    monkeypatch.setattr(rn, "HttpArenaApiClient", lambda *_a, **_k: SimpleNamespace(source=lambda *_: None))
+    monkeypatch.setattr(rn, "SourceCache", lambda *_a, **_k: object())
+    monkeypatch.setattr(rn, "Runner", lambda config: SimpleNamespace(_config=config))
+    harness = SimpleNamespace(round_id="arena-2026-10-29", sandbox=object())
+    if free_gib == 1:
+        with pytest.raises(rn.RunnerError, match="insufficient disk space for image export"):
+            _http_runner(harness, object(), tmp_path, key_label="svc-runner-alpha", local_capacity=10)
+    else:
+        runner = _http_runner(harness, object(), tmp_path, key_label="svc-runner-alpha", local_capacity=10)
+        cache = runner._config.image_cache
+        digest = "sha256:" + "a" * 64
+        assert cache.rootfs_for(digest).is_dir()
 
 
 class _ExecutionEvidence:

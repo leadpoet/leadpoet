@@ -8,15 +8,19 @@ from tests.lab_arena.training_eligibility_test import refresh_response_links, su
 from tests.lab_arena.training_steps_test import seal
 
 
-def recovered_example(*, truncated=False):
-    value = cap_example('openrouter.responses')
+def recovered_example(*, truncated=False, api='openrouter.responses'):
+    value = cap_example(api)
     success = value['provider_calls'][0]
     body=success['request']['outbound']['body']
     body['reasoning'].pop('exclude',None)
     success['request']['outbound']['body_sha256']=contracts.document_hash(body)
     if not truncated:
-        success['response']['output'][1]['arguments'] = '{}'
-        success['response']['usage']['output_tokens'] = 50
+        if api == 'openrouter.responses':
+            success['response']['output'][1]['arguments'] = '{}'
+            success['response']['usage']['output_tokens'] = 50
+        else:
+            success['response']['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{}'
+            success['response']['usage']['completion_tokens'] = 50
     refresh_response_links(value, 0)
     value = without_client_callbacks(value)
     for call in value['provider_calls']:
@@ -66,7 +70,7 @@ def test_hidden_free_retry_keeps_eligibility_and_successful_targets_without_a_fa
 def test_hidden_free_retry_and_recovered_cap_eof_keep_their_separate_proofs():
     value=recovered_example(truncated=True)
     failed,recovered=value['provider_calls'][:2]
-    assert training_thinking.verified_recovered_responses_retry(value,failed)
+    assert training_thinking.verified_recovered_provider_retry(value,failed)
     assert training_thinking.verified_cap_truncated_target(value,recovered)
     result=training_eligibility.assess_capture(submission(),{'run':value},['run'],enabled=True)
     assert result['eligible'],result

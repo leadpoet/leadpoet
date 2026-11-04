@@ -12,7 +12,7 @@ exercises the production function contract.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import secrets
@@ -68,6 +68,11 @@ READ_RETRY_TRANSPORT_ERRORS = (
 )
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_nov03_review_recovery_authorized_v1": (("p_submission_id", "text"),),
+    "lab_arena_preserved_judgment_policy_v1": (
+        ("p_round_id", "text"), ("p_judge_run_id", "text"),
+        ("p_source_run_id", "text"), ("p_refs", "jsonb"),
+    ),
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
     "lab_arena_claim_signal_judgment_v1": (
@@ -380,10 +385,12 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
     "mode", "network_name", "netuid", "schedule",
     "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
     "integrity_policy", "contact_policy", "company_quality_policy", "company_judgment_policy",
-    "intent_details_policy", "scorer_policy",
+    "intent_details_policy", "scorer_policy", "scorer_image_digest", "scorer_image_reference",
 )
 # Fixed computed projections for direct SQL and PostgREST transports.
 _RUNTIME_JSON_COLUMNS = {
+    "training_recovered_response:lab_arena_training_deepline_response_v1":
+        "public.lab_arena_training_deepline_response_v1(lab_arena_ledger) AS training_recovered_response",
     "execution_attempt:lab_arena_execution_attempt_count":
         "public.lab_arena_execution_attempt_count(lab_arena_runs) AS execution_attempt",
     PUBLIC_CONFIGURATION_COLUMN:
@@ -1348,6 +1355,16 @@ class ArenaStore:
             "lab_arena_scoring_policy_history_v1", {"p_round_id": round_id}
         ), "scoring_policy_history")
 
+    def preserved_judgment_policy(self, round_id, judge_run_id, source_run_id, refs):
+        """Read the exact November 3 completed-judgment preservation proof."""
+        result = self._transport.rpc("lab_arena_preserved_judgment_policy_v1", {
+            "p_round_id": round_id, "p_judge_run_id": judge_run_id,
+            "p_source_run_id": source_run_id, "p_refs": refs,
+        })
+        if result is None:
+            return None
+        return _require_mapping(result, "preserved_judgment_policy")
+
     def whoami(self) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_whoami", {}), "whoami")
 
@@ -1375,7 +1392,7 @@ class ArenaStore:
             "current_daily_icp_set",
         )
 
-    def code_review_schema(self) -> Dict[str, Any]:
+    def code_review_schema(self, *, require_refusal_fallback: bool = False) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
         result = _require_mapping(
@@ -1402,6 +1419,14 @@ class ArenaStore:
                 != "replacement_freeze_to_benchmark_deadline"
         ):
             raise ArenaStoreError("code review schema mismatch")
+        if require_refusal_fallback and result.get("refusal_fallback") != {
+            "primary_model": "anthropic/claude-sonnet-5.5",
+            "alternate_model": "openai/gpt-6.1-sol",
+            "max_primary_refusal_claims": 2,
+            "max_alternate_claims": 2,
+            "legacy_structured_refusal_recovery": True,
+        }:
+            raise ArenaStoreError("code review fallback schema mismatch")
         return result
 
     def validator_scoring_authority_schema(self) -> Dict[str, Any]:
@@ -2100,7 +2125,35 @@ class ArenaStore:
 
     def get_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)
-        return rows[0] if rows else None
+        return self._hydrate_legacy_review(rows[0]) if rows else None
+
+    def _hydrate_legacy_review(self, row):
+        from lab_arena import code_review_policy
+        if not code_review_policy.legacy_refusal_candidate(row):
+            return row
+        round_row = self.get_round(str(row["round_id"]))
+        if not round_row:
+            return row
+        schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
+        deadline = schedule.get("benchmark_deadline")
+        if not deadline and schedule.get("submission_cutoff"):
+            deadline = datetime.fromisoformat(str(schedule["submission_cutoff"]).replace("Z", "+00:00")) + timedelta(minutes=30)
+        admission_open = (round_row.get("status") == "open" and deadline
+            and datetime.fromisoformat(str(deadline).replace("Z", "+00:00")) > datetime.now(timezone.utc))
+        if not admission_open:
+            if (row.get("round_id") != "arena-2026-11-03"
+                or not self.nov03_review_recovery_authorized(str(row["submission_id"]))):
+                return row
+        entries = self.list_ledger(submission_id=row["submission_id"], operation_id="openrouter.code_review", limit=1000)
+        return dict(code_review_policy.legacy_refusal_from_ledger(row, entries))
+
+    def nov03_review_recovery_authorized(self, submission_id: str) -> bool:
+        result = self._transport.rpc("lab_arena_nov03_review_recovery_authorized_v1", {
+            "p_submission_id": submission_id,
+        })
+        if not isinstance(result, bool):
+            raise ArenaStoreError("November 3 review recovery authority is malformed")
+        return result
 
     def list_submissions(
         self,
@@ -2112,12 +2165,13 @@ class ArenaStore:
         filters: Dict[str, Any] = {"round_id": round_id}
         if status:
             filters["status"] = status
-        return self._transport.select(
+        rows = self._transport.select(
             "lab_arena_submissions",
             filters=filters,
             order="created_at",
             columns=columns,
         )
+        return [self._hydrate_legacy_review(row) for row in rows]
 
     # -- stages and assignments -------------------------------------------
 
@@ -2990,6 +3044,7 @@ class ArenaStore:
         operation_id: Optional[str] = None,
         after_entry_id: Optional[int] = None,
         limit: Optional[int] = None,
+        training_responses: bool = False,
     ) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {}
         if run_id:
@@ -3014,6 +3069,8 @@ class ArenaStore:
             "filters": filters or None,
             "order": "entry_id",
         }
+        if training_responses:
+            arguments["columns"] = "*,training_recovered_response:lab_arena_training_deepline_response_v1"
         if limit is not None:
             arguments["limit"] = limit
         if after_entry_id is not None:

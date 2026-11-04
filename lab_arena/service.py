@@ -34,6 +34,7 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
+from lab_arena.publication_lock import PublicationLockError, publication_round_lock
 from lab_arena.store import (
     ArenaStore,
     ArenaStoreError,
@@ -190,6 +191,33 @@ def _telemetry_tool(operation_id: str, parameters: Mapping[str, Any]) -> str:
     else:
         tool = str(operation.deepline_tool or "")
     return tool if tool in operations.DEEPLINE_TOOLS else telemetry.NO_TOOL
+
+
+def _telemetry_model(operation_id: str, parameters: Any, *,
+                     price_table: Any = None, registry: Any = None) -> str:
+    """Name a requested OpenRouter model only from host-owned model IDs.
+
+    A syntactically valid caller string is not evidence of a model identity.
+    The broker validates its catalog; run context holds the frozen registry.
+    Neither source establishes that this request reached a provider endpoint.
+    """
+    operation = operations.get_operation(operation_id)
+    if (operation is None or operation.provider != "openrouter"
+            or not isinstance(parameters, Mapping)):
+        return telemetry.NO_MODEL
+    model = parameters.get("model")
+    if (not isinstance(model, str)
+            or operations._MODEL_ID_RE.fullmatch(model) is None):
+        return telemetry.NO_MODEL
+    models = price_table.get("models") if isinstance(price_table, Mapping) else None
+    if isinstance(models, Mapping) and model in models:
+        return model
+    routes = registry.get("approved_routes") if isinstance(registry, Mapping) else None
+    if isinstance(routes, list) and any(
+            isinstance(route, Mapping) and route.get("model_id") == model
+            and route.get("api") == operation_id for route in routes):
+        return model
+    return telemetry.NO_MODEL
 
 
 def _provider_telemetry_fields(
@@ -728,6 +756,8 @@ class ServiceConfig:
     ] = None
     # Observational uploads use a separate bounded client in production.
     training_object_store: Optional[ObjectStore] = None
+    # Existing private directory shared by canonical gateway processes.
+    publication_lock_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if (
@@ -1946,7 +1976,7 @@ class ArenaService:
             return False
 
     def _due_daily_round_opening(self, round_id: str) -> bool:
-        """Identify only the missing canonical round near its UTC opening."""
+        """Identify the due canonical intake round, including its early grace."""
 
         if self._pinned_round_id() is not None:
             return False
@@ -1957,17 +1987,18 @@ class ArenaService:
         opening = now.replace(hour=int(hour), minute=0, second=0, microsecond=0)
         if now < opening:
             opening -= timedelta(days=1)
-        # This only describes the bounded scheduler cutover, not a permanent
-        # alternative admission path if daily creation fails. The window spans
-        # the opening in both directions: miners racing the cutoff name the
-        # next canonical round moments before it is created, and a terminal
-        # 404 there loses a submission that a short retry would have placed.
+        # A missing due round is unavailable while daily creation can still
+        # give it the configured minimum submission window. A brief creation
+        # delay cannot make its canonical identity unknown.
+        # Keep the early grace only for miners racing the next opening. This
+        # classifies the refusal; the driver still owns round creation.
         next_opening = opening + timedelta(days=1)
+        earliest = now + timedelta(hours=max(0, int(self._config.defaults.min_submission_hours)))
         grace = timedelta(seconds=90)
         return (
-            (opening <= now < opening + grace
-             and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
+            (next_opening >= earliest and round_id == round_id_for_cutoff(next_opening))
             or (next_opening - grace <= now < next_opening
+                and next_opening + timedelta(days=1) >= earliest
                 and round_id == round_id_for_cutoff(next_opening + timedelta(days=1)))
         )
 
@@ -3934,6 +3965,19 @@ class ArenaService:
         evidence_reads: Optional[_CompanyEvidenceReads] = None,
         round_context: Optional[Mapping[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        preserved = self._preserved_judgment_configuration(run, round_context)
+        if preserved is not None:
+            policy = contracts.validate_scorer_policy(preserved["scorer_policy"])
+        elif (run.get("round_id") == "arena-2026-11-03"
+              and run.get("status") == "accepted"
+              and isinstance(run.get("company_judgment_refs"), list)):
+            current = self._round_from_context(str(run["round_id"]), round_context)
+            configuration = (current or {}).get("configuration_doc") or {}
+            if any(not isinstance(ref, Mapping) or any(
+                (ref.get("scope_doc") or {}).get(key) != configuration.get(key)
+                for key in ("scorer_image_digest", "scorer_image_reference"))
+                for ref in run["company_judgment_refs"]):
+                raise scoring.ScoringError("preserved judgment authority is missing")
         if run.get("company_judgment_refs") is not None:
             return self._company_quality_breakdowns(
                 run, icp=icp, companies=companies, policy=policy,
@@ -4693,6 +4737,32 @@ class ArenaService:
             "eligibility_reason": reason,
         }
 
+    def _preserved_judgment_configuration(self, judge, round_row=None):
+        """Use original policy only for the audited completed November 3 rows."""
+        if (judge.get("round_id") != "arena-2026-11-03"
+            or judge.get("status") != "accepted"
+            or judge.get("terminal_cause") != "accepted"
+            or not isinstance(judge.get("company_judgment_refs"), list)):
+            return None
+        row = self._round_from_context(str(judge["round_id"]), round_row)
+        configuration = (row or {}).get("configuration_doc") or {}
+        refs = judge["company_judgment_refs"]
+        if refs and all(isinstance(ref, Mapping) and all((ref.get("scope_doc") or {}).get(key) == configuration.get(key)
+                   for key in ("scorer_image_digest", "scorer_image_reference"))
+               for ref in refs):
+            return None
+        preserved = self._store.preserved_judgment_policy(
+            str(judge["round_id"]), str(judge["run_id"]),
+            str(judge.get("scored_run_id") or ""), refs)
+        if preserved is None:
+            return None
+        if (preserved.get("operation") != "nov03_forward_only_verifier_v1"
+            or preserved.get("scoring_generation_floor") != self._score_generation_floor(row)
+            or any(preserved.get("current_" + key) != configuration.get(key)
+                   for key in ("scorer_image_digest", "scorer_image_reference"))):
+            raise ServiceError("preserved_judgment_policy_invalid", 500)
+        return preserved
+
     def _judgment_matches_execution(
         self, row: Mapping[str, Any], judge: Mapping[str, Any],
         source: Mapping[str, Any],
@@ -4734,10 +4804,14 @@ class ArenaService:
             # Legacy scoring assignments have no judgment-cache scope. Their
             # accepted output and execution membership are the final authority.
             return True
-        return all(scope.get("round_id") == round_id and all(
+        matches = lambda configuration: all(scope.get("round_id") == round_id and all(
             scope.get(key) == configuration.get(key)
             for key in ("scorer_image_digest", "scorer_image_reference")
         ) for scope in scopes)
+        if matches(configuration):
+            return True
+        preserved = self._preserved_judgment_configuration(judge, row)
+        return preserved is not None and matches(preserved)
 
     def _terminal_miner_credit_judgment(self, source_id: str) -> bool:
         """Only the database's bound credit proof can end an unmeasured judge."""
@@ -4999,6 +5073,21 @@ class ArenaService:
             return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
 
     def publish(self, round_id: str) -> Dict[str, Any]:
+        lock_dir = getattr(getattr(self, "_config", None), "publication_lock_dir", None)
+        if lock_dir is None:  # Embedded/test services do not have a host directory.
+            return self._publish_locked(round_id)
+        try:
+            with publication_round_lock(lock_dir, round_id) as acquired:
+                if not acquired:
+                    return {"status": "retry", "round_status": "scored",
+                            "reason": "publication_busy"}
+                # Read the current status only after ownership. A former owner
+                # may have published while this process waited for its tick.
+                return self._publish_locked(round_id)
+        except PublicationLockError as exc:
+            raise ServiceError("publication_lock_unavailable", 503) from exc
+
+    def _publish_locked(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
@@ -6997,6 +7086,7 @@ class ArenaService:
             # or the result returned to the worker.
             _warn_trajectory_failure("provider_request", exc)
         started = time.monotonic()
+        provider_start_ns = time.time_ns()
         try:
             result = broker.execute(
                 context,
@@ -7043,7 +7133,13 @@ class ArenaService:
                 error_type=type(exc).__name__,
                 store_error=store_error or None,
                 tool=_telemetry_tool(operation_id, frame["parameters"]),
+                model=_telemetry_model(
+                    operation_id, frame["parameters"],
+                    price_table=getattr(broker, "_price_table", None),
+                    registry=getattr(context, "reasoning_route_registry", None),
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                start_ns=provider_start_ns,
                 run_identity=run_identity,
             )
             raise
@@ -7070,7 +7166,14 @@ class ArenaService:
                     call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
                     frame["parameters"],
                 ),
+                model=_telemetry_model(
+                    call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
+                    frame["parameters"],
+                    price_table=getattr(broker, "_price_table", None),
+                    registry=getattr(context, "reasoning_route_registry", None),
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                start_ns=provider_start_ns,
                 run_identity=run_identity,
                 **provider_fields,
             )
@@ -7406,8 +7509,16 @@ class ArenaService:
         # one run outcome to telemetry.
         expected_status = "accepted" if terminal_status == "accepted" else "failed"
         if result.get("status") == expected_status and result.get("idempotent") is False:
+            # The runner's own diagnostic, already validated against the
+            # frozen vocabularies by the completion contract. Without it a
+            # repeated judge_error says only that scoring failed, never why.
+            diagnostic = run_result.get("failure_diagnostic")
+            if not isinstance(diagnostic, Mapping):
+                diagnostic = {}
             telemetry.record_run(
-                kind, terminal_status, run_identity=_telemetry_run_identity(run)
+                kind, terminal_status, run_identity=_telemetry_run_identity(run),
+                failure_stage=str(diagnostic.get("stage") or "-"),
+                failure_error_class=str(diagnostic.get("error_class") or "-"),
             )
         return result
 

@@ -85,6 +85,7 @@ throttled provider looked the same.
 | `arena.provider` | `openrouter` (`ARENA_PROVIDERS`; `unknown` when the operation is not in the table) |
 | `arena.operation` | `openrouter.responses` (registered operation/provider pair; Exa compatibility operations belong to Deepline) |
 | `arena.tool` | `hunter_email_finder` (`ARENA_DEEPLINE_TOOLS`, a copy of `operations.DEEPLINE_TOOLS`; `-` for any call with no Deepline tool) |
+| `arena.model` | `deepseek/deepseek-v4.1-flash-1017` (requested OpenRouter model from the host-owned catalog or frozen registry; `-` for unknown values or other providers) |
 | `arena.outcome` | `ok` \| `refused` \| `uncertain` \| `failed` |
 | `arena.error_code` | `budget_refused` (`ARENA_PROVIDER_ERROR_CODES`; `-` when none) |
 | `arena.error_type` | `HTTPError` (exception CLASS only; `-` when none) |
@@ -100,6 +101,11 @@ Every Deepline call leaves as the single operation `deepline.execute`, so
 `hunter_email_finder` rather than to "Deepline". It is only ever set on a
 Deepline span, and a tool outside the frozen table drops the span whole like
 any other out-of-vocabulary value.
+
+`arena.model` records the requested model, including on a refused call. The
+service requires membership in the broker's validated catalog or the run's
+frozen registry for that API; format alone is insufficient. It does not prove
+endpoint availability or identify the upstream provider that served the call.
 
 Span name is `arena.provider.<provider>`. `uncertain` means the ledger could
 not be settled and the cost is reconciled later; `failed` means the broker

@@ -217,10 +217,10 @@ def test_preserved_effort_and_cap_keep_recovered_free_retry_proof(monkeypatch):
     for call in (failed, recovered):
         _bind_preserved_controls(call)
     before = deepcopy(example)
-    assert training_thinking.verified_recovered_responses_retry(example, failed)
+    assert training_thinking.verified_recovered_provider_retry(example, failed)
     assert example == before
     monkeypatch.setattr(training_thinking, "_captured_reasoning_controls_match", lambda *_: False)
-    assert not training_thinking.verified_recovered_responses_retry(example, failed)
+    assert not training_thinking.verified_recovered_provider_retry(example, failed)
 
 
 @pytest.mark.parametrize("damage", ["outbound_cap", "outbound_effort", "request_hash", "disabled", "excluded", "oversized_cap"])
@@ -241,7 +241,7 @@ def test_preserved_controls_do_not_relax_failure_proof_integrity(damage):
             call["request"]["hashed_parameters"]["reasoning"]["exclude"] = True
             call["request_hash"] = call["request"]["request_hash"] = contracts.document_hash(call["request"]["hashed_parameters"])
         call["request"]["outbound"]["body_sha256"] = contracts.document_hash(body)
-    assert not training_thinking.verified_recovered_responses_retry(example, failed)
+    assert not training_thinking.verified_recovered_provider_retry(example, failed)
 
 
 @pytest.mark.parametrize("kind", ["cap", "retry"])
@@ -261,7 +261,7 @@ def test_historical_tested_settings_do_not_override_disabling_or_conflicting_ali
         call["request_hash"] = call["request"]["request_hash"] = contracts.document_hash(call["request"]["hashed_parameters"])
         call["request"]["outbound"]["body_sha256"] = contracts.document_hash(body)
     verify = (training_thinking.verified_cap_truncated_target if kind == "cap"
-              else training_thinking.verified_recovered_responses_retry)
+              else training_thinking.verified_recovered_provider_retry)
     assert not verify(example, calls[0])
 
 
@@ -280,7 +280,7 @@ def test_responses_retry_proof_requires_the_actual_api_control_schema(invalid):
         call["request_hash"] = call["request"]["request_hash"] = contracts.document_hash(call["request"]["hashed_parameters"])
         call["request"]["outbound"]["body_sha256"] = contracts.document_hash(call["request"]["outbound"]["body"])
         operations.validate_operation_request("openrouter.responses", call["request"]["hashed_parameters"], allow_full_thinking=True)
-    assert training_thinking.verified_recovered_responses_retry(example, failed)
+    assert training_thinking.verified_recovered_provider_retry(example, failed)
     for call in (failed, recovered):
         for value in (call["request"]["outbound"]["body"], call["request"]["hashed_parameters"],
                       call["request"]["effective_parameters"], call["request"]["admitted_parameters"]):
@@ -293,4 +293,4 @@ def test_responses_retry_proof_requires_the_actual_api_control_schema(invalid):
         call["request"]["outbound"]["body_sha256"] = contracts.document_hash(call["request"]["outbound"]["body"])
         with pytest.raises(operations.OperationError):
             operations.validate_operation_request("openrouter.responses", call["request"]["hashed_parameters"], allow_full_thinking=True)
-    assert not training_thinking.verified_recovered_responses_retry(example, failed)
+    assert not training_thinking.verified_recovered_provider_retry(example, failed)

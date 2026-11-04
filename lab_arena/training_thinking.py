@@ -21,7 +21,7 @@ POLICY = "full_generated_thinking_v1"
 PARSER_VERSION = "arena_openrouter_reasoning_v1"
 _ROUTE_FIELDS = ("model_id", "model_version", "provider_route", "api",
                  "parser_version", "probe_id", "probe_manifest_sha256", "registry_sha256")
-def _policy(call: Mapping[str, Any], registry: Any = None) -> bool:
+def _policy(call: Mapping[str, Any], registry: Any = None, *, worker_proofs=None) -> bool:
     annotation = call.get("reasoning_capture") or {}
     model = (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model")
     operation = call.get("operation_id")
@@ -51,10 +51,17 @@ def _policy(call: Mapping[str, Any], registry: Any = None) -> bool:
             and annotation.get("api") == call.get("operation_id")):
         return False
     try:
-        frozen = reasoning_capture.validate_registry(registry)
+        if type(worker_proofs) is training_worker_proof.WorkerProofs:
+            frozen, registry_hash = worker_proofs.reasoning_registry(
+                registry, validate=reasoning_capture.validate_registry)
+        else:
+            frozen = reasoning_capture.validate_registry(registry)
+            registry_hash = None
     except (TypeError, ValueError, KeyError, AttributeError):
         return False
-    if (contracts.document_hash(frozen).split(":", 1)[1] != annotation["registry_sha256"]
+    if registry_hash is None:
+        registry_hash = contracts.document_hash(frozen).split(":", 1)[1]
+    if (registry_hash != annotation["registry_sha256"]
             or not reasoning_capture.explicit_provider_matches(call.get("request") or {}, annotation.get("provider_route"))):
         return False
     matches = [entry for entry in frozen["approved_routes"]
@@ -102,9 +109,9 @@ def _approved_segments(segments: list[dict], allowed: set[str]) -> bool:
         for segment in segments)
 
 
-def full_text_segments(call: Mapping[str, Any], role: str, registry: Any = None) -> tuple[list[dict], dict]:
+def full_text_segments(call: Mapping[str, Any], role: str, registry: Any = None, *, worker_proofs=None) -> tuple[list[dict], dict]:
     """Admit only reviewed full text; keep ancillary summaries and opaque state separate."""
-    status = attempt_coverage(call, role, registry)
+    status = attempt_coverage(call, role, registry, worker_proofs=worker_proofs)
     segments, _, _ = _segments(call.get("response"), str(call.get("operation_id")))
     if (not status["route_reviewed"] or not status["provider_route_verified"]
             or status["storage"] != "saved"
@@ -247,21 +254,30 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                             segments.append({"source_path": ["output", oi, field, pi, "text"],
                                              "field": "output.content.reasoning_text" if field == "content" and part.get("type") == "reasoning_text" else "output.unproved",
                                              "text": part["text"]})
-    # Providers can repeat one generated string in an alias and a typed block.
-    # Keep both source locations but train and count the text once.
-    unique = []
-    by_text = {}
+    # Chat can expose the same ordered text in alternative representation
+    # fields. Match their complete sequences within one message, not equal
+    # strings anywhere in a response. Repeated typed occurrences, summaries
+    # and distinct native Responses items remain separate evidence.
+    alias_fields = {"reasoning", "reasoning_content", "reasoning_details.text"}
+    groups = {}
     for segment in segments:
-        existing = by_text.get(segment["text"])
+        segment["source_paths"] = [segment.pop("source_path")]
+        if operation == "openrouter.chat" and segment["field"] in alias_fields:
+            message_path = tuple(segment["source_paths"][0][:3])
+            groups.setdefault((message_path, segment["field"]), []).append(segment)
+    equivalents, omitted = {}, set()
+    for (message_path, field), sequence in groups.items():
+        key = (message_path, tuple(segment["text"] for segment in sequence))
+        existing = equivalents.get(key)
         if existing is None:
-            segment["source_paths"] = [segment.pop("source_path")]
-            by_text[segment["text"]] = segment
-            unique.append(segment)
+            equivalents[key] = sequence
         else:
-            existing["source_paths"].append(segment["source_path"])
-            if existing["field"] != segment["field"]:
-                existing.setdefault("alias_fields", []).append(segment["field"])
-    return unique, summary, opaque
+            for retained, alias in zip(existing, sequence):
+                retained["source_paths"].extend(alias["source_paths"])
+                retained.setdefault("alias_fields", []).append(field)
+                omitted.add(tuple(alias["source_paths"][0]))
+    return [segment for segment in segments
+            if tuple(segment["source_paths"][0]) not in omitted], summary, opaque
 
 
 def _route_observation(call: Mapping[str, Any]) -> Any:
@@ -306,13 +322,13 @@ def _reasoning_request_state(call: Mapping[str, Any], annotation: Mapping[str, A
     return "requested" if annotation.get("requested") is True else "unknown"
 
 
-def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -> dict:
+def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None, *, worker_proofs=None) -> dict:
     """Describe one stored provider attempt without asserting model cognition."""
     annotation = call.get("reasoning_capture") or {}
     annotation = annotation if isinstance(annotation, Mapping) else {}
     response = call.get("response")
     segments, summary, opaque = _segments(response, str(call.get("operation_id")))
-    policy_verified = _policy(call, registry)
+    policy_verified = _policy(call, registry, worker_proofs=worker_proofs)
     observation_verified = _observation_matches(_route_observation(call), annotation)
     route_verified = policy_verified and observation_verified
     allowed = set(annotation["full_text_fields"]) if policy_verified else set()
@@ -520,12 +536,37 @@ def _captured_reasoning_controls_match(call, registry) -> bool:
         return False
 
 
-def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
-    """Prove a hidden free throttle recovered by the same request's host write.
+def _error_body_has_no_generation(value: Any) -> bool:
+    """Keep reported generated work out of the no-generation exception."""
+    if (not isinstance(value, Mapping) or not value.get("error")
+            or value.get("choices") or value.get("output")):
+        return False
+    usage = value.get("usage")
+    if usage is None:
+        return True
+    if not isinstance(usage, Mapping):
+        return False
+    # Input tokens can be charged before generation. Only output counters
+    # contradict this exception; malformed reported counters prove nothing.
+    for field in ("output_tokens", "completion_tokens", "reasoning_tokens"):
+        if field in usage and (type(usage[field]) is not int or usage[field] != 0):
+            return False
+    for field in ("output_tokens_details", "completion_tokens_details"):
+        if field in usage:
+            details = usage[field]
+            if (not isinstance(details, Mapping)
+                    or any(type(count) is not int or count != 0 for count in details.values())):
+                return False
+    return True
+
+
+def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
+    """Prove a hidden throttle recovered by the same request's host write.
 
     A managed retry is provider evidence, never a delivered response or target.
-    Keep its missing write explicit; only an exact settled-zero 429 can borrow
-    proof of recovery from a later successful request on the frozen route.
+    Retain the settled-zero later-action proof. Broker-internal attempts instead
+    need exact same-action lineage; their saved billing remains authoritative,
+    including uncertainty. Both require saved 429 bytes and a successful write.
     """
     try:
         registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
@@ -535,26 +576,60 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
         provenance = call.get("response_provenance") or {}
         terminal_id = call.get("terminal_entry_id")
         sequence = call.get("action_sequence")
-        expected_error = {"error": {"code": "provider_unavailable"}}
+        operation = call.get("operation_id")
+        internal = call.get("response_status") == 402
+        expected_status = 402 if internal else 502
+        expected_error = {"error": {"code": "miner_credentials_unavailable" if internal else "provider_unavailable"}}
         digest = contracts.document_hash(expected_error)
+        amount = call.get("actual_microusd")
+        accounting = call.get("accounting_state")
+        response_id = training_export.response_entry_id(call) if internal else terminal_id
+        accounting_view = call
+        if internal and response_id != terminal_id:
+            # The existing retained-response primitive proves the delayed bill
+            # points back to this error. Verify both amounts; order recovery
+            # against the saved error, never the later accounting-only head.
+            prior = [row for row in call.get("lifecycle") or [] if row.get("entry_id") == response_id]
+            if (len(prior) != 1 or prior[0].get("entry_kind") != "uncertain"
+                    or type(prior[0].get("amount_microusd")) is not int or prior[0]["amount_microusd"] != 0):
+                return False
+            accounting_view = {**call, "lifecycle": [row for row in call.get("lifecycle") or []
+                                                    if row.get("entry_id") != response_id]}
+        if internal:
+            base, attempt = call.get("base_call_identity"), call.get("provider_attempt")
+            if (call.get("provider") != "openrouter" or call.get("funding_source") != "miner_key"
+                    or not isinstance(base, str) or contracts.SHA256_RE.fullmatch(base) is None
+                    or type(attempt) is not int or attempt < 1
+                    or call.get("call_identity") != (base if attempt == 1 else contracts.document_hash(
+                        {"base_call_identity": base, "provider_attempt": attempt}))
+                    or not (accounting == "uncertain" and "actual_microusd" in call and amount is None
+                            or accounting == "settlement" and type(amount) is int and amount >= 0)
+                    or not _terminal_accounting_matches(accounting_view, accounting, 0 if amount is None else amount)
+                    or type(call.get("reservation_entry_id")) is not int
+                    or not 0 < call["reservation_entry_id"] < response_id
+                    or set(call.get("evidence_gaps") or []) != (
+                        {"provider_cost_unresolved"} if accounting == "uncertain" else set())):
+                return False
+        elif (accounting != "settlement" or type(amount) is not int or amount != 0
+              or call.get("evidence_gaps")):
+            return False
         if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
                 or call.get("run_id") != example.get("run_id")
-                or call.get("operation_id") != "openrouter.responses"
+                or operation not in reasoning_capture.OPERATIONS
+                or not internal and operation != "openrouter.responses"
                 or call.get("funding_source") not in {"host", "miner_key"}
-                or call.get("accounting_state") != "settlement"
-                or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
                 or type(sequence) is not int or sequence < 0 or type(terminal_id) is not int or terminal_id < 1
-                or not _policy(call, registry) or call.get("evidence_gaps")
+                or not _policy(call, registry, worker_proofs=worker_proofs)
                 or (call.get("request_capture") or {}).get("redacted")
                 or not training_steps._exact(request)
-                or request.get("operation_id") != "openrouter.responses"
+                or request.get("operation_id") != operation
                 or request.get("request_hash") != call.get("request_hash")
                 or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(body, Mapping)
                 or contracts.document_hash(body) != outbound.get("body_sha256")
                 or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
-                or outbound.get("path") != "/api/v1/responses"
-                or call.get("response_status") != 502 or call.get("response") != expected_error
+                or outbound.get("path") != operations.OPERATIONS[operation].path
+                or call.get("response_status") != expected_status or call.get("response") != expected_error
                 or call.get("response_sha256") != digest or call.get("response_privacy_redactions")
                 or provenance.get("delivery_to_worker") != "not_proved"
                 or provenance.get("agent_receipt") not in (None, "not_reported")
@@ -569,19 +644,25 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
                 or not (_legacy_tested_controls_match(call)
                         or _captured_reasoning_controls_match(call, registry))):
             return False
-        settlements = [row for row in call.get("lifecycle") or []
-                       if row.get("entry_id") == terminal_id and row.get("entry_kind") == "settlement"]
-        if (len(settlements) != 1 or type(settlements[0].get("amount_microusd")) is not int
-                or settlements[0]["amount_microusd"] != 0):
-            return False
-        receipts = [row for row in call.get("response_receipts") or [] if row.get("entry_id") == terminal_id]
+        if not internal:
+            settlements = [row for row in call.get("lifecycle") or []
+                           if row.get("entry_id") == terminal_id and row.get("entry_kind") == "settlement"]
+            if (len(settlements) != 1 or type(settlements[0].get("amount_microusd")) is not int
+                    or settlements[0]["amount_microusd"] != 0):
+                return False
+        receipts = [row for row in call.get("response_receipts") or [] if row.get("entry_id") == response_id]
         if (len(receipts) != 1 or receipts[0].get("response_sha256") != digest
                 or receipts[0].get("wire_body_sha256") != digest
                 or receipts[0].get("wire_body_bytes") != len(contracts.canonical_json(expected_error).encode())
-                or (receipts[0].get("metadata") or {}).get("status") != 502
+                or (receipts[0].get("metadata") or {}).get("status") != expected_status
                 or (receipts[0].get("metadata") or {}).get("call_succeeded") is not False
-                or receipts[0].get("response_ref") != {"entry_id": terminal_id, "field": "response"}
+                or receipts[0].get("response_ref") != {"entry_id": response_id, "field": "response"}
                 or receipts[0].get("response_unavailable") or receipts[0].get("privacy_redactions")):
+            return False
+        if internal and (receipts[0].get("entry_kind") != ("uncertain" if response_id != terminal_id else accounting)
+                or (receipts[0].get("metadata") or {}).get("account_failure_evidence") != {
+                    "error_class": "account_credential_failure", "provider_status": 429,
+                    "action_sequence": sequence, "provider_attempt": attempt, "base_call_identity": base}):
             return False
         upstream = call.get("upstream_response_receipts") or []
         if not upstream:
@@ -589,9 +670,9 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
         for receipt in upstream:
             response = receipt.get("response")
             if (receipt.get("status") != 429 or not isinstance(response, Mapping)
-                    or type(receipt.get("entry_id")) is not int or not 0 < receipt["entry_id"] <= terminal_id
+                    or type(receipt.get("entry_id")) is not int or not 0 < receipt["entry_id"] <= response_id
                     or not isinstance(response.get("error"), Mapping) or response["error"].get("code") != 429
-                    or response.get("choices") or response.get("output")
+                    or not _error_body_has_no_generation(response)
                     or receipt.get("provenance") != "private_upstream_response_receipt"
                     or receipt.get("delivery_to_worker") != "not_proved"
                     or receipt.get("privacy_redactions") or not training_steps._exact(response, response=True)
@@ -608,17 +689,47 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
             return False
         for recovered in example.get("provider_calls") or []:
             later_request = recovered.get("request") or {}
+            recovered_amount = recovered.get("actual_microusd")
+            if internal:
+                later_attempt = recovered.get("provider_attempt")
+                recovered_accounting = recovered.get("accounting_state")
+                heads = [row for row in recovered.get("lifecycle") or []
+                         if row.get("entry_id") == recovered.get("terminal_entry_id")]
+                if (recovered.get("base_call_identity") != base
+                        or recovered.get("provider") != "openrouter"
+                        or recovered.get("funding_source") != "miner_key"
+                        or type(later_attempt) is not int or later_attempt <= attempt
+                        or recovered.get("call_identity") != contracts.document_hash(
+                            {"base_call_identity": base, "provider_attempt": later_attempt})
+                        or recovered.get("action_sequence") != sequence
+                        or type(recovered.get("reservation_entry_id")) is not int
+                        or recovered["reservation_entry_id"] <= response_id
+                        or type(recovered.get("terminal_entry_id")) is not int
+                        or recovered["terminal_entry_id"] <= recovered["reservation_entry_id"]
+                        or not (recovered_accounting == "uncertain" and "actual_microusd" in recovered
+                                and recovered_amount is None
+                                or recovered_accounting == "settlement" and type(recovered_amount) is int
+                                and recovered_amount >= 0)
+                        or len(heads) != 1 or heads[0].get("entry_kind") != recovered_accounting
+                        or type(heads[0].get("amount_microusd")) is not int
+                        or heads[0]["amount_microusd"] != (0 if recovered_amount is None else recovered_amount)
+                        or ("provider_cost_unresolved" in (recovered.get("evidence_gaps") or []))
+                            != (recovered_accounting == "uncertain")):
+                    continue
+            elif (type(recovered.get("action_sequence")) is not int
+                  or recovered["action_sequence"] <= sequence
+                  or recovered.get("accounting_state") != "settlement"
+                  or type(recovered_amount) is not int or recovered_amount < 0):
+                continue
             if (recovered.get("run_id") != call["run_id"] or recovered.get("call_identity") == call.get("call_identity")
-                    or recovered.get("operation_id") != "openrouter.responses"
-                    or type(recovered.get("action_sequence")) is not int or recovered["action_sequence"] <= sequence
-                    or type(recovered.get("terminal_entry_id")) is not int or recovered["terminal_entry_id"] <= terminal_id
+                    or recovered.get("operation_id") != operation
+                    or type(recovered.get("terminal_entry_id")) is not int or recovered["terminal_entry_id"] <= response_id
                     or recovered.get("request_hash") != call.get("request_hash")
                     or later_request.get("hashed_parameters") != request["hashed_parameters"]
                     or (later_request.get("outbound") or {}).get("body") != body
                     or (later_request.get("outbound") or {}).get("body_sha256") != outbound["body_sha256"]
-                    or recovered.get("accounting_state") != "settlement" or recovered.get("response_status") != 200
-                    or type(recovered.get("actual_microusd")) is not int or recovered["actual_microusd"] < 0
-                    or not _policy(recovered, registry)):
+                    or recovered.get("response_status") != 200
+                    or not _policy(recovered, registry, worker_proofs=worker_proofs)):
                 continue
             # Recovery proves a delivered provider response, not target quality.
             # Its own eligibility checks still validate or omit a cap-hit target.
@@ -626,7 +737,7 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
             if (evidence["write"]["status"] != 200 or evidence["response"] != recovered.get("response")
                     or contracts.document_hash(evidence["response"]) != recovered.get("response_sha256")):
                 continue
-            state = attempt_coverage(recovered, _role(example, recovered), registry)
+            state = attempt_coverage(recovered, _role(example, recovered), registry, worker_proofs=worker_proofs)
             if state["route_reviewed"] and state["provider_route_verified"]:
                 return True
         return False
@@ -769,7 +880,13 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
                 or any(row["kind"] == "response_received" and row["data"]["call_identity"] == identity
                        for row in payload["agent_observations"])):
             return False
-        observations = [row for row in payload["observations"] if row["action_sequence"] == sequence]
+        observations = [row for row in payload["observations"]
+                        if row["action_sequence"] == sequence or row["call_identity"] == identity]
+        if not observations:
+            # SQL closes only an unused reservation under the same run lock
+            # as dispatch. That exact ledger chain proves no provider call;
+            # a worker exception is optional, and no reply is manufactured.
+            return "worker_observation_ref" not in call
         if len(observations) != 1:
             return False
         row = observations[0]
@@ -782,7 +899,8 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
                             or outcome["protocol"] == "http" and outcome["response"] == {
                                 "status": 503, "headers": {}, "body_b64": base64.b64encode(json.dumps(
                                     {"error": {"code": "worker_unavailable"}}, sort_keys=True).encode()).decode()}))
-        return (row["kind"] == "transport_failure" and row["operation_id"] == call["operation_id"]
+        return (row["action_sequence"] == sequence
+                and row["kind"] == "transport_failure" and row["operation_id"] == call["operation_id"]
                 and row["call_identity"] in (None, identity)
                 and row["contributes_to_provider_call_count"] is True and row["privacy"]["redacted"] is False
                 and row["request"]["admitted_parameters"] == request.get("admitted_parameters")
@@ -794,13 +912,14 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
 
 
 def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
-    """Prove a delivered retryable error without making it a model target.
+    """Prove no generation or a delivered error without making a model target.
 
     Provider errors need no observed generation route: no generation is
     claimed. The reviewed request, saved failure bytes, host write and agent
     read must agree. Unsettled billing does not establish whether the delivered bytes are usable.
     """
-    if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
+    if (verified_recovered_provider_retry(example, call, worker_proofs=worker_proofs)
+            or verified_undispatched_transport(example, call, worker_proofs=worker_proofs)):
         return True
     try:
         run_id = example["run_id"]
@@ -849,7 +968,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
         body = outbound.get("body")
         if (call.get("run_id") != run_id or call.get("provider") != "openrouter"
                 or operation not in reasoning_capture.OPERATIONS
-                or not _policy(call, registry)
+                or not _policy(call, registry, worker_proofs=worker_proofs)
                 or (call.get("request_capture") or {}).get("redacted")
                 or not training_steps._exact(request)
                 or request.get("operation_id") != operation
@@ -954,8 +1073,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                 return (provenance.get("worker_body_source") == "worker_error_observation"
                         and bool(failure_bodies)
                         and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
-        return all(isinstance(value, Mapping) and bool(value.get("error"))
-                   and not value.get("choices") and not value.get("output")
+        return all(_error_body_has_no_generation(value)
                    and (status != 404 or _ignored_provider_failure(
                        value, body, call.get("reasoning_capture") or {}))
                    for value in failure_bodies)
@@ -1004,6 +1122,50 @@ def _incomplete_json_object_prefix(value: str) -> bool:
     return False
 
 
+def verified_private_explicit_truncation(example, call, *, worker_proofs=None) -> bool:
+    """Discard a proved explicit cap stop; never admit its private response.
+
+    A redacted source excerpt can coexist with a provider's explicit truncation
+    status. The entire turn stays outside targets and reasoning-token totals.
+    Its exact request, input history, selected route and host-written receipt
+    must still be proved. Later requests keep their ordinary privacy checks.
+    """
+    if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+            or call.get("operation_id") != "openrouter.responses"
+            or not isinstance(call.get("response"), Mapping)
+            or call["response"].get("status") != "incomplete"
+            or call["response"].get("incomplete_details") != {"reason": "max_output_tokens"}
+            or call["response"].get("error")
+            or "credential" not in (call.get("response_privacy_redactions") or [])
+            or not set(call.get("evidence_gaps") or []) <= {
+                "response_privacy_nonexact", "provider_cost_unresolved"}):
+        return False
+    try:
+        operation, body, _ = training_steps._model_request(example, call, worker_proofs=worker_proofs)
+        evidence = training_steps._host_result(example, call, allow_privacy=True, worker_proofs=worker_proofs)
+        response = evidence["response"]
+        if (evidence["write"]["status"] != 200 or response != call["response"]
+                or contracts.document_hash(response) != call.get("response_sha256")):
+            return False
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
+        state = attempt_coverage(call, _role(example, call), registry, worker_proofs=worker_proofs)
+        if (not state["requested"] or not state["route_reviewed"]
+                or not state["provider_route_verified"]
+                or not (_legacy_tested_controls_match(call)
+                        or _captured_reasoning_controls_match(call, registry))):
+            return False
+        try:
+            # This preserves input-history and retrieval checks before the
+            # ordinary explicit-incomplete branch. It never returns a target.
+            training_steps._target(body, response, operation, allow_reasoning_history=True,
+                                   allow_tool_error_history=True)
+        except ValueError as exc:
+            return str(exc) == "response_not_complete"
+        return False
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def verified_cap_truncated_target(example, call, *, worker_proofs=None) -> bool:
     """Recognize exact cap-hit tool JSON ending at EOF, never repair a target.
 
@@ -1030,7 +1192,8 @@ def verified_cap_truncated_target(example, call, *, worker_proofs=None) -> bool:
         usage = response.get("usage") or {}
         checked = dict(call, response=response, response_sha256=contracts.document_hash(response))
         state = attempt_coverage(checked, _role(example, call),
-                                 baseline_reasoning.for_example(example).get("reasoning_route_registry"))
+                                 baseline_reasoning.for_example(example).get("reasoning_route_registry"),
+                                 worker_proofs=worker_proofs)
         if (operation not in reasoning_capture.OPERATIONS or evidence["write"]["status"] != 200
                 or type(cap) is not int or cap < 1
                 or not (_legacy_tested_controls_match(call)
@@ -1141,7 +1304,8 @@ def coverage(examples) -> dict:
                     training_steps._candidate(example, call)
                     target_usable = True
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-                    omitted_truncation = verified_cap_truncated_target(example, call) or (
+                    private_truncation = verified_private_explicit_truncation(example, call)
+                    omitted_truncation = private_truncation or verified_cap_truncated_target(example, call) or (
                         isinstance(exc, ValueError) and str(exc) == "response_not_complete"
                         and row["returned"] == "truncated" and row["route_reviewed"]
                         and row["provider_route_verified"])
@@ -1152,7 +1316,8 @@ def coverage(examples) -> dict:
                 if not full and verified_missing_thinking(row):
                     missing_reasoning_tokens += row["tokens_reported"]
             if omitted_truncation and row["returned"] != "truncated":
-                row["target_omission_reason"] = "inferred_output_cap_json_eof"
+                row["target_omission_reason"] = ("explicit_output_cap_private_response" if private_truncation
+                                                 else "inferred_output_cap_json_eof")
             has_text |= execution_model and bool(full) and target_usable
             bad |= execution_model and new_policy and not (target_usable or failed or omitted_truncation)
             empty = (verified_no_thinking(call, call.get("response") or {}, row) if new_policy
@@ -1239,7 +1404,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                 if key not in {"choices", "output", "usage"}:
                     add("response_metadata", path + [key], response[key], delivery=delivery)
             segments, summary, opaque = _segments(response, operation)
-            full, _ = full_text_segments({**call, "response": response}, _role(example, call), registry)
+            full, _ = full_text_segments({**call, "response": response}, _role(example, call), registry,
+                                         worker_proofs=worker_proofs)
             def add_segments(values):
                 for segment in values:
                     classification = ("summary" if "summary" in segment["field"] else
@@ -1335,7 +1501,12 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "response_path": prefix + ["response"], "response_sha256": call.get("response_sha256"),
                       "response_status": call.get("response_status"),
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
-                      "reasoning_coverage": attempt_coverage(call, _role(example, call), registry),
+                      **({"recovered_response_ref": copy.deepcopy(call["recovered_response_ref"])}
+                         if call.get("recovered_response_ref") is not None else {}),
+                      "reasoning_coverage": attempt_coverage(call, _role(example, call), registry,
+                                                           worker_proofs=worker_proofs),
+                      **({"target_omission_reason": "explicit_output_cap_private_response"}
+                         if verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs) else {}),
                       **({"target_omission_reason": "inferred_output_cap_json_eof"}
                          if verified_cap_truncated_target(example, call, worker_proofs=worker_proofs) else {}),
                       "actual_microusd": call.get("actual_microusd"),
@@ -1470,7 +1641,7 @@ def readable_trace_markdown(report: Mapping[str, Any], *, raw_export_name: str |
 
 
 def _prior_observations(example: Mapping[str, Any], call: Mapping[str, Any]) -> list[dict]:
-    artifact = (example.get("worker_observation_artifacts") or {}).get(call.get("run_id")) or {}
+    artifact = training_steps._worker_artifact(example, call, allow_journal_prefix=True)
     payload = artifact.get("payload") or {}
     if contracts.document_hash(payload) != artifact.get("payload_sha256"):
         raise ValueError("worker_payload_hash_mismatch")
@@ -1659,7 +1830,7 @@ def _optional_capture_runs_proven(example, *, worker_proofs=None):
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         delivered = []
         for call in calls:
-            if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
+            if verified_recovered_provider_retry(example, call, worker_proofs=worker_proofs):
                 continue
             training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
             delivered.append(call["call_identity"])
@@ -1755,6 +1926,96 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
     return None if result is None else result | diagnostic_gaps
 
 
+def _individual_research_evidence(example):
+    """Builder-only absence exception; never establish full-ICP eligibility."""
+    selected = selected_research_evidence(example)
+    if selected is not None:
+        return selected
+    try:
+        run_id, score_id = example.get("run_id"), example.get("score_run_id")
+        snapshots = example.get("input_snapshots", {})
+        if (not isinstance(run_id, str) or not isinstance(score_id, str)
+                or not isinstance(snapshots, Mapping)
+                or not any(identity not in snapshots for identity in (run_id, score_id))):
+            return None
+        proof = example.get("completeness") or {}
+        reasons = proof.get("incomplete_reasons") or []
+        dimensions, by_dimension = proof.get("dimensions") or {}, proof.get("reasons_by_dimension") or {}
+        # Invalid snapshots can be removed by the exporter before it reports
+        # absence. Preserve that contradiction, including its dimension.
+        if (proof.get("complete") is not False or not isinstance(reasons, list)
+                or any(not isinstance(reason, str) for reason in reasons)
+                or by_dimension.get("exact_inputs") != ["runtime_input_snapshot_missing"]
+                or set(dimensions) != set(by_dimension)
+                or any(not isinstance(value, list) or any(not isinstance(reason, str) for reason in value)
+                       for value in by_dimension.values())
+                or set(reasons) != set().union(*(set(value) for value in by_dimension.values()))
+                or any(dimensions[name] is not (not value) for name, value in by_dimension.items())
+                or set(reasons) & {"runtime_input_snapshot_invalid", "runtime_input_privacy_nonexact",
+                                  "runtime_input_context_mismatch", "judge_input_context_mismatch"}
+                or dimensions.get("context") is not True
+                or dimensions.get("source_identity") is not True):
+            return None
+        configuration = example.get("configuration") or {}
+        training_coverage.missing_reasoning_percent_from_configuration(configuration)
+        training_coverage.percent_from_configuration(configuration)
+        if not reasoning_capture.enabled(baseline_reasoning.for_example(example)):
+            return None
+        judgment = example.get("judgment") or {}
+        if (type(judgment.get("per_icp_score")) not in (int, float)
+                or not verified_output_projection(example)):
+            return None
+        for identity, kind in ((run_id, "execute"), (score_id, "score")):
+            attempts = [row for row in example.get("attempts") or [] if row.get("run_id") == identity]
+            if len(attempts) != 1 or attempts[0].get("kind") != kind or attempts[0].get("status") != "accepted":
+                return None
+            if identity not in snapshots:
+                continue
+            snapshot = snapshots[identity]
+            document = snapshot.get("input")
+            if (set(snapshot) != {"schema_version", "run_id", "kind", "lease_generation",
+                                 "claim_request_hash", "input", "input_sha256", "privacy"}
+                    or snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
+                    or snapshot.get("run_id") != identity or snapshot.get("kind") != kind
+                    or type(snapshot.get("lease_generation")) is not int or snapshot["lease_generation"] < 1
+                    or type(attempts[0].get("lease_generation")) is not int
+                    or snapshot["lease_generation"] != attempts[0].get("lease_generation")
+                    or not isinstance(snapshot.get("claim_request_hash"), str)
+                    or not contracts.SHA256_RE.fullmatch(snapshot["claim_request_hash"])
+                    or snapshot.get("privacy") != {"redacted": False, "redactions": []}
+                    or snapshot["privacy"]["redacted"] is not False
+                    or not isinstance(document, dict)
+                    or snapshot.get("input_sha256") != contracts.document_hash(document)):
+                return None
+            artifact = (example.get("worker_observation_artifacts") or {}).get(identity) or {}
+            if any(key in artifact and snapshot[key] != artifact[key]
+                   for key in ("run_id", "kind", "lease_generation", "claim_request_hash")):
+                return None
+            if kind == "score" and (document.get("scored_run_id") != run_id
+                                    or document.get("companies") != example["output"].get("companies")):
+                return None
+            if "icp" in document or kind == "execute":
+                actual_icp = dict(document.get("icp") or {})
+                expected_icp = (training_export.integrity.agent_visible_icp(
+                    example["icp"], contacts_required=training_export.contact_policy.enabled(configuration))
+                    if training_export.integrity.enabled(configuration) else dict(example["icp"]))
+                if not training_export.contact_policy.enabled(configuration):
+                    expected_icp.pop("contact_policy", None)
+                for key in ("output_schema_version", "company_quality_policy", "company_requirements",
+                            "intent_details_policy", "_arena_provider_observations"):
+                    actual_icp.pop(key, None)
+                if actual_icp != expected_icp:
+                    return None
+            if document.get("evaluation_date") != example.get("evaluation_date"):
+                return None
+            if (kind == "score" and "scorer_policy" in document
+                    and document["scorer_policy"] != training_dataset.label_scorer_configuration(example).get("scorer_policy")):
+                return None
+        return frozenset(reasons)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def _combined_coverage(reports):
     result = coverage([])
     returned, trajectories, grouped = Counter(), Counter(), defaultdict(Counter)
@@ -1802,7 +2063,7 @@ def build(examples, rules: training_steps.Rules | None = None):
             return
         source = ref["example_hash"]
         if source not in scoped:
-            scoped[source] = selected_research_evidence(example)
+            scoped[source] = _individual_research_evidence(example)
         ancillary_gaps = scoped[source]
         if ancillary_gaps is None:
             reasons["trajectory_evidence_incomplete"] += 1
@@ -1828,6 +2089,8 @@ def build(examples, rules: training_steps.Rules | None = None):
         if source not in diagnostic_gaps_by_source:
             diagnostic_gaps_by_source[source] = provider_visible_view(example)[1]
         diagnostic_gaps = diagnostic_gaps_by_source[source]
+        missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
+                                if identity not in (example.get("input_snapshots") or {}))
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
                   "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
@@ -1837,9 +2100,13 @@ def build(examples, rules: training_steps.Rules | None = None):
                                    "response_sha256": ref["delivered_response_sha256"],
                                    "route": copy.deepcopy(call["reasoning_capture"]),
                                    "selected_research_evidence": {
-                                       "complete": True,
-                                       **({"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
-                                       "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps),
+                                       "complete": not missing_inputs,
+                                       **({"scope": "individual_model_request_result",
+                                           "runtime_input_availability": "unavailable",
+                                           "missing_runtime_input_run_ids": missing_inputs} if missing_inputs else
+                                          {"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
+                                       "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps
+                                           - ({"runtime_input_snapshot_missing"} if missing_inputs else set())),
                                        **({"diagnostic_capture_gaps": sorted(diagnostic_gaps)}
                                           if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {})}}]}
         record["candidate_id"] = contracts.document_hash({key: record[key] for key in

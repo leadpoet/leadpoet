@@ -95,12 +95,17 @@ def assess_bank(values, example, *, percent=80):
 @pytest.mark.parametrize('complete', [False, True])
 def test_reader_keeps_zero_recovery_proof_and_no_response_claim(operation, complete):
     values = undispatched_values(operation=operation, complete=complete)
+
+    def list_ledger(*, run_id, after_entry_id, limit, training_responses):
+        assert training_responses is True
+        return [row for row in values['ledger_rows']
+                if row['run_id'] == run_id and (after_entry_id is None or row['entry_id'] > after_entry_id)][:limit]
+
     store = SimpleNamespace(
         get_run=lambda identity: next(row for row in values['runs'] if row['run_id'] == identity),
         get_round=lambda _: values['round_row'], get_submission=lambda _: values['submission_row'],
         list_runs=lambda _: values['runs'],
-        list_ledger=lambda *, run_id, after_entry_id, limit: [row for row in values['ledger_rows']
-            if row['run_id'] == run_id and (after_entry_id is None or row['entry_id'] > after_entry_id)][:limit],
+        list_ledger=list_ledger,
         icp_cost_eligibility=lambda **identity: values['cost_eligibility_reader'](**identity)['eligibility'])
     example = training_reader.export_run(store, values['objects'], values['run_id'])
     call = example['provider_calls'][-1]

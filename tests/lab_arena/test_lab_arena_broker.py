@@ -187,7 +187,8 @@ class FakeLedgerStore:
             if call["kind"] != "reservation":
                 return self._view(call)
             call["kind"] = "dispatch"
-            return {"status": "dispatched", "idempotent": False, "call_identity": call_identity, "amount_microusd": call["amount"]}
+            return {"status": "dispatched", "idempotent": False, "call_identity": call_identity,
+                    "amount_microusd": call["amount"], "dispatch_entry_id": 2}
 
     def settle_call(self, *, run_id, lease_token_hash, call_identity, actual_microusd, terminal_response, lease_ttl_seconds):
         with self.lock:
@@ -4226,6 +4227,11 @@ def test_missing_malformed_or_wrong_model_usage_keeps_execute_result_when_valid(
         "body_is_mapping": True,
         "usage_present": "usage" in payload,
         "billing_present": False,
+        **({
+            "credential_fingerprint": br._credential_fingerprint(HOST_KEYS["openrouter"]),
+            "openrouter_terminal_response": br._terminal_response_document(
+                result.status, result.headers, result.body, call_succeeded=True),
+        } if expected_status == 200 else {}),
     }
 
 

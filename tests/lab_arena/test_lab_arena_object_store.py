@@ -245,3 +245,32 @@ def test_service_wiring_passes_the_optional_object_prefix(
         wiring.build_service_from_environment("shadow")
     assert captured["bucket"] == "arena"
     assert captured["prefix"] == expected_prefix
+
+
+def test_default_client_bounds_its_network_budget(monkeypatch):
+    """The round driver's object store must never wait on S3 indefinitely.
+
+    boto3's defaults are 60 s connect, 60 s read and five legacy retry
+    attempts. advance_round holds its span open for the whole call, so an
+    unbounded client is what turns a slow S3 leg into an hour-long driver
+    stall and a run of refused claims.
+    """
+    import boto3
+
+    captured = {}
+
+    def fake_client(service, *, region_name=None, config=None):
+        captured["service"] = service
+        captured["config"] = config
+        return object()
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    S3ObjectStore("arena-bucket", region_name="us-east-1")
+
+    config = captured["config"]
+    assert captured["service"] == "s3"
+    assert config.signature_version == "s3v4"
+    assert 0 < config.connect_timeout <= 30
+    assert 0 < config.read_timeout <= 60
+    assert config.retries["mode"] == "standard"
+    assert 1 <= config.retries["total_max_attempts"] <= 3

@@ -27,6 +27,9 @@ _RETAINED_ERROR_STATUSES = {
     "openrouter": (400, 402, 403, 404, 422, 502),
     "deepline": (400, 402, 403, 404, 422),
 }
+_UNDISPATCHED_RECOVERY_REASONS = {
+    "attempt_completed_before_dispatch", "provider_admission_cancelled", "provider_admission_deadline",
+}
 
 
 class ExportError(ValueError):
@@ -555,11 +558,15 @@ def response_entry_id(call):
         or type(terminal) is not int or not 0 < selected <= terminal or len(receipts) != 1):
         raise ExportError("retained_provider_error_identity_invalid")
     receipt = receipts[0]
+    metadata = receipt.get("metadata") or {}
+    successful = (provider == "openrouter" and metadata.get("call_succeeded") is True
+                  and type(call.get("response_status")) is int
+                  and 200 <= call["response_status"] < 300)
     if (receipt.get("terminal_source") != f"entry_doc.call.{provider}_terminal_response"
         or receipt.get("entry_kind") != "uncertain"
-        or (receipt.get("metadata") or {}).get("call_succeeded") is not False
-        or (receipt.get("metadata") or {}).get("status") != call.get("response_status")
-        or call.get("response_status") not in _RETAINED_ERROR_STATUSES[provider]
+        or not (successful or metadata.get("call_succeeded") is False
+                and call.get("response_status") in _RETAINED_ERROR_STATUSES[provider])
+        or metadata.get("status") != call.get("response_status")
         or receipt.get("response_sha256") != call.get("response_sha256")
         or receipt.get("response_ref") != {"field": "response", "entry_id": selected}):
         raise ExportError("retained_provider_error_identity_invalid")
@@ -698,6 +705,7 @@ def _calls(rows, run_ids, objects, run_order):
                      {"settlement", "uncertain", "recovery", "refusal"}]
         response_terminals = terminals
         retained = []
+        retained_success = False
         provider = reserves[0].get("provider") if reserves else None
         if provider in _RETAINED_ERROR_STATUSES:
             terminal_field = f"{provider}_terminal_response"
@@ -708,11 +716,34 @@ def _calls(rows, run_ids, objects, run_order):
                 terminal = saved[terminal_field]
                 try:
                     status, _, body = _decode_terminal(terminal)
-                    if (saved.get("reason") != "missing_provider_cost"
-                        or saved.get("call_succeeded") is not False
-                        or terminal.get("call_succeeded") is not False
-                        or status not in _RETAINED_ERROR_STATUSES[provider]
-                        or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
+                    successful = (provider == "openrouter" and saved.get("call_succeeded") is True
+                                  and type(terminal.get("status")) is int
+                                  and terminal.get("call_succeeded") is True and 200 <= status < 300)
+                    if successful:
+                        retained_success = True
+                        generation = saved.get("openrouter_generation_id")
+                        fingerprint = saved.get("credential_fingerprint")
+                        reservation_doc = reserves[0].get("entry_doc") or {}
+                        if (saved.get("reason") not in {"missing_provider_cost", "settle_failure"}
+                            or reserves[0].get("operation_id") not in {"openrouter.chat", "openrouter.responses"}
+                            or type(saved.get("provider_status")) is not int
+                            or not 200 <= saved["provider_status"] < 300
+                            or not isinstance(fingerprint, str)
+                            or contracts.SHA256_RE.fullmatch(fingerprint) is None
+                            or generation is not None and (not isinstance(generation, str)
+                                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", generation) is None)
+                            or any(saved.get(key) != reservation_doc[key] for key in (
+                                "credential_fingerprint", "openrouter_generation_id", "openrouter_model", "request_hash")
+                                if key in reservation_doc and key in saved)
+                            or len(body) > MAX_RECEIPT_BYTES
+                            or set(terminal) != {"status", "headers", "body_b64", "call_succeeded"}
+                            or any(key.startswith("judgment_cache_source_") for key in terminal)):
+                            raise BrokerError("broker_unavailable")
+                    elif (saved.get("reason") != "missing_provider_cost"
+                          or saved.get("call_succeeded") is not False
+                          or terminal.get("call_succeeded") is not False
+                          or status not in _RETAINED_ERROR_STATUSES[provider]
+                          or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
                         raise BrokerError("broker_unavailable")
                     if provider == "deepline" and status == 402:
                         from lab_arena.operations import GENERIC_UNAVAILABLE_BODY
@@ -755,8 +786,10 @@ def _calls(rows, run_ids, objects, run_order):
             reasons.add("ambiguous_call_lifecycle")
             continue
         reserve = entries[0] if standalone_refusal else reserves[0]
-        if any(any(row.get(key) != reserve.get(key) for key in
-                   ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
+        membership = ("run_id", "round_id", "submission_id", "provider", "operation_id")
+        if retained_success:
+            membership += ("miner_hotkey", "stage", "funding_source")
+        if any(any(row.get(key) != reserve.get(key) for key in membership) for row in entries):
             raise ExportError("ledger_membership_mismatch")
         recovered = _ledger_recovered_response(entries, reserve)
         entry = ((reserve.get("entry_doc") or {}).get("call") if standalone_refusal
@@ -846,7 +879,8 @@ def _calls(rows, run_ids, objects, run_order):
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
                              "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
-                             "transport_elapsed_ms", "timing_scope"}
+                             "transport_elapsed_ms", "timing_scope",
+                             "transport_not_started", "undispatched_dispatch_entry_id"}
         call["lifecycle"] = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
             metadata = {key: copy.deepcopy(row[key]) for key in
@@ -854,8 +888,8 @@ def _calls(rows, run_ids, objects, run_order):
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
             if (row.get("entry_kind") == "recovery"
-                    and (row.get("entry_doc") or {}).get("reason") == "attempt_completed_before_dispatch"):
-                metadata["accounting"]["reason"] = "attempt_completed_before_dispatch"
+                    and (row.get("entry_doc") or {}).get("reason") in _UNDISPATCHED_RECOVERY_REASONS):
+                metadata["accounting"]["reason"] = row["entry_doc"]["reason"]
             metadata["accounting"].update({key: copy.deepcopy(value) for key, value in
                 observations(row.get("entry_doc") or {}).items() if key in accounting_fields})
             recorded_call = (row.get("entry_doc") or {}).get("call")

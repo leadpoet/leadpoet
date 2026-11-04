@@ -251,6 +251,11 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_judgment_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
+    "lab_arena_release_undispatched_call": (
+        ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_call_identity", "text"), ("p_call_doc", "jsonb"), ("p_reason", "text"),
+        ("p_dispatch_entry_id", "bigint"),
+    ),
     "lab_arena_mark_dispatched": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text")),
     "lab_arena_settle_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_actual_microusd", "bigint"), ("p_terminal_response", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_mark_uncertain": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
@@ -2336,6 +2341,16 @@ class ArenaStore:
             ),
             "icp_cost_eligibility",
         )
+
+    def release_undispatched_call(self, *, run_id: str, lease_token_hash: str,
+                                call_identity: str, call_doc: Mapping[str, Any],
+                                reason: str, dispatch_entry_id: Optional[int] = None) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_release_undispatched_call", {
+                "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+                "p_call_identity": call_identity, "p_call_doc": dict(call_doc),
+                "p_reason": reason, "p_dispatch_entry_id": dispatch_entry_id,
+            }), "release_undispatched_call")
 
     def mark_dispatched(self, *, run_id: str, lease_token_hash: str, call_identity: str) -> Dict[str, Any]:
         return _require_mapping(

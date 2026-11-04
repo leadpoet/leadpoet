@@ -2230,6 +2230,8 @@ class CallStore(Protocol):
 
     def reserve_judgment_call(self, **kwargs: Any) -> Dict[str, Any]: ...
 
+    def release_undispatched_call(self, **kwargs: Any) -> Dict[str, Any]: ...
+
     def mark_dispatched(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def settle_call(self, **kwargs: Any) -> Dict[str, Any]: ...
@@ -5635,6 +5637,46 @@ class Broker:
                 # observed history against the refreshed authoritative head.
                 reserved = self._store.reserve_call(**reservation_arguments)
                 status = reserved.get("status")
+            # This explicit sanitized terminal is authority only for this exact
+            # reservation. A private upstream receipt is never replay authority.
+            saved_successes = [
+                entry["entry_doc"]["call"] for entry in ledger_entries
+                if isinstance(entry, Mapping) and entry.get("entry_kind") == "uncertain"
+                and isinstance(entry.get("entry_doc"), Mapping)
+                and isinstance(entry["entry_doc"].get("call"), Mapping)
+                and isinstance(entry["entry_doc"]["call"].get("openrouter_terminal_response"), Mapping)
+                and entry["entry_doc"]["call"]["openrouter_terminal_response"].get("call_succeeded") is True
+            ]
+            if saved_successes:
+                if (len(saved_successes) != 1 or status not in {"uncertain", "settled"}
+                    or not _reservation_readback_matches(
+                        self._store, reservation_arguments, reserved,
+                        confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
+                        ledger_entries=ledger_entries,
+                    )):
+                    return _error_result("broker_unavailable", summary)
+                saved_call = saved_successes[0]
+                saved_terminal = saved_call["openrouter_terminal_response"]
+                generation = saved_call.get("openrouter_generation_id")
+                try:
+                    saved_status, saved_headers, saved_body = _decode_terminal(saved_terminal, secret=secret)
+                    if (saved_call.get("reason") not in {"missing_provider_cost", "settle_failure"}
+                        or saved_call.get("call_succeeded") is not True
+                        or saved_call.get("credential_fingerprint") != _credential_fingerprint(secret)
+                        or (generation is not None and (not isinstance(generation, str)
+                            or _OPENROUTER_GENERATION_ID_RE.fullmatch(generation) is None))
+                        or not 200 <= saved_status < 300
+                        or not 200 <= saved_call.get("provider_status", 0) < 300
+                        or any(key.startswith("judgment_cache_source_") for key in saved_terminal)
+                        or _response_contains_credential(ProviderResponse(saved_status, saved_headers, saved_body), secret)):
+                        raise BrokerError("broker_unavailable")
+                except (BrokerError, TypeError):
+                    return _error_result("broker_unavailable", summary)
+                summary.update(outcome=status, idempotent=True, status=saved_status,
+                    provider_status=saved_call["provider_status"], response_hash=contracts.hash_bytes(saved_body))
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                return BrokerResult(saved_status, saved_headers, saved_body, summary)
             # A paid response can be structurally replayable for its own call
             # while failing the new shared-cache paragraph protocol. SQL does
             # not expose noneligible pending replies as shared authority.
@@ -6068,8 +6110,8 @@ class Broker:
 
         # Gated OpenRouter calls share the worker API's absolute deadline.
         # Other providers retain their full post-admission request and billing
-        # windows. Once reserve commits, preserve the existing accounting
-        # sequence because no call-level pre-dispatch release transition exists.
+        # windows. Release a cancelled/elapsed OpenRouter reservation only when
+        # the database proves that this exact current lease never dispatched it.
         billing_deadline: Optional[float] = None
         request_deadline = time.monotonic() + operation_timeout_seconds
         if source_content_deadline is not None:
@@ -6096,6 +6138,33 @@ class Broker:
                 return _error_result("capability_unavailable", {
                     **summary, "outcome": "not_dispatched", "actual_microusd": 0,
                 })
+        def openrouter_dispatch_stop() -> Optional[str]:
+            if effective_operation.provider != "openrouter":
+                return None
+            if OpenRouterSharedGate._cancelled(cancel_requested):
+                return "provider_admission_cancelled"
+            if time.monotonic() >= request_deadline:
+                return "provider_admission_deadline"
+            return None
+
+        def release_before_transport(reason, *, dispatch_entry_id=None):
+            released = self._store.release_undispatched_call(
+                run_id=context.run_id, lease_token_hash=context.lease_token_hash,
+                call_identity=call_identity, call_doc=reservation_arguments["call_doc"],
+                reason=reason, **({"dispatch_entry_id": dispatch_entry_id}
+                                  if dispatch_entry_id is not None else {}),
+            )
+            if released.get("status") == "stale":
+                return _error_result("lease_stale", summary)
+            if released.get("status") != "recovered":
+                summary["outcome"] = "uncertain"
+                return _error_result("call_uncertain", summary)
+            summary.update(outcome="not_dispatched", reason=reason)
+            return _error_result("provider_unavailable", summary)
+
+        dispatch_stop = openrouter_dispatch_stop()
+        if dispatch_stop is not None:
+            return release_before_transport(dispatch_stop)
         dispatched = ({"status": "dispatched", "idempotent": False}
             if deepline_response_recovery else self._store.mark_dispatched(
                 run_id=context.run_id,
@@ -6182,6 +6251,17 @@ class Broker:
                         except Exception:
                             transport_started = None
                         try:
+                            # Reservation/dispatch persistence can itself use
+                            # the remaining deadline or observe a disconnect.
+                            # Only this fresh marker reply proves local ownership.
+                            # Once send is entered this release path is unreachable.
+                            dispatch_stop = openrouter_dispatch_stop()
+                            if dispatch_stop is not None:
+                                dispatch_entry_id = dispatched.get("dispatch_entry_id")
+                                if type(dispatch_entry_id) is not int or dispatch_entry_id < 1:
+                                    raise ProviderTransportError("request_cancelled_before_transport")
+                                return release_before_transport(dispatch_stop,
+                                    dispatch_entry_id=dispatch_entry_id)
                             response = self._transport.send(
                                 method=outbound.target.method,
                                 url=url,
@@ -6723,6 +6803,46 @@ class Broker:
             if upstream_capture is not None:
                 _retain_upstream_response_receipt(document, upstream_capture)
 
+        def confirmed_success_receipt(document, state):
+            state_status = state.get("status")
+            if state_status not in {"uncertain", "settled"}:
+                return False
+            if state_status == "uncertain" and state.get("idempotent") is not True:
+                return True
+            # A lost write reply may expose an existing uncertainty or a
+            # committed settlement. Validate the exact reservation and bytes.
+            rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if not _reservation_readback_matches(
+                self._store, reservation_arguments, state,
+                confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
+                ledger_entries=rows,
+            ):
+                return False
+            saved_calls = [row.get("entry_doc", {}).get("call") for row in rows
+                           if row.get("entry_kind") == "uncertain"]
+            if state_status == "uncertain":
+                return saved_calls == [document]
+            if state.get("terminal_response") != rows[-1].get("terminal_response"):
+                return False
+            saved_terminal = state.get("terminal_response")
+            known_actual = document.get("known_actual_microusd")
+            if known_actual is not None and known_actual != state.get("amount_microusd"):
+                return False
+            try:
+                saved_response = _decode_terminal(saved_terminal)
+                wanted_response = _decode_terminal(document["openrouter_terminal_response"])
+            except BrokerError:
+                return False
+            if saved_terminal.get("call_succeeded") is True and saved_response == wanted_response:
+                return known_actual is not None
+            # Billing-only settlement stores a placeholder; retain the exact
+            # previously persisted response and its reconciliation pointer.
+            accounting = rows[-1].get("entry_doc") or {}
+            return (saved_calls == [document]
+                and accounting.get("openrouter_delayed_reconciliation") is True
+                and accounting.get("reconciled_uncertainty_entry_id") == next(
+                    row["entry_id"] for row in rows if row.get("entry_kind") == "uncertain"))
+
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
@@ -6926,6 +7046,12 @@ class Broker:
                         sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
                         account_failure_evidence=account_failure_evidence,
                     )
+                if (effective_operation.provider == "openrouter" and call_succeeded
+                    and 200 <= sanitized_status < 300):
+                    uncertain_doc["credential_fingerprint"] = provider_credential_fingerprint
+                    uncertain_doc["openrouter_terminal_response"] = _terminal_response_document(
+                        sanitized_status, sanitized_headers, sanitized_body, call_succeeded=True,
+                    )
                 if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
@@ -6949,6 +7075,16 @@ class Broker:
                     call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
+                if (effective_operation.provider == "openrouter" and call_succeeded
+                    and not confirmed_success_receipt(uncertain_doc, uncertain_state)):
+                    return _error_result("lease_stale" if uncertain_state.get("status") == "stale"
+                                         else "broker_unavailable", summary)
+                if (effective_operation.provider == "openrouter" and call_succeeded
+                    and uncertain_state.get("status") == "settled"):
+                    summary.update(outcome="settled", actual_microusd=uncertain_state["amount_microusd"],
+                                   status=sanitized_status, provider_status=provider_status_for_summary,
+                                   response_hash=contracts.hash_bytes(sanitized_body))
+                    return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
                 if (effective_operation.provider == "deepline" and call_succeeded
                     and isinstance(raw_document, Mapping) and raw_document.get("status") == "completed"
                     and deepline_execution_key is not None
@@ -7318,6 +7454,12 @@ class Broker:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:
                     uncertain_doc["provider_cost"] = cost_record
+                if (effective_operation.provider == "openrouter" and call_succeeded
+                    and 200 <= sanitized_status < 300):
+                    uncertain_doc["credential_fingerprint"] = provider_credential_fingerprint
+                    uncertain_doc["openrouter_terminal_response"] = _terminal_response_document(
+                        sanitized_status, sanitized_headers, sanitized_body, call_succeeded=True,
+                    )
                 if judgment_response_replayable:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
@@ -7334,18 +7476,29 @@ class Broker:
             retain_transport_timing(uncertain_doc)
             retain_upstream_response(uncertain_doc)
             try:
-                self._persist_provider_accounting(self._store.mark_uncertain,
+                uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
                     deadline=accounting_store_deadline,
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                     call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
+                if ("openrouter_terminal_response" in uncertain_doc and call_succeeded
+                    and not confirmed_success_receipt(uncertain_doc, uncertain_state)):
+                    return _error_result("lease_stale" if uncertain_state.get("status") == "stale"
+                                         else "broker_unavailable", summary)
                 summary.update({"outcome": "uncertain"})
+                if ("openrouter_terminal_response" in uncertain_doc and call_succeeded
+                    and uncertain_state.get("status") == "settled"):
+                    summary.update(outcome="settled", actual_microusd=uncertain_state["amount_microusd"])
             except Exception:
                 # No uncertainty receipt was confirmed. Do not claim the
                 # durable head changed, or discard its unknown accounting state.
                 summary.update({"outcome": "dispatched"})
                 return _error_result("broker_unavailable", summary)
+            if "openrouter_terminal_response" in uncertain_doc and call_succeeded:
+                summary.update(status=sanitized_status, provider_status=provider_status_for_summary,
+                               response_hash=contracts.hash_bytes(sanitized_body))
+                return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
         if settle_status == "settled" and credit_failure_proof is not None:

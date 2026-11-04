@@ -152,8 +152,11 @@ def stack(tmp_path_factory):
                 """)
                 cursor.execute((Path(__file__).resolve().parents[2] /
                     "scripts/593-lab-arena-capture-summary-reader.sql").read_text())
+                # Install the current Store write RPC before PostgREST builds
+                # its schema cache; the full-round test compares every RPC.
                 for migration in ("595-lab-arena-capture-called-icps.sql",
-                                  "598-lab-arena-capture-summary-v2.sql"):
+                                  "598-lab-arena-capture-summary-v2.sql",
+                                  "619-lab-arena-release-undispatched-call.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
                 # Current Store probes include these receipt-bound readers.
                 # Install their real definitions and grants, but never the

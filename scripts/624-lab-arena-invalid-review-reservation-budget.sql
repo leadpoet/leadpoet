@@ -2,6 +2,8 @@
 -- unusable outcome; an untagged legacy error starts at its latest bound failure.
 -- Preserve refusal2+2 ceilings, prior costs, deadlines and final rows.
 -- No historical writes, new RPCs, tables, roles or diagnostic policy authority.
+-- Exact current review bodies include605's receipt-bound November3 recovery
+-- guards. Preserve those helper, deadline and round checks in place.
 -- Apply only through the canonical drained-release flow.
 BEGIN;
 SET LOCAL lock_timeout='5s';
@@ -11,8 +13,8 @@ LOCK TABLE public.lab_arena_rounds, public.lab_arena_submissions IN ACCESS EXCLU
 DO $invalid624_0$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)';
-  v_preimage CONSTANT TEXT := '4b6560038d304138cccd174ed080313328c098a399bc8d50042099bc6d21986b';
-  v_postimage CONSTANT TEXT := 'd057d4c76e4b26c4251673aa6b0aa2d7e1069e177ddcc12ecb0b94c4f1c95bf2';
+  v_preimage CONSTANT TEXT := '6c9974bae7c8b42dedcdee6e4a9145672402f5e0c74c87f8a9fff56afafeddf5';
+  v_postimage CONSTANT TEXT := '64b59849b4c36c19b3295fdb12cf8213171f8e550f903d79aaa3d463571cb079';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;
@@ -118,13 +120,13 @@ $new624_0_2$;
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
   v_old:=$old624_0_3$          END,
-          'retryable', v_now < v_deadline AND v_round.status = 'open'
+          'retryable', v_now < v_deadline AND (v_round.status = 'open' OR v_nov03_recovery)
             AND (NOT v_refusal_recovery OR v_alternate_count<2),
           'model', v_reservation.entry_doc ->> 'review_model',
           'file_count', v_reservation.entry_doc -> 'file_count',
 $old624_0_3$;
   v_new:=$new624_0_3$          END,
-          'retryable', v_now < v_deadline AND v_round.status = 'open'
+          'retryable', v_now < v_deadline AND (v_round.status = 'open' OR v_nov03_recovery)
             AND (NOT v_refusal_recovery OR v_alternate_count<2)
             AND (v_invalid_start IS NULL OR v_invalid_count<3),
           'model', v_reservation.entry_doc ->> 'review_model',
@@ -224,8 +226,8 @@ $invalid624_0$;
 DO $invalid624_1$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)';
-  v_preimage CONSTANT TEXT := '881ed3c299f5989d1e481416ec645ba2686ab646596a4aae4eb0f2aa2807e8a6';
-  v_postimage CONSTANT TEXT := '2e273f7683e33c4749996951919cfc229a74c3269d860c58980b0be211bcb78b';
+  v_preimage CONSTANT TEXT := '947841e794d9be0b7c997d5752f892a26952d4fae81ddf01ecb60b7fac25de24';
+  v_postimage CONSTANT TEXT := 'a84213a8c7affd3e6dd15c97b4cb20fa3b155c2e67d52e72de8de50eb536960b';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;

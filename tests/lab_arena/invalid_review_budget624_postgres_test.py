@@ -17,12 +17,25 @@ from tests.postgres_migration_harness import SCRIPTS
 MIGRATION = SCRIPTS / '624-lab-arena-invalid-review-reservation-budget.sql'
 
 
+def install_current_review_predecessor(cursor):
+    """Compose605's exact function guards, excluding its dated recovery DML.
+
+    The disposable599 fixture predates605. Production includes605; its owner,
+    helper, round/deadline and receipt guards are part of624's real preimage.
+    Retain605's schema-ACL restoration and leave all saved rows unchanged.
+    """
+    migration = (SCRIPTS / '605-arena-2026-11-03-admission-review-recovery.sql').read_text()
+    cursor.execute(migration.split('DO $recover605$')[0]
+                   + 'DO $restore605$' + migration.split('DO $restore605$', 1)[1])
+
+
 @pytest.fixture(scope='module')
 def recovery_database():
     database = predecessor_database.__wrapped__()
     try:
         psycopg2, dsn = next(database)
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            install_current_review_predecessor(cursor)
             cursor.execute(MIGRATION.read_text())
         yield psycopg2, dsn
     finally:
@@ -77,13 +90,15 @@ def test_bound_fails_before_migration_then_same_claim_settles_and_exhausts(recov
 
 def test_budget_counter_fails_on_exact_predecessor_then_migration_bounds_it(recovery_connect):
     # Separate fixture proves the cap itself changes behavior; canonical624 is
-    # still tested against exact599 hashes rather than a fabricated preimage.
+    # still tested against exact605 hashes rather than a fabricated preimage.
     database = predecessor_database.__wrapped__()
     try:
         psycopg2, dsn = next(database)
         from lab_arena.store import ArenaStore, PsycopgTransport
         store = ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
         connection = psycopg2.connect(**dsn); connection.autocommit = True
+        with connection.cursor() as cursor:
+            install_current_review_predecessor(cursor)
         _, submission, miner = accepted_recovery_submission(store, 'invalid624-cap-before')
         for _ in range(3):
             claim_error(store, connection, submission, miner)

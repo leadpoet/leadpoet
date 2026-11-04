@@ -525,7 +525,8 @@ class LocalObjectStore:
 # connect, 60 s read and five legacy retry attempts, so one unreachable S3
 # endpoint can hold the driver for tens of minutes; the heartbeat then stops
 # and competitors are refused their next run. Bound the client instead, so a
-# bad object leg fails in about a minute and the next driver tick retries.
+# stalled object operation has bounded connect/read waits and retry attempts.
+# These are per-attempt inactivity limits, not a total transfer deadline.
 # (wiring.py already does this for the evidence-capture store, with a much
 # shorter budget because that path must never hold a provider request.)
 OBJECT_STORE_CONNECT_TIMEOUT_SECONDS = float(

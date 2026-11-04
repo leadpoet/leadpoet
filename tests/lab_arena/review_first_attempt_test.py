@@ -115,17 +115,15 @@ def test_schema_binds_exact_source_and_comparison_identifiers():
         validator.validate(content)
 
 
-def test_schema_required_empty_comparisons_are_in_output_capacity_bound():
-    # This bound previously omitted a required field when there are no contexts.
-    payload = _archive(_pydantic_style_source())
-    prepared = code_review.prepare_request(payload)
-    minimum = {'verdict': 'pass', 'summary': 'review complete',
-               'reviewed_files': list(prepared.reviewed_files),
-               'reviewed_comparisons': [], 'findings': []}
-    from lab_arena import contracts
-    bound = len(contracts.canonical_json(minimum).encode())
-    with pytest.raises(code_review.CodeReviewError, match='review_output_cannot_report_coverage'):
-        code_review.prepare_request(payload, max_output_tokens=bound-1)
+def test_strict_required_fields_do_not_make_an_actually_truncated_reply_complete():
+    prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
+    response = _openrouter_response(prepared, finish_reason='length')
+    document = json.loads(response['choices'][0]['message']['content'])
+    document['reviewed_comparisons'] = []
+    response['choices'][0]['message']['content'] = json.dumps(document)
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == 'truncated'
 
 
 @pytest.mark.parametrize('native_finish', ['length', 'max_tokens'])

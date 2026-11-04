@@ -334,13 +334,15 @@ def test_large_verified_review_still_requires_every_comparison():
     assert failure.value.response_reason == "coverage"
 
 
-def test_prepare_request_rejects_when_output_cannot_list_every_file():
+def test_small_output_limit_is_prepared_but_actual_truncation_cannot_pass():
+    prepared = code_review.prepare_request(
+        _archive(_pydantic_style_source()), max_output_tokens=10,
+    )
+    response = _openrouter_response(prepared, finish_reason="length")
     with pytest.raises(code_review.CodeReviewError) as failure:
-        code_review.prepare_request(
-            _archive(_pydantic_style_source()),
-            max_output_tokens=10,
-        )
-    assert failure.value.code == "review_output_cannot_report_coverage"
+        code_review.parse_response(response, prepared)
+    assert failure.value.code == "review_response_invalid"
+    assert failure.value.response_reason == "truncated"
 
 
 @pytest.mark.parametrize(

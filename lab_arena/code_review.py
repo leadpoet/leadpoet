@@ -487,25 +487,9 @@ def prepare_request(
         or input_bound + max_output_tokens > context_window_tokens
     )
 
-    minimum_coverage_response = {
-        "verdict": "pass",
-        "summary": "review complete",
-        "reviewed_files": list(paths),
-        "reviewed_comparisons": [context["comparison_id"] for context in similarity_contexts],
-        "findings": [],
-    }
-    if research_control:
-        excerpt_file = next((item for item in files if item.content.strip()), None)
-        if excerpt_file is None:
-            raise CodeReviewError("review_output_cannot_report_coverage")
-        minimum_coverage_response["research_control"] = {
-            **submission["research_control"], "classification": "unverified",
-            "evidence": [{"claim": "uncertainty", "file": excerpt_file.path,
-                          "excerpt": excerpt_file.content.strip()[:1],
-                          "explanation": "Unresolved route."}],
-            "limitations": ["Source-only assessment."],
-        }
-    if len(contracts.canonical_json(minimum_coverage_response).encode("utf-8")) > max_output_tokens:
+    # Research evidence still needs nonblank source. Output JSON byte length
+    # cannot establish its provider token requirement; validate actual replies.
+    if research_control and not any(item.content.strip() for item in files):
         raise CodeReviewError("review_output_cannot_report_coverage")
     return PreparedCodeReview(
         parameters, files, input_bound, similarity_contexts,

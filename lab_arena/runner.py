@@ -2398,6 +2398,10 @@ class WorkerSocketServer:
                 or (state.lease.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_cache_control.POLICY):
                 raise ValueError("signal cache control is not authorized")
             request = signal_cache_control.validate_request(frame["request"])
+            if request.get("operation") == signal_cache_control.FIT_CAPABILITY_OPERATION:
+                # Pure, worker-local support proof after the same scorer and
+                # frozen-policy guards. Older workers reject this operation.
+                return contracts.canonical_json(signal_cache_control.fit_checkpoint_capability()).encode("utf-8")
             result = self._api.signal_judgment(state.lease["run_id"], state.lease_token, request)
             encoded = contracts.canonical_json(result).encode("utf-8")
             if len(encoded) > signal_cache_control.MAX_BYTES:

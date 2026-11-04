@@ -80,6 +80,7 @@ class ReviewStore:
         self.begin_calls = []
         self.finish_calls = []
         self.terminal = None
+        self.output_token_recommendation = code_review.DEFAULT_MAX_OUTPUT_TOKENS
 
     def begin_submission_review(self, *args):
         self.begin_calls.append(args)
@@ -94,11 +95,14 @@ class ReviewStore:
             "code_review_status": "reviewing",
             "attempt": 1,
             "reserved_microusd": args[3],
+            "review_output_token_recommendation": self.output_token_recommendation,
         }
 
     def finish_submission_review(self, *args):
         self.finish_calls.append(args)
         self.terminal = args[3]
+        if args[4].get("error_reason") == "truncated":
+            self.output_token_recommendation = code_review.RETRY_MAX_OUTPUT_TOKENS
         return {
             "status": args[3],
             "code_review_status": args[3],
@@ -504,7 +508,7 @@ def test_large_review_preserves_runtime_integrity_and_actual_cost(case):
     ("damage", "reason"),
     (
         ("malformed_json", "content_json"),
-        ("truncated", "not_finished"),
+        ("truncated", "truncated"),
         ("incomplete_coverage", "coverage"),
         ("missing_cost", None),
         ("wrong_model", "model_mismatch"),

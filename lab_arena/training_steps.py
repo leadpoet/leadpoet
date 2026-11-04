@@ -51,7 +51,7 @@ def _exact(value, *, response=False, worker_proofs=None):
     return _exact_stateless(value, response=response)
 
 
-def _exact_stateless(value, *, response=False):
+def _exact_stateless(value, *, response=False, clean_text_digests=None):
     def comparable(item):
         if isinstance(item, dict):
             return {key: comparable(child) for key, child in item.items()
@@ -75,7 +75,8 @@ def _exact_stateless(value, *, response=False):
                     if field in msg and (msg[field] is None or msg[field] == '' or field == 'reasoning_details' and msg[field] == []):
                         msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
-    sanitized, redactions = training_capture.sanitize_training_value(value)
+    sanitized, redactions = training_capture.sanitize_training_value(
+        value, clean_text_digests=clean_text_digests)
     # A provider can return the marker literally. Callers verify capture and
     # receipt redaction flags plus request/response hashes separately.
     return not removed and not redactions and clean == value and sanitized == value

@@ -12,6 +12,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 from tests.lab_arena.test_lab_arena_code_review_postgres import (
     accepted_recovery_submission, recovery_connect, recovery_store, recovery_superuser,
 )
+from tests.lab_arena.unfinished_review_recovery585_postgres_test import current_runtime_store
 from tests.postgres_migration_harness import SCRIPTS
 
 
@@ -222,7 +223,10 @@ def test_database_vocabulary_matches_python_projection():
         assert "'" + value + "'" in migration
 
 
-def test_real_runtime_keeps_each_attempt_diagnostic_without_changing_recovery(recovery_store, recovery_superuser):
+def test_real_runtime_keeps_each_attempt_diagnostic_without_changing_recovery(
+    current_runtime_store,
+):
+    recovery_store, recovery_superuser = current_runtime_store
     from tests.lab_arena.review_private_diagnostics_test import _response
     from tests.lab_arena.test_lab_arena_code_review_runtime import ReviewTransport, _archive, _reviewer, _source
     from tests.lab_arena.test_lab_arena_code_review_postgres import _age_review_error
@@ -233,6 +237,7 @@ def test_real_runtime_keeps_each_attempt_diagnostic_without_changing_recovery(re
     def respond(parameters):
         nonlocal calls
         calls += 1
+        assert parameters["max_tokens"] == (32768 if calls == 1 else 65536)
         body = _response(parameters)
         if calls == 1:
             body["choices"][0]["finish_reason"] = "length"
@@ -253,13 +258,11 @@ def test_real_runtime_keeps_each_attempt_diagnostic_without_changing_recovery(re
     assert "provider_diagnostic" not in row["code_review_doc"]
 
 
-def test_existing_deadline_and_long_retry_controls(recovery_store, recovery_superuser):
+def test_existing_deadline_source_cost_and_verdict_controls(recovery_store, recovery_superuser):
     from tests.lab_arena.unfinished_review_recovery585_postgres_test import (
-        test_runtime_recovers_after_old_caps_and_reuses_completed_review,
         test_deadline_stops_claims_and_late_admission,
         test_source_accounting_and_negative_verdict_keep_their_limits,
     )
-    test_runtime_recovers_after_old_caps_and_reuses_completed_review(recovery_store, recovery_superuser)
     test_deadline_stops_claims_and_late_admission(recovery_store, recovery_superuser)
     for kind in ("source", "accounting", "rejected"):
         test_source_accounting_and_negative_verdict_keep_their_limits(recovery_store, recovery_superuser, kind)

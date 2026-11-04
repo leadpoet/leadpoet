@@ -15,6 +15,10 @@ from lab_arena.store import new_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     current_service_database,
 )
+from tests.lab_arena.invalid_review_budget624_postgres_test import (
+    install_current_review_predecessor,
+)
+from tests.postgres_migration_harness import SCRIPTS
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_KEYS,
     CANARY_OPENROUTER_KEY,
@@ -29,7 +33,22 @@ from tests.lab_arena.test_lab_arena_service_round import (
 
 @pytest.fixture(scope="module")
 def database():
-    yield from current_service_database()
+    database = current_service_database()
+    try:
+        psycopg2, dsn = next(database)
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            # The full-service fixture ends at591. Current reviewer writes use
+            # the real605+624 contract, excluding the dated recovery DML.
+            for migration in (
+                "594-lab-arena-private-review-diagnostics.sql",
+                "599-lab-arena-refusal-review-fallback.sql",
+            ):
+                cursor.execute((SCRIPTS / migration).read_text())
+            install_current_review_predecessor(cursor)
+            cursor.execute((SCRIPTS / "624-lab-arena-invalid-review-reservation-budget.sql").read_text())
+        yield psycopg2, dsn
+    finally:
+        database.close()
 
 
 def _iso(moment: datetime) -> str:
@@ -140,6 +159,7 @@ class RecoveryReviewTransport(FakeProviderTransport):
     def __init__(self) -> None:
         super().__init__()
         self.attempts: dict[str, int] = {}
+        self.output_limits: dict[str, list[int]] = {}
         self.first_dispatch = threading.Event()
         self.release_first_dispatch = threading.Event()
 
@@ -159,6 +179,7 @@ class RecoveryReviewTransport(FakeProviderTransport):
         flavor = self._flavor(body)
         attempt = self.attempts.get(flavor, 0) + 1
         self.attempts[flavor] = attempt
+        self.output_limits.setdefault(flavor, []).append(body["max_tokens"])
         if flavor == "RecoveredReplacement":
             if attempt == 1:
                 self.first_dispatch.set()
@@ -169,9 +190,9 @@ class RecoveryReviewTransport(FakeProviderTransport):
                     {"content-type": "application/json"},
                     b'{"error":"temporary"}',
                 )
-            if attempt in (2, 4):
+            if attempt in (2, 4, 5):
                 raise broker.ProviderTransportError("controlled transport failure")
-            if attempt in (5, 6, 7):
+            if attempt in (6, 7):
                 response = super().send(**request)
                 document = json.loads(response.body.decode("utf-8"))
                 if attempt == 6:
@@ -339,8 +360,9 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         connect, round_id, "benchmark_deadline", original_deadline
     )
 
-    # Recover transport/503 failures and unusable JSON/unfinished responses.
-    # Attempt 8 passes, beyond both former caps, then reaches publication below.
+    # Transport/503 failures before unusable content do not consume the invalid
+    # episode. Malformed JSON and one truncation then use its first two slots;
+    # Attempt8 passes in the final slot at the increased output capacity.
     outcomes = []
     for _attempt in range(2, 9):
         _make_review_retry_ready(connect, replacement_id)
@@ -348,6 +370,11 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
             harness.service.store.get_submission(replacement_id)
         )
         outcomes.append(outcome["status"])
+        if _attempt in (6, 7):
+            invalid = harness.service.store.get_submission(replacement_id)["code_review_doc"]
+            assert invalid["error_reason"] == ("content_json" if _attempt == 6 else "truncated")
+            assert invalid["invalid_episode_start"] == 6
+            assert invalid["review_invalid_attempts"] == _attempt - 5
     assert outcomes == ["error"] * 6 + ["passed"]
     recovered = harness.service.store.get_submission(replacement_id)
     assert recovered["code_review_status"] == "passed"
@@ -356,6 +383,7 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     assert recovered["code_review_doc"]["cost_microusd"] == 0
     assert recovered["code_review_doc"]["review_cost_microusd"] > 0
     assert transport.attempts["RecoveredReplacement"] == 8
+    assert transport.output_limits["RecoveredReplacement"] == [32768] * 7 + [65536]
     recovered_kinds = _ledger_kinds(harness, replacement_id)
     assert recovered_kinds.count("reservation") == 8
     assert recovered_kinds.count("dispatch") == 8

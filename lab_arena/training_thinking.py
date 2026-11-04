@@ -795,6 +795,7 @@ def _verified_unavailable_upstream_failure(example, call, *, worker_proofs=None)
 def verified_undispatched_transport(example, call, *, require_observation_ref=True, worker_proofs=None) -> bool:
     """Prove the retained provider request never dispatched; invent no reply."""
     from lab_arena import training_observations
+    from lab_arena.training_export import _UNDISPATCHED_RECOVERY_REASONS
     operation = operations.get_operation(call.get("operation_id"))
     if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
             or call.get("run_id") != example.get("run_id")
@@ -833,20 +834,41 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
                 or not training_steps._outbound_request_exact(call)):
             return False
         lifecycle = call["lifecycle"]
+        recovery = lifecycle[-1]
+        marked = len(lifecycle) == 3
+        expected_accounting = {"reason": recovery["accounting"].get("reason"),
+                               "reserved_microusd": lifecycle[0]["amount_microusd"]}
+        if marked:
+            if (operation.provider != "openrouter"
+                    or recovery["accounting"].get("reason") not in {
+                        "provider_admission_cancelled", "provider_admission_deadline"}
+                    or lifecycle[1].get("accounting") != {}
+                    or type(lifecycle[1].get("amount_microusd")) is not int
+                    or lifecycle[1]["amount_microusd"] != lifecycle[0]["amount_microusd"]
+                    or recovery["accounting"].get("transport_not_started") is not True
+                    or type(recovery["accounting"].get("undispatched_dispatch_entry_id")) is not int
+                    or recovery["accounting"]["undispatched_dispatch_entry_id"] != lifecycle[1]["entry_id"]):
+                return False
+            expected_accounting.update(transport_not_started=True,
+                                       undispatched_dispatch_entry_id=lifecycle[1]["entry_id"])
         if (not isinstance(identity, str) or contracts.SHA256_RE.fullmatch(identity) is None
                 or type(sequence) is not int or sequence < 0
-                or len(lifecycle) != 2 or [row["entry_kind"] for row in lifecycle] != ["reservation", "recovery"]
+                or len(lifecycle) not in {2, 3}
+                or [row["entry_kind"] for row in lifecycle] != (
+                    ["reservation", "dispatch", "recovery"] if marked else ["reservation", "recovery"])
                 or any(type(row["entry_id"]) is not int or row["entry_id"] < 1 for row in lifecycle)
-                or lifecycle[0]["entry_id"] >= lifecycle[1]["entry_id"]
+                or any(left["entry_id"] >= right["entry_id"] for left, right in zip(lifecycle, lifecycle[1:]))
                 or type(call.get("reservation_entry_id")) is not int or type(call.get("terminal_entry_id")) is not int
                 or call["reservation_entry_id"] != lifecycle[0]["entry_id"]
-                or call["terminal_entry_id"] != lifecycle[1]["entry_id"]
+                or call["terminal_entry_id"] != recovery["entry_id"]
                 or any(row.get("funding_source") != call.get("funding_source") for row in lifecycle)
                 or type(lifecycle[0]["amount_microusd"]) is not int or lifecycle[0]["amount_microusd"] < 0
-                or type(lifecycle[1]["amount_microusd"]) is not int or lifecycle[1]["amount_microusd"] != 0
-                or lifecycle[1]["accounting"] != {"reason": "attempt_completed_before_dispatch",
-                    "reserved_microusd": lifecycle[0]["amount_microusd"]}
-                or type(lifecycle[1]["accounting"].get("reserved_microusd")) is not int
+                or type(recovery["amount_microusd"]) is not int or recovery["amount_microusd"] != 0
+                or recovery["accounting"].get("reason") not in _UNDISPATCHED_RECOVERY_REASONS
+                or (recovery["accounting"].get("reason") != "attempt_completed_before_dispatch"
+                    and operation.provider != "openrouter")
+                or recovery["accounting"] != expected_accounting
+                or type(recovery["accounting"].get("reserved_microusd")) is not int
                 or any(lifecycle[0]["accounting"].get(key) != call.get(key) for key in (
                     "request_hash", "action_sequence", "base_call_identity", "provider_attempt"))
                 or type(call.get("provider_attempt")) is not int or call["provider_attempt"] < 1
@@ -861,7 +883,7 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
             return False
         receipt = call["response_receipts"]
         if (not isinstance(receipt, list) or len(receipt) != 1
-                or receipt[0] != {"created_at": lifecycle[1].get("created_at"),
+                or receipt[0] != {"created_at": recovery.get("created_at"),
                     "entry_id": call["terminal_entry_id"], "entry_kind": "recovery",
                     "metadata": {}, "response_unavailable": True}):
             return False

@@ -270,6 +270,19 @@ def test_serialized_long_settlement_outage_is_sql_reconcilable(leased, monkeypat
 def test_migration_runs_without_superuser_and_restores_schema_acl(database):
     pg, dsn = database
     with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        # Reconstruct the exact pre-619 function and remove only this migration's
+        # new RPC. This exercises first CREATE/ALTER OWNER, not just replay.
+        base_sql = (SQL.parent / '179-lab-arena-v1.sql').read_text()
+        start = base_sql.index('CREATE OR REPLACE FUNCTION public.lab_arena_mark_dispatched(')
+        end = base_sql.index('-- Settle a dispatched call', start)
+        cursor.execute(base_sql[start:end])
+        signature = 'public.lab_arena_release_undispatched_call(text,text,text,jsonb,text,bigint)'
+        cursor.execute('DROP FUNCTION ' + signature)
+        cursor.execute("""SELECT encode(extensions.digest(pg_get_functiondef(
+            'public.lab_arena_mark_dispatched(text,text,text)'::regprocedure),'sha256'),'hex')""")
+        assert cursor.fetchone()[0] == '3149e4a6f481ca8dee40831b811674f7c540936d8d73ae346f55b0a1eea4f12f'
+        cursor.execute('SELECT to_regprocedure(%s)', (signature,))
+        assert cursor.fetchone()[0] is None
         cursor.execute('CREATE ROLE release619_migrator NOLOGIN')
         cursor.execute('GRANT lab_arena_owner TO release619_migrator')
         cursor.execute('ALTER SCHEMA public OWNER TO release619_migrator')
@@ -277,7 +290,11 @@ def test_migration_runs_without_superuser_and_restores_schema_acl(database):
         cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
         before = cursor.fetchone()[0]
         cursor.execute('SET ROLE release619_migrator')
+        cursor.execute('SELECT rolsuper FROM pg_roles WHERE rolname=current_user')
+        assert cursor.fetchone()[0] is False
         cursor.execute(SQL.read_text())
+        cursor.execute('SELECT to_regprocedure(%s)', (signature,))
+        assert cursor.fetchone()[0] is not None
         cursor.execute("SELECT nspacl,has_schema_privilege('lab_arena_owner','public','CREATE') FROM pg_namespace WHERE nspname='public'")
         after, owner_create = cursor.fetchone()
         assert after == before and owner_create is False

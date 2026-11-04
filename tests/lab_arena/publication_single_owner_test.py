@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import errno
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import time
 import pytest
 
 from lab_arena.publication_lock import PublicationLockError, publication_round_lock
+from lab_arena import publication_lock
 from lab_arena.service import ArenaService, ServiceError
 
 
@@ -135,3 +137,76 @@ def test_service_refuses_to_assess_when_lock_unavailable(tmp_path):
     with pytest.raises(ServiceError) as failure:
         service.publish("arena-2026-11-03")
     assert failure.value.code == "publication_lock_unavailable"
+
+
+def test_service_import_without_fcntl_keeps_disabled_path_and_fails_closed(tmp_path):
+    script = """
+import builtins, json, sys
+from pathlib import Path
+from types import SimpleNamespace
+original_import = builtins.__import__
+def without_fcntl(name, *args, **kwargs):
+    if name == 'fcntl':
+        raise ModuleNotFoundError("No module named 'fcntl'")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_fcntl
+from lab_arena.service import ArenaService, ServiceError
+service = ArenaService.__new__(ArenaService)
+service._config = SimpleNamespace(publication_lock_dir=None)
+service._publish_locked = lambda _round: {'status': 'stale', 'round_status': 'published'}
+disabled = service.publish('arena-2026-11-03')
+service._config.publication_lock_dir = Path(sys.argv[1])
+try:
+    service.publish('arena-2026-11-03')
+except ServiceError as exc:
+    configured = exc.code
+else:
+    configured = 'assessment_bypassed_lock'
+print(json.dumps({'disabled': disabled, 'configured': configured}))
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], capture_output=True,
+        text=True, timeout=5, check=True,
+    )
+    assert json.loads(child.stdout) == {
+        "disabled": {"status": "stale", "round_status": "published"},
+        "configured": "publication_lock_unavailable",
+    }
+
+
+@pytest.mark.parametrize("failed_operation", ["unlink", "fstat"])
+def test_lock_creation_failure_closes_descriptor(tmp_path, monkeypatch, failed_operation):
+    tmp_path.chmod(0o700)
+    actual_open = os.open
+    actual_fstat = os.fstat
+    actual_unlink = os.unlink
+    lock_descriptors = []
+
+    def track_open(name, *args, **kwargs):
+        descriptor = actual_open(name, *args, **kwargs)
+        if isinstance(name, str) and "arena-publication-" in name:
+            lock_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_unlink(name, *args, **kwargs):
+        if isinstance(name, str) and name.startswith(".arena-publication-"):
+            raise PermissionError("injected unlink failure")
+        return actual_unlink(name, *args, **kwargs)
+
+    def fail_fstat(descriptor):
+        if descriptor in lock_descriptors:
+            raise OSError(errno.EIO, "injected stat failure")
+        return actual_fstat(descriptor)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(publication_lock.os, "open", track_open)
+        scoped.setattr(publication_lock.os, failed_operation,
+                       fail_unlink if failed_operation == "unlink" else fail_fstat)
+        with pytest.raises(PublicationLockError):
+            with publication_round_lock(tmp_path, "arena-2026-11-03"):
+                pytest.fail("assessment bypassed failed lock")
+        assert lock_descriptors
+        for descriptor in lock_descriptors:
+            with pytest.raises(OSError) as closed:
+                actual_fstat(descriptor)
+            assert closed.value.errno == errno.EBADF

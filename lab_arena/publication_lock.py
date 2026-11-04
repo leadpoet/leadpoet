@@ -8,7 +8,6 @@ This does not coordinate publishers on different hosts.
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -32,6 +31,7 @@ def _lock_file(directory: Path, round_id: str) -> int:
     name = "arena-publication-" + hashlib.sha256(round_id.encode("utf-8")).hexdigest() + ".lock"
     try:
         parent = _open_directory_tree(directory, create=False)
+        descriptor = None
         try:
             parent_stat = os.fstat(parent)
             if (parent_stat.st_mode & 0o077) or (
@@ -55,12 +55,9 @@ def _lock_file(directory: Path, round_id: str) -> int:
                         os.link(temporary, name, src_dir_fd=parent,
                                 dst_dir_fd=parent, follow_symlinks=False)
                     except FileExistsError:
-                        winning = os.open(name, flags, dir_fd=parent)
                         os.close(descriptor)
-                        descriptor = winning
-                except BaseException:
-                    os.close(descriptor)
-                    raise
+                        descriptor = None
+                        descriptor = os.open(name, flags, dir_fd=parent)
                 finally:
                     os.unlink(temporary, dir_fd=parent)
             details = os.fstat(descriptor)
@@ -70,10 +67,13 @@ def _lock_file(directory: Path, round_id: str) -> int:
             if (not stat.S_ISREG(details.st_mode) or details.st_nlink < 1
                 or details.st_uid != parent_stat.st_uid
                 or stat.S_IMODE(details.st_mode) != 0o600):
-                os.close(descriptor)
                 raise PublicationLockError("publication lock file is unsafe")
-            return descriptor
+            acquired = descriptor
+            descriptor = None
+            return acquired
         finally:
+            if descriptor is not None:
+                os.close(descriptor)
             os.close(parent)
     except (OSError, ValueError) as exc:
         raise PublicationLockError("publication lock unavailable") from exc
@@ -82,6 +82,10 @@ def _lock_file(directory: Path, round_id: str) -> int:
 @contextmanager
 def publication_round_lock(directory: Path, round_id: str) -> Iterator[bool]:
     """Try the per-round host lock without waiting; close it on every exit."""
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise PublicationLockError("publication lock unavailable") from exc
     descriptor = _lock_file(directory, round_id)
     try:
         try:

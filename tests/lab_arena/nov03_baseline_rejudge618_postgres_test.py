@@ -70,7 +70,7 @@ def prepared(request):
             rendered=re.sub(r'\$manifest618\$.*?\$manifest618\$',lambda _: '$manifest618$'+json.dumps(manifest,separators=(',',':'),sort_keys=True)+'$manifest618$',SQL.read_text(),flags=re.S)
             # Real SQL and trigger paths; only the time-bound live fixture is
             # rendered into the future so this regression remains executable.
-            rendered=rendered.replace('2026-11-03T23:45:00Z','2099-11-03T23:45:00Z').replace('2026-11-03T23:59:00Z','2099-11-03T23:59:00Z')
+            rendered=rendered.replace('2026-11-04T00:10:00Z','2099-11-04T00:10:00Z').replace('2026-11-04T00:25:00Z','2099-11-04T00:25:00Z').replace('2026-11-04T00:29:00Z','2099-11-04T00:29:00Z')
             yield SimpleNamespace(pg=pg,dsn=dsn,conn=conn,store=store,service=service,objects=objects,row=row,before=before,manifest=manifest,sql=rendered)
     finally:
         if store is not None: store.close()
@@ -202,7 +202,7 @@ def test_wrong_authority_rolls_back_every_change(prepared,fault):
     if fault=='icp8': manifest['work_items'][0]['old_run_id']=prior.RUN
     if fault=='duplicate': manifest['work_items'][1]=deepcopy(manifest['work_items'][0])
     if fault=='old_refs': manifest['work_items'][0]['company_judgment_refs']=[{'invalid':True}]
-    if fault=='clock': sql=sql.replace('2099-11-03T23:45:00Z','2000-11-03T23:45:00Z')
+    if fault=='clock': sql=sql.replace('2099-11-04T00:10:00Z','2000-11-04T00:10:00Z')
     if fault=='guard':
         with p.conn.cursor() as cur: cur.execute('UPDATE public.lab_arena_restart_claim_control SET guard_generation=760 WHERE singleton')
         p.conn.commit()

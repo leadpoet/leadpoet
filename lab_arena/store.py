@@ -1397,7 +1397,10 @@ class ArenaStore:
             "current_daily_icp_set",
         )
 
-    def code_review_schema(self, *, require_refusal_fallback: bool = False) -> Dict[str, Any]:
+    def code_review_schema(
+        self, *, require_refusal_fallback: bool = False,
+        require_invalid_review_budget: bool = False,
+    ) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
         result = _require_mapping(
@@ -1432,6 +1435,16 @@ class ArenaStore:
             "legacy_structured_refusal_recovery": True,
         }:
             raise ArenaStoreError("code review fallback schema mismatch")
+        if require_invalid_review_budget and result.get("invalid_review_budget") != {
+            "max_reservations": 3,
+            "starts_at": "first_invalid_or_unverified_result",
+            "legacy_untagged_origin": "latest_bound_invalid_or_unverified_result",
+            "counts_expired_and_transport_claims": True,
+            "refusal_does_not_reset": True,
+            "output_tokens": [32_768, 65_536],
+            "truncated_at_limit_terminal": True,
+        }:
+            raise ArenaStoreError("code review invalid budget schema mismatch")
         return result
 
     def validator_scoring_authority_schema(self) -> Dict[str, Any]:

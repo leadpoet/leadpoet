@@ -694,7 +694,8 @@ def parse_response(
         choice = choices[0]
         if not isinstance(choice, Mapping):
             invalid("choice")
-        if choice.get("finish_reason") in {"length", "max_tokens"}:
+        if any(choice.get(name) in {"length", "max_tokens"}
+               for name in ("finish_reason", "native_finish_reason")):
             invalid("truncated_at_limit" if prepared.parameters["max_tokens"] >= RETRY_MAX_OUTPUT_TOKENS else "truncated")
         if choice.get("finish_reason") != "stop":
             invalid("not_finished")

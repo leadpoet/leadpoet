@@ -57,7 +57,9 @@ class SubmissionCodeReviewer:
                     "code_review_attempts": committed_attempt,
                     "code_review_doc": document,
                 })
-            if result.get("refusal_recovery") is True and type(result.get("retryable")) is bool:
+            if (result.get("refusal_recovery") is True
+                or type(result.get("review_invalid_attempts")) is int
+            ) and type(result.get("retryable")) is bool:
                 retryable = result["retryable"]
             if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
                 error_code = {
@@ -130,6 +132,7 @@ class SubmissionCodeReviewer:
         submission_id = str(row["submission_id"])
         hotkey = str(row["miner_hotkey"])
         review_model = code_review_policy.review_model_for(row)
+        review_output_tokens = code_review_policy.review_output_tokens_for(row)
         review_context = (
             code_review.FALLBACK_CONTEXT_WINDOW_TOKENS
             if review_model == code_review.FALLBACK_REVIEW_MODEL
@@ -165,6 +168,7 @@ class SubmissionCodeReviewer:
             # skip the paid review. Persisted digests bind rows to object bytes.
             prepared = code_review.prepare_request(
                 payload, model=review_model, context_window_tokens=review_context,
+                max_output_tokens=review_output_tokens,
                 research_control=research_control,
             )
             if (self._similarity_references_for is not None or row.get("source_archive_sha256")
@@ -221,6 +225,7 @@ class SubmissionCodeReviewer:
                     prepared = code_review.prepare_request(
                         payload, similarity_contexts=tuple(contexts),
                         model=review_model, context_window_tokens=review_context,
+                        max_output_tokens=review_output_tokens,
                         research_control=research_control,
                     )
             if not exact_duplicate:
@@ -277,6 +282,20 @@ class SubmissionCodeReviewer:
                  "categories": ["duplicate_submission"],
                  "model": review_model,
                  "file_count": len(prepared.reviewed_files),
+                 "source_bytes": prepared.reviewed_file_bytes}, 0,
+                attempt=claim.get("attempt"),
+            )
+        # Historical standalone callers have no recommendation field and use
+        # only the default plan. Present malformed fields and elevated plans
+        # require an exact match. Production wiring always requires624 first.
+        if claim.get("review_output_token_recommendation", code_review.DEFAULT_MAX_OUTPUT_TOKENS) != review_output_tokens:
+            # A stale reader can reserve a smaller output plan. Settle the
+            # undispatched claim at zero, retaining SQL's authoritative plan
+            # for the next bounded attempt; never send an under-reserved call.
+            return self._finish_review(
+                row, token, "error",
+                {**code_review_policy.diagnostic("code_review_preparation_unavailable", retryable=True),
+                 "model": review_model, "file_count": len(prepared.reviewed_files),
                  "source_bytes": prepared.reviewed_file_bytes}, 0,
                 attempt=claim.get("attempt"),
             )
@@ -429,11 +448,12 @@ class SubmissionCodeReviewer:
                             document["provider_http_status"] = provider_http_status
             except code_review.CodeReviewError as exc:
                 # An unusable provider review is not a negative code verdict.
-                # Account this call, then let the admission window and backoff
-                # bound the next independent claim. Never loop within a call.
+                # Account this call; SQL also bounds any invalid-review episode
+                # by durable reservations. Never loop within a call.
                 document = code_review_policy.diagnostic(
                     exc.code, error_reason=exc.response_reason,
-                    retryable=True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None,
+                    retryable=(False if exc.response_reason == "truncated_at_limit" else
+                               True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None),
                 )
             except broker.ProviderTransportError:
                 # The request may have reached the provider, so its cost is unknown.

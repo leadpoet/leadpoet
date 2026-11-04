@@ -126,3 +126,13 @@ def test_schema_required_empty_comparisons_are_in_output_capacity_bound():
     bound = len(contracts.canonical_json(minimum).encode())
     with pytest.raises(code_review.CodeReviewError, match='review_output_cannot_report_coverage'):
         code_review.prepare_request(payload, max_output_tokens=bound-1)
+
+
+@pytest.mark.parametrize('native_finish', ['length', 'max_tokens'])
+def test_native_output_limit_still_classifies_truncation_when_router_says_stop(native_finish):
+    prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
+    response = _openrouter_response(prepared)
+    response['choices'][0]['native_finish_reason'] = native_finish
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == 'truncated'

@@ -36,6 +36,16 @@ NON_PROVIDER_WORKER_RESERVE = 32
 # Two captures can progress when one storage call is slow, without starting
 # every judge's snapshot work at once.
 TRAINING_INPUT_WORKER_LIMIT = 2
+# Public result reads fetch run outputs from the object store, so one slow
+# S3 leg holds a worker for the whole call. On 2026-11-04 these reads ran for
+# up to 22 minutes each; 12-19 of them were in flight at once and the shared
+# pool sat pinned at its 64-worker ceiling for 45 minutes, which starved the
+# paid lane (run claims, completions and training capture) as well. Public
+# reads are anonymous and retriable, so they get eight separate worker permits
+# and queue beyond them without consuming the default pool's worker permits.
+# Normal demand is far below this: the busiest hour in the last four days was
+# 1,468 reads with a p95 of 3.1 s, about 1.3 concurrent.
+PUBLIC_OBJECT_READ_WORKER_LIMIT = 8
 
 
 def _ensure_worker_pool() -> None:
@@ -111,6 +121,16 @@ def create_app(service: ArenaService) -> FastAPI:
     # NON_PROVIDER_WORKER_RESERVE workers for every other route.
     provider_limiter: Optional[anyio.CapacityLimiter] = None
     training_input_limiter: Optional[anyio.CapacityLimiter] = None
+    public_object_read_limiter: Optional[anyio.CapacityLimiter] = None
+
+    def _public_object_read_limiter() -> anyio.CapacityLimiter:
+        nonlocal public_object_read_limiter
+        if public_object_read_limiter is None:
+            _ensure_worker_pool()
+            public_object_read_limiter = anyio.CapacityLimiter(
+                PUBLIC_OBJECT_READ_WORKER_LIMIT
+            )
+        return public_object_read_limiter
 
     async def no_store_public_call(
         call: Any, *args: Any, _worker_limiter: Optional[anyio.CapacityLimiter] = None,
@@ -258,13 +278,15 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.get("/arena/v1/rounds/{round_id}/results/{submission_id}")
     async def round_results(round_id: str, submission_id: str) -> JSONResponse:
         return await no_store_public_call(
-            service.public_results, round_id, submission_id
+            service.public_results, round_id, submission_id,
+            _worker_limiter=_public_object_read_limiter(),
         )
 
     @app.get("/arena/v1/submissions/{submission_id}/code")
     async def submission_code(submission_id: str) -> JSONResponse:
         return await no_store_public_call(
-            service.public_submission_code, submission_id
+            service.public_submission_code, submission_id,
+            _worker_limiter=_public_object_read_limiter(),
         )
 
     # -- miner --------------------------------------------------------------

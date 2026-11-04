@@ -68,13 +68,17 @@ def read_input(objects: Any, run_id: str, kind: str, lease_generation: int, clai
     _validate_claim_hash(claim_request_hash)
     ref = object_ref(run_id, lease_generation)
     try:
-        compressed = objects.get_bounded(ref, MAX_COMPRESSED_BYTES)
+        optional = getattr(objects, "get_optional_bounded", None)
+        compressed = (optional(ref, MAX_COMPRESSED_BYTES) if callable(optional)
+                      else objects.get_bounded(ref, MAX_COMPRESSED_BYTES))
     except ValueError:
         # Existing bounded stores use contract/value errors for known-present
         # oversize objects. These are invalid evidence, never mere absence.
         raise InputCaptureError("input_storage_invalid") from None
     except Exception:
         raise InputCaptureError("input_unavailable") from None
+    if callable(optional) and compressed is None:
+        raise InputCaptureError("input_unavailable")
     try:
         if not isinstance(compressed, bytes) or len(compressed) > MAX_COMPRESSED_BYTES:
             raise InputCaptureError("input_size_or_type_invalid")

@@ -34,7 +34,6 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
-from lab_arena.publication_lock import PublicationLockError, round_lock
 from lab_arena.store import (
     ArenaStore,
     ArenaStoreError,
@@ -756,9 +755,6 @@ class ServiceConfig:
     ] = None
     # Observational uploads use a separate bounded client in production.
     training_object_store: Optional[ObjectStore] = None
-    # Shared host path, outside release slots. Production wiring always sets
-    # this; programmatic tests may supply an isolated directory or omit it.
-    publication_lock_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if (
@@ -5074,21 +5070,6 @@ class ArenaService:
             return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
 
     def publish(self, round_id: str) -> Dict[str, Any]:
-        """Allow one publisher per round on the canonical gateway host."""
-        directory = getattr(getattr(self, "_config", None), "publication_lock_dir", None)
-        try:
-            with round_lock(directory, round_id) as acquired:
-                if not acquired:
-                    return {"status": "retry", "round_status": "scored",
-                            "reason": "publication_in_progress"}
-                return self._publish_owned(round_id)
-        except PublicationLockError:
-            raise ServiceError("publication_lock_unavailable", 503) from None
-
-    def _publish_owned(self, round_id: str) -> Dict[str, Any]:
-        # Read current state only after host ownership; preparation holds no
-        # database transaction. The existing final SQL validation/CAS remains
-        # the authority if cancellation or another external writer intervenes.
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}

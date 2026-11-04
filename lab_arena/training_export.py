@@ -1829,15 +1829,19 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             reasons["research_process"].add("prior_attempt_source_unverified")
         if selected_id not in snapshots:
             try:
-                from lab_arena.training_input import read_input
+                from lab_arena.training_input import InputCaptureError, read_input
                 selected = by_id[selected_id]
                 snapshots[selected_id] = read_input(objects, selected_id, selected["kind"],
                                                      selected.get("lease_generation"), selected.get("claim_request_hash"))
-            except Exception:
-                if selected_id in selected_ids:
+            except InputCaptureError as exc:
+                if str(exc) != "input_unavailable":
+                    attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
+                elif selected_id in selected_ids:
                     reasons["exact_inputs"].add("runtime_input_snapshot_missing")
                 else:
                     reasons["research_process"].add("prior_attempt_input_missing")
+            except Exception:
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
         if selected_id in snapshots:
             snapshot = snapshots[selected_id]
             document = snapshot.get("input")

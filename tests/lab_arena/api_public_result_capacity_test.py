@@ -13,24 +13,30 @@ import threading
 
 import anyio
 import httpx
+import pytest
 
 from lab_arena.api import PUBLIC_OBJECT_READ_WORKER_LIMIT, create_app
+from lab_arena.service import ServiceError
 from tests.lab_arena.api_provider_capacity_test import (
     BlockingService, POOL, wait_until,
 )
 
 
-def get_results(client, submission_id):
+def get_results(client, submission_id, *, code=False):
     return asyncio.create_task(
-        client.get("/arena/v1/rounds/round-1/results/" + submission_id)
+        client.get(
+            "/arena/v1/submissions/" + submission_id + "/code"
+            if code else "/arena/v1/rounds/round-1/results/" + submission_id
+        )
     )
 
 
 class StalledObjectStoreService(BlockingService):
     """public_results blocks the way a hung S3 GET blocks it: holding a worker."""
 
-    def __init__(self, default):
+    def __init__(self, default, fail_read=False):
         super().__init__(default)
+        self.fail_read = fail_read
         self.results_release = threading.Event()
         self.results_active = 0
         self.results_maximum = 0
@@ -42,24 +48,35 @@ class StalledObjectStoreService(BlockingService):
         try:
             if not self.results_release.wait(5):
                 raise AssertionError("test did not release the stalled read")
+            if self.fail_read and submission_id == "sub-0":
+                raise ServiceError("public_result_unavailable", 503)
             return {"round_id": round_id, "submission_id": submission_id}
         finally:
             with self.lock:
                 self.results_active -= 1
 
+    def public_submission_code(self, submission_id):
+        return self.public_results("round-1", submission_id)
 
-def test_stalled_public_results_cannot_starve_claims_and_completions():
+
+@pytest.mark.parametrize("route_mode", ("results", "code", "mixed"))
+@pytest.mark.parametrize("fail_read", (False, True))
+def test_stalled_public_results_cannot_starve_claims_and_completions(route_mode, fail_read):
     async def scenario():
         default = anyio.to_thread.current_default_thread_limiter()
-        service = StalledObjectStoreService(default)
+        service = StalledObjectStoreService(default, fail_read)
         app = create_app(service)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                # Far more concurrent reads than the bulkhead admits, as during
-                # the stall: 19 were in flight at once.
-                reads = [get_results(client, "sub-" + str(i)) for i in range(24)]
+                # Exceed the entire shared pool: 24 reads cannot reproduce
+                # starvation on the old code because the pool has 64 workers.
+                count = POOL + 16
+                reads = [get_results(
+                    client, "sub-" + str(i),
+                    code=route_mode == "code" or (route_mode == "mixed" and i % 2 == 1),
+                ) for i in range(count)]
                 try:
                     await wait_until(
                         lambda: service.results_active >= PUBLIC_OBJECT_READ_WORKER_LIMIT
@@ -81,9 +98,17 @@ def test_stalled_public_results_cannot_starve_claims_and_completions():
                 finally:
                     service.results_release.set()
                     responses = await asyncio.wait_for(asyncio.gather(*reads), 5)
-                # Every queued read still completes — the bulkhead delays, it
-                # does not refuse.
-                assert [r.status_code for r in responses] == [200] * 24
+                # A service failure releases its permit and preserves the
+                # existing error response; all queued reads still finish.
+                expected = [200] * count
+                if fail_read:
+                    expected[0] = 503
+                    assert responses[0].json() == {
+                        "status": "rejected", "code": "public_result_unavailable",
+                    }
+                assert [r.status_code for r in responses] == expected
+                assert all(r.headers["cache-control"] == "no-store" for r in responses)
+                assert all(r.headers["x-content-type-options"] == "nosniff" for r in responses)
                 assert service.results_maximum == PUBLIC_OBJECT_READ_WORKER_LIMIT
 
     anyio.run(scenario)

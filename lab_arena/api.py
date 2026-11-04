@@ -41,8 +41,8 @@ TRAINING_INPUT_WORKER_LIMIT = 2
 # up to 22 minutes each; 12-19 of them were in flight at once and the shared
 # pool sat pinned at its 64-worker ceiling for 45 minutes, which starved the
 # paid lane (run claims, completions and training capture) as well. Public
-# reads are anonymous and retriable, so they get their own small share of the
-# non-provider reserve and queue beyond it rather than consuming all of it.
+# reads are anonymous and retriable, so they get eight separate worker permits
+# and queue beyond them without consuming the default pool's worker permits.
 # Normal demand is far below this: the busiest hour in the last four days was
 # 1,468 reads with a p95 of 3.1 s, about 1.3 concurrent.
 PUBLIC_OBJECT_READ_WORKER_LIMIT = 8

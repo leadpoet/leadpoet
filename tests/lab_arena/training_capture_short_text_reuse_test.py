@@ -43,13 +43,12 @@ def test_short_entries_do_not_evict_existing_medium_lane(monkeypatch):
 
 @pytest.mark.parametrize("length", [0, 1023, 1024, 16384, 16385])
 @pytest.mark.parametrize("aggregate", [False, True])
-def test_cache_size_boundaries_include_short_aggregate_strings(monkeypatch, length, aggregate):
+def test_cache_size_boundaries_scan_once_in_each_mode(monkeypatch, length, aggregate):
     marker = "q" * length
     calls = _spy(monkeypatch, marker)
     value = [marker] * 4
     assert capture.sanitize_training_value(value, aggregate_parts=aggregate) == (value, [])
-    cached = length <= 16384 or aggregate
-    assert len(calls) == (1 if cached else 4)
+    assert len(calls) == 1
 
 
 def test_short_string_subclass_still_scans_each_occurrence(monkeypatch):

@@ -391,7 +391,8 @@ def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_co
 
 def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                             max_nodes: int = MAX_VALUE_NODES,
-                            aggregate_parts: bool = False) -> tuple[Any, list[str]]:
+                            aggregate_parts: bool = False,
+                            clean_text_digests: OrderedDict[bytes, None] | None = None) -> tuple[Any, list[str]]:
     """Redact private material without truncation; report every redaction class.
 
     Final joined examples may budget each canonical call and input snapshot
@@ -408,8 +409,8 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     # Final examples repeat large request and catalog strings. Keep only bounded
     # long-text results within this walk; every node, path, and key is still checked.
     text_cache: OrderedDict[str, str] = OrderedDict()
-    # Standalone captures and aggregates repeat short schema strings and keys;
-    # aggregates also repeat complete long responses. These modes share a bounded
+    # Captures repeat schema keys and long history across request projections;
+    # aggregates also repeat complete responses. These modes share a bounded
     # plain-string lane without evicting the medium/custom lane.
     # Secret subclasses may carry behavior, so they disable this lane.
     large_text_cache: OrderedDict[str, tuple[str, int]] = OrderedDict()
@@ -417,15 +418,35 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     large_text_bytes = 0
     large_text_byte_limit = 8 * 1024 * 1024
 
+    def scan_or_reuse(text: str) -> str:
+        # Only exact built-in strings that passed an earlier no-secret scan
+        # qualify. Retain a digest, never the original plaintext or a redacted
+        # result. A new walk still checks every key, node, path, and limit.
+        digest = None
+        if clean_text_digests is not None and not secrets and type(text) is str and len(text) >= 1_024:
+            try:
+                digest = hashlib.sha256(text.encode("utf-8")).digest()
+            except UnicodeError:
+                pass
+            if digest is not None and digest in clean_text_digests:
+                clean_text_digests.move_to_end(digest)
+                return text
+        cleaned, url_redacted = scan_text(text)
+        if digest is not None and cleaned == text and not url_redacted:
+            clean_text_digests[digest] = None
+            if len(clean_text_digests) > 1_024:
+                clean_text_digests.popitem(last=False)
+        return cleaned
+
     def clean_text(text: str) -> str:
         nonlocal large_text_bytes
         if (large_text_cache_enabled and type(text) is str
-                and (len(text) < 1_024 or (aggregate_parts and len(text) > 16_384))):
+                and (len(text) < 1_024 or len(text) > 16_384)):
             cached = large_text_cache.get(text)
             if cached is not None:
                 large_text_cache.move_to_end(text)
                 return cached[0]
-            cleaned = scan_text(text)
+            cleaned = scan_or_reuse(text)
             if type(cleaned) is str:
                 # Count both retained strings, even if they are the same object.
                 # Built-in Unicode storage includes wide characters and avoids
@@ -444,14 +465,15 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             if cached is not None:
                 text_cache.move_to_end(text)
                 return cached
-        cleaned = scan_text(text)
+        cleaned = scan_or_reuse(text)
         if 1_024 <= len(text) <= 16_384 and len(cleaned) <= 16_384:
             text_cache[text] = cleaned
             if len(text_cache) > 512:
                 text_cache.popitem(last=False)
         return cleaned
 
-    def scan_text(text: str) -> str:
+    def scan_text(text: str) -> tuple[str, bool]:
+        url_redacted = False
         # A known secret can span URL component or URL/text boundaries.
         for secret in sorted(variants, key=len, reverse=True):
             text = text.replace(secret, "[REDACTED]")
@@ -491,6 +513,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             return trajectory.redact_text(value, tuple(variants), escape_nul=False)
 
         def clean_url(match):
+            nonlocal url_redacted
             url = match[0]
             try:
                 parts = urlsplit(url)
@@ -519,6 +542,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                     pairs.append((safe_key, safe_child))
                 changed = query_changed or (netloc, path, fragment) != (parts.netloc, parts.path, parts.fragment)
                 if changed:
+                    url_redacted = True
                     reasons.add("credential")
                     return urlunsplit((parts.scheme, netloc, path,
                                        urlencode(pairs) if query_changed else parts.query, fragment))
@@ -537,7 +561,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             # was masked. The same pre-mask exact-secret check still applies.
             cleaned = (trajectory.redact_text(text, escape_nul=False)
                        if slug_prefix and slug_prefix in text else redact(text))
-            return restore_slugs(cleaned)
+            return restore_slugs(cleaned), url_redacted
         # Keep URL delimiters out of the generic credential scan, while a URL
         # used as a credential value still gets removed with its full context.
         # '[' cannot turn Basic/Bearer plus a public URL into a credential.
@@ -557,8 +581,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         # Exact secrets were removed before masking; never match them against
         # temporary tokens. Restore all surviving URLs in one scan.
         cleaned = trajectory.redact_text(masked, escape_nul=False)
-        return restore_slugs(re.sub(re.escape(prefix) + r"([0-9]+)\]",
-                                    lambda match: urls[int(match[1])], cleaned))
+        return (restore_slugs(re.sub(re.escape(prefix) + r"([0-9]+)\]",
+                                     lambda match: urls[int(match[1])], cleaned)),
+                url_redacted)
 
     def request_config_path(path: tuple[str, ...]) -> bool:
         # The same request is sanitized first as a standalone blob and later

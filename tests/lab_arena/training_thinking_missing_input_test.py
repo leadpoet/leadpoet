@@ -64,6 +64,7 @@ def test_absent_runtime_inputs_keep_exact_thinking_pairs_but_not_full_icp(missin
         proof = ref["selected_research_evidence"]
         assert proof["complete"] is False
         assert proof["scope"] == "individual_model_request_result"
+        assert proof["runtime_input_availability"] == "unavailable"
         assert proof["missing_runtime_input_run_ids"] == sorted(missing_ids)
         assert "runtime_input_snapshot_missing" not in proof["ancillary_judge_gaps"]
 

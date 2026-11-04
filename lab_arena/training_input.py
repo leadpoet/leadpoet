@@ -65,9 +65,19 @@ def build_snapshot(
 
 def read_input(objects: Any, run_id: str, kind: str, lease_generation: int, claim_request_hash: str) -> dict[str, Any]:
     """Read a bounded snapshot and verify its run, schema, hash, and privacy."""
+    _validate_claim_hash(claim_request_hash)
+    ref = object_ref(run_id, lease_generation)
     try:
-        _validate_claim_hash(claim_request_hash)
-        compressed = objects.get_bounded(object_ref(run_id, lease_generation), MAX_COMPRESSED_BYTES)
+        compressed = objects.get_bounded(ref, MAX_COMPRESSED_BYTES)
+    except ValueError:
+        # Existing bounded stores use contract/value errors for known-present
+        # oversize objects. These are invalid evidence, never mere absence.
+        raise InputCaptureError("input_storage_invalid") from None
+    except Exception:
+        raise InputCaptureError("input_unavailable") from None
+    try:
+        if not isinstance(compressed, bytes) or len(compressed) > MAX_COMPRESSED_BYTES:
+            raise InputCaptureError("input_size_or_type_invalid")
         with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
             raw = stream.read(MAX_OBJECT_BYTES + 1)
         if len(raw) > MAX_OBJECT_BYTES:
@@ -100,4 +110,4 @@ def read_input(objects: Any, run_id: str, kind: str, lease_generation: int, clai
     except InputCaptureError:
         raise
     except Exception:
-        raise InputCaptureError("input_unavailable") from None
+        raise InputCaptureError("input_document_invalid") from None

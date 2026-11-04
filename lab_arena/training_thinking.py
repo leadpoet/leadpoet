@@ -2092,6 +2092,7 @@ def build(examples, rules: training_steps.Rules | None = None):
                                    "selected_research_evidence": {
                                        "complete": not missing_inputs,
                                        **({"scope": "individual_model_request_result",
+                                           "runtime_input_availability": "unavailable",
                                            "missing_runtime_input_run_ids": missing_inputs} if missing_inputs else
                                           {"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
                                        "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps

@@ -1110,3 +1110,15 @@ frozen rounds, costs and historical results. Internal agents implement/test only
 The coordinator owns independent review, safe merge, exact committed migrations,
 canonical paired deployment, and fresh worker/OnePatch/Sentry verification.
 Preserve concurrent work and release ownership; do not replay paid historical work.
+
+## Scoped authorization: November 4 review and checkpoint reliability
+
+The user authorized stricter supported review schemas, sufficient output capacity,
+equivalent coverage formatting, classified bounded retries, and durable verified
+company-fit checkpoints through existing continuation and accounting paths.
+Preserve admission criteria, source evidence, scoring, privacy, frozen policies,
+accepted work and historical outcomes. Internal agents implement and test only.
+The coordinator owns independent review, controlled organizer-funded validation,
+safe merge, exact migrations, canonical release and fresh production verification.
+Use a task-local $10 validation ceiling including failures and pending charges;
+do not use miner keys or replay historical paid calls. Add no service or dependency.

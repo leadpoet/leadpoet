@@ -9,7 +9,7 @@ from tests.lab_arena.unfinished_review_recovery585_postgres_test import _begin
 from tests.postgres_migration_harness import SCRIPTS
 
 REVIEW_READ = '574-lab-arena-review-guard-row-read.sql'
-MIGRATION = SCRIPTS / '595-lab-arena-review-guard-lease-expiry.sql'
+MIGRATION = SCRIPTS / '619-lab-arena-review-guard-lease-expiry.sql'
 EXPIRED = ("UPDATE public.lab_arena_restart_claim_control "
            "SET guard_expires_at=clock_timestamp()-interval '1 second' WHERE singleton")
 
@@ -44,7 +44,7 @@ def acquire(connection, seconds=600):
     with connection.cursor() as c:
         c.execute('SELECT guard_generation FROM public.lab_arena_restart_claim_control WHERE singleton')
         generation = c.fetchone()[0]
-        c.execute("SELECT public.lab_arena_acquire_restart_guard_v1(%s,%s,%s,%s,%s,'gateway','review595-test')",
+        c.execute("SELECT public.lab_arena_acquire_restart_guard_v1(%s,%s,%s,%s,%s,'gateway','review619-test')",
                   ('lab_arena_restart_guard:' + 'a'*64, 'lab_arena_restart_owner:' + 'b'*64,
                    generation, seconds, 'c'*40))
         return c.fetchone()[0]

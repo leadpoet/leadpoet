@@ -5,8 +5,8 @@
 -- long as a commitment is held. Only an owner-driven abort or release clears
 -- the commitment; nothing sweeps a lapsed one. A restart controller that dies
 -- between acquiring and releasing therefore leaves a retained, expired guard
--- that withholds paid review work for good. That has happened on five days in
--- a row.
+-- that withholds paid review work for good. That has happened on every one of
+-- the last ten days, most recently for 95 minutes on 2026-11-04.
 --
 -- Review admission is gated in two places and both read presence only, so
 -- either one alone keeps the work stopped:
@@ -25,6 +25,10 @@
 -- only the singleton row FOR SHARE so it never queues behind a lease sweep
 -- holding the global claim-control advisory lock.
 --
+-- The preimage below is the function as migration 605 left it; 599 and 605 have
+-- both patched `lab_arena_begin_submission_review` since 587, and neither
+-- touched the guard lines this migration anchors on.
+--
 -- The 587 patch below verifies its preimage digest and then asserts that the
 -- readback is byte-identical to the text this migration constructed, which is
 -- the same guarantee a hardcoded postimage digest gives. It is written that
@@ -37,7 +41,7 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
-CREATE TEMP TABLE arena595_acl ON COMMIT DROP AS
+CREATE TEMP TABLE arena619_acl ON COMMIT DROP AS
 SELECT nspacl AS acl,has_schema_privilege('lab_arena_owner','public','CREATE') AS had_create
 FROM pg_namespace WHERE nspname='public';
 GRANT CREATE ON SCHEMA public TO lab_arena_owner;
@@ -76,10 +80,10 @@ REVOKE ALL ON FUNCTION public.lab_arena_review_guard_state_v1()
 GRANT EXECUTE ON FUNCTION public.lab_arena_review_guard_state_v1()
   TO lab_arena_service;
 
-DO $review595_0$
+DO $review619_0$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)';
-  v_preimage CONSTANT TEXT := '38ed2f3616f92a0c17a3ef1c8f7617f229fed949f560f1bb3bb1f91c03c6534a';
+  v_preimage CONSTANT TEXT := '6c9974bae7c8b42dedcdee6e4a9145672402f5e0c74c87f8a9fff56afafeddf5';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;
@@ -98,26 +102,26 @@ BEGIN
     'lab_arena_owner',
     '{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}',
     TRUE,'v',ARRAY['search_path=pg_catalog, public']::TEXT[]) THEN
-    RAISE EXCEPTION 'Arena review595 security shape differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena review619 security shape differs' USING ERRCODE='55000';
   END IF;
-  IF pg_catalog.position('v_review_guard_active' IN v_definition) > 0 THEN
+  IF pg_catalog.strpos(v_definition,'v_review_guard_active') > 0 THEN
     RETURN;
   END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')<>v_preimage THEN
-    RAISE EXCEPTION 'Arena review595 preimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena review619 preimage differs' USING ERRCODE='55000';
   END IF;
   v_updated:=v_definition;
 
-  v_old:=$old595_0_0$  v_review_guard_present BOOLEAN;$old595_0_0$;
-  v_new:=$new595_0_0$  v_review_guard_active BOOLEAN;$new595_0_0$;
+  v_old:=$old619_0_0$  v_review_guard_present BOOLEAN;$old619_0_0$;
+  v_new:=$new619_0_0$  v_review_guard_active BOOLEAN;$new619_0_0$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old) THEN
-    RAISE EXCEPTION 'Arena review595 anchor 0 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena review619 anchor 0 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
 
-  v_old:=$old595_0_1$  SELECT guard_commitment <> '' INTO STRICT v_review_guard_present
-  FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;$old595_0_1$;
-  v_new:=$new595_0_1$  -- The guard carries a lease. An owner that never reaches its release step
+  v_old:=$old619_0_1$  SELECT guard_commitment <> '' INTO STRICT v_review_guard_present
+  FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;$old619_0_1$;
+  v_new:=$new619_0_1$  -- The guard carries a lease. An owner that never reaches its release step
   -- leaves the commitment behind, so holding on presence alone stops review
   -- work for good. A NULL expiry cannot occur while a commitment is held, and
   -- is read as never-expiring so an unexpected row shape still fails closed.
@@ -125,41 +129,41 @@ BEGIN
     AND COALESCE(guard_expires_at, 'infinity'::TIMESTAMPTZ)
       > pg_catalog.clock_timestamp()
     INTO STRICT v_review_guard_active
-  FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;$new595_0_1$;
+  FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;$new619_0_1$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old) THEN
-    RAISE EXCEPTION 'Arena review595 anchor 1 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena review619 anchor 1 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
 
-  v_old:=$old595_0_2$  IF v_review_guard_present AND NOT ($old595_0_2$;
-  v_new:=$new595_0_2$  IF v_review_guard_active AND NOT ($new595_0_2$;
+  v_old:=$old619_0_2$  IF v_review_guard_present AND NOT ($old619_0_2$;
+  v_new:=$new619_0_2$  IF v_review_guard_active AND NOT ($new619_0_2$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old) THEN
-    RAISE EXCEPTION 'Arena review595 anchor 2 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena review619 anchor 2 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
 
-  IF pg_catalog.position('v_review_guard_present' IN v_updated) > 0 THEN
-    RAISE EXCEPTION 'Arena review595 left a presence-only guard behind' USING ERRCODE='55000';
+  IF pg_catalog.strpos(v_updated,'v_review_guard_present') > 0 THEN
+    RAISE EXCEPTION 'Arena review619 left a presence-only guard behind' USING ERRCODE='55000';
   END IF;
   EXECUTE v_updated;
   IF pg_catalog.pg_get_functiondef(v_oid) IS DISTINCT FROM v_updated
      OR (SELECT pg_catalog.to_jsonb(p)-'prosrc' FROM pg_catalog.pg_proc p WHERE p.oid=v_oid)
        IS DISTINCT FROM v_metadata THEN
-    RAISE EXCEPTION 'Arena review595 readback differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena review619 readback differs' USING ERRCODE='55000';
   END IF;
 END;
-$review595_0$;
+$review619_0$;
 
-DO $restore595$
+DO $restore619$
 BEGIN
-  IF NOT (SELECT had_create FROM pg_temp.arena595_acl) THEN
+  IF NOT (SELECT had_create FROM pg_temp.arena619_acl) THEN
     REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
   END IF;
   IF (SELECT nspacl FROM pg_namespace WHERE nspname='public') IS DISTINCT FROM
-      (SELECT acl FROM pg_temp.arena595_acl) THEN
+      (SELECT acl FROM pg_temp.arena619_acl) THEN
     RAISE EXCEPTION 'Arena review guard schema ACL changed';
   END IF;
 END;
-$restore595$;
+$restore619$;
 NOTIFY pgrst, 'reload schema';
 COMMIT;

@@ -150,11 +150,11 @@ def prepared(database):
             from tests.lab_arena.training_export_source_correction_test import corrected
             source_values,source_proof,_=corrected()
             payload=source_values['objects'].get_bounded(source_proof['source_ref'],10_000_000)
-            source_ref='arena/arena-2026-11-04/sources/replacement-source.tar.gz'
+            source_ref=json.loads(re.search(r'\$manifest621\$(.*?)\$manifest621\$',SQL.read_text(),re.S)[1])['source_ref']
             objects[source_ref]=payload
             manifest=dict(round_sha256=hash_doc(cur,row),prior_round_sha256=scalar(cur,"SELECT encode(extensions.digest(to_jsonb(r)::TEXT,'sha256'),'hex') FROM public.lab_arena_rounds r WHERE round_id='arena-2026-11-03'"),submission_sha256=hash_doc(cur,sub),minimum_guard_generation=764,run_hashes=hashes,accepted_run_hashes={k:hashes[k] for k,v in before.items() if v['status']=='accepted'},source_ref=source_ref,source_size_bytes=len(payload),source_archive_sha256=source_proof['source_archive_sha256'],source_normalized_sha256=source_proof['source_normalized_sha256'],source_url='https://github.com/leadpoet/leadpoet-sales-agent/archive/24d9201c3c5fdc86cb1676628774223205c87166.tar.gz')
             ledger=scalar(cur,'SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) FROM public.lab_arena_ledger l')
-        sql=render(SQL.read_text(),manifest).replace('2026-11-04T20:00:00Z','2099-11-04T20:00:00Z').replace('2026-11-04T23:55:00Z','2099-11-04T23:55:00Z').replace('2026-11-04T23:59:00Z','2099-11-04T23:59:00Z')
+        sql=render(SQL.read_text(),manifest).replace('2026-11-04T21:00:00Z','2099-11-04T21:00:00Z').replace('2026-11-04T23:55:00Z','2099-11-04T23:55:00Z').replace('2026-11-04T23:59:00Z','2099-11-04T23:59:00Z')
         try:yield SimpleNamespace(pg=pg,conn=conn,dsn=dsn,store=store,service=service,objects=objects,row=row,before=before,sub=sub,manifest=manifest,sql=sql,ledger=ledger)
         finally:store.close()
 
@@ -184,6 +184,39 @@ def age_pending(p):
     p.conn.commit()
 
 
+def assert_current_table_checks(cur):
+    # Evaluate every existing CHECK against the actual mutated tuples. Do not
+    # replace the committed source key with a shorter fixture-only identity.
+    tables=['public.lab_arena_rounds','public.lab_arena_submissions',
+        'public.lab_arena_runs','public.lab_arena_scoring_supersessions']
+    cur.execute("SELECT conrelid::regclass::text,conname,pg_get_expr(conbin,conrelid) "
+        "FROM pg_constraint WHERE contype='c' AND conrelid=ANY(%s::regclass[])",(tables,))
+    for table,name,expression in cur.fetchall():
+        assert scalar(cur,f'SELECT NOT EXISTS(SELECT 1 FROM {table} WHERE NOT ({expression}))'),name
+
+
+def test_exact_source_filename_constraint_and_rollback(prepared):
+    p=prepared
+    expected='arena/arena-2026-11-04/sources/baseline-2026-11-04-24d9201c3c5fdc86cb1676628774223205c87166.tar.gz'
+    assert p.manifest['source_ref']==expected
+    assert len(expected.rsplit('/',1)[1].removesuffix('.tar.gz'))==60
+    invalid=expected.replace('baseline-2026-11-04-','baseline-2026-11-04-source-')
+    with p.conn.cursor() as cur:
+        with pytest.raises(p.pg.errors.CheckViolation) as error:
+            cur.execute(p.sql.replace(expected,invalid))
+    assert error.value.diag.constraint_name=='lab_arena_submissions_source_ref_check'
+    p.conn.rollback()
+    with p.conn.cursor() as cur:
+        assert scalar(cur,'SELECT count(*) FROM public.lab_arena_scoring_supersessions WHERE round_id=%s AND request_id=%s',(ROUND,REQUEST))==0
+        assert scalar(cur,'SELECT jsonb_object_agg(run_id,to_jsonb(a)) FROM public.lab_arena_runs a WHERE round_id=%s',(ROUND,))==p.before
+        assert scalar(cur,'SELECT source_ref FROM public.lab_arena_submissions WHERE submission_id=%s',(BASELINE,))==p.sub['source_ref']
+    p.conn.commit()
+    apply(p)
+    with p.conn.cursor() as cur:
+        assert scalar(cur,'SELECT source_ref FROM public.lab_arena_submissions WHERE submission_id=%s',(BASELINE,))==expected
+        assert_current_table_checks(cur)
+
+
 def test_exact_supersession_preserves_miners_and_history_and_is_idempotent(prepared):
     p=prepared
     original_id=next(k for k,v in p.before.items() if v['kind']=='execute' and v['status']=='accepted' and v['stage']==1)
@@ -203,6 +236,7 @@ def test_exact_supersession_preserves_miners_and_history_and_is_idempotent(prepa
     assert row['configuration_doc']['baseline_reasoning_configuration']==p.row['configuration_doc']['baseline_reasoning_configuration'] if 'baseline_reasoning_configuration' in p.row['configuration_doc'] else True
     assert row['configuration_doc']['scorer_policy']==p.row['configuration_doc']['scorer_policy']
     with p.conn.cursor() as cur:
+        assert_current_table_checks(cur)
         rows=scalar(cur,'SELECT jsonb_object_agg(run_id,to_jsonb(a)) FROM public.lab_arena_runs a WHERE round_id=%s',(ROUND,))
         receipt=scalar(cur,'SELECT recovery_doc FROM public.lab_arena_scoring_supersessions WHERE round_id=%s AND request_id=%s',(ROUND,REQUEST))
         assert len(receipt['superseded_runs'])==20 and len(rows)==len(p.before)+10
@@ -287,7 +321,7 @@ def test_wrong_authority_rolls_back_all_changes(prepared,fault):
     if fault=='history':manifest['run_hashes'][next(iter(manifest['run_hashes']))]='0'*64
     if fault=='source':manifest['submission_sha256']='0'*64
     if fault=='prior':manifest['prior_round_sha256']='0'*64
-    if fault=='clock':sql=sql.replace('2099-11-04T20:00:00Z','2000-11-04T20:00:00Z')
+    if fault=='clock':sql=sql.replace('2099-11-04T21:00:00Z','2000-11-04T21:00:00Z')
     with p.conn.cursor() as cur:
         if fault=='paused':cur.execute('UPDATE public.lab_arena_restart_claim_control SET operator_paused=true WHERE singleton')
         if fault=='active_guard':cur.execute("SELECT public.lab_arena_acquire_restart_guard_v1(%s,%s,764,600,%s,'gateway','source621-test')",('lab_arena_restart_guard:'+'a'*64,'lab_arena_restart_owner:'+'b'*64,'c'*40))

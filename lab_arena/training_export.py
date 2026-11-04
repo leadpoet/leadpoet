@@ -53,6 +53,7 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             result = {}
             kind = reasoning_kind(item)
             for key, child in item.items():
+                key = key if type(key) is str else copy.deepcopy(key)
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
                 if (normalized == "reasoning_content" and isinstance(child, str)
@@ -81,7 +82,9 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
                 else:
                     kept.append(walk(child, (*path, str(index))))
             return kept
-        return item
+        # Ordinary JSON scalars are immutable. Accepted scalar subclasses can
+        # carry mutable attributes, so detach them while copying the context.
+        return item if item is None or type(item) in (str, bool, int, float) else copy.deepcopy(item)
 
     return walk(value), removed
 
@@ -1243,7 +1246,11 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
         errors.add(code)
         per_run_errors.setdefault(run_id, set()).add(code)
     for run in related:
-        run_id = run["run_id"]
+        # Only these small identity fields come from caller rows. Payloads
+        # below are independently decoded; do not copy their full trees.
+        artifact_identity = copy.deepcopy({key: run.get(key) for key in
+                                           ("run_id", "kind", "lease_generation", "claim_request_hash")})
+        run_id = artifact_identity["run_id"]
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
         capture = summary.get("worker_observations")
         paid = [call for call in calls if call["run_id"] == run_id]
@@ -1271,9 +1278,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                 if partial is not None:
                     partial_artifacts[run_id] = {
                         "schema_version": training_observations.JOURNAL_SCHEMA_VERSION,
-                        "run_id": run_id, "kind": run["kind"],
-                        "lease_generation": run["lease_generation"],
-                        "claim_request_hash": run["claim_request_hash"],
+                        **artifact_identity,
                         "complete": False, "payload": partial,
                         "payload_sha256": contracts.document_hash(partial),
                         "segment_refs": [training_observations.segment_ref(
@@ -1779,6 +1784,17 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             launched_ids.add(row["run_id"])
     snapshot_ids = selected_ids | launched_ids
     attempt_by_id = {row["run_id"]: row for row in example["attempts"]}
+
+    def attempt_gap(attempt_id, dimension, code):
+        if attempt_id in selected_ids:
+            reasons[dimension].add(code)
+        else:
+            # Historical inputs and runtime identities remain diagnostic
+            # evidence, not authority for the selected replacement's labels.
+            prior_code = "prior_attempt_" + code
+            reasons["research_process"].add(prior_code)
+            related_gaps[attempt_id]["research_process"].add(prior_code)
+
     for selected_id in sorted(snapshot_ids):
         attempt_policy = config.get("scorer_policy")
         if by_id[selected_id]["kind"] == "score":
@@ -1805,8 +1821,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 if selected_id == example.get("score_run_id"):
                     example["judgment"]["runtime_identity"] = copy.deepcopy(identity)
             except (reviewer_runtime.ReviewerRuntimeError, KeyError, TypeError, ValueError):
-                dimension = "source_identity" if selected_id in selected_ids else "research_process"
-                reasons[dimension].add("reviewer_runtime_identity_unverified")
+                attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
         selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
         if selected_id in selected_ids and not _verified_runtime_source(selected_resource):
             reasons["source_identity"].add("runtime_source_unverified")
@@ -1830,22 +1845,22 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             if (not isinstance(privacy, dict) or type(privacy.get("redacted")) is not bool
                     or not isinstance(privacy.get("redactions"), list)
                     or privacy["redacted"] != bool(privacy["redactions"])):
-                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
             if (snapshot.get("privacy") or {}).get("redacted") is True:
-                reasons["exact_inputs"].add("runtime_input_privacy_nonexact")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_privacy_nonexact")
             if (snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
                     or snapshot.get("run_id") != selected_id or snapshot.get("kind") != by_id[selected_id]["kind"]
                     or snapshot.get("lease_generation") != by_id[selected_id].get("lease_generation")
                     or snapshot.get("claim_request_hash") != by_id[selected_id].get("claim_request_hash")
                     or not isinstance(document, dict) or snapshot.get("input_sha256") != contracts.document_hash(document)):
-                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
                 del snapshots[selected_id]
             elif by_id[selected_id]["kind"] == "score" and (
                     document.get("scored_run_id") != run_id or output is None
                     or document.get("companies") != output["companies"]
                     or document.get("scorer_policy") != attempt_policy
                     or document.get("evaluation_date") != round_row.get("evaluation_date")):
-                reasons["exact_inputs"].add("judge_input_context_mismatch")
+                attempt_gap(selected_id, "exact_inputs", "judge_input_context_mismatch")
                 if (round_row.get("round_id") == "arena-2026-11-03"
                         and document.get("scorer_policy") != attempt_policy):
                     # Contradictory saved inputs cannot establish that an old
@@ -1853,8 +1868,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     attempt_by_id[selected_id].pop("runtime_identity", None)
                     if selected_id == example.get("score_run_id"):
                         example["judgment"].pop("runtime_identity", None)
-                    dimension = "source_identity" if selected_id in selected_ids else "research_process"
-                    reasons[dimension].add("reviewer_runtime_identity_unverified")
+                    attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
             if isinstance(document, dict) and icp is not None:
                 actual_icp = dict(document.get("icp") or {})
                 expected_icp = integrity.agent_visible_icp(icp, contacts_required=contact_policy.enabled(config)) if integrity.enabled(config) else dict(icp)
@@ -1863,7 +1877,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 for key in ("output_schema_version", "company_quality_policy", "company_requirements", "intent_details_policy", "_arena_provider_observations"):
                     actual_icp.pop(key, None)
                 if actual_icp != expected_icp or document.get("evaluation_date") != round_row.get("evaluation_date"):
-                    reasons["exact_inputs"].add("runtime_input_context_mismatch")
+                    attempt_gap(selected_id, "exact_inputs", "runtime_input_context_mismatch")
     signal_policy = (config.get("scorer_policy") or {}).get("signal_judgment_policy") == signal_judgments.POLICY
     unmarked_signal_evidence = bool(signal_judgment_uses or signal_judgment_rows or signal_source_ledger_rows) or any(
         "signal_judgment_reference" in detail
@@ -2011,13 +2025,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              "dimensions": {key: not value for key, value in reasons.items()},
                              "incomplete_reasons": sorted({reason for values in reasons.values() for reason in values}),
                              "reasons_by_dimension": {key: sorted(value) for key, value in reasons.items()}}
-    clean["related_run_gap_attribution"] = {
+    clean["related_run_gap_attribution"] = copy.deepcopy({
         row["run_id"]: {"kind": row["kind"], "status": row["status"],
                         "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
-        for row in related}
+        for row in related})
     clean["example_hash"] = contracts.document_hash(clean)
-    # The privacy pass normalized context, and worker artifacts came from
-    # validated JSON. Keep caller isolation without expanding shared history
-    # strings into a second serialized document and then parsing it again.
-    return copy.deepcopy(clean)
+    # Both privacy walks own their context containers. Worker artifacts and
+    # journal prefixes come from freshly decoded JSON, with no caller-owned
+    # containers in their metadata. Return that owned tree without copying it.
+    return clean

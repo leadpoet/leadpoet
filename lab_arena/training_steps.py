@@ -316,8 +316,9 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         _require(isinstance(item, dict), 'response_shape_unsupported')
         kind = item.get('type')
         if kind == 'reasoning':
-            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status'}
+            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status', 'encrypted_content'}
                                       | ({'format'} if allow_reasoning_history else set())), 'reasoning_shape_unsupported')
+            _require(item.get('encrypted_content') is None, 'reasoning_shape_unsupported')
             _require('format' not in item or isinstance(item['format'], str)
                      and 1 <= len(item['format']) <= 128, 'reasoning_shape_unsupported')
             _require('id' not in item or isinstance(item['id'], str) and 1 <= len(item['id']) <= 256,

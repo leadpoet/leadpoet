@@ -3451,6 +3451,36 @@ class ArenaService:
             or run.get("run_id") != assignment + ":" + str(run.get("attempt"))
             or run.get("champion_restart_required")):
             return False
+        # An owner-created supersession names the new source generation's
+        # root. Its normal frozen attempt budget applies to that source only.
+        if run.get("kind") == "execute":
+            superseded = [parent for parent in runs
+                if parent.get("assignment_id") == assignment
+                and parent.get("status") == "failed"
+                and parent.get("terminal_cause") == "stage_closed"
+                and isinstance(parent.get("terminal_doc"), Mapping)
+                and parent["terminal_doc"].get("operation") == "baseline_source_supersession_v1"
+                and all(parent.get(key) == run.get(key) for key in
+                    ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "kind"))]
+            if len(superseded) == 1:
+                root_id = str(superseded[0]["terminal_doc"].get("new_execution_run_id") or "")
+                root_text = root_id.removeprefix(assignment + ":")
+                if root_text.isdecimal() and root_id == assignment + ":" + root_text:
+                    root, attempt = int(root_text), run.get("attempt")
+                    parents = [parent for parent in runs if parent.get("assignment_id") == assignment
+                        and type(parent.get("attempt")) is int and type(attempt) is int
+                        and root <= parent["attempt"] < attempt]
+                    if (type(attempt) is int and root > superseded[0].get("attempt", root)
+                        and root <= attempt < root + configuration["max_attempts_per_assignment"]
+                        and len(parents) == attempt - root
+                        and all(parent.get("status") == "failed"
+                            and parent.get("terminal_cause") in ("provider_error", "lease_expired")
+                            and parent.get("output_ref") is None
+                            and not parent.get("champion_restart_required")
+                            and (parent.get("terminal_cause") == "lease_expired"
+                                or (parent.get("result_doc") or {}).get("terminal_status") == parent.get("terminal_cause"))
+                            for parent in parents)):
+                        return True
         if run.get("kind") == "score":
             source = next((r for r in runs if r.get("run_id") == run.get("scored_run_id")), {})
             if (source.get("kind") == "execute" and source.get("status") == "accepted"

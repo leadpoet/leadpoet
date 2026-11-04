@@ -22,6 +22,17 @@ class GuardError(RuntimeError):
     pass
 
 
+class GuardRpcError(GuardError):
+    def __init__(self, rpc: str, status: int | str, code: str):
+        self.rpc = rpc
+        self.status = status
+        self.code = code
+        super().__init__(
+            "Arena restart guard authority rejected the request "
+            f"(rpc={rpc}, http_status={status}, code={code})"
+        )
+
+
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _INVOCATION = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
 _ERROR_CODE = re.compile(r"(?:[0-9A-Z]{5}|PGRST[0-9]{3})\Z")
@@ -209,10 +220,7 @@ def _request(function: str, payload: Mapping[str, Any]) -> Any:
         if isinstance(raw_code, str) and _ERROR_CODE.fullmatch(raw_code):
             if raw_code.startswith("PGRST") or raw_code[:2] in _SQLSTATE_CLASSES:
                 code = raw_code
-        raise GuardError(
-            "Arena restart guard authority rejected the request "
-            f"(rpc={rpc}, http_status={status}, code={code})"
-        )
+        raise GuardRpcError(rpc, status, code)
     if not isinstance(value, Mapping):
         raise GuardError("Arena restart guard response is invalid")
     return dict(value)
@@ -423,10 +431,24 @@ def _drain(args: argparse.Namespace) -> dict[str, Any]:
                 if _require_generation(state["guard_generation"]) != generation:
                     raise GuardError("Arena restart guard generation changed")
                 last_renewal = now
-            drain = _require_drain(_request("lab_arena_restart_quiescence_v1", {
-                "p_guard_id": guard, "p_owner_id": owner,
-                "p_guard_generation": generation,
-            }), "leadpoet.lab_arena.restart_quiescence.v1")
+            try:
+                response = _request("lab_arena_restart_quiescence_v1", {
+                    "p_guard_id": guard, "p_owner_id": owner,
+                    "p_guard_generation": generation,
+                })
+            except GuardRpcError as exc:
+                if (exc.rpc, exc.status, exc.code) != (
+                    "lab_arena_restart_quiescence_v1", 500, "55P03"
+                ):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GuardError("Arena leases did not drain before the restart deadline") from exc
+                time.sleep(min(args.poll_seconds, remaining))
+                if time.monotonic() >= deadline:
+                    raise GuardError("Arena leases did not drain before the restart deadline") from exc
+                continue
+            drain = _require_drain(response, "leadpoet.lab_arena.restart_quiescence.v1")
             if (
                 drain.get("guard_active") is not True
                 or drain.get("guard_generation") != generation

@@ -445,6 +445,8 @@ def _drain(args: argparse.Namespace) -> dict[str, Any]:
                 if remaining <= 0:
                     raise GuardError("Arena leases did not drain before the restart deadline") from exc
                 time.sleep(min(args.poll_seconds, remaining))
+                if time.monotonic() >= deadline:
+                    raise GuardError("Arena leases did not drain before the restart deadline") from exc
                 continue
             drain = _require_drain(response, "leadpoet.lab_arena.restart_quiescence.v1")
             if (

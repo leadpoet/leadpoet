@@ -1,5 +1,6 @@
 -- Typed positive company-fit evidence in the existing private signal authority.
 -- Preserve normal signal positions, costs, provenance, leases, and historical rows.
+-- Apply after621; preserve its exact retired-source cache exclusion.
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
@@ -26,8 +27,8 @@ BEGIN
  WHERE p.oid=to_regprocedure(signature);
  IF identity IS DISTINCT FROM '["lab_arena_owner","{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}",true,"v",["search_path=pg_catalog, public"],"plpgsql"]'::JSONB THEN
   RAISE EXCEPTION 'Fit625 security shape differs' USING ERRCODE='55000'; END IF;
- IF encode(extensions.digest(definition,'sha256'),'hex')='63a7c34ed921254c562943507cb527b4ece4ad9079789d7092972206d5a420c5' THEN RETURN; END IF;
- IF encode(extensions.digest(definition,'sha256'),'hex') IS DISTINCT FROM '47a767d79cc8a47ad3d653f940e5987ce1ae210701ec41f97e781b498b1ce250' THEN
+ IF encode(extensions.digest(definition,'sha256'),'hex')='5397c48a740fddef5ea7c9e5aa0a319450567407308267c5ebc6ed56bf87b6ef' THEN RETURN; END IF;
+ IF encode(extensions.digest(definition,'sha256'),'hex') IS DISTINCT FROM 'b2f39b095a1596b35244d9da68ab591b3c50b733d8d1e1b5dcfbcd5668f9ee32' THEN
   RAISE EXCEPTION 'Fit625 preimage differs' USING ERRCODE='55000'; END IF;
  updated:=definition;
   IF (length(updated)-length(replace(updated,$old6250$p_signal_index NOT BETWEEN 0 AND 99$old6250$,'')))<>length($old6250$p_signal_index NOT BETWEEN 0 AND 99$old6250$) THEN RAISE EXCEPTION 'Fit625 patch shape differs' USING ERRCODE='55000'; END IF;
@@ -54,11 +55,11 @@ BEGIN
         v_run.reviewer_runtime_doc->>'runtime_image_reference',r.configuration_doc->>'scorer_image_reference'))
  ) THEN RAISE EXCEPTION 'lab_arena_fit_checkpoint_context_invalid' USING ERRCODE='22023'; END IF;
  v_key:=p_scope$new6251$);
- IF encode(extensions.digest(updated,'sha256'),'hex')<>'63a7c34ed921254c562943507cb527b4ece4ad9079789d7092972206d5a420c5' THEN
+ IF encode(extensions.digest(updated,'sha256'),'hex')<>'5397c48a740fddef5ea7c9e5aa0a319450567407308267c5ebc6ed56bf87b6ef' THEN
   RAISE EXCEPTION 'Fit625 postimage differs' USING ERRCODE='55000'; END IF;
  EXECUTE updated;
  IF (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE p.oid=to_regprocedure(signature)) IS DISTINCT FROM metadata
-  OR encode(extensions.digest(pg_get_functiondef(to_regprocedure(signature)),'sha256'),'hex')<>'63a7c34ed921254c562943507cb527b4ece4ad9079789d7092972206d5a420c5' THEN
+  OR encode(extensions.digest(pg_get_functiondef(to_regprocedure(signature)),'sha256'),'hex')<>'5397c48a740fddef5ea7c9e5aa0a319450567407308267c5ebc6ed56bf87b6ef' THEN
   RAISE EXCEPTION 'Fit625 readback differs' USING ERRCODE='55000'; END IF;
 END;
 $fit625_claim$;

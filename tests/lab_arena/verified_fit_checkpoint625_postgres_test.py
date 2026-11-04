@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,11 +23,36 @@ from tests.lab_arena.verified_fit_checkpoint_test import snapshot
 SQL = Path(__file__).parents[2] / "scripts/625-lab-arena-verified-fit-checkpoint.sql"
 
 
+def compose_current_claim(cur):
+    """Install621's function-only delta, never its historical recovery DML."""
+    # The retained517 harness predates536's nullable recovery receipt column.
+    cur.execute("ALTER TABLE public.lab_arena_scoring_supersessions ADD COLUMN IF NOT EXISTS recovery_doc JSONB")
+    signature = "public.lab_arena_claim_signal_judgment_v1(text,text,integer,integer,jsonb)"
+    cur.execute("SELECT pg_get_functiondef(%s::regprocedure)", (signature,))
+    definition = cur.fetchone()[0]
+    assert hashlib.sha256(definition.encode()).hexdigest() == "47a767d79cc8a47ad3d653f940e5987ce1ae210701ec41f97e781b498b1ce250"
+    old = "  AND j.signal_input_hash=v_hash"
+    retired = old + """
+  AND NOT EXISTS (SELECT 1 FROM public.lab_arena_scoring_supersessions retired621
+    WHERE retired621.round_id='arena-2026-11-04'
+      AND retired621.request_id='nov04-baseline-source621-v1'
+      AND retired621.recovery_doc->>'operation'='baseline_source_supersession_v1'
+      AND retired621.recovery_doc->'superseded_runs' ? j.source_scored_run_id
+      AND retired621.recovery_doc->'superseded_runs'->j.source_scored_run_id->>'kind'='execute'
+      AND retired621.recovery_doc->'superseded_runs'->j.source_scored_run_id->>'round_id'='arena-2026-11-04'
+      AND retired621.recovery_doc->'superseded_runs'->j.source_scored_run_id->>'submission_id'='baseline-2026-11-04')"""
+    assert definition.count(old) == 1
+    definition = definition.replace(old, retired)
+    assert hashlib.sha256(definition.encode()).hexdigest() == "b2f39b095a1596b35244d9da68ab591b3c50b733d8d1e1b5dcfbcd5668f9ee32"
+    cur.execute(definition)
+
+
 @pytest.fixture(scope="module")
 def database():
     fixture = current.database.__wrapped__(); db = next(fixture)
     try:
         with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
+            compose_current_claim(cur)
             cur.execute("CREATE ROLE fit625_migrator NOLOGIN NOSUPERUSER INHERIT")
             cur.execute("GRANT lab_arena_owner TO fit625_migrator")
             cur.execute("GRANT USAGE,CREATE ON SCHEMA public TO fit625_migrator WITH GRANT OPTION")
@@ -34,6 +60,10 @@ def database():
             cur.execute("SET ROLE fit625_migrator")
             cur.execute(SQL.read_text()); cur.execute(SQL.read_text())
             cur.execute("RESET ROLE")
+            cur.execute("SELECT pg_get_functiondef('public.lab_arena_claim_signal_judgment_v1(text,text,integer,integer,jsonb)'::regprocedure)")
+            claim = cur.fetchone()[0]
+            assert hashlib.sha256(claim.encode()).hexdigest() == "5397c48a740fddef5ea7c9e5aa0a319450567407308267c5ebc6ed56bf87b6ef"
+            assert claim.count("retired621.request_id='nov04-baseline-source621-v1'") == 1
             cur.execute("SELECT jsonb_agg(to_jsonb(r)) FROM public.lab_arena_signal_judgments r")
             assert cur.fetchone()[0] == before
             for signature in ("public.lab_arena_claim_signal_judgment_v1(text,text,integer,integer,jsonb)", "public.lab_arena_complete_signal_judgment_v1(text,text,integer,integer,jsonb,jsonb,jsonb,text)"):

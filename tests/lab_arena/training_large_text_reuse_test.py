@@ -1,4 +1,4 @@
-"""Bounded aggregate-only reuse must preserve the sanitizer's full walk."""
+"""Bounded per-invocation reuse must preserve the sanitizer's full walk."""
 
 from collections import OrderedDict
 
@@ -33,7 +33,9 @@ def test_repeated_large_plain_text_scans_once_per_aggregate_invocation(monkeypat
     assert calls == [text]
     assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
     assert calls == [text, text]
-    # Standalone requests retain the original uncached large-string path.
+    # Standalone requests also reuse leaves only within their own invocation.
+    assert capture.sanitize_training_value([text, text]) == ([text, text], [])
+    assert calls == [text] * 3
     assert capture.sanitize_training_value([text, text]) == ([text, text], [])
     assert calls == [text] * 4
 

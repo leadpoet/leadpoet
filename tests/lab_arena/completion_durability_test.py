@@ -70,8 +70,9 @@ def test_real_success_pipeline_leaves_no_pending_files(tmp_path):
 
 
 @pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("owner", ["baseline", "miner"])
 @pytest.mark.parametrize("failure", ["finished_ack_crash", "lost_completion_reply"])
-def test_finished_boundary_replays_exact_signed_completion(tmp_path, kind, failure):
+def test_finished_boundary_replays_exact_signed_completion(tmp_path, kind, owner, failure):
     class Crash(BaseException):
         pass
 
@@ -91,6 +92,8 @@ def test_finished_boundary_replays_exact_signed_completion(tmp_path, kind, failu
             raise rn.RunnerError("controlled lost completion reply", http_status=503)
 
     request = scoring_lease() if kind == "score" else lease()
+    if owner == "baseline":
+        request["submission_id"] = "baseline-" + ROUND.removeprefix("arena-")
     api = CrashAfterFinished(request)
     cfg = config(tmp_path, api)
     cfg.work_dir.mkdir()
@@ -483,6 +486,132 @@ def test_active_run_once_replays_exhausted_completion_before_healthy_work_ends(t
     finally:
         second_finish.set()
         worker.close()
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("owner", ["baseline", "miner"])
+def test_shutdown_drains_saved_completion_before_other_work_finishes(tmp_path, monkeypatch, kind, owner):
+    stop, second_active, second_finish, replayed, first_finished = [threading.Event() for _ in range(5)]
+    clock = [0.0]
+    first = scoring_lease("first", 0) if kind == "score" else lease("first", 0)
+    if owner == "baseline":
+        first["submission_id"] = "baseline-" + ROUND.removeprefix("arena-")
+    api = Api(leases=[first, lease("second", 1), lease("unclaimed", 2)])
+    cfg = make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=2)
+    cfg.completion_retry_seconds = ()
+    cfg.claim_poll_seconds = 0.01
+    worker = rn.Runner(cfg)
+    monkeypatch.setattr(rn.time, "monotonic", lambda: clock[0])
+
+    def execute(leased, *args, before_finished):
+        if leased["run_id"] == "second":
+            second_active.set()
+            assert second_finish.wait(5)
+        original = envelope(cfg, ("a" if leased["run_id"] == "first" else "b") * 32)
+        original["body"]["run_id"] = leased["run_id"]
+        document = contracts.build_signed_request(scope=contracts.SCOPE_COMPLETE, round_id=ROUND,
+            hotkey=RUNNER.ss58_address, body=original["body"], timestamp=original["timestamp"],
+            request_id=original["request_id"], sign_message=sign)
+        before_finished(document)
+        return document
+
+    def complete(document):
+        api.attempts.append(copy.deepcopy(document))
+        if document["body"]["run_id"] == "first":
+            if len(api.attempts) == 1:
+                assert second_active.wait(5)
+                clock[0] = 1.0
+                # The production SIGINT/SIGTERM handler sets this same event.
+                stop.set()
+                raise rn.RunnerError("controlled outage", http_status=503)
+            assert not second_finish.is_set()
+            replayed.set()
+        return {"status": "accepted" if clock[0] < 100 else "stale"}
+
+    original_run = worker._run_lease
+
+    def run_lease(leased):
+        original_run(leased)
+        if leased["run_id"] == "first":
+            first_finished.set()
+
+    original_wait = rn.wait
+    original_replay = worker._replay_pending_completions
+    advance_after_poll = [False]
+
+    def wait(futures, **kwargs):
+        result = original_wait(futures, **kwargs)
+        if len(futures) == 1 and first_finished.is_set() and clock[0] == 1.0:
+            advance_after_poll[0] = True
+        return result
+
+    def replay():
+        original_replay()
+        if advance_after_poll[0]:
+            # The receipt was not yet due on this drain poll. Another poll
+            # must deliver it, rather than a blocking wait on the second run.
+            clock[0] = 31.0
+            advance_after_poll[0] = False
+
+    worker._executor.execute = execute
+    worker._run_lease = run_lease
+    worker._replay_pending_completions = replay
+    monkeypatch.setattr(rn, "wait", wait)
+    api.complete = complete
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        task = caller.submit(worker.run_once, max_claims=3, stop_event=stop)
+        assert replayed.wait(2), "shutdown blocked saved receipt behind active work"
+        assert not task.done() and not second_finish.is_set()
+        assert [item["run_id"] for item in api.leases] == ["unclaimed"]
+        second_finish.set()
+        assert task.result(timeout=3) == 2
+        assert [row["body"]["run_id"] for row in api.attempts] == ["first", "first", "second"]
+        assert api.attempts[0] == api.attempts[1]
+        assert cfg.sandbox_runtime.specs == [] and api.provider_frames == []
+        assert list((cfg.work_dir / "pending-completions").iterdir()) == []
+    finally:
+        second_finish.set()
+        caller.shutdown(wait=True)
+        worker.close()
+
+
+@pytest.mark.parametrize("mode", ["delivery", "replay"])
+@pytest.mark.parametrize("terminal", ["accepted", "model_error"])
+def test_failed_acknowledgment_keeps_successful_receipt_without_paid_retry(tmp_path, mode, terminal):
+    api = Api([{"status": "failed"}])
+    cfg = config(tmp_path, api)
+    worker = rn.Runner(cfg)
+    original = envelope(cfg)
+    original["body"]["result"]["terminal_status"] = terminal
+    original = contracts.build_signed_request(scope=contracts.SCOPE_COMPLETE, round_id=ROUND,
+        hotkey=RUNNER.ss58_address, body=original["body"], timestamp=original["timestamp"],
+        request_id=original["request_id"], sign_message=sign)
+    path = cfg.work_dir / "pending-completions" / (original["request_id"] + ".json")
+    try:
+        if mode == "delivery":
+            assert worker._complete_with_retries(original) == {"status": "failed"}
+        else:
+            publish(worker, original)
+            worker.run_once(max_claims=0)
+        assert not path.exists()
+        archive = path.with_suffix(".failed.json")
+        if terminal == "accepted":
+            assert json.loads(archive.read_text()) == original
+            assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+        else:
+            assert not archive.exists()
+    finally:
+        worker.close()
+    fresh_api = Api()
+    fresh_cfg = config(tmp_path, fresh_api)
+    fresh = rn.Runner(fresh_cfg)
+    try:
+        assert fresh.run_once(max_claims=0) == 0
+        assert fresh_api.attempts == [] and fresh_api.provider_frames == []
+        assert fresh_cfg.sandbox_runtime.specs == []
+    finally:
+        fresh.close()
 
 
 def test_actual_new_process_replays_private_saved_receipt(tmp_path):

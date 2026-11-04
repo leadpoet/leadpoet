@@ -5632,13 +5632,17 @@ class Runner:
             except FileNotFoundError:
                 pass
 
-    def _acknowledge_completion(self, path: Path, result: Mapping[str, Any]) -> bool:
+    def _acknowledge_completion(
+        self, path: Path, result: Mapping[str, Any], envelope: Mapping[str, Any],
+    ) -> bool:
         status = result.get("status")
-        if status in {"accepted", "failed"}:
-            path.unlink()
-        elif status in {"stale", "rejected"}:
-            # Stale/denied leases cannot be replayed, but their completed paid
-            # evidence is not proved persisted. Keep it privately for audit.
+        mismatched_failure = (status == "failed"
+                              and envelope["body"]["result"]["terminal_status"] == "accepted")
+        if status in {"stale", "rejected"} or mismatched_failure:
+            # These terminal acknowledgments cannot be replayed, but do not
+            # prove the submitted successful output was persisted. Keep the
+            # exact signed receipt privately for audit, including when the
+            # server has already failed an otherwise successful local run.
             archive = path.with_suffix("." + status + ".json")
             try:
                 os.link(path, archive, follow_symlinks=False)
@@ -5647,6 +5651,8 @@ class Runner:
                 if ((source_details.st_dev, source_details.st_ino)
                     != (saved_details.st_dev, saved_details.st_ino)):
                     raise RunnerError("completion archive already exists") from None
+            path.unlink()
+        elif status in {"accepted", "failed"}:
             path.unlink()
         else:
             return False
@@ -5674,7 +5680,7 @@ class Runner:
                     envelope = self._read_pending_completion(descriptor, path)
                     refreshed = self._completion_envelope_for_attempt(envelope)
                     result = self._config.api.complete(refreshed)
-                    if self._acknowledge_completion(path, result):
+                    if self._acknowledge_completion(path, result, envelope):
                         self.completed.append({"run_id": envelope["body"]["run_id"], "result": result})
                         if (result.get("status") in ("accepted", "failed")
                             and self._config.operational_logger is not None):
@@ -5769,13 +5775,13 @@ class Runner:
             # Keep the retained inode locked through terminal telemetry and
             # delivery so a concurrent replay cannot take over between them.
             result = self._deliver_completion_with_retries(envelope)
-            self._acknowledge_completion(pending_path, result)
+            self._acknowledge_completion(pending_path, result, envelope)
             return result
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         with self._retain_completion(envelope) as path:
             result = self._deliver_completion_with_retries(envelope)
-            self._acknowledge_completion(path, result)
+            self._acknowledge_completion(path, result, envelope)
             return result
 
     def _deliver_completion_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
@@ -5887,7 +5893,7 @@ class Runner:
         taken = 0
         futures = set()
 
-        def wait_for_completion(*, rescan_on_timeout: bool = False) -> bool:
+        def wait_for_completion(*, rescan_on_timeout: bool = False, draining: bool = False) -> bool:
             while futures:
                 done, pending = wait(
                     futures,
@@ -5901,7 +5907,7 @@ class Runner:
                     for future in done:
                         future.result()
                     return True
-                if stop_event is not None and stop_event.is_set():
+                if not draining and stop_event is not None and stop_event.is_set():
                     return False
                 if rescan_on_timeout:
                     return True
@@ -6028,12 +6034,10 @@ class Runner:
             elif round_index == len(round_ids):
                 break
         # Keep servicing completed receipts while the last healthy sandbox
-        # runs. A busy run_once must not defer delivery until lease expiry.
+        # runs, including graceful shutdown. Stop prevents new claims, but
+        # must not defer saved completion delivery behind another sandbox.
         while futures:
-            if not wait_for_completion():
-                for future in futures:
-                    future.result()
-                break
+            wait_for_completion(draining=True)
         if log is not None:
             self._report_capacity()
             log.state(scoring_state="unavailable" if pickup_failed else "idle", progress=not pickup_failed)

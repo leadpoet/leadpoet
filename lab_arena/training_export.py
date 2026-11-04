@@ -488,11 +488,65 @@ def _verified_runtime_source(resource):
     return origin == "git_checkout" and dirty == "clean" or origin in {"release_marker", "verified_archive_environment"} and dirty == "unknown"
 
 
-def _source_evidence(objects, run, round_row, submission, participant):
+def _corrected_source_binding(run, round_row, submission, participant, history):
+    """Accept only an owner-recorded source revision for this exact execution.
+
+    The existing history RPC projects a receipt only while its source and round
+    still match live state, and names only executions admitted by that receipt.
+    It never supplies a general exemption for noncanonical object paths.
+    """
+    config = round_row.get("configuration_doc") or {}
+    round_id = run["round_id"]
+    baseline_id = "baseline-" + round_id.removeprefix("arena-")
+    if (submission.get("is_king") is not True or participant.get("is_king") is not True
+            or submission.get("status") != "frozen" or run.get("kind") != "execute"
+            or run.get("submission_id") != baseline_id
+            or participant.get("submission_id") != baseline_id
+            or participant.get("miner_hotkey") != run.get("miner_hotkey")
+            or config.get("baseline_hotkey") != run.get("miner_hotkey")
+            or not isinstance(history, Mapping) or history.get("round_id") != round_id
+            or not isinstance(history.get("source_corrections"), list)):
+        raise ExportError("source_correction_authority_missing")
+    matches = [row for row in history["source_corrections"]
+               if isinstance(row, Mapping) and isinstance(row.get("run_ids"), list)
+               and run["run_id"] in row["run_ids"]]
+    if len(matches) != 1:
+        raise ExportError("source_correction_authority_ambiguous")
+    proof = matches[0]
+    fields = ("submission_id", "miner_hotkey", "source_ref", "source_size_bytes",
+              "source_archive_sha256", "source_normalized_sha256")
+    source_url = proof.get("baseline_source_url")
+    match = re.fullmatch(
+        r"https://github[.]com/leadpoet/leadpoet-sales-agent/archive/([0-9a-f]{40})[.]tar[.]gz",
+        source_url if isinstance(source_url, str) else "")
+    if (proof.get("operation") != "baseline_source_supersession_v1"
+            or proof.get("round_id") != round_id
+            or not isinstance(proof.get("request_id"), str) or not proof["request_id"]
+            or any(not isinstance(proof.get(key), str)
+                   or contracts.SHA256_RE.fullmatch(proof[key]) is None
+                   for key in ("request_hash", "source_archive_sha256", "source_normalized_sha256"))
+            or any(proof.get(key) != submission.get(key) for key in fields)
+            or type(proof.get("source_size_bytes")) is not int or proof["source_size_bytes"] < 1
+            or participant.get("source_ref") != proof["source_ref"]
+            or participant.get("source_size_bytes") != proof["source_size_bytes"]
+            or any(proof.get(key) != config.get(key) for key in
+                   ("baseline_source_url", "reasoning_baseline_source_sha256"))
+            or proof.get("reasoning_baseline_source_sha256") != proof["source_archive_sha256"]
+            or any(not isinstance(identity, str) for identity in proof["run_ids"])
+            or len(set(proof["run_ids"])) != len(proof["run_ids"])
+            or match is None):
+        raise ExportError("source_correction_binding_invalid")
+    return {"request_id": proof["request_id"], "request_hash": proof["request_hash"],
+            "commit": match.group(1)}
+
+
+def _source_evidence(objects, run, round_row, submission, participant, history=None):
     source_ref = participant["source_ref"]
     expected_ref = "arena/%s/sources/%s.tar.gz" % (run["round_id"], run["submission_id"])
-    if source_ref != submission.get("source_ref") or source_ref != expected_ref:
+    if source_ref != submission.get("source_ref"):
         raise ExportError("source_ref_mismatch")
+    correction = (_corrected_source_binding(run, round_row, submission, participant, history)
+                  if source_ref != expected_ref else None)
     source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
     facts = source_bundle.validate_source_archive(source)
     if (type(participant.get("source_size_bytes")) is not int
@@ -517,10 +571,19 @@ def _source_evidence(objects, run, round_row, submission, participant):
                 or (round_row.get("configuration_doc") or {}).get("baseline_hotkey") != run.get("miner_hotkey")):
             raise ExportError("source_recorded_hash_missing")
         origin = "computed_from_frozen_object"
-    return {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
+    if correction is not None:
+        from lab_arena import submission_similarity
+        if (source_bundle.source_archive_commit(source) != correction["commit"]
+                or submission_similarity.inspect_archive(source).normalized_sha256
+                != submission["source_normalized_sha256"]):
+            raise ExportError("source_correction_archive_mismatch")
+    evidence = {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
             "hash_origin": origin, "recorded_hash_present": bool(recorded),
             "normalized_sha256": submission.get("source_normalized_sha256"),
             "archive_commit_comment": source_bundle.source_archive_commit(source) or None}
+    if correction is not None:
+        evidence["source_correction"] = correction
+    return evidence
 
 
 def _response_value(terminal, provider):
@@ -1684,7 +1747,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         raise ExportError("ambiguous_frozen_participant")
     participant = participants[0]
     try:
-        example["source"] = _source_evidence(objects, run, round_row, submission_row, participant)
+        example["source"] = _source_evidence(
+            objects, run, round_row, submission_row, participant, scoring_policy_history)
     except Exception:
         reasons["source_identity"].add("source_unverified")
     resource = (run.get("result_doc") or {}).get("resource_summary") or {}

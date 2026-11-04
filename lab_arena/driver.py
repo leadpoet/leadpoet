@@ -8,6 +8,18 @@ from datetime import datetime, timedelta, timezone
 from lab_arena import telemetry
 
 
+class RewardActivationRefused(Exception):
+    """A pending round refused activation without raising an exception.
+
+    ``activate_pending_rewards`` stops at the first round it cannot activate
+    and *returns* that round's status, so the loop never reaches the rounds
+    behind it. Read only through ``activated``, that refusal is a zero — the
+    same zero a fully paid-out Arena reports — and the stage span says
+    ``idle``. The identical fault reached through an exception says ``failed``.
+    This makes the two agree, so a stalled payout cannot read as a quiet one.
+    """
+
+
 def drive_once(service) -> str:
     """Advance all active rounds and ensure one submission round is open."""
 
@@ -38,6 +50,13 @@ def drive_once(service) -> str:
             rewards = service.activate_pending_rewards()
             observed.count = int(rewards.get("activated") or 0)
             observed.idle = observed.count == 0
+            # "ok" means the pending list was walked to the end; "disabled"
+            # means this process never activates rewards. Anything else is a
+            # round that refused, with the queue behind it untouched. An
+            # absent status is not evidence of a refusal and stays benign.
+            status = str(rewards.get("status") or "ok")
+            if status not in ("ok", "disabled"):
+                raise RewardActivationRefused(status)
     except Exception as exc:
         parts.append("failed activate_rewards: %s" % type(exc).__name__)
     else:

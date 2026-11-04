@@ -1231,6 +1231,7 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
         assert "model_context_window" not in config
         assert 'request_max_retries = 0' in config
         assert 'stream_max_retries = 0' in config
+        assert '\nplugins = false\n' in config
     assert not home.exists()
 
 
@@ -1495,6 +1496,69 @@ def _pin_real_codex(monkeypatch):
         monkeypatch.setenv(name, "http://127.0.0.1:9")
     monkeypatch.setenv("NO_PROXY", "")
     monkeypatch.setenv("no_proxy", "")
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+@pytest.mark.parametrize("bootstrap_control", [False, True], ids=("arena-default", "plugins-enabled-control"))
+def test_pinned_codex_skips_plugin_bootstrap_but_keeps_submitted_skills_and_tools(
+    monkeypatch, tmp_path, bootstrap_control,
+):
+    _pin_real_codex(monkeypatch)
+    # Keep the test offline, including Git's startup plugin lookup. Trace2
+    # proves whether the native CLI attempts that lookup without cloning it.
+    for name in ("ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    skill = tmp_path / ".agents/skills/arena-submitted/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: arena-submitted\ndescription: ARENA_SUBMITTED_SKILL_CATALOG_MARKER\n---\n"
+        "ARENA_SUBMITTED_SKILL_BODY_MARKER\n",
+        encoding="utf-8",
+    )
+    posts = []
+
+    def dispatch(_socket_path, document, **_kwargs):
+        posts.append(document)
+        assert document["model"] == "openai/gpt-4o-mini"
+        assert document["reasoning"]["effort"] == "high"
+        if len(posts) == 1:
+            assert "ARENA_SUBMITTED_SKILL_CATALOG_MARKER" in json.dumps(document)
+            names = [tool["name"] for tool in document["tools"]]
+            name = "exec_command" if "exec_command" in names else "shell_command"
+            assert name in names, names
+            command = "cat .agents/skills/arena-submitted/SKILL.md"
+            arguments = {"cmd": command, "max_output_tokens": 100} if name == "exec_command" else {"command": command}
+            output = [{"type": "function_call", "id": "fc-skill", "call_id": "call-skill", "name": name,
+                       "arguments": json.dumps(arguments), "status": "completed"}]
+        else:
+            assert len(posts) == 2
+            assert any(item.get("type") == "function_call_output"
+                       and "ARENA_SUBMITTED_SKILL_BODY_MARKER" in item["output"]
+                       for item in document["input"])
+            output = None
+        return 200, json.dumps(response(output=output)).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.session(model="openai/gpt-4o-mini", reasoning_effort="high") as environment:
+        home = Path(environment["CODEX_HOME"])
+        trace = home / "git-trace.jsonl"
+        environment["GIT_TRACE2_EVENT"] = str(trace)
+        command = [codex.CODEX_BINARY, "exec", "--skip-git-repo-check", "--ephemeral", "--color", "never"]
+        if bootstrap_control:
+            command += ["-c", "features.plugins=true"]
+        process = subprocess.run(
+            command + ["-C", str(tmp_path), "Use the submitted skill and local shell tool, then reply ARENA_CODEX_OK."],
+            env=environment, text=True, capture_output=True, timeout=30,
+        )
+        assert process.returncode == 0, process.stderr[-8000:]
+        assert "ARENA_CODEX_OK" in process.stdout
+        events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+        plugin_commands = [event["argv"] for event in events if event.get("event") == "start"
+                           and "https://github.com/openai/plugins.git" in event.get("argv", [])]
+        assert bool(plugin_commands) is bootstrap_control
+        assert (home / ".tmp/plugins.sync.lock").exists() is bootstrap_control
+        assert not (home / ".tmp/plugins").exists()
+    assert len(posts) == 2
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")

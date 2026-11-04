@@ -9075,10 +9075,15 @@ class ArenaService:
         row = self._public_results_round(round_id)
         round_status = str(row["status"])
         public_reads = getattr(self, "_public_result_reads", None)
+        # Object refs are write-once and the sharer only joins a read that is
+        # still in flight, so a round's status cannot change what one ref
+        # returns. Sharing matters most BEFORE publication: on 2026-11-04 the
+        # object store slowed twice, and the only rounds whose result reads ran
+        # past the gateway's 150 s proxy deadline were the two unpublished ones,
+        # where every concurrent viewer issued its own GET for the same outputs.
         read_objects = (
             public_reads
-            if round_status == "published" and public_reads is not None
-            and public_reads.source is self._objects
+            if public_reads is not None and public_reads.source is self._objects
             else None
         )
         completed = self.completed_submission_scores(row).get(submission_id) if round_status != "published" else None

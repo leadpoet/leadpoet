@@ -186,3 +186,12 @@ def test_research_query_cannot_supply_evidence_or_change_supplier_role():
             industry.resolve(value, proposal(value, research_query='', **update), research=True)
     with pytest.raises(ValueError, match='invalid research query'):
         industry.resolve(value, proposal(value, research_query='unnecessary query'), research=True)
+
+
+def test_listed_customers_and_products_describe_the_offering_but_functions_stay_required():
+    system = industry.request_payload(packet(), model='openai/gpt-6.1-sol')['messages'][0]['content']
+    assert "Examples introduced by 'such as' or 'including' are illustrative" in system
+    assert "without proof of each listed type, unless the criterion says each, all, both or only" in system
+    assert "making the core listed products meets it without every listed product" in system
+    assert "Each listed function or capability of a required product or service remains required" in system
+    assert "a priced monthly or annual plan for the offering proves a subscription" in system

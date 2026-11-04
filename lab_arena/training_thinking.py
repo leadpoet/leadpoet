@@ -1916,6 +1916,96 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
     return None if result is None else result | diagnostic_gaps
 
 
+def _individual_research_evidence(example):
+    """Builder-only absence exception; never establish full-ICP eligibility."""
+    selected = selected_research_evidence(example)
+    if selected is not None:
+        return selected
+    try:
+        run_id, score_id = example.get("run_id"), example.get("score_run_id")
+        snapshots = example.get("input_snapshots", {})
+        if (not isinstance(run_id, str) or not isinstance(score_id, str)
+                or not isinstance(snapshots, Mapping)
+                or not any(identity not in snapshots for identity in (run_id, score_id))):
+            return None
+        proof = example.get("completeness") or {}
+        reasons = proof.get("incomplete_reasons") or []
+        dimensions, by_dimension = proof.get("dimensions") or {}, proof.get("reasons_by_dimension") or {}
+        # Invalid snapshots can be removed by the exporter before it reports
+        # absence. Preserve that contradiction, including its dimension.
+        if (proof.get("complete") is not False or not isinstance(reasons, list)
+                or any(not isinstance(reason, str) for reason in reasons)
+                or by_dimension.get("exact_inputs") != ["runtime_input_snapshot_missing"]
+                or set(dimensions) != set(by_dimension)
+                or any(not isinstance(value, list) or any(not isinstance(reason, str) for reason in value)
+                       for value in by_dimension.values())
+                or set(reasons) != set().union(*(set(value) for value in by_dimension.values()))
+                or any(dimensions[name] is not (not value) for name, value in by_dimension.items())
+                or set(reasons) & {"runtime_input_snapshot_invalid", "runtime_input_privacy_nonexact",
+                                  "runtime_input_context_mismatch", "judge_input_context_mismatch"}
+                or dimensions.get("context") is not True
+                or dimensions.get("source_identity") is not True):
+            return None
+        configuration = example.get("configuration") or {}
+        training_coverage.missing_reasoning_percent_from_configuration(configuration)
+        training_coverage.percent_from_configuration(configuration)
+        if not reasoning_capture.enabled(baseline_reasoning.for_example(example)):
+            return None
+        judgment = example.get("judgment") or {}
+        if (type(judgment.get("per_icp_score")) not in (int, float)
+                or not verified_output_projection(example)):
+            return None
+        for identity, kind in ((run_id, "execute"), (score_id, "score")):
+            attempts = [row for row in example.get("attempts") or [] if row.get("run_id") == identity]
+            if len(attempts) != 1 or attempts[0].get("kind") != kind or attempts[0].get("status") != "accepted":
+                return None
+            if identity not in snapshots:
+                continue
+            snapshot = snapshots[identity]
+            document = snapshot.get("input")
+            if (set(snapshot) != {"schema_version", "run_id", "kind", "lease_generation",
+                                 "claim_request_hash", "input", "input_sha256", "privacy"}
+                    or snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
+                    or snapshot.get("run_id") != identity or snapshot.get("kind") != kind
+                    or type(snapshot.get("lease_generation")) is not int or snapshot["lease_generation"] < 1
+                    or type(attempts[0].get("lease_generation")) is not int
+                    or snapshot["lease_generation"] != attempts[0].get("lease_generation")
+                    or not isinstance(snapshot.get("claim_request_hash"), str)
+                    or not contracts.SHA256_RE.fullmatch(snapshot["claim_request_hash"])
+                    or snapshot.get("privacy") != {"redacted": False, "redactions": []}
+                    or snapshot["privacy"]["redacted"] is not False
+                    or not isinstance(document, dict)
+                    or snapshot.get("input_sha256") != contracts.document_hash(document)):
+                return None
+            artifact = (example.get("worker_observation_artifacts") or {}).get(identity) or {}
+            if any(key in artifact and snapshot[key] != artifact[key]
+                   for key in ("run_id", "kind", "lease_generation", "claim_request_hash")):
+                return None
+            if kind == "score" and (document.get("scored_run_id") != run_id
+                                    or document.get("companies") != example["output"].get("companies")):
+                return None
+            if "icp" in document or kind == "execute":
+                actual_icp = dict(document.get("icp") or {})
+                expected_icp = (training_export.integrity.agent_visible_icp(
+                    example["icp"], contacts_required=training_export.contact_policy.enabled(configuration))
+                    if training_export.integrity.enabled(configuration) else dict(example["icp"]))
+                if not training_export.contact_policy.enabled(configuration):
+                    expected_icp.pop("contact_policy", None)
+                for key in ("output_schema_version", "company_quality_policy", "company_requirements",
+                            "intent_details_policy", "_arena_provider_observations"):
+                    actual_icp.pop(key, None)
+                if actual_icp != expected_icp:
+                    return None
+            if document.get("evaluation_date") != example.get("evaluation_date"):
+                return None
+            if (kind == "score" and "scorer_policy" in document
+                    and document["scorer_policy"] != training_dataset.label_scorer_configuration(example).get("scorer_policy")):
+                return None
+        return frozenset(reasons)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def _combined_coverage(reports):
     result = coverage([])
     returned, trajectories, grouped = Counter(), Counter(), defaultdict(Counter)
@@ -1963,7 +2053,7 @@ def build(examples, rules: training_steps.Rules | None = None):
             return
         source = ref["example_hash"]
         if source not in scoped:
-            scoped[source] = selected_research_evidence(example)
+            scoped[source] = _individual_research_evidence(example)
         ancillary_gaps = scoped[source]
         if ancillary_gaps is None:
             reasons["trajectory_evidence_incomplete"] += 1
@@ -1989,6 +2079,8 @@ def build(examples, rules: training_steps.Rules | None = None):
         if source not in diagnostic_gaps_by_source:
             diagnostic_gaps_by_source[source] = provider_visible_view(example)[1]
         diagnostic_gaps = diagnostic_gaps_by_source[source]
+        missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
+                                if identity not in (example.get("input_snapshots") or {}))
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
                   "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
@@ -1998,9 +2090,12 @@ def build(examples, rules: training_steps.Rules | None = None):
                                    "response_sha256": ref["delivered_response_sha256"],
                                    "route": copy.deepcopy(call["reasoning_capture"]),
                                    "selected_research_evidence": {
-                                       "complete": True,
-                                       **({"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
-                                       "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps),
+                                       "complete": not missing_inputs,
+                                       **({"scope": "individual_model_request_result",
+                                           "missing_runtime_input_run_ids": missing_inputs} if missing_inputs else
+                                          {"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
+                                       "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps
+                                           - ({"runtime_input_snapshot_missing"} if missing_inputs else set())),
                                        **({"diagnostic_capture_gaps": sorted(diagnostic_gaps)}
                                           if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {})}}]}
         record["candidate_id"] = contracts.document_hash({key: record[key] for key in

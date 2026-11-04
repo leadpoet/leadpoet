@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import company_judgments as cj, contact_policy, contracts, integrity, intent_details_policy, runner, scoring, shim
+from lab_arena import company_judgments as cj, contact_policy, contracts, integrity, intent_details_policy, runner, scorer_entrypoint, scoring, shim
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, hash_lease_token
 from lab_arena.service import ServiceError
 from tests.lab_arena import signal_judgments503_postgres_test as prior
@@ -123,13 +123,28 @@ def run_process(service, leased, token, document, mode, tmp_path):
         worker = runner.WorkerSocketServer(Path(directory)/"worker.sock", api, state)
         worker.start()
         try:
-            env = {**os.environ, shim.WORKER_SOCKET_ENV: str(Path(directory)/"worker.sock")}
+            # CI credentials belong to the host process. A fresh judge uses
+            # its own proxy placeholders and keeps the real conflict guards.
+            env = {**os.environ, **scorer_entrypoint.PLACEHOLDER_CREDENTIALS,
+                   shim.WORKER_SOCKET_ENV: str(Path(directory)/"worker.sock")}
             result = subprocess.run([sys.executable, "-c", "import json,sys; from tests.lab_arena.verified_fit_checkpoint_test import process_score; print(json.dumps(process_score(sys.argv[1],sys.argv[2],json.load(sys.stdin))))", mode, str(count_path)], input=json.dumps(document), capture_output=True, text=True, timeout=45, env=env)
             assert result.returncode == 0, result.stderr[-2000:]
             output = json.loads(result.stdout)
         finally: worker.stop()
     assert state.action_sequence == 0 and state.calls == []
     return output
+
+
+def test_fresh_process_isolates_host_credentials_without_changing_parent(store,database,tmp_path,monkeypatch):
+    inherited = {name: "test-host-" + name.lower() for name in scoring.CREDENTIAL_ENV_NAMES}
+    for name, value in inherited.items():
+        monkeypatch.setenv(name, value)
+    service, leased, token, document = setup(store,database,tmp_path,paragraph=True)
+    result = run_process(service,leased,token,document,"healthy",tmp_path)
+    assert "failure" not in result
+    assert result["breakdowns"][0]["final_score"] > 0
+    assert (tmp_path/"fit-calls.txt").read_text().splitlines() == ["fit"]
+    assert {name: os.environ[name] for name in inherited} == inherited
 
 
 @pytest.mark.parametrize("failure", ["intent_fail", "paragraph_fail"])

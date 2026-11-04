@@ -1,5 +1,4 @@
-"""Publication validation reuses text and registry work within existing bounds."""
-from collections import OrderedDict
+"""Publication validation reuses one immutable registry within each selected run."""
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from statistics import median
@@ -8,30 +7,25 @@ from unittest.mock import patch
 
 import pytest
 
-from lab_arena import contracts, reasoning_capture, training_capture, training_eligibility
-from lab_arena import training_steps, training_thinking, training_worker_proof, trajectory
+from lab_arena import contracts, reasoning_capture, training_eligibility
+from lab_arena import training_thinking, training_worker_proof
 from tests.lab_arena.training_eligibility_test import captured_example, submission
 from tests.lab_arena.training_steps_test import seal
 
 
 @contextmanager
 def original_validation_work():
-    """Restore the pre-change scans without replacing any outcome checks."""
-    sanitize, policy = training_capture.sanitize_training_value, training_thinking._policy
-
-    def uncached_text(value, *args, **kwargs):
-        kwargs.pop('reuse_large_text', None)
-        return sanitize(value, *args, **kwargs)
+    """Restore repeated registry validation without replacing outcome checks."""
+    policy = training_thinking._policy
 
     def uncached_registry(call, registry=None, **kwargs):
         return policy(call, registry)
 
-    with patch.object(training_capture, 'sanitize_training_value', side_effect=uncached_text):
-        with patch.object(training_thinking, '_policy', side_effect=uncached_registry):
-            yield
+    with patch.object(training_thinking, '_policy', side_effect=uncached_registry):
+        yield
 
 
-def growing_example(history_turns=4, registry_routes=128):
+def growing_example(history_turns=4, registry_routes=95):
     example = captured_example()
     registry = example['configuration']['reasoning_route_registry']
     original = deepcopy(registry['approved_routes'][0])
@@ -173,68 +167,10 @@ def test_registry_cache_keeps_only_the_current_single_snapshot():
         assert validate.call_count == 3
 
 
-def test_text_reuse_is_opt_in_and_exact_validator_scans_large_plain_text_once():
-    text = 'Public synthetic evidence. ' * 800
-    request = {'admitted_parameters': {'messages': [text]}, 'effective_parameters': {'messages': [text]},
-               'outbound': {'body': {'messages': [text]}}}
-    with patch.object(trajectory, 'redact_text', wraps=trajectory.redact_text) as redact:
-        assert training_capture.sanitize_training_value(request) == (request, [])
-        assert sum(call.args[0] == text for call in redact.call_args_list) == 3
-        redact.reset_mock()
-        assert training_steps._exact_stateless(request)
-        assert sum(call.args[0] == text for call in redact.call_args_list) == 1
-        assert training_steps._exact_stateless(request)
-        assert sum(call.args[0] == text for call in redact.call_args_list) == 2
-
-
-@pytest.mark.parametrize('suffix', ['', ' Bearer synthetic-private-token',
-                                    ' https://user:pass@example.test/?token=private-value'])
-def test_opt_in_text_reuse_preserves_redactions_paths_and_node_limits(suffix):
-    text = 'Public synthetic evidence. ' * 800 + suffix
-    value = {'public': [text, text], 'authorization': text, 'hidden_reasoning': text}
-    expected = training_capture.sanitize_training_value(value)
-    assert training_capture.sanitize_training_value(value, reuse_large_text=True) == expected
-    assert expected[0]['authorization'] == expected[0]['hidden_reasoning'] == '[REDACTED]'
-    with pytest.raises(training_capture.CaptureError, match='request_structure_limit'):
-        training_capture.sanitize_training_value([text] * 5, max_nodes=5, reuse_large_text=True)
-    with pytest.raises(training_capture.CaptureError, match='request_redaction_key_collision'):
-        training_capture.sanitize_training_value({text + 'private': 1, text + '[REDACTED]': 2},
-                                                 secrets=('private',), reuse_large_text=True)
-
-
-def test_opt_in_text_reuse_keeps_byte_entry_and_custom_value_bounds(monkeypatch):
-    class ObservedCache(OrderedDict):
-        def __setitem__(self, key, value):
-            if isinstance(value, tuple):
-                assert len(self) < 512
-                assert sum(v[1] for v in self.values()) + value[1] <= 8 * 1024 * 1024
-            super().__setitem__(key, value)
-
-    class CustomText(str):
-        def __hash__(self):
-            raise AssertionError('custom hash must not be used')
-
-    monkeypatch.setattr(training_capture, 'OrderedDict', ObservedCache)
-    texts = [f'{index}: ' + '界' * 17_000 for index in range(100)]
-    assert training_capture.sanitize_training_value(texts + [texts[0]], reuse_large_text=True) == (texts + [texts[0]], [])
-    custom = CustomText('Public synthetic evidence. ' * 800)
-    assert training_capture.sanitize_training_value([custom, custom], reuse_large_text=True) == ([custom, custom], [])
-
-
-@pytest.mark.parametrize('text,secrets', [('𐀀' * 1_050_000, ()),
-                                        ('aaaa' * 650_000, ('aaaa',))], ids=['wide-unicode', 'expanded-secret'])
-def test_opt_in_does_not_retain_text_and_output_above_existing_byte_bound(text, secrets):
-    with patch.object(trajectory, 'redact_text', wraps=trajectory.redact_text) as redact:
-        cleaned, _ = training_capture.sanitize_training_value([text, text], secrets=secrets,
-                                                              reuse_large_text=True)
-        assert cleaned[0] == cleaned[1]
-        assert sum(len(call.args[0]) > 16_384 for call in redact.call_args_list) == 2
-
-
 def benchmark():
     """Run with python3.11 -m tests.lab_arena.training_publication_cpu_reuse_test."""
     for turns in (2, 4, 8):
-        example = growing_example(history_turns=turns, registry_routes=256)
+        example = growing_example(history_turns=turns, registry_routes=95)
         outcomes, timings, counts = [], [], []
         for original in (True, False):
             samples = []
@@ -251,7 +187,7 @@ def benchmark():
                     counts.append(validate.call_count)
         assert outcomes[0] == outcomes[1] and outcomes[1]['eligible']
         print({'history_turns_per_call': [turns * n for n in (1, 2, 3)],
-               'registry_routes': 256, 'example_bytes': len(contracts.canonical_json(example).encode()),
+               'registry_routes': 95, 'example_bytes': len(contracts.canonical_json(example).encode()),
                'before_seconds': timings[0], 'after_seconds': timings[1],
                'registry_validations_before_after': counts,
                'result_sha256': contracts.document_hash(outcomes[1])})

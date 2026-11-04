@@ -325,6 +325,9 @@ def test_growing_history_cache_preserves_full_icp_eligibility_boundaries(monkeyp
         def exact_privacy(self, value, *, response, check):
             return check(value, response=response)
 
+        def reasoning_registry(self, registry, *, validate):
+            return validate(registry), None
+
     monkeypatch.setattr(training_worker_proof, 'WorkerProofs', Stateless)
     stateless, stateless_scans = assess_with_scan_count()
     assert owned == stateless

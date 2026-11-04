@@ -7664,6 +7664,14 @@ def test_acquisition_alone_is_not_rebrand_but_explicit_rebrand_can_coexist():
 def test_cross_domain_rebrand_locator_flows_through_bounded_investigator(
     monkeypatch,
 ):
+    async def no_linkedin_redirect(_session, url, **_kwargs):
+        assert url in {
+            "https://www.linkedin.com/company/mittihq",
+            "https://www.linkedin.com/company/safetyculturehq",
+        }
+        return 200, url, ""
+
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", no_linkedin_redirect)
     request_url = "https://safetyculture.com/"
     final_url = "https://mitti.com/"
     page_text = (
@@ -16757,6 +16765,14 @@ def test_real_reserve_completed_judgment_and_faults_through_arena_score(
 def test_unproven_alias_completion_and_fault_classification_through_lab_scorer(
     monkeypatch, cross_domain, missing_submitted_linkedin, review_state,
 ):
+    async def no_linkedin_redirect(_session, url, **_kwargs):
+        assert url in {
+            "https://www.linkedin.com/company/abacus-group",
+            "https://www.linkedin.com/company/abacus-technology",
+        }
+        return 200, url, ""
+
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", no_linkedin_redirect)
     submitted_name = "Abacus" if cross_domain else "DBS"
     submitted_domain = (
         "abacustechnology.com" if cross_domain else "dbs.com"

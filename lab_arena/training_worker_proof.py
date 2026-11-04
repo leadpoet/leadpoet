@@ -6,6 +6,7 @@ them with explicit dict/list base-class mutation calls.
 """
 
 from dataclasses import dataclass
+from collections import OrderedDict
 import hashlib
 import json
 
@@ -89,6 +90,8 @@ class WorkerProofs:
     def __init__(self):
         self._proofs = {}
         self._exact_privacy = {}
+        self._reasoning_registry = None
+        self._clean_text_digests = OrderedDict()
 
     def exact_privacy(self, value, *, response, check):
         # Requests remain mutable. Never reuse object identity or retain input
@@ -98,16 +101,31 @@ class WorkerProofs:
         except Exception:
             # Unsupported values or hashing failures keep the original scan,
             # including its exceptions. Scanner exceptions are never cached.
-            return check(value, response=response)
+            return check(value, response=response, clean_text_digests=self._clean_text_digests)
         key = (digest, response)
         if key in self._exact_privacy:
             return self._exact_privacy[key]
-        result = check(value, response=response)
+        result = check(value, response=response, clean_text_digests=self._clean_text_digests)
         if type(result) is bool:
             if len(self._exact_privacy) >= MAX_EXACT_PRIVACY_PROOFS:
                 del self._exact_privacy[next(iter(self._exact_privacy))]
             self._exact_privacy[key] = result
         return result
+
+    def reasoning_registry(self, registry, *, validate):
+        # Recompute current plain JSON before reuse. Retain at most one owned
+        # validated registry in this run; mutations and custom values revalidate.
+        try:
+            digest = _exact_privacy_digest(registry, False)
+        except Exception:
+            return validate(registry), None
+        if self._reasoning_registry is not None and self._reasoning_registry[0] == digest:
+            return self._reasoning_registry[1:]
+        frozen = validate(registry)
+        registry_hash = contracts.document_hash(frozen).split(":", 1)[1]
+        owned = _freeze(frozen)
+        self._reasoning_registry = (digest, owned, registry_hash)
+        return owned, registry_hash
 
     def prepare(self, example):
         view = dict(example)

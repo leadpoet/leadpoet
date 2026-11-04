@@ -58,10 +58,13 @@ def test_real_cap_wire_and_worker_readback_roundtrip_through_current_broker(capt
     assert training_capture.sanitize_training_value(example) == (example, [])
     trace = training_thinking.readable_trace(example)
     # The immutable digest predates indexing Chat choice/message metadata.
-    # Removing only the new exact metadata events must recover that view,
+    # Removing the later metadata events and request-control diagnostics recovers that view,
     # including the original reasoning/tool order and every source hash.
     legacy_trace = deepcopy(trace)
     for call in legacy_trace['calls']:
+        for field in ('outbound_reasoning_controls', 'outbound_reasoning_controls_status',
+                      'probe_reasoning_mode'):
+            call['reasoning_coverage'].pop(field)
         call['events'] = [event for event in call['events']
                           if not (event['kind'] == 'response_metadata'
                                   and 'choices' in event['source_path'])]

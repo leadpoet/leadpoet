@@ -34,6 +34,22 @@ def test_named_temporary_operator_creates_only_hardened_local_client(monkeypatch
     assert session.calls == ["sts", "secretsmanager"]
 
 
+def test_cached_admin_explicit_credentials_create_hardened_client(monkeypatch):
+    session = Session(method="explicit", arn="arn:aws:sts::493765492819:assumed-role/AWSReservedSSO_Admin_9f135d1e5dbc915b/pranav-admin")
+    monkeypatch.setattr(subject, "gateway_iam_session", lambda **kwargs: session)
+    client, account = subject.secret_operator_client(profile="leadpoet-admin")
+    assert client is session.secrets and account == "493765492819"
+    assert session.calls == ["sts", "secretsmanager"]
+
+
+def test_explicit_nonadmin_identity_is_rejected(monkeypatch):
+    session = Session(method="explicit")
+    monkeypatch.setattr(subject, "gateway_iam_session", lambda **kwargs: session)
+    with pytest.raises(subject.SecretOperatorError):
+        subject.secret_operator_client(profile="leadpoet-admin")
+    assert session.calls == ["sts"]
+
+
 @pytest.mark.parametrize("method", ["iam-role", "container-role", "env", "shared-credentials-file", "explicit", ""])
 def test_nonoperator_authority_fails_before_any_secret_client(monkeypatch, method):
     session = Session(method=method)

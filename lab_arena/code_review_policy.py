@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any, Dict, Mapping, Optional
+
+from lab_arena import code_review
 
 
 LEGACY_MAX_ATTEMPTS = 3
@@ -70,6 +73,7 @@ ERROR_CODES = frozenset({
     "code_review_provider_credit",
     "code_review_provider_rate_limited",
     "code_review_provider_request_rejected",
+    "code_review_provider_refused",
     "code_review_provider_timeout",
     "code_review_provider_unavailable",
     "code_review_transport_error",
@@ -81,6 +85,110 @@ ERROR_CODES = frozenset({
     "review_response_invalid",
     "code_review_research_unverified",
 })
+
+# Private diagnostics are observations, never admission, billing or retry input.
+REVIEW_FINISH_REASONS = frozenset({
+    "stop", "length", "tool_calls", "function_call", "content_filter", "error",
+    "end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal",
+    "cancelled", "completed", "missing", "invalid", "other",
+})
+REVIEW_CONTEXT_REASONS = frozenset({
+    "not_required", "verified", "metadata_missing", "requested_model", "strategy",
+    "attempt", "pipeline", "endpoints_missing", "endpoints_available",
+    "endpoints_total", "endpoint_shape", "selected_count", "selected_model", "selected_provider",
+    "usage_missing", "prompt_tokens", "context_budget",
+})
+REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure"})
+_GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
+
+
+def explicit_provider_refusal(document: Any) -> bool:
+    """Recognize typed refusal fields in one provider choice, without prose matching.
+
+    This reads the credential-checked response itself. The private diagnostic
+    projection is never an authority for review or retry decisions.
+    """
+    if not isinstance(document, Mapping):
+        return False
+    choices = document.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        return False
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        return False
+    for name in ("finish_reason", "native_finish_reason"):
+        value = choice.get(name)
+        if isinstance(value, str) and value in {"content_filter", "refusal"}:
+            return True
+    message = choice.get("message")
+    if not isinstance(message, Mapping):
+        return False
+    refusal = message.get("refusal")
+    return isinstance(refusal, str) and bool(refusal.strip())
+
+
+def private_response_diagnostic(document: Any, prepared: Any, *, generation_id: Any = None) -> dict:
+    """Copy only bounded metadata from a credential-checked provider reply.
+
+    Unknown provider text and identifiers are omitted. No source, message,
+    reasoning, error prose, headers or arbitrary routing metadata is retained.
+    """
+    from lab_arena import code_review
+
+    response = document if isinstance(document, Mapping) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and len(choices) == 1 else None
+
+    def finish(name):
+        if not isinstance(choice, Mapping):
+            return "invalid"
+        value = choice.get(name)
+        if value is None:
+            return "missing"
+        if not isinstance(value, str):
+            return "invalid"
+        return value if len(value) <= 32 and value in REVIEW_FINISH_REASONS else "other"
+
+    context = "not_required"
+    if prepared.requires_context_integrity:
+        context = code_review.context_integrity_failure(response, prepared) or "verified"
+    result = {
+        "finish_reason": finish("finish_reason"),
+        "native_finish_reason": finish("native_finish_reason"),
+        "max_output_tokens": prepared.parameters["max_tokens"],
+        "context_integrity": context,
+    }
+    usage = response.get("usage")
+    if isinstance(usage, Mapping):
+        for name in ("prompt_tokens", "completion_tokens"):
+            value = usage.get(name)
+            if type(value) is int and 0 <= value <= 1_000_000_000:
+                result[name] = value
+        details = usage.get("completion_tokens_details")
+        value = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
+        if type(value) is int and 0 <= value <= 1_000_000_000:
+            result["reasoning_tokens"] = value
+    models = {prepared.parameters["model"]}
+    canonical = code_review._REVIEW_MODEL_CANONICAL_SLUGS.get(prepared.parameters["model"])
+    if canonical:
+        models.add(canonical)
+    model = response.get("model")
+    if isinstance(model, str) and model in models:
+        result["response_model"] = model
+    metadata = response.get("openrouter_metadata")
+    endpoints = metadata.get("endpoints") if isinstance(metadata, Mapping) else None
+    available = endpoints.get("available") if isinstance(endpoints, Mapping) else None
+    if isinstance(available, list) and len(available) <= 128:
+        selected = [row for row in available if isinstance(row, Mapping) and row.get("selected") is True]
+        if len(selected) == 1:
+            model, provider = selected[0].get("model"), selected[0].get("provider")
+            if isinstance(model, str) and model in models:
+                result["selected_model"] = model
+            if isinstance(provider, str) and provider in REVIEW_PROVIDER_NAMES:
+                result["selected_provider"] = provider
+    if isinstance(generation_id, str) and len(generation_id) <= 153 and _GENERATION_ID.fullmatch(generation_id):
+        result["generation_id"] = generation_id
+    return result
 
 
 def diagnostic(
@@ -210,12 +318,101 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
 
     attempts = max(0, int(row.get("code_review_attempts") or 0))
     document = row.get("code_review_doc")
+    if refusal_recovery(document):
+        return None if recovery_retryable(document) else attempts
     if transient_failure(document):
         return None
     retryable = document.get("retryable") if isinstance(document, Mapping) else None
     if retryable is False:
         return attempts
     return LEGACY_MAX_ATTEMPTS
+
+
+def refusal_recovery(document: Any) -> bool:
+    return isinstance(document, Mapping) and (
+        document.get("refusal_recovery") is True
+        or document.get("error_code") == "code_review_provider_refused"
+        or document.get("model") == code_review.FALLBACK_REVIEW_MODEL
+    )
+
+
+def recovery_retryable(document: Mapping[str, Any]) -> bool:
+    code = document.get("error_code")
+    allowed = (code in TRANSIENT_ERROR_CODES
+               or code in {"code_review_provider_refused"}
+               or (code == "code_review_provider_request_rejected"
+                   and document.get("legacy_refusal_proven") is True))
+    return allowed and int(document.get("review_alternate_attempts") or 0) < 2
+
+
+def review_model_for(row: Mapping[str, Any]) -> str:
+    """Follow committed chain counts; SQL rechecks every paid claim."""
+    document = row.get("code_review_doc")
+    if refusal_recovery(document):
+        primary = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
+        alternate = int(document.get("review_alternate_attempts") or 0)
+        if primary >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
+            return code_review.FALLBACK_REVIEW_MODEL
+    return code_review.DEFAULT_REVIEW_MODEL
+
+
+def legacy_refusal_candidate(row: Mapping[str, Any]) -> bool:
+    doc = row.get("code_review_doc")
+    return (row.get("status") in {"accepted", "frozen"}
+            and row.get("code_review_status") == "error"
+            and isinstance(doc, Mapping)
+            and doc.get("error_code") == "code_review_provider_request_rejected"
+            and doc.get("provider_http_status") == 200
+            and doc.get("model") == code_review.DEFAULT_REVIEW_MODEL)
+
+
+def legacy_refusal_from_ledger(row: Mapping[str, Any], entries: list) -> Mapping[str, Any]:
+    """Prove the latest exact claim's authoritative HTTP200 refusal error pair."""
+    import hashlib
+    if not legacy_refusal_candidate(row) or not entries or len(entries) >= 1000:
+        return row
+    attempt = int(row.get("code_review_attempts") or 0)
+    identity = "sha256:" + hashlib.sha256(
+        f"lab_arena.code_review:{row['submission_id']}:{attempt}".encode()
+    ).hexdigest()
+    rows = [entry for entry in entries
+            if entry.get("submission_id") == row["submission_id"]
+            and entry.get("operation_id") == "openrouter.code_review"]
+    current = [entry for entry in rows if entry.get("call_identity") == identity]
+    reservations = [entry for entry in current if entry.get("entry_kind") == "reservation"]
+    if len(reservations) != 1 or not current:
+        return row
+    reservation = reservations[0].get("entry_doc") or {}
+    head = max(current, key=lambda entry: int(entry["entry_id"]))
+    doc = head.get("entry_doc") or {}
+    if not (head.get("entry_kind") in {"settlement", "uncertain"}
+            and reservation.get("attempt") == attempt
+            and reservation.get("review_model") == code_review.DEFAULT_REVIEW_MODEL
+            and doc.get("error_code") == "code_review_provider_request_rejected"
+            and doc.get("provider_http_status") == 200):
+        return row
+    # Old runtime emitted this authoritative HTTP200 pair only for an explicit
+    # refusal. Optional diagnostics never determine admission or retry rights.
+    origins = []
+    reservations = [entry for entry in rows if entry.get("entry_kind") == "reservation"]
+    for saved in reservations:
+        binding = saved.get("entry_doc") or {}
+        if binding.get("review_model") != code_review.DEFAULT_REVIEW_MODEL:
+            continue
+        bound = [entry for entry in rows if entry.get("call_identity") == saved.get("call_identity")
+                 and entry.get("entry_kind") in {"settlement", "uncertain"}]
+        if any((entry.get("entry_doc") or {}).get("error_code") == "code_review_provider_refused"
+               or ((entry.get("entry_doc") or {}).get("error_code") == "code_review_provider_request_rejected"
+                   and (entry.get("entry_doc") or {}).get("provider_http_status") == 200)
+               for entry in bound):
+            origins.append(int(binding["attempt"]))
+    origin = min(origins) if origins else attempt
+    counts = [entry.get("entry_doc") or {} for entry in reservations
+              if int((entry.get("entry_doc") or {}).get("attempt") or 0) >= origin]
+    return {**row, "code_review_doc": {**row["code_review_doc"],
+        "refusal_recovery": True, "legacy_refusal_proven": True, "refusal_episode_start": origin,
+        "review_primary_attempts": sum(doc.get("review_model") == code_review.DEFAULT_REVIEW_MODEL for doc in counts),
+        "review_alternate_attempts": sum(doc.get("review_model") == code_review.FALLBACK_REVIEW_MODEL for doc in counts)}}
 
 
 def review_retry_available(row: Mapping[str, Any]) -> bool:

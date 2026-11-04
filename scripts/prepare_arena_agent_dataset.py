@@ -21,6 +21,9 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--eval-percent', type=int, default=20)
     parser.add_argument('--seed', default=training_steps.Rules.seed)
+    parser.add_argument('--eval-mode', choices=('company', 'company_and_icp'),
+                        default=training_steps.Rules.eval_mode)
+    parser.add_argument('--eval-after')
     parser.add_argument('--include-nonproduction-rounds', action='store_true')
     parser.add_argument('--review-sample-size', type=int, default=0)
     parser.add_argument('--review-decisions', type=Path)
@@ -30,7 +33,10 @@ def main(argv=None):
         parser.error("max-example-bytes must be positive")
     created = False
     try:
-        rules = training_steps.Rules(args.eval_percent, args.seed, not args.include_nonproduction_rounds)
+        rules = training_steps.Rules(
+            eval_percent=args.eval_percent, seed=args.seed,
+            production_rounds_only=not args.include_nonproduction_rounds,
+            eval_mode=args.eval_mode, eval_after=args.eval_after)
         splits, manifest = training_steps.build(_examples(args.examples, max_example_bytes=args.max_example_bytes), rules)
         curation = training_curation.flag_manifest(splits, manifest['dataset_version'])
         review = None

@@ -144,7 +144,7 @@ session. An open session is not proof that a new one will work.
 
 Check the effective Session Manager maximum duration and idle settings for SSH
 sessions, plus the SSO/role credential lifetime. They must support the canonical
-110-minute drain **plus restart and recovery margin**; plan at least 180 minutes
+200-minute drain **plus restart and recovery margin**; plan at least 270 minutes
 for the deployment window. Do not start a release near credential/session expiry.
 A keepalive does not extend the maximum session duration. Verify the actual
 SSH-over-SSM duration policy; do not infer it from an ordinary shell session.

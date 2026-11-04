@@ -1,0 +1,214 @@
+{
+  "scope": "Sanitized public source quotes from four recorded native industry-to-paragraph handoffs; no labels or provider reasoning. Only the primary and mainframe supporting quotes are retained for projection regression tests.",
+  "cases": [
+    {
+      "company": {
+        "name": "CACI International",
+        "website": "https://caci.com/"
+      },
+      "paragraph": "CACI launched Ask Aida, its AI platform to accelerate data analysis at scale. A report dated August 3, 2026 says CACI partnered with Oracle to deliver federal human resources IT modernization to the Office of Personnel Management. This activity may help CACI expand its managed IT infrastructure, cloud migration, and mainframe modernization services.",
+      "icp": {
+        "optional_bonus_intents": [
+          {
+            "criterion": "Launched a new service offering or major capability in the last 12 months, per a press release or product page",
+            "matched_icp_signal": 1
+          }
+        ],
+        "product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+        "prompt": "Find companies meeting every company requirement. Industry: Information Technology; Sub-industry: IT Infrastructure and Managed Services; Country: United States; Headquarters geography: United States; Company stage: Public; Allowed employee size: 1,001-5,000, 5,001-10,000, 10,001+; Product/service requirement: Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments; Required attribute: Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange\n\nIntent qualification:\nRequired primary intent (365 days): Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement\nOptional bonus intent (365 days): Launched a new service offering or major capability in the last 12 months, per a press release or product page\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+        "required_primary_intent": {
+          "criterion": "Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement",
+          "matched_icp_signal": 0
+        }
+      },
+      "industry_primary": {
+        "url": "https://caci.com/",
+        "quote": "m, built to find, track, and stop hostile drones before they can... Learn More Case study Supporting global marine operations with modernized logistics The U.S. Marine Corps relies on fast, reliable, and innovative development to support the Global Combat Support... Learn More Careers Join a Washington Technology Top 100 company Explore opportunities with one of the largest prime contractors in the federal government market. Learn More New at CACI October 27, 2026 CACI Awarded $145 Million U.S. Navy Task Order to Advance Maritime Technologies RESTON, VA. - CACI International Inc (NYSE: CACI) announced today that it has been awarded a four-year task order valued at up to $145 million to support the Naval Surface Warfare Center Carderock… Read More Read More October 26, 2026 CACI Secures U.S. Navy Task Order to Strengthen Electromagnetic Spectrum Dominance RESTON, VA. - CACI International Inc (NYSE: CACI) announced today that it has been awarded a five-year task order valued at up to $281 million by the U.S. Navy's Naval Surface Warfare Center (NSWC)… Read More Read More October 21, 2026 CACI Reports Results for Its Fiscal 2027 First Quarter RESTON, VA. - CACI International Inc (NYSE: CACI) announced results today for its fiscal first quarter ended September 30, 2026. Read More Read More October 6, 2026 CACI Schedules Fiscal Year 2027 First Quarter Conference Call Reston, VA. - CACI International Inc (NYSE: CACI) will release its financial results for the first quarter of fiscal year 2027 after the market closes on Wednesday, October 21. The company will host… Read More Read"
+      },
+      "industry_support": [
+        {
+          "url": "https://www.caci.com/contract/cio-sp3-0",
+          "quote": "are Tools and Applications (including Application Service Provider) Hardware/Software Maintenance Transition Planning A-76 Studies Specific to IT Operations or Support Database Administration and Data Storage Management Backup and Recovery Services System Console Operations Production Control and Management Asset Management (including Radio Frequency Identification [RFID] Tracking) IT Acquisition Management Desktop Computing as a Unified Service Managed IT Services Support IT Impact Analyses Workflow Management Implementation of Standards (e.g., International Organization for Standardization [ISO] 9000, Capability Maturity Model Integration [CMMI], IT Services Management) Solution Leasing Software-as-a-service (SaaS) Cloud Computing Task Area 5 – IT Operations and Maintenance The objective of this task area is to support the operations and maintenance of IT systems, keeping IT systems viable with supported vendor releases or off-the-shelf applications software upgrades. Operations and maintenance on IT systems shall include all software and hardware associated with mainframes, client/server, web-based applications, and networking. A comprehensive, but not limited, sampling of work to be performed under this task area is: Operational Support Software Maintenance and Upgrades Telecommunications Maintenance (Data, Voice, Images, including Wireless) Infrastructure Management Services (IMS) Configuration Management Network/Hardware Support Help Desk/IT Support Resource Management Backup and Recovery Management Installation, Configuration, and Tuning Electronic Software Licensing"
+        }
+      ],
+      "identity": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "submitted_name": "caciinternational",
+        "submitted_domain": "caci.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "caciinternational",
+        "observed_domain": "caci.com",
+        "observed_linkedin_slug": "caci-international-inc",
+        "evidence_source": "company_web_reverification"
+      },
+      "provenance": {
+        "industry_capture_index": 74645,
+        "paragraph_capture_index": 74672,
+        "paragraph_capture_sha256": "762b7f05341ee64661dc5c5af33696d773b8a65f3192f3794d884fed1bf0acba",
+        "final_result_sha256": "3591294e9f1e079bc48df1fd875bffb367093195be3ef52b6802238f60afb79d",
+        "support_quote_sha256": [
+          "47e2df333b9a39c3f6c435ad5cd795d88009baf2f08732901daff4308dd0cb85"
+        ]
+      }
+    },
+    {
+      "company": {
+        "name": "Maximus",
+        "website": "https://maximus.com/"
+      },
+      "paragraph": "A report dated November 10, 2025 quotes Jason Schick, vice president of US Public Sector at Genesys, saying \"Our expanded collaboration with Maximus empowers government agencies to redefine what is possible for citizen engagement.\" A report dated January 27, 2026 says Maximus launched Accuracy Assistant to prevent SNAP payment errors. These developments may help Maximus expand its managed IT infrastructure, cloud migration, and mainframe modernization services.",
+      "icp": {
+        "optional_bonus_intents": [
+          {
+            "criterion": "Launched a new service offering or major capability in the last 12 months, per a press release or product page",
+            "matched_icp_signal": 1
+          }
+        ],
+        "product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+        "prompt": "Find companies meeting every company requirement. Industry: Information Technology; Sub-industry: IT Infrastructure and Managed Services; Country: United States; Headquarters geography: United States; Company stage: Public; Allowed employee size: 1,001-5,000, 5,001-10,000, 10,001+; Product/service requirement: Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments; Required attribute: Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange\n\nIntent qualification:\nRequired primary intent (365 days): Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement\nOptional bonus intent (365 days): Launched a new service offering or major capability in the last 12 months, per a press release or product page\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+        "required_primary_intent": {
+          "criterion": "Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement",
+          "matched_icp_signal": 0
+        }
+      },
+      "industry_primary": {
+        "url": "https://maximus.com/technology-capabilities/cloud-services",
+        "quote": "Cloud Capabilities | Maximus Skip to main content Cloud Capabilities Accelerate mission success with secure, agile multi-cloud platforms that enable continuous modernization, operational agility, and innovation at government scale — without compromising compliance or security. Cloud services work alongside our modernization, security, and data services. View all technology capabilities Secure, seamless cloud integration for mission-ready transformation Simplifying hybrid and multi-cloud environments to accelerate modernization We deliver FedRAMP-ready architectures that ensure government compliance while modernizing legacy applications for future-ready operations, enabling faster delivery of digital services, improved resiliency, and continuous modernization over time. The result? A seamless, secure transition to AI-ready innovation and sustainable modernization across mission systems. Our capabilities Cloud readiness, migration and integration Move smarter, operate leaner, and modernize with purpose. We help agencies evolve from legacy environments to modern, cloud-native platforms that support rapid change, continuous improvement, and mission growth. Enterprise cloud engineering and design Our experts architect cloud-native solutions that integrate containerization and automated compliance, DevSecOps best practices and resilient application design, creating platforms that accelerate application modernization, data integration, and digital service delivery. Cloud operations, optimization and modernization Ensure your mission-critical systems operate securely, efficiently,"
+      },
+      "industry_support": [
+        {
+          "url": "https://maximus.com/news/wisconsin-child-support-modernization-contract-award",
+          "quote": "Wisconsin child support modernization contract award # Maximus awarded modernization contract in Wisconsin February 21, 2024 Project management of a new child support system improves service delivery. We were selected by the Wisconsin Department of Children and Families (DCF) to provide Project Management Services over the design, development, and implementation of a modernized, automated child support system. The contract is part of a major initiative for the state to replace a legacy system using state-of-the-art modern technology and transform child support service delivery. In late 2020, we started working with the state of Wisconsin on the planning, business process reengineering, and strategy design for this modernization project. We're now providing project management services for the implementation phase, which includes replacing the legacy mainframe system with a cloud-based, modern system while reimagining the entire child support program to better serve Wisconsin families. We're establishing project governance plans and procedures, maintaining an integrated project schedule, providing standardized project status reports, facilitating deliverable reviews, and managing project risks and scope. “Wisconsin has one of the largest child support programs in the country, and we’re keenly aware of the importance of ensuring this implementation is successful, so families can more easily interact with the program and access critical child support services,” said Pat Aguilar, Managing Director of Program Modernization Consulting for Maximus. “In addition to our demonstrated "
+        }
+      ],
+      "identity": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "submitted_name": "maximus",
+        "submitted_domain": "maximus.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "maximus",
+        "observed_domain": "maximus.com",
+        "observed_linkedin_slug": "maximus",
+        "evidence_source": "company_web_reverification"
+      },
+      "provenance": {
+        "industry_capture_index": 74761,
+        "paragraph_capture_index": 74781,
+        "paragraph_capture_sha256": "19346a1cb031fe5b50c5ced6cf17012f0a7ef2560015870acbb534b44dde5e70",
+        "final_result_sha256": "aec79040b62110a2f66652a99757e99773c8ba39f17e60c263b4741863211a35",
+        "support_quote_sha256": [
+          "4a9749915c2a252e7871458f83c07d9d8a3bcf7d1e69fe032a822536949a8629"
+        ]
+      }
+    },
+    {
+      "company": {
+        "name": "Unisys",
+        "website": "https://unisys.com/"
+      },
+      "paragraph": "A report dated August 20, 2026 says Unisys and Refroid partnered to advance deployment of high-performance AI infrastructure, combining liquid cooling innovation and global field services to scale organizations' AI infrastructure. A report dated April 22, 2026 says Unisys expanded work with Salesforce to deliver AI-driven field services at scale. These developments may help Unisys expand its managed IT infrastructure, cloud migration, and mainframe modernization services.",
+      "icp": {
+        "optional_bonus_intents": [
+          {
+            "criterion": "Launched a new service offering or major capability in the last 12 months, per a press release or product page",
+            "matched_icp_signal": 1
+          }
+        ],
+        "product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+        "prompt": "Find companies meeting every company requirement. Industry: Information Technology; Sub-industry: IT Infrastructure and Managed Services; Country: United States; Headquarters geography: United States; Company stage: Public; Allowed employee size: 1,001-5,000, 5,001-10,000, 10,001+; Product/service requirement: Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments; Required attribute: Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange\n\nIntent qualification:\nRequired primary intent (365 days): Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement\nOptional bonus intent (365 days): Launched a new service offering or major capability in the last 12 months, per a press release or product page\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+        "required_primary_intent": {
+          "criterion": "Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement",
+          "matched_icp_signal": 0
+        }
+      },
+      "industry_primary": {
+        "url": "https://www.unisys.com/solutions/clearpath-forward/",
+        "quote": "Clearpath Forward Transaction Processing Solutions | Unisys # ClearPath Forward ® For computing requirements that demand the utmost in security, resiliency, availability and scalability, ClearPath provides the foundation for business agility and digital transformation. Cultivating success with ClearPath. Learn how Lar Cooperativa Agroindustrial has been harvesting 50x growth — securely and reliably — using ClearPath® Solution and Services. 4900 0 % Revenue increase 30 0 Years of partnership ## Enable mission-critical, high-volume transaction processing Achieve powerful, secure, highly available business-critical transaction processing using the open attributes essential for today’s diverse computing environments. Explore how ClearPath Forward can play a vital role in supporting your day-to-day operations and your digital transformation. ## ClearPath offerings ClearPath Services ClearPath Systems Operating Environments Enterprise Integration and Automation Services ### Maximize your ROI with ClearPath How will you take advantage of everything ClearPath offers today and continue to deliver excellence into the future? ClearPath services offer the expertise and support you need to plan and execute innovation initiatives – without taking your eye off day-to-day operations. Portfolio includes: - ClearPath Managed Services: Maximize the full potential of your ClearPath environment with comprehensive support that optimizes performance, strengthens security and ensures reliability across your infrastructure — from daily operations and administration to cloud transitions and disaster"
+      },
+      "industry_support": [
+        {
+          "url": "https://www.unisys.com/solutions/clearpath-forward/",
+          "quote": " recovery. - ClearPath Application Services: Future-proof your mainframe applications with end-to-end services spanning modernization, development and AI integration — all designed to meet evolving business demands while preserving mission-critical reliability. - ClearPath Technology Consulting Services: Transform your ClearPath ecosystem with expert-led solutions that optimize performance and maximize ROI — from rapid proof-of-concept implementations to cyber recovery strategies that align perfectly with your business objectives. - ClearPath Cloud Transition Services: Deploy your ClearPath MCP and OS 2200 environments on private or public clouds, including Amazon Web Services (AWS) and Azure, without compromising reliability or disrupting operations. ### Power your most demanding workloads ClearPath enables mission-critical, high-volume transaction processing for the world's most demanding high-volume workloads with ClearPath Forward Libra and Dorado Systems. Deploy these systems your way — on-premises, private cloud and public cloud. ### Host your business-critical workloads ClearPath MCP and OS 2200 operating environments deliver unrivaled, comprehensive software ecosystems for your mission-critical workloads. Effortlessly handle the most resource-intensive applications with robust, scalable performance and gain unparalleled flexibility with licensing options. ### Extend your ClearPath capabilities Complement your ClearPath operating systems, including: - Developing and evolving applications - Turning data into business insights - Integrating and automating business proc"
+        },
+        {
+          "url": "https://www.unisys.com/siteassets/collateral/solution-brief/sb-3468-7446-modernize-your-mainframe-ecosystem.pdf",
+          "quote": "tion ### Evolve without disruption ClearPath Application Services modernize your critical systems incrementally, minimizing risk while maximizing business continuity. Modernize your mainframe applications and propel your business forward System modernization can be a complex undertaking with both risks and rewards. While full-scale overhauls can lead to disruptions, a well-planned approach often yields substantial benefits. ClearPath Application Services offer a pragmatic approach to modernization, drawing on industry best practices and experience to employ an incremental method to reduce risk. This approach segments the journey into manageable steps, helping to ensure a smoother transition while minimizing disruptions. Organizations running on ClearPath Forward systems, IBM mainframes or legacy platforms can amplify the value of their existing infrastructure. This is accomplished by modernizing the ecosystem that connects to the platforms, enhancing the overall user experience, optimizing the operational cost and automating the end-to-end software delivery process. The result? Increased business agility and reduced time to market for delivering business features. How you benefit • DevSecOps: Accelerate change implementation, reduce post-production issues and enhance overall security. Enjoy smoother transitions throughout the development life cycle and avoid costly rework due to security misalignments. • APIs and microservices: Unlock seamless integration and information sharing across your enterprise, partners and customers. Dramatically reduce time to market for new produ"
+        }
+      ],
+      "identity": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "submitted_name": "unisys",
+        "submitted_domain": "unisys.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "unisys",
+        "observed_domain": "unisys.com",
+        "observed_linkedin_slug": "unisys",
+        "evidence_source": "company_web_reverification"
+      },
+      "provenance": {
+        "industry_capture_index": 76690,
+        "paragraph_capture_index": 76708,
+        "paragraph_capture_sha256": "f55db42d2299635a8b0c1cff8531db5da1c42165c3d66d2e2ad99613c5da786f",
+        "final_result_sha256": "fffd7d770138b750d9bbf83097af83504f8d6f6ef24dfe4baea3637c4c4991fe",
+        "support_quote_sha256": [
+          "4a97961cb3be622cb0ef3319cf83505c9465c91d64b9c54670a86347ee2d51a8",
+          "69661c60c62173215b70eb90fa19580c5bf28bddb46cc9d72318602de81ca60a"
+        ]
+      }
+    },
+    {
+      "company": {
+        "name": "Leidos",
+        "website": "https://leidos.com/"
+      },
+      "paragraph": "A report dated June 25, 2026 says Leidos and The Modern Data Company will organize fragmented federal data into actionable insights. A report dated September 29, 2026 says Leidos launched an agentic AI platform to speed response to cyber threats. These initiatives may help Leidos expand its managed IT infrastructure, cloud migration, and mainframe modernization services.",
+      "icp": {
+        "optional_bonus_intents": [
+          {
+            "criterion": "Launched a new service offering or major capability in the last 12 months, per a press release or product page",
+            "matched_icp_signal": 1
+          }
+        ],
+        "product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+        "prompt": "Find companies meeting every company requirement. Industry: Information Technology; Sub-industry: IT Infrastructure and Managed Services; Country: United States; Headquarters geography: United States; Company stage: Public; Allowed employee size: 1,001-5,000, 5,001-10,000, 10,001+; Product/service requirement: Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments; Required attribute: Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange\n\nIntent qualification:\nRequired primary intent (365 days): Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement\nOptional bonus intent (365 days): Launched a new service offering or major capability in the last 12 months, per a press release or product page\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+        "required_primary_intent": {
+          "criterion": "Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement",
+          "matched_icp_signal": 0
+        }
+      },
+      "industry_primary": {
+        "url": "https://www.leidos.com/capabilities/digital-modernization",
+        "quote": "Skip to main content Back to top # Digital Modernization Secure systems. Faster decisions. Stronger outcomes. ## Systems built for mission speed Modern missions move too fast for outdated systems. Leidos helps organizations modernize cloud environments, strengthen cyber operations, and connect data, AI, and enterprise infrastructure so teams can make faster decisions and stay ready for what’s next. Explore our approach ## Key Australian IT projects ##### Centralised Processing Consolidation of 280 data centres into 12 domestic and three international sites, creating a new Centralised Processing environment for the Australian Department of Defence ##### End User Computing Agile desktop environment for Defence designed to improve security through more rigorous responses to cybersecurity threats and better support day-to-day operations and sustainment. ##### End User Technology & Support Device-agnostic services for desktop infrastructure, development and test environments, and server and storage management. ##### Enterprise Service Management Centre Supporting Australia Tax Office employees with full ITIL-based service management, including round-the-clock service desk support ##### 70% increase in speed of endpoint migration for the Pentagon’s Fourth Estate due to scaled automation ##### 3M number of global users supported by a secure network ##### 62% reduction in consumer agency spend through serverless multicloud ## Transform complexity into outcomes - Product Suites - InSight - UpHold - HeadWay - ForWard ### Integrated capabilities Our Product Suites — Insight™, UpHold™,"
+      },
+      "industry_support": [
+        {
+          "url": "https://www.leidos.com/sites/leidos/files/2021-05/IRS%20Electronic%20Tax%20Systems%20Whitepaper.pdf",
+          "quote": "9, the system was handling approximately 80,000 transactions each day. By the time the team finished the rewrite of TDS 18 months later, it was fielding 125,000. Today it is running over 500,000 transactions a day. The development team’s familiarity with the IRS development strategy contributed to the project's success. The Leidos team worked closely with IRS developers in following this methodology to create a new system that ran on Oracle databases and J2EE app servers. With TDS improved and reliable, the joint IRS Leidos team turned its attention to the TIN Matching application in 2012. It migrated and modernized this functionality from a monolithic PeopleCode-based application running on a mainframe to a component based system. The third migration focused on the eFile application component, which the IRS renamed the External Services Authorization Management (ESAM) module. This system, which today has more than 875,000 registered user accounts, humbly began in 2014 as an application designed to authorize the submission of information returns for the Affordable Care Act (ACA). The combined IRS-Leidos team completed the ACA information returns authorization module in 18 months, and then began re-engineering the eFile application. The eFile application contained four distinct modules providing authorization of third parties to access eFile, TDS, TIN Match, and the Income Verification Express Servie (IVES). Each module was reengineered separately and added to the ESAM product baseline. The team began with the TIN Match module adding it to the ESAM framework. Building upon t"
+        }
+      ],
+      "identity": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "submitted_name": "leidos",
+        "submitted_domain": "leidos.com",
+        "submitted_linkedin_slug": "leidos",
+        "observed_name": "leidos",
+        "observed_domain": "leidos.com",
+        "observed_linkedin_slug": "leidos",
+        "evidence_source": "company_web_reverification"
+      },
+      "provenance": {
+        "industry_capture_index": 76692,
+        "paragraph_capture_index": 76711,
+        "paragraph_capture_sha256": "445995a51ffce9a6fad61db773f48c4fcc16f11a4ae2ceb37bc72853711897e5",
+        "final_result_sha256": "0465c91749713c082b023e53d416e8cba96ea5eb8967ede08d862dd3abde8bc3",
+        "support_quote_sha256": [
+          "1dc5ed64371213cbff761264d2882667b50065b24ea623af2e433e65d85dcb23"
+        ]
+      }
+    }
+  ]
+}

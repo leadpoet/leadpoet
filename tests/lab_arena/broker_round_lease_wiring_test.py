@@ -20,6 +20,10 @@ class LeaseStore(FakeLedgerStore):
         self.paid_at = datetime(2026, 9, 15, 8, tzinfo=timezone.utc)
         self.lease_expires_at = self.paid_at
 
+    def code_review_schema(self, *, require_refusal_fallback=False):
+        assert require_refusal_fallback is True
+        return {"refusal_fallback": {"max_primary_refusal_claims": 2, "max_alternate_claims": 2}}
+
     def _renew(self, kind: str, ttl: int) -> None:
         self.renewals.append((kind, ttl))
         # The store's reserve/settle/uncertain SQL writes now + passed TTL.
@@ -191,6 +195,7 @@ def test_gateway_broker_uses_round_judge_models_instead_of_current_defaults(monk
         "intent_details_review": "anthropic/claude-sonnet-4.5",
         "role_batch_check": "google/gemini-2.5-flash",
     })
+    frozen.pop("industry_evidence_review", None)
     table = price_table()
     pricing = {component: "0" for component in broker.PRICED_COMPONENTS}
     pricing.update(prompt="0.000001", completion="0.000002")
@@ -201,6 +206,7 @@ def test_gateway_broker_uses_round_judge_models_instead_of_current_defaults(monk
     instance = service.config.broker_factory(service, {"configuration_doc": {
         "lease_ttl_seconds": 3600, "scorer_policy": {"judge_models": selected},
     }})
+    assert instance._judge_model_roles == selected
     for model in set(selected.values()):
         parameters, _ = instance._openrouter_parameters({
             "model": model, "messages": [{"role": "user", "content": "review"}],
@@ -209,3 +215,39 @@ def test_gateway_broker_uses_round_judge_models_instead_of_current_defaults(monk
     for model in set((*current.values(), *frozen.values())) - set(selected.values()):
         with pytest.raises(broker.BrokerError, match="model_not_allowed"):
             instance._openrouter_parameters({"model": model, "messages": []}, kind="score")
+
+
+@pytest.mark.parametrize("industry_enabled", [False, True])
+def test_gateway_frozen_industry_role_controls_outbound_route(monkeypatch, industry_enabled):
+    import json
+    from dataclasses import replace
+    from lab_arena import operations
+
+    model = "openai/gpt-6.1-sol"
+    roles = {"company_fit_reverification": model}
+    if industry_enabled:
+        roles["industry_evidence_review"] = model
+    table = price_table()
+    pricing = {component: "0" for component in broker.PRICED_COMPONENTS}
+    pricing.update(prompt="0.000001", completion="0.000005")
+    table["models"][model] = pricing
+    service, _store, provider = _wired_factory(monkeypatch, prices=table)
+    # Current defaults must not add a role that an older round did not freeze.
+    service.scorer_policy = {"judge_models": {"industry_evidence_review": model}}
+    instance = service.config.broker_factory(service, {"configuration_doc": {
+        "lease_ttl_seconds": 3600, "scorer_policy": {"judge_models": roles},
+    }})
+    provider.responses[:] = [(200, {"id": "gen-wired-industry", "model": model,
+        "choices": [{"message": {"role": "assistant", "content": "ok"},
+                     "finish_reason": "stop"}], "usage": {"cost": "0.0002"}})]
+    result = instance.execute(replace(CONTEXT, kind="score"),
+        operation_id="openrouter.chat", action_sequence=0, timeout_ms=65000,
+        parameters={"model": model, "max_tokens": 2000,
+                    "messages": [{"role": "user", "content": "review"}]})
+    assert result.status == 200
+    policy = json.loads(provider.sent[0]["body"])["provider"]
+    if industry_enabled:
+        assert policy["only"] == ["azure/us", "azure/eu"]
+        assert policy["zdr"] is True and policy["data_collection"] == "deny"
+    else:
+        assert policy == dict(operations.OPENROUTER_STRICT_PROVIDER_POLICY)

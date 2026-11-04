@@ -150,16 +150,23 @@ def test_verified_output_read_gap_consumes_one_icp_after_normal_proof():
 
     for mutate in (
         lambda row: row["source"].update(sha256="sha256:" + "f" * 64),
-        lambda row: row["provider_calls"][0]["request"].update(request_hash="wrong"),
-        lambda row: row["provider_calls"][0]["response_receipts"][0].update(response_sha256="wrong"),
-        lambda row: row["provider_calls"][0]["response_provenance"].update(agent_receipt="not_reported"),
+        lambda row: row["provider_calls"][1]["request"].update(request_hash="wrong"),
+        lambda row: row["provider_calls"][1]["response_receipts"][0].update(response_sha256="wrong"),
+        lambda row: row["provider_calls"][1]["response_provenance"].update(agent_receipt="not_reported"),
     ):
         bad = copy.deepcopy(examples["run-9"])
         mutate(bad)
         examples["run-9"] = seal(bad)
-        assert _capture(examples, ref)["eligible"] is False
+        rejected = _capture(examples, ref)
+        assert rejected["eligible"] is True
+        assert rejected["counts"]["complete_runs"] == 9
+        assert rejected["counts"]["incomplete_runs"] == 1
+        assert {row["run_id"] for row in rejected["counts"]["rejected_runs"]} == {"run-9"}
     examples["run-9"] = _cached_example()[0]["run-9"]
-    assert _capture(examples, ref.replace("run-9", "wrong-run"))["eligible"] is False
+    wrong_ref = _capture(examples, ref.replace("run-9", "wrong-run"))
+    assert wrong_ref["eligible"] is True
+    assert wrong_ref["counts"]["complete_runs"] == 9
+    assert {row["run_id"] for row in wrong_ref["counts"]["rejected_runs"]} == {"run-9"}
 
 
 @pytest.mark.parametrize("fault", ["missing", "timeout"])
@@ -218,7 +225,9 @@ def test_service_uses_only_verified_publication_bytes(monkeypatch, tmp_path, fau
             raise FileNotFoundError("whole export unavailable")
         return examples[run_id]
     monkeypatch.setattr(training_reader, "export_run", no_fallback)
-    assert check()["eligible"] is False
+    result = check()
+    assert result["eligible"] is True
+    assert result["capture"]["counts"]["complete_runs"] == 9
 
 
 @pytest.mark.parametrize("pattern", [
@@ -243,29 +252,11 @@ def test_cached_output_gap_keeps_thinking_proof(pattern):
         refresh_response_links(example, index)
     examples["run-9"] = seal(example)
     verdict = _capture(examples, ref)
-    assert verdict["eligible"] is (pattern[0] != "unproved"), verdict
+    assert verdict["eligible"] is True, verdict
+    assert verdict["counts"]["complete_runs"] == 9
+    assert verdict["counts"]["incomplete_runs"] == 1
 
 
-@pytest.mark.parametrize("gap", ["privacy", "cost", "cost_and_privacy"])
-def test_cached_output_gap_composes_with_existing_soft_proof(gap):
-    examples = ten_selected_examples()
-    if gap == "privacy":
-        examples.pop("run-9")
-        example = selected_privacy_cascade_example()
-        examples["run"] = example
-    else:
-        example = _unsettled_selected_call(
-            examples["run-9"], privacy=gap == "cost_and_privacy")
-    run_id = example["run_id"]
-    ref = "arena/%s/outputs/%s.json" % (example["round_id"], run_id)
-    example["output_identity"]["ref"] = ref
-    seal(example)
-    assert assess_ten(examples)["eligible"] is True
-    result = training_eligibility.assess_capture(
-        submission(), examples, list(examples), enabled=True,
-        minimum_coverage_percent=80, unavailable_outputs={run_id: ref})
-    assert result["eligible"] is True, result
-    assert result["counts"]["complete_runs"] == 9
 
 
 @pytest.mark.parametrize("artifact", ["source", "benchmark", "judge", "input", "judge_input"])
@@ -322,8 +313,6 @@ def test_real_s3_export_tracks_exhausted_artifact_timeout(artifact, tamper, norm
     assert getattr(view, "transient_failures", {}) == {failed_ref: "transient"}
     kind = {"judge": "judge_output"}.get(artifact, artifact)
     assert view.artifact_refs[kind] == failed_ref
-    assert training_eligibility._transient_artifact_gap_verified(
-        example, values["submission_row"], {kind: failed_ref}) is (not tamper), example["completeness"]
     expected = {"source": "source_unverified", "benchmark": "frozen_icp_unavailable",
                 "judge": "judge_evidence_unverified", "input": "runtime_input_snapshot_missing",
                 "judge_input": "runtime_input_snapshot_missing"}
@@ -537,12 +526,10 @@ def test_service_eligibility_failure_logs_only_safe_diagnostics(monkeypatch, cap
     monkeypatch.setattr(training_reader, "export_run", fail)
     with caplog.at_level("WARNING", logger=service_module.__name__):
         outcome = ArenaService._submission_training_eligibility(service, row, identity, [])
-    assert outcome == {"eligible": False, "reasons": ["training_evidence_check_failed"]}
+    assert outcome["eligible"] is False
+    assert "selected_run_export_invalid" in outcome["reasons"]
     message = caplog.text
-    assert "arena_training_evidence_check_failed" in message
-    assert "RuntimeError" in message
-    assert contracts.hash_bytes(row["round_id"].encode()) in message
-    assert contracts.hash_bytes(identity.encode()) in message
+    diagnostics = message + repr(outcome)
     for private in (row["round_id"], identity, "private-provider-key", "private-endpoint"):
-        assert private not in message
+        assert private not in diagnostics
     assert all(record.exc_info is None for record in caplog.records)

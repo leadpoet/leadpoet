@@ -97,6 +97,7 @@ def test_prepare_request_contains_every_file_in_full_and_pydantic_style_passes()
         {"id": "context-compression", "enabled": False}
     ]
     assert prepared.parameters["provider"] == {
+        "only": ["google-vertex"],
         "allow_fallbacks": False,
         "require_parameters": True,
         "data_collection": "deny",

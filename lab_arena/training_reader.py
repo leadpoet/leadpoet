@@ -72,7 +72,8 @@ class AvailabilityReadView:
 def _ledger(store, run_id):
     rows, cursor = [], None
     while True:
-        page = store.list_ledger(run_id=run_id, after_entry_id=cursor, limit=1000)
+        page = store.list_ledger(run_id=run_id, after_entry_id=cursor, limit=1000,
+                                  training_responses=True)
         rows.extend(page)
         if len(page) < 1000:
             return rows
@@ -157,6 +158,7 @@ def export_run(store, objects, run_id):
                             signal_judgment_rows=[row for row in signal_rows.values() if row is not None],
                             signal_source_ledger_rows=signal_source_ledger,
                             scoring_policy_history=policy_history,
+                            preserved_judgment_policy_reader=getattr(store, "preserved_judgment_policy", None),
                             cost_eligibility_reader=cost_eligibility_reader)
 
 

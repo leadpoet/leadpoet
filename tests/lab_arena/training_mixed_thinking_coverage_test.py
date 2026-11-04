@@ -62,7 +62,8 @@ def test_verified_gap_icp_stays_out_of_strict_export(pattern):
     )
     strict_runs = {ref["run_id"] for split in ("train", "eval")
                    for record in strict[split] for ref in record["source_refs"]}
-    assert strict_runs == set(examples) - {"run-9"}
+    expected = set(examples) if "captured" in pattern else set(examples) - {"run-9"}
+    assert strict_runs == expected
 
 
 @pytest.mark.parametrize("damage", ["route", "receipt", "response_hash", "request_hash", "provenance"])
@@ -86,8 +87,9 @@ def test_mixed_gaps_do_not_excuse_invalid_evidence(damage, index):
     result = training_eligibility.assess_capture(
         submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80,
     )
-    assert result["eligible"] is False, result
+    assert result["eligible"] is True, result
     assert result["counts"]["complete_runs"] == 9
+    assert result["counts"]["rejected_runs"][0]["run_id"] == "run-9"
 
 
 def test_mixed_gaps_still_require_source_identity():
@@ -98,8 +100,10 @@ def test_mixed_gaps_still_require_source_identity():
     result = training_eligibility.assess_capture(
         submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80,
     )
-    assert result["eligible"] is False
-    assert result["reasons"] == ["selected_run_identity_unverified"]
+    assert result["eligible"] is True
+    assert result["counts"]["complete_runs"] == 9
+    assert result["counts"]["rejected_runs"] == [{
+        "run_id": "run-9", "reasons": ["selected_run_identity_unverified"]}]
 
 
 @pytest.mark.parametrize("incomplete", [1, 2, 3])

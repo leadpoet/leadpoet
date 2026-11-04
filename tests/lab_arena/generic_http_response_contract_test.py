@@ -180,18 +180,23 @@ def test_running_same_key_recovery_uses_native_contract_on_both_dispatches(monke
                                    credential_for=lambda *_: DL_KEY)
     context = replace(CONTEXT, deepline_catalog=catalog)
     first = execute(broker, context)
-    assert first.status == 502
+    assert first.status == 200 and json.loads(first.body) == fixture["native_raw_v2"]
+    assert first.call["transport_recovery"] == "deepline_execution_lookup"
+    assert first.call["actual_microusd"] == 0
+    before_replay = len(transport.sent)
     recovered = execute(broker, context)
-    assert recovered.status == 200 and json.loads(recovered.body) == fixture["native_raw_v2"]
+    assert recovered.status == 200 and recovered.body == first.body
     assert recovered.call["call_identity"] == first.call["call_identity"]
-    assert recovered.call["actual_microusd"] == 0
+    assert recovered.call["actual_microusd"] == 0 and recovered.call["idempotent"] is True
+    assert len(transport.sent) == before_replay
     posts = [r for r in transport.sent if r["method"] == "POST"]
     assert len(posts) == 2 and store.log.count("dispatch") == 1
     for post in posts:
         assert post["headers"]["x-deepline-execute-response-contract"] == "raw-v2"
         assert post["headers"]["x-deepline-tool-error-schema"] == "1"
     assert posts[0]["body"] == posts[1]["body"]
-    assert posts[0]["headers"]["idempotency-key"] == posts[1]["headers"]["idempotency-key"]
+    assert posts[0]["headers"] == posts[1]["headers"]
+    assert posts[0]["url"] == posts[1]["url"]
 
 
 @pytest.mark.parametrize("shape", ["arena_raw", "native_raw_v2"])

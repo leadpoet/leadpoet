@@ -151,6 +151,9 @@ def _check_manifest_binding(source_manifest, curation_manifest):
         raise ValueError("curation_manifest_mismatch")
     if source_manifest.get("schema_version") == training_dataset.SCHEMA_VERSION:
         keys = ("schema_version", "record_schema_version", "rules", "sources", "record_hashes")
+        if ((source_manifest.get("rules") or {}).get("split_grouping")
+                == training_dataset.SPLIT_GROUPING):
+            keys += ("split_source_hashes",)
         valid_source = all(key in source_manifest for key in keys) and (
             source_manifest.get("dataset_version") == contracts.document_hash(
                 {key: source_manifest[key] for key in keys}))

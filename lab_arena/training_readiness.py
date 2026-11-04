@@ -40,7 +40,13 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
             # versions of a run using filename or caller order.
             rejected["conflicting_export_versions"] += len(versions)
             continue
-        valid.append(next(iter(versions.values())))
+        example = next(iter(versions.values()))
+        try:
+            training_dataset.label_scorer_configuration(example)
+        except ValueError:
+            rejected["preserved_judgment_policy_invalid"] += 1
+            continue
+        valid.append(example)
 
     dimensions, gaps, call_gaps, calls, recorder_counts = Counter(), Counter(), Counter(), Counter(), Counter()
     recorder_runs, recorder_missing, complete, selected_research_complete, cohorts = 0, 0, 0, 0, defaultdict(list)
@@ -101,12 +107,16 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                                        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
                                     "recorder_buffer_complete": recorder_complete,
                                     "response_receipts": receipts}})
-        config = example.get("configuration") or {}
+        config = training_dataset.label_scorer_configuration(example)
         cohorts[(config.get("scorer_image_digest"), contracts.document_hash(config.get("scorer_policy") or {}))].append(example)
 
     qualification, qualification_totals = [], Counter()
     for (image, policy), records in sorted(cohorts.items(), key=lambda item: str(item[0])):
-        splits, manifest = training_dataset.build(records, training_dataset.Rules(production_rounds_only=production_rounds_only))
+        # Keep the complete verified source graph even when labels are selected
+        # from one scorer cohort. Steps and thinking use this same corpus.
+        splits, manifest = training_dataset.build(
+            records, training_dataset.Rules(production_rounds_only=production_rounds_only),
+            split_sources=valid)
         counts = {name: len(items) for name, items in splits.items()}
         qualification_totals.update(counts)
         qualification.append({"scorer_image_digest": image, "scorer_policy_hash": policy,
@@ -116,6 +126,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
     steps, step_manifest = training_steps.build(valid, training_steps.Rules(production_rounds_only=production_rounds_only))
     thinking_splits, thinking_manifest = training_thinking.build(
         valid, training_steps.Rules(production_rounds_only=production_rounds_only))
+    # This inventory counts ICPs with at least one valid thinking pair. It
+    # does not establish complete ICP capture or champion eligibility.
     strict_runs = {ref.get("run_id") for split in ("train", "eval")
                    for record in thinking_splits[split] for ref in record.get("source_refs") or []}
     coverage_groups = defaultdict(list)
@@ -172,7 +184,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                         "manifest": step_manifest},
         "full_thinking": {"candidate_records": len(thinking_splits["train"]) + len(thinking_splits["eval"]),
                           "manifest": thinking_manifest, "coverage": coverage,
-                          "coverage_scope": "supplied_exports_only_not_champion_eligibility"},
+                          "coverage_scope": "supplied_icps_with_valid_thinking_pairs_not_complete_icps_or_champion_eligibility"},
         "readiness": {"human_label_review": "not_proved_by_storage",
                       "agent_action_quality": "unreviewed",
                       "training_permission": dict(training_dataset.TRAINING_PERMISSION),

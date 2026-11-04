@@ -196,14 +196,14 @@ def _provider_call_path(path: tuple[str, ...], root: Any = None
     return None
 
 
-def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
-    """Recognize only the host's rejected model-frame observation containers.
+def _rejected_model_config_path(path: tuple[str, ...], root: Any) -> bool:
+    """Bind rejected frame/HTTP controls to canonical host request containers.
 
-    Parse errors have no admitted operation identity. Bind controls to the
-    decoded model frame instead, never to arbitrary nested ``parameters``.
-    The same bytes must remain a fixed point in saved and exported evidence.
+    Parse errors have no admitted operation identity. The same decoded control
+    values must remain a fixed point in saved and exported evidence.
     """
-    if path[-3:] != ("admitted_parameters", "raw_frame", "parameters"):
+    http = path[-2:] == ("admitted_parameters", "body_text")
+    if not http and path[-3:] != ("admitted_parameters", "raw_frame", "parameters"):
         return False
     if not isinstance(root, Mapping) or (isinstance(root.get("choices"), list)
             or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
@@ -220,7 +220,7 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
                 return None
         return item
 
-    request_path = path[:-3]
+    request_path = path[:-2] if http else path[:-3]
     if request_path:
         # No suffix matching: provider bodies and arbitrary wrappers cannot
         # establish a host observation by copying canonical field names.
@@ -259,15 +259,29 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
                 or observation.get("call_identity") is not None
                 or observation.get("contributes_to_provider_call_count") is not False
                 or not isinstance(observation.get("outcome"), Mapping)
-                or observation["outcome"].get("protocol") != "frame"):
+                or observation["outcome"].get("protocol") != ("http" if http else "frame")):
             return False
     request = at(request_path)
     if (not isinstance(request, Mapping) or set(request) != {"admitted_parameters", "timeout_ms"}
             or type(request.get("timeout_ms")) is not int or request["timeout_ms"] != 0
-            or not isinstance(request.get("admitted_parameters"), Mapping)
-            or set(request["admitted_parameters"]) != {"raw_frame"}):
+            or not isinstance(request.get("admitted_parameters"), Mapping)):
         return False
-    frame = request["admitted_parameters"]["raw_frame"]
+    admitted = request["admitted_parameters"]
+    if http:
+        body = admitted.get("body_text")
+        return (set(admitted) == {"method", "url", "headers", "body_text"}
+                and admitted.get("method") == "POST"
+                and admitted.get("url") in (
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    "https://openrouter.ai/api/v1/responses")
+                and isinstance(admitted.get("headers"), Mapping)
+                and isinstance(body, Mapping)
+                and isinstance(body.get("model"), str) and bool(body["model"].strip())
+                and not isinstance(body.get("choices"), list)
+                and body.get("object") not in ("response", "chat.completion", "chat.completion.chunk"))
+    if set(admitted) != {"raw_frame"}:
+        return False
+    frame = admitted["raw_frame"]
     return (isinstance(frame, Mapping)
             and {"operation_id", "parameters"} <= set(frame)
             and set(frame) <= {"schema_version", "operation_id", "parameters", "timeout_ms"}
@@ -278,7 +292,7 @@ def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
             and bool(frame["parameters"]["model"].strip()))
 
 
-def _rejected_frame_controls(value: Mapping[str, Any]) -> bool:
+def _rejected_model_controls(value: Mapping[str, Any]) -> bool:
     """Allow only control values, not arbitrary strings in control-shaped data."""
     choices = {
         "effort": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
@@ -377,7 +391,8 @@ def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_co
 
 def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                             max_nodes: int = MAX_VALUE_NODES,
-                            aggregate_parts: bool = False) -> tuple[Any, list[str]]:
+                            aggregate_parts: bool = False,
+                            clean_text_digests: OrderedDict[bytes, None] | None = None) -> tuple[Any, list[str]]:
     """Redact private material without truncation; report every redaction class.
 
     Final joined examples may budget each canonical call and input snapshot
@@ -394,24 +409,44 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     # Final examples repeat large request and catalog strings. Keep only bounded
     # long-text results within this walk; every node, path, and key is still checked.
     text_cache: OrderedDict[str, str] = OrderedDict()
-    # Standalone captures repeat short schema strings and keys; aggregates
-    # repeat complete responses beyond the old cache's length cap. These modes
-    # share a bounded plain-string lane without evicting the medium/custom lane.
+    # Captures repeat schema keys and long history across request projections;
+    # aggregates also repeat complete responses. These modes share a bounded
+    # plain-string lane without evicting the medium/custom lane.
     # Secret subclasses may carry behavior, so they disable this lane.
     large_text_cache: OrderedDict[str, tuple[str, int]] = OrderedDict()
     large_text_cache_enabled = all(type(variant) is str for variant in variants)
     large_text_bytes = 0
     large_text_byte_limit = 8 * 1024 * 1024
 
+    def scan_or_reuse(text: str) -> str:
+        # Only exact built-in strings that passed an earlier no-secret scan
+        # qualify. Retain a digest, never the original plaintext or a redacted
+        # result. A new walk still checks every key, node, path, and limit.
+        digest = None
+        if clean_text_digests is not None and not secrets and type(text) is str and len(text) >= 1_024:
+            try:
+                digest = hashlib.sha256(text.encode("utf-8")).digest()
+            except UnicodeError:
+                pass
+            if digest is not None and digest in clean_text_digests:
+                clean_text_digests.move_to_end(digest)
+                return text
+        cleaned, url_redacted = scan_text(text)
+        if digest is not None and cleaned == text and not url_redacted:
+            clean_text_digests[digest] = None
+            if len(clean_text_digests) > 1_024:
+                clean_text_digests.popitem(last=False)
+        return cleaned
+
     def clean_text(text: str) -> str:
         nonlocal large_text_bytes
         if (large_text_cache_enabled and type(text) is str
-                and (len(text) > 16_384 if aggregate_parts else len(text) < 1_024)):
+                and (len(text) < 1_024 or len(text) > 16_384)):
             cached = large_text_cache.get(text)
             if cached is not None:
                 large_text_cache.move_to_end(text)
                 return cached[0]
-            cleaned = scan_text(text)
+            cleaned = scan_or_reuse(text)
             if type(cleaned) is str:
                 # Count both retained strings, even if they are the same object.
                 # Built-in Unicode storage includes wide characters and avoids
@@ -430,14 +465,15 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             if cached is not None:
                 text_cache.move_to_end(text)
                 return cached
-        cleaned = scan_text(text)
+        cleaned = scan_or_reuse(text)
         if 1_024 <= len(text) <= 16_384 and len(cleaned) <= 16_384:
             text_cache[text] = cleaned
             if len(text_cache) > 512:
                 text_cache.popitem(last=False)
         return cleaned
 
-    def scan_text(text: str) -> str:
+    def scan_text(text: str) -> tuple[str, bool]:
+        url_redacted = False
         # A known secret can span URL component or URL/text boundaries.
         for secret in sorted(variants, key=len, reverse=True):
             text = text.replace(secret, "[REDACTED]")
@@ -477,6 +513,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             return trajectory.redact_text(value, tuple(variants), escape_nul=False)
 
         def clean_url(match):
+            nonlocal url_redacted
             url = match[0]
             try:
                 parts = urlsplit(url)
@@ -495,7 +532,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 for key, child in parse_qsl(parts.query, keep_blank_values=True):
                     safe_key = redact(key)
                     normalized = safe_key.lower().replace("-", "_")
-                    if normalized in _URL_SECRET_KEYS or trajectory._SENSITIVE_KEY_RE.fullmatch(normalized):
+                    # A blank query value contains no credential bytes. Keep
+                    # its exact spelling, as with empty structured fields.
+                    if child and (normalized in _URL_SECRET_KEYS or trajectory._SENSITIVE_KEY_RE.fullmatch(normalized)):
                         safe_child = "[REDACTED]"
                     else:
                         safe_child = redact(child)
@@ -503,6 +542,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                     pairs.append((safe_key, safe_child))
                 changed = query_changed or (netloc, path, fragment) != (parts.netloc, parts.path, parts.fragment)
                 if changed:
+                    url_redacted = True
                     reasons.add("credential")
                     return urlunsplit((parts.scheme, netloc, path,
                                        urlencode(pairs) if query_changed else parts.query, fragment))
@@ -521,7 +561,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             # was masked. The same pre-mask exact-secret check still applies.
             cleaned = (trajectory.redact_text(text, escape_nul=False)
                        if slug_prefix and slug_prefix in text else redact(text))
-            return restore_slugs(cleaned)
+            return restore_slugs(cleaned), url_redacted
         # Keep URL delimiters out of the generic credential scan, while a URL
         # used as a credential value still gets removed with its full context.
         # '[' cannot turn Basic/Bearer plus a public URL into a credential.
@@ -541,8 +581,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         # Exact secrets were removed before masking; never match them against
         # temporary tokens. Restore all surviving URLs in one scan.
         cleaned = trajectory.redact_text(masked, escape_nul=False)
-        return restore_slugs(re.sub(re.escape(prefix) + r"([0-9]+)\]",
-                                    lambda match: urls[int(match[1])], cleaned))
+        return (restore_slugs(re.sub(re.escape(prefix) + r"([0-9]+)\]",
+                                     lambda match: urls[int(match[1])], cleaned)),
+                url_redacted)
 
     def request_config_path(path: tuple[str, ...]) -> bool:
         # The same request is sanitized first as a standalone blob and later
@@ -600,7 +641,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())
                     and (request_config_path(path)
                          or item.get("object") == "response" and isinstance(item.get("output"), list)
-                         or _rejected_frame_config_path(path, value) and _rejected_frame_controls(child))
+                         or _rejected_model_config_path(path, value) and _rejected_model_controls(child))
                 )
                 # False and zero retain the existing sensitive-value handling.
                 empty_credential = child is None or (

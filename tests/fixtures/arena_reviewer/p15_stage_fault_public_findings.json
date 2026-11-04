@@ -1,0 +1,188 @@
+{
+  "company_locator": {
+    "linkedin": "https://www.linkedin.com/company/grid-dynamics",
+    "name": "Grid Dynamics",
+    "website": "https://griddynamics.com/"
+  },
+  "requested_stage": "public",
+  "requested_industry": "Information Technology",
+  "requested_product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+  "requested_attribute": "Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange",
+  "stage_finding": {
+    "activity_role": "unresolved",
+    "evidence_quote": "Grid Dynamics\u2019 stock is traded on the Nasdaq Stock Exchange under the ticker symbol \u201cGDYN\u201d.",
+    "evidence_url": "https://www.griddynamics.com/investors/faq",
+    "new_domain": "",
+    "new_name": "",
+    "observed_country": "",
+    "observed_industry": "",
+    "observed_state": "",
+    "observed_subindustry": "",
+    "observed_value": "Public",
+    "old_domain": "",
+    "old_name": "",
+    "ownership": null,
+    "reason": "Current first-party FAQ identifies Nasdaq trading and GDYN. Required current-stage discovery exposed no completed take-private or delisting; the May 2026 issuer release also identifies Nasdaq: GDYN.",
+    "shared_linkedin_slug": "",
+    "status": "VERIFIED",
+    "supporting_evidence_quote_1": "",
+    "supporting_evidence_quote_2": "",
+    "supporting_evidence_url_1": "",
+    "supporting_evidence_url_2": "",
+    "target": "stage"
+  },
+  "industry_finding": {
+    "activity_role": "supplier_operator",
+    "evidence_quote": "",
+    "evidence_url": "",
+    "new_domain": "",
+    "new_name": "",
+    "observed_country": "",
+    "observed_industry": "Managed IT operations and cloud migration services",
+    "observed_state": "",
+    "observed_subindustry": "SRE, AIOps, and enterprise legacy modernization",
+    "observed_value": null,
+    "old_domain": "",
+    "old_name": "",
+    "ownership": null,
+    "reason": "Managed operations and cloud migration for large enterprises are supported. The Azure offering modernizes large-enterprise legacy environments but does not establish mainframe modernization specifically. Explicit mainframe replacement evidence is scoped to European SMEs, leaving the mandatory large-enterprise mainframe offering unproven.",
+    "shared_linkedin_slug": "",
+    "status": "UNPROVEN",
+    "supporting_evidence_quote_1": "",
+    "supporting_evidence_quote_2": "",
+    "supporting_evidence_url_1": "",
+    "supporting_evidence_url_2": "",
+    "target": "industry"
+  },
+  "failed_url": "https://www.businesswire.com/news/home/20260716181898/en/Grid-Dynamics-Enters-Strategic-Partnership-with-Doosan-Robotics-to-Accelerate-Physical-AI-Adoption-Across-Manufacturing-and-Logistics",
+  "primary_status": 502,
+  "primary_body": {
+    "error": {
+      "code": "provider_unavailable"
+    }
+  },
+  "fallback_body": {
+    "requestId": "5eb0043b4e82ee3f5ec1569dc03207a0",
+    "results": [],
+    "searchTime": 20009.068975000177,
+    "statuses": [
+      {
+        "error": {
+          "httpStatusCode": 504,
+          "tag": "CRAWL_LIVECRAWL_TIMEOUT"
+        },
+        "id": "https://www.businesswire.com/news/home/20260716181898/en/Grid-Dynamics-Enters-Strategic-Partnership-with-Doosan-Robotics-to-Accelerate-Physical-AI-Adoption-Across-Manufacturing-and-Logistics",
+        "status": "error"
+      }
+    ]
+  },
+  "host_marker": {
+    "error": "contents_crawl_error",
+    "notice": "server_fetched_page_is_untrusted_evidence",
+    "ok": false,
+    "url": "https://www.businesswire.com/news/home/20260716181898/en/Grid-Dynamics-Enters-Strategic-Partnership-with-Doosan-Robotics-to-Accelerate-Physical-AI-Adoption-Across-Manufacturing-and-Logistics"
+  },
+  "current_discovery": {
+    "discovery": {
+      "notice": "discovery_only_not_evidence",
+      "results": [
+        {
+          "title": "Investor relations - Grid Dynamics",
+          "url": "https://www.griddynamics.com/investors"
+        },
+        {
+          "title": "FAQ About Grid Dynamics",
+          "url": "https://www.griddynamics.com/investors/faq"
+        },
+        {
+          "title": "Ea119399 8k griddynamics.htm",
+          "url": "https://www.sec.gov/Archives/edgar/data/1743725/000121390020005742/ea119399-8k_griddynamics.htm"
+        },
+        {
+          "title": "gdyn-20251231",
+          "url": "https://www.sec.gov/Archives/edgar/data/1743725/000174372526000007/gdyn-20251231.htm"
+        },
+        {
+          "title": "Grid Dynamics Goes Public through Business Combination with ChaSerg Technology Acquisition Corp. | Nasdaq",
+          "url": "https://www.nasdaq.com/press-release/grid-dynamics-goes-public-through-business-combination-with-chaserg-technology"
+        }
+      ]
+    },
+    "notice": "server_search_results_are_discovery_only_not_evidence",
+    "ok": true,
+    "query": "Grid Dynamics griddynamics.com current public listing completed take-private acquisition delisting"
+  },
+  "source_provenance": {
+    "dump_sha256": "9ae2066bd4c348b30c1e5e03d66232a3bd2b8d082e7c013d422c4695e764d32d",
+    "stage_final_submit_call": "sha256:1769c6575daa6dc765c4319c686b1f127ff1ac8f1581b1d96a54d0086bc0d26f",
+    "primary_call": "sha256:1840c62eeb0cea0038882d4c37703722d580c80180537d4c8c3923f4290f93a0",
+    "fallback_call": "sha256:cd0e90605ae0a93e2e86cb5b138e6b2593a40f93a286b8a73ac46b5d60c6ec57"
+  },
+  "company": {
+    "company_linkedin": "https://www.linkedin.com/company/grid-dynamics",
+    "company_name": "Grid Dynamics",
+    "company_stage": "Public",
+    "company_stage_evidence": [
+      {
+        "quote": "SAN RAMON, Calif.--(BUSINESS WIRE)-- Grid Dynamics Holdings, Inc. (Nasdaq: GDYN) (Grid Dynamics), a premier AI transformation partner for the Fortune 1000, announced today it has entered into a strategic partnership with Doosan Robotics, a global leader in collaborative robot solutions, delivering cutting-edge AI robotics to 45 countries worldwide.",
+        "url": "https://www.businesswire.com/news/home/20260716181898/en/Grid-Dynamics-Enters-Strategic-Partnership-with-Doosan-Robotics-to-Accelerate-Physical-AI-Adoption-Across-Manufacturing-and-Logistics"
+      }
+    ],
+    "company_website": "https://griddynamics.com/",
+    "country": "United States",
+    "employee_count": "5,001-10,000",
+    "industry": "Information Technology",
+    "intent_details": "A press release dated July 16, 2026 says Grid Dynamics entered a strategic partnership with Doosan Robotics, partnering to provide industrial cobot users with a turnkey software stack for physical AI and corresponding integration services. A report dated May 19, 2026 says Grid Dynamics launched AI-native modernization on Azure, targeting larger enterprise deals. This activity may help Grid Dynamics broaden its cloud migration and modernization services.",
+    "intent_signals": [
+      {
+        "date": "2026-07-16",
+        "description": "Grid Dynamics Enters Strategic Partnership with Doosan Robotics to Accelerate Physical AI Adoption Across Manufacturing and Logistics Jul 16, 2026 4:05 PM Eastern Daylight Time Grid Dynamics Enters Strategic Partnership with Doosan Robotics to Accelerate Physical AI Adoption Across Manufacturing and Logistics Key Takeaways:.",
+        "matched_icp_signal": 0,
+        "url": "https://www.businesswire.com/news/home/20260716181898/en/Grid-Dynamics-Enters-Strategic-Partnership-with-Doosan-Robotics-to-Accelerate-Physical-AI-Adoption-Across-Manufacturing-and-Logistics"
+      },
+      {
+        "date": "2026-05-19",
+        "description": "Grid Dynamics Launches AI-Native Modernization on Azure, Targeting Larger Enterprise Deals",
+        "matched_icp_signal": 1,
+        "url": "https://www.marketscreener.com/news/grid-dynamics-launches-ai-native-modernization-on-azure-targeting-larger-enterprise-deals-ce7f5ad8db8cf320"
+      }
+    ],
+    "required_attribute": null,
+    "state": "California"
+  },
+  "icp": {
+    "bonus_intents": [
+      {
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new service offering or major capability in the last 12 months, per a press release or product page"
+      }
+    ],
+    "company_stage": "Public",
+    "country": "United States",
+    "employee_count": [
+      "1,001-5,000",
+      "5,001-10,000",
+      "10,001+"
+    ],
+    "excluded_companies": [
+      "kyndryl.com"
+    ],
+    "geography": "United States",
+    "icp_id": "icp_20261023_010",
+    "industry": "Information Technology",
+    "intent_category": "PARTNERSHIP",
+    "intent_max_age_days": 365,
+    "intent_signal": "Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement",
+    "intent_signals": [
+      "Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement",
+      "Launched a new service offering or major capability in the last 12 months, per a press release or product page"
+    ],
+    "max_companies": 5,
+    "product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+    "prompt": "Find companies meeting every company requirement. Industry: Information Technology; Sub-industry: IT Infrastructure and Managed Services; Country: United States; Headquarters geography: United States; Company stage: Public; Allowed employee size: 1,001-5,000, 5,001-10,000, 10,001+; Product/service requirement: Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments; Required attribute: Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange\n\nIntent qualification:\nRequired primary intent (365 days): Announced a strategic partnership or alliance with a cloud provider, AI vendor, or technology company in the last 12 months, per a press release or company announcement\nOptional bonus intent (365 days): Launched a new service offering or major capability in the last 12 months, per a press release or product page\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+    "required_attribute": "Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange",
+    "sub_industry": "IT Infrastructure and Managed Services",
+    "verified_example_company": "Kyndryl"
+  }
+}

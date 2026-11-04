@@ -7,9 +7,10 @@ for follow-ups, test evidence and remaining limits.
 
 ## Admission rule
 
-Allow a model only through a tested provider, API, and reasoning mode that emits
-its generated thinking text. A summary, encrypted state, token counter, or
-explanation requested after the answer is not a substitute. “Full” means the
+Allow a model only through a tested provider and API that emit generated
+thinking text. Preserve the caller's explicit enabled reasoning controls.
+A summary, encrypted state, token counter, or explanation requested after the
+answer is not a substitute. “Full” means the
 provider's unsummarized generated text; it does not mean access to neural state
 or a guarantee that the text explains every internal computation.
 
@@ -23,9 +24,11 @@ model/API/provider routes. The October 27 GLM/Kimi extension adds 38 routes acro
 17 models, while preserving all original 25 rows, provider defaults and baseline.
 All use ZDR, no provider fallback, and a route price bound. Chat calls use
 `exclude: false`; Responses uses typed `reasoning_text`. Gemma uses
-`enabled: true`; other approved routes use `effort: high`. Route output caps are
-unchanged for existing models; new GLM-4.5V routes use 16,384, GLM-5 Venice uses
-32,000, and other additions use 32,768.
+`enabled: true`; other route probes use `effort: high`. These are defaults when
+the caller supplies no reasoning controls. Explicit valid efforts and budgets
+remain unchanged. Route output caps are unchanged for existing models; new
+GLM-4.5V routes use 16,384, GLM-5 Venice uses 32,000, and other additions use
+32,768.
 
 The [GLM/Kimi capture evidence](evidence/full-thinking/glm-kimi-routes-20261027.json)
 records two real-provider synthetic cases per added route, exact raw/SQL/readable
@@ -58,6 +61,20 @@ verified the original 25 routes with the then-current registry. Exact raw storag
 empty optional fields; the readable export may omit empty summary arrays.
 The requested provider selector is recorded separately: returned metadata does
 not independently expose its quantization suffix.
+
+Per-call coverage and readable traces report `outbound_reasoning_controls`
+from the saved `request.outbound.body`. The accompanying status is `present`,
+`absent` (saved body with no controls), or `unavailable` (no saved body).
+`probe_reasoning_mode` describes the route probe only. Do not count a call as
+high effort from the registry or `reasoning_capture.mode`; use the saved
+outbound `reasoning.effort` or `reasoning_effort`. Budget and enabled controls
+remain separate and do not imply an effort level. Requested controls do not
+prove that the provider generated or exposed reasoning text.
+
+A promoted baseline keeps its original frozen reasoning contract. An empty
+`baseline_reasoning_configuration` preserves a legacy champion's behavior;
+it does not grant strict full-thinking training eligibility. The entrant
+policy and the 80% ICP coverage requirement remain unchanged.
 
 The probe reports say `approval_granted: false`: running a probe never approves
 a route. Registry approval is a separate review of provider semantics and the

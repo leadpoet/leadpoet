@@ -107,7 +107,8 @@ def main(argv=None):
                         help="also use probe, replay and unpublished rounds")
     parser.add_argument("--scorer-image-digest", default=None, help="keep one scorer cohort only")
     parser.add_argument("--scorer-policy-hash", default=None, help="keep one exact scorer policy cohort only")
-    parser.add_argument("--eval-mode", choices=("company", "company_and_icp"), default="company")
+    parser.add_argument("--eval-mode", choices=("company", "company_and_icp"),
+                        default=training_dataset.Rules.eval_mode)
     parser.add_argument("--eval-after", help="strict YYYY-MM-DD cutoff; later records only in eval")
     parser.add_argument("--review-sample-size", type=int, default=0)
     parser.add_argument("--review-decisions", type=Path,

@@ -6,7 +6,7 @@ import pytest
 
 from lab_arena import contracts, training_capture, training_export, training_steps, training_thinking
 from scripts.prepare_arena_full_thinking_dataset import main
-from tests.lab_arena.training_steps_test import fixture, response_fixture, seal
+from tests.lab_arena.training_steps_test import bind_selected_output, fixture, response_fixture, seal
 
 
 def full_example():
@@ -45,8 +45,8 @@ def full_example():
     example["role"] = "miner"
     example["configuration"] = {"reasoning_capture_policy": training_thinking.POLICY,
                                 "reasoning_route_registry": registry}
-    example["completeness"] = {"complete": True, "incomplete_reasons": []}
-    return seal(example)
+    example["completeness"].update(complete=True, incomplete_reasons=[])
+    return bind_selected_output(example)
 
 
 def rows(example):
@@ -231,6 +231,64 @@ def test_request_coverage_reads_budget_and_legacy_include_controls():
     ):
         call = {"request": {"outbound": {"body": body}}}
         assert training_thinking._reasoning_request_state(call, {}) == expected
+
+
+@pytest.mark.parametrize("controls", [
+    {"reasoning": {"effort": "low", "exclude": False}},
+    {"reasoning": {"effort": "medium"}},
+    {"reasoning": {"max_tokens": 2048}},
+    {"reasoning": {"budget_tokens": 1024}},
+    {"reasoning_effort": "low", "include_reasoning": True},
+    {"reasoning": {"enabled": True}},
+    {"reasoning": {"enabled": False}},
+    {},
+])
+def test_attempt_reports_saved_controls_separately_from_high_probe(controls):
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call["reasoning_capture"]["mode"] = {"effort": "high"}
+    body = call["request"]["outbound"]["body"]
+    for field in ("reasoning", "reasoning_effort", "include_reasoning"):
+        body.pop(field, None)
+    body.update(copy.deepcopy(controls))
+    before = copy.deepcopy(call)
+
+    row = training_thinking.attempt_coverage(call, "miner")
+
+    assert row["outbound_reasoning_controls"] == controls
+    assert row["outbound_reasoning_controls_status"] == ("present" if controls else "absent")
+    assert row["probe_reasoning_mode"] == {"effort": "high"}
+    assert call == before
+    if controls:
+        row["outbound_reasoning_controls"].clear()
+        assert call == before
+
+
+def test_attempt_does_not_infer_actual_controls_from_probe_without_saved_body():
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call["reasoning_capture"]["mode"] = {"effort": "high"}
+    del call["request"]["outbound"]["body"]
+
+    row = training_thinking.attempt_coverage(call, "miner")
+
+    assert row["outbound_reasoning_controls"] is None
+    assert row["outbound_reasoning_controls_status"] == "unavailable"
+    assert row["probe_reasoning_mode"] == {"effort": "high"}
+
+
+def test_saved_controls_reach_json_coverage_and_readable_trace():
+    example = full_example()
+    call = example["provider_calls"][0]
+    call["request"]["outbound"]["body"]["reasoning"] = {"effort": "low"}
+    example = seal(example)
+
+    coverage = json.loads(json.dumps(training_thinking.coverage([example])))
+    trace = training_thinking.readable_trace(example)
+    markdown = training_thinking.readable_trace_markdown(trace)
+    for row in (coverage["attempts"][0], trace["calls"][0]["reasoning_coverage"]):
+        assert row["outbound_reasoning_controls"] == {"reasoning": {"effort": "low"}}
+        assert row["probe_reasoning_mode"] == {"effort": "high"}
+    assert '"effort": "low"' in markdown
+    assert '"probe_reasoning_mode"' in markdown
 
 
 def test_reasoning_usage_null_alias_does_not_hide_nested_count():
@@ -448,7 +506,7 @@ def test_judge_and_non_model_tool_do_not_disqualify_execution_trajectory():
     tool = {"run_id": "run", "call_identity": "tool-call", "provider": "scrapingdog",
             "operation_id": "scrapingdog.search", "response": {"status": "ok"}}
     example["provider_calls"].extend([judge, tool])
-    example["attempts"] = [{"run_id": "judge-run", "kind": "score"}]
+    example["attempts"].append({"run_id": "judge-run", "kind": "score"})
     got, manifest = rows(example)
     assert len(got) == 1
     assert manifest["coverage"]["trajectories"]["complete_full_thinking"] == 1
@@ -463,11 +521,9 @@ def test_failed_execution_before_accepted_retry_does_not_disqualify_selected_tra
     failed.update(run_id="failed-run", call_identity="failed-call")
     failed["response"]["choices"][0]["message"]["content"] = "Invalid company output"
     example["provider_calls"].insert(0, failed)
-    example["attempts"] = [
+    example["attempts"].append(
         {"run_id": "failed-run", "kind": "execute", "status": "failed",
-         "terminal_cause": "invalid_output"},
-        {"run_id": example["run_id"], "kind": "execute", "status": "accepted"},
-    ]
+         "terminal_cause": "invalid_output"})
 
     got, manifest = rows(example)
     assert len(got) == 1
@@ -484,7 +540,7 @@ def test_failed_execution_before_accepted_retry_does_not_disqualify_selected_tra
     selected["response_receipts"][0]["response_sha256"] = selected["response_sha256"]
     got, manifest = rows(example)
     assert not got
-    assert manifest["counts"]["exclusion_reasons"] == {"trajectory_reasoning_ineligible": 1}
+    assert manifest["counts"]["exclusion_reasons"] == {"requested_empty": 1}
 
 
 def test_registry_and_actual_route_must_match_frozen_request():
@@ -583,7 +639,7 @@ def test_responses_full_content_with_ancillary_summary_qualifies_but_summary_onl
     call["response_receipts"][0]["response_sha256"] = call["response_sha256"]
     example["configuration"] = {"reasoning_capture_policy": training_thinking.POLICY,
                                 "reasoning_route_registry": registry}
-    example["completeness"] = {"complete": True, "incomplete_reasons": []}
+    example["completeness"].update(complete=True, incomplete_reasons=[])
     got, _ = rows(example)
     assert len(got) == 1
     assert got[0]["generated_thinking"][0]["text"] == "Check evidence first."

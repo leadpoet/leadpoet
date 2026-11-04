@@ -86,6 +86,8 @@ def test_index_bounds_large_round_reads_preserves_responses_and_security(current
             security_before = _security_state(cursor)
             cursor.execute("SELECT md5(string_agg(to_jsonb(r)::text, '' ORDER BY round_id)) FROM public.lab_arena_rounds r")
             data_before = cursor.fetchone()
+            cursor.execute("SELECT pg_get_functiondef('public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'::regprocedure)")
+            current_configuration_reader = cursor.fetchone()[0]
             query = "SELECT round_id FROM public.lab_arena_rounds WHERE arena_network_name='finney' AND arena_netuid=71 AND configuration_doc->>'mode'='live' ORDER BY created_at DESC LIMIT 30"
             cursor.execute("SET ROLE lab_arena_service")
             before = _plan(cursor, query)
@@ -101,6 +103,12 @@ def test_index_bounds_large_round_reads_preserves_responses_and_security(current
         with connection.cursor() as cursor:
             cursor.execute(MIGRATION.read_text())
             cursor.execute(MIGRATION.read_text())
+            # Migration 464 resets the reader to its original body. Restore
+            # this fixture's current reader, then apply migration 601 before
+            # checking current API parity. The separate test below still
+            # checks the original migration 464 projection without upgrades.
+            cursor.execute(current_configuration_reader)
+            cursor.execute(MIGRATION.with_name("601-lab-arena-defending-champion-proof.sql").read_text())
             # Indexes do not alter table/schema privileges or row policies.
             security_after = _security_state(cursor)
             assert security_after[0] == security_before[0]

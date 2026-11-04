@@ -163,7 +163,7 @@ def test_review_cannot_promote_analysis_or_proof_failure():
     bad_manifest = copy.deepcopy(manifest)
     bad_manifest["record_hashes"] = {name: [contracts.document_hash(record) for record in rows]
                                      for name, rows in bad.items()}
-    keys = ("schema_version", "record_schema_version", "rules", "sources", "record_hashes")
+    keys = ("schema_version", "record_schema_version", "rules", "sources", "record_hashes", "split_source_hashes")
     bad_manifest["dataset_version"] = contracts.document_hash({key: bad_manifest[key] for key in keys})
     bad_curation = training_curation.flag_manifest(bad, bad_manifest["dataset_version"])
     decision = _decision(bad[split][0], split, bad_manifest, bad_curation)

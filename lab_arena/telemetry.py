@@ -54,6 +54,7 @@ NO_ERROR = "-"
 # A provider call that names no Deepline tool: any non-Deepline provider, and
 # a Deepline operation whose tool could not be resolved from the frame.
 NO_TOOL = "-"
+NO_MODEL = "-"
 
 _recorder: Optional[Any] = None
 
@@ -141,6 +142,7 @@ def record_provider(
     error_code: str = NO_ERROR,
     error_type: str = NO_ERROR,
     tool: str = NO_TOOL,
+    model: str = NO_MODEL,
     http_status: int = 0,
     provider_status: int = 0,
     attempts: int = 1,
@@ -162,6 +164,7 @@ def record_provider(
             error_code=error_code,
             error_type=error_type,
             tool=tool,
+            model=model,
             http_status=http_status,
             provider_status=provider_status,
             attempts=attempts,
@@ -178,17 +181,27 @@ def record_provider(
 def record_run(
     run_kind: str, terminal_cause: str,
     *, run_identity: Optional[Mapping[str, Any]] = None,
+    failure_stage: str = "-",
+    failure_error_class: str = "-",
 ) -> None:
     """Record one finished evaluation run. Never raises.
 
     No duration: the run row carries no start time, so the sidecar can only
     honestly report that a run ended and which cause ended it.
+
+    ``failure_stage`` / ``failure_error_class`` carry the runner's
+    ``failure_diagnostic`` when the completion reported one, so a repeated
+    failure says which stage raised and why. "-" when there is none.
     """
     recorder = _recorder
     if recorder is None:
         return
     try:
-        recorder.record_run(run_kind, terminal_cause, run_identity=run_identity)
+        recorder.record_run(
+            run_kind, terminal_cause, run_identity=run_identity,
+            failure_stage=failure_stage,
+            failure_error_class=failure_error_class,
+        )
     except BaseException:
         pass
 

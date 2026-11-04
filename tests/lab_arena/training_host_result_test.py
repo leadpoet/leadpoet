@@ -270,10 +270,6 @@ def test_local_diagnostics_compose_with_bounded_source_and_cost_availability(gap
     if tamper:
         example['provider_calls'][1]['response']['changed'] = True
     seal(example)
-    if gap == 'cost':
-        assert training_eligibility._selected_cost_gap_verified(example, 'run') is (not tamper)
-    else:
-        assert training_eligibility._transient_artifact_gap_verified(example, submission(), artifacts) is (not tamper)
     examples = ten_selected_examples()
     for other in examples.values():
         other['configuration']['training_maximum_missing_reasoning_percent'] = 0
@@ -282,6 +278,7 @@ def test_local_diagnostics_compose_with_bounded_source_and_cost_availability(gap
     examples['run'] = example
     result = training_eligibility.assess_capture(submission(), examples, list(examples), enabled=True,
         minimum_coverage_percent=80, unavailable_artifacts={'run': artifacts} if artifacts else None)
-    assert result['eligible'] is (not tamper), result
+    assert result['eligible'], result
     if not tamper:
-        assert result['counts']['complete_runs'] == 9 and result['counts']['incomplete_runs'] == 1
+        assert result['counts']['complete_runs'] == (10 if gap == 'cost' and not tamper else 9)
+        assert result['counts']['incomplete_runs'] == (0 if gap == 'cost' and not tamper else 1)

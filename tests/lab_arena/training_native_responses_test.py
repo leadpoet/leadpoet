@@ -5,7 +5,7 @@ import json
 import pytest
 
 from lab_arena import contracts, operations, training_steps as steps, training_thinking
-from tests.lab_arena.training_steps_test import response_fixture, records, seal
+from tests.lab_arena.training_steps_test import bind_selected_output, response_fixture, records, seal
 from tests.lab_arena.training_thinking_test import full_example
 
 
@@ -25,7 +25,7 @@ def example(*, native=False):
     result['role'] = 'miner'
     result['configuration'] = {'reasoning_capture_policy': training_thinking.POLICY,
                                'reasoning_route_registry': registry}
-    result['completeness'] = {'complete': True, 'incomplete_reasons': []}
+    result['completeness'].update(complete=True, incomplete_reasons=[])
     body = call['request']['outbound']['body']
     body['reasoning'] = {'effort': 'high'}
     body['tools'] = [{'type': 'function', 'name': 'lookup', 'parameters': {'type': 'object'}}]
@@ -207,7 +207,7 @@ def _eligible_example():
     value['configuration']['training_maximum_missing_reasoning_percent'] = 1
     value['provider_calls'][0].update(accounting_state='settlement', actual_microusd=1,
                                       response_status=200)
-    return refresh(value)
+    return refresh(bind_selected_output(value))
 
 
 def _note_and_tool():

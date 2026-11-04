@@ -302,7 +302,8 @@ def test_retention_preserves_admission_for_every_related_run_role(role, optional
     if target["result_doc"] is None:
         target["result_doc"] = {}
     resource = target["result_doc"].setdefault("resource_summary", {})
-    resource["worker_observations"] = {**summary_for(snapshot), "status": "unavailable"}
+    resource["worker_observations"] = {**summary_for(snapshot), "status": "unavailable",
+        "payload_sha256": contracts.hash_bytes(b"conflicting completion summary")}
     after = assemble_example(**values)
     assert target["run_id"] in after["unverified_worker_observation_artifacts"]
     assert target["run_id"] not in after["worker_observation_artifacts"]

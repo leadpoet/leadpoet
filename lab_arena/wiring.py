@@ -605,7 +605,9 @@ def build_service_from_environment(mode: str):
         )
         if (route_requested or frozen_route_marker) and host_shadow_route_round_id is None:
             raise broker_module.BrokerError("broker_unavailable")
-        judge_models = sorted({str(model) for model in ((configuration.get("scorer_policy") or {}).get("judge_models") or {}).values() if model})
+        # Preserve the frozen role map: only newly opted-in industry review
+        # uses its bounded regional route. Old rounds keep their own routing.
+        judge_models = dict((configuration.get("scorer_policy") or {}).get("judge_models") or {})
         return broker_module.Broker(
             store=store, key_for=key_for, judge_models=judge_models,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
@@ -660,6 +662,9 @@ def build_service_from_environment(mode: str):
         del active_at  # the database function uses its own UTC statement time
         return store.current_daily_icp_set(set_id)
 
+    # The current paid reviewer must not start against a database that lacks
+    # atomic route selection and bounded refusal-recovery reservations.
+    store.code_review_schema(require_refusal_fallback=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
@@ -687,6 +692,13 @@ def build_service_from_environment(mode: str):
                 if chain_config.network_name != "test" else ""
             )
         ),
+        # The canonical gateway env and restart controls live here across
+        # releases. Root operator commands and the ec2-user driver must share
+        # the same inode; Path.home() would split their lock namespaces.
+        publication_lock_dir=Path(os.environ.get(
+            "LAB_ARENA_PUBLICATION_LOCK_DIR",
+            "/home/ec2-user/.config/leadpoet",
+        )),
     )
     service = ArenaService(config)
     app = create_app(service)

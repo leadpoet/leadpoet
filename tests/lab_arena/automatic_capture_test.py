@@ -3,15 +3,19 @@ import asyncio
 import gzip
 import hashlib
 import http.client
+import json
 import threading
 import sys
 import time
+from array import array
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.request import urlopen
 
 import pytest
 
+from lab_arena import automatic_capture, lab_arena_checkpoint
 from lab_arena.automatic_capture import install
 
 
@@ -266,6 +270,202 @@ def test_readinto_iteration_and_zero_reads(endpoint):
         summary = finish(recorder, checkpoint)
     assert len(checkpoint.web) == 1, summary
     assert_web(checkpoint.web[0], BODY)
+
+
+@pytest.mark.parametrize("buffer_kind", ["bytearray", "array", "typed_memoryview"])
+@pytest.mark.parametrize("read_mode", ["full", "continued", "partial"])
+def test_readinto_captures_only_returned_bytes_from_typed_buffers(endpoint, buffer_kind, read_mode):
+    class ValidatingCheckpoint(Checkpoint):
+        def record_web_fetch(self, **kwargs):
+            lab_arena_checkpoint.validate_web_capture_metadata(kwargs["capture"], kwargs["body"])
+            return super().record_web_fetch(**kwargs)
+
+    url, server = endpoint
+    checkpoint = ValidatingCheckpoint()
+    recorder = install(checkpoint)
+    capacity = 40 if read_mode == "full" else 8
+    initial = b"Z" * capacity
+    if buffer_kind == "bytearray":
+        buffer = bytearray(initial)
+    else:
+        buffer = array("I")
+        buffer.frombytes(initial)
+        if buffer_kind == "typed_memoryview":
+            buffer = memoryview(buffer)
+    connection = None
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        # The stdlib's own readinto length cap counts typed elements. Close
+        # after this one local response so a short read cannot wait on reuse.
+        connection.request("GET", "/text", headers={"Connection": "close"})
+        response = connection.getresponse()
+        count = response.readinto(buffer)
+        assert count == min(capacity, len(BODY))
+        stored = bytes(memoryview(buffer).cast("B"))
+        assert stored[:count] == BODY[:count]
+        # A short final read must not expose the untouched non-zero tail.
+        assert stored[count:] == initial[count:]
+        if read_mode == "continued":
+            assert stored[:count] + response.read() == BODY
+        elif read_mode == "full":
+            assert response.read() == b""
+        response.close()
+    finally:
+        if connection is not None:
+            connection.close()
+        summary = recorder.close()
+    assert not recorder.worker.is_alive(), summary
+    assert len(checkpoint.web) == 1, summary
+    expected = BODY[:count] if read_mode == "partial" else BODY
+    assert_web(checkpoint.web[0], expected, complete=read_mode != "partial")
+    assert recorder.retained == 0
+    assert checkpoint.binary == checkpoint.metadata == checkpoint.acks == []
+    assert summary["counts"].get("checkpoint_failure", 0) == 0
+    assert summary["counts"].get("adapter_failure", 0) == 0
+    assert summary["complete"] is (read_mode != "partial")
+    assert server.paths == ["/text"]
+
+
+@pytest.mark.parametrize("client", ["stdlib", "urllib3"])
+@pytest.mark.parametrize("path", ["/text", "/empty"])
+@pytest.mark.parametrize("keyword", [False, True])
+def test_zero_capacity_readinto_does_not_claim_eof(endpoint, client, path, keyword):
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    url, server = endpoint
+    connection = None
+    try:
+        if client == "stdlib":
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request("GET", path)
+            response = connection.getresponse()
+        else:
+            urllib3 = pytest.importorskip("urllib3")
+            connection = urllib3.PoolManager()
+            response = connection.request("GET", url + path, preload_content=False)
+        empty = bytearray()
+        assert (response.readinto(b=empty) if keyword else response.readinto(empty)) == 0
+        expected = b"" if path == "/empty" else BODY
+        assert response.read() == expected
+        assert response.readinto(bytearray(4)) == 0
+        response.close()
+    finally:
+        if connection is not None:
+            connection.close() if client == "stdlib" else connection.clear()
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    event = checkpoint.web[0]
+    assert_web(event, expected)
+    lab_arena_checkpoint.validate_web_capture_metadata(event["capture"], event["body"])
+    assert summary["complete"] is True
+    assert server.paths == [path]
+
+
+@pytest.mark.parametrize("step", [2, -2])
+@pytest.mark.parametrize("read_mode", ["full", "continued", "partial"])
+def test_urllib3_strided_readinto_retains_exact_logical_prefix(endpoint, step, read_mode):
+    urllib3 = pytest.importorskip("urllib3")
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    url, server = endpoint
+    capacity = 40 if read_mode == "full" else 8
+    backing = bytearray(b"Z" * (capacity * 2))
+    buffer = memoryview(backing)[::step]
+    connection = urllib3.PoolManager()
+    try:
+        response = connection.request("GET", url + "/text", preload_content=False)
+        count = response.readinto(buffer)
+        assert count == min(capacity, len(BODY))
+        assert buffer[:count].tobytes() == BODY[:count]
+        assert buffer[count:].tobytes() == b"Z" * (capacity - count)
+        # Both the gaps and logical tail must stay outside retained bytes.
+        assert (backing[1::2] if step > 0 else backing[::2]) == b"Z" * capacity
+        if read_mode == "continued":
+            assert buffer[:count].tobytes() + response.read() == BODY
+        elif read_mode == "full":
+            assert response.read() == b""
+        response.close()
+    finally:
+        connection.clear()
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    event = checkpoint.web[0]
+    assert_web(event, BODY[:count] if read_mode == "partial" else BODY,
+               complete=read_mode != "partial")
+    lab_arena_checkpoint.validate_web_capture_metadata(event["capture"], event["body"])
+    assert summary["counts"].get("adapter_failure", 0) == 0
+    assert summary["complete"] is (read_mode != "partial")
+    assert server.paths == ["/text"]
+
+
+def test_unsupported_readinto_layout_is_explicitly_incomplete():
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    try:
+        body = recorder._new("test", "https://example.com/readinto", 200, {})
+        buffer = memoryview(array("I", range(8)))[::2]
+        assert recorder._readinto_bytes(body, (buffer,), {}, 1) is None
+        body.finish(True)
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert summary["complete"] is False
+    assert summary["counts"]["adapter_failure"] == 1
+    assert summary["counts"]["responses_partial"] == 1
+    assert checkpoint.web == checkpoint.binary == checkpoint.metadata == []
+
+
+@pytest.mark.parametrize("retain", [True, False])
+def test_strided_readinto_uses_bounded_chunks_without_losing_bytes(endpoint, monkeypatch, retain):
+    urllib3 = pytest.importorskip("urllib3")
+    # Split a multibyte character at the first 64 KiB boundary.
+    payload = (b"a" * 65_535 + "€".encode() + b"b" * 65_536 + b"tail"
+               if retain else b"a" * (8 * 1024 * 1024))
+    monkeypatch.setattr(sys.modules[__name__], "BODY", payload)
+    chunks = []
+    original_add = automatic_capture._Body.add
+
+    def add(body, value):
+        if value:
+            chunks.append(memoryview(value).nbytes)
+        return original_add(body, value)
+
+    monkeypatch.setattr(automatic_capture._Body, "add", add)
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint, memory_limit=4 * 1024 * 1024 if retain else 0)
+    url, server = endpoint
+    capacity = len(payload) + 17
+    backing = bytearray(b"Z" * (2 * capacity))
+    buffer = memoryview(backing)[::2]
+    connection = urllib3.PoolManager()
+    try:
+        response = connection.request("GET", url + "/text", preload_content=False)
+        count = response.readinto(buffer)
+        assert count == len(payload)
+        assert buffer[:count].tobytes() == payload
+        assert buffer[count:].tobytes() == b"Z" * 17
+        assert backing[1::2] == b"Z" * capacity
+        assert response.read() == b""
+        body = response._arena_http_capture_body
+        response.close()
+    finally:
+        connection.clear()
+        summary = finish(recorder, checkpoint)
+    assert chunks and max(chunks) <= 64 * 1024
+    assert sum(chunks) == len(payload)
+    assert body.size == len(payload)
+    assert body.digest.hexdigest() == hashlib.sha256(payload).hexdigest()
+    if retain:
+        assert len(checkpoint.web) == 1, summary
+        event = checkpoint.web[0]
+        assert_web(event, payload)
+        lab_arena_checkpoint.validate_web_capture_metadata(event["capture"], event["body"])
+        assert summary["complete"] is True
+    else:
+        assert checkpoint.web == checkpoint.binary == checkpoint.metadata == []
+        assert summary["counts"]["body_buffer_overflow"] == 1
+        assert summary["complete"] is False
+    assert summary["counts"].get("adapter_failure", 0) == 0
+    assert server.paths == ["/text"]
 
 
 @pytest.mark.parametrize("path,expected", [("/latin", "caf\xe9".encode("latin-1")), ("/error", BODY)])
@@ -1229,3 +1429,205 @@ def test_unread_metadata_checkpoint_failure_does_not_change_response(endpoint):
     assert summary["counts"]["checkpoint_failure"] == 1
     assert summary["complete"] is False
     assert endpoint[1].paths == ["/text"]
+
+
+def test_shutdown_keeps_consumed_inflight_bytes_with_exact_retry_token(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockedCheckpoint:
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            self.sent = kwargs
+            entered.set()
+            release.wait(2)
+            return None
+
+        def _training_failure_reason(self):
+            return "timeout"
+
+    checkpoint = BlockedCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.01,
+                                          handoff_dir=tmp_path)
+    body = recorder._new("fixture", "https://example.com/page", 200, {"content-type": "text/plain"})
+    body.add(b"consumed before shutdown")
+    body.finish(True)
+    assert entered.wait(1)
+    started = time.monotonic()
+    summary = recorder.close()
+    assert time.monotonic() - started < 0.2
+    assert summary["complete"] is False and summary["inflight"] == 1
+    frames = list(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(frames) == 1
+    frame = json.loads(frames[0].read_bytes())
+    assert frame["data"]["body"] == "consumed before shutdown"
+    assert frame["data"]["retrieved_at"] == body.retrieved_at
+    assert frame["retry_token"] == checkpoint.sent["_retry_token"]
+    release.set()
+    recorder.worker.join(2)
+    assert frames[0].is_file()
+
+
+def test_handoff_capacity_marks_gap_and_keeps_response_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(automatic_capture, "HANDOFF_MAX_BYTES", 1)
+
+    class CheckpointWithSchema(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+    checkpoint = CheckpointWithSchema()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    body = recorder._new("fixture", "https://example.com/page", 200, {"content-type": "text/plain"})
+    body.add(b"unchanged response")
+    body.finish(True)
+    summary = recorder.close()
+    assert summary["counts"]["handoff_overflow"] == 1
+    assert summary["complete"] is False
+    assert not list(tmp_path.iterdir())
+    assert [row["body"] for row in checkpoint.web] == ["unchanged response"]
+
+
+def test_unstaged_recorder_keeps_best_effort_after_one_failed_checkpoint():
+    class IntermittentCheckpoint(Checkpoint):
+        def record_web_fetch(self, **kwargs):
+            if not hasattr(self, "failed"):
+                self.failed = True
+                return None
+            return super().record_web_fetch(**kwargs)
+
+    checkpoint = IntermittentCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25)
+    for value in (b"first", b"second"):
+        body = recorder._new("fixture", "https://example.com/page", 200,
+                             {"content-type": "text/plain"})
+        body.add(value)
+        body.finish(True)
+    summary = recorder.close()
+    assert summary["counts"]["checkpoint_failure"] == 1
+    assert [row["body"] for row in checkpoint.web] == ["second"]
+
+
+def test_staged_recorder_keeps_later_live_success_and_only_failed_frame(tmp_path):
+    class IntermittentCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            self.web.append(kwargs)
+            return None if len(self.web) == 1 else len(self.web)
+
+    checkpoint = IntermittentCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    for value in (b"first", b"second"):
+        body = recorder._new("fixture", "https://example.com/page", 200,
+                             {"content-type": "text/plain"})
+        body.add(value)
+        body.finish(True)
+    summary = recorder.close()
+    assert [row["body"] for row in checkpoint.web] == ["first", "second"]
+    assert summary["counts"]["checkpoint_failure"] == 1
+    frames = sorted(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(frames) == 1
+    assert json.loads(frames[0].read_bytes())["data"]["body"] == "first"
+
+
+def test_completed_response_objects_do_not_retain_prepared_pages(tmp_path):
+    class SuccessfulCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+    checkpoint = SuccessfulCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024 * 1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    responses = []
+    for number in range(12):
+        body = recorder._new("fixture", f"https://example.com/{number}", 200,
+                             {"content-type": "text/plain"})
+        body.add(b"x" * 1024 * 1024)
+        body.finish(True)
+        responses.append(SimpleNamespace(_arena_http_capture_body=body))
+        recorder.queue.join()
+        assert recorder.retained == 0
+    summary = recorder.close()
+    assert summary["complete"] is True
+    assert len(checkpoint.web) == 12
+    assert not list(tmp_path.iterdir())
+    assert all(response._arena_http_capture_body.handoff is None for response in responses)
+
+
+def test_failed_send_keeps_file_without_retaining_prepared_body(tmp_path):
+    class FailedCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            return None
+
+    recorder = automatic_capture.Recorder(FailedCheckpoint(), memory_limit=1024,
+                                          queue_limit=2, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    body = recorder._new("fixture", "https://example.com/page", 200,
+                         {"content-type": "text/plain"})
+    body.add(b"failed but already consumed")
+    body.finish(True)
+    response = SimpleNamespace(_arena_http_capture_body=body)
+    recorder.queue.join()
+    summary = recorder.close()
+    files = list(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_bytes())["data"]["body"] == "failed but already consumed"
+    assert response._arena_http_capture_body.handoff is None
+    assert summary["complete"] is False
+
+
+def test_full_queue_releases_payload_and_keeps_staged_file(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockedCheckpoint(Checkpoint):
+        TRAINING_SCHEMA_VERSION = lab_arena_checkpoint.TRAINING_SCHEMA_VERSION
+        TRAINING_CONTROL = lab_arena_checkpoint.TRAINING_CONTROL
+        validate_training_frame = staticmethod(lab_arena_checkpoint.validate_training_frame)
+
+        def record_web_fetch(self, **kwargs):
+            if kwargs["body"] == "first":
+                entered.set()
+                assert release.wait(2)
+            return super().record_web_fetch(**kwargs)
+
+    checkpoint = BlockedCheckpoint()
+    recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024,
+                                          queue_limit=1, close_timeout=0.25,
+                                          handoff_dir=tmp_path)
+    bodies = []
+    for value in (b"first", b"second", b"third"):
+        body = recorder._new("fixture", "https://example.com/page", 200,
+                             {"content-type": "text/plain"})
+        body.add(value)
+        body.finish(True)
+        bodies.append(body)
+        if value == b"first":
+            assert entered.wait(1)
+    assert bodies[2].handoff is None
+    assert bodies[2].buffer == bytearray()
+    release.set()
+    summary = recorder.close()
+    files = list(tmp_path.glob(automatic_capture.HANDOFF_PREFIX + "*"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_bytes())["data"]["body"] == "third"
+    assert [row["body"] for row in checkpoint.web] == ["first", "second"]
+    assert summary["counts"]["queue_overflow"] == 1

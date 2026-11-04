@@ -9,6 +9,25 @@ Missing episode identity sends a candidate to analysis. The manifest records
 the grouping policy and checks episode overlap. Existing datasets are not
 rewritten; rebuild them to apply this rule.
 
+Qualification, observed agent-step, and full-thinking builders now use the
+same in-memory source grouping and split bucket. Each verified source links
+its original episode, submitted company aliases, the ICP fingerprint in the
+default `company_and_icp` mode, and exact main-execution model request bodies.
+These links are made before any family selects labels or targets. The default
+seed, evaluation percentage, mode, and optional temporal cutoff are shared.
+`--eval-mode company` keeps the company and episode links but omits the ICP
+link in all three preparation CLIs. A temporal cutoff sends earlier members
+of a group with later evidence to analysis. Invalid episode identity fails
+closed. Retained records, labels, observed targets, and quality status do not
+change.
+
+Run the preparation CLIs on the **same verified export corpus** with the same
+split options before combining their train or evaluation files. Different
+source corpora or manual split options do not have a cross-family split
+guarantee. The readiness report builds each scorer cohort's labels from its
+exact cohort while using the full supplied corpus for split links; it does
+not mix scorer cohorts into one label dataset. No split plan is persisted.
+
 Each dataset preparation CLI writes the original `train.jsonl`, `eval.jsonl`,
 `analysis.jsonl`, and `manifest.json`, plus a private `curation.json` sidecar.
 The sidecar uses `leadpoet.lab_arena.training_curation.v1`. It binds each flag

@@ -26,6 +26,10 @@ POSTGREST_IMAGE = "postgrest/postgrest:v14.5@sha256:b574528fe109c8343c1247155734
 NGINX_IMAGE = "nginx:1.28.3-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236"
 JWT_AUDIENCE = "leadpoet-subnet-api"
 KEY_ROLES = {"arena_key": "lab_arena_service", "gateway_key": "service_role", "public_key": "anon"}
+# Optional keys render only when present, so existing input keeps its bytes.
+# Its opaque key exposes one aggregate RPC, including on databases with retained
+# PUBLIC grants. Direct SQL privileges still require review (lab_arena/RUNBOOK.md).
+OPTIONAL_KEY_ROLES = {"capture_reader_key": "leadpoet_capture_reader"}
 _KEY = re.compile(r"sb_(?:secret|publishable)_[A-Za-z0-9_-]{16,256}\Z")
 _UPSTREAM = re.compile(r"(?:[a-zA-Z0-9][a-zA-Z0-9.-]*|\[[0-9a-fA-F:]+\]):[0-9]{1,5}\Z")
 
@@ -34,18 +38,23 @@ class ConfigurationError(ValueError):
     """A fixed diagnostic with no secret-bearing exception text."""
 
 
+def key_roles(values: Mapping[str, str]) -> dict[str, str]:
+    return {**KEY_ROLES, **{name: role for name, role in OPTIONAL_KEY_ROLES.items() if name in values}}
+
+
 def validate_secrets(values: Mapping[str, str]) -> dict[str, str]:
     expected = {*KEY_ROLES, "jwt_secret", "db_uri"}
-    if (not isinstance(values, Mapping) or set(values) != expected
+    if (not isinstance(values, Mapping) or not expected <= set(values) <= expected | set(OPTIONAL_KEY_ROLES)
             or any(not isinstance(v, str) for v in values.values())):
         raise ConfigurationError("invalid configuration fields")
     result = dict(values)
-    for name in KEY_ROLES:
+    names = key_roles(result)
+    for name in names:
         key = result[name]
         prefix = "sb_publishable_" if name == "public_key" else "sb_secret_"
         if not _KEY.fullmatch(key) or not key.startswith(prefix):
             raise ConfigurationError("invalid opaque key")
-    if len({result[name] for name in KEY_ROLES}) != 3:
+    if len({result[name] for name in names}) != len(names):
         raise ConfigurationError("client identities must differ")
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", result["jwt_secret"]):
         raise ConfigurationError("invalid signing secret")
@@ -66,7 +75,7 @@ def validate_secrets(values: Mapping[str, str]) -> dict[str, str]:
 
 
 def role_jwt(role: str, secret: str) -> str:
-    if role not in KEY_ROLES.values():
+    if role not in {*KEY_ROLES.values(), *OPTIONAL_KEY_ROLES.values()}:
         raise ConfigurationError("invalid request role")
     def encode(value: object) -> str:
         data = json.dumps(value, separators=(",", ":")).encode()
@@ -83,20 +92,43 @@ def render_nginx(values: Mapping[str, str], *, upstream: str = "127.0.0.1:3000",
     values = validate_secrets(values)
     if not _UPSTREAM.fullmatch(upstream) or not _UPSTREAM.fullmatch(listen):
         raise ConfigurationError("invalid HTTP address")
-    keys = "\n".join('        ~^%s$ %s;' % (values[name], role) for name, role in KEY_ROLES.items())
+    roles = key_roles(values)
+    # The optional reader's role:role map key exceeds nginx's default bucket.
+    # Keep the existing three-key configuration byte-identical when disabled.
+    map_size = "    map_hash_bucket_size 128;\n" if roles.keys() - KEY_ROLES.keys() else ""
+    keys = "\n".join('        ~^%s$ %s;' % (values[name], role) for name, role in roles.items())
     bearers = "\n".join('        "~^[Bb][Ee][Aa][Rr][Ee][Rr] +%s$" %s;' % (values[name], role)
-                        for name, role in KEY_ROLES.items())
+                        for name, role in roles.items())
     tokens = "\n".join('        %s %s;' % (role, role_jwt(role, values["jwt_secret"]))
-                       for role in KEY_ROLES.values())
+                       for role in roles.values())
     allowed = "\n".join('        "%s:%s" 1;\n        "%s:absent" 1;' % (role, role, role)
-                        for role in KEY_ROLES.values())
+                        for role in roles.values())
+    reader_map = reader_check = ""
+    if "capture_reader_key" in roles:
+        # Check both nginx's normalized URI and the original request target.
+        # Only the canonical POST is supported: no query/path/method aliases.
+        # Explicit public profiles remain compatible; other schemas and
+        # method/path override headers cannot widen the opaque key's surface.
+        # Regex keys are case-sensitive; literal nginx map keys are not.
+        reader_routes = "\n".join(
+            f'        "~^leadpoet_capture_reader:POST:{path}:{path}:(?:public)?:(?:public)?:::::$" 1;'
+            for path in ("/rest/v1/rpc/lab_arena_capture_summary_v1",
+                         "/rest/v1/rpc/lab_arena_capture_summary_v2")
+        )
+        reader_map = f'''    map "$request_role:$request_method:$uri:$request_uri:$http_accept_profile:$http_content_profile:$http_x_http_method_override:$http_x_http_method:$http_x_method_override:$http_x_original_url:$http_x_rewrite_url" $capture_reader_route_allowed {{
+        default 1;
+{reader_routes}
+        ~^leadpoet_capture_reader: 0;
+    }}
+'''
+        reader_check = "            if ($capture_reader_route_allowed = 0) { return 403; }\n"
     return f'''# Private generated file. Never print nginx -T output.
 worker_processes 1;
 pid /tmp/nginx.pid;
 error_log /dev/null crit;
 events {{ worker_connections 1024; }}
 http {{
-    access_log off;
+{map_size}    access_log off;
     server_tokens off;
     client_body_temp_path /tmp/client-body;
     proxy_temp_path /tmp/proxy;
@@ -122,14 +154,14 @@ http {{
         default "";
 {tokens}
     }}
-    server {{
+{reader_map}    server {{
         listen {listen};
         large_client_header_buffers 4 64k;
         # RPC/input contracts own their bounds; do not add nginx's 1 MB cap.
         client_max_body_size 0;
         location ^~ /rest/v1/ {{
             if ($authorized = 0) {{ return 401; }}
-            proxy_pass http://{upstream}/;
+{reader_check}            proxy_pass http://{upstream}/;
             proxy_http_version 1.1;
             proxy_set_header Connection "";
             proxy_set_header Authorization "Bearer $backend_jwt";

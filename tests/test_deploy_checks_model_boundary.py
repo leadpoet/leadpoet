@@ -23,7 +23,7 @@ def test_all_test_partitions_gate_the_stable_required_check_without_push_coverag
     assert all(job['runs-on'] == 'ubuntu-latest' for job in jobs.values())
     shards = jobs['test-shards']
     assert shards['strategy']['matrix']['shard'] == [str(i) for i in range(8)]
-    assert shards['strategy']['max-parallel'] == '4'
+    assert shards['strategy']['max-parallel'] == '8'
     assert shards['strategy']['fail-fast'] == 'false'
     partition = next(step['run'] for step in shards['steps']
                      if step['name'] == 'Run complete pytest partition')

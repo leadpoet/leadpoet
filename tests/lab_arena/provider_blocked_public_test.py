@@ -81,6 +81,48 @@ def test_history_paginates_excluded_entrants_and_preserves_real_zero():
     assert "private-native-receipt" not in json.dumps(results)
 
 
+def test_published_submissions_projection_closes_incomplete_judge_after_19_accepted_runs():
+    row = _row("published")
+    row["scoring_generation_floor"] = 7
+    target = {"submission_id": "unfinished", "miner_hotkey": "5Unfinished"}
+    service, transport = _service(row)
+    service._store.scoring_policy_history = lambda _: {
+        "round_id": row["round_id"],
+        "revisions": [{"generation_floor": 7, "recovery": {
+            "excluded_participants": [{**target, "status": "evaluation_incomplete",
+                "evaluation": "not_evaluated"}],
+        }}],
+    }
+    transport.submissions.append({**target, "round_id": row["round_id"],
+                                  "status": "frozen", "source_ref": "private-source"})
+    accepted = [{
+        "run_id": f"accepted:{index}", "assignment_id": f"accepted:{index}",
+        "submission_id": target["submission_id"], "kind": "execute" if index < 10 else "score",
+        "status": "accepted", "attempt": 1, "lease_generation": 1,
+        "runner_hotkey": "5" + "A" * 47, "scoring_generation_floor": 7,
+    } for index in range(19)]
+    pending_judge = {
+        "run_id": "judge:retry", "assignment_id": "judge:retry",
+        "submission_id": target["submission_id"], "kind": "score",
+        "status": "pending", "attempt": 2, "lease_generation": 2,
+        "runner_hotkey": None, "scoring_generation_floor": 7,
+    }
+    service._store.list_runs = lambda *_a, **_k: [*accepted, pending_judge]
+
+    result = public_dashboard.submissions_snapshot(service, row["round_id"])
+    projected = next(item for item in result["submissions"]
+                     if item["submission_id"] == target["submission_id"])
+
+    assert projected["status"] == "evaluation_incomplete"
+    assert projected["evaluation"]["state"] == "evaluation_incomplete"
+    assert projected["evaluation"]["counts"] == {
+        "queued": 0, "active": 0, "completed": 19, "failed": 1, "retrying": 0,
+    }
+    assert projected["evaluation"]["active_count"] == 0
+    assert projected["evaluation"]["validators"] == []
+    assert "private-source" not in json.dumps(result)
+
+
 def test_history_exclusions_respect_generation_and_readmission():
     service, _calls, rows = fixture(1)
     row = rows[0]

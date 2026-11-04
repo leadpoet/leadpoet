@@ -11,22 +11,23 @@ from lab_arena import contracts, integrity, service, training_reader
 from tests.lab_arena.complete_baseline_final_authority_test import fixture as baseline_fixture
 from tests.lab_arena.training_eligibility_test import SOURCE_HASH, captured_example, submission
 from tests.lab_arena.training_eligibility_test import ten_selected_examples
-from tests.lab_arena.training_steps_test import seal
+from tests.lab_arena.training_steps_test import bind_selected_output, seal
 
 ROUND_ID = "arena-2026-10-13"
 BASELINE_ID = "baseline-2026-10-13"
 
 
 @pytest.mark.parametrize("error,eligible", [
-    (FileNotFoundError("missing object"), False),
-    (training_reader.ExportError("execution_output_hash_mismatch"), False),
-    (training_reader.ExportError("ledger_membership_mismatch"), False),
-    (ValueError("malformed stored evidence"), False),
-    (RuntimeError("unexpected reader failure"), False),
+    (FileNotFoundError("missing object"), True),
+    (training_reader.ExportError("execution_output_hash_mismatch"), True),
+    (training_reader.ExportError("ledger_membership_mismatch"), True),
+    (ValueError("malformed stored evidence"), True),
+    (RuntimeError("unexpected reader failure"), True),
 ])
-def test_coverage_floor_never_excuses_export_integrity_errors(monkeypatch, error, eligible):
+@pytest.mark.parametrize("failed_count", [1, 2, 3, 10])
+def test_export_integrity_errors_exclude_the_affected_icp_only(monkeypatch, error, eligible, failed_count):
     examples = ten_selected_examples()
-    row = {"configuration_doc": {"stage_1_icp_count": 5, "stage_2_icp_count": 5,
+    row = {"round_id": ROUND_ID, "configuration_doc": {"stage_1_icp_count": 5, "stage_2_icp_count": 5,
                                 "training_minimum_icp_coverage_percent": 80}}
     obj = SimpleNamespace(
         _store=SimpleNamespace(get_submission=lambda _: submission()), _objects=object(),
@@ -36,15 +37,18 @@ def test_coverage_floor_never_excuses_export_integrity_errors(monkeypatch, error
     )
 
     def export(_store, _objects, run_id):
-        if run_id == "run-9":
+        if int(run_id.split("-")[1]) >= 10 - failed_count:
             raise error
         return examples[run_id]
 
     monkeypatch.setattr(training_reader, "export_run", export)
     result = service.ArenaService._submission_training_eligibility(obj, row, "sub", [])
-    assert result["eligible"] is eligible
-    if not eligible:
-        assert result["reasons"] == ["training_evidence_check_failed"]
+    assert result["eligible"] is (eligible and failed_count <= 2)
+    assert result["capture"]["counts"]["complete_runs"] == 10 - failed_count
+    assert result["capture"]["counts"]["rejected_runs"] == [{
+        "run_id": f"run-{position}", "reasons": ["selected_run_export_invalid"],
+        "error_class": type(error).__name__,
+    } for position in range(10 - failed_count, 10)]
 
 
 def _replace_exact(value, old, new):
@@ -62,7 +66,7 @@ def _export(run_id, submission_id, *, baseline=False):
     example["role"] = "baseline" if baseline else "miner"
     if baseline:
         example["source"]["hash_origin"] = "computed_from_frozen_object"
-    return seal(example)
+    return bind_selected_output(example)
 
 
 def _publication_harness(monkeypatch):
@@ -347,14 +351,15 @@ def test_publication_checks_final_selected_accepted_attempt(monkeypatch):
     assert _ranking(publication, "miner")["final_score"] == 3.0
 
 
-def test_missing_selected_position_fails_capture_coverage_before_export(monkeypatch):
+def test_missing_selected_position_keeps_legacy_full_coverage_requirement(monkeypatch):
     harness = _publication_harness(monkeypatch)
     obj, row, _, runs, _, _, _, exported = harness
     result = obj._submission_training_eligibility(
         row, "miner", [run for run in runs if run["run_id"] != "miner-1"])
     assert result["eligible"] is False
     assert result["reasons"] == ["selected_execution_coverage_incomplete"]
-    assert exported == []
+    assert exported == ["miner-0"]
+    assert result["capture"]["counts"]["missing_selected_runs"] == 1
 
 
 def test_pre_scoring_review_gate_rejects_stale_pass(monkeypatch):
@@ -388,3 +393,51 @@ def test_frozen_stale_source_proof_finishes_scoring_but_cannot_win(monkeypatch):
     assert _ranking(publication, "miner")["eligible"] is False
     assert _ranking(publication, "miner")["final_score"] == 3.0
     assert publication["king_decision"]["outcome"] == "no_king"
+
+
+@pytest.mark.parametrize('actual,eligible', [(0, False), (7, False), (8, True), (10, True)])
+def test_selected_execution_coverage_uses_the_whole_icp_bank(monkeypatch, actual, eligible):
+    examples = ten_selected_examples()
+    selected = {position: {'run_id': f'run-{position}'} for position in range(actual)}
+    row = {'round_id': ROUND_ID, 'configuration_doc': {
+        'stage_1_icp_count': 5, 'stage_2_icp_count': 5,
+        'training_minimum_icp_coverage_percent': 80}}
+    obj = SimpleNamespace(_store=SimpleNamespace(get_submission=lambda _: submission()),
+        _objects=object(), _is_daily_baseline=lambda *_: False,
+        _selected_accepted_execution_runs=lambda *_: selected)
+    exported = []
+    def export(_store, _objects, run_id):
+        exported.append(run_id)
+        return examples[run_id]
+    monkeypatch.setattr(training_reader, 'export_run', export)
+    result = service.ArenaService._submission_training_eligibility(obj, row, 'sub', [])
+    assert result['eligible'] is eligible, result
+    assert result['capture']['counts']['complete_runs'] == actual
+    assert result['capture']['counts']['incomplete_runs'] == 10 - actual
+    assert len(exported) == actual
+    if actual < 10:
+        assert result['capture']['counts']['missing_icp_positions'] == list(range(actual, 10))
+
+
+@pytest.mark.parametrize('damage', ['unexpected_position', 'duplicate_run', 'source_review', 'configuration'])
+def test_coverage_allowance_cannot_hide_global_selection_source_or_policy_errors(monkeypatch, damage):
+    examples = ten_selected_examples()
+    selected = {position: {'run_id': f'run-{position}'} for position in range(8)}
+    source = submission()
+    configuration = {'stage_1_icp_count': 5, 'stage_2_icp_count': 5,
+                     'training_minimum_icp_coverage_percent': 80}
+    if damage == 'unexpected_position':
+        selected[10] = {'run_id': 'run-8'}
+    elif damage == 'duplicate_run':
+        selected[7] = selected[6]
+    elif damage == 'source_review':
+        source['code_review_status'] = 'failed'
+    else:
+        configuration['training_minimum_icp_coverage_percent'] = True
+    obj = SimpleNamespace(_store=SimpleNamespace(get_submission=lambda _: source),
+        _objects=object(), _is_daily_baseline=lambda *_: False,
+        _selected_accepted_execution_runs=lambda *_: selected)
+    monkeypatch.setattr(training_reader, 'export_run', lambda _store, _objects, run_id: examples[run_id])
+    result = service.ArenaService._submission_training_eligibility(
+        obj, {'round_id': ROUND_ID, 'configuration_doc': configuration}, 'sub', [])
+    assert not result['eligible']

@@ -33,8 +33,10 @@ _SENSITIVE_KEY_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _BASIC_RE = re.compile(r"(?i)\bbasic\s+([A-Za-z0-9._~+/=-]+)")
+# Start at an escape run boundary, rather than retrying every suffix when
+# a long backslash run is not followed by a quoted sensitive field.
 _QUOTED_SENSITIVE_CONTEXT_RE = re.compile(
-    r"(?i)((?:\\*[\"'])(?:api[-_ ]?key|x[-_]api[-_]key|(?:proxy[-_])?authorization|"
+    r"(?i)(?<!\\)((?:\\*[\"'])(?:api[-_ ]?key|x[-_]api[-_]key|(?:proxy[-_])?authorization|"
     r"password|passwd|secret|client[-_]secret|access[-_ ]?token|refresh[-_ ]?token|"
     r"lease(?:[-_ ]?token)?|cookie|set[-_]cookie|credentials?|private[-_]key|"
     r"secret[-_]key|session[-_]token|x[-_]amz[-_](?:credential|signature|security[-_]token))"

@@ -237,8 +237,15 @@ def fake_exporter(reference, digest, target):
     (target / "rootfs").mkdir()
 
 
+class FakeExportImageCache(rn.ImageCache):
+    """The empty fake exporter downloads and extracts no physical image."""
+
+    def _reserve_export_space_locked(self):
+        pass
+
+
 def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
-    cache = rn.ImageCache(tmp_path / "images", fake_exporter)
+    cache = FakeExportImageCache(tmp_path / "images", fake_exporter)
     source_cache = rn.SourceCache(
         tmp_path / "sources", api.source, dependency_installer=lambda _requirements, _target: None
     )
@@ -248,6 +255,15 @@ def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
         evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
         claim_retry_seconds=(0.0, 0.0), completion_retry_seconds=(0.0, 0.0),
     )
+
+
+def test_fake_image_fixture_does_not_require_physical_export_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+
+    config = make_config(tmp_path, FakeApi([]), BridgingRuntime(output={}))
+    with config.image_cache.acquire(IMAGE) as rootfs:
+        assert rootfs.is_dir()
+        assert list(rootfs.iterdir()) == []
 
 
 def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path):
@@ -860,11 +876,12 @@ def test_committed_dispatch_response_loss_maps_real_broker_run_to_provider_error
     assert next(iter(store.calls.values()))["kind"] == "dispatch"
 
 
-def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
+def test_run_once_respects_max_claims_and_images_export_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
     leases = [lease("r%d" % i, i) for i in range(5)]
     api = FakeApi(leases)
     exports = []
-    cache = rn.ImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
+    cache = FakeExportImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
     config.image_cache = cache
@@ -1357,6 +1374,7 @@ def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_pat
 
 
 def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
     digests = ["sha256:" + character * 64 for character in "123"]
     exports = []
 
@@ -1364,6 +1382,7 @@ def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, mo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     cache.rootfs_for(digests[0])
     cache.rootfs_for(digests[1])
@@ -1385,6 +1404,7 @@ def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, mo
 
 
 def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
     first = "sha256:" + "1" * 64
     second = "sha256:" + "2" * 64
     third = "sha256:" + "3" * 64
@@ -1394,6 +1414,7 @@ def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_expo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     with cache.acquire(first) as active_rootfs:
         cache.rootfs_for(second)
@@ -1416,8 +1437,8 @@ def test_image_cache_export_error_is_not_retried_and_partial_target_is_removed(t
         (target / "rootfs").mkdir()
         raise ValueError("bad image layer")
 
-    cache = rn.ImageCache(tmp_path / "images", exporter)
     monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
+    cache = rn.ImageCache(tmp_path / "images", exporter)
     with pytest.raises(ValueError, match="bad image layer"):
         cache.rootfs_for(digest)
     assert exports == [digest]

@@ -490,7 +490,8 @@ def test_cli_rejects_file_above_bounded_256_mib_limit(tmp_path):
 def test_splits_never_share_a_company_cluster():
     companies = [claim("Company %d" % index, "company%d.com" % index, "company-%d" % index) for index in range(40)]
     examples = [example("run-%d" % index, [row(0, company, "qualified" if index % 2 else "wrong_fit")],
-                        submission_id="separate-episode-%d" % index)
+                        submission_id="separate-episode-%d" % index,
+                        icp={**ICP, "industry": "Distinct industry %d" % index})
                 for index, company in enumerate(companies)]
     # The same company under another name and ICP shares its LinkedIn slug.
     alias = claim("Company Zero Inc", "zero-alias.com", "company-0")
@@ -513,10 +514,10 @@ def test_manifest_is_deterministic_and_records_permission_status():
     assert first == second
     manifest = first[1]
     assert manifest["training_permission"]["status"] == "unconfirmed"
-    assert manifest["rules"] == {"eval_percent": 20, "seed": "leadpoet-arena-dataset-v1",
+    assert manifest["rules"] == {"eval_percent": 20, "seed": "arena-agent-steps-v1",
                                  "production_rounds_only": True, "scorer_image_digest": None,
-                                 "scorer_policy_hash": None,
-                                 "split_grouping": "original_episode_and_company_v1"}
+                                 "scorer_policy_hash": None, "eval_mode": "company_and_icp",
+                                 "split_grouping": "shared_source_episode_company_icp_request_v1"}
     other_seed = dataset.build(examples, dataset.Rules(seed="other"))[1]
     assert other_seed["dataset_version"] != manifest["dataset_version"]
 
@@ -605,11 +606,16 @@ def test_temporal_cutoff_rejects_invalid_dates(cutoff):
 
 
 def test_temporal_boundary_and_company_purge_and_missing_dates():
-    docs = [example("old-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-17"),
-            example("future-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-19"),
-            example("boundary", [row(0, claim("B", "b.com", "b"), "wrong_fit")], submission_id="boundary-episode"),
-            example("missing", [row(0, claim("M", "m.com", "m"), "qualified")], evaluation_date=None),
-            example("invalid", [row(0, claim("I", "i.com", "i"), "qualified")], evaluation_date="2026-02-30")]
+    docs = [example("old-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-17",
+                    submission_id="old-episode"),
+            example("future-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-19",
+                    submission_id="future-episode"),
+            example("boundary", [row(0, claim("B", "b.com", "b"), "wrong_fit")],
+                    submission_id="boundary-episode", icp={**ICP, "industry": "Separate industry"}),
+            example("missing", [row(0, claim("M", "m.com", "m"), "qualified")],
+                    evaluation_date=None, submission_id="missing-episode"),
+            example("invalid", [row(0, claim("I", "i.com", "i"), "qualified")],
+                    evaluation_date="2026-02-30", submission_id="invalid-episode")]
     splits, manifest = dataset.build(docs, dataset.Rules(eval_after="2026-10-18"))
     assert [r["meta"]["run_id"] for r in splits["train"]] == ["boundary"]
     assert [r["meta"]["run_id"] for r in splits["eval"]] == ["future-shared"]
@@ -806,8 +812,9 @@ def test_episode_links_from_deduplicated_records_preserve_temporal_purge():
 
 
 def test_temporal_icp_purge_does_not_move_old_records_into_eval():
-    docs = [example("past", [row(0, claim(), "qualified")]),
-            example("future", [row(0, claim("B", "b.com", "b"), "qualified")], evaluation_date="2026-10-19")]
+    docs = [example("past", [row(0, claim(), "qualified")], submission_id="past-episode"),
+            example("future", [row(0, claim("B", "b.com", "b"), "qualified")],
+                    evaluation_date="2026-10-19", submission_id="future-episode")]
     splits, manifest = dataset.build(docs, dataset.Rules(eval_mode="company_and_icp", eval_after="2026-10-18"))
     assert not splits["train"]
     assert splits["analysis"][0]["meta"]["run_id"] == "past"
@@ -834,7 +841,7 @@ def test_review_is_deterministic_stratified_and_does_not_edit_originals():
     review[0]["original_label"]["class"] = "edited"
     review[0]["input_provenance"]["run_id"] = "edited"
     assert splits == before
-    assert manifest["rules"] == dataset.build(docs, dataset.Rules(eval_mode="company"))[1]["rules"]
+    assert manifest["rules"] == dataset.build(docs, dataset.Rules())[1]["rules"]
 
 
 def test_review_cli_private_and_cleanup(tmp_path, monkeypatch, capsys):

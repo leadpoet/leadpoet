@@ -85,7 +85,8 @@ def save(values, document, *, generation=1, claim_hash=CLAIM_HASH):
 
 
 @pytest.mark.parametrize("operation", ["openrouter.responses", "openrouter.chat"])
-def test_rejected_model_controls_survive_runner_snapshot_and_export(tmp_path, operation):
+@pytest.mark.parametrize("protocol", ["frame", "http"])
+def test_rejected_model_controls_survive_runner_snapshot_and_export(tmp_path, operation, protocol):
     parameters = {"model": "deepseek/deepseek-v4.1-flash-1017", "reasoning": {"effort": "high"}}
     history = "synthetic history " * 2100
     parameters.update({"input": history} if operation == "openrouter.responses" else {
@@ -97,11 +98,26 @@ def test_rejected_model_controls_survive_runner_snapshot_and_export(tmp_path, op
     state = runner.RunState(lease=lease(), lease_token=TOKEN)
     api = FakeApi([])
     server = runner.WorkerSocketServer(tmp_path / "worker.sock", api, state)
-    returned = json.loads(server.handle_frame(frame))
+    if protocol == "frame":
+        returned = json.loads(server.handle_frame(frame))
+        expected_request = {"raw_frame": json.loads(frame)}
+    else:
+        path = "/api/v1/responses" if operation == "openrouter.responses" else "/api/v1/chat/completions"
+        url = "https://openrouter.ai" + path
+        headers = {"content-type": "application/json"}
+        body = contracts.canonical_json(parameters).encode()
+        with pytest.raises(operations.OperationRequestError):
+            operations.match_request("POST", url, body, headers)
+        status, returned_headers, returned_body = server.handle_http("POST", url, body, headers)
+        assert status == 400
+        returned = {"status": status, "headers": returned_headers,
+                    "body_b64": base64.b64encode(returned_body).decode()}
+        expected_request = {"method": "POST", "url": url, "headers": headers, "body_text": parameters}
     document = state.worker_observations.document()
     row = document["observations"][0]
     assert row["kind"] == "local_parse_error" and row["outcome"]["response"] == returned
-    assert row["request"]["admitted_parameters"]["raw_frame"] == json.loads(frame)
+    assert row["outcome"]["protocol"] == protocol
+    assert row["request"]["admitted_parameters"] == expected_request
     assert row["privacy"] == {"redacted": False, "redactions": []}
     assert document["complete"] and state.action_sequence == len(state.calls) == len(api.provider_frames) == 0
 
@@ -119,17 +135,27 @@ def test_rejected_model_controls_survive_runner_snapshot_and_export(tmp_path, op
         assert training_capture.sanitize_training_value(value) == (value, [])
         assert json.loads(contracts.canonical_json(value)) == value
     assert contracts.document_hash(exported["payload"]) == snapshot["payload_sha256"]
-    restored_parameters = exported["payload"]["observations"][0]["request"]["admitted_parameters"]["raw_frame"]["parameters"]
+    restored_request = exported["payload"]["observations"][0]["request"]["admitted_parameters"]
+    restored_parameters = (restored_request["raw_frame"]["parameters"] if protocol == "frame"
+                           else restored_request["body_text"])
     assert contracts.document_hash(restored_parameters["reasoning"]) == contracts.document_hash(parameters["reasoning"])
 
 
-def test_rejected_frame_fix_preserves_historical_privacy_flags():
+@pytest.mark.parametrize("protocol", ["frame", "http"])
+def test_rejected_model_fix_preserves_historical_privacy_flags(protocol):
     row = observation(kind="local_parse_error", operation="unknown", action=None, contributes=False)
     row["request"] = {"admitted_parameters": {"raw_frame": {
         "operation_id": "openrouter.responses", "parameters": {
             "model": "synthetic/model", "reasoning": "[REDACTED]", "input": "synthetic"}}},
         "timeout_ms": 0}
     row["outcome"] = {"protocol": "frame", "response": {"error": "invalid_request"}}
+    if protocol == "http":
+        row["request"] = {"admitted_parameters": {"method": "POST",
+            "url": "https://openrouter.ai/api/v1/responses", "headers": {},
+            "body_text": {"model": "synthetic/model", "reasoning": "[REDACTED]", "input": "synthetic"}},
+            "timeout_ms": 0}
+        row["outcome"] = {"protocol": "http", "response": {"status": 400, "headers": {},
+            "body_b64": base64.b64encode(b'{"error":"invalid_request"}').decode()}}
     row["privacy"] = {"redacted": True, "redactions": ["hidden_reasoning"]}
     values = fixture()
     snapshot = save(values, payload(row))

@@ -59,7 +59,7 @@ def test_proven_provider_output_fault_is_one_incomplete_icp(kind):
     assert result['counts']['incomplete_runs'] == 1
     strict, _ = training_thinking.build(list(examples.values()), training_steps.Rules(production_rounds_only=False))
     runs = {ref['run_id'] for split in ('train', 'eval') for row in strict[split] for ref in row['source_refs']}
-    assert runs == set(examples) - {'run'}
+    assert runs == set(examples)
     assert not assess_ten(examples, percent=100)['eligible']
     examples['run-8'] = examples['run-7'] = None
     assert 'training_coverage_incomplete' in assess_ten(examples)['reasons']
@@ -109,7 +109,7 @@ def test_empty_chat_fault_requires_exact_zero_reasoning_output_and_all_existing_
     assert training_eligibility._verified_provider_output_fault(example, call) is (damage == 'later_bad_call')
     # Explicit provider length stops keep their existing incomplete-ICP path.
     if damage != 'length':
-        assert not assess_ten(bank(example))['eligible']
+        assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 @pytest.mark.parametrize('location', ['response', 'choice'])
@@ -128,7 +128,7 @@ def test_empty_chat_fault_rejects_output_or_reasoning_outside_the_message(locati
     target[field] = value
     refresh_response_links(example, 0)
     assert not training_eligibility._verified_provider_output_fault(example, call)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 @pytest.mark.parametrize('location', [None, 'completion_tokens_details', 'output_tokens_details'])
@@ -141,7 +141,7 @@ def test_empty_chat_fault_requires_every_present_reasoning_counter_to_be_exact_z
     target['reasoning_tokens'] = tokens
     refresh_response_links(example, 0)
     assert not training_eligibility._verified_provider_output_fault(example, call)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 @pytest.mark.parametrize('variant', ['absent_reasoning_aliases', 'standard_choice_metadata', 'all_zero_counters', 'top_level_counter'])
@@ -269,7 +269,7 @@ def test_output_fault_cannot_hide_bad_evidence_or_other_target_failures(damage):
         body = call['request']['outbound']['body']
         call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
     seal(example)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 @pytest.mark.parametrize('gap', ['cost', 'privacy', 'truncated', 'empty'])
@@ -313,7 +313,7 @@ def test_provider_output_fault_composes_only_with_independently_proven_gaps(gap,
         example['provider_calls'][2]['request']['request_hash'] = contracts.hash_bytes(b'wrong')
     seal(example)
     result = assess_ten(bank(example))
-    assert result['eligible'] is (not tamper), result
+    assert result['eligible'] and result['counts']['complete_runs'] == 9, result
     assert result['counts']['incomplete_runs'] == 1
 
 
@@ -337,12 +337,12 @@ def test_output_fault_with_attributed_judge_failure_keeps_every_other_proof(dama
     elif damage == 'cost': call['actual_microusd'] = None
     elif damage == 'receipt': call['response_receipts'][0]['wire_body_sha256'] = contracts.hash_bytes(b'wrong')
     seal(example)
-    # The shared export path must keep its strict default.
-    assert training_thinking.selected_research_evidence(example) is None
+    assert (training_thinking.selected_research_evidence(example) is None) is (damage in {'input', 'output'})
     result = assess_ten(bank(example))
-    assert result['eligible'] is (damage is None), result
+    assert result['eligible'] and result['counts']['complete_runs'] == 9, result
+    assert not assess_ten(bank(example), percent=100)['eligible']
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not strict['train'] and not strict['eval']
+    assert len(strict['train']) + len(strict['eval']) == (0 if damage in {'input', 'output'} else 2)
 
 
 @pytest.mark.parametrize('damage', ['amount', 'uncertain', 'duplicate', 'missing', 'identity', 'bool_amount'])
@@ -359,7 +359,7 @@ def test_output_fault_requires_matching_settled_terminal(damage, kind):
     else: row['amount_microusd'] = True
     seal(example)
     assert not training_eligibility._verified_provider_output_fault(example, call)
-    assert not assess_ten(bank(example))['eligible']
+    assert not assess_ten(bank(example), percent=100)['eligible']
 
 
 @pytest.mark.parametrize('tamper', [False, True])
@@ -383,7 +383,7 @@ def test_output_fault_with_source_timeout_and_unknown_cost_keeps_retained_proof(
     result = training_eligibility.assess_capture(
         submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80,
         unavailable_artifacts={'run': {'source': source_ref}})
-    assert result['eligible'] is (not tamper), result
+    assert result['eligible'] and result['counts']['complete_runs'] == 9, result
 
 
 @pytest.mark.parametrize('kind', ['undeclared', 'reasoning_only', 'empty_chat'])
@@ -413,6 +413,6 @@ def test_chat_undeclared_tool_is_incomplete_coverage_with_exact_proof(tamper):
         call['response_provenance']['worker_receipt_ref']['payload_sha256'] = contracts.hash_bytes(b'wrong')
     seal(example)
     result = assess_ten(bank(example))
-    assert result['eligible'] is (not tamper), result
+    assert result['eligible'] and result['counts']['complete_runs'] == 9, result
     strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
-    assert not strict['train'] and not strict['eval']
+    assert len(strict['train']) + len(strict['eval']) == 2

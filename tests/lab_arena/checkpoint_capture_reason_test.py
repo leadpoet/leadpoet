@@ -2,6 +2,7 @@
 import collections
 import hashlib
 import json
+import queue
 import socket
 import threading
 import tempfile
@@ -18,6 +19,10 @@ def recorder(cp=checkpoint):
     value.checkpoint = cp
     value.lock = threading.RLock()
     value.counts = collections.Counter()
+    value.handoff_dir = None
+    value.queue = queue.Queue()
+    value.inflight = 0
+    value.adapters = set()
     return value
 
 
@@ -68,7 +73,8 @@ def test_socket_ack_diagnostic(tmp_path, monkeypatch, mode, reason):
         status=200, retrieved_at='2026-10-21T00:00:00+00:00', digest=hashlib.sha256(raw))
     checkpoint._TRAINING_FAILURE.reason = "host_rejected"
     value = recorder()
-    value._emit(body)
+    value._enqueue(body)
+    value._emit(value.queue.get_nowait())
     thread.join(2)
     server.close()
     short.cleanup()
@@ -128,15 +134,12 @@ def test_parallel_capture_calls_keep_their_own_reason(tmp_path, monkeypatch):
 
 
 def test_provider_ack_keeps_failure_and_incomplete(monkeypatch):
-    import queue
     monkeypatch.delenv(checkpoint.WORKER_SOCKET_ENV, raising=False)
     value = recorder()
-    value.queue = queue.Queue()
-    value.inflight = 0
-    value.adapters = set()
-    value._emit(SimpleNamespace(identity='sha256:'+'a'*64, complete=True,
+    value._enqueue(SimpleNamespace(identity='sha256:'+'a'*64, complete=True,
         status=200, content_encoding='', provider_wire=False,
         digest=hashlib.sha256(b'text'), size=4))
+    value._emit(value.queue.get_nowait())
     assert value.counts == {'checkpoint_failure': 1,
         'checkpoint_failure_response_received_socket_unavailable': 1}
     assert value._summary()['complete'] is False

@@ -14,7 +14,8 @@ Docker Desktop deployment recipe.
 
 ## Private configuration
 
-The renderer takes a mode 0600 JSON regular file with exactly these names:
+The renderer takes a mode 0600 JSON regular file with exactly these names,
+plus the optional names listed after them:
 
 - `arena_key`: existing Arena `sb_secret_` key; maps to `lab_arena_service` on RDS.
 - `gateway_key`: separate existing gateway `sb_secret_` key; maps to `service_role` on RDS.
@@ -28,10 +29,29 @@ The renderer takes a mode 0600 JSON regular file with exactly these names:
   requires these TLS settings. Set `SUBNET_API_CA_FILE` to the reviewed AWS
   CA file for compose's read-only mount; neither tool retrieves it.
 
+Optional:
+
+- `capture_reader_key`: Leadpoet website's own distinct `sb_secret_` key; maps
+  to `leadpoet_capture_reader`. nginx exposes only its canonical summary POST
+  (`lab_arena/RUNBOOK.md`, "Capture summary reader"). The database role can
+  retain privileges inherited from existing `PUBLIC` grants; this key's narrow
+  HTTP surface does not remove them. Leaving the key out renders the same bytes
+  as before it existed.
+
 The API uses only the dedicated AWS RDS PostgREST connection. Target is the
 default backend; explicit `--rest-backend target` produces the same private
 configuration. Hosted-source selection is rejected. The source rollback window
 closed on October 29, 2026; do not route clients or this pair back to Supabase.
+
+The coordinator can retire the five audited legacy outbound callback RPCs with
+the exact reviewed `scripts/retire_legacy_subnet_outbound_callbacks.sql` through
+the protected target SQL workflow. This is a one-time function retirement, not
+a data migration. It accepts the exact five inventoried definitions and security
+metadata, or an already-empty set; a partial set, changed definition, overload,
+or dependent object aborts the transaction. It preserves tables, publication
+membership and other functions, then notifies PostgREST to reload its schema.
+It needs no app restart. Keep the private exact beforeimage outside Git for
+reviewed rollback; never invoke these callbacks to test them.
 
 Keep existing opaque client keys and the fixed gateway origin. Upgrade or retire
 old validators and auditors that still call the hosted source before retiring
@@ -107,6 +127,18 @@ host network, UID/GID, read-only mounts and selected private configuration hashe
 cold private HTTP identity/ACL checks before public routing or client changes.
 Rendering or a local syntax check does not start either service.
 
+For an allowlist-only nginx change with unchanged keys and signing secret,
+the owner may use a graceful nginx reload instead of replacing the pair. Render
+from the same private input outside the live directory. Verify that PostgREST
+configuration is byte-identical and the nginx difference contains only the
+reviewed route. Hold an operator lock, check the live file's expected hash,
+preserve its inode and permissions when updating the bound file, then run
+`nginx -t` and `nginx -s reload` with the existing `-c` path inside the container.
+Keep all command output private because configuration errors may contain keys.
+Restore the prior file on validation failure. Verify both allowed and denied
+HTTP routes after reload; restore and reload the previous configuration if
+verification fails. This does not apply to key or signing-secret rotation.
+
 Starting the pair, routing TLS and changing endpoint/key documents remain
 separate owner actions. An explicit API key/signing-secret rotation requires
 stopping admission, rendering both private configs and restarting the pair as
@@ -122,6 +154,16 @@ Literal nginx map keys are case-insensitive and must not replace these regexes.
 An absent bearer is allowed only with a valid apikey. Any nonblank bearer must
 carry that same apikey. Unknown, changed-case, duplicate and mismatched
 credentials fail closed. Incoming role/JWT headers cannot select a role.
+
+When the optional capture key is configured, its role is allowed only the exact
+`POST /rest/v1/rpc/lab_arena_capture_summary_v1` or
+`POST /rest/v1/rpc/lab_arena_capture_summary_v2` request target, with no query
+string. nginx checks both `$uri` and `$request_uri`; encoded paths, dot segments,
+repeated/trailing slashes and case variants do not provide alternate routes.
+The only accepted explicit schema profile is `public`. Method and path override
+headers are rejected. Other keys keep their existing routing and HTTP behavior.
+Retained PUBLIC-granted RPCs and tables must be unreachable with the reader key,
+even if SQL `has_function_privilege` or `has_table_privilege` returns true.
 
 nginx replaces Authorization with an internally signed role JWT and removes
 apikey before proxying. These internal tokens have no expiry,
@@ -145,7 +187,8 @@ own payload limits. Request and response buffering are disabled.
 The owner must create/review the authenticator on RDS separately. It must be LOGIN,
 NOINHERIT, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION and NOBYPASSRLS.
 On PostgreSQL 17 its only SET memberships must be `anon`, `service_role` and
-`lab_arena_service`, with INHERIT and ADMIN false. It must never SET
+`lab_arena_service`, plus `leadpoet_capture_reader` once the capture reader is
+enabled, with INHERIT and ADMIN false. It must never SET
 `lab_arena_owner`, `postgres`, `arena_admin` or a platform owner role.
 
 Run these password-free, read-only review queries on the RDS target:
@@ -155,7 +198,8 @@ SELECT rolname,rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,
        rolreplication,rolbypassrls,rolconfig
 FROM pg_roles
 WHERE rolname IN ('anon','service_role','lab_arena_service',
-                  'lab_arena_owner','leadpoet_subnet_authenticator');
+                  'leadpoet_capture_reader','lab_arena_owner',
+                  'leadpoet_subnet_authenticator');
 
 SELECT granted.rolname AS granted_role,recipient.rolname AS recipient,
        m.admin_option,m.inherit_option,m.set_option
@@ -169,6 +213,7 @@ FROM pg_db_role_setting s
 LEFT JOIN pg_roles r ON r.oid=s.setrole
 LEFT JOIN pg_database d ON d.oid=s.setdatabase
 WHERE r.rolname IN ('anon','service_role','lab_arena_service',
+                   'leadpoet_capture_reader',
                    'leadpoet_subnet_authenticator') OR s.setrole=0;
 ```
 
@@ -180,6 +225,33 @@ In particular, keep the Arena statement, lock and idle-transaction limits;
 PostgREST request behavior. After startup use `lab_arena_whoami` to confirm
 current_user/JWT role, session_user and the NOLOGIN/non-BYPASSRLS request role.
 Prove all negative ACL cases before production endpoint changes.
+
+For the capture reader, also inventory effective PUBLIC/inherited access. A
+NOLOGIN/NOINHERIT role still receives PUBLIC privileges. Do not broaden this
+rollout into shared ACL removal or claim SQL-only one-RPC isolation:
+
+```sql
+SELECT n.nspname,p.oid::regprocedure,p.prosecdef
+FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+WHERE n.nspname IN ('public','extensions') AND p.prokind='f'
+  AND has_function_privilege('leadpoet_capture_reader',p.oid,'EXECUTE')
+ORDER BY 1,2;
+
+SELECT n.nspname,c.relname
+FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+WHERE n.nspname IN ('public','extensions') AND c.relkind IN ('r','p','v','m','f')
+  AND (has_table_privilege('leadpoet_capture_reader',c.oid,
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       OR has_any_column_privilege('leadpoet_capture_reader',c.oid,
+         'SELECT,INSERT,UPDATE,REFERENCES'))
+ORDER BY 1,2;
+```
+
+Before enabling that key, verify the exact summary signature/definition/ACL,
+reviewed role memberships and absence of unexpected summary overloads. Prove
+the reader-only nginx restriction with the pinned real pair, then verify actual
+loopback binds and private JWT/config handling. Direct SQL or an exposed backend
+would bypass this HTTP boundary. Keep the key disabled if these checks fail.
 
 ## Local verification
 

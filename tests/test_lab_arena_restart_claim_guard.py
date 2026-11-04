@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -159,6 +160,10 @@ def test_transport_reports_only_bounded_guard_rpc_status_and_code(monkeypatch, c
 
     with pytest.raises(guard_cli.GuardError) as error:
         guard_cli._request("lab_arena_restart_quiescence_v1", {})
+    assert isinstance(error.value, guard_cli.GuardRpcError)
+    assert (error.value.rpc, error.value.status, error.value.code) == (
+        "lab_arena_restart_quiescence_v1", 503, code
+    )
     assert str(error.value) == (
         "Arena restart guard authority rejected the request "
         f"(rpc=lab_arena_restart_quiescence_v1, http_status=503, code={code})"
@@ -378,6 +383,260 @@ def test_timeout_aborts_only_owned_pre_destructive_guard(monkeypatch):
     with pytest.raises(guard_cli.GuardError, match="did not drain"):
         guard_cli._drain(_args())
     assert calls[-1] == "lab_arena_abort_restart_guard_v1"
+
+
+def test_quiescence_lock_conflict_retries_then_requires_fresh_preserved_proof(monkeypatch):
+    calls = []
+    now = [0.0]
+
+    def request(function, payload):
+        calls.append((function, payload))
+        if function == "lab_arena_restart_guard_state_v1":
+            return _guard_state()
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            if sum(name == function for name, _ in calls) == 1:
+                raise guard_cli.GuardRpcError(function, 500, "55P03")
+            return {
+                **_drain_state(preserved=True),
+                "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+            }
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(guard_cli.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    assert guard_cli._drain(_args(timeout_seconds=5, poll_seconds=1))["preserved"] is True
+    quiescence = [payload for name, payload in calls if name == "lab_arena_restart_quiescence_v1"]
+    assert len(quiescence) == 2 and quiescence[0] == quiescence[1]
+    assert quiescence[1]["p_guard_generation"] == 1
+    assert now[0] == 1
+
+
+def test_quiescence_lock_retry_never_requests_proof_at_deadline(monkeypatch):
+    now = [0.0]
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function == "lab_arena_restart_guard_state_v1":
+            return _guard_state()
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            if calls.count(function) == 1:
+                raise guard_cli.GuardRpcError(function, 500, "55P03")
+            return {
+                **_drain_state(preserved=True),
+                "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+            }
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(guard_cli.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    with pytest.raises(guard_cli.GuardError, match="did not drain"):
+        guard_cli._drain(_args(timeout_seconds=1, poll_seconds=5))
+    assert now[0] == 1
+    assert calls.count("lab_arena_restart_quiescence_v1") == 1
+    assert calls.count("lab_arena_abort_restart_guard_v1") == 1
+
+
+def test_quiescence_lock_conflicts_keep_renewing_then_abort_at_deadline(monkeypatch):
+    now = [0.0]
+    calls = []
+
+    def request(function, payload):
+        calls.append((function, payload))
+        if function == "lab_arena_restart_guard_state_v1":
+            return _guard_state()
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            raise guard_cli.GuardRpcError(function, 500, "55P03")
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(guard_cli.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    with pytest.raises(guard_cli.GuardError, match="did not drain"):
+        guard_cli._drain(_args(timeout_seconds=65, poll_seconds=10, lease_seconds=90))
+    assert now[0] == 65
+    names = [name for name, _ in calls]
+    assert names.count("lab_arena_acquire_restart_guard_v1") >= 3
+    assert names.count("lab_arena_abort_restart_guard_v1") == 1
+    assert all(payload["p_expected_generation"] == 1 for name, payload in calls
+               if name == "lab_arena_acquire_restart_guard_v1")
+
+
+def test_lock_retry_stops_if_renewal_finds_another_owner(monkeypatch):
+    now = [0.0]
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function == "lab_arena_restart_guard_state_v1":
+            state = _guard_state()
+            if now[0] >= 30:
+                state["owner_commitment"] = "sha256:" + "f" * 64
+            return state
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            raise guard_cli.GuardRpcError(function, 500, "55P03")
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(guard_cli.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    with pytest.raises(guard_cli.GuardError, match="not owned"):
+        guard_cli._drain(_args(timeout_seconds=65, poll_seconds=10, lease_seconds=90))
+    assert now[0] == 30
+    assert calls.count("lab_arena_restart_quiescence_v1") == 3
+    assert "lab_arena_abort_restart_guard_v1" not in calls
+
+
+@pytest.mark.parametrize("rpc,status,code", [
+    ("lab_arena_restart_quiescence_v1", 500, "40P01"),
+    ("lab_arena_restart_quiescence_v1", 503, "55P03"),
+    ("lab_arena_restart_quiescence_v1", 500, "P0001"),
+    ("lab_arena_restart_guard_state_v1", 500, "55P03"),
+])
+def test_other_quiescence_errors_abort_without_retry(monkeypatch, rpc, status, code):
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            raise guard_cli.GuardRpcError(rpc, status, code)
+        if function == "lab_arena_restart_guard_state_v1":
+            return _guard_state()
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    with pytest.raises(guard_cli.GuardRpcError) as failure:
+        guard_cli._drain(_args(timeout_seconds=5))
+    assert (failure.value.status, failure.value.code) == (status, code)
+    assert calls.count("lab_arena_restart_quiescence_v1") == 1
+    assert calls.count("lab_arena_abort_restart_guard_v1") == 1
+
+
+@pytest.mark.parametrize("invalid", ["generation", "receipt", "schema"])
+def test_lock_retry_never_accepts_invalid_fresh_proof(monkeypatch, invalid):
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            if calls.count(function) == 1:
+                raise guard_cli.GuardRpcError(function, 500, "55P03")
+            result = {
+                **_drain_state(preserved=True),
+                "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+            }
+            if invalid == "generation":
+                result["guard_generation"] = 2
+            elif invalid == "receipt":
+                result["lost_or_mutated_count"] = 1
+            else:
+                result["schema_version"] = "wrong"
+            return result
+        if function == "lab_arena_restart_guard_state_v1":
+            return _guard_state()
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "sleep", lambda _seconds: None)
+    with pytest.raises(guard_cli.GuardError):
+        guard_cli._drain(_args(timeout_seconds=5))
+    assert calls.count("lab_arena_restart_quiescence_v1") == 2
+    assert calls.count("lab_arena_abort_restart_guard_v1") == 1
+
+
+def test_signal_during_lock_retry_aborts_exact_owned_guard(monkeypatch):
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function == "lab_arena_acquire_restart_guard_v1":
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            raise guard_cli.GuardRpcError(function, 500, "55P03")
+        if function == "lab_arena_restart_guard_state_v1":
+            return _guard_state()
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "sleep", lambda _seconds: signal.raise_signal(signal.SIGTERM))
+    with pytest.raises(guard_cli.GuardError, match="interrupted by SIGTERM"):
+        guard_cli._drain(_args(timeout_seconds=5))
+    assert calls.count("lab_arena_restart_quiescence_v1") == 1
+    assert calls.count("lab_arena_abort_restart_guard_v1") == 1
+
+
+@pytest.mark.parametrize("receipt_after", [
+    pytest.param(30, id="completed-work"),
+    pytest.param(2700 - 1 + 3600, id="late-45m-heartbeat"),
+    pytest.param(3600 - 1 + 4500, id="late-60m-heartbeat"),
+    pytest.param(5400 - 1 + 6300, id="late-90m-heartbeat"),
+    pytest.param(None, id="bounded-timeout"),
+])
+def test_gateway_budget_covers_runtime_then_renewed_lease(monkeypatch, receipt_after):
+    # Provider activity can renew a captured lease to now + its full TTL near
+    # the end of execution. Model the subsequent natural-expiry receipt without
+    # running a provider, changing a lease, or waiting on the wall clock.
+    script = (SCRIPT.parents[1] / "gw_restart.sh").read_text(encoding="utf-8")
+    drain = script.split("drain_lab_arena_for_restart() {", 1)[1].split("\n}", 1)[0]
+    timeout = int(re.search(r"--timeout-seconds (\d+)", drain).group(1))
+    now = [0.0]
+    calls = []
+
+    def request(function, _payload):
+        calls.append(function)
+        if function in ("lab_arena_restart_guard_state_v1", "lab_arena_acquire_restart_guard_v1"):
+            return _guard_state()
+        if function == "lab_arena_restart_quiescence_v1":
+            preserved = receipt_after is not None and now[0] >= receipt_after
+            return {
+                **_drain_state(preserved=preserved),
+                "schema_version": "leadpoet.lab_arena.restart_quiescence.v1",
+            }
+        if function == "lab_arena_abort_restart_guard_v1":
+            return _guard_state(present=False)
+        raise AssertionError(function)
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(guard_cli, "_request", request)
+    monkeypatch.setattr(guard_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(guard_cli.time, "sleep", sleep)
+    args = _args(timeout_seconds=timeout, poll_seconds=1, lease_seconds=14400)
+    if receipt_after is None:
+        with pytest.raises(guard_cli.GuardError, match="did not drain"):
+            guard_cli._drain(args)
+        assert now[0] == timeout
+        assert calls.count("lab_arena_abort_restart_guard_v1") == 1
+    else:
+        assert guard_cli._drain(args)["preserved"] is True
+        assert receipt_after <= now[0] < timeout
+        assert "lab_arena_abort_restart_guard_v1" not in calls
+    assert calls.count("lab_arena_acquire_restart_guard_v1") > 1
 
 
 @pytest.mark.parametrize("interrupt", [signal.SIGHUP, signal.SIGINT, signal.SIGTERM])

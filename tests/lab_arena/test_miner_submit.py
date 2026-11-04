@@ -87,6 +87,72 @@ class _Keypair:
         return b"\x11" * 64
 
 
+@pytest.mark.parametrize('started_after,post_wait', [(0, 0), (105, 0), (0, 60)])
+def test_full_submission_discovers_intake_after_the_observed_144_second_delay(
+    tmp_path, monkeypatch, started_after, post_wait,
+):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    opening = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    elapsed = [float(started_after)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (opening + timedelta(seconds=elapsed[0])).astimezone(tz)
+
+    class Session(_Session):
+        gets = 0
+
+        def get(self, *_args, **_kwargs):
+            self.gets += 1
+            return _Response(200, {
+                'open_round': {'round_id': 'arena-2026-11-02', 'status': 'open'} if elapsed[0] >= 144 else None,
+                'round': {'schedule': {'submission_cutoff': opening.isoformat()}},
+            })
+
+        def post(self, url, **kwargs):
+            response = super().post(url, **kwargs)
+            if post_wait and len(self.posts) == 1:
+                response = _Response(503, {'code': 'arena_store_unavailable'})
+                response.headers = {'Retry-After': str(post_wait)}
+                return response
+            if url.endswith('/presign'):
+                response._document['source_ref'] = response._document['source_ref'].replace(
+                    'arena-2026-09-04', 'arena-2026-11-02')
+            return response
+
+    def sleep(delay):
+        elapsed[0] += delay
+
+    archives = []
+    original_write = miner_submit.source_bundle.write_source_archive
+
+    def write_archive(*args, **kwargs):
+        archives.append(args)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(miner_submit, 'datetime', Clock)
+    monkeypatch.setattr(miner_submit, 'time', SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep))
+    monkeypatch.setattr(miner_submit.source_bundle, 'write_source_archive', write_archive)
+    session = Session({})
+    result = submit_agent_source(
+        source_dir=_agent_source(tmp_path), api_base_url='https://arena.example',
+        keypair=_Keypair(), credentials=CREDENTIALS, session=session,
+        now=lambda: opening.timestamp() + elapsed[0],
+    )
+    assert result['status'] == 'accepted' and result['round_id'] == 'arena-2026-11-02'
+    assert 144 + post_wait <= elapsed[0] <= 145 + post_wait
+    assert len(archives) == len(session.uploads) == 1
+    assert len(session.posts) == 2 + bool(post_wait)
+    assert session.posts[0][0].endswith('/presign') and session.posts[-1][0].endswith('/finalize')
+    if post_wait:
+        assert session.posts[0][1] is session.posts[1][1]
+        assert elapsed[0] > 180  # Each stage has a bound; this is no global deadline.
+    assert all(post[1]['round_id'] == result['round_id'] for post in session.posts)
+
+
 def _agent_source(tmp_path: Path, harness: str = "def run_icp(icp):\n    return []\n") -> Path:
     (tmp_path / "harness.py").write_text(harness, encoding="utf-8")
     (tmp_path / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")

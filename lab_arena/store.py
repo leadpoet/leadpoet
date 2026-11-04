@@ -450,6 +450,14 @@ STORE_TRANSPORT_ERRORS = frozenset({
 })
 
 
+# A RAISE EXCEPTION inside one of our own SQL functions names the specific guard
+# that refused, which the SQLSTATE alone cannot: `lab_arena_reward_slot_snapshot`
+# raises 22023 from eight distinct sites. Only an identifier of ours is projected
+# -- lowercase, underscore, `lab_arena_`-prefixed, bounded -- so no free-text
+# database message (and therefore no credential or row content) can ride along.
+STORE_RAISED_ERROR_NAME = re.compile(r"lab_arena_[a-z0-9_]{1,80}")
+
+
 def safe_store_error_metadata(value: Any) -> Dict[str, Any]:
     """Project only a known store operation and bounded machine diagnostics."""
     if not isinstance(value, Mapping):
@@ -464,6 +472,9 @@ def safe_store_error_metadata(value: Any) -> Dict[str, Any]:
         result["http_status"] = status
     if isinstance(code, str) and re.fullmatch(r"(?:[0-9A-Z]{5}|PGRST[0-9]{3})", code):
         result["code"] = code
+    error_name = value.get("error_name")
+    if isinstance(error_name, str) and STORE_RAISED_ERROR_NAME.fullmatch(error_name):
+        result["error_name"] = error_name
     if isinstance(transport_error, str) and transport_error in STORE_TRANSPORT_ERRORS:
         result["transport_error"] = transport_error
     return result
@@ -473,11 +484,12 @@ class ArenaStoreError(RuntimeError):
     """A durable-state operation failed. Messages never carry credentials."""
 
     def __init__(self, message: str, *, operation=None, resource=None,
-                 http_status=None, code=None, transport_error=None) -> None:
+                 http_status=None, code=None, transport_error=None,
+                 error_name=None) -> None:
         super().__init__(message)
         metadata = safe_store_error_metadata({
             "operation": operation, "resource": resource, "http_status": http_status,
-            "code": code, "transport_error": transport_error,
+            "code": code, "transport_error": transport_error, "error_name": error_name,
         })
         if metadata:
             self.store_error = metadata
@@ -627,10 +639,12 @@ class PostgrestTransport(StoreTransport):
             return
         detail = ""
         code = None
+        error_name = None
         try:
             body = response.json()
             if isinstance(body, dict):
                 code = body.get("code")
+                error_name = body.get("message")
                 detail = " code=%s message=%s" % (body.get("code"), str(body.get("message") or "")[:200])
         except ValueError:
             detail = ""
@@ -639,11 +653,12 @@ class PostgrestTransport(StoreTransport):
                 "%s failed: HTTP %d%s" % (context, response.status_code, detail),
                 transaction_rolled_back=True,
                 operation=operation, resource=resource,
-                http_status=response.status_code, code=code,
+                http_status=response.status_code, code=code, error_name=error_name,
             )
         raise ArenaStoreError("%s failed: HTTP %d%s" % (context, response.status_code, detail),
                               operation=operation, resource=resource,
-                              http_status=response.status_code, code=code)
+                              http_status=response.status_code, code=code,
+                              error_name=error_name)
 
     def rpc(self, function: str, params: Mapping[str, Any]) -> Any:
         if function not in FUNCTION_SIGNATURES:

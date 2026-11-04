@@ -220,3 +220,37 @@ def test_nonstore_exception_cannot_claim_store_diagnostics(monkeypatch):
         assert CANARY not in str(span) + str(error)
     finally:
         client.close()
+
+
+def test_raised_guard_name_is_projected_so_one_sqlstate_can_be_told_apart():
+    """lab_arena_reward_slot_snapshot raises 22023 from eight sites; name the one."""
+    def handle(request):
+        return httpx.Response(400, json={
+            'code': '22023', 'message': 'lab_arena_reward_slot_start_epoch_invalid',
+            'details': CANARY, 'hint': CANARY,
+        })
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = PostgrestTransport('https://db.example', service_key='sb_secret_test', http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            store.rpc('lab_arena_reward_slot_snapshot', {'p_round_id': 'arena-2026-11-04'})
+    assert caught.value.store_error == dict(
+        operation='rpc', resource='lab_arena_reward_slot_snapshot', http_status=400,
+        code='22023', error_name='lab_arena_reward_slot_start_epoch_invalid',
+    )
+    assert CANARY not in json.dumps(caught.value.store_error)
+
+
+@pytest.mark.parametrize('message', [
+    CANARY, 'relation "x" does not exist', 'LAB_ARENA_SHOUTING', 'lab_arena_' + 'x' * 81,
+    'permission denied for table lab_arena_runs', 42, None, '',
+])
+def test_a_database_message_that_is_not_one_of_our_guard_names_is_dropped(message):
+    def handle(request):
+        return httpx.Response(400, json={'code': '22023', 'message': message})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = PostgrestTransport('https://db.example', service_key='sb_secret_test', http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            store.rpc(RPC, {})
+    assert 'error_name' not in caught.value.store_error
+    assert caught.value.store_error == dict(
+        operation='rpc', resource=RPC, http_status=400, code='22023')

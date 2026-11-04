@@ -801,7 +801,7 @@ PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 
 STORE_ERROR_SPAN_FIELDS = frozenset({
     "arena.store_operation", "arena.store_resource", "arena.store_http_status",
-    "arena.store_code", "arena.store_transport_error",
+    "arena.store_code", "arena.store_transport_error", "arena.store_error_name",
 })
 
 PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(PROVIDER_SPAN_ATTRIBUTE_TYPES)

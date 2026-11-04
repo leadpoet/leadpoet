@@ -557,11 +557,65 @@ def _verified_runtime_source(resource):
     return origin == "git_checkout" and dirty == "clean" or origin in {"release_marker", "verified_archive_environment"} and dirty == "unknown"
 
 
-def _source_evidence(objects, run, round_row, submission, participant):
+def _corrected_source_binding(run, round_row, submission, participant, history):
+    """Accept only an owner-recorded source revision for this exact execution.
+
+    The existing history RPC projects a receipt only while its source and round
+    still match live state, and names only executions admitted by that receipt.
+    It never supplies a general exemption for noncanonical object paths.
+    """
+    config = round_row.get("configuration_doc") or {}
+    round_id = run["round_id"]
+    baseline_id = "baseline-" + round_id.removeprefix("arena-")
+    if (submission.get("is_king") is not True or participant.get("is_king") is not True
+            or submission.get("status") != "frozen" or run.get("kind") != "execute"
+            or run.get("submission_id") != baseline_id
+            or participant.get("submission_id") != baseline_id
+            or participant.get("miner_hotkey") != run.get("miner_hotkey")
+            or config.get("baseline_hotkey") != run.get("miner_hotkey")
+            or not isinstance(history, Mapping) or history.get("round_id") != round_id
+            or not isinstance(history.get("source_corrections"), list)):
+        raise ExportError("source_correction_authority_missing")
+    matches = [row for row in history["source_corrections"]
+               if isinstance(row, Mapping) and isinstance(row.get("run_ids"), list)
+               and run["run_id"] in row["run_ids"]]
+    if len(matches) != 1:
+        raise ExportError("source_correction_authority_ambiguous")
+    proof = matches[0]
+    fields = ("submission_id", "miner_hotkey", "source_ref", "source_size_bytes",
+              "source_archive_sha256", "source_normalized_sha256")
+    source_url = proof.get("baseline_source_url")
+    match = re.fullmatch(
+        r"https://github[.]com/leadpoet/leadpoet-sales-agent/archive/([0-9a-f]{40})[.]tar[.]gz",
+        source_url if isinstance(source_url, str) else "")
+    if (proof.get("operation") != "baseline_source_supersession_v1"
+            or proof.get("round_id") != round_id
+            or not isinstance(proof.get("request_id"), str) or not proof["request_id"]
+            or any(not isinstance(proof.get(key), str)
+                   or contracts.SHA256_RE.fullmatch(proof[key]) is None
+                   for key in ("request_hash", "source_archive_sha256", "source_normalized_sha256"))
+            or any(proof.get(key) != submission.get(key) for key in fields)
+            or type(proof.get("source_size_bytes")) is not int or proof["source_size_bytes"] < 1
+            or participant.get("source_ref") != proof["source_ref"]
+            or participant.get("source_size_bytes") != proof["source_size_bytes"]
+            or any(proof.get(key) != config.get(key) for key in
+                   ("baseline_source_url", "reasoning_baseline_source_sha256"))
+            or proof.get("reasoning_baseline_source_sha256") != proof["source_archive_sha256"]
+            or any(not isinstance(identity, str) for identity in proof["run_ids"])
+            or len(set(proof["run_ids"])) != len(proof["run_ids"])
+            or match is None):
+        raise ExportError("source_correction_binding_invalid")
+    return {"request_id": proof["request_id"], "request_hash": proof["request_hash"],
+            "commit": match.group(1)}
+
+
+def _source_evidence(objects, run, round_row, submission, participant, history=None):
     source_ref = participant["source_ref"]
     expected_ref = "arena/%s/sources/%s.tar.gz" % (run["round_id"], run["submission_id"])
-    if source_ref != submission.get("source_ref") or source_ref != expected_ref:
+    if source_ref != submission.get("source_ref"):
         raise ExportError("source_ref_mismatch")
+    correction = (_corrected_source_binding(run, round_row, submission, participant, history)
+                  if source_ref != expected_ref else None)
     source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
     facts = source_bundle.validate_source_archive(source)
     if (type(participant.get("source_size_bytes")) is not int
@@ -586,10 +640,19 @@ def _source_evidence(objects, run, round_row, submission, participant):
                 or (round_row.get("configuration_doc") or {}).get("baseline_hotkey") != run.get("miner_hotkey")):
             raise ExportError("source_recorded_hash_missing")
         origin = "computed_from_frozen_object"
-    return {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
+    if correction is not None:
+        from lab_arena import submission_similarity
+        if (source_bundle.source_archive_commit(source) != correction["commit"]
+                or submission_similarity.inspect_archive(source).normalized_sha256
+                != submission["source_normalized_sha256"]):
+            raise ExportError("source_correction_archive_mismatch")
+    evidence = {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
             "hash_origin": origin, "recorded_hash_present": bool(recorded),
             "normalized_sha256": submission.get("source_normalized_sha256"),
             "archive_commit_comment": source_bundle.source_archive_commit(source) or None}
+    if correction is not None:
+        evidence["source_correction"] = correction
+    return evidence
 
 
 def _response_value(terminal, provider):
@@ -1526,7 +1589,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
-                               reader: Callable[..., Mapping[str, Any]] | None) -> dict:
+                               reader: Callable[..., Mapping[str, Any]] | None,
+                               source_correction: Mapping[str, Any] | None = None) -> dict:
     """Keep the export-time cost decision separate from the quality label.
 
     The existing SQL authority calculates successful-sourcing cost. Its result
@@ -1585,15 +1649,32 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
         execution = snapshot["execution"]
         if not isinstance(execution, Mapping):
             raise ValueError("execution cost state is not a mapping")
+        source_split = ("excluded_superseded_source_successful_microusd",
+                        "excluded_superseded_source_settled_microusd")
+        source_excluded = any(key in execution for key in source_split)
+        if source_excluded and (
+            not isinstance(source_correction, Mapping)
+            or not isinstance(source_correction.get("request_id"), str)
+            or not source_correction["request_id"]
+            or not isinstance(source_correction.get("request_hash"), str)
+            or contracts.SHA256_RE.fullmatch(source_correction["request_hash"]) is None
+            or configuration.get("baseline_source_url") != (
+                "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                + str(source_correction.get("commit") or "") + ".tar.gz")
+            or run.get("submission_id") != "baseline-" + run["round_id"].removeprefix("arena-")
+            or run.get("miner_hotkey") != configuration.get("baseline_hotkey")
+            or any(type(execution.get(key)) is not int or execution[key] < 0 for key in source_split)
+        ):
+            raise ValueError("superseded source cost authority is invalid")
         successful = execution["successful_microusd"]
         split = ("competition_successful_microusd",
                  "excluded_infrastructure_successful_microusd")
-        if any(key in execution for key in split):
-            # Migration 478 preserves raw spend and excludes proved failed
-            # infrastructure attempts only from competition spend. Both parts
-            # must account for the unchanged raw successful total.
+        if source_excluded or any(key in execution for key in split):
+            # Infrastructure and receipt-bound superseded-source exclusions
+            # are disjoint. Every part must reproduce the raw financial total.
             if (any(type(execution.get(key)) is not int or execution[key] < 0 for key in split)
-                    or successful != sum(execution[key] for key in split)):
+                    or successful != sum(execution[key] for key in split) + (
+                        execution[source_split[0]] if source_excluded else 0)):
                 raise ValueError("execution cost split is invalid")
             successful = execution["competition_successful_microusd"]
         confirmed = execution.get("settled_microusd")
@@ -1602,10 +1683,11 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 raise ValueError("confirmed cost is invalid")
             settled_split = ("competition_settled_microusd",
                              "excluded_infrastructure_settled_microusd")
-            if any(key in execution for key in settled_split):
+            if source_excluded or any(key in execution for key in settled_split):
                 if (any(type(execution.get(key)) is not int or execution[key] < 0
                         for key in settled_split)
-                        or confirmed != sum(execution[key] for key in settled_split)):
+                        or confirmed != sum(execution[key] for key in settled_split) + (
+                            execution[source_split[1]] if source_excluded else 0)):
                     raise ValueError("confirmed competition cost split is invalid")
                 confirmed = execution["competition_settled_microusd"]
         numbers = (
@@ -1753,7 +1835,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         raise ExportError("ambiguous_frozen_participant")
     participant = participants[0]
     try:
-        example["source"] = _source_evidence(objects, run, round_row, submission_row, participant)
+        example["source"] = _source_evidence(
+            objects, run, round_row, submission_row, participant, scoring_policy_history)
     except Exception:
         reasons["source_identity"].add("source_unverified")
     resource = (run.get("result_doc") or {}).get("resource_summary") or {}
@@ -1872,6 +1955,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["competition_cost_eligibility"] = _competition_cost_snapshot(
         run=run, configuration=config, scored=scored, related=related,
         reader=cost_eligibility_reader,
+        source_correction=example.get("source", {}).get("source_correction"),
     )
     if (config.get("sourcing_cost_eligibility_policy")
             in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES

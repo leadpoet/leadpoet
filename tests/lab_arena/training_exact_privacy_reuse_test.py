@@ -1,12 +1,13 @@
 """Per-example privacy reuse rechecks content and preserves independent proof."""
 
 from copy import deepcopy
+from collections import OrderedDict
 from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
 
-from lab_arena import training_steps as steps, training_worker_proof as proof
+from lab_arena import training_capture as capture, training_steps as steps, training_worker_proof as proof
 from tests.lab_arena.training_host_result_test import without_client_callbacks
 from tests.lab_arena.training_steps_test import fixture
 
@@ -178,6 +179,83 @@ def test_actual_candidate_path_reuses_requests_and_responses_without_changing_ou
         # _host_response share the request result in the host-result variant.
         assert scan.call_count == 2
     assert example == before
+
+
+def test_growing_requests_reuse_clean_history_scans_without_skipping_request_checks():
+    history = [f'plain history {i}: ' + ('ordinary evidence ' * 1_000)
+               for i in range(4)]
+    requests = [{'messages': [{'role': 'user', 'content': text}
+                              for text in history[:end]]}
+                for end in range(1, 5)]
+    original_scan = capture.trajectory.redact_text
+    large_scans = []
+
+    def count_large(text, *args, **kwargs):
+        if len(text) > 16_000:
+            large_scans.append(1)
+        return original_scan(text, *args, **kwargs)
+
+    with patch.object(capture.trajectory, 'redact_text', side_effect=count_large):
+        expected = [steps._exact(request) for request in requests]
+        standalone_scans = len(large_scans)
+    owner = proof.WorkerProofs()
+    large_scans.clear()
+    with patch.object(capture.trajectory, 'redact_text', side_effect=count_large):
+        assert [steps._exact(request, worker_proofs=owner) for request in requests] == expected
+        shared_scans = len(large_scans)
+    assert expected == [True] * len(requests)
+    assert shared_scans < standalone_scans / 2
+    assert len(owner._exact_privacy) == len(requests)  # no whole-request hits
+    assert all(type(digest) is bytes and len(digest) == 32
+               for digest in owner._clean_text_digests)
+
+
+def test_clean_text_proof_rechecks_mutations_secrets_urls_and_modes():
+    owner = proof.WorkerProofs()
+    text = 'plain evidence ' * 100
+    value = {'messages': [{'content': text}, {'content': text + ' second'}]}
+    assert steps._exact(value, worker_proofs=owner)
+    assert owner._clean_text_digests
+    cases = [
+        {'messages': [{'content': text + ' Bearer synthetic-secret'}]},
+        {'messages': [{'content': text + ' https://example.test/?api_key=synthetic-secret'}]},
+        {'messages': [{'content': 'Bearer synthetic-secret ' + text}]},
+    ]
+    for changed in cases:
+        assert steps._exact(changed, worker_proofs=owner) == steps._exact(changed) is False
+    # The same bytes in a response use their own whole-object proof; the text
+    # proof only saves the context-independent clean leaf scan.
+    assert steps._exact(value, response=True, worker_proofs=owner) == steps._exact(value, response=True)
+    reordered = {'messages': list(reversed(value['messages']))}
+    assert steps._exact(reordered, worker_proofs=owner) == steps._exact(reordered)
+    value['messages'][0]['content'] += ' Bearer synthetic-secret'
+    assert steps._exact(value, worker_proofs=owner) == steps._exact(value) is False
+
+
+def test_shared_clean_text_proof_never_caches_dirty_or_custom_values_and_keeps_reasons():
+    cache = OrderedDict()
+    clean = 'ordinary source detail ' * 100
+    assert capture.sanitize_training_value({'content': clean}, clean_text_digests=cache) == (
+        {'content': clean}, [])
+    snapshot = tuple(cache)
+    values = [
+        {'content': clean, 'authorization': 'Bearer synthetic-secret'},
+        {'content': clean + ' Bearer synthetic-secret'},
+        {'content': clean + ' https://example.test/?token=synthetic-secret'},
+        {'reasoning': {'text': clean}, 'encrypted_content': 'opaque'},
+        {'content': CustomString(clean)},
+    ]
+    for value in values:
+        assert capture.sanitize_training_value(value, clean_text_digests=cache) == (
+            capture.sanitize_training_value(value))
+    assert tuple(cache) == snapshot
+    secret_value = {'content': clean + ' private-token-value'}
+    assert capture.sanitize_training_value(secret_value, secrets=('private-token-value',),
+                                           clean_text_digests=cache) == capture.sanitize_training_value(
+                                               secret_value, secrets=('private-token-value',))
+    assert tuple(cache) == snapshot
+    with pytest.raises(capture.CaptureError, match='request_structure_limit'):
+        capture.sanitize_training_value({'content': clean}, max_nodes=1, clean_text_digests=cache)
 
 
 @pytest.mark.parametrize('damage,reason', [

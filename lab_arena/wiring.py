@@ -692,6 +692,13 @@ def build_service_from_environment(mode: str):
                 if chain_config.network_name != "test" else ""
             )
         ),
+        # The canonical gateway env and restart controls live here across
+        # releases. Root operator commands and the ec2-user driver must share
+        # the same inode; Path.home() would split their lock namespaces.
+        publication_lock_dir=Path(os.environ.get(
+            "LAB_ARENA_PUBLICATION_LOCK_DIR",
+            "/home/ec2-user/.config/leadpoet",
+        )),
     )
     service = ArenaService(config)
     app = create_app(service)

@@ -34,6 +34,7 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
+from lab_arena.publication_lock import PublicationLockError, publication_round_lock
 from lab_arena.store import (
     ArenaStore,
     ArenaStoreError,
@@ -755,6 +756,8 @@ class ServiceConfig:
     ] = None
     # Observational uploads use a separate bounded client in production.
     training_object_store: Optional[ObjectStore] = None
+    # Existing private directory shared by canonical gateway processes.
+    publication_lock_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if (
@@ -5070,6 +5073,21 @@ class ArenaService:
             return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
 
     def publish(self, round_id: str) -> Dict[str, Any]:
+        lock_dir = getattr(getattr(self, "_config", None), "publication_lock_dir", None)
+        if lock_dir is None:  # Embedded/test services do not have a host directory.
+            return self._publish_locked(round_id)
+        try:
+            with publication_round_lock(lock_dir, round_id) as acquired:
+                if not acquired:
+                    return {"status": "retry", "round_status": "scored",
+                            "reason": "publication_busy"}
+                # Read the current status only after ownership. A former owner
+                # may have published while this process waited for its tick.
+                return self._publish_locked(round_id)
+        except PublicationLockError as exc:
+            raise ServiceError("publication_lock_unavailable", 503) from exc
+
+    def _publish_locked(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}

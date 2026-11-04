@@ -25,9 +25,9 @@
 -- only the singleton row FOR SHARE so it never queues behind a lease sweep
 -- holding the global claim-control advisory lock.
 --
--- The preimage below is the function as migration 605 left it; 599 and 605 have
--- both patched `lab_arena_begin_submission_review` since 587, and neither
--- touched the guard lines this migration anchors on.
+-- 599 and 605 have both patched `lab_arena_begin_submission_review` since 587,
+-- and neither touched the guard lines this migration anchors on, so the patch
+-- below accepts either the 587 body or the 605 body and refuses anything else.
 --
 -- The 587 patch below verifies its preimage digest and then asserts that the
 -- readback is byte-identical to the text this migration constructed, which is
@@ -83,7 +83,14 @@ GRANT EXECUTE ON FUNCTION public.lab_arena_review_guard_state_v1()
 DO $review619_0$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)';
-  v_preimage CONSTANT TEXT := '6c9974bae7c8b42dedcdee6e4a9145672402f5e0c74c87f8a9fff56afafeddf5';
+  -- Two bodies legitimately carry the guard lines this migration anchors on:
+  -- the function as 587 left it, and the same function after 599 and 605
+  -- patched unrelated parts of it. Production is on the latter; a database
+  -- built only as far as 587 is on the former. Any other body is refused.
+  v_preimages CONSTANT TEXT[] := ARRAY[
+    '38ed2f3616f92a0c17a3ef1c8f7617f229fed949f560f1bb3bb1f91c03c6534a',
+    '6c9974bae7c8b42dedcdee6e4a9145672402f5e0c74c87f8a9fff56afafeddf5'];
+  v_digest TEXT;
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;
@@ -107,8 +114,9 @@ BEGIN
   IF pg_catalog.strpos(v_definition,'v_review_guard_active') > 0 THEN
     RETURN;
   END IF;
-  IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')<>v_preimage THEN
-    RAISE EXCEPTION 'Arena review619 preimage differs' USING ERRCODE='55000';
+  v_digest:=pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex');
+  IF NOT (v_digest = ANY (v_preimages)) THEN
+    RAISE EXCEPTION 'Arena review619 preimage differs: %', v_digest USING ERRCODE='55000';
   END IF;
   v_updated:=v_definition;
 

@@ -32,6 +32,10 @@ CACHE_SCOPE_SCHEMA_VERSION = "leadpoet.lab_arena.company_judgment_scope.v1"
 COMPANY_REF_SCHEMA_VERSION = "leadpoet.lab_arena.company_judgment_ref.v1"
 LEASE_SCHEMA_VERSION = "leadpoet.lab_arena.company_judgment_lease.v1"
 EVIDENCE_SCHEMA_VERSION = "leadpoet.lab_arena.company_judgment_evidence.v1"
+FIT_CHECKPOINT_KIND = "verified_company_fit_v1"
+FIT_CHECKPOINT_INDEX = -1
+FIT_CHECKPOINT_SCHEMA_VERSION = "leadpoet.lab_arena.verified_company_fit.v1"
+MAX_FIT_CHECKPOINT_BYTES = 1_000_000
 
 _BASE_SCORING_INPUT_FIELDS = (
     "schema_version",
@@ -75,6 +79,90 @@ def _require_hash(value: Any, field: str) -> str:
     ):
         raise CompanyJudgmentError(f"{field} is invalid")
     return text
+
+
+def validate_verified_fit_checkpoint(value: Any) -> Dict[str, Any]:
+    """Admit only a complete positive fit, with its original private contexts.
+
+    This is intermediate evidence. It is never a company judgment or an
+    approval of intent, paragraph, contact, or aggregate score.
+    """
+    from qualification.scoring.arena_integrity import verified_identity_receipt
+    from qualification.scoring.company_fit_decision import (
+        COMPANY_FIT_DECISION_CONTRACT_ID, COMPANY_FIT_DECISION_VERSION,
+        COMPANY_FIT_DIMENSIONS, COMPANY_FIT_REQUIRED_DIMENSIONS,
+    )
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version", "company_fit_receipt", "linkedin_profile_source",
+        "matched_company_sources", "required_attribute_sources",
+    }:
+        raise CompanyJudgmentError("verified fit checkpoint fields changed")
+    copied = _json_copy(value)
+    if len(contracts.canonical_json(copied).encode("utf-8")) > MAX_FIT_CHECKPOINT_BYTES:
+        raise CompanyJudgmentError("verified fit checkpoint is too large")
+    receipt = copied["company_fit_receipt"]
+    if (copied["schema_version"] != FIT_CHECKPOINT_SCHEMA_VERSION
+        or not isinstance(receipt, Mapping)
+        or receipt.get("gate") != "company_fit"
+        or receipt.get("contract_id") != COMPANY_FIT_DECISION_CONTRACT_ID
+        or receipt.get("contract_version") != COMPANY_FIT_DECISION_VERSION
+        or receipt.get("decision") != "match"
+        or receipt.get("company_fit_decision") != "match"
+        or type(receipt.get("company_fit_stage_required")) is not bool
+        or receipt.get("required_attribute_decision") != "match"
+        or receipt.get("failure_class") or receipt.get("failure_reason_code")):
+        raise CompanyJudgmentError("verified fit checkpoint is not positive")
+    dimensions = receipt.get("company_fit_dimensions")
+    required = set(COMPANY_FIT_REQUIRED_DIMENSIONS)
+    if receipt["company_fit_stage_required"]:
+        required.add("stage")
+    if (not isinstance(dimensions, Mapping)
+        or set(dimensions) != set(COMPANY_FIT_DIMENSIONS)
+        or any(decision not in {"match", "mismatch", "unavailable"} for decision in dimensions.values())
+        or any(dimensions[dimension] != "match" for dimension in required)):
+        raise CompanyJudgmentError("verified fit checkpoint dimensions are incomplete")
+    identity = verified_identity_receipt([receipt])
+    if (identity is None or not identity.get("observed_name")
+        or not identity.get("observed_domain")):
+        raise CompanyJudgmentError("verified fit checkpoint identity is incomplete")
+    evidence = receipt.get("dimension_evidence")
+    if not isinstance(evidence, Mapping) or any(
+        not isinstance(evidence.get(dimension), Mapping)
+        or evidence[dimension].get("decision") != "match"
+        for dimension in required
+    ):
+        raise CompanyJudgmentError("verified fit checkpoint evidence is incomplete")
+    for field in ("linkedin_profile_source", "matched_company_sources", "required_attribute_sources"):
+        if not isinstance(copied[field], Mapping):
+            raise CompanyJudgmentError("verified fit checkpoint source context is invalid")
+    from qualification.competition_models import public_http_url
+    from qualification.scoring.company_evidence_investigator import MAX_PAGE_CHARACTERS
+    from qualification.scoring.linkedin_company_size import PROFILE_MAX_CHARACTERS
+    profile = copied["linkedin_profile_source"]
+    if profile and (set(profile) not in ({"url", "text"}, {"url", "text", "http_status"})
+        or not isinstance(profile.get("text"), str) or len(profile["text"]) > PROFILE_MAX_CHARACTERS
+        or not isinstance(profile.get("url"), str)):
+        raise CompanyJudgmentError("verified fit profile context is invalid")
+    try:
+        if profile and public_http_url(profile["url"]) != profile["url"]:
+            raise ValueError("noncanonical profile URL")
+        for field, maximum in (("matched_company_sources", 14), ("required_attribute_sources", 2)):
+            if len(copied[field]) > maximum:
+                raise ValueError("too many source contexts")
+            for url, entry in copied[field].items():
+                if (not isinstance(url, str) or public_http_url(url) != url
+                    or not isinstance(entry, Mapping)
+                    or not isinstance(entry.get("final_url"), str)
+                    or public_http_url(entry["final_url"]) != entry["final_url"]
+                    or not isinstance(entry.get("text"), str) or not entry["text"]
+                    or len(entry["text"]) > MAX_PAGE_CHARACTERS
+                    or (field == "matched_company_sources" and set(entry) != {"final_url", "text"})
+                    or (field == "required_attribute_sources" and entry.get("status") != "fetched")):
+                    raise ValueError("invalid fetched source context")
+    except (TypeError, ValueError) as exc:
+        raise CompanyJudgmentError("verified fit source context is invalid") from exc
+    return copied
 
 
 def _input_fields(

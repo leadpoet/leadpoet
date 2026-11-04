@@ -233,7 +233,7 @@ def _terminal_company_fit_nonmatch(breakdown):
 
 def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                                scoring_input, uses, authority_rows, company_rows, runs,
-                               round_row):
+                               round_row, source_input_reader=None):
     """Resolve every emitted signal reference against its original frozen row."""
     if (scoring_input.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_judgments.POLICY:
         if uses or any(
@@ -268,7 +268,8 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
     by_use = {}
     for use in uses:
         position = (use.get("run_id"), use.get("company_index"), use.get("signal_index"))
-        if (position in by_use or any(type(value) is not int or value < 0 for value in position[1:])):
+        if (position in by_use or type(position[1]) is not int or position[1] < 0
+            or type(position[2]) is not int or position[2] < company_judgments.FIT_CHECKPOINT_INDEX):
             raise ExportError("signal_use_invalid")
         by_use[position] = use
     by_authority = {}
@@ -318,11 +319,79 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             positions.append(position)
         return positions
     for company_index, breakdown in zip(scored_company_indexes, breakdowns):
+        fit_position = (judge["run_id"], company_index, company_judgments.FIT_CHECKPOINT_INDEX)
+        fit_use = by_use.get(fit_position)
+        if fit_use is None:
+            positions = source_positions(company_index, company_judgments.FIT_CHECKPOINT_INDEX, None)
+            fit_position = positions[0] if len(positions) == 1 else None
+            fit_use = by_use.get(fit_position)
+        if fit_use is not None:
+            row = by_authority.get((fit_use.get("cache_key"), fit_use.get("authority_slot")))
+            fit_judge = runs.get(fit_position[0])
+            execution = runs.get(fit_judge.get("scored_run_id")) if fit_judge is not None else None
+            if row is None or execution is None or fit_position in seen:
+                raise ExportError("fit_checkpoint_authority_missing")
+            fit_input = frozen_input
+            if fit_judge["run_id"] != judge["run_id"]:
+                if source_input_reader is None:
+                    raise ExportError("fit_checkpoint_source_input_missing")
+                source_input = source_input_reader(fit_judge)
+                if not isinstance(source_input, Mapping) or set(source_input) - runtime_fields != set(fields):
+                    raise ExportError("fit_checkpoint_source_input_invalid")
+                fit_input = {field: source_input[field] for field in fields}
+                current_effective = company_judgments.effective_company_inputs(frozen_input)[company_index]
+                source_effective = company_judgments.effective_company_inputs(fit_input)[fit_position[1]]
+                if current_effective != source_effective:
+                    raise ExportError("fit_checkpoint_company_input_mismatch")
+            execution_hash = contracts.document_hash({
+                "schema_version": contact_policy.output_schema(config),
+                "companies": fit_input["companies"],
+            })
+            scope = signal_judgments.build_fit_scope(
+                scoring_input=fit_input, company_index=fit_position[1],
+                checkpoint_context=signal_judgments.fit_checkpoint_context(
+                    fit_judge, execution, config, fit_input, execution_hash,
+                ),
+                round_id=judge["round_id"], network_name=round_row["arena_network_name"],
+                netuid=int(round_row.get("arena_netuid") or 0),
+                scorer_image_digest=config["scorer_image_digest"],
+                scorer_image_reference=config["scorer_image_reference"],
+            )
+            judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
+            from arena_reviewer_runtime.checkpoint_io import normalize_evidence_quotes
+            fit_receipts = [receipt for receipt in breakdown.get("verifier_gate_receipts") or []
+                            if isinstance(receipt, Mapping) and receipt.get("gate") == "company_fit"]
+            source = runs.get(row.get("source_score_run_id"))
+            if (row.get("scope_doc") != scope
+                or fit_receipts != [normalize_evidence_quotes(judgment["company_fit_receipt"])]
+                or row.get("cache_key") != scope["cache_key"]
+                or row.get("signal_input_hash") != scope["signal_input_hash"]
+                or row.get("judgment_hash") != contracts.document_hash(judgment)
+                or any(fit_use.get(key) != row.get(key) for key in (
+                    "cache_key", "authority_slot", "signal_input_hash", "source_score_run_id", "judgment_hash",
+                )) or source is None or source.get("kind") != "score"
+                or source.get("status") not in {"accepted", "failed", "leased"}
+                or source.get("round_id") != judge["round_id"]
+                or source.get("assignment_id") != fit_judge.get("assignment_id")
+                or source.get("scoring_generation_floor", 0) != fit_judge.get("scoring_generation_floor", 0)
+                or source.get("scored_run_id") != fit_judge.get("scored_run_id")
+                or source.get("scored_run_id") != row.get("source_scored_run_id")
+                or source.get("runner_hotkey") != row.get("source_runner_hotkey")
+                or source.get("claim_request_hash") != row.get("source_claim_request_hash")
+                or source.get("lease_generation") != row.get("source_lease_generation")
+                or reviewer_runtime.selected_image(source, config) != reviewer_runtime.selected_image(fit_judge, config)):
+                raise ExportError("fit_checkpoint_source_mismatch")
+            seen.add(fit_position)
+            evidence.append({
+                "company_index": company_index, "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+                "reference": signal_judgments.reference(scope, row["authority_slot"]),
+                "use": copy.deepcopy(fit_use), "authority": copy.deepcopy(row),
+            })
         details = _signal_details(breakdown)
         unmatched = {position for position in by_use
-                     if position[0] == judge["run_id"] and position[1] == company_index}
+                     if position[0] == judge["run_id"] and position[1] == company_index and position not in seen}
         for signal_index in {position[2] for position in by_use}:
-            unmatched.update(source_positions(company_index, signal_index, None))
+            unmatched.update(position for position in source_positions(company_index, signal_index, None) if position not in seen)
         if not details and unmatched:
             if not _terminal_company_fit_nonmatch(breakdown):
                 raise ExportError("signal_use_without_reference")
@@ -1926,6 +1995,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     )
     if signal_policy or unmarked_signal_evidence:
         try:
+            def read_fit_source_input(source):
+                from lab_arena.training_input import read_input
+                snapshot = read_input(objects, source["run_id"], "score",
+                                      source.get("lease_generation"), source.get("claim_request_hash"))
+                if (snapshot.get("privacy") or {}).get("redacted"):
+                    raise ExportError("fit_checkpoint_source_input_redacted")
+                return snapshot["input"]
             if judge is None or "judgment" not in example or judge["run_id"] not in snapshots:
                 raise ExportError("signal_judge_evidence_missing")
             evidence = _signal_authority_evidence(
@@ -1935,6 +2011,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 uses=signal_judgment_uses, authority_rows=signal_judgment_rows,
                 company_rows=company_judgment_rows, runs=by_id,
                 round_row={**round_row, "configuration_doc": score_configuration(judge)},
+                source_input_reader=read_fit_source_input,
             )
             example["judgment"]["signal_authority_evidence"] = evidence
             # Keep persisted actions as process evidence even when the final

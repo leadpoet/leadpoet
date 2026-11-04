@@ -129,6 +129,70 @@ def build_scope(
     return {**scope, "cache_key": _hash(scope)}
 
 
+def build_fit_scope(
+    *, scoring_input: Mapping[str, Any], company_index: int, round_id: str,
+    network_name: str, netuid: int, scorer_image_digest: str,
+    scorer_image_reference: str, checkpoint_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind intermediate fit to every original effective company input."""
+    policy = scoring_input.get("scorer_policy") if isinstance(scoring_input, Mapping) else None
+    if not isinstance(policy, Mapping) or policy.get("signal_judgment_policy") != POLICY:
+        raise SignalJudgmentError("signal policy is not frozen")
+    effective = company_judgments.effective_company_inputs(scoring_input)
+    if type(company_index) is not int or not 0 <= company_index < len(effective):
+        raise SignalJudgmentError("company index is outside scoring input")
+    if (not isinstance(checkpoint_context, Mapping) or set(checkpoint_context) != {
+        "assignment_id", "scored_run_id", "scoring_generation_floor", "execution_output_ref",
+        "execution_output_hash", "scoring_input_hash", "runtime_image_digest", "runtime_image_reference",
+    } or checkpoint_context.get("scored_run_id") != scoring_input.get("scored_run_id")
+        or checkpoint_context.get("scoring_input_hash") != _hash(scoring_input)
+        or type(checkpoint_context.get("scoring_generation_floor")) is not int
+        or checkpoint_context["scoring_generation_floor"] < 0
+        or not all(checkpoint_context.get(key) for key in ("assignment_id", "execution_output_ref", "runtime_image_reference"))):
+        raise SignalJudgmentError("verified fit execution context is invalid")
+    for key in ("execution_output_hash", "scoring_input_hash", "runtime_image_digest"):
+        _require_hash(checkpoint_context[key])
+    scope = {
+        "schema_version": SCOPE_VERSION,
+        "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+        "checkpoint_context": _copy(checkpoint_context),
+        "round_id": str(round_id), "network_name": str(network_name),
+        "netuid": int(netuid),
+        "scorer_image_digest": str(scorer_image_digest),
+        "scorer_image_reference": str(scorer_image_reference),
+        "evaluation_date": str(effective[company_index]["evaluation_date"]),
+        "signal_judgment_policy": POLICY,
+        "signal_input_hash": _hash({
+            "schema_version": "leadpoet.lab_arena.verified_company_fit_input.v1",
+            "effective_company_input": effective[company_index],
+        }),
+    }
+    if not all(scope[key] for key in (
+        "round_id", "network_name", "scorer_image_digest", "scorer_image_reference", "evaluation_date",
+    )) or scope["netuid"] < 0:
+        raise SignalJudgmentError("verified fit scope is incomplete")
+    return {**scope, "cache_key": _hash(scope)}
+
+
+def fit_checkpoint_context(
+    run: Mapping[str, Any], executed: Mapping[str, Any], configuration: Mapping[str, Any],
+    scoring_input: Mapping[str, Any], execution_output_hash: str,
+) -> dict[str, Any]:
+    """Read only gateway-owned execution and lease-selected runtime identity."""
+    from lab_arena import reviewer_runtime
+    selected = reviewer_runtime.selected_image(run, configuration)
+    return {
+        "assignment_id": run.get("assignment_id"),
+        "scored_run_id": executed.get("run_id"),
+        "scoring_generation_floor": run.get("scoring_generation_floor", 0),
+        "execution_output_ref": executed.get("output_ref"),
+        "execution_output_hash": execution_output_hash,
+        "scoring_input_hash": _hash(scoring_input),
+        "runtime_image_digest": selected["image_digest"],
+        "runtime_image_reference": selected["image_reference"],
+    }
+
+
 def reference(scope: Mapping[str, Any], authority_slot: int) -> dict[str, Any]:
     if type(authority_slot) is not int or authority_slot < 0:
         raise SignalJudgmentError("authority slot is invalid")
@@ -153,6 +217,11 @@ def validate_reference(value: Any, scope: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_judgment(value: Any, scope: Mapping[str, Any]) -> dict[str, Any]:
+    if scope.get("checkpoint_kind") == company_judgments.FIT_CHECKPOINT_KIND:
+        try:
+            return company_judgments.validate_verified_fit_checkpoint(value)
+        except company_judgments.CompanyJudgmentError as exc:
+            raise SignalJudgmentError("verified fit checkpoint is invalid") from exc
     if not isinstance(value, Mapping):
         raise SignalJudgmentError("signal judgment is not an object")
     copied = _copy(value)

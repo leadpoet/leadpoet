@@ -20,6 +20,21 @@ REQUEST_FIELDS = {"operation", "company_index", "signal_index", "verified_compan
 def validate_request(value: Any) -> dict:
     if not isinstance(value, Mapping):
         raise ValueError("invalid signal cache request")
+    from lab_arena import company_judgments
+    if value.get("checkpoint_kind") == company_judgments.FIT_CHECKPOINT_KIND:
+        expected = {"operation", "company_index", "signal_index", "checkpoint_kind"}
+        if value.get("operation") == "complete":
+            expected |= {"reference", "judgment"}
+        if (set(value) != expected or value.get("operation") not in {"claim", "complete"}
+            or type(value.get("company_index")) is not int or not 0 <= value["company_index"] < 5
+            or type(value.get("signal_index")) is not int
+            or value["signal_index"] != company_judgments.FIT_CHECKPOINT_INDEX):
+            raise ValueError("invalid verified fit checkpoint request")
+        from lab_arena import contracts
+        encoded = contracts.canonical_json(value).encode("utf-8")
+        if len(encoded) > MAX_BYTES:
+            raise ValueError("signal cache request too large")
+        return json.loads(encoded)
     expected = REQUEST_FIELDS | ({"reference", "judgment"} if value.get("operation") == "complete" else set())
     if "verified_source_pages" in value:
         expected.add("verified_source_pages")

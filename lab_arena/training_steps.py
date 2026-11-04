@@ -75,7 +75,7 @@ def _exact_stateless(value, *, response=False):
                     if field in msg and (msg[field] is None or msg[field] == '' or field == 'reasoning_details' and msg[field] == []):
                         msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
-    sanitized, redactions = training_capture.sanitize_training_value(value)
+    sanitized, redactions = training_capture.sanitize_training_value(value, reuse_large_text=True)
     # A provider can return the marker literally. Callers verify capture and
     # receipt redaction flags plus request/response hashes separately.
     return not removed and not redactions and clean == value and sanitized == value

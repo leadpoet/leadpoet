@@ -312,7 +312,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     # consume one incomplete ICP without excusing bad proof.
                     if str(exc) == "response_not_complete":
                         state = training_thinking.attempt_coverage(
-                            call, example.get("role", "miner"), registry)
+                            call, example.get("role", "miner"), registry, worker_proofs=worker_proofs)
                         if (state["returned"] == "truncated" and state["route_reviewed"]
                                 and state["provider_route_verified"]):
                             reasoning_counts["truncated_model_calls"] += 1
@@ -324,7 +324,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 delivered = training_thinking._delivered_response(call, digest)
                 full_segments, status = training_thinking.full_text_segments(
                     {**call, "response": delivered, "response_sha256": digest},
-                    example["role"], registry)
+                    example["role"], registry, worker_proofs=worker_proofs)
                 if not status["route_reviewed"] or not status["provider_route_verified"]:
                     run_reasons.append("full_thinking_route_unverified")
                     continue

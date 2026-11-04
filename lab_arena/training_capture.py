@@ -391,7 +391,8 @@ def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_co
 
 def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                             max_nodes: int = MAX_VALUE_NODES,
-                            aggregate_parts: bool = False) -> tuple[Any, list[str]]:
+                            aggregate_parts: bool = False,
+                            reuse_large_text: bool = False) -> tuple[Any, list[str]]:
     """Redact private material without truncation; report every redaction class.
 
     Final joined examples may budget each canonical call and input snapshot
@@ -409,7 +410,8 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     # long-text results within this walk; every node, path, and key is still checked.
     text_cache: OrderedDict[str, str] = OrderedDict()
     # Standalone captures and aggregates repeat short schema strings and keys;
-    # aggregates also repeat complete long responses. These modes share a bounded
+    # aggregates and exact-privacy checks also repeat complete long responses.
+    # These modes share a bounded
     # plain-string lane without evicting the medium/custom lane.
     # Secret subclasses may carry behavior, so they disable this lane.
     large_text_cache: OrderedDict[str, tuple[str, int]] = OrderedDict()
@@ -420,7 +422,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
     def clean_text(text: str) -> str:
         nonlocal large_text_bytes
         if (large_text_cache_enabled and type(text) is str
-                and (len(text) < 1_024 or (aggregate_parts and len(text) > 16_384))):
+                and (len(text) < 1_024 or ((aggregate_parts or reuse_large_text) and len(text) > 16_384))):
             cached = large_text_cache.get(text)
             if cached is not None:
                 large_text_cache.move_to_end(text)

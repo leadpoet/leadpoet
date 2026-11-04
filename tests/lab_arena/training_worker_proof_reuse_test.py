@@ -252,6 +252,9 @@ def test_owned_and_stateless_assessments_have_identical_results_and_flags(monkey
         def exact_privacy(self, value, *, response, check):
             return check(value, response=response)
 
+        def reasoning_registry(self, registry, *, validate):
+            return validate(registry), None
+
     monkeypatch.setattr(training_worker_proof, 'WorkerProofs', Stateless)
     assert assess(example) == result
     assert example == before

@@ -11,6 +11,7 @@ import base64
 import copy
 import json
 import re
+from collections import OrderedDict
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
@@ -2031,7 +2032,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
     from lab_arena.training_capture import sanitize_training_value
     example, redactions = sanitize_training_value(
-        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True)
+        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True,
+        clean_text_digests=OrderedDict())
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations

@@ -226,3 +226,33 @@ def test_fit_completion_keeps_current_lease_and_reservation_proof(store,database
     with pytest.raises(ArenaStoreError,match="signal_(completion_invalid|reservation_stale)"):
         store.complete_signal_judgment(**args[0],reference=miss["reference"],judgment=snapshot(),judgment_hash=contracts.document_hash(snapshot()))
     assert store.get_signal_judgment_uses(leased["run_id"])==[]
+
+
+@pytest.mark.parametrize("baseline",[False,True])
+def test_old_worker_validator_keeps_new_scorer_native_output_without_fit_reuse(store,database,tmp_path,monkeypatch,baseline):
+    from lab_arena import signal_cache_control
+    from tests.lab_arena.fit_checkpoint_host_compatibility_test import old_validator
+    service,leased,token,document=setup(store,database,tmp_path,paragraph=True,baseline=baseline)
+    before=run_process(service,leased,token,document,"before_healthy",tmp_path)
+    assert "failure" not in before
+    # Only the worker process uses old validation. The fresh scorer interpreter
+    # retains the new sender and capability logic, as on an external host.
+    monkeypatch.setattr(signal_cache_control,"validate_request",old_validator())
+    current=run_process(service,leased,token,document,"healthy",tmp_path)
+    assert current==before
+    assert (tmp_path/"fit-calls.txt").read_text().splitlines()==["fit","fit"]
+    assert all(use["signal_index"]>=0 for use in store.get_signal_judgment_uses(leased["run_id"]))
+
+
+def test_supported_new_worker_translated_gateway_failure_does_not_repeat_fit(store,database,tmp_path):
+    from lab_arena.runner import RunnerError
+    service,leased,token,document=setup(store,database,tmp_path,paragraph=True)
+    calls=[]
+    def rejected(_run,_token,request):
+        calls.append(request)
+        raise RunnerError("accepted checkpoint source is corrupt")
+    service.handle_signal_judgment=rejected
+    result=run_process(service,leased,token,document,"healthy",tmp_path)
+    assert result["failure"]=="judge_error"
+    assert not (tmp_path/"fit-calls.txt").exists()
+    assert calls and all(request["operation"]=="claim" and request["signal_index"]==-1 for request in calls)

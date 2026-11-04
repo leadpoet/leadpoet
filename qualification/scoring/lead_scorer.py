@@ -12551,6 +12551,19 @@ async def score_company_competition_intent(
         if precheck.decision != COMPANY_FIT_MATCH:
             fit_exchange = None
             fit_cache = None
+    if fit_exchange is not None:
+        from lab_arena.signal_cache_control import FIT_CAPABILITY_OPERATION, fit_checkpoint_capability
+        capability = await invoke_exchange(fit_exchange, {
+            "operation": FIT_CAPABILITY_OPERATION,
+            "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+            "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+        })
+        if capability == {"status": "unavailable"}:
+            # An old worker rejects the pure support probe before any fit
+            # claim or reuse. Keep its original full native scoring path.
+            fit_exchange = None
+        elif capability != fit_checkpoint_capability():
+            raise SignalJudgmentCacheError("verified fit checkpoint capability is invalid")
     fit_request = None
     fit_reference = None
     if fit_exchange is not None:

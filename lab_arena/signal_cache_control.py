@@ -15,6 +15,13 @@ SCHEMA = "leadpoet.lab_arena.signal_judgment_control.v1"
 POLICY = "signal_judgment_v1"
 MAX_BYTES = 1_048_576
 REQUEST_FIELDS = {"operation", "company_index", "signal_index", "verified_company_identity", "verified_funding_stage_context"}
+FIT_CAPABILITY_OPERATION = "fit_checkpoint_capability"
+
+
+def fit_checkpoint_capability() -> dict:
+    from lab_arena import company_judgments
+    return {"status": "supported", "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+            "schema_version": company_judgments.FIT_CHECKPOINT_SCHEMA_VERSION}
 
 
 def validate_request(value: Any) -> dict:
@@ -25,7 +32,7 @@ def validate_request(value: Any) -> dict:
         expected = {"operation", "company_index", "signal_index", "checkpoint_kind"}
         if value.get("operation") == "complete":
             expected |= {"reference", "judgment"}
-        if (set(value) != expected or value.get("operation") not in {"claim", "complete"}
+        if (set(value) != expected or value.get("operation") not in {"claim", "complete", FIT_CAPABILITY_OPERATION}
             or type(value.get("company_index")) is not int or not 0 <= value["company_index"] < 5
             or type(value.get("signal_index")) is not int
             or value["signal_index"] != company_judgments.FIT_CHECKPOINT_INDEX):
@@ -83,6 +90,10 @@ async def exchange(request: Mapping[str, Any]) -> dict:
             result = await asyncio.to_thread(_exchange_once, request)
         except (OSError, ValueError) as exc:
             raise SignalJudgmentCacheError("signal cache transport unavailable") from exc
+        if request.get("operation") == FIT_CAPABILITY_OPERATION:
+            if result == {"status": "unavailable"} or result == fit_checkpoint_capability():
+                return result
+            raise SignalJudgmentCacheError("verified fit checkpoint capability is invalid")
         if result.get("status") not in {"busy", "pending"}:
             if result.get("status") not in {"hit", "miss", "stored", "existing", "released"}:
                 raise SignalJudgmentCacheError("signal cache request unavailable")

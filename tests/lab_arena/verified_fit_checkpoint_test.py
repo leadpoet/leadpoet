@@ -129,6 +129,8 @@ def test_nonserializable_and_multibyte_snapshot_release_without_changing_score(m
     monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", signal)
     completions = []
     async def exchange(request):
+        if request["operation"] == signal_cache_control.FIT_CAPABILITY_OPERATION:
+            return signal_cache_control.fit_checkpoint_capability()
         if request["operation"] == "claim": return {"status": "miss", "reference": {"authority_slot": 0}}
         completions.append(request["judgment"])
         return {"status": "released"}
@@ -313,7 +315,10 @@ def test_training_compares_existing_visible_quote_projection_without_changing_ra
 @pytest.mark.parametrize("failure",["intent_mismatch","intent_unavailable","paragraph_mismatch"])
 def test_reused_fit_cannot_autoaccept_later_intent_or_paragraph_failure(monkeypatch,failure):
     async def no_fit(*_args,**_kwargs):pytest.fail("verified fit must not be repeated")
-    async def hit(_request):return {"status":"hit","reference":{"authority_slot":0},"judgment":snapshot()}
+    async def hit(request):
+        if request["operation"] == signal_cache_control.FIT_CAPABILITY_OPERATION:
+            return signal_cache_control.fit_checkpoint_capability()
+        return {"status":"hit","reference":{"authority_slot":0},"judgment":snapshot()}
     async def signal(*_args,**_kwargs):
         if failure=="intent_unavailable":return 0,0,0,0,False,[{"judge_verdict":{"decision":"rejected_verifier_error","pipeline_decision":"unavailable","error_class":"provider_error"}}]
         return (0,0,0,0,True,[]) if failure=="intent_mismatch" else (80,80,1,100,False,[])

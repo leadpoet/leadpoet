@@ -1099,3 +1099,14 @@ merge, deploy, change production or renew credentials. The coordinator owns
 independent review and any later release after full native positive improvement,
 negative controls and the existing production owner's release handoff. Add no
 new judging system, dependency or unrelated architecture.
+
+## Scoped authorization: November 4 Arena paid-work reliability
+
+The user authorized the four audited infrastructure fixes: bounded public reads
+(PR1007/923), graceful completion delivery, cancellation/deadline checks before
+OpenRouter dispatch, and durable same-call successful replies during billing
+recovery. Reuse existing persistence and accounting; preserve scoring, judging,
+frozen rounds, costs and historical results. Internal agents implement/test only.
+The coordinator owns independent review, safe merge, exact committed migrations,
+canonical paired deployment, and fresh worker/OnePatch/Sentry verification.
+Preserve concurrent work and release ownership; do not replay paid historical work.

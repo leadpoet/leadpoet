@@ -6,6 +6,7 @@ them with explicit dict/list base-class mutation calls.
 """
 
 from dataclasses import dataclass
+from collections import OrderedDict
 import hashlib
 import json
 
@@ -90,6 +91,7 @@ class WorkerProofs:
         self._proofs = {}
         self._exact_privacy = {}
         self._reasoning_registry = None
+        self._clean_text_digests = OrderedDict()
 
     def exact_privacy(self, value, *, response, check):
         # Requests remain mutable. Never reuse object identity or retain input
@@ -99,11 +101,11 @@ class WorkerProofs:
         except Exception:
             # Unsupported values or hashing failures keep the original scan,
             # including its exceptions. Scanner exceptions are never cached.
-            return check(value, response=response)
+            return check(value, response=response, clean_text_digests=self._clean_text_digests)
         key = (digest, response)
         if key in self._exact_privacy:
             return self._exact_privacy[key]
-        result = check(value, response=response)
+        result = check(value, response=response, clean_text_digests=self._clean_text_digests)
         if type(result) is bool:
             if len(self._exact_privacy) >= MAX_EXACT_PRIVACY_PROOFS:
                 del self._exact_privacy[next(iter(self._exact_privacy))]

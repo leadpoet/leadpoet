@@ -74,6 +74,7 @@ class _PublicResultEvidenceReads(dict):
         self.companies: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
         self.exclusions: Dict[str, List[str]] = {}
         self.objects: Dict[Tuple[str, int], bytes] = {}
+        self.source_outputs: Dict[Tuple[str, int], Tuple[bytes, str, Dict[str, Any]]] = {}
         self._bytes = 0
 
     def _read(self, rows: Dict, identity: Any, load: Callable[[], Any]) -> Any:
@@ -130,6 +131,32 @@ class _PublicResultEvidenceReads(dict):
             self.objects[identity] = value
             self._bytes += len(value)
         return value
+
+    def source_output(self, ref: str, max_bytes: int, raw: bytes) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Reuse a successful proof only while its exact raw bytes are held."""
+        if type(raw) is not bytes or type(ref) is not str or type(max_bytes) is not int:
+            return None
+        identity = (ref, max_bytes)
+        cached = self.source_outputs.get(identity)
+        if cached is None or cached[0] is not raw or self.objects.get(identity) is not raw:
+            return None
+        return cached[1], copy.deepcopy(cached[2])
+
+    def remember_source_output(
+        self, ref: str, max_bytes: int, raw: bytes, digest: str, validated: Dict[str, Any],
+    ) -> None:
+        if type(raw) is not bytes or type(ref) is not str or type(max_bytes) is not int:
+            return
+        identity = (ref, max_bytes)
+        if self.objects.get(identity) is not raw or identity in self.source_outputs:
+            return
+        try:
+            size = len(json.dumps(validated, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError, OverflowError):
+            return
+        if len(self.source_outputs) < self.MAX_IDENTITIES and self._bytes + size <= self.MAX_BYTES:
+            self.source_outputs[identity] = (raw, digest, copy.deepcopy(validated))
+            self._bytes += size
 
 _DEEPLINE_BILLING_BATCH_LIMIT = 96
 _DEEPLINE_BILLING_WORKERS = 8
@@ -3639,25 +3666,27 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment authority is invalid"
             )
+        source_ref = str(evidence["source_output_ref"])
+        source_limit = scoring.MAX_SCORING_OUTPUT_BYTES
         try:
             get_object = (lambda ref, limit: reads.object(self._objects, ref, limit)) if reads is not None else self._objects.get_bounded
-            source_output = json.loads(
-                get_object(
-                    str(evidence["source_output_ref"]),
-                    scoring.MAX_SCORING_OUTPUT_BYTES,
-                ).decode("utf-8")
-            )
+            raw_source = get_object(source_ref, source_limit)
+            reused_source = reads.source_output(source_ref, source_limit, raw_source) if reads is not None else None
+            if reused_source is None:
+                source_output = json.loads(raw_source.decode("utf-8"))
         except (TypeError, ValueError, UnicodeDecodeError) as exc:
             raise scoring.ScoringError(
                 "accepted company judgment source output is unavailable"
             ) from exc
-        if contracts.document_hash(source_output) != evidence["source_output_hash"]:
+        source_hash = reused_source[0] if reused_source is not None else contracts.document_hash(source_output)
+        if source_hash != evidence["source_output_hash"]:
             raise scoring.ScoringError(
                 "accepted company judgment source output hash is invalid"
             )
         try:
-            validated_output = scoring.validate_scoring_output_document(
-                source_output
+            validated_output = (
+                reused_source[1] if reused_source is not None
+                else scoring.validate_scoring_output_document(source_output)
             )
         except scoring.ScoringError as exc:
             raise scoring.ScoringError(
@@ -3701,6 +3730,8 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment source output is not bound"
             )
+        if reads is not None and reused_source is None:
+            reads.remember_source_output(source_ref, source_limit, raw_source, source_hash, validated_output)
         if evidence_reads is not None and identity is not None:
             # A consumer cannot alter the successful proof used by a later
             # consumer. Failures never populate the map.

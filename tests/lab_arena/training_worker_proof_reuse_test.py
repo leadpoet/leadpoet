@@ -4,12 +4,13 @@ from copy import deepcopy
 import gc
 import json
 import weakref
+from unittest.mock import patch
 
 import pytest
 
-from lab_arena import contracts, training_eligibility, training_observations, training_steps, training_worker_proof
+from lab_arena import contracts, training_capture, training_eligibility, training_observations, training_steps, training_worker_proof
 from tests.lab_arena.training_host_result_test import without_client_callbacks
-from tests.lab_arena.training_eligibility_test import submission
+from tests.lab_arena.training_eligibility_test import refresh_response_links, submission, ten_selected_examples
 from tests.lab_arena.training_steps_test import seal
 
 
@@ -259,3 +260,85 @@ def test_owned_and_stateless_assessments_have_identical_results_and_flags(monkey
     assert assess(example) == result
     assert example == before
     assert contracts.document_hash(example) == contracts.document_hash(before)
+
+
+@pytest.mark.parametrize('missing_tokens', [1, 2])
+@pytest.mark.parametrize('damage', ['none', 'privacy', 'identity', 'tool', 'score'])
+def test_growing_history_cache_preserves_full_icp_eligibility_boundaries(monkeypatch, missing_tokens, damage):
+    examples = ten_selected_examples()
+    for example in examples.values():
+        example['configuration']['training_maximum_missing_reasoning_percent'] = 1
+        seal(example)
+    example = examples['run-7']
+    history = 'Plain synthetic source history. ' * 100
+    for call in example['provider_calls']:
+        request = call['request']
+        for parameters in (request['admitted_parameters'], request['outbound']['body']):
+            parameters['messages'][0]['content'] = history
+        request['outbound']['body_sha256'] = contracts.document_hash(request['outbound']['body'])
+    for index, tokens in enumerate((missing_tokens, 40, 60 - missing_tokens)):
+        example['provider_calls'][index]['response']['usage']['completion_tokens_details']['reasoning_tokens'] = tokens
+        refresh_response_links(example, index)
+    changed = example['provider_calls'][1]
+    if damage == 'privacy':
+        for parameters in (changed['request']['admitted_parameters'], changed['request']['outbound']['body']):
+            parameters['messages'][0]['content'] += ' Bearer synthetic-secret'
+    elif damage == 'identity':
+        changed['request']['request_hash'] = contracts.hash_bytes(b'wrong request')
+    elif damage == 'tool':
+        for parameters in (changed['request']['admitted_parameters'], changed['request']['outbound']['body']):
+            parameters['messages'][2]['tool_call_id'] = 'unpaired-tool-id'
+    elif damage == 'score':
+        example['judgment']['per_icp_score'] = 99
+    changed['request']['outbound']['body_sha256'] = contracts.document_hash(
+        changed['request']['outbound']['body'])
+    seal(example)
+    before = deepcopy(examples)
+    assert [len(call['request']['outbound']['body']['messages']) for call in example['provider_calls']] == [1, 3, 5]
+    assert len({contracts.document_hash(call['request']) for call in example['provider_calls']}) == 3
+
+    def assess_with_scan_count():
+        scans = []
+        original = training_capture.trajectory.redact_text
+
+        def counted(text, *args, **kwargs):
+            if type(text) is str and text.startswith(history):
+                scans.append(1)
+            return original(text, *args, **kwargs)
+
+        with patch.object(training_capture.trajectory, 'redact_text', side_effect=counted):
+            result = training_eligibility.assess_capture(
+                submission(), examples, list(examples)[:8], enabled=True,
+                minimum_coverage_percent=80, expected_run_count=10,
+                maximum_missing_reasoning_percent=1)
+        return result, len(scans)
+
+    owned, owned_scans = assess_with_scan_count()
+
+    class Stateless:
+        def prepare(self, value):
+            return value
+
+        def payload_hash(self, value):
+            return contracts.document_hash(value)
+
+        def exact_privacy(self, value, *, response, check):
+            return check(value, response=response)
+
+    monkeypatch.setattr(training_worker_proof, 'WorkerProofs', Stateless)
+    stateless, stateless_scans = assess_with_scan_count()
+    assert owned == stateless
+    assert examples == before
+    expected_complete = 8 if missing_tokens == 1 and damage in ('none', 'score') else 7
+    assert owned['counts']['complete_runs'] == expected_complete
+    assert owned['counts']['incomplete_runs'] == 10 - expected_complete
+    assert owned['eligible'] is (expected_complete == 8)
+    assert next(row for row in owned['counts']['reasoning_by_run'] if row['run_id'] == 'run-7')[
+        'missing_reasoning_tokens'] == missing_tokens
+    if damage in ('none', 'score'):
+        assert owned_scans == 1 < stateless_scans
+    if damage in ('privacy', 'identity', 'tool'):
+        rejected = next(row for row in owned['counts']['rejected_runs'] if row['run_id'] == 'run-7')
+        assert 'selected_run_evidence_invalid' in rejected['reasons']
+    if damage == 'score':
+        assert example['judgment']['per_icp_score'] == 99

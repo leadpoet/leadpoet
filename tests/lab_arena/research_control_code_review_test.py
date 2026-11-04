@@ -195,7 +195,7 @@ def test_active_truncated_reply_fails_closed():
     response["choices"][0]["finish_reason"] = "length"
     with pytest.raises(code_review.CodeReviewError) as failure:
         code_review.parse_response(response, prepared)
-    assert failure.value.response_reason == "not_finished"
+    assert failure.value.response_reason == "truncated"
 
 
 def test_untrusted_source_instruction_cannot_change_schema_or_misconduct_finding():

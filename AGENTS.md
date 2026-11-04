@@ -974,6 +974,17 @@ scoped fixes and production verification are complete.
 
 Applies to this repository. `AGENTS.md` and `CLAUDE.md` must remain byte-identical.
 
+## Scoped production authorization: November 4 baseline source correction
+
+The user explicitly authorized a fresh November 4 baseline execution and judgment
+from the finalized November 3 champion source
+`24d9201c3c5fdc86cb1676628774223205c87166`, followed by a corrected comparison and
+publication before rewards. This includes narrow source changes, the exact
+committed `scripts/621-arena-2026-11-04-baseline-source-correction.sql` migration,
+and canonical deployment. Preserve the frozen November 4 ICPs, scorer and scoring rules, all accepted miner work and costs,
+original history, and the November 3 outcome. This authority expires when the
+corrected publication and unaffected live flows are verified.
+
 Historical task-specific authorizations are preserved in
 [the instruction archive](docs/agent-instruction-history-20261025.md).
 Read only the relevant authorization when continuing that task; confirm its scope
@@ -1018,6 +1029,10 @@ merge, deployment, data, and spending limits take precedence.
 19. Use OnePatch only when explicitly requested. Verify fresh, scoped telemetry and direct production evidence; do not start monitors or schedules without authorization.
 
 20. Make the smallest durable fix at the cause; keep unrelated changes separate. Before editing, trace every affected path in the actual code, including callers, shared defaults, validators, stored state, and failure handling; do not rely on summaries or assumed file boundaries. Reproduce the defect, then test the production execution path end to end, including relevant combined failures and preserved behavior. Use independent review for high-risk changes. State test substitutions and unverified paths; passing test counts alone do not prove completion.
+
+21. Before baseline execution and publication, verify the actual frozen source
+    archive against the intended finalized prior champion. Carry any pending
+    prior-round correction forward and resolve it before freezing the next baseline.
 
 ## Scoped production authorization: champion baseline continuity
 
@@ -1110,3 +1125,15 @@ frozen rounds, costs and historical results. Internal agents implement/test only
 The coordinator owns independent review, safe merge, exact committed migrations,
 canonical paired deployment, and fresh worker/OnePatch/Sentry verification.
 Preserve concurrent work and release ownership; do not replay paid historical work.
+
+## Scoped authorization: November 4 review and checkpoint reliability
+
+The user authorized stricter supported review schemas, sufficient output capacity,
+equivalent coverage formatting, classified bounded retries, and durable verified
+company-fit checkpoints through existing continuation and accounting paths.
+Preserve admission criteria, source evidence, scoring, privacy, frozen policies,
+accepted work and historical outcomes. Internal agents implement and test only.
+The coordinator owns independent review, controlled organizer-funded validation,
+safe merge, exact migrations, canonical release and fresh production verification.
+Use a task-local $10 validation ceiling including failures and pending charges;
+do not use miner keys or replay historical paid calls. Add no service or dependency.

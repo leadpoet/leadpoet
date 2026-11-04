@@ -40,7 +40,7 @@ class Store:
 
     def begin_submission_review(self, *args):
         self.begins.append(args)
-        return {"status": "claimed"}
+        return {"status": "claimed", "review_output_token_recommendation": code_review.DEFAULT_MAX_OUTPUT_TOKENS}
 
     def finish_submission_review(self, *args):
         self.finishes.append(args)

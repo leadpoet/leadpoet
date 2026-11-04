@@ -663,8 +663,8 @@ def build_service_from_environment(mode: str):
         return store.current_daily_icp_set(set_id)
 
     # The current paid reviewer must not start against a database that lacks
-    # atomic route selection and bounded refusal-recovery reservations.
-    store.code_review_schema(require_refusal_fallback=True)
+    # atomic route selection and both bounded recovery reservation policies.
+    store.code_review_schema(require_refusal_fallback=True, require_invalid_review_budget=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,

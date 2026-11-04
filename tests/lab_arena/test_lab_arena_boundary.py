@@ -261,6 +261,11 @@ HOST_ARENA_IMPORTS = {
     "leadpoet_canonical/arena_weights.py": {("lab_arena", "contracts")},
     "qualification/scoring/company_evidence_investigator.py": {("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS")},
     "qualification/scoring/competition.py": {("lab_arena.provider_observations", "company_observation")},
+    "qualification/scoring/lead_scorer.py": {
+        ("lab_arena", "company_judgments"),
+        ("lab_arena.signal_cache_control", "FIT_CAPABILITY_OPERATION"),
+        ("lab_arena.signal_cache_control", "fit_checkpoint_capability"),
+    },
     "qualification/scoring/linkedin_company_size.py": {("lab_arena.scoring_provider_compat", "CompatibilityResponseError"),
                                                        ("lab_arena.scoring_provider_compat", "_firecrawl_response")},
 }

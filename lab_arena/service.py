@@ -3451,6 +3451,36 @@ class ArenaService:
             or run.get("run_id") != assignment + ":" + str(run.get("attempt"))
             or run.get("champion_restart_required")):
             return False
+        # An owner-created supersession names the new source generation's
+        # root. Its normal frozen attempt budget applies to that source only.
+        if run.get("kind") == "execute":
+            superseded = [parent for parent in runs
+                if parent.get("assignment_id") == assignment
+                and parent.get("status") == "failed"
+                and parent.get("terminal_cause") == "stage_closed"
+                and isinstance(parent.get("terminal_doc"), Mapping)
+                and parent["terminal_doc"].get("operation") == "baseline_source_supersession_v1"
+                and all(parent.get(key) == run.get(key) for key in
+                    ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "kind"))]
+            if len(superseded) == 1:
+                root_id = str(superseded[0]["terminal_doc"].get("new_execution_run_id") or "")
+                root_text = root_id.removeprefix(assignment + ":")
+                if root_text.isdecimal() and root_id == assignment + ":" + root_text:
+                    root, attempt = int(root_text), run.get("attempt")
+                    parents = [parent for parent in runs if parent.get("assignment_id") == assignment
+                        and type(parent.get("attempt")) is int and type(attempt) is int
+                        and root <= parent["attempt"] < attempt]
+                    if (type(attempt) is int and root > superseded[0].get("attempt", root)
+                        and root <= attempt < root + configuration["max_attempts_per_assignment"]
+                        and len(parents) == attempt - root
+                        and all(parent.get("status") == "failed"
+                            and parent.get("terminal_cause") in ("provider_error", "lease_expired")
+                            and parent.get("output_ref") is None
+                            and not parent.get("champion_restart_required")
+                            and (parent.get("terminal_cause") == "lease_expired"
+                                or (parent.get("result_doc") or {}).get("terminal_status") == parent.get("terminal_cause"))
+                            for parent in parents)):
+                        return True
         if run.get("kind") == "score":
             source = next((r for r in runs if r.get("run_id") == run.get("scored_run_id")), {})
             if (source.get("kind") == "execute" and source.get("status") == "accepted"
@@ -6328,8 +6358,21 @@ class ArenaService:
         signal_index = request.get("signal_index")
         if operation not in ("claim", "complete") or type(company_index) is not int or type(signal_index) is not int:
             raise ServiceError("signal_judgment_request_invalid", 400)
+        fit_checkpoint = request.get("checkpoint_kind") == company_judgments.FIT_CHECKPOINT_KIND
+        if (fit_checkpoint != (signal_index == company_judgments.FIT_CHECKPOINT_INDEX)
+            or ("checkpoint_kind" in request and not fit_checkpoint)):
+            raise ServiceError("signal_judgment_request_invalid", 400)
+        if fit_checkpoint:
+            from lab_arena.signal_cache_control import validate_request
+            try:
+                validate_request(request)
+            except ValueError as exc:
+                raise ServiceError("signal_judgment_request_invalid", 400) from exc
         executed = self._store.get_run(str(run.get("scored_run_id") or ""))
-        if executed is None or executed.get("status") != "accepted" or not executed.get("output_ref"):
+        if (executed is None or executed.get("kind") != "execute"
+            or executed.get("status") != "accepted" or not executed.get("output_ref")
+            or (fit_checkpoint and any(executed.get(key) != run.get(key) for key in
+                ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position")))):
             raise ServiceError("scored_run_missing", 500)
         try:
             output = json.loads(self._objects.get_bounded(
@@ -6358,12 +6401,17 @@ class ArenaService:
                     and provider_observations.enabled(policy) else None
                 ),
             )
-            scope = signal_judgments.build_scope(
+            scope_builder = signal_judgments.build_fit_scope if fit_checkpoint else signal_judgments.build_scope
+            scope = scope_builder(
                 scoring_input=scoring_input, company_index=company_index,
-                signal_index=signal_index,
-                verified_company_identity=request.get("verified_company_identity"),
-                verified_funding_stage_context=request.get("verified_funding_stage_context"),
-                verified_source_pages=request.get("verified_source_pages"),
+                **({"checkpoint_context": signal_judgments.fit_checkpoint_context(
+                    run, executed, configuration, scoring_input, contracts.document_hash(output),
+                )} if fit_checkpoint else {
+                    "signal_index": signal_index,
+                    "verified_company_identity": request.get("verified_company_identity"),
+                    "verified_funding_stage_context": request.get("verified_funding_stage_context"),
+                    "verified_source_pages": request.get("verified_source_pages"),
+                }),
                 round_id=str(run["round_id"]),
                 network_name=str(round_row.get("arena_network_name") or ""),
                 netuid=int(round_row.get("arena_netuid") or 0),
@@ -6372,7 +6420,7 @@ class ArenaService:
             )
         except (ValueError, TypeError, KeyError, IndexError, OutputInvalid,
                 scoring.ScoringError, signal_judgments.SignalJudgmentError,
-                company_judgments.CompanyJudgmentError) as exc:
+                company_judgments.CompanyJudgmentError, reviewer_runtime.ReviewerRuntimeError) as exc:
             raise ServiceError("signal_judgment_input_invalid", 400) from exc
         lease_hash = hash_lease_token(lease_token)
         if operation == "claim":
@@ -6416,6 +6464,14 @@ class ArenaService:
                         or source.get("source_runner_hotkey") not in exclusions
                         or (run.get("miner_hotkey") in exclusions and not same_current_lease)):
                         raise signal_judgments.SignalJudgmentError("accepted signal source is invalid")
+                    if fit_checkpoint and (
+                        source_run.get("assignment_id") != run.get("assignment_id")
+                        or source_run.get("scoring_generation_floor", 0) != run.get("scoring_generation_floor", 0)
+                        or source_run.get("scored_run_id") != run.get("scored_run_id")
+                        or reviewer_runtime.selected_image(source_run, configuration)
+                        != reviewer_runtime.selected_image(run, configuration)
+                    ):
+                        raise signal_judgments.SignalJudgmentError("verified fit source context differs")
                     return {"status": "hit", "reference": reference, "judgment": judgment}
                 if result.get("status") == "miss":
                     return {"status": "miss", "reference": reference}

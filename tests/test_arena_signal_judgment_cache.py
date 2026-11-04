@@ -434,6 +434,9 @@ def test_full_scoring_input_reuses_a_across_mixed_company_submissions(
         return 54.0, 90, "in_window", str(signal.date), signal.matched_icp_signal
 
     async def exchange(request):
+        if request["operation"] == signal_cache_control.FIT_CAPABILITY_OPERATION:
+            # This fixture implements the original signal-only worker.
+            return {"status": "unavailable"}
         row = current_input["companies"][request["company_index"]]["intent_signals"][request["signal_index"]]
         key = json.dumps({
             "company": current_input["companies"][request["company_index"]]["company_name"],

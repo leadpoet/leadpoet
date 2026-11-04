@@ -94,6 +94,49 @@ def test_actual_assessment_validates_registry_once_and_rechecks_each_assessment(
     assert not assess(example)['eligible']
 
 
+@pytest.mark.parametrize('kind', ['undeclared', 'empty_chat'])
+@pytest.mark.parametrize('bad_route', [False, True])
+def test_output_fault_assessment_reuses_owned_registry_and_keeps_route_rejection(kind, bad_route):
+    from tests.lab_arena.training_provider_output_coverage_test import output_fault
+    from tests.lab_arena.training_eligibility_test import refresh_response_links
+
+    example = output_fault(kind)
+    if bad_route:
+        example['provider_calls'][0]['response_receipts'][0]['metadata']['reasoning_route_observation']['status'] = 'mismatched'
+        refresh_response_links(example, 0)
+    before = deepcopy(example)
+    validations, outcomes = [], []
+    attempt = training_thinking.attempt_coverage
+
+    def omit_owner(*args, **kwargs):
+        kwargs.pop('worker_proofs', None)
+        return attempt(*args, **kwargs)
+
+    for forward in (False, True):
+        owner = training_worker_proof.WorkerProofs()
+        owned = owner.prepare(deepcopy(example))
+        call = owned['provider_calls'][0]
+        # readable_trace warms this same selected-run registry before the
+        # assessment reaches an unusable generated target.
+        attempt(call, owned['role'], owned['configuration']['reasoning_route_registry'], worker_proofs=owner)
+        with patch.object(reasoning_capture, 'validate_registry', wraps=reasoning_capture.validate_registry) as validate:
+            with (nullcontext() if forward else patch.object(training_thinking, 'attempt_coverage', side_effect=omit_owner)):
+                outcomes.append(training_eligibility._verified_provider_output_fault(owned, call, worker_proofs=owner))
+            validations.append(validate.call_count)
+    assert outcomes == [not bad_route, not bad_route]
+    assert validations[1] == validations[0] - 1
+    with original_validation_work():
+        expected = assess(example)
+    with patch.object(training_eligibility, '_verified_provider_output_fault',
+                      wraps=training_eligibility._verified_provider_output_fault) as fault:
+        actual = assess(example)
+        assert fault.call_count > 0
+        assert all(type(call.kwargs.get('worker_proofs')) is training_worker_proof.WorkerProofs
+                   for call in fault.call_args_list)
+    assert contracts.canonical_json(actual) == contracts.canonical_json(expected)
+    assert example == before
+
+
 def test_registry_reuse_rehashes_mutations_and_keeps_snapshot_immutable():
     example = captured_example()
     call, registry = example['provider_calls'][0], example['configuration']['reasoning_route_registry']

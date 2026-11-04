@@ -154,7 +154,8 @@ def _verified_provider_output_fault(example, call, *, worker_proofs=None):
                 or not set(call.get("response_privacy_redactions") or []) <= {"hidden_reasoning"}):
             return False
         state = training_thinking.attempt_coverage(
-            call, example.get("role", "miner"), baseline_reasoning.for_example(example).get("reasoning_route_registry"))
+            call, example.get("role", "miner"), baseline_reasoning.for_example(example).get("reasoning_route_registry"),
+            worker_proofs=worker_proofs)
         if not state["route_reviewed"] or not state["provider_route_verified"]:
             return False
         try:

@@ -8,7 +8,7 @@ import uuid
 
 import pytest
 
-from lab_arena import contracts, scoring, company_judgments
+from lab_arena import contracts, scoring, company_judgments, verify
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
 from tests.lab_arena import nov03_corrected_judge607_postgres_test as prior
@@ -225,12 +225,22 @@ def test_exact_supersession_preserves_miners_and_history_and_is_idempotent(prepa
     assert lease['status']=='leased' and lease['kind']=='execute' and lease['attempt']==3
 
 
-def finish_source_executions(p, *, nonempty_position=None):
-    for _ in range(10):
+def finish_source_executions(p, *, nonempty_position=None, count=10):
+    for _ in range(count):
         lease=claim(p);assert lease['status']=='leased' and lease['kind']=='execute',lease
         output=json.dumps({'schema_version':contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,'companies':prior._input()['companies'] if lease['icp_position']==nonempty_position else []}).encode()
         ref=lease['run_id']+'.json';p.objects[ref]=output
         result=p.store.complete_attempt(run_id=lease['run_id'],lease_token_hash=hash_lease_token('source621'),result={'terminal_status':'accepted'},terminal_cause='accepted',output_ref=ref,output_hash=contracts.hash_bytes(output),completion_request_hash=contracts.document_hash({'run':lease['run_id']}))
+        assert result['status']=='accepted',result
+
+
+def finish_source_judgments(p):
+    for _ in range(10):
+        lease=claim(p);assert lease['status']=='leased' and lease['kind']=='score',lease
+        assert lease['scored_run_id'].endswith(':3') and lease['attempt']==(3 if lease['icp_position']==7 else 2)
+        output=json.dumps({'schema_version':scoring.SCORING_OUTPUT_SCHEMA_VERSION,'scored_run_id':lease['scored_run_id'],'breakdowns':[],'company_judgments':[]}).encode()
+        ref=lease['run_id']+'.json';p.objects[ref]=output
+        result=p.store.complete_attempt(run_id=lease['run_id'],lease_token_hash=hash_lease_token('source621'),result={'terminal_status':'accepted','company_judgment_consumed_indexes':[]},terminal_cause='accepted',output_ref=ref,output_hash=contracts.hash_bytes(output),company_judgment_evidence=[],completion_request_hash=contracts.document_hash({'run':lease['run_id']}))
         assert result['status']=='accepted',result
 
 
@@ -244,13 +254,7 @@ def test_ten_native_execution_and_judgment_completions_use_new_source_plan(prepa
     assert row['stage1_scoring_plan_doc']==expected
     assert row['stage2_scoring_plan_doc']==p.row['stage2_scoring_plan_doc']
     age_pending(p)
-    for _ in range(10):
-        lease=claim(p);assert lease['status']=='leased' and lease['kind']=='score',lease
-        assert lease['scored_run_id'].endswith(':3') and lease['attempt']==(3 if lease['icp_position']==7 else 2)
-        output=json.dumps({'schema_version':scoring.SCORING_OUTPUT_SCHEMA_VERSION,'scored_run_id':lease['scored_run_id'],'breakdowns':[],'company_judgments':[]}).encode()
-        ref=lease['run_id']+'.json';p.objects[ref]=output
-        result=p.store.complete_attempt(run_id=lease['run_id'],lease_token_hash=hash_lease_token('source621'),result={'terminal_status':'accepted','company_judgment_consumed_indexes':[]},terminal_cause='accepted',output_ref=ref,output_hash=contracts.hash_bytes(output),company_judgment_evidence=[],completion_request_hash=contracts.document_hash({'run':lease['run_id']}))
-        assert result['status']=='accepted',result
+    finish_source_judgments(p)
     assert claim(p)['status']=='no_pending'
     # Follow the native phase transition; no behavior under test uses replica.
     assert p.service.close_scoring(ROUND,2)['status']=='closed'
@@ -321,6 +325,8 @@ def test_cost_replacement_generation(prepared,call_succeeded):
         old_max=scalar(cur,'SELECT max(entry_id) FROM public.lab_arena_ledger')
         cost=scalar(cur,'SELECT public.lab_arena__successful_icp_cost_state(%s,%s,0)',(ROUND,BASELINE))
         assert cost['settled_microusd']==6000000
+        miner=next(r['submission_id'] for r in p.before.values() if r['stage']==2)
+        ordinary_before=scalar(cur,'SELECT public.lab_arena_icp_cost_eligibility(%s,%s,0,0)',(ROUND,miner))
     p.conn.commit()
     apply(p);age_pending(p)
     lease=claim(p)
@@ -352,6 +358,36 @@ def test_cost_replacement_generation(prepared,call_succeeded):
     p.conn.commit()
     refused=rpc("lab_arena_reserve_call(%s,%s,%s,'openrouter.chat','openrouter',%s,100,'{}'::jsonb,1500)",(lease['run_id'],token,'sha256:'+'d'*64,funding))
     assert refused['status']=='refused' and refused['reason']=='money_cap',refused
+    ref=lease['run_id']+'.json';output=json.dumps({'schema_version':contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,'companies':[]}).encode();p.objects[ref]=output
+    assert p.store.complete_attempt(run_id=lease['run_id'],lease_token_hash=token,result={'terminal_status':'accepted'},terminal_cause='accepted',output_ref=ref,output_hash=contracts.hash_bytes(output),completion_request_hash=contracts.document_hash({'run':lease['run_id']}))['status']=='accepted'
+    finish_source_executions(p,count=9)
+    p.service._recover_baseline(p.store.get_round(ROUND));age_pending(p);finish_source_judgments(p)
+    assert p.service.close_scoring(ROUND,2)['status']=='closed'
+    assert p.service.score_stage(ROUND,2)['status']=='ok'
+    p.service._record_recovered_judgment_scores(p.store.get_round(ROUND))
+    from lab_arena.training_export import _competition_cost_snapshot,_source_evidence
+    run=p.store.get_run(lease['run_id']);row=p.store.get_round(ROUND);source=p.store.get_submission(BASELINE)
+    participant=next(p for p in row['participants'] if p['is_king'])
+    binding=_source_evidence(p.service._objects,run,row,source,participant,p.store.scoring_policy_history(ROUND))['source_correction']
+    scored=verify.scored_row(BASELINE,0,run['run_id'],p.service.evaluation_icps(ROUND)[0],[],[],row['configuration_doc']['scorer_policy'])
+    related=[r for r in p.store.list_runs(ROUND) if r['assignment_id']==run['assignment_id'] or r.get('scored_run_id')==run['run_id']]
+    observed={'observed_at':p.service.now().isoformat(),'eligibility':p.store.icp_cost_eligibility(round_id=ROUND,submission_id=BASELINE,icp_position=0,qualified_company_count=0)}
+    execution=observed['eligibility']['execution']
+    assert execution['excluded_superseded_source_settled_microusd']==6000000
+    assert execution['excluded_superseded_source_successful_microusd']==6000000
+    assert execution['excluded_infrastructure_settled_microusd']==0
+    args=dict(run=run,configuration=row['configuration_doc'],scored=scored,related=related)
+    result=_competition_cost_snapshot(**args,reader=lambda **_:observed,source_correction=binding)
+    assert result['status']=='available' and result['competition_sourcing_microusd']==6000000,result
+    assert _competition_cost_snapshot(**args,reader=lambda **_:observed)['status']=='unavailable'
+    wrong=deepcopy(observed);wrong['eligibility']['execution']['excluded_superseded_source_settled_microusd']+=1
+    assert _competition_cost_snapshot(**args,reader=lambda **_:wrong,source_correction=binding)['status']=='unavailable'
+    miner=next(r['submission_id'] for r in p.before.values() if r['stage']==2)
+    ordinary=p.store.icp_cost_eligibility(round_id=ROUND,submission_id=miner,icp_position=0,qualified_company_count=0)
+    assert ordinary==ordinary_before
+    assert not any(key.startswith('excluded_superseded_source') for key in ordinary['execution'])
+    stale={**binding,'commit':'0'*40}
+    assert _competition_cost_snapshot(**args,reader=lambda **_:observed,source_correction=stale)['status']=='unavailable'
 
 
 def test_retired_cache_authorities_miss_and_unrelated_authorities_still_hit(prepared):

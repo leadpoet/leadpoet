@@ -455,7 +455,7 @@ BEGIN
  FOR expected IN SELECT * FROM (VALUES
 ('public.lab_arena__execute_assignment_calls_v1(text,text)','fbaaeba7355ed524201a5d5381be8791b31424e45875e0d7b6bda5b1a57bece6','9db0dfe3420016d430269efca49878c21f69a489914fef7930958915c3cc87b8',$cost_security621${"owner":"lab_arena_owner","acl":"{lab_arena_owner=X/lab_arena_owner}","prosecdef":true,"provolatile":"s","proconfig":["search_path=pg_catalog, public"],"proisstrict":false,"proleakproof":false,"proparallel":"u","prokind":"f","language":"sql"}$cost_security621$::JSONB),
 ('public.lab_arena__submission_stage_consumed(text,smallint,text,text)','488e418fcd9c479b6898ac661bb64392a0fcb7cd271039bc28c062c1923e78e9','cf3f9729010d77f0a2f379cdc394b636aa18542df965a3fb7e6023e538f601e7',$cost_security621${"owner":"lab_arena_owner","acl":"{lab_arena_owner=X/lab_arena_owner}","prosecdef":true,"provolatile":"s","proconfig":["search_path=pg_catalog, public"],"proisstrict":false,"proleakproof":false,"proparallel":"u","prokind":"f","language":"sql"}$cost_security621$::JSONB),
-('public.lab_arena__successful_icp_cost_state(text,text,integer)','a227265beb00a1918e26079c1b878ab846dd5849d1928e79bfd4fcf519ba4b97','91734409c42ab7cc3b2592dcda1fca79e622d9dae3a9a437a9cb4c6c8febf06a',$cost_security621${"owner":"lab_arena_owner","acl":"{lab_arena_owner=X/lab_arena_owner}","prosecdef":true,"provolatile":"s","proconfig":["search_path=pg_catalog, public"],"proisstrict":false,"proleakproof":false,"proparallel":"u","prokind":"f","language":"sql"}$cost_security621$::JSONB),
+('public.lab_arena__successful_icp_cost_state(text,text,integer)','a227265beb00a1918e26079c1b878ab846dd5849d1928e79bfd4fcf519ba4b97','b0b968dc81c960f25187d8598d53c26930a8bc792eda4850850e5b2da9a3e226',$cost_security621${"owner":"lab_arena_owner","acl":"{lab_arena_owner=X/lab_arena_owner}","prosecdef":true,"provolatile":"s","proconfig":["search_path=pg_catalog, public"],"proisstrict":false,"proleakproof":false,"proparallel":"u","prokind":"f","language":"sql"}$cost_security621$::JSONB),
 ('public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)','2b95e5566b8fed2ddee1fae3525a6bbc0ab5d598001eee650b45653f2dee22a0','8740ff3538cdd0800178711ea8cda5af273b9ede0e8e319d4f1a1a66037fd4ab',$cost_security621${"owner":"lab_arena_owner","acl":"{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}","prosecdef":true,"provolatile":"v","proconfig":["search_path=pg_catalog, public"],"proisstrict":false,"proleakproof":false,"proparallel":"u","prokind":"f","language":"plpgsql"}$cost_security621$::JSONB)
  ) functions(signature,preimage,postimage,security) LOOP
   target:=to_regprocedure(expected.signature);
@@ -582,6 +582,20 @@ AS $function$
  WHERE entry_kind IN ('reservation','dispatch','settlement','uncertain');
 $function$
 $assignment_perf_new621$)
+,
+('public.lab_arena__successful_icp_cost_state(text,text,integer)',6,$source_split_old621$    'excluded_infrastructure_settled_microusd', COALESCE(SUM(amount_microusd)
+      FILTER (WHERE entry_kind='settlement' AND infrastructure_exempt),0)::BIGINT,
+    'excluded_infrastructure_successful_microusd', COALESCE(SUM(amount_microusd)
+      FILTER (WHERE entry_kind='settlement' AND call_succeeded IS TRUE AND infrastructure_exempt),0)::BIGINT$source_split_old621$,$source_split_new621$    'excluded_infrastructure_settled_microusd', COALESCE(SUM(amount_microusd)
+      FILTER (WHERE entry_kind='settlement' AND infrastructure_exempt AND NOT source_retired),0)::BIGINT,
+    'excluded_infrastructure_successful_microusd', COALESCE(SUM(amount_microusd)
+      FILTER (WHERE entry_kind='settlement' AND call_succeeded IS TRUE AND infrastructure_exempt AND NOT source_retired),0)::BIGINT$source_split_new621$),
+('public.lab_arena__successful_icp_cost_state(text,text,integer)',7,$source_totals_old621$  ) ELSE '{}'::JSONB END FROM heads;$source_totals_old621$,$source_totals_new621$  ) ELSE '{}'::JSONB END || CASE WHEN bool_or(source_retired) THEN jsonb_build_object(
+    'excluded_superseded_source_settled_microusd',COALESCE(SUM(amount_microusd)
+      FILTER(WHERE entry_kind='settlement' AND source_retired),0)::BIGINT,
+    'excluded_superseded_source_successful_microusd',COALESCE(SUM(amount_microusd)
+      FILTER(WHERE entry_kind='settlement' AND call_succeeded IS TRUE AND source_retired),0)::BIGINT
+  ) ELSE '{}'::JSONB END FROM heads;$source_totals_new621$)
  ) edits(signature,ordinal,old_text,new_text)
  WHERE edits.signature=expected.signature ORDER BY edits.ordinal LOOP
    IF length(d)-length(replace(d,edit.old_text,''))<>length(edit.old_text) THEN

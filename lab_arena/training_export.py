@@ -1520,7 +1520,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
-                               reader: Callable[..., Mapping[str, Any]] | None) -> dict:
+                               reader: Callable[..., Mapping[str, Any]] | None,
+                               source_correction: Mapping[str, Any] | None = None) -> dict:
     """Keep the export-time cost decision separate from the quality label.
 
     The existing SQL authority calculates successful-sourcing cost. Its result
@@ -1579,15 +1580,32 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
         execution = snapshot["execution"]
         if not isinstance(execution, Mapping):
             raise ValueError("execution cost state is not a mapping")
+        source_split = ("excluded_superseded_source_successful_microusd",
+                        "excluded_superseded_source_settled_microusd")
+        source_excluded = any(key in execution for key in source_split)
+        if source_excluded and (
+            not isinstance(source_correction, Mapping)
+            or not isinstance(source_correction.get("request_id"), str)
+            or not source_correction["request_id"]
+            or not isinstance(source_correction.get("request_hash"), str)
+            or contracts.SHA256_RE.fullmatch(source_correction["request_hash"]) is None
+            or configuration.get("baseline_source_url") != (
+                "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                + str(source_correction.get("commit") or "") + ".tar.gz")
+            or run.get("submission_id") != "baseline-" + run["round_id"].removeprefix("arena-")
+            or run.get("miner_hotkey") != configuration.get("baseline_hotkey")
+            or any(type(execution.get(key)) is not int or execution[key] < 0 for key in source_split)
+        ):
+            raise ValueError("superseded source cost authority is invalid")
         successful = execution["successful_microusd"]
         split = ("competition_successful_microusd",
                  "excluded_infrastructure_successful_microusd")
-        if any(key in execution for key in split):
-            # Migration 478 preserves raw spend and excludes proved failed
-            # infrastructure attempts only from competition spend. Both parts
-            # must account for the unchanged raw successful total.
+        if source_excluded or any(key in execution for key in split):
+            # Infrastructure and receipt-bound superseded-source exclusions
+            # are disjoint. Every part must reproduce the raw financial total.
             if (any(type(execution.get(key)) is not int or execution[key] < 0 for key in split)
-                    or successful != sum(execution[key] for key in split)):
+                    or successful != sum(execution[key] for key in split) + (
+                        execution[source_split[0]] if source_excluded else 0)):
                 raise ValueError("execution cost split is invalid")
             successful = execution["competition_successful_microusd"]
         confirmed = execution.get("settled_microusd")
@@ -1596,10 +1614,11 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 raise ValueError("confirmed cost is invalid")
             settled_split = ("competition_settled_microusd",
                              "excluded_infrastructure_settled_microusd")
-            if any(key in execution for key in settled_split):
+            if source_excluded or any(key in execution for key in settled_split):
                 if (any(type(execution.get(key)) is not int or execution[key] < 0
                         for key in settled_split)
-                        or confirmed != sum(execution[key] for key in settled_split)):
+                        or confirmed != sum(execution[key] for key in settled_split) + (
+                            execution[source_split[1]] if source_excluded else 0)):
                     raise ValueError("confirmed competition cost split is invalid")
                 confirmed = execution["competition_settled_microusd"]
         numbers = (
@@ -1867,6 +1886,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["competition_cost_eligibility"] = _competition_cost_snapshot(
         run=run, configuration=config, scored=scored, related=related,
         reader=cost_eligibility_reader,
+        source_correction=example.get("source", {}).get("source_correction"),
     )
     if (config.get("sourcing_cost_eligibility_policy")
             in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES

@@ -34,6 +34,7 @@ from lab_arena.service import (
 from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
+from lab_arena.publication_lock import production_lock_directory
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 from lab_arena.runtime_host import parallel_memory_capacity, prepare_scoring_host
 from lab_arena.scoring_startup import prepare_validator_scoring
@@ -667,6 +668,7 @@ def build_service_from_environment(mode: str):
     store.code_review_schema(require_refusal_fallback=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
+        publication_lock_dir=production_lock_directory(supabase_url, mode),
         daily_icp_source=daily_icp_source,
         deepline_catalog_source=deepline_catalog_source,
         # Approved routes are pinned locally and never inferred from a live catalog.

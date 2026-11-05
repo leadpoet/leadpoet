@@ -7,6 +7,7 @@ accounting, admission, or training authority.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -28,6 +29,8 @@ MAX_EXPORT_EVENTS = 30_000
 STAGES = ("request", "response", "outcome")
 _REF = re.compile(re.escape(OBJECT_PREFIX) + r"(\d{4}-\d{2}-\d{2})/([0-9a-f]{32})/(request|response|outcome)\.json\Z")
 _PURPOSE = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
+_LOGGER = logging.getLogger(__name__)
+_LOG_PURPOSES = frozenset({"admission_review", "icp_generation", "icp_exclusion", "judge"})
 
 
 def _json(value: Any) -> bytes:
@@ -139,7 +142,18 @@ class InternalCall:
                 self._objects.put(ref, payload)
                 result = {"status": "stored", "ref": ref, "sha256": document["event_sha256"]}
             except Exception:
-                pass
+                # A total object-store outage has no discoverable index. Keep
+                # one bounded diagnostic in existing app logs, without source
+                # data, object refs, provider errors, or exception text.
+                try:
+                    purpose = self._common.get("purpose")
+                    call_id = self.call_id if re.fullmatch(r"[0-9a-f]{32}", self.call_id) else "unknown"
+                    _LOGGER.warning(
+                        "arena_internal_capture_write_failed stage=%s purpose=%s call_id=%s",
+                        stage if stage in STAGES else "unknown",
+                        purpose if purpose in _LOG_PURPOSES else "unknown", call_id)
+                except Exception:
+                    pass  # Diagnostics must also remain observational.
             self._stages[stage] = result
             return result
 

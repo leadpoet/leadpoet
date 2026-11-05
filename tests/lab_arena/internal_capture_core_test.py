@@ -202,6 +202,34 @@ def test_all_capture_storage_failures_are_observational():
     disabled.finish(outcome={})
 
 
+def test_index_outage_logs_only_fixed_metadata_without_secret_or_error_text(caplog):
+    secret = "never-log-this-private-credential"
+    class Broken:
+        def put(self, *args):
+            raise OSError(secret + " storage endpoint and private request")
+    call = capture.InternalCapture(Broken()).start(
+        purpose="admission_review", context={"private_context": secret}, request=request(), secrets=(secret,))
+    response_result = call.response(body=json.dumps(response()).encode(), status=200)
+    finish_result = call.finish(outcome={"committed_review": {"status": "passed"}, "private_note": secret}, cost_microusd=12)
+    assert response_result["status"] == finish_result["status"] == "unavailable"
+    messages = [record.getMessage() for record in caplog.records if record.name == capture.__name__]
+    assert messages == ["arena_internal_capture_write_failed stage=" + stage
+                        + " purpose=admission_review call_id=" + call.call_id for stage in capture.STAGES]
+    assert secret not in caplog.text
+    assert "storage endpoint" not in caplog.text and "private_context" not in caplog.text
+    assert "private_note" not in caplog.text and "Supported answer" not in caplog.text
+
+
+def test_unknown_purpose_and_logger_failure_cannot_expose_data_or_break_capture(monkeypatch, caplog):
+    call = capture.InternalCapture(None).start(purpose="private_label", context={}, request=request())
+    assert "purpose=unknown" in caplog.text and "private_label" not in caplog.text
+    def failed_logger(*args, **kwargs):
+        raise RuntimeError("logging unavailable")
+    monkeypatch.setattr(capture._LOGGER, "warning", failed_logger)
+    call.response(body=b"{}", status=200)
+    assert call.finish(outcome={"status": "unchanged"})["status"] == "unavailable"
+
+
 def test_duplicate_stage_cannot_overwrite_original_evidence(tmp_path):
     objects, call = captured(tmp_path)
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}

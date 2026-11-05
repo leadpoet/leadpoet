@@ -703,7 +703,7 @@ BEGIN
    'sha256:9df0c4d451043da9fcec15fe86f9bfeb87fd7c048609aaf43736a6cbf0244cc4'  OR r.status<>'scored' OR r.status_generation<>13 OR r.stage_generation<>8 OR r.scoring_generation_floor<>0
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.reward_activated_at IS NOT NULL
   OR r.promotion_doc IS NOT NULL OR r.baseline_promoted_at IS NOT NULL
-  OR clock_timestamp()>='2026-11-05T01:00:00Z'::TIMESTAMPTZ
+  OR clock_timestamp()>='2026-11-05T01:55:00Z'::TIMESTAMPTZ
   OR encode(extensions.digest((to_jsonb(r)-'updated_at')::TEXT,'sha256'),'hex')<>manifest->>'round_hash'
   OR (SELECT count(*) FROM public.lab_arena_restart_claim_control WHERE singleton)<>1
   OR EXISTS(SELECT 1 FROM public.lab_arena_restart_claim_control WHERE operator_paused

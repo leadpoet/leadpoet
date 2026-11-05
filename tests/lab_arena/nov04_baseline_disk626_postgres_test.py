@@ -154,6 +154,18 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
             future_before=scalar(cur,"SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id='arena-2026-11-05'")
         p.conn.commit()
     ordinary_cost_before=p.store.icp_cost_eligibility(round_id=ROUND,submission_id='source621-miner-0',icp_position=0,qualified_company_count=0)
+    # Exercise the whole migration immediately before and exactly at the
+    # operator fence, independently of this machine's wall-clock date.
+    fence="clock_timestamp()>='2099-11-05T01:55:00Z'::TIMESTAMPTZ"
+    assert sql.count(fence)==1
+    before_cutoff=sql.replace(fence,"'2099-11-05T01:54:59.999999Z'::TIMESTAMPTZ>='2099-11-05T01:55:00Z'::TIMESTAMPTZ")
+    before_cutoff=before_cutoff.rsplit('COMMIT;',1)[0]+'ROLLBACK;'
+    with p.conn.cursor() as cur:cur.execute(before_cutoff)
+    p.conn.rollback()
+    at_cutoff=sql.replace(fence,"'2099-11-05T01:55:00Z'::TIMESTAMPTZ>='2099-11-05T01:55:00Z'::TIMESTAMPTZ")
+    with pytest.raises(p.pg.Error):
+        with p.conn.cursor() as cur:cur.execute(at_cutoff)
+    p.conn.rollback()
     # A wrong manifest must roll back helper creation and all writes.
     wrong=sql.replace(json.loads(re.search(r'\$manifest626\$(.*?)\$manifest626\$',sql,re.S)[1])['round_hash'],'0'*64)
     with pytest.raises(p.pg.Error):

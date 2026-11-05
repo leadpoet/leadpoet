@@ -12574,8 +12574,10 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     }
 
 
-def test_positive_semantic_review_model_is_already_in_judge_allowlist():
-    assert arena_scoring.DEFAULT_JUDGE_MODELS["intent_fetched_evidence"] == (
+def test_legacy_positive_semantic_review_model_is_already_in_frozen_judge_allowlist():
+    from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
+    policy = arena_scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
+    assert policy["judge_models"]["intent_fetched_evidence"] == (
         investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     )
 

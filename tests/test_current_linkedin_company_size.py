@@ -16,6 +16,7 @@ from qualification.scoring.company_fit_decision import (
     company_fit_unavailable,
 )
 from qualification.scoring import linkedin_company_size
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 from qualification.scoring.competition import (
     scorer_breakdown_has_retryable_infrastructure_failure,
 )
@@ -60,7 +61,7 @@ def _frozen_integrity_policy():
     # Keep their original model policy instead of opting in via today's defaults.
     return arena_scoring.build_scorer_policy(
         scoring_adapter_version="qualification_integrity_v2",
-        judge_models={name: model for name, model in arena_scoring.DEFAULT_JUDGE_MODELS.items()
+        judge_models={name: model for name, model in LEGACY_MODELS.items()
                       if name != "industry_evidence_review"},
     )
 
@@ -3788,6 +3789,7 @@ def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
 
 @pytest.mark.parametrize("missing_size_observation", [False, True])
 @pytest.mark.parametrize("frozen_round_policy", [False, True])
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_state_street_web_identity_reuses_structured_profile_for_size_with_listing_proof(
     monkeypatch, missing_size_observation, frozen_round_policy,
 ):
@@ -4027,6 +4029,7 @@ def test_structured_profile_fallback_rejects_incomplete_or_conflicting_identity(
 
 
 @pytest.mark.parametrize("provider_failure", [False, True])
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_structured_public_stage_scorer_entrypoint_transition(
     monkeypatch,
     provider_failure,
@@ -4131,6 +4134,7 @@ def test_structured_public_stage_scorer_entrypoint_transition(
     assert output["failure"] == "judge_error", output
 
 
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch):
     for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
         monkeypatch.setenv(name, value)
@@ -4317,6 +4321,7 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
 
 
 @pytest.mark.parametrize("recovers", [True, False])
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_tiny_homepage_placeholder_retries_full_scorer(
     monkeypatch,
     recovers,
@@ -4804,6 +4809,7 @@ def test_archived_sec_snapshot_cannot_override_bound_current_private_type(
         "sub-a9371aca5c5f319e63d2f789ad6f7269",
     ],
 )
+@pytest.mark.usefixtures("scorer_process_environment")
 def test_envestnet_private_type_rejects_old_sec_under_frozen_policy(
     monkeypatch,
     scored_run_id,

@@ -10611,6 +10611,26 @@ async def _llm_reverify_company(
         # still follows the normal rebrand investigation. The repair cannot
         # replace source-bound identity or any independent fit proof.
         investigation_targets = ()
+    identity_fields = ("observed_company_name", "observed_company_website")
+    if company.company_linkedin:
+        identity_fields += ("observed_company_linkedin",)
+    if (
+        investigation_targets
+        and "rebrand" not in investigation_targets
+        and "identity" in _incomplete_company_reverify_dimensions(
+            result, icp_attribute=icp_attribute, icp_stage=icp_stage,
+        )
+        and any(
+            not isinstance(verdict.get(field), str) or not verdict[field].strip()
+            for field in identity_fields
+        )
+    ):
+        # Repair the missing identity before spending the single bounded
+        # investigation. Its full response can leave a different fact gap
+        # (for example geography), which must join that same investigation.
+        # No completed finding exists yet; never copy proof from this
+        # incomplete identity or add a second investigation budget.
+        investigation_targets = ()
     claims: Mapping[str, Any] = {}
     repair_missing_identity = False
     if investigation_targets:

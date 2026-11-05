@@ -1,0 +1,344 @@
+"""Private observations of trusted Arena host calls, using existing object storage.
+
+A request event is a plan, not proof of dispatch. HTTP response and committed
+business outcomes remain separate. These records confer no miner eligibility,
+accounting, admission, or training authority.
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import threading
+import uuid
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from lab_arena import contracts, reasoning_capture, training_capture, training_steps, training_thinking
+
+SCHEMA_VERSION = "leadpoet.lab_arena.internal_capture_event.v1"
+EXAMPLE_SCHEMA_VERSION = "leadpoet.lab_arena.internal_training_example.v1"
+SFT_SCHEMA_VERSION = "leadpoet.lab_arena.internal_sft_candidate.v1"
+OBJECT_PREFIX = "private/arena-training/internal/"
+MAX_EVENT_BYTES = 64 * 1024
+MAX_OUTCOME_BYTES = 512 * 1024
+MAX_EXPORT_EVENTS = 30_000
+STAGES = ("request", "response", "outcome")
+_REF = re.compile(re.escape(OBJECT_PREFIX) + r"(\d{4}-\d{2}-\d{2})/([0-9a-f]{32})/(request|response|outcome)\.json\Z")
+_PURPOSE = re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
+
+
+def _json(value: Any) -> bytes:
+    return contracts.canonical_json(value).encode("utf-8")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _source_hash() -> str | None:
+    try:
+        return contracts.hash_bytes(Path(__file__).read_bytes())
+    except OSError:
+        return None
+
+
+CAPTURE_SOURCE_SHA256 = _source_hash()
+
+
+def from_environment() -> "InternalCapture":
+    """Return an optional bounded sink, without constructing a service or worker."""
+    try:
+        import boto3
+        from botocore.config import Config
+        from lab_arena.service import S3ObjectStore
+
+        bucket = os.environ["LAB_ARENA_BUCKET"].strip()
+        if not bucket:
+            raise ValueError("bucket_unavailable")
+        client = boto3.client("s3", region_name=os.environ.get("AWS_REGION"), config=Config(
+            signature_version="s3v4", connect_timeout=0.5, read_timeout=0.5,
+            retries={"total_max_attempts": 1, "mode": "standard"}))
+        objects = S3ObjectStore(bucket, client=client, prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""))
+    except Exception:
+        objects = None
+    return InternalCapture(objects)
+
+
+class InternalCapture:
+    """Best-effort capture. All persistence uses the existing write-once stores."""
+
+    def __init__(self, objects: Any) -> None:
+        self.objects = objects
+
+    @classmethod
+    def from_environment(cls) -> "InternalCapture":
+        return from_environment()
+
+    def start(self, *, purpose: str, context: Mapping[str, Any], request: Mapping[str, Any],
+              api: str = "openrouter.chat", secrets: Iterable[str] = ()) -> "InternalCall":
+        call = InternalCall(self.objects)
+        try:
+            call._secrets = tuple(value for value in secrets if isinstance(value, str) and value)
+            if not isinstance(purpose, str) or not _PURPOSE.fullmatch(purpose):
+                raise ValueError("purpose_invalid")
+            if api not in reasoning_capture.OPERATIONS or not isinstance(request, Mapping):
+                raise ValueError("request_invalid")
+            call._common.update(purpose=purpose, api=api,
+                                model=request.get("model") if isinstance(request.get("model"), str) else None)
+            # Store the body once. Exporters can pass this same verified value
+            # to shared parsers without persisting redundant prompt copies.
+            document = {"operation_id": api, "outbound": {"body": dict(request)}}
+            cleaned, redactions = training_capture.sanitize_training_value(dict(context), call._secrets)
+            if len(_json(cleaned)) > MAX_EVENT_BYTES // 2:
+                raise ValueError("context_size_limit")
+            call._common.update(context=cleaned,
+                                context_privacy={"redacted": bool(redactions), "redactions": redactions})
+            call.request_pointer = training_capture.RequestCapture(self.objects)(document, secrets=call._secrets)
+            call._event("request", {"capture": call.request_pointer, "dispatch": "not_established"})
+        except Exception:
+            # Do not log exception text, endpoints, caller data, or secrets.
+            call.request_pointer = training_capture.unavailable("internal_request_capture_failed")
+            call._event("request", {"capture": call.request_pointer, "dispatch": "not_established"})
+        return call
+
+
+class InternalCall:
+    def __init__(self, objects: Any) -> None:
+        self.call_id = uuid.uuid4().hex
+        self.created_at = _now()
+        self.prefix = OBJECT_PREFIX + self.created_at[:10] + "/" + self.call_id + "/"
+        self.request_pointer: dict[str, Any] = training_capture.unavailable()
+        self.response_pointer: dict[str, Any] = training_capture.unavailable("response_not_observed")
+        self._objects = objects
+        self._secrets: tuple[str, ...] = ()
+        self._lock = threading.RLock()
+        self._stages: dict[str, dict[str, Any]] = {}
+        self._common = {"schema_version": SCHEMA_VERSION, "actor_type": "arena_internal",
+                        "call_id": self.call_id, "created_at": self.created_at,
+                        "capture_source_sha256": CAPTURE_SOURCE_SHA256,
+                        "purpose": "unknown", "api": None, "context": {},
+                        "model": None, "context_privacy": {"redacted": False, "redactions": []}}
+
+    def _event(self, stage: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if stage in self._stages:
+                return self._stages[stage]
+            result = {"status": "unavailable", "reason": "internal_index_write_failed"}
+            try:
+                document = {**self._common, "stage": stage, "recorded_at": _now(), **fields}
+                document, redactions = training_capture.sanitize_training_value(document, self._secrets)
+                document["event_privacy"] = {"redacted": bool(redactions), "redactions": redactions}
+                document["event_sha256"] = contracts.document_hash(document)
+                payload = _json(document)
+                if len(payload) > MAX_EVENT_BYTES:
+                    raise ValueError("event_size_limit")
+                ref = self.prefix + stage + ".json"
+                self._objects.put(ref, payload)
+                result = {"status": "stored", "ref": ref, "sha256": document["event_sha256"]}
+            except Exception:
+                pass
+            self._stages[stage] = result
+            return result
+
+    def response(self, *, body: bytes, status: int,
+                 elapsed_seconds: float | None = None) -> dict[str, Any]:
+        with self._lock:
+            if "response" in self._stages or "outcome" in self._stages:
+                return self._stages.get("response", {"status": "unavailable", "reason": "call_finished"})
+            fields: dict[str, Any] = {"http_status": status if type(status) is int and 100 <= status <= 599 else None,
+                                      "request_event": self._stages.get("request"),
+                                      "response_observed": True}
+            try:
+                if not isinstance(body, bytes) or len(body) > training_capture.MAX_OBJECT_BYTES:
+                    raise ValueError("response_size_or_type")
+                fields.update(wire_body_sha256=contracts.hash_bytes(body), wire_body_bytes=len(body))
+                text = body.decode("utf-8")
+                try:
+                    provider_response = json.loads(text)
+                    document = {"provider_calls": [{"response": provider_response}]}
+                    fields["body_format"] = "json"
+                except ValueError:
+                    document = {"body_text": text}
+                    fields["body_format"] = "text"
+                self.response_pointer = training_capture.RequestCapture(self._objects)(document, secrets=self._secrets)
+                fields["capture"] = self.response_pointer
+                if (type(elapsed_seconds) in (int, float) and math.isfinite(elapsed_seconds)
+                        and elapsed_seconds >= 0):
+                    fields["elapsed_seconds"] = elapsed_seconds
+            except Exception:
+                self.response_pointer = training_capture.unavailable("internal_response_capture_failed")
+                fields["capture"] = self.response_pointer
+            return self._event("response", fields)
+
+    def finish(self, *, outcome: Mapping[str, Any], cost_microusd: int | None = None) -> dict[str, Any]:
+        with self._lock:
+            if "outcome" in self._stages:
+                return self._stages["outcome"]
+            pointer = training_capture.unavailable("internal_outcome_capture_failed")
+            try:
+                if not isinstance(outcome, Mapping) or len(_json(outcome)) > MAX_OUTCOME_BYTES:
+                    raise ValueError("outcome_size_or_type")
+                pointer = training_capture.RequestCapture(self._objects)({"outcome": dict(outcome)}, secrets=self._secrets)
+            except Exception:
+                pass
+            known_cost = type(cost_microusd) is int and cost_microusd >= 0
+            result = self._event("outcome", {
+                "capture": pointer, "request_event": self._stages.get("request"),
+                "response_event": self._stages.get("response"),
+                "cost_microusd": cost_microusd if known_cost else None,
+                "cost_status": "known" if known_cost else "unknown",
+                "outcome_authority": "observed_host_result_not_verified_ground_truth"})
+            self._secrets = ()
+            return result
+
+
+def call_prefix(ref: str) -> str:
+    """Restrict read access to explicit internal event references."""
+    match = _REF.fullmatch(ref) if isinstance(ref, str) else None
+    if match is None:
+        raise ValueError("internal_event_ref_invalid")
+    date.fromisoformat(match[1])
+    return ref.rsplit("/", 1)[0] + "/"
+
+
+def _read_event(objects: Any, ref: str) -> dict[str, Any] | None:
+    prefix = call_prefix(ref)
+    reader = getattr(objects, "get_optional_bounded", None)
+    raw = reader(ref, MAX_EVENT_BYTES) if callable(reader) else objects.get_bounded(ref, MAX_EVENT_BYTES)
+    if raw is None:
+        return None
+    event = json.loads(raw)
+    if not isinstance(event, dict):
+        raise ValueError("event_invalid")
+    digest = event.get("event_sha256")
+    if (event.get("schema_version") != SCHEMA_VERSION or event.get("actor_type") != "arena_internal"
+            or event.get("call_id") != prefix.split("/")[-2]
+            or event.get("created_at", "")[:10] != prefix.split("/")[-3]
+            or event.get("stage") + ".json" != ref.rsplit("/", 1)[1]
+            or digest != contracts.document_hash({key: value for key, value in event.items() if key != "event_sha256"})):
+        raise ValueError("event_identity_or_hash_invalid")
+    # Index metadata has no provider reasoning path. Its sanitizer must be a
+    # fixed point before private output, including manually supplied local refs.
+    if training_capture.sanitize_training_value(event)[0] != event:
+        raise ValueError("event_privacy_invalid")
+    return event
+
+
+def _reasoning(request: Mapping[str, Any], response: Any, api: str, redactions: list[str], registry: Any) -> dict:
+    call = {"provider": "openrouter", "operation_id": api, "response": response,
+            "request": {"outbound": {"body": request}, "admitted_parameters": request,
+                        "hashed_parameters": request}, "response_privacy_redactions": redactions}
+    try:
+        checked, annotation = reasoning_capture.apply(api, request, policy=reasoning_capture.POLICY, registry=registry)
+        # The exporter cannot add controls that the saved request did not send.
+        if checked == request:
+            call["reasoning_capture"] = annotation
+            call["route_observation"] = reasoning_capture.route_observation(response, annotation)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        pass
+    segments, summary, opaque = training_thinking._segments(response, api)
+    full, status = training_thinking.full_text_segments(call, "arena_internal", registry)
+    return {"available_segments": segments, "contains_summary": summary,
+            "contains_opaque": opaque or "hidden_reasoning" in redactions,
+            "full_generated_thinking": full, "status": status,
+            "registry_sha256": contracts.document_hash(registry) if isinstance(registry, Mapping) else None}
+
+
+def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, dict | None]:
+    """Read one call; corrupt, missing, redacted and unavailable evidence is explicit."""
+    prefix = call_prefix(ref)
+    events, documents, gaps = {}, {}, []
+    for stage in STAGES:
+        try:
+            event = _read_event(objects, prefix + stage + ".json")
+        except Exception:
+            event = None
+            gaps.append(stage + "_event_unavailable_or_invalid")
+        if event is None:
+            gaps.append(stage + "_event_missing")
+            continue
+        events[stage] = event
+        try:
+            documents[stage] = training_capture.read_request(objects, event.get("capture") or {})
+        except Exception:
+            gaps.append(stage + "_body_unavailable_or_invalid")
+    first = next(iter(events.values()), {})
+    for event in events.values():
+        if any(event.get(key) != first.get(key) for key in
+               ("purpose", "context", "api", "created_at", "model", "capture_source_sha256")):
+            gaps.append("event_context_mismatch")
+    request = ((documents.get("request") or {}).get("outbound") or {}).get("body")
+    response_document = documents.get("response") or {}
+    calls = response_document.get("provider_calls") or []
+    response = calls[0].get("response") if len(calls) == 1 and isinstance(calls[0], Mapping) else None
+    redactions = sorted({reason for event in events.values()
+                         for field in (event.get("capture") or {}, event.get("context_privacy") or {},
+                                       event.get("event_privacy") or {})
+                         for reason in field.get("redactions") or []})
+    if redactions:
+        gaps.append("privacy_redactions")
+    outcome_event = events.get("outcome") or {}
+    if outcome_event.get("cost_status") != "known":
+        gaps.append("cost_unknown")
+    dimensions = {stage: stage in documents for stage in STAGES}
+    dimensions.update(privacy=not redactions, costs=outcome_event.get("cost_status") == "known")
+    reasoning = {"available_segments": [], "full_generated_thinking": [], "status": {"returned": "unavailable"}}
+    if isinstance(request, Mapping):
+        try:
+            reasoning = _reasoning(request, response, first.get("api"), redactions, registry)
+        except Exception:
+            gaps.append("reasoning_parse_unavailable")
+    raw = {"schema_version": EXAMPLE_SCHEMA_VERSION, "actor_type": "arena_internal",
+           "call_id": prefix.split("/")[-2], "purpose": first.get("purpose"),
+           "api": first.get("api"), "context": first.get("context", {}),
+           "created_at": first.get("created_at"), "event_refs": [prefix + stage + ".json" for stage in STAGES],
+           "events": events, "request": request, "response": response,
+           **({"response_text": response_document["body_text"]} if "body_text" in response_document else {}),
+           "outcome": (documents.get("outcome") or {}).get("outcome"),
+           "cost_microusd": outcome_event.get("cost_microusd"),
+           "cost_status": outcome_event.get("cost_status", "unknown"), "reasoning": reasoning,
+           "completeness": {"complete": all(dimensions.values()) and not gaps,
+                            "dimensions": dimensions, "gaps": sorted(set(gaps))}}
+    candidate, exclusions = None, []
+    if not dimensions["request"] or not dimensions["response"] or "event_context_mismatch" in gaps:
+        exclusions.append("request_response_unavailable")
+    elif redactions:
+        exclusions.append("privacy_nonexact")
+    elif events.get("response", {}).get("http_status") != 200:
+        exclusions.append("provider_http_error")
+    else:
+        try:
+            target, _ = training_steps._target(request, response, first["api"], allow_reasoning_history=True,
+                                               allow_tool_error_history=True)
+            candidate = {"schema_version": SFT_SCHEMA_VERSION, "actor_type": "arena_internal",
+                         "purpose": first.get("purpose"), "call_id": raw["call_id"],
+                         "format": first["api"], "input": request, "target": target,
+                         "available_reasoning": reasoning["available_segments"],
+                         "generated_thinking": reasoning["full_generated_thinking"],
+                         "quality": {"status": "unreviewed", "correct_action": "not_established"},
+                         "training_permission": {"status": "unconfirmed"},
+                         "source": {"event_refs": raw["event_refs"], "context": raw["context"],
+                                    "request_sha256": (events["request"].get("capture") or {}).get("sha256"),
+                                    "response_sha256": (events["response"].get("capture") or {}).get("sha256"),
+                                    "outcome": raw["outcome"], "cost_status": raw["cost_status"],
+                                    "capture_completeness": raw["completeness"]}}
+        except Exception:
+            exclusions.append("target_shape_or_completion_unsupported")
+    raw["sft_exclusions"] = exclusions
+    raw["example_sha256"] = contracts.document_hash(raw)
+    return raw, candidate
+
+
+def iter_exports(objects: Any, refs: Iterable[str], *, registry: Any = None):
+    prefixes = set()
+    for index, ref in enumerate(refs):
+        if index >= MAX_EXPORT_EVENTS:
+            raise ValueError("event_limit_exceeded")
+        prefixes.add(call_prefix(ref))
+    for prefix in sorted(prefixes):
+        yield read_call(objects, prefix + "request.json", registry=registry)
+
+

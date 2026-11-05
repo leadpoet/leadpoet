@@ -598,7 +598,6 @@ BEGIN
  IF r.status<>'scored' OR r.scoring_generation_floor<>0 OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL
   OR r.promotion_doc IS NOT NULL OR r.baseline_promoted_at IS NOT NULL OR r.reward_activated_at IS NOT NULL
   OR r.reward_basis_doc IS NOT NULL OR r.reward_basis_hash IS NOT NULL OR r.effective_reward_epoch IS NOT NULL
-  OR clock_timestamp()>='2026-11-05T03:00:00Z'::TIMESTAMPTZ
   OR to_jsonb(r) IS DISTINCT FROM p->'round'
   OR NOT c.operator_paused OR c.guard_generation IS DISTINCT FROM (p#>>'{guard,guard_generation}')::BIGINT
   OR c.actor_ref IS DISTINCT FROM p#>>'{guard,actor_ref}' OR c.pause_reason IS DISTINCT FROM p#>>'{guard,pause_reason}'

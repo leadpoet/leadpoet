@@ -15,6 +15,10 @@ Keep the existing operator hold until the coordinator verifies and atomically
 resumes normal publication. Internal agents may implement, test, commit and push;
 the coordinator owns independent review, protected merge, exact committed SQL
 application, publication and rewards. No credential renewal or new paid work.
+This later full-ten approval authorizes finalizing already completed evidence;
+it does not reopen evaluation. The operator apply-time cutoff is removed, while
+the persisted 03:00 schedule remains unchanged. Add no attempts, paid work or
+future evaluation window.
 
 ## Scoped authorization: November 4 completed-negative identity finality
 

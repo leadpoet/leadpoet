@@ -1,3 +1,15 @@
+## Scoped authorization: November 4 completed-negative identity finality
+
+The user authorized the reviewed completed-negative finality correction for any
+unfinished baseline or miner judgment. Preserve every completed judgment, the
+frozen grading/cache identity, strict identity and evidence rules, provider
+failures, costs and history. Internal agents may implement and test the narrow
+predicate and exact-source composer, then build and publish the verified
+one-file runtime on frozen79cd through the canonical composer. No paid validation,
+image selection, registration, restart or database write is authorized to an
+internal agent. The coordinator owns independent review, the existing
+reviewer-runtime mapping, recovery and deployed verification.
+
 ## Scoped authorization: November 3 baseline judgment correction
 
 The user authorized superseding exactly the nine old-verifier November 3

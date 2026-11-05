@@ -55,5 +55,14 @@
         "sha256": "3928db13fbc3b37dbd8cc56b0085abf142310a44b2ab883e91db16368c3dfe5c"
       }
     }
+  },
+  "empty_domain_finality79cd": {
+    "image_digest": "sha256:79cd4bc932acf572df035d734afc66309a801862e8f080ed797cd11420f6902b",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "empty_domain_finality79cd-lead_scorer.py.gz",
+        "sha256": "125c0303aa5e100df746499bc1ca76dc8e381b2bda8f3a1ad5132d688df15d58"
+      }
+    }
   }
 }

@@ -205,6 +205,52 @@ def test_quote_occurrence_without_independent_findings_does_not_close_discovery(
     assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
 
 
+def test_homepage_quote_uses_native_plain_projection_but_fingerprint_keeps_html(monkeypatch):
+    from qualification.scoring.company_evidence_investigator import _plain_text
+    html = "<html><title>Acme</title><body><p>Acme provides</p><p>software.</p></body></html>"
+    plain = _plain_text(html)
+    assert plain not in html
+    fit = fit_result()
+    for item in fit.details["dimension_evidence"].values():
+        if "web_evidence" in item:
+            item["web_evidence"].update(url=HOME, quote=plain)
+    for finding in fit.details["supporting_receipts"][0]["claims"].values():
+        finding.update(evidence_url=HOME, evidence_quote=plain)
+    fit.details["supporting_receipts"][0]["claims"]["industry"]["_industry_review"]["evidence"] = [
+        {"url": HOME, "quote": plain}]
+    def capture_home(body):
+        reuse.record_source("homepage", {"url": HOME}, {"status": 200, "final_url": HOME, "text": body})
+    with reuse.capture_fit_evidence() as captured:
+        capture_home(html)
+    snapshot = reuse.build_fit_snapshot(fit, {}, {}, {}, captured)
+    assert snapshot is not None
+    current = {"html": html}
+    async def read(_entry): capture_home(current["html"])
+    monkeypatch.setattr(reuse, "_read_source", read)
+    assert asyncio.run(reuse.revalidate_fit_snapshot(snapshot))
+    current["html"] = html.replace("<body>", '<body class="changed">')
+    assert _plain_text(current["html"]) == plain
+    assert not asyncio.run(reuse.revalidate_fit_snapshot(snapshot))
+
+
+def test_exact_native_context_with_link_metadata_is_bound_without_making_metadata_evidence():
+    from qualification.scoring.company_evidence_investigator import _plain_text, _quote_occurs
+    html = ('<html><body><p>' + TEXT + '</p><a href="https://acme.example/products">Products</a></body></html>')
+    body = _plain_text(html)
+    assert "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]" in body
+    assert not _quote_occurs(body, body)  # Factual quotes must still exclude this metadata.
+    with reuse.capture_fit_evidence() as captured:
+        reuse.record_source("homepage", {"url": HOME}, {"status": 200, "final_url": HOME, "text": html})
+        reuse.record_source("investigator_page", {"url": PAGE, "stealth_mode": False,
+            "archive_targets": [], "archive_company_names": []},
+            {"result": {"ok": True, "url": PAGE, "final_url": PAGE, "text": body}, "contexts": {}})
+    contexts = {url: {"final_url": url, "text": body} for url in (HOME, PAGE)}
+    assert reuse.build_fit_snapshot(fit_result(), {}, contexts, {}, captured) is not None
+    contexts[PAGE]["text"] = body.replace("https://acme.example/products", "https://acme.example/forged")
+    assert reuse.build_fit_snapshot(fit_result(), {}, contexts, {}, captured) is None
+    assert not _quote_occurs(body, body)
+
+
 @pytest.mark.parametrize("mutation", [
     lambda fit: fit.details["supporting_receipts"][0].update(completed_submitted_findings=False),
     lambda fit: fit.details["supporting_receipts"][0].update(failure_reason="provider_error"),

@@ -162,8 +162,18 @@ def _text_pages(captured):
         elif isinstance(value, list):
             for item in value: visit(item)
     for identity, response in captured.responses.items():
-        visit(response)
         record = captured.records[identity]
+        if record["kind"] == "homepage":
+            # The native investigator sees this exact plain-text projection.
+            # Keep raw HTML in the response hash so markup/body changes still
+            # invalidate reuse; quote checks must use the admitted text surface.
+            from qualification.scoring.company_evidence_investigator import _plain_text
+            text = _plain_text(response.get("text", ""))
+            for url in (record["request"].get("url"), response.get("final_url")):
+                if isinstance(url, str) and text:
+                    pages[url] = text
+            continue
+        visit(response)
         result = response.get("result") if isinstance(response, Mapping) else None
         if isinstance(result, Mapping) and isinstance(result.get("text"), str):
             url = record["request"].get("url")
@@ -378,7 +388,7 @@ def _contexts_complete(contexts, captured):
             final = value.get("final_url") or url
             text = value["text"]
             return isinstance(text, str) and bool(text) and any(
-                url == source and final == target and _quote_occurs(text, body)
+                url == source and final == target and (text == body or _quote_occurs(text, body))
                 for source, target, body in pages)
         return all(valid(item, key) for key, item in value.items())
     return all(valid(context) for context in contexts)

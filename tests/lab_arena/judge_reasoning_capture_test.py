@@ -145,6 +145,19 @@ def test_worker_source_policy_cannot_enable_a_legacy_judge():
     assert runner._full_thinking_lease({'kind': 'execute', 'reasoning_capture_policy': rc.POLICY})
 
 
+def test_judge_receipts_do_not_enable_unrelated_training_frames(tmp_path):
+    from lab_arena import runner, lab_arena_checkpoint as checkpoint
+
+    state = runner.RunState(lease={'run_id': 'test', 'kind': 'score',
+        'judge_reasoning_capture_policy': rc.POLICY}, lease_token='test-token')
+    worker = runner.WorkerSocketServer(tmp_path / 'worker.sock', SimpleNamespace(), state)
+    frame = {'schema_version': checkpoint.TRAINING_SCHEMA_VERSION,
+        'control': checkpoint.TRAINING_CONTROL, 'kind': 'state_snapshot',
+        'depends_on': [], 'data': {'name': 'untrusted', 'value': {'accepted': True}}}
+    assert json.loads(worker._handle_training_control(json.dumps(frame).encode())) == {'recorded': False}
+    assert state.worker_observations.agent_observations == []
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 def test_trusted_judge_consumption_reaches_existing_worker_receipt_path(monkeypatch, enabled):
     import tempfile

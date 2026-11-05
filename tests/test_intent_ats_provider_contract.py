@@ -256,7 +256,7 @@ async def _run_greenhouse_verification(monkeypatch, payload, stage3_status):
     client = _GreenhouseClient(payload)
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(stage3_status)
 
@@ -309,7 +309,7 @@ async def test_scale_greenhouse_department_reaches_source_and_semantic_gate(
     client = _GreenhouseClient(_scale_greenhouse_payload())
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return {
             "answer": {

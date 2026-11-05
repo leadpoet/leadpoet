@@ -115,6 +115,12 @@ def endpoint():
                     self.wfile.flush()
                     time.sleep(0.2)
                     data = data[3:]
+                if self.path.endswith("/paused"):
+                    self.wfile.write(data[:3])
+                    self.wfile.flush()
+                    if not self.server.response_gate.wait(5):
+                        return
+                    data = data[3:]
                 self.wfile.write(data)
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
@@ -124,6 +130,7 @@ def endpoint():
 
     server = QuietHTTPServer(("127.0.0.1", 0), Handler)
     server.paths = []
+    server.response_gate = threading.Event()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield "http://127.0.0.1:" + str(server.server_port), server
@@ -1146,6 +1153,109 @@ def test_slot_stream_identity_survives_owner_content_replacement():
         assert recorder.stream_bodies == {}
     finally:
         finish(recorder, checkpoint)
+
+
+@pytest.mark.parametrize("provider", [False, True])
+@pytest.mark.parametrize("keyword", [False, True])
+@pytest.mark.parametrize("amount", [0, 3])
+def test_aiohttp_nowait_read_preserves_remaining_body(endpoint, monkeypatch, provider, keyword, amount):
+    aiohttp = pytest.importorskip("aiohttp")
+    monkeypatch.setattr("lab_arena.automatic_capture._PROVIDER_HOSTS", {"127.0.0.1"})
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    path = "/provider" if provider else "/text"
+
+    async def run():
+        async with aiohttp.ClientSession() as client:
+            async with client.get(endpoint[0] + path) as response:
+                reader = response.content
+                # Wait for the real socket body without consuming its bytes.
+                await reader.wait_eof()
+                assert not reader.at_eof()
+                body = recorder._body(reader, "aiohttp", lambda _: None)
+                assert body is not None
+                prefix = reader.read_nowait(n=amount) if keyword else reader.read_nowait(amount)
+                assert prefix == BODY[:amount]
+                assert not body.done
+                assert recorder.counts["responses_complete"] == 0
+                assert prefix + await reader.read() == BODY
+                assert reader.read_nowait(n=0) == b""
+                assert reader.read_nowait(0) == b""
+    try:
+        asyncio.run(run())
+    finally:
+        summary = finish(recorder, checkpoint)
+    if provider:
+        assert checkpoint.web == []
+        assert checkpoint.acks == [{"call_identity": IDENTITY, "status": 200,
+            "body_sha256": "sha256:" + hashlib.sha256(BODY).hexdigest(), "body_bytes": len(BODY)}], summary
+    else:
+        assert checkpoint.acks == []
+        assert len(checkpoint.web) == 1, summary
+        assert_web(checkpoint.web[0], BODY)
+    assert summary["complete"] is True
+    assert endpoint[1].paths == [path]
+
+
+@pytest.mark.parametrize("provider", [False, True])
+@pytest.mark.parametrize("mode", ["positional", "keyword", "default"])
+@pytest.mark.parametrize("read_error", [False, True])
+def test_aiohttp_nowait_empty_buffer_waits_for_real_eof(endpoint, monkeypatch, provider, mode, read_error):
+    aiohttp = pytest.importorskip("aiohttp")
+    monkeypatch.setattr("lab_arena.automatic_capture._PROVIDER_HOSTS", {"127.0.0.1"})
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    path = "/provider/paused" if provider else "/paused"
+
+    def nowait(reader):
+        if mode == "positional":
+            return reader.read_nowait(3)
+        if mode == "keyword":
+            return reader.read_nowait(n=3)
+        return reader.read_nowait()
+
+    async def run():
+        async with aiohttp.ClientSession() as client:
+            async with client.get(endpoint[0] + path) as response:
+                reader = response.content
+                assert await reader.readexactly(3) == BODY[:3]
+                body = recorder._body(reader, "aiohttp", lambda _: None)
+                assert body is not None and not reader.at_eof()
+                assert nowait(reader) == b""
+                assert not body.done
+                assert recorder.counts["responses_complete"] == 0
+                if read_error:
+                    error = aiohttp.ClientPayloadError("original reader failure")
+                    reader.set_exception(error)
+                    with pytest.raises(aiohttp.ClientPayloadError) as caught:
+                        nowait(reader)
+                    assert caught.value is error
+                    assert body.done and not body.complete
+                else:
+                    endpoint[1].response_gate.set()
+                    await reader.wait_eof()
+                    suffix = bytearray()
+                    while not reader.at_eof():
+                        suffix.extend(nowait(reader))
+                    assert suffix == BODY[3:]
+                    assert body.done and body.complete
+                    assert reader.at_eof() and nowait(reader) == b""
+    try:
+        asyncio.run(run())
+    finally:
+        endpoint[1].response_gate.set()
+        summary = finish(recorder, checkpoint)
+    if provider:
+        assert checkpoint.web == []
+        expected = [] if read_error else [{"call_identity": IDENTITY, "status": 200,
+            "body_sha256": "sha256:" + hashlib.sha256(BODY).hexdigest(), "body_bytes": len(BODY)}]
+        assert checkpoint.acks == expected, summary
+    else:
+        assert checkpoint.acks == []
+        assert len(checkpoint.web) == 1, summary
+        assert_web(checkpoint.web[0], BODY[:3] if read_error else BODY, not read_error)
+    assert summary["complete"] is (not read_error)
+    assert endpoint[1].paths == [path]
 
 
 def test_aiohttp_cached_read_and_eof_do_not_duplicate_capture(endpoint):

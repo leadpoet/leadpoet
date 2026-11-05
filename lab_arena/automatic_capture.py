@@ -486,7 +486,7 @@ class Recorder:
             body.truncated = True
             self._count("adapter_failure")
 
-    def _read(self, client, metadata, *, readinto=False, whole=False, eof=None):
+    def _read(self, client, metadata, *, readinto=False, whole=False, eof=None, empty_is_eof=True):
         def factory(original):
             @functools.wraps(original)
             def wrapped(response, *args, **kwargs):
@@ -523,7 +523,8 @@ class Recorder:
                     self._safe(body.add, value)
                 done = (whole and (amount is None or amount == -1))
                 # A zero-capacity read returns zero without observing EOF.
-                done = done or ((value == b"" or (readinto and value == 0 and amount is not None)) and amount != 0)
+                done = done or (((empty_is_eof and value == b"")
+                                 or (readinto and value == 0 and amount is not None)) and amount != 0)
                 if eof is not None:
                     done = done or bool(self._safe(eof, response))
                 if done:
@@ -871,7 +872,9 @@ class Recorder:
         for method in ("read", "readany", "readexactly", "readline", "readuntil", "readchunk"):
             self._patch(reader, method, read_factory)
         def nowait_factory(original):
-            return self._read("aiohttp", metadata, eof=lambda response: response.at_eof())(original)
+            # An empty nonblocking read can mean that more bytes have yet to arrive.
+            return self._read("aiohttp", metadata, eof=lambda response: response.at_eof(),
+                              empty_is_eof=False)(original)
         self._patch(reader, "read_nowait", nowait_factory)
         self.adapters.add("aiohttp_stream_reader")
         return True

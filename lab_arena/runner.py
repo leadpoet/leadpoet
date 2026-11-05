@@ -242,6 +242,7 @@ _KNOWN_CLAIM_DENIAL_CODES = frozenset(
         "runner_validator_required",
         "validator_output_schema_upgrade_required",
         "validator_checkpoint_upgrade_required",
+        "validator_evidence_judgment_upgrade_required",
         "signature_invalid",
     }
 )
@@ -5495,6 +5496,8 @@ class Runner:
         return self.round_id
 
     def claim_one(self, round_id: Optional[str] = None) -> Dict[str, Any]:
+        from lab_arena import evidence_judgments
+
         config = self._config
         round_id = round_id or self.round_id
         if round_id is None:
@@ -5511,6 +5514,7 @@ class Runner:
                 round_id=round_id,
                 hotkey=config.identity.hotkey,
                 body={"declared_parallelism": capacity,
+                      "evidence_judgment_policies": [evidence_judgments.POLICY],
                       "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION,
                       "output_schema_versions": sorted(
                           SUPPORTED_OUTPUT_SCHEMA_VERSIONS

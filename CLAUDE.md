@@ -1,3 +1,23 @@
+## Scoped authorization: Arena evidence-bound judge caching
+
+The user authorized the smallest permanent improvement to existing Arena judge
+caches and checkpoints, including implementation, rigorous tests, safe merge,
+canonical deployment and production verification. Separate company-fit evidence
+from intent wording. Reuse signal judgments only when source evidence and buyer
+requirements are unchanged and claim equivalence is proved. Preserve verified
+passes, genuine negative verdicts, retryable incomplete/provider failures, all
+accuracy and FP/FN rules, costs, private provenance and historical/frozen rounds.
+Use existing authority tables and transports; add no service or dependency.
+Internal agents may implement, test and commit assigned isolated worktrees.
+The coordinator owns independent review, protected merge, exact migrations,
+scorer-image selection and canonical production operations. Keep all conflict
+reports and handoffs in the current chat; do not send cross-chat messages.
+Use prospective frozen policy activation; do not repin committed rounds or
+rewrite historical judgments. Use bounded organizer-funded validation only,
+with an initial task ceiling of $10 including failed and pending calls; do not
+use miner keys or replay historical paid calls. Preserve active release owners,
+locks, guards and all unrelated concurrent work.
+
 ## Scoped authorization: November 4 accepted donor evidence correction
 
 The user explicitly approved reusing all ten accepted results of

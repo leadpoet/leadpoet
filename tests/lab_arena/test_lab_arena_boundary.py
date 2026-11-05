@@ -260,8 +260,22 @@ HOST_ARENA_IMPORTS = {
                                         ("lab_arena.internal_capture", "from_environment"),
                                         ("lab_arena.store", "ArenaStore"), ("lab_arena.store", "PostgrestTransport")},
     "leadpoet_canonical/arena_weights.py": {("lab_arena", "contracts")},
+    "qualification/scoring/claim_equivalence.py": {
+        ("lab_arena.contracts", "canonical_json"),
+        ("lab_arena.contracts", "document_hash"),
+    },
     "qualification/scoring/company_evidence_investigator.py": {("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS")},
+    "qualification/scoring/company_fit_evidence_reuse.py": {
+        ("lab_arena", "contracts"),
+        ("lab_arena", "signal_cache_control"),
+    },
     "qualification/scoring/competition.py": {("lab_arena.provider_observations", "company_observation")},
+    "qualification/scoring/evidence_cache_bridge.py": {
+        ("lab_arena.contracts", "canonical_json"),
+        ("lab_arena.contracts", "document_hash"),
+        ("lab_arena.signal_cache_control", "MAX_BYTES"),
+        ("lab_arena.signal_cache_control", "SCHEMA"),
+    },
     "qualification/scoring/lead_scorer.py": {
         ("lab_arena", "company_judgments"),
         ("lab_arena.signal_cache_control", "FIT_CAPABILITY_OPERATION"),

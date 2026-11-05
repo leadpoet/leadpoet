@@ -5934,6 +5934,64 @@ async def verify_three_stage(
             row["_funding_company_source_urls"] = [context["url"]]
             contents = {**contents, "results": [*contents["results"], source]}
             combined_text += "\n" + context["text"]
+    # Prospective policies install this scorer-local callback. Existing rounds
+    # retain their exact native path. Even an exact-wording hit must reach this
+    # point through a fresh source fetch; shortened saved contexts are not an
+    # evidence identity. Recovery/search/ownership paths need their own complete
+    # observation proof and therefore remain native misses in this first seam.
+    from qualification.scoring import intent_evidence_reuse
+
+    evidence_reuse_callback = intent_evidence_reuse.current_callback()
+    evidence_reuse_snapshot = None
+    if (
+        evidence_reuse_callback is not None
+        and integrity_policy and stage1_soft_reject
+        and selected_stage3_model == ARENA_EVIDENCE_MODEL
+        and row.get("_evidence_type") not in {"SOCIAL_POSTING", "PODCAST_APPEARANCE"}
+        and len(row["claimed_source_urls"]) == 1 and len(contents["results"]) == 1
+        and not incomplete_bundle and not source_absent
+        and retained_fallback_original is None and unavailable_source_resolution is None
+        and not prefer_dynamic_job_index and not ats_posting_urls
+        and not verified_funding_stage_context
+        and not _same_event_link_candidates(contents, row)
+        and not (not source_publication_dates and _article_archive_locator(contents, row))
+        and contents["results"][0].get("url") == fetch_source_url
+        and bool(contents["results"][0].get("text"))
+        and not any(
+            marker in json.dumps(contents, sort_keys=True).lower()
+            for marker in ("web.archive.org/", "wayback", '"kind": "archive_card"')
+        )
+    ):
+        evidence_reuse_snapshot = intent_evidence_reuse.snapshot(
+            row, contents, verified_identity_context=verified_identity_context,
+            model=selected_stage3_model, company_quality=company_quality,
+            decision_context={
+                "company_check": company_check,
+                "is_hiring_claim": is_hiring_claim,
+                "is_job_board": is_job_board,
+                "official_publisher_binding": official_publisher_binding,
+                "has_linkedin_structured": has_linkedin_structured,
+                "first_party_careers_listing_count": first_party_careers_listing_count,
+                "source_publication_dates": source_publication_dates,
+            },
+        )
+        if evidence_reuse_snapshot is not None:
+            evidence_input, submitted_claim = evidence_reuse_snapshot
+            reused = await intent_evidence_reuse.invoke(
+                evidence_reuse_callback, "lookup", evidence_input, submitted_claim,
+            )
+            if reused is not None and reused.get("status") == "hit":
+                saved_result = reused.get("judgment")
+                if not intent_evidence_reuse.terminal_result(
+                    saved_result, contents=contents, source_url=fetch_source_url,
+                ):
+                    from qualification.scoring.signal_judgment_cache import SignalJudgmentCacheError
+                    raise SignalJudgmentCacheError("intent evidence hit is not terminal")
+                return json.loads(json.dumps(saved_result))
+            if reused is not None and reused.get("status") != "miss":
+                from qualification.scoring.signal_judgment_cache import SignalJudgmentCacheError
+                raise SignalJudgmentCacheError("intent evidence lookup is invalid")
+
     s3_prompt = _build_final_judge_prompt(
         row,
         contents,
@@ -6634,4 +6692,14 @@ async def verify_three_stage(
                 for item in (contents.get("results") or [])[:3 + len(funding_stage_sources)]
                 if _normalize_url(item.get("url") or "") in declared
             ]
+    if evidence_reuse_snapshot is not None and intent_evidence_reuse.terminal_result(
+        result, contents=contents, source_url=fetch_source_url,
+    ):
+        evidence_input, submitted_claim = evidence_reuse_snapshot
+        # The callback only captures this native result. Its owner admits and
+        # stores the final signal row after the existing date/scoring gates.
+        await intent_evidence_reuse.invoke(
+            evidence_reuse_callback, "complete", evidence_input, submitted_claim,
+            judgment=result,
+        )
     return result

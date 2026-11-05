@@ -562,6 +562,7 @@ def build_service_from_environment(mode: str):
         company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
         company_judgment_from=os.environ.get("LAB_ARENA_COMPANY_JUDGMENT_FROM") or None,
         signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
+        evidence_judgment_cache=True,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
         reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
         training_minimum_icp_coverage_percent=_training_coverage_from_environment(),

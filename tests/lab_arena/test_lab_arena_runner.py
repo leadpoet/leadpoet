@@ -908,6 +908,10 @@ def test_run_once_respects_max_claims_and_images_export_once(tmp_path, monkeypat
         == sorted(rn.SUPPORTED_OUTPUT_SCHEMA_VERSIONS)
         for c in api.claims
     )
+    assert all(
+        c["body"]["evidence_judgment_policies"] == ["evidence_judgment_v2"]
+        for c in api.claims
+    )
 
 
 def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):

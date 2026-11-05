@@ -621,9 +621,8 @@ def _outbound_request_exact(call):
             and outbound.get('host') == (operation.outbound_host or operation.host)
             and outbound.get('path') == (operation.outbound_path or operations._render_path(
                 operation, request.get('hashed_parameters') or {}))
-            and outbound.get('body_sha256') == (
-                contracts.hash_bytes(b'') if outbound.get('body') is None
-                else contracts.document_hash(outbound['body'])))
+            and operations.outbound_body_hash_matches(
+                call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256')))
 
 
 def _model_request(example, call, *, worker_proofs=None):
@@ -645,7 +644,8 @@ def _model_request(example, call, *, worker_proofs=None):
         _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
     outbound = request.get('outbound') or {}
     body = outbound.get('body')
-    _require(isinstance(body, dict) and contracts.document_hash(body) == outbound.get('body_sha256'), 'outbound_body_hash_mismatch')
+    _require(isinstance(body, dict) and operations.outbound_body_hash_matches(
+        op, body, outbound.get('body_sha256')), 'outbound_body_hash_mismatch')
     _require(outbound.get('method') == 'POST' and outbound.get('host') == 'openrouter.ai'
              and outbound.get('path') == ('/api/v1/responses' if op.endswith('responses') else '/api/v1/chat/completions'), 'outbound_identity_mismatch')
     _require(isinstance(body.get('model'), str) and body['model']

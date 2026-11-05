@@ -127,10 +127,28 @@ def recovery_claim(original, now):
     )
 
 
+def test_v2_recovery_cannot_allocate_from_an_old_worker_claim(tmp_path):
+    now = make_config(tmp_path, FakeApi([]), BridgingRuntime(calls=0)).clock()
+    service, store = claim_service(lambda: now)
+    store.round_row["configuration_doc"]["scorer_policy"] = {
+        "evidence_judgment_policy": "evidence_judgment_v2",
+    }
+    original = original_claim(now - timedelta(seconds=301))
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_claim(recovery_claim(original, now))
+    assert rejected.value.code == "validator_evidence_judgment_upgrade_required"
+    assert store.allocations == 0
+
+
 @pytest.mark.parametrize("elapsed", (301, 5401))
-def test_recovery_replays_original_token_after_lost_response(tmp_path, elapsed):
+@pytest.mark.parametrize("evidence_policy", [False, True])
+def test_recovery_replays_original_token_after_lost_response(tmp_path, elapsed, evidence_policy):
     current = [make_config(tmp_path, FakeApi([]), BridgingRuntime(calls=0)).clock()]
     service, store = claim_service(lambda: current[0])
+    if evidence_policy:
+        store.round_row["configuration_doc"]["scorer_policy"] = {
+            "evidence_judgment_policy": "evidence_judgment_v2",
+        }
 
     class Api(FakeApi):
         def claim(self, envelope):
@@ -149,6 +167,8 @@ def test_recovery_replays_original_token_after_lost_response(tmp_path, elapsed):
     try:
         assert runner.run_once(max_claims=1) == 0
         original = runner._pending_claims[ROUND]
+        if evidence_policy:
+            assert original["body"]["evidence_judgment_policies"] == ["evidence_judgment_v2"]
         old_token = service._lease_token(original)
         if elapsed > 4500:
             # The server has expired the exact prior lease. Its old response

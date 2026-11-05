@@ -4713,7 +4713,11 @@ class Broker:
         source_content_fallback: bool = False,
         source_content_response_url: Optional[str] = None,
     ) -> BrokerResult:
-        capture_policy, capture_registry = _reasoning_contract(context, parameters.get("model"), operation_id)
+        capture_policy, capture_registry = _reasoning_contract(
+            context,
+            parameters.get("model") if isinstance(parameters, Mapping) else None,
+            operation_id,
+        )
         full_thinking = capture_policy == reasoning_capture.POLICY
         operation = (operations.OPERATIONS.get(operation_id)
                      or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))

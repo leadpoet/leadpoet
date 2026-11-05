@@ -818,8 +818,8 @@ possible provider charge and later native judgment both count in cost checks.
 A separate comparison model or larger bound is not enabled by this change.
 
 New rounds use GPT-OSS-120B on `near-ai/fp4` with low reasoning and a 4096-token
-output cap for intent, fetched evidence, paragraph, role and generic/semantic
-investigator checks. Company research and search fallbacks use DeepSeek V4.1
+output cap for intent, fetched evidence, role and generic/semantic
+investigator checks. Company research, paragraph review and search fallbacks use DeepSeek V4.1
 Flash 1017 on `nebius/fp8`, low reasoning, and an 8192-token cap. Native hosted
 search requests one tool round, `max_uses: 1` and `max_total_results: 5`.
 These settings do not prove the number of internal parallel provider queries.

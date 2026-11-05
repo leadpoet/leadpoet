@@ -22,12 +22,12 @@ The component results below are not a claim that the new policy is deployed.
 | --- | --- | --- | --- |
 | Company reverification and industry research controller | Sonar; Sol controller | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
 | Intent signal gate and fetched evidence | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
-| Intent paragraph review | Sonnet 5.5 | further candidates under test after full-flow quote failures | pending |
+| Intent paragraph review | Sonnet 5.5 | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192; latency review pending |
 | Role checks and generic company investigator | Gemini 3.5 Flash Lite | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
 | Positive semantic company review | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
 | Claim equivalence for evidence reuse | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / **500, 15 seconds** |
 | Search fallback, including social/podcast verification | Sonar Pro | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
-| Final industry classification | GPT-6.1 Sol | Sol retained pending the expanded quality gate | existing policy |
+| Final industry classification | GPT-6.1 Sol | retained after expanded quality tests | existing policy |
 | Admission and security review | Sonnet 5.5, Sol fallback | retained | existing policy |
 | ICP generation | Sonnet 5.5 | retained after factual evaluation | existing policy |
 | ICP exclusion research | DeepSeek, from PR1044 | retained after cheaper variants failed complete gates | high / 4096 |
@@ -85,6 +85,28 @@ for every role. The later full scoring test exposed paragraph quote-binding
 failures after the existing repair attempt. These component results therefore
 do not qualify GPT-OSS as the final paragraph reviewer.
 
+Manual and independent review also found incorrect positive labels in two
+later EPAM request contexts. They contained the same paragraph, whose wording
+referred to the requested company filters. The existing writing rule requires
+`natural_paragraph=false` for that selection commentary, even when all business
+facts and the partnership event are supported. Original requests, labels and
+results are preserved as disputed calibration. They are not two independent
+positive examples, and their original expected company score of 51 is invalid.
+New client-facing wordings have separate labels set before any model response.
+The old paragraph remains a negative writing control, distinct from a false
+primary-event claim.
+
+DeepSeek with the original paragraph prompt passed all 12 frozen cases and
+both new positive wordings, without repairs, invalid replies or timeouts.
+The two paired new positives cost $0.057048 on Sonnet versus $0.0134982 on
+DeepSeek. Latency was 2.35–2.48 seconds versus 12.24–16.64 seconds, so route
+latency remains a release concern. Across all 14 DeepSeek checks, median
+latency was 5.72 seconds. GLM Flash also passed these 14 checks, but failed
+the original writing-negative control. A preregistered generic writing-rule
+reminder still missed both negative contexts and introduced a quote-binding
+failure on a new positive. That variant did not advance to its reserved
+three-case check. No paragraph prompt change is selected.
+
 Seven separately retained production requests screened GPT-OSS-120B,
 GPT-OSS-20B, Ling 3.1 Flash, Gemma 4 31B and Nemotron 3.5 Lightning. GPT-OSS-120B
 completed all seven with readable thinking. The smaller alternatives had
@@ -113,8 +135,23 @@ same confusion counts as Sol: TP14, TN15, FP2, FN4. It cost $0.360286992 versus
 $2.30229175 for the saved Sol calls. Across all 137 slots, this variant then
 scored 120/137 with TP53, TN67, FP6, FN9 and two truncated outputs. All 137
 returned readable thinking, but the extra false positives and incomplete
-outputs fail the replacement gate. The run cost $1.388905020. Sol remains
-selected while another approved GLM route is evaluated.
+outputs fail the replacement gate. The run cost $1.388905020.
+
+GLM 5.2 on `coreweave/fp4`, low reasoning and 8192 output tokens, improved the
+35-case screen to 32/35 with one false positive. On all 137 fixed slots it
+scored 120/137: TP55, TN65, FP9, FN7 and one truncated reply. This does not meet
+Sol's quality result. All 137 exposed readable reasoning and the expected
+provider route. The selected responses cost $2.34161746; median measured
+latency was 8.714 seconds across 135 calls, with two conservative wall-time
+upper bounds kept separate. Sol remains selected.
+
+A local disk-full error left 83 attempts without saved responses during the
+first larger GLM run.
+Every complete response was kept; only lost responses were repeated with the
+same request bytes. The unknown original charges retain a $6.740806 budget
+reservation, separate from the selected-response cost above. No label was
+changed after testing, and no unsuccessful model result was replaced by a
+better repeat. New private test dispatches check free disk space first.
 
 Admission remains security sensitive. Prior realistic complete-source tests
 found unsafe acceptances by DeepSeek and Kimi. The additional GLM Flash screen

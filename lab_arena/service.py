@@ -8935,8 +8935,8 @@ class ArenaService:
             == signal_judgments.POLICY
         )
 
-        evidence_v2 = (((self._round_from_context(round_id, round_context).get("configuration_doc") or {})
-                        .get("scorer_policy") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2")
+        evidence_v2 = signal_policy and (((self._round_from_context(round_id, round_context).get("configuration_doc") or {})
+                                         .get("scorer_policy") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2")
 
         if score_run.get("company_judgment_refs") is not None:
             try:

@@ -18,7 +18,7 @@ from tests.test_company_evidence_investigator import (
 
 def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
               repair="valid", investigation_failure="", source_fault=False,
-              industry="UNPROVEN", initial_rebrand=False):
+              industry="UNPROVEN", initial_rebrand=False, company_quality=True):
     company, icp = _company(), _icp(required_attribute="Supplies software.")
     initial = _complete_verdict(
         observed_company_linkedin="" if missing_identity else company.company_linkedin,
@@ -130,7 +130,7 @@ def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
     monkeypatch.setattr(scorer.aiohttp, "ClientSession", OfflineSession)
     result = asyncio.run(scorer._llm_reverify_company(
         company, icp, require_company_fit_dimensions=True,
-        company_quality=True, evidence_investigator=True,
+        company_quality=company_quality, evidence_investigator=True,
     ))
     return result, events, investigations
 

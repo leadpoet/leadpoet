@@ -1683,7 +1683,10 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                                          "source_path": [field, run_id, "payload", collection, index],
                                          "value": copy.deepcopy(row),
                                          "value_sha256": contracts.document_hash(row),
-                                         "payload_sha256": artifact.get("payload_sha256")})
+                                         "payload_sha256": artifact.get("payload_sha256"),
+                                         **({"execution": "reported_host_tool_validation_not_gold",
+                                             "delivery": "not_proof_of_subsequent_model_consumption"}
+                                            if isinstance(row, Mapping) and row.get("kind") == "judge_local_tool" else {})})
     core_context = ("icp", "configuration", "input_snapshots", "output", "judgment",
                     "runtime", "costs", "competition_cost_eligibility", "completeness")
     separate = {"provider_calls", "worker_observation_artifacts",

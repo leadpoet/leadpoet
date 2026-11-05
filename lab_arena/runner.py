@@ -1921,6 +1921,7 @@ class RunState:
     )
     worker_observations: training_observations.Buffer = field(default_factory=training_observations.Buffer)
     worker_observation_ordinal: int = 0
+    judge_local_tool_sequences: Dict[str, int] = field(default_factory=dict)
     worker_observations_pending: set[int] = field(default_factory=set)
     worker_observations_frozen: bool = False
     worker_handlers_inflight: int = 0
@@ -2533,12 +2534,16 @@ class WorkerSocketServer:
         unavailable = contracts.canonical_json({"recorded": False}).encode("utf-8")
         try:
             frame = lab_arena_checkpoint.validate_training_frame(frame)
-            if (str(self._state.lease.get("kind") or "execute") != "execute"
-                    and not (self._state.lease.get("kind") == "score"
-                             and frame["kind"] == "response_received"
-                             and _full_thinking_lease(self._state.lease))):
-                return unavailable
             data = dict(frame["data"])
+            judge_tool = (frame["kind"] == "judge_local_tool" or
+                          frame["kind"] == "capture_failure" and data["category"] == "judge_local_tool")
+            frozen_judge = (self._state.lease.get("kind") == "score"
+                            and _full_thinking_lease(self._state.lease))
+            if judge_tool and not frozen_judge:
+                return unavailable
+            if (str(self._state.lease.get("kind") or "execute") != "execute"
+                    and not (frozen_judge and (frame["kind"] == "response_received" or judge_tool))):
+                return unavailable
             if frame["kind"] == "web_fetch":
                 body = data["body"].encode("utf-8")
                 data.update(body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
@@ -2563,6 +2568,11 @@ class WorkerSocketServer:
                             return unavailable
                         return contracts.canonical_json({"recorded": True,
                             "observation_id": previous[1]}).encode("utf-8")
+                if frame["kind"] == "judge_local_tool":
+                    expected = self._state.judge_local_tool_sequences.get(data["investigation_id"], 0)
+                    if data["sequence"] != expected:
+                        buffer.failures.add("capture_incomplete")
+                        return unavailable
                 if frame["kind"] == "response_received":
                     matched = [row for row in buffer.response_receipts if row["call_identity"] == data["call_identity"]
                                and row["status"] == data["status"] and row["body_sha256"] == data["body_sha256"]
@@ -2591,6 +2601,8 @@ class WorkerSocketServer:
                     *(os.environ.get(name, "") for name in (
                         "OPENROUTER_API_KEY", "DEEPLINE_API_KEY", "SCRAPINGDOG_API_KEY")),
                 ))
+                if identity is not None and frame["kind"] == "judge_local_tool":
+                    self._state.judge_local_tool_sequences[data["investigation_id"]] = data["sequence"] + 1
                 if identity is not None and retry_token is not None:
                     self._state.training_retry_tokens[retry_token] = (hashlib.sha256(raw).digest(), identity)
             if identity is None:

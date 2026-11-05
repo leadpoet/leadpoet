@@ -17,7 +17,7 @@ SOL = "openai/gpt-6.1-sol"
 MODELS = {
     "company_fit_reverification": DEEPSEEK,
     "intent_signal_judge": GPT_OSS,
-    "intent_details_review": GPT_OSS,
+    "intent_details_review": DEEPSEEK,
     "intent_three_stage_stage3": DEEPSEEK,
     "intent_fetched_evidence": GPT_OSS,
     "role_batch_check": GPT_OSS,

@@ -83,9 +83,10 @@ asyncio.run(verification_helpers.openrouter_chat(
 ))
 assert requests[-1]["model"] == models["intent_details_review"]
 capture = policy["env_bindings"].get("ARENA_JUDGE_REASONING_CAPTURE_POLICY") == "full_generated_thinking_v1"
-assert requests[-1]["max_tokens"] == (4096 if capture else 800)
+assert requests[-1]["max_tokens"] == (8192 if capture else 800)
 if capture:
-    assert requests[-1]["provider"] == {"only": ["near-ai/fp4"]}
+    assert models["intent_details_review"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert requests[-1]["provider"] == {"only": ["nebius/fp8"]}
     assert requests[-1]["reasoning"] == {"effort": "low", "exclude": False}
 elif models["intent_details_review"] == "anthropic/claude-sonnet-5.5":
     assert not {"temperature", "top_p", "top_k"} & requests[-1].keys()

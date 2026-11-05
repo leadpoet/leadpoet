@@ -26,7 +26,7 @@ SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
 DEFAULT_JUDGE_MODELS = {
     "company_fit_reverification": "deepseek/deepseek-v4.1-flash-1017",
     "intent_signal_judge": "openai/gpt-oss-120b",
-    "intent_details_review": "openai/gpt-oss-120b",
+    "intent_details_review": "deepseek/deepseek-v4.1-flash-1017",
     "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
     "intent_fetched_evidence": "openai/gpt-oss-120b",
     "role_batch_check": "openai/gpt-oss-120b",

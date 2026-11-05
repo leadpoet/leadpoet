@@ -3465,7 +3465,10 @@ class ArenaService:
                 and parent["terminal_doc"].get("operation") == "baseline_source_supersession_v1"
                 and all(parent.get(key) == run.get(key) for key in
                     ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "kind"))]
-            if len(superseded) == 1:
+            # A later receipt may supersede a measured infrastructure-damaged
+            # source generation. Its latest retired parent defines the root.
+            if superseded:
+                superseded = [max(superseded, key=lambda parent: parent.get("attempt", 0))]
                 root_id = str(superseded[0]["terminal_doc"].get("new_execution_run_id") or "")
                 root_text = root_id.removeprefix(assignment + ":")
                 if root_text.isdecimal() and root_id == assignment + ":" + root_text:

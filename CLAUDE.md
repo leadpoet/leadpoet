@@ -10,6 +10,22 @@ image selection, registration, restart or database write is authorized to an
 internal agent. The coordinator owns independent review, the existing
 reviewer-runtime mapping, recovery and deployed verification.
 
+## Scoped authorization: November 4 disk-fault baseline recovery
+
+The user explicitly authorized correction through November 5 02:00 UTC.
+Exact migration `scripts/626-arena-2026-11-04-baseline-disk-recovery.sql` may
+extend only final scoring to 01:55 UTC and publication to 02:00 UTC, and rerun
+only baseline ICP positions 1, 3 and 8 with proved infrastructure disk faults.
+Recover the one unfinished baseline ICP6 judgment with an exact sixth attempt;
+permit no automatic seventh. Preserve the already active November5 baseline
+state and leases; do not rewind that round. Preserve the seven clean baseline
+executions, all miner work, all original
+payloads and financial records, source24d, frozen79cd scorer and ICPs. Hold
+publication and the next baseline freeze until the correction is resolved.
+Internal agents implement and test only. The coordinator owns independent
+review, push, merge, exact application and canonical release. No miner rerun
+is included without separate proof and coordinated review.
+
 ## Scoped authorization: November 3 baseline judgment correction
 
 The user authorized superseding exactly the nine old-verifier November 3

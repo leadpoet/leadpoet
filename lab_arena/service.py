@@ -6658,11 +6658,92 @@ class ArenaService:
             raise ServiceError("lease_inactive", 409)
         return run
 
+    def _training_input_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Grant only immutable input storage, never renewed execution authority."""
+        try:
+            return self._training_capture_run(run_id, lease_token)
+        except ServiceError as exc:
+            if exc.code not in {"lease_inactive", "lease_expired"}:
+                raise
+            original_error = exc
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
+        if not hmac.compare_digest(str(run.get("lease_token_hash") or ""), hash_lease_token(lease_token)):
+            raise ServiceError("lease_invalid", 401)
+        try:
+            training_input.object_ref(run_id, run.get("lease_generation"))
+            training_input._validate_claim_hash(run.get("claim_request_hash"))
+            claim = run.get("claim_response") or {}
+            if (claim.get("status") != "leased" or not isinstance(run.get("claim_request_id"), str)
+                    or contracts.HEX32_RE.fullmatch(run["claim_request_id"]) is None
+                    or claim.get("request_id") != run["claim_request_id"]
+                    or claim.get("run_id") != run_id or type(claim.get("lease_generation")) is not int
+                    or claim["lease_generation"] != run["lease_generation"]
+                    or claim.get("kind") != run.get("kind") or run.get("terminal_doc")):
+                raise ValueError("input lease binding differs")
+            def instant(value):
+                parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("input timestamp lacks a zone")
+                return parsed.astimezone(timezone.utc)
+            now = self.now()
+            expiry = instant(run.get("lease_expires_at"))
+            anchors = [expiry]
+            if run.get("status") in {"accepted", "failed"}:
+                result = run.get("result_doc")
+                contracts.validate_run_result(result)
+                cause = run.get("terminal_cause")
+                allowed = ({"accepted"} | set(contracts.MODEL_CAUSED_TERMINAL_CAUSES) | {"provider_error"}
+                           if run.get("kind") == "execute" else set(contracts.SCORE_TERMINAL_CAUSES))
+                if (cause not in allowed or result.get("terminal_status") != cause
+                        or (run["status"] == "accepted") != (cause == "accepted")):
+                    raise ValueError("input terminal binding differs")
+                started, finished = instant(result["started_at"]), instant(result["finished_at"])
+                if not started <= finished <= now:
+                    raise ValueError("input finish anchor is invalid")
+                anchors.append(finished)
+                if run["status"] == "accepted":
+                    terminal = instant(run.get("participation_accepted_at"))
+                else:
+                    event = self._store.get_input_finish_event(run_id)
+                    # runtime.finished can be appended only under the live
+                    # token. Its database created_at precedes completion and
+                    # cannot be refreshed by late provider or billing events.
+                    if (not isinstance(event, Mapping) or not isinstance(run.get("runner_hotkey"), str)
+                            or not run["runner_hotkey"]
+                            or any(event.get(key) != run.get(key) for key in ("run_id", "round_id", "runner_hotkey"))
+                            or event.get("run_kind") != run.get("kind")
+                            or event.get("event_kind") != "runtime.finished"
+                            or event.get("status") != cause or event.get("started_at") != result["started_at"]
+                            or event.get("finished_at") != result["finished_at"]
+                            or contracts.canonical_json(event.get("resource_summary")) != contracts.canonical_json(result["resource_summary"])):
+                        raise ValueError("input server finish binding differs")
+                    terminal = instant(event.get("created_at"))
+                if not started <= terminal <= now:
+                    raise ValueError("input server terminal anchor is invalid")
+                anchors.append(terminal)
+            elif run.get("status") != "leased" or run.get("terminal_cause") is not None or expiry > now:
+                raise ValueError("input lease is not eligible")
+            if now >= min(anchors) + _OBSERVATION_FINALIZATION_GRACE:
+                raise ServiceError("lease_expired", 409)
+            round_state = self._store.get_round_capture_state(str(run["round_id"]))
+            if (round_state is None or round_state.get("round_id") != run["round_id"]
+                    or round_state.get("status") == "cancelled"):
+                raise ValueError("input round is not active")
+        except ServiceError:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError, ArenaContractError):
+            raise original_error from None
+        return run
+
     def handle_training_input(
         self, run_id: str, lease_token: str, document: Any,
     ) -> Dict[str, Any]:
-        """Store the final runner input only for this live, owned run lease."""
-        run = self._training_capture_run(run_id, lease_token)
+        """Store only the original owned input, with a bounded capture-only grace."""
+        run = self._training_input_capture_run(run_id, lease_token)
+        identity = {key: run.get(key) for key in ("round_id", "kind", "lease_generation", "claim_request_hash")}
         try:
             snapshot, compressed = training_input.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,
@@ -6672,6 +6753,9 @@ class ArenaService:
             )
         except (ValueError, TypeError, RecursionError):
             raise ServiceError("training_input_invalid", 400) from None
+        current = self._training_input_capture_run(run_id, lease_token)
+        if any(current.get(key) != value for key, value in identity.items()):
+            raise ServiceError("lease_invalid", 401)
         objects = self._config.training_object_store
         if objects is None:
             raise ServiceError("training_input_unavailable", 503)

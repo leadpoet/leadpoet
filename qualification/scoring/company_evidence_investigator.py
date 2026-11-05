@@ -6540,10 +6540,7 @@ async def investigate_company_evidence(
                             )
                         ),
                     })
-                    local_tools.emit(
-                        {"function": {"name": required_tool or "invalid_tool_call", "arguments": None}},
-                        messages[-1], "repair",
-                    )
+                    local_tools.emit(None, messages[-1], "repair")
                     continue
                 try:
                     message = body["choices"][0]["message"]

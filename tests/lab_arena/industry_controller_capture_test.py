@@ -111,6 +111,17 @@ def final_attribute():
         evidence_quote="Acme supplies reporting software for enterprise customers.")]}), call_id="final")
 
 
+def test_empty_exhausted_reply_repair_has_no_raw_tool_call(monkeypatch):
+    empty = {"choices": [{"finish_reason": "length", "message": {"content": "", "tool_calls": []}}]}
+    events = []
+    result, calls = run_attribute(monkeypatch, recorder=lambda event, **_: events.append(deepcopy(event)),
+                                  replies=[empty, final_attribute()])
+    assert result["_completed_submit"] is True and len(calls) == 2
+    assert [event["disposition"] for event in events] == ["repair", "accepted_terminal"]
+    assert events[0]["host_validation"]["raw_tool_call"] is None
+    assert events[0]["tool_call_id"] is None and events[0]["arguments"] is None
+
+
 @pytest.mark.parametrize("first", ["fetch", "malformed_submit", "ambiguous_batch"])
 def test_ordered_host_results_and_repairs_preserve_raw_arguments(monkeypatch, first):
     raw = ' { "url" : "https://acme.example/" } '

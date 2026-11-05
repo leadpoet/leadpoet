@@ -316,3 +316,55 @@ def test_restored_second_attempt_failure_cannot_create_third(prepared):
     assert complete(p,lease,cause='provider_error')['status']=='failed'
     p.store.expire_leases(ROUND)
     assert sorted(x['attempt']for x in p.store.list_runs(ROUND,submission_id=lease['submission_id'],kind='execute')if x['assignment_id']==lease['assignment_id'])==[1,2]
+
+
+def test_historical_round_preservation_exceeds_jsonb_aggregate_limit(prepared):
+    """Hash each full row before aggregation; never combine historical payloads."""
+    p=prepared
+    old="SELECT jsonb_object_agg(a.round_id,to_jsonb(a)) FROM public.lab_arena_rounds a WHERE a.round_id<>%s"
+    hashes="SELECT jsonb_object_agg(a.round_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')) FROM public.lab_arena_rounds a WHERE a.round_id<>%s"
+    with p.conn.cursor()as q:
+        q.execute('SET LOCAL session_replication_role=replica')
+        # Seventeen independently valid 16MiB documents exceed the 256MiB
+        # aggregate limit. PostgreSQL builds them; no large Python payloads.
+        q.execute("""INSERT INTO public.lab_arena_rounds
+            (round_id,status,configuration_doc,evaluation_date,stage1_scoring_plan_doc)
+            SELECT 'arena-2026-10-'||lpad(i::text,2,'0'),'open',
+                jsonb_set(configuration_doc,'{round_id}',to_jsonb('arena-2026-10-'||lpad(i::text,2,'0'))),
+                '2026-10-01',jsonb_build_object('retained',repeat(chr(97+i),16*1024*1024))
+            FROM public.lab_arena_rounds CROSS JOIN generate_series(1,17)i
+            WHERE round_id=%s""",(ROUND,))
+        q.execute('SET LOCAL session_replication_role=origin')
+    p.conn.commit()
+    with p.conn.cursor()as q:
+        assert scalar(q,"SELECT sum(octet_length(to_jsonb(a)::TEXT)) FROM public.lab_arena_rounds a WHERE round_id LIKE 'arena-2026-10-%%'")>256*1024*1024
+        q.execute('SAVEPOINT old_aggregate')
+        with pytest.raises(p.pg.errors.ProgramLimitExceeded,match='total size of jsonb object elements'):
+            q.execute(old,(ROUND,))
+        q.execute('ROLLBACK TO SAVEPOINT old_aggregate')
+        before=scalar(q,hashes,(ROUND,))
+        assert len(before)==18 and all(len(value)==64 for value in before.values())
+        # Full-row hashes bind payload, other columns, and every row identity.
+        q.execute('SET LOCAL session_replication_role=replica')
+        for mutation in [
+            "UPDATE public.lab_arena_rounds SET evaluation_date='2026-10-02' WHERE round_id='arena-2026-10-01'",
+            "UPDATE public.lab_arena_rounds SET stage1_scoring_plan_doc=jsonb_set(stage1_scoring_plan_doc,'{retained}','\"changed\"') WHERE round_id='arena-2026-10-01'",
+            "UPDATE public.lab_arena_rounds SET round_id='arena-2026-09-01' WHERE round_id='arena-2026-10-01'",
+            "DELETE FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-01'",
+        ]:
+            q.execute('SAVEPOINT changed_history')
+            q.execute(mutation)
+            assert scalar(q,hashes,(ROUND,))!=before
+            q.execute('ROLLBACK TO SAVEPOINT changed_history')
+        q.execute('SET LOCAL session_replication_role=origin')
+    p.conn.commit()
+    # The actual migration must apply and replay with all historical bytes
+    # represented by exactly the same full-row digest map.
+    apply(p)
+    with p.conn.cursor()as q:
+        assert scalar(q,hashes,(ROUND,))==before
+        assert scalar(q,"SELECT count(*) FROM public.lab_arena_runs WHERE status='accepted'")==333
+        assert scalar(q,"SELECT count(*) FROM public.lab_arena_runs WHERE kind='execute' AND status='pending'")==50
+    p.conn.commit()
+    apply(p)
+    with p.conn.cursor()as q:assert scalar(q,hashes,(ROUND,))==before

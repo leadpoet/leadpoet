@@ -148,7 +148,7 @@ BEGIN
  SELECT jsonb_object_agg(a.run_id,to_jsonb(a)) INTO before_runs FROM public.lab_arena_runs a WHERE a.round_id=r.round_id;
  SELECT jsonb_object_agg(a.run_id,to_jsonb(a)) INTO before_accepted FROM public.lab_arena_runs a WHERE a.round_id=r.round_id AND a.status='accepted';
  SELECT jsonb_object_agg(s.submission_id,to_jsonb(s)) INTO before_submissions FROM public.lab_arena_submissions s WHERE s.round_id=r.round_id;
- SELECT jsonb_object_agg(a.round_id,to_jsonb(a)) INTO before_rounds FROM public.lab_arena_rounds a WHERE a.round_id<>r.round_id;
+ SELECT jsonb_object_agg(a.round_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')) INTO before_rounds FROM public.lab_arena_rounds a WHERE a.round_id<>r.round_id;
  SELECT jsonb_agg(jsonb_build_array(t.tgname,t.tgenabled,pg_get_triggerdef(t.oid),pg_get_functiondef(t.tgfoid)) ORDER BY t.tgname)
  INTO before_triggers FROM pg_trigger t WHERE t.tgrelid='public.lab_arena_runs'::REGCLASS AND NOT t.tgisinternal;
  IF NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc f ON f.oid=t.tgfoid
@@ -256,7 +256,7 @@ BEGIN
     ELSE to_jsonb(a) IS DISTINCT FROM before_runs->a.run_id END))
   OR (SELECT jsonb_object_agg(a.run_id,to_jsonb(a)) FROM public.lab_arena_runs a WHERE a.round_id=r.round_id AND a.status='accepted') IS DISTINCT FROM before_accepted
   OR (SELECT jsonb_object_agg(s.submission_id,to_jsonb(s)) FROM public.lab_arena_submissions s WHERE s.round_id=r.round_id) IS DISTINCT FROM before_submissions
-  OR (SELECT jsonb_object_agg(a.round_id,to_jsonb(a)) FROM public.lab_arena_rounds a WHERE a.round_id<>r.round_id) IS DISTINCT FROM before_rounds
+  OR (SELECT jsonb_object_agg(a.round_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')) FROM public.lab_arena_rounds a WHERE a.round_id<>r.round_id) IS DISTINCT FROM before_rounds
   OR (SELECT to_jsonb(a)-'updated_at' FROM public.lab_arena_rounds a WHERE a.round_id=r.round_id) IS DISTINCT FROM to_jsonb(n)-'updated_at'
   OR clock_timestamp()>='2026-11-05T20:30:00Z'::TIMESTAMPTZ THEN
   RAISE EXCEPTION 'Recovery633 exact readback differs'; END IF;

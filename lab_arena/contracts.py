@@ -409,9 +409,22 @@ def sha256_json(value: Any) -> str:
     digest = hashlib.sha256()
     encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
                                ensure_ascii=False, allow_nan=False)
+    # Schema-heavy inputs contain many tiny encoder fragments. Batch those
+    # updates without reconstructing a large history or changing its bytes.
+    buffer = bytearray()
+    buffer_limit = 64 * 1024
     try:
         for chunk in encoder.iterencode(value):
-            digest.update(chunk.encode("utf-8"))
+            data = chunk.encode("utf-8")
+            if buffer and len(buffer) + len(data) > buffer_limit:
+                digest.update(buffer)
+                buffer.clear()
+            if len(data) >= buffer_limit:
+                digest.update(data)
+            else:
+                buffer.extend(data)
+        if buffer:
+            digest.update(buffer)
     except UnicodeEncodeError:
         raise
     except (TypeError, ValueError) as exc:

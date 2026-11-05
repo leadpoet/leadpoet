@@ -528,12 +528,25 @@ async def _read_source(entry):
         raise FitEvidenceReuseError("unknown evidence source")
 
 
-async def revalidate_fit_snapshot(snapshot, *, captured_out=None):
+async def revalidate_fit_snapshot(snapshot, *, captured_out=None, source_reads=None):
     snapshot = validate_fit_snapshot(snapshot)
+    source_reads = {} if source_reads is None else source_reads
     try:
         with capture_fit_evidence() as fresh:
             for entry in snapshot["evidence_manifest"]["sources"]:
-                await _read_source(entry)
+                identity = _hash({"kind": entry["kind"], "request": entry["request"]})
+                if identity not in source_reads:
+                    with capture_fit_evidence() as observed:
+                        source_reads[identity] = observed
+                        try:
+                            await _read_source(entry)
+                        except BaseException:
+                            observed.complete = False
+                            raise
+                observed = source_reads[identity]
+                fresh.complete = fresh.complete and observed.complete
+                for key, record in observed.records.items():
+                    fresh.add(record["kind"], record["request"], observed.responses[key], ok=observed.complete)
         equal = (fresh.complete and fresh.manifest() == snapshot["evidence_manifest"]
                  and _source_complete(snapshot["company_fit_receipt"], fresh)
                  and _contexts_complete((snapshot["linkedin_profile_source"], snapshot["matched_company_sources"],
@@ -580,10 +593,11 @@ async def fit_with_evidence_reuse(native, *, company, linkedin, matched, require
     response = await exchange({"operation": "candidates"})
     if not isinstance(response, Mapping) or not isinstance(response.get("candidates"), list) or len(response["candidates"]) > 8:
         raise FitEvidenceReuseError("fit evidence candidates are invalid")
+    source_reads = {}  # Fresh once per invocation, shared only across variants.
     for candidate in response["candidates"]:
         snapshot = validate_fit_snapshot(candidate.get("judgment"))
         fresh_captures = []
-        if not await revalidate_fit_snapshot(snapshot, captured_out=fresh_captures):
+        if not await revalidate_fit_snapshot(snapshot, captured_out=fresh_captures, source_reads=source_reads):
             continue
         claim = {"operation": "claim", "candidate_reference": candidate.get("reference"),
                  "source_snapshot_hash": snapshot["source_snapshot_hash"], "source_manifest": snapshot["evidence_manifest"]}

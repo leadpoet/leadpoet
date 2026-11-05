@@ -134,6 +134,12 @@ def test_changed_source_appends_variant_without_overwriting_original(monkeypatch
 def test_eight_candidates_use_the_same_bound_as_gateway(monkeypatch):
     current, authority, score = harness(monkeypatch)
     asyncio.run(score())
+    reads = []
+    read = reuse._read_source
+    async def counted(entry):
+        reads.append((entry["kind"], entry["request"]))
+        return await read(entry)
+    monkeypatch.setattr(reuse, "_read_source", counted)
     first = deepcopy(next(iter(authority.rows.values())))
     # Older variants can precede the currently matching source. All eight
     # candidates are valid protocol input; a changed page is only a miss.
@@ -144,6 +150,9 @@ def test_eight_candidates_use_the_same_bound_as_gateway(monkeypatch):
         authority.rows[other["source_snapshot_hash"]] = other
     asyncio.run(score())
     assert current["calls"] == 1
+    assert len(reads) == 2  # Eight variants must not pay for each source eight times.
+    asyncio.run(score())
+    assert len(reads) == 4  # A separate submission must still fetch fresh evidence.
 
 
 @pytest.mark.parametrize("search_kind", ["web", "industry"])

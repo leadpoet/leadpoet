@@ -8,6 +8,8 @@ import time
 
 import pytest
 
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
+
 from lab_arena import contracts, scoring
 from tests.lab_arena import held_recovery_admission539_postgres_test as prior
 from tests.lab_arena import test_lab_arena_service_round as flows
@@ -53,7 +55,7 @@ def completed(database, tmp_path_factory):
     _enable_verified_proxy_runtime(harness)
     monkey = pytest.MonkeyPatch()
     monkey.setattr(flows, 'deterministic_scorer', _baseline_first_judge)
-    monkey.setitem(scoring.DEFAULT_JUDGE_MODELS, 'role_batch_check', 'google/gemini-2.5-flash')
+    bind_historical_judge_models(harness.service, role_batch_model='google/gemini-2.5-flash')
     prices = _BASE_PRICE_TABLE
     monkey.setattr(flows, 'price_table', lambda: prices((*flows.PRICED_MODELS, 'google/gemini-2.5-flash')))
     harness.sandbox.empty_outputs.update((flavor, position)
@@ -363,7 +365,7 @@ def test_positive_ten_icp_large_cohort_publishes_promotes_and_derives_rewards(da
         return runtime.fake_result(exit_code=0, output_bytes=json.dumps(output).encode())
     h.sandbox.run_icp = current_protocol
     monkeypatch.setattr(flows, 'deterministic_scorer', judge)
-    monkeypatch.setitem(scoring.DEFAULT_JUDGE_MODELS, 'role_batch_check', 'google/gemini-2.5-flash')
+    bind_historical_judge_models(h.service, role_batch_model='google/gemini-2.5-flash')
     prices = _BASE_PRICE_TABLE
     monkeypatch.setattr(flows, 'price_table', lambda: prices((*flows.PRICED_MODELS, 'google/gemini-2.5-flash')))
     try:

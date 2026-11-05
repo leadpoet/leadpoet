@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from qualification.scoring.company_fit_evidence_reuse import observed_source
+
 from gateway.qualification.models import (
     candidate_linkedin_prompt_slug, canonical_candidate_prompt_url,
 )
@@ -949,6 +951,7 @@ def project_structured_linkedin_company_type(
     return None
 
 
+@observed_source("linkedin_structured", ("requested_domain", "profile_url", "company_identity_observed_profile_url", "expected_company_name", "preserve_identity_website"), ("public_company_evidence", "company_identity_evidence", "company_description_evidence", "company_headquarters_evidence"))
 async def fetch_structured_linkedin_company_size(
     requested_domain: str,
     profile_url: str,
@@ -1242,6 +1245,7 @@ def _profile_body_matches_company_identity(
     return False
 
 
+@observed_source("linkedin_contents", ("profile_url", "expected_company_identity"), ("source_text_sink",))
 async def fetch_current_linkedin_company_size(
     profile_url: str,
     *,

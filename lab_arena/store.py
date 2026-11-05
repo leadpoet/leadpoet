@@ -75,6 +75,11 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     ),
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
+    "lab_arena_evidence_judgment_v2": (
+        ("p_operation", "text"), ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_company_index", "integer"), ("p_signal_index", "integer"),
+        ("p_scope", "jsonb"), ("p_candidate_reference", "jsonb"), ("p_equivalence_receipt", "jsonb"),
+    ),
     "lab_arena_claim_signal_judgment_v1": (
         ("p_run_id", "text"), ("p_lease_token_hash", "text"),
         ("p_company_index", "integer"), ("p_signal_index", "integer"),
@@ -2749,19 +2754,19 @@ class ArenaStore:
     def get_signal_judgment_batch(self, identities):
         return self._get_authority_batch("lab_arena_signal_judgments", identities)
 
-    def get_signal_judgment_uses_batch(self, run_ids):
-        """Read complete selected-run uses, bounded by the five by 100 schema."""
+    def get_signal_judgment_uses_batch(self, run_ids, *, evidence=False):
+        """Read complete selected-run uses, bounded by five companies and 101 evidence slots."""
         ids = sorted(set(run_ids))
         found = {run_id: [] for run_id in ids}
         for first in range(0, len(ids), 25):
             batch = ids[first:first + 25]
             previous = None
-            for offset in range(0, len(batch) * 500 + 1, 500):
+            for offset in range(0, len(batch) * 505 + 1, 500):
                 rows = self._transport.select(
                     "lab_arena_signal_judgment_uses", run_ids=batch,
                     order="signal_use_identity", limit=500, offset=offset,
                     columns=("run_id,company_index,signal_index,cache_key,authority_slot,"
-                             "signal_input_hash,source_score_run_id,judgment_hash"),
+                             "signal_input_hash,source_score_run_id,judgment_hash" + (",acceptance_doc" if evidence else "")),
                 )
                 if len(rows) > 500:
                     raise ArenaStoreError("signal use bulk page exceeds limit")
@@ -2772,7 +2777,7 @@ class ArenaStore:
                                               ("run_id", "company_index", "signal_index"))
                     if (type(run_id) is not str or run_id not in batch
                             or type(company) is not int or not 0 <= company < 5
-                            or type(signal) is not int or not 0 <= signal < 100):
+                            or type(signal) is not int or not -1 <= signal < 100):
                         raise ArenaStoreError("signal use bulk identity is invalid")
                     identity = (run_id, company, signal)
                     if previous is not None and identity <= previous:
@@ -2799,6 +2804,17 @@ class ArenaStore:
                 "source_scored_run_id,source_runner_hotkey,created_at"
             ),
         )
+
+    def evidence_judgment(self, *, operation: str, run_id: str, lease_token_hash: str,
+                          company_index: int, signal_index: int, scope: Mapping[str, Any],
+                          candidate_reference: Optional[Mapping[str, Any]] = None,
+                          equivalence_receipt: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc("lab_arena_evidence_judgment_v2", {
+            "p_operation": operation, "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+            "p_company_index": company_index, "p_signal_index": signal_index,
+            "p_scope": dict(scope), "p_candidate_reference": dict(candidate_reference) if candidate_reference is not None else None,
+            "p_equivalence_receipt": dict(equivalence_receipt) if equivalence_receipt is not None else None,
+        }), "evidence judgment")
 
     def claim_signal_judgment(
         self, *, run_id: str, lease_token_hash: str, company_index: int,
@@ -2841,12 +2857,12 @@ class ArenaStore:
             raise ArenaStoreError("signal judgment authority is not unique")
         return rows[0] if rows else None
 
-    def get_signal_judgment_uses(self, run_id: str) -> List[Dict[str, Any]]:
+    def get_signal_judgment_uses(self, run_id: str, *, evidence=False) -> List[Dict[str, Any]]:
         return self._transport.select(
             "lab_arena_signal_judgment_uses", filters={"run_id": run_id},
-            order="company_index", limit=500,
+            order="company_index", limit=505,
             columns=("run_id,company_index,signal_index,cache_key,authority_slot,"
-                     "signal_input_hash,source_score_run_id,judgment_hash"),
+                     "signal_input_hash,source_score_run_id,judgment_hash" + (",acceptance_doc" if evidence else "")),
         )
 
     def signal_authority_exclusions(self, run_id: str) -> List[str]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -22,6 +23,7 @@ class SubmissionCodeReviewer:
         credential_for: Callable[[Mapping[str, Any]], str],
         price_table: Mapping[str, Any], transport: broker.ProviderTransport,
         similarity_references_for: Callable[[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None,
+        capture: Any = None,
     ) -> None:
         self._store = store
         self._objects = objects
@@ -29,17 +31,35 @@ class SubmissionCodeReviewer:
         self._prices = broker.validate_price_table(price_table)
         self._transport = transport
         self._similarity_references_for = similarity_references_for
+        self._capture = capture
+
+    @staticmethod
+    def _capture_outcome(call, document, result, actual):
+        if call is not None:
+            try:
+                call.finish(outcome={"host_decision": dict(document),
+                                     "committed_review": dict(result)},
+                            cost_microusd=actual)
+            except Exception:
+                # Private training evidence never changes admission authority.
+                pass
 
     def _finish_review(
         self, row: Mapping[str, Any], token: str, status: str,
         document: Mapping[str, Any], actual: int | None,
         *, attempt: Any, provider_http_status: int = 0,
         funding_route: str = "none",
+        capture_call: Any = None,
     ) -> Mapping[str, Any]:
-        result = self._store.finish_submission_review(
-            str(row["submission_id"]), str(row["miner_hotkey"]),
-            token, status, document, actual,
-        )
+        try:
+            result = self._store.finish_submission_review(
+                str(row["submission_id"]), str(row["miner_hotkey"]),
+                token, status, document, actual,
+            )
+        except Exception:
+            self._capture_outcome(capture_call, document, {"status": "unavailable"}, actual)
+            raise
+        self._capture_outcome(capture_call, document, result, actual)
         try:
             # The database may replace a late pass with a terminal error.
             # Emit only its committed decision, never a stale or replay reply.
@@ -304,6 +324,7 @@ class SubmissionCodeReviewer:
         provider_http_status = 0
         provider_observation: dict[str, Any] = {}
         diagnostic_response: tuple[Any, Mapping[str, Any]] | None = None
+        capture_call = None
         funding_route = "none"
         document: dict[str, Any] = code_review_policy.diagnostic(
             "code_review_provider_unavailable"
@@ -340,6 +361,22 @@ class SubmissionCodeReviewer:
                 # This is the owner's stored OpenRouter key; no organizer key
                 # is available on this review route.
                 funding_route = "miner_key"
+                if self._capture is not None:
+                    try:
+                        capture_call = self._capture.start(
+                            purpose="admission_review", api="openrouter.chat",
+                            context={
+                                "round_id": row["round_id"], "submission_id": submission_id,
+                                "attempt": claim.get("attempt"), "funding_source": funding_route,
+                                "source_archive_sha256": contracts.hash_bytes(payload),
+                                "source_manifest_sha256": prepared.source_manifest_sha256,
+                                "research_policy_hash": code_review.RESEARCH_POLICY_HASH if research_control else None,
+                            },
+                            request=prepared.parameters, secrets=(secret,),
+                        )
+                    except Exception:
+                        pass
+                request_started = time.monotonic()
                 response = self._transport.send(
                     method="POST", url="https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": "Bearer " + secret,
@@ -348,6 +385,12 @@ class SubmissionCodeReviewer:
                     body=request_body,
                     timeout_seconds=300,
                 )
+                if capture_call is not None:
+                    try:
+                        capture_call.response(body=response.body, status=response.status,
+                                              elapsed_seconds=time.monotonic() - request_started)
+                    except Exception:
+                        pass
                 provider_http_status = response.status
                 if broker._response_contains_credential(response, secret):
                     document = code_review_policy.diagnostic(
@@ -512,4 +555,5 @@ class SubmissionCodeReviewer:
             attempt=claim.get("attempt"),
             provider_http_status=provider_http_status,
             funding_route=funding_route,
+            capture_call=capture_call,
         )

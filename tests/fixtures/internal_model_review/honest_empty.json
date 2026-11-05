@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "honest_empty",
+  "files": {
+    "harness.py": "def run_icp(icp):\n    # No supported evidence is available; do not claim that any company qualifies.\n    return []\n",
+    "LICENSE": "MIT License\nCopyright (c) 2026 Synthetic Fixture Authors\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction.\nTHE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND.\n"
+  },
+  "expected": {
+    "verdict": "pass",
+    "research_classification": "workflow",
+    "categories": []
+  },
+  "rationale": "An honest empty result is not fabrication or a prepared answer. Fixed control remains workflow."
+}

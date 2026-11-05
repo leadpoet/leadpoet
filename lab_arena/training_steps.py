@@ -268,7 +268,7 @@ def _empty_target_message(item):
 
 
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
-            allow_empty_messages=False):
+            allow_empty_messages=False, responses_input_validator=None):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -302,10 +302,11 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
             _require(choice['finish_reason'] == 'stop' and isinstance(msg.get('content'), str)
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
-    _responses_input(body.get('input'), tools=body.get('tools', []),
-                     max_tool_calls=body.get('max_tool_calls'),
-                     allow_reasoning_history=allow_reasoning_history,
-                     allow_tool_error_history=allow_tool_error_history)
+    validate_input = _responses_input if responses_input_validator is None else responses_input_validator
+    validate_input(body.get('input'), tools=body.get('tools', []),
+                   max_tool_calls=body.get('max_tool_calls'),
+                   allow_reasoning_history=allow_reasoning_history,
+                   allow_tool_error_history=allow_tool_error_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')

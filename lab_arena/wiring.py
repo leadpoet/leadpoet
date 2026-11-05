@@ -495,6 +495,9 @@ def build_service_from_environment(mode: str):
         except Exception:
             capture_objects = None
     request_capture = training_capture.RequestCapture(capture_objects)
+    from lab_arena.internal_capture import InternalCapture
+
+    internal_capture = InternalCapture(capture_objects)
 
     def capture_provider_request(document, *, secrets=()):
         return request_capture.prepare(document, secrets=(*provider_keys.values(), *secrets))
@@ -679,6 +682,7 @@ def build_service_from_environment(mode: str):
             store=store, objects=objects, credential_for=submission_keys.code_review_key,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
             similarity_references_for=lambda row: service.submission_similarity_references(row),
+            capture=internal_capture,
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,

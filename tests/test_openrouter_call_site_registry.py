@@ -13,11 +13,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # file (repo-relative) → classification
+#   private_internal_capture — trusted host requests, responses and outcomes
+#                              reuse Arena's private training object store.
 #   uncaptured_by_decision   — provider calls are bounded and costed by the
 #                              active broker and do not produce training data.
 CALL_SITE_REGISTRY = {
-    # -- uncaptured by dated owner decision ---------------------------------
-    "gateway/tasks/icp_generator.py": "uncaptured_by_decision",
+    "gateway/tasks/icp_generator.py": "private_internal_capture",
+    # -- broker-backed shared scorers --------------------------------------
     # The closed-lab training-trace sink was retired on 2026-09-04. Arena
     # calls are costed and bounded by the host broker; these shared scorers do
     # not write a second S3 trace or receipt stream.

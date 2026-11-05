@@ -257,6 +257,7 @@ HOST_ARENA_IMPORTS = {
     "gateway/middleware/body_size.py": {("lab_arena", "training_observations")},
     "gateway/observability/otel_bootstrap.py": {("lab_arena.store", "safe_store_error_metadata")},
     "gateway/tasks/icp_generator.py": {("lab_arena", "contracts"), ("lab_arena.integrity", "company_only_icp"),
+                                        ("lab_arena.internal_capture", "from_environment"),
                                         ("lab_arena.store", "ArenaStore"), ("lab_arena.store", "PostgrestTransport")},
     "leadpoet_canonical/arena_weights.py": {("lab_arena", "contracts")},
     "qualification/scoring/claim_equivalence.py": {

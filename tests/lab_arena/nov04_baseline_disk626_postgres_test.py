@@ -93,7 +93,7 @@ def render(p):
     with p.conn.cursor() as cur:
         row=scalar(cur,"SELECT to_jsonb(r)-'updated_at' FROM public.lab_arena_rounds r WHERE round_id=%s",(ROUND,))
         hashes=scalar(cur,"SELECT jsonb_object_agg(run_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')) FROM public.lab_arena_runs a WHERE round_id=%s",(ROUND,))
-        manifest={'round_hash':prior.hash_doc(cur,row),'run_hashes':hashes,'positions':[1,3,8],'future_hash':scalar(cur,"SELECT encode(extensions.digest((to_jsonb(r)-'updated_at')::TEXT,'sha256'),'hex') FROM public.lab_arena_rounds r WHERE round_id='arena-2026-11-05'")}
+        manifest={'round_hash':prior.hash_doc(cur,row),'run_hashes':hashes,'positions':[1,3,8],'future_immutable_hash':scalar(cur,"SELECT encode(extensions.digest((SELECT jsonb_object_agg(key,value) FROM jsonb_each(to_jsonb(r)) WHERE key=ANY(ARRAY['configuration_doc','participants','benchmark_ref','evaluation_date','icp_set_date','arena_network_name','arena_netuid','champion_hotkey','champion_submission_id','champion_funding_frozen','champion_fallback_providers','rewards_enabled','scoring_generation_floor']))::TEXT,'sha256'),'hex') FROM public.lab_arena_rounds r WHERE round_id='arena-2026-11-05'")}
     text=re.sub(r'\$manifest626\$.*?\$manifest626\$',lambda _: '$manifest626$'+json.dumps(manifest,separators=(',',':'))+'$manifest626$',SQL.read_text(),flags=re.S)
     return text.replace('2026-11-05T01:00:00Z','2099-11-05T01:00:00Z').replace('2026-11-05T01:55:00Z','2099-11-05T01:55:00Z').replace('2026-11-05T02:00:00Z','2099-11-05T02:00:00Z')
 
@@ -132,6 +132,7 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
         for attempt in (3,4,5):
             cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,status,stage_generation,kind,scored_run_id,terminal_cause,result_doc,company_judgment_refs,scoring_generation_floor) SELECT assignment_id||':'||%s,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,%s,'failed',stage_generation,kind,scored_run_id,'judge_error','{\"terminal_status\":\"judge_error\"}',company_judgment_refs,0 FROM public.lab_arena_runs WHERE round_id=%s AND submission_id=%s AND kind='score' AND icp_position=6 AND attempt=2",(attempt,attempt,ROUND,BASELINE))
         cur.execute("UPDATE public.lab_arena_runs SET per_icp_score=NULL,qualification_doc=NULL WHERE round_id=%s AND submission_id=%s AND kind='execute' AND icp_position=6 AND attempt=4",(ROUND,BASELINE))
+        cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(jsonb_set(configuration_doc,'{baseline_source_url}',to_jsonb(%s::text)),'{reasoning_baseline_source_sha256}',to_jsonb(%s::text)) WHERE round_id='arena-2026-11-05'",('https://github.com/leadpoet/leadpoet-sales-agent/archive/24d9201c3c5fdc86cb1676628774223205c87166.tar.gz','sha256:9df0c4d451043da9fcec15fe86f9bfeb87fd7c048609aaf43736a6cbf0244cc4'))
         if sixth_outcome=='judge_error':
             # Preserve the real incident variant: the next day already has an
             # active leased baseline. Recovery must not rewind or replace it.
@@ -145,6 +146,13 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
         before=scalar(cur,'SELECT jsonb_object_agg(run_id,to_jsonb(a)) FROM public.lab_arena_runs a WHERE round_id=%s',(ROUND,))
         financial=scalar(cur,'SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) FROM public.lab_arena_ledger l')
     p.conn.commit();sql=render(p)
+    if sixth_outcome=='judge_error':
+        with p.conn.cursor() as cur:
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_rounds SET status='stage1_scoring',status_generation=status_generation+2,stage_generation=stage_generation+1 WHERE round_id='arena-2026-11-05'")
+            cur.execute('SET LOCAL session_replication_role=origin')
+            future_before=scalar(cur,"SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id='arena-2026-11-05'")
+        p.conn.commit()
     ordinary_cost_before=p.store.icp_cost_eligibility(round_id=ROUND,submission_id='source621-miner-0',icp_position=0,qualified_company_count=0)
     # A wrong manifest must roll back helper creation and all writes.
     wrong=sql.replace(json.loads(re.search(r'\$manifest626\$(.*?)\$manifest626\$',sql,re.S)[1])['round_hash'],'0'*64)
@@ -160,6 +168,14 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
         with pytest.raises(p.pg.Error):
             with p.conn.cursor() as cur:cur.execute(sql)
         p.conn.rollback()
+    # Phase changes are allowed; a changed frozen funding identity is not.
+    with p.conn.cursor() as cur:
+        cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("UPDATE public.lab_arena_rounds SET champion_hotkey=%s WHERE round_id='arena-2026-11-05'",(prior.hotkey('wrong-future-funding'),))
+        cur.execute('SET LOCAL session_replication_role=origin')
+    with pytest.raises(p.pg.Error):
+        with p.conn.cursor() as cur:cur.execute(sql)
+    p.conn.rollback()
     # The live table CHECK also rejects inconsistent candidate metadata.
     with pytest.raises(p.pg.errors.CheckViolation):
         with p.conn.cursor() as cur:

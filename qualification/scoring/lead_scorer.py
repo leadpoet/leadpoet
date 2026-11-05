@@ -7643,7 +7643,37 @@ def _has_explicitly_unproven_fit_dimensions(
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
                 or (
                     completed_investigation
-                    and _is_bound_homepage_name_conflict(identity_receipt)
+                    and (
+                        _is_bound_homepage_name_conflict(identity_receipt)
+                        or (
+                            # An explicit absent website is not identity proof.
+                            # A completed targeted negative can exhaust it;
+                            # missing, malformed or failed observations cannot.
+                            isinstance(identity_receipt, Mapping)
+                            and identity_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                            and identity_receipt.get("reason_code") == "identity_not_proven"
+                            and identity_receipt.get("evidence_source") == "company_web_reverification"
+                            and verdict.get("observed_company_website") == ""
+                            and identity_receipt.get("observed_domain") == ""
+                            and all(
+                                isinstance(identity_receipt.get(field), str)
+                                and bool(identity_receipt[field].strip())
+                                for field in (
+                                    "submitted_name", "submitted_domain", "observed_name",
+                                )
+                            )
+                            and all(
+                                isinstance(identity_receipt.get(field), str)
+                                and (
+                                    identity_receipt[field] == ""
+                                    or bool(identity_receipt[field].strip())
+                                )
+                                for field in (
+                                    "submitted_linkedin_slug", "observed_linkedin_slug",
+                                )
+                            )
+                        )
+                    )
                     and "rebrand" in (investigation_receipt.get("targets") or ())
                     and isinstance(investigation_claims, Mapping)
                     and isinstance(investigation_claims.get("rebrand"), Mapping)

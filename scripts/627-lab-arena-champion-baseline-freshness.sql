@@ -89,9 +89,9 @@ REVOKE ALL ON FUNCTION public.lab_arena__baseline_source_current_v1(public.lab_a
  FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
 CREATE TEMP TABLE arena627_patches(signature TEXT,preimage TEXT,postimage TEXT,ordinal INTEGER,old_text TEXT,new_text TEXT) ON COMMIT DROP;
 INSERT INTO arena627_patches VALUES
-('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','5a68098e87b2dc7663ef79abe551887b58afcf0c31b8f9233747aa5434760016',0,$old627$  current_round public.lab_arena_rounds;$old627$,$new627$  current_round public.lab_arena_rounds;
+('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','17619139dd59bcadcfc170ad677c5caeda47fb329ec833668759b63385f64cbd',0,$old627$  current_round public.lab_arena_rounds;$old627$,$new627$  current_round public.lab_arena_rounds;
   baseline_evaluation_day TEXT;$new627$),
-('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','5a68098e87b2dc7663ef79abe551887b58afcf0c31b8f9233747aa5434760016',1,$old627$  -- The promotion lock and target row lock cover this fresh receipt read.
+('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','17619139dd59bcadcfc170ad677c5caeda47fb329ec833668759b63385f64cbd',1,$old627$  -- The promotion lock and target row lock cover this fresh receipt read.
   IF EXISTS(
     SELECT 1 FROM public.lab_arena_scoring_supersessions h
       JOIN public.lab_arena_rounds correction ON correction.round_id=h.round_id
@@ -103,15 +103,29 @@ INSERT INTO arena627_patches VALUES
     RETURN jsonb_build_object('status','promotion_pending');
   END IF;$old627$,$new627$  baseline_evaluation_day:=coalesce(current_round.evaluation_date,
     to_char((current_round.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ AT TIME ZONE 'UTC','YYYY-MM-DD'));
+  IF current_round.configuration_doc->>'mode'='live' AND current_round.configuration_doc->>'reasoning_capture_policy'='full_generated_thinking_v1' THEN
   IF NOT public.lab_arena__baseline_source_current_v1(current_round) THEN
     RETURN jsonb_build_object('status','promotion_pending');
+  END IF;
+  ELSE
+  -- The promotion lock and target row lock cover this fresh receipt read.
+  IF EXISTS(
+    SELECT 1 FROM public.lab_arena_scoring_supersessions h
+      JOIN public.lab_arena_rounds correction ON correction.round_id=h.round_id
+    WHERE h.old_round_doc->>'status'='published'
+      AND correction.status NOT IN('published','cancelled')
+      AND correction.arena_network_name=current_round.arena_network_name
+      AND correction.arena_netuid=current_round.arena_netuid
+      AND correction.evaluation_date<current_round.evaluation_date) THEN
+    RETURN jsonb_build_object('status','promotion_pending');
+  END IF;
   END IF;$new627$),
-('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','5a68098e87b2dc7663ef79abe551887b58afcf0c31b8f9233747aa5434760016',2,$old627$    AND prior.round_id <> p_round_id$old627$,$new627$    AND prior.round_id <> p_round_id
+('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','17619139dd59bcadcfc170ad677c5caeda47fb329ec833668759b63385f64cbd',2,$old627$    AND prior.round_id <> p_round_id$old627$,$new627$    AND prior.round_id <> p_round_id
     AND prior.evaluation_date < baseline_evaluation_day$new627$),
-('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','5a68098e87b2dc7663ef79abe551887b58afcf0c31b8f9233747aa5434760016',3,$old627$  ORDER BY prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$old627$,$new627$  ORDER BY prior.evaluation_date DESC, prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$new627$),
-('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','5a46c8af7e4febf9aa73762628fec27d7315313809dba80fef73d20300c9ac34',0,$old627$  v_round public.lab_arena_rounds;$old627$,$new627$  v_round public.lab_arena_rounds;
+('public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)','caf315c8c6c4c15d946ba70b00b0a7c4f893f42ada5e77b3af22fe4fdea8575b','17619139dd59bcadcfc170ad677c5caeda47fb329ec833668759b63385f64cbd',3,$old627$  ORDER BY prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$old627$,$new627$  ORDER BY prior.evaluation_date DESC, prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$new627$),
+('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','ac3168201636f6256b88d7b8bc83234527859a9c09ae2a5c64fcbec662561df7',0,$old627$  v_round public.lab_arena_rounds;$old627$,$new627$  v_round public.lab_arena_rounds;
   baseline_evaluation_day TEXT;$new627$),
-('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','5a46c8af7e4febf9aa73762628fec27d7315313809dba80fef73d20300c9ac34',1,$old627$  -- The promotion lock and target row lock cover this fresh receipt read.
+('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','ac3168201636f6256b88d7b8bc83234527859a9c09ae2a5c64fcbec662561df7',1,$old627$  -- The promotion lock and target row lock cover this fresh receipt read.
   IF EXISTS(
     SELECT 1 FROM public.lab_arena_scoring_supersessions h
       JOIN public.lab_arena_rounds correction ON correction.round_id=h.round_id
@@ -123,37 +137,54 @@ INSERT INTO arena627_patches VALUES
     RETURN jsonb_build_object('status','promotion_pending');
   END IF;$old627$,$new627$  baseline_evaluation_day:=coalesce(v_round.evaluation_date,
     to_char((v_round.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ AT TIME ZONE 'UTC','YYYY-MM-DD'));
+  IF v_round.configuration_doc->>'mode'='live' AND v_round.configuration_doc->>'reasoning_capture_policy'='full_generated_thinking_v1' THEN
   IF NOT public.lab_arena__baseline_source_current_v1(v_round) THEN
     RETURN jsonb_build_object('status','promotion_pending');
+  END IF;
+  ELSE
+  -- The promotion lock and target row lock cover this fresh receipt read.
+  IF EXISTS(
+    SELECT 1 FROM public.lab_arena_scoring_supersessions h
+      JOIN public.lab_arena_rounds correction ON correction.round_id=h.round_id
+    WHERE h.old_round_doc->>'status'='published'
+      AND correction.status NOT IN('published','cancelled')
+      AND correction.arena_network_name=v_round.arena_network_name
+      AND correction.arena_netuid=v_round.arena_netuid
+      AND correction.evaluation_date<v_round.evaluation_date) THEN
+    RETURN jsonb_build_object('status','promotion_pending');
+  END IF;
   END IF;$new627$),
-('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','5a46c8af7e4febf9aa73762628fec27d7315313809dba80fef73d20300c9ac34',2,$old627$    AND prior.round_id <> p_round_id$old627$,$new627$    AND prior.round_id <> p_round_id
-    AND prior.evaluation_date < baseline_evaluation_day$new627$),
-('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','5a46c8af7e4febf9aa73762628fec27d7315313809dba80fef73d20300c9ac34',3,$old627$  ORDER BY prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$old627$,$new627$  ORDER BY prior.evaluation_date DESC, prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$new627$),
-('public.lab_arena_latest_promoted_champion_v1(text,integer)','ad9e16e5d0ad70bebe5803874286428879528adca855bb5ffc3ce2114e036707','43e7d334d92fe6519ac78d73347365fb418c41d03d2f12c6f7d717ba4d2032d4',0,$old627$  ORDER BY prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$old627$,$new627$  ORDER BY prior.evaluation_date DESC, prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$new627$),
-('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','fa64590384836b59ede7178c4c3751685690d3e38b83bafa9b0feba01476f798',0,$old627$  v_publication_deadline TEXT;$old627$,$new627$  v_publication_deadline TEXT;
+('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','ac3168201636f6256b88d7b8bc83234527859a9c09ae2a5c64fcbec662561df7',2,$old627$    AND prior.round_id <> p_round_id$old627$,$new627$    AND prior.round_id <> p_round_id
+    AND (v_round.configuration_doc->>'mode' IS DISTINCT FROM 'live'
+      OR v_round.configuration_doc->>'reasoning_capture_policy' IS DISTINCT FROM 'full_generated_thinking_v1'
+      OR prior.evaluation_date < baseline_evaluation_day)$new627$),
+('public.lab_arena_freeze_champion_funding(text)','7633073e713c6969e550c1316d8531426337ada442e563f6bdc8d399bc4c3151','ac3168201636f6256b88d7b8bc83234527859a9c09ae2a5c64fcbec662561df7',3,$old627$  ORDER BY prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$old627$,$new627$  ORDER BY CASE WHEN v_round.configuration_doc->>'mode'='live'
+      AND v_round.configuration_doc->>'reasoning_capture_policy'='full_generated_thinking_v1'
+      THEN prior.evaluation_date END DESC, prior.baseline_promoted_at DESC, prior.round_id DESC LIMIT 1;$new627$),
+('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c',0,$old627$  v_publication_deadline TEXT;$old627$,$new627$  v_publication_deadline TEXT;
   v_baseline_source_current BOOLEAN;$new627$),
-('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','fa64590384836b59ede7178c4c3751685690d3e38b83bafa9b0feba01476f798',1,$old627$  -- Only lab_arena_service can call this RPC. The gateway verifies the signed$old627$,$new627$  -- Promotion/correction, then claim control, then round/run.
+('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c',1,$old627$  -- Only lab_arena_service can call this RPC. The gateway verifies the signed$old627$,$new627$  -- Promotion/correction, then claim control, then round/run.
   PERFORM pg_advisory_xact_lock_shared(hashtextextended('lab_arena.baseline_promotion',0));
   -- Only lab_arena_service can call this RPC. The gateway verifies the signed$new627$),
-('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','fa64590384836b59ede7178c4c3751685690d3e38b83bafa9b0feba01476f798',2,$old627$  SELECT * INTO v_existing FROM public.lab_arena_runs$old627$,$new627$  v_baseline_source_current:=public.lab_arena__baseline_source_current_v1(v_round);
+('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c',2,$old627$  SELECT * INTO v_existing FROM public.lab_arena_runs$old627$,$new627$  v_baseline_source_current:=public.lab_arena__baseline_source_current_v1(v_round);
   SELECT * INTO v_existing FROM public.lab_arena_runs$new627$),
-('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','fa64590384836b59ede7178c4c3751685690d3e38b83bafa9b0feba01476f798',3,$old627$    IF v_existing.claim_request_hash = p_request_hash THEN$old627$,$new627$    IF v_existing.claim_request_hash = p_request_hash THEN
-      IF NOT v_baseline_source_current AND v_existing.kind='execute' AND EXISTS(
+('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c',3,$old627$    IF v_existing.claim_request_hash = p_request_hash THEN$old627$,$new627$    IF v_existing.claim_request_hash = p_request_hash THEN
+      IF NOT v_baseline_source_current AND v_existing.kind IN('execute','score') AND EXISTS(
         SELECT 1 FROM public.lab_arena_submissions baseline
         WHERE baseline.submission_id=v_existing.submission_id AND baseline.round_id=p_round_id AND baseline.is_king) THEN
         RETURN jsonb_build_object('status','promotion_pending');
       END IF;$new627$),
-('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','fa64590384836b59ede7178c4c3751685690d3e38b83bafa9b0feba01476f798',4,$old627$    SELECT runs.run_id FROM public.lab_arena_runs AS runs
+('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c',4,$old627$    SELECT runs.run_id FROM public.lab_arena_runs AS runs
   WHERE runs.round_id = p_round_id$old627$,$new627$    SELECT runs.run_id FROM public.lab_arena_runs AS runs
   WHERE runs.round_id = p_round_id
-    AND (v_baseline_source_current OR runs.kind <> 'execute' OR NOT EXISTS(
+    AND (v_baseline_source_current OR runs.kind NOT IN ('execute','score') OR NOT EXISTS(
       SELECT 1 FROM public.lab_arena_submissions baseline
       WHERE baseline.submission_id=runs.submission_id AND baseline.round_id=p_round_id AND baseline.is_king))$new627$),
-('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','fa64590384836b59ede7178c4c3751685690d3e38b83bafa9b0feba01476f798',5,$old627$  IF NOT FOUND THEN
+('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','1866128216b9f8ebf4e37ebbca9de4aebf025422085a06c1bb2d5b1e95ffde6e','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c',5,$old627$  IF NOT FOUND THEN
     RETURN pg_catalog.jsonb_build_object('status', 'no_pending');$old627$,$new627$  IF NOT FOUND THEN
     IF NOT v_baseline_source_current AND EXISTS(SELECT 1 FROM public.lab_arena_runs pending
       JOIN public.lab_arena_submissions baseline ON baseline.submission_id=pending.submission_id
-      WHERE pending.round_id=p_round_id AND pending.status='pending' AND pending.kind='execute' AND baseline.is_king) THEN
+      WHERE pending.round_id=p_round_id AND pending.status='pending' AND pending.kind IN('execute','score') AND baseline.is_king) THEN
       RETURN jsonb_build_object('status','promotion_pending');
     END IF;
     RETURN pg_catalog.jsonb_build_object('status', 'no_pending');$new627$),
@@ -166,34 +197,34 @@ INSERT INTO arena627_patches VALUES
   IF NOT public.lab_arena__baseline_source_current_v1(v_round) THEN
     RETURN jsonb_build_object('status','promotion_pending');
   END IF;$new627$),
-('public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)','8740ff3538cdd0800178711ea8cda5af273b9ede0e8e319d4f1a1a66037fd4ab','d7eb048e7ac186376f8b000e885c49af1219dc9b066432f07baf588a9196608f',0,$old627$  BEGIN
+('public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)','8740ff3538cdd0800178711ea8cda5af273b9ede0e8e319d4f1a1a66037fd4ab','175b9bf90d9b1aa5436d78dca6f9a724445c9fd689650f76ef92e1d42f3303ed',0,$old627$  BEGIN
   -- lab_arena_infrastructure_retry_cost_consumer_v1$old627$,$new627$  IF EXISTS(SELECT 1 FROM public.lab_arena_runs baseline
-    WHERE baseline.run_id=p_run_id AND baseline.kind='execute'
+    WHERE baseline.run_id=p_run_id AND baseline.kind IN('execute','score')
       AND baseline.submission_id='baseline-'||regexp_replace(baseline.round_id,'^arena-','')) THEN
     PERFORM pg_advisory_xact_lock_shared(hashtextextended('lab_arena.baseline_promotion',0));
   END IF;
   BEGIN
   -- lab_arena_infrastructure_retry_cost_consumer_v1$new627$),
-('public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)','8740ff3538cdd0800178711ea8cda5af273b9ede0e8e319d4f1a1a66037fd4ab','d7eb048e7ac186376f8b000e885c49af1219dc9b066432f07baf588a9196608f',1,$old627$  -- A held recovered evaluation admits no fresh execution liability.$old627$,$new627$  -- Keep existing receipts available for completion and billing above.
-  IF v_is_baseline AND v_run.kind='execute'
+('public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)','8740ff3538cdd0800178711ea8cda5af273b9ede0e8e319d4f1a1a66037fd4ab','175b9bf90d9b1aa5436d78dca6f9a724445c9fd689650f76ef92e1d42f3303ed',1,$old627$  -- A held recovered evaluation admits no fresh execution liability.$old627$,$new627$  -- Keep existing receipts available for completion and billing above.
+  IF v_is_baseline AND v_run.kind IN('execute','score')
     AND NOT public.lab_arena__baseline_source_current_v1(v_round) THEN
     RETURN jsonb_build_object('status','promotion_pending');
   END IF;
   -- A held recovered evaluation admits no fresh execution liability.$new627$),
-('public.lab_arena_mark_dispatched(text,text,text)','0b7b0f601204f13e2a65fd218a1c6286066aa797dd2ccfeaaa24f2954eb436ab','537b13cc5c36cdc33aceed392e41f6875f7e7f4a502f57bab279127a8457f485',0,$old627$  v_dispatch_entry_id BIGINT;$old627$,$new627$  v_dispatch_entry_id BIGINT;
+('public.lab_arena_mark_dispatched(text,text,text)','0b7b0f601204f13e2a65fd218a1c6286066aa797dd2ccfeaaa24f2954eb436ab','107864d49bcd4bdeaa0885e51b5ad9a735a109bb482acea0e639cde2443b3e3b',0,$old627$  v_dispatch_entry_id BIGINT;$old627$,$new627$  v_dispatch_entry_id BIGINT;
   v_round public.lab_arena_rounds;$new627$),
-('public.lab_arena_mark_dispatched(text,text,text)','0b7b0f601204f13e2a65fd218a1c6286066aa797dd2ccfeaaa24f2954eb436ab','537b13cc5c36cdc33aceed392e41f6875f7e7f4a502f57bab279127a8457f485',1,$old627$BEGIN
+('public.lab_arena_mark_dispatched(text,text,text)','0b7b0f601204f13e2a65fd218a1c6286066aa797dd2ccfeaaa24f2954eb436ab','107864d49bcd4bdeaa0885e51b5ad9a735a109bb482acea0e639cde2443b3e3b',1,$old627$BEGIN
   BEGIN
 $old627$,$new627$BEGIN
   IF EXISTS(SELECT 1 FROM public.lab_arena_runs baseline
-    WHERE baseline.run_id=p_run_id AND baseline.kind='execute'
+    WHERE baseline.run_id=p_run_id AND baseline.kind IN('execute','score')
       AND baseline.submission_id='baseline-'||regexp_replace(baseline.round_id,'^arena-','')) THEN
     PERFORM pg_advisory_xact_lock_shared(hashtextextended('lab_arena.baseline_promotion',0));
   END IF;
   BEGIN
 $new627$),
-('public.lab_arena_mark_dispatched(text,text,text)','0b7b0f601204f13e2a65fd218a1c6286066aa797dd2ccfeaaa24f2954eb436ab','537b13cc5c36cdc33aceed392e41f6875f7e7f4a502f57bab279127a8457f485',2,$old627$  INSERT INTO public.lab_arena_ledger ($old627$,$new627$  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id=v_run.round_id;
-  IF v_run.kind='execute' AND EXISTS(SELECT 1 FROM public.lab_arena_submissions baseline
+('public.lab_arena_mark_dispatched(text,text,text)','0b7b0f601204f13e2a65fd218a1c6286066aa797dd2ccfeaaa24f2954eb436ab','107864d49bcd4bdeaa0885e51b5ad9a735a109bb482acea0e639cde2443b3e3b',2,$old627$  INSERT INTO public.lab_arena_ledger ($old627$,$new627$  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id=v_run.round_id;
+  IF v_run.kind IN('execute','score') AND EXISTS(SELECT 1 FROM public.lab_arena_submissions baseline
     WHERE baseline.submission_id=v_run.submission_id AND baseline.round_id=v_run.round_id AND baseline.is_king)
     AND NOT public.lab_arena__baseline_source_current_v1(v_round) THEN
     -- The locked head is still a reservation: no dispatch can have occurred.
@@ -246,6 +277,7 @@ BEGIN
  SELECT * INTO p FROM pg_proc WHERE oid=to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer,text)');
  IF FOUND AND (encode(extensions.digest(p.prosrc,'sha256'),'hex')<>'c5ef0f481424e226b79cb1722b86b9bd9099bdec76e983d955d85497a0940a8c'
    OR pg_get_userbyid(p.proowner)<>'lab_arena_owner' OR NOT p.prosecdef OR p.provolatile<>'s'
+   OR p.proisstrict OR p.proleakproof OR p.proparallel<>'u' OR p.prokind<>'f' OR p.proretset
    OR p.proacl::TEXT IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}'
    OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::TEXT[]) THEN
    RAISE EXCEPTION 'Baseline freshness627 bounded reader differs'; END IF;

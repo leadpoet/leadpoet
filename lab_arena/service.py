@@ -6136,7 +6136,7 @@ class ArenaService:
         ):
             return {"status": "no_work", "claim_recovery": "resolved",
                     "claim_recovery_request_id": original["request_id"]}
-        if (response.get("kind") == "execute"
+        if (response.get("kind") in ("execute", "score")
                 and response.get("submission_id") == "baseline-%s" % round_id.removeprefix("arena-")
                 and self._full_thinking_required(round_row)
                 and configuration.get("mode") == "live"):

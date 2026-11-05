@@ -365,7 +365,7 @@ def test_future_champion_is_excluded_before_source_download(prepared, tmp_path):
     from tests.lab_arena.full_thinking_round_test import opted_in
     from tests.lab_arena.test_lab_arena_promotion_git import source
     p = prepared
-    change(p, "UPDATE public.lab_arena_rounds SET evaluation_date='2026-11-08' WHERE round_id='arena-2026-11-03'")
+    change(p, "UPDATE public.lab_arena_rounds SET evaluation_date='2026-11-08',baseline_promoted_at=now()+interval '1 day' WHERE round_id='arena-2026-11-03'")
     assert p.store.latest_promoted_champion(network_name='finney', netuid=71)['round_id'] == 'arena-2026-11-03'
     assert p.store.latest_promoted_champion(network_name='finney', netuid=71,
         before_evaluation_date='2026-11-06')['round_id'] == prior.ROUND
@@ -391,7 +391,60 @@ def test_replay_preserves_security_and_rejects_changed_helper(prepared):
         assert scalar(cur, "SELECT has_function_privilege('lab_arena_service','public.lab_arena__baseline_source_current_v1(public.lab_arena_rounds)','EXECUTE')") is False
         assert scalar(cur, "SELECT has_function_privilege('lab_arena_service','public.lab_arena_latest_promoted_champion_v1(text,integer,text)','EXECUTE')") is True
         assert scalar(cur, "SELECT has_function_privilege('anon','public.lab_arena_latest_promoted_champion_v1(text,integer,text)','EXECUTE')") is False
+        cur.execute('BEGIN')
         cur.execute('ALTER FUNCTION public.lab_arena__baseline_source_current_v1(public.lab_arena_rounds) STRICT')
         with pytest.raises(p.pg.Error, match='helper differs'):
             cur.execute(SQL.read_text())
     p.conn.rollback()
+
+
+def score_run(p, baseline=True):
+    source = run(p, baseline=baseline)
+    participant = p.target_baseline if baseline else p.target_miner
+    change(p, "UPDATE public.lab_arena_runs SET status='accepted',terminal_cause='accepted',result_doc='{\"terminal_status\":\"accepted\"}',output_ref='baseline-output.json' WHERE run_id=%s", (source,))
+    assignment = ROUND + ':' + participant['submission_id'] + ':1:0:score'
+    with p.conn.cursor() as cur:
+        cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation,scoring_generation_floor,scored_run_id) VALUES (%s,%s,%s,%s,%s,1,0,1,'score','pending',1,0,%s)", (assignment + ':1', assignment, ROUND, participant['submission_id'], participant['miner_hotkey'], source))
+        cur.execute('SET LOCAL session_replication_role=origin')
+    p.conn.commit()
+    return assignment + ':1'
+
+
+def test_baseline_judge_claim_and_new_paid_dispatch_wait_for_prior_correction(prepared):
+    p = prepared
+    # Match the live November 5 incident: its saved source still agrees with
+    # November 3, but November 4 has an unfinished published correction.
+    change(p, "UPDATE public.lab_arena_rounds SET status='scored' WHERE round_id=%s", (prior.ROUND,))
+    change(p, "UPDATE public.lab_arena_rounds r SET status='stage1_scoring',champion_submission_id=prior.publication_doc#>>'{king_decision,winner_submission_id}',champion_hotkey=prior.publication_doc#>>'{king_decision,king_hotkey}',configuration_doc=jsonb_set(r.configuration_doc,'{baseline_source_url}',to_jsonb('https://github.com/leadpoet/leadpoet-sales-agent/archive/'||(prior.promotion_doc->>'commit')||'.tar.gz')) FROM public.lab_arena_rounds prior WHERE r.round_id=%s AND prior.round_id='arena-2026-11-03'", (ROUND,))
+    assert current(p) is True
+    score = score_run(p)
+    request = uuid.uuid4().hex
+    lease = claim(p, request)
+    assert lease['status'] == 'leased' and lease['run_id'] == score
+    identity = 'sha256:' + 'c' * 64
+    assert reserve(p, score, identity)['status'] == 'reserved'
+    with p.conn.cursor() as cur:
+        cur.execute("INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc) SELECT round_id,1,'judge627-correction','sha256:'||repeat('c',64),'fixture',txid_current(),pg_backend_pid(),jsonb_set(to_jsonb(r),'{status}','\"published\"'),to_jsonb(r),'{}','{}' FROM public.lab_arena_rounds r WHERE round_id=%s", (prior.ROUND,))
+    p.conn.commit()
+    assert current(p) is False
+    assert claim(p, request) == {'status': 'promotion_pending'}
+    assert reserve(p, score, 'sha256:' + '9' * 64) == {'status': 'promotion_pending'}
+    assert p.store.mark_dispatched(run_id=score, lease_token_hash=hash_lease_token('freshness627'), call_identity=identity) == {'status': 'promotion_pending'}
+    assert p.store.get_run(score)['status'] == 'leased'
+    miner_score = score_run(p, baseline=False)
+    assert claim(p)['run_id'] == miner_score
+    miner_identity = 'sha256:' + '8' * 64
+    assert reserve(p, miner_score, miner_identity)['status'] == 'reserved'
+    assert p.store.mark_dispatched(run_id=miner_score, lease_token_hash=hash_lease_token('freshness627'), call_identity=miner_identity)['status'] == 'dispatched'
+
+
+@pytest.mark.parametrize('mode', ['live', 'shadow'])
+def test_legacy_funding_keeps_existing_timestamp_order_and_future_scope(prepared, mode):
+    p = prepared
+    # Legacy funding intentionally keeps its old timestamp selector, including
+    # future rows. Only modern full-thinking freezes use the prior-day reader.
+    change(p, "UPDATE public.lab_arena_rounds SET status='open',champion_funding_frozen=false,champion_submission_id=NULL,champion_hotkey=NULL,configuration_doc=(configuration_doc-'reasoning_capture_policy')||jsonb_build_object('mode',%s) WHERE round_id=%s", (mode, ROUND))
+    change(p, "UPDATE public.lab_arena_rounds SET evaluation_date='2026-11-08',baseline_promoted_at=now()+interval '1 day',configuration_doc=jsonb_set(configuration_doc,'{mode}',to_jsonb(%s::text)) WHERE round_id='arena-2026-11-03'", (mode,))
+    assert p.store.freeze_champion_funding(ROUND) == {'status': 'frozen'}
+    assert p.store.get_round(ROUND)['champion_submission_id'] == 'sub-28594d902080fb5213f4344c09ffb531'

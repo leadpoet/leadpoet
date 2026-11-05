@@ -84,6 +84,16 @@ def test_legacy_rounds_still_publish_and_promote_after_integrity_migrations(data
 
 
 class IntegrityHarness(fixtures.Harness):
+    def frozen_baseline_source_sha256(self):
+        """Bind synthetic full-thinking policy to the saved baseline bytes."""
+        baseline = next(row for row in self.service.store.list_submissions(self.round_id)
+                        if row["is_king"])
+        payload = self.objects.get_bounded(
+            baseline["source_ref"], fixtures.source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+        digest = contracts.hash_bytes(payload)
+        assert baseline.get("source_archive_sha256") in (None, digest)
+        return digest
+
     def objects_key(self):
         # All harnesses on one disposable DB share promoted source objects.
         # Separate DB fixtures must never reuse a sealed object namespace.

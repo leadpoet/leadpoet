@@ -239,6 +239,7 @@ def test_reused_full_thinking_baseline_is_verified_before_freeze(status, stored)
     service._store = SimpleNamespace(
         get_submission=lambda _sid: row,
         freeze_champion_funding=lambda _rid: {"status": "existing"},
+        freeze_full_thinking_baseline=lambda _rid, **_selection: {"status": "existing"},
         list_submissions=lambda _rid, *, status: [row] if status == row["status"] else [],
         update_submission=lambda *_args: pytest.fail("unexpected participant mutation"),
     )
@@ -288,6 +289,10 @@ def test_open_next_round_adopts_champion_promoted_before_baseline_freeze(tmp_pat
 
         def freeze_full_thinking_baseline(self, round_id, **selection):
             assert round_id == next_config["round_id"]
+            if round_row["champion_funding_frozen"]:
+                assert selection["expected_promotion_round_id"] is None
+                assert selection["source_url"] == champion_url
+                return {"status": "existing"}
             assert selection["expected_promotion_round_id"] == "arena-2026-10-23"
             assert selection["expected_winner_submission_id"] == "winner"
             assert selection["source_url"] == champion_url

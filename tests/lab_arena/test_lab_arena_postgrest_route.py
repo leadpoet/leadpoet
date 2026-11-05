@@ -179,6 +179,11 @@ def stack(tmp_path_factory):
                     cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
                 cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
                 assert cursor.fetchone()[0] == schema_acl
+            # Install additive current readers before PostgREST takes its
+            # schema snapshot, preserving historical write RPCs and ACLs.
+            arena_pg.prepare_current_service_reads(
+                lambda: pg.connect(**dsn),
+                include_run_reads=False, include_round_reads=False)
             directory = tmp_path_factory.mktemp("private-api-" + suffix)
             directory.chmod(0o700)
             values = {

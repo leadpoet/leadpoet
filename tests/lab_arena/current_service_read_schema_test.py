@@ -67,3 +67,31 @@ def test_read_dependencies_enable_current_queries_without_replacing_historical_w
             assert cursor.fetchone() == ('retained later deployment',)
     finally:
         store.close()
+
+
+def test_bounded_champion_reader_preserves_historical_functions_and_schema_acl():
+    from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+
+    fixture = full_thinking_database()
+    pg, dsn = next(fixture)
+    connect = lambda: pg.connect(**dsn)
+    try:
+        with connect() as connection, connection.cursor() as cursor:
+            before = _functions(cursor)
+            cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+            schema_acl = cursor.fetchone()
+        prepare_current_service_reads(connect, include_run_reads=False, include_round_reads=False)
+        with connect() as connection, connection.cursor() as cursor:
+            after = _functions(cursor)
+            assert {signature: after[signature] for signature in before} == before
+            assert set(after) - set(before) == {
+                'lab_arena_latest_promoted_champion_v1(text,integer,text)'}
+            cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+            assert cursor.fetchone() == schema_acl
+            cursor.execute("SELECT public.lab_arena_latest_promoted_champion_v1('finney',71,'2099-01-01')")
+            assert cursor.fetchone() == (None,)
+        prepare_current_service_reads(connect, include_run_reads=False, include_round_reads=False)
+        with connect() as connection, connection.cursor() as cursor:
+            assert _functions(cursor) == after
+    finally:
+        fixture.close()

@@ -1,3 +1,13 @@
+## Scoped authorization: November 3 closed Deepline proof guards
+
+The coordinator authorized exact function-only migration617 during the November 3
+Arena watch. Use only the reviewed late scalar LATERAL and CASE gates after the
+unchanged ordered candidate fence. Preserve all four full-proof helpers, billing,
+frozen rules, source data and concurrent work. Add no index, retry, timeout,
+provider or credential change. Internal agents implement and test only. The root
+coordinator owns independent review, push, merge, exact committed SQL application
+and deployed-output verification. Internal agents must not change production.
+
 ## Scoped authorization: November 5 ordered OpenRouter cost reads
 
 The user authorized the smallest fix for repeated active OpenRouter cost-read

@@ -63,7 +63,9 @@ def _install_hints(harness):
                                 }
                             ],
                         },
-                        10,
+                        # Real SQL admission/dispatch can exceed 10 ms under
+                        # CI load; this fixture tests cache costs, not expiry.
+                        5000,
                     )
                     assert status == 200
                 finally:

@@ -522,6 +522,7 @@ ARENA_DENIAL_CODES = frozenset(
         "promotion_winner_invalid",
         "public_output_unavailable",
         "public_result_unavailable",
+        "publication_lock_unavailable",
         "quota_unavailable",
         "recovered_judgment_binding_invalid",
         "recovered_judgment_scores_not_recorded",

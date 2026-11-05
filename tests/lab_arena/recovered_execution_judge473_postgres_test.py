@@ -1,4 +1,5 @@
 """The original recovered execution remains the source of ordinary judge retries."""
+from contextlib import ExitStack
 import json
 from pathlib import Path
 
@@ -218,7 +219,7 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
             return FrozenRecoveryStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
     monkeypatch.setattr(integrity_flows, 'IntegrityHarness', IntegrityHarness)
 
-    clients = []
+    clients = ExitStack()
     build = IntegrityHarness.build_service
     sandbox_run = flows.ModelSandbox.run_icp
     store_claim = ArenaStore.claim_assignment
@@ -232,8 +233,9 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
         # The real creation clock is October 13; use 472's existing isolated
         # reward-disabled shadow rollout rather than changing its date fence.
         service.config.mode = 'shadow'
-        client = TestClient(create_app(service))
-        clients.append(client)
+        # One app owns one event loop, including its AnyIO training-input
+        # limiter. Concurrent requests must not create separate portals.
+        client = clients.enter_context(TestClient(create_app(service)))
         self.api_factory = lambda: HttpArenaApiClient('http://localhost', client=client)
         return service
 
@@ -327,5 +329,4 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
         assert len(original_source_failures) == 1
         assert len(assembled) == 1
     finally:
-        for client in clients:
-            client.close()
+        clients.close()

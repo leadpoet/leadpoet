@@ -1631,7 +1631,7 @@ def _lock_down_dependency_tree(path: Path, *, site: str = "dependency_tree") -> 
 
 
 class SourceCache:
-    """A bounded LRU keyed by the existing server-assigned submission id."""
+    """A bounded per-submission LRU bound to the leased source reference."""
 
     def __init__(
         self,
@@ -1661,6 +1661,19 @@ class SourceCache:
         with self._lock:
             self._load_existing_locked()
 
+    @staticmethod
+    def _ready_source_ref(marker: Path) -> Optional[str]:
+        """Read the exact UTF-8 identity without trusting an unbounded marker."""
+        try:
+            with marker.open("rb") as stream:
+                encoded = stream.read(4097)
+            if len(encoded) > 4096:
+                return None
+            source_ref = encoded.decode("utf-8")
+        except (OSError, UnicodeError):
+            return None
+        return source_ref if 1 <= len(source_ref) <= 1024 else None
+
     def _load_existing_locked(self) -> None:
         existing = []
         for target in sorted(self._root.glob("submission-*"), key=lambda item: item.name):
@@ -1679,6 +1692,7 @@ class SourceCache:
                 not contracts.SUBMISSION_ID_RE.fullmatch(submission_id)
                 or target.name != "submission-" + submission_id
                 or not 1 <= archive_size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                or self._ready_source_ref(marker) is None
                 or source.is_symlink()
                 or not source.is_dir()
                 or dependencies.is_symlink()
@@ -1722,15 +1736,22 @@ class SourceCache:
     def _cached_source_locked(
         self,
         submission_id: str,
+        source_ref: str,
         source_size_bytes: int,
     ) -> Optional[Tuple[Path, Path]]:
         cached = self._ready.get(submission_id)
         if cached is None:
             return None
         archive = cached[0].parent / "source.tar.gz"
-        if archive.is_file() and archive.stat().st_size == source_size_bytes:
+        if (
+            archive.is_file()
+            and archive.stat().st_size == source_size_bytes
+            and self._ready_source_ref(archive.parent / ".ready") == source_ref
+        ):
             self._ready.move_to_end(submission_id)
             return cached
+        if self._in_use.get(submission_id, 0):
+            return None  # The caller waits before replacing an active source.
         self._ready.pop(submission_id, None)
         self._sizes.pop(submission_id, None)
         _remove_cache_path(cached[0].parent)
@@ -1767,7 +1788,10 @@ class SourceCache:
             if requirements.is_file():
                 self._dependency_installer(requirements, dependency_path)
             _lock_down_dependency_tree(dependency_path, site="source_cache")
-            (target / ".ready").touch(mode=0o400)
+            marker = target / ".ready.tmp"
+            marker.write_bytes(source_ref.encode("utf-8"))
+            os.chmod(marker, 0o400)
+            os.replace(marker, target / ".ready")
             size = _cache_path_bytes(target)
             if size > self._max_bytes:
                 raise RunnerError("source exceeds runner cache capacity")
@@ -1800,14 +1824,19 @@ class SourceCache:
             raise RunnerError("source size is invalid")
         must_prepare = False
         with self._condition:
-            while submission_id in self._building:
-                self._condition.wait()
-            paths = self._cached_source_locked(submission_id, source_size_bytes)
-            if paths is None:
-                self._building.add(submission_id)
-                must_prepare = True
-            else:
-                self._in_use[submission_id] = self._in_use.get(submission_id, 0) + 1
+            while True:
+                while submission_id in self._building:
+                    self._condition.wait()
+                paths = self._cached_source_locked(submission_id, source_ref, source_size_bytes)
+                if paths is None and self._in_use.get(submission_id, 0):
+                    self._condition.wait()
+                    continue
+                if paths is None:
+                    self._building.add(submission_id)
+                    must_prepare = True
+                else:
+                    self._in_use[submission_id] = self._in_use.get(submission_id, 0) + 1
+                break
         if must_prepare:
             try:
                 paths, size = self._prepare_source(
@@ -1834,13 +1863,14 @@ class SourceCache:
         try:
             yield paths
         finally:
-            with self._lock:
+            with self._condition:
                 remaining = self._in_use.get(submission_id, 0) - 1
                 if remaining > 0:
                     self._in_use[submission_id] = remaining
                 else:
                     self._in_use.pop(submission_id, None)
                 self._evict_locked()
+                self._condition.notify_all()
 
 
 def registry_image_exporter(client: images.RegistryClient, *, rules: Optional[images.ImageRules] = None) -> ImageExporter:
@@ -2398,6 +2428,10 @@ class WorkerSocketServer:
                 or (state.lease.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_cache_control.POLICY):
                 raise ValueError("signal cache control is not authorized")
             request = signal_cache_control.validate_request(frame["request"])
+            if request.get("operation") == signal_cache_control.FIT_CAPABILITY_OPERATION:
+                # Pure, worker-local support proof after the same scorer and
+                # frozen-policy guards. Older workers reject this operation.
+                return contracts.canonical_json(signal_cache_control.fit_checkpoint_capability()).encode("utf-8")
             result = self._api.signal_judgment(state.lease["run_id"], state.lease_token, request)
             encoded = contracts.canonical_json(result).encode("utf-8")
             if len(encoded) > signal_cache_control.MAX_BYTES:
@@ -5632,13 +5666,17 @@ class Runner:
             except FileNotFoundError:
                 pass
 
-    def _acknowledge_completion(self, path: Path, result: Mapping[str, Any]) -> bool:
+    def _acknowledge_completion(
+        self, path: Path, result: Mapping[str, Any], envelope: Mapping[str, Any],
+    ) -> bool:
         status = result.get("status")
-        if status in {"accepted", "failed"}:
-            path.unlink()
-        elif status in {"stale", "rejected"}:
-            # Stale/denied leases cannot be replayed, but their completed paid
-            # evidence is not proved persisted. Keep it privately for audit.
+        mismatched_failure = (status == "failed"
+                              and envelope["body"]["result"]["terminal_status"] == "accepted")
+        if status in {"stale", "rejected"} or mismatched_failure:
+            # These terminal acknowledgments cannot be replayed, but do not
+            # prove the submitted successful output was persisted. Keep the
+            # exact signed receipt privately for audit, including when the
+            # server has already failed an otherwise successful local run.
             archive = path.with_suffix("." + status + ".json")
             try:
                 os.link(path, archive, follow_symlinks=False)
@@ -5647,6 +5685,8 @@ class Runner:
                 if ((source_details.st_dev, source_details.st_ino)
                     != (saved_details.st_dev, saved_details.st_ino)):
                     raise RunnerError("completion archive already exists") from None
+            path.unlink()
+        elif status in {"accepted", "failed"}:
             path.unlink()
         else:
             return False
@@ -5674,7 +5714,7 @@ class Runner:
                     envelope = self._read_pending_completion(descriptor, path)
                     refreshed = self._completion_envelope_for_attempt(envelope)
                     result = self._config.api.complete(refreshed)
-                    if self._acknowledge_completion(path, result):
+                    if self._acknowledge_completion(path, result, envelope):
                         self.completed.append({"run_id": envelope["body"]["run_id"], "result": result})
                         if (result.get("status") in ("accepted", "failed")
                             and self._config.operational_logger is not None):
@@ -5769,13 +5809,13 @@ class Runner:
             # Keep the retained inode locked through terminal telemetry and
             # delivery so a concurrent replay cannot take over between them.
             result = self._deliver_completion_with_retries(envelope)
-            self._acknowledge_completion(pending_path, result)
+            self._acknowledge_completion(pending_path, result, envelope)
             return result
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         with self._retain_completion(envelope) as path:
             result = self._deliver_completion_with_retries(envelope)
-            self._acknowledge_completion(path, result)
+            self._acknowledge_completion(path, result, envelope)
             return result
 
     def _deliver_completion_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
@@ -5887,7 +5927,7 @@ class Runner:
         taken = 0
         futures = set()
 
-        def wait_for_completion(*, rescan_on_timeout: bool = False) -> bool:
+        def wait_for_completion(*, rescan_on_timeout: bool = False, draining: bool = False) -> bool:
             while futures:
                 done, pending = wait(
                     futures,
@@ -5901,7 +5941,7 @@ class Runner:
                     for future in done:
                         future.result()
                     return True
-                if stop_event is not None and stop_event.is_set():
+                if not draining and stop_event is not None and stop_event.is_set():
                     return False
                 if rescan_on_timeout:
                     return True
@@ -6028,12 +6068,10 @@ class Runner:
             elif round_index == len(round_ids):
                 break
         # Keep servicing completed receipts while the last healthy sandbox
-        # runs. A busy run_once must not defer delivery until lease expiry.
+        # runs, including graceful shutdown. Stop prevents new claims, but
+        # must not defer saved completion delivery behind another sandbox.
         while futures:
-            if not wait_for_completion():
-                for future in futures:
-                    future.result()
-                break
+            wait_for_completion(draining=True)
         if log is not None:
             self._report_capacity()
             log.state(scoring_state="unavailable" if pickup_failed else "idle", progress=not pickup_failed)

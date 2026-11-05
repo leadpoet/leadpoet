@@ -11,6 +11,7 @@ import base64
 import copy
 import json
 import re
+from collections import OrderedDict
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
@@ -26,6 +27,9 @@ MAX_EXAMPLE_NODES = 2_000_000
 _RETAINED_ERROR_STATUSES = {
     "openrouter": (400, 402, 403, 404, 422, 502),
     "deepline": (400, 402, 403, 404, 422),
+}
+_UNDISPATCHED_RECOVERY_REASONS = {
+    "attempt_completed_before_dispatch", "provider_admission_cancelled", "provider_admission_deadline",
 }
 
 
@@ -229,7 +233,7 @@ def _terminal_company_fit_nonmatch(breakdown):
 
 def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                                scoring_input, uses, authority_rows, company_rows, runs,
-                               round_row):
+                               round_row, source_input_reader=None):
     """Resolve every emitted signal reference against its original frozen row."""
     if (scoring_input.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_judgments.POLICY:
         if uses or any(
@@ -264,7 +268,8 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
     by_use = {}
     for use in uses:
         position = (use.get("run_id"), use.get("company_index"), use.get("signal_index"))
-        if (position in by_use or any(type(value) is not int or value < 0 for value in position[1:])):
+        if (position in by_use or type(position[1]) is not int or position[1] < 0
+            or type(position[2]) is not int or position[2] < company_judgments.FIT_CHECKPOINT_INDEX):
             raise ExportError("signal_use_invalid")
         by_use[position] = use
     by_authority = {}
@@ -314,11 +319,79 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             positions.append(position)
         return positions
     for company_index, breakdown in zip(scored_company_indexes, breakdowns):
+        fit_position = (judge["run_id"], company_index, company_judgments.FIT_CHECKPOINT_INDEX)
+        fit_use = by_use.get(fit_position)
+        if fit_use is None:
+            positions = source_positions(company_index, company_judgments.FIT_CHECKPOINT_INDEX, None)
+            fit_position = positions[0] if len(positions) == 1 else None
+            fit_use = by_use.get(fit_position)
+        if fit_use is not None:
+            row = by_authority.get((fit_use.get("cache_key"), fit_use.get("authority_slot")))
+            fit_judge = runs.get(fit_position[0])
+            execution = runs.get(fit_judge.get("scored_run_id")) if fit_judge is not None else None
+            if row is None or execution is None or fit_position in seen:
+                raise ExportError("fit_checkpoint_authority_missing")
+            fit_input = frozen_input
+            if fit_judge["run_id"] != judge["run_id"]:
+                if source_input_reader is None:
+                    raise ExportError("fit_checkpoint_source_input_missing")
+                source_input = source_input_reader(fit_judge)
+                if not isinstance(source_input, Mapping) or set(source_input) - runtime_fields != set(fields):
+                    raise ExportError("fit_checkpoint_source_input_invalid")
+                fit_input = {field: source_input[field] for field in fields}
+                current_effective = company_judgments.effective_company_inputs(frozen_input)[company_index]
+                source_effective = company_judgments.effective_company_inputs(fit_input)[fit_position[1]]
+                if current_effective != source_effective:
+                    raise ExportError("fit_checkpoint_company_input_mismatch")
+            execution_hash = contracts.document_hash({
+                "schema_version": contact_policy.output_schema(config),
+                "companies": fit_input["companies"],
+            })
+            scope = signal_judgments.build_fit_scope(
+                scoring_input=fit_input, company_index=fit_position[1],
+                checkpoint_context=signal_judgments.fit_checkpoint_context(
+                    fit_judge, execution, config, fit_input, execution_hash,
+                ),
+                round_id=judge["round_id"], network_name=round_row["arena_network_name"],
+                netuid=int(round_row.get("arena_netuid") or 0),
+                scorer_image_digest=config["scorer_image_digest"],
+                scorer_image_reference=config["scorer_image_reference"],
+            )
+            judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
+            from arena_reviewer_runtime.checkpoint_io import normalize_evidence_quotes
+            fit_receipts = [receipt for receipt in breakdown.get("verifier_gate_receipts") or []
+                            if isinstance(receipt, Mapping) and receipt.get("gate") == "company_fit"]
+            source = runs.get(row.get("source_score_run_id"))
+            if (row.get("scope_doc") != scope
+                or fit_receipts != [normalize_evidence_quotes(judgment["company_fit_receipt"])]
+                or row.get("cache_key") != scope["cache_key"]
+                or row.get("signal_input_hash") != scope["signal_input_hash"]
+                or row.get("judgment_hash") != contracts.document_hash(judgment)
+                or any(fit_use.get(key) != row.get(key) for key in (
+                    "cache_key", "authority_slot", "signal_input_hash", "source_score_run_id", "judgment_hash",
+                )) or source is None or source.get("kind") != "score"
+                or source.get("status") not in {"accepted", "failed", "leased"}
+                or source.get("round_id") != judge["round_id"]
+                or source.get("assignment_id") != fit_judge.get("assignment_id")
+                or source.get("scoring_generation_floor", 0) != fit_judge.get("scoring_generation_floor", 0)
+                or source.get("scored_run_id") != fit_judge.get("scored_run_id")
+                or source.get("scored_run_id") != row.get("source_scored_run_id")
+                or source.get("runner_hotkey") != row.get("source_runner_hotkey")
+                or source.get("claim_request_hash") != row.get("source_claim_request_hash")
+                or source.get("lease_generation") != row.get("source_lease_generation")
+                or reviewer_runtime.selected_image(source, config) != reviewer_runtime.selected_image(fit_judge, config)):
+                raise ExportError("fit_checkpoint_source_mismatch")
+            seen.add(fit_position)
+            evidence.append({
+                "company_index": company_index, "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+                "reference": signal_judgments.reference(scope, row["authority_slot"]),
+                "use": copy.deepcopy(fit_use), "authority": copy.deepcopy(row),
+            })
         details = _signal_details(breakdown)
         unmatched = {position for position in by_use
-                     if position[0] == judge["run_id"] and position[1] == company_index}
+                     if position[0] == judge["run_id"] and position[1] == company_index and position not in seen}
         for signal_index in {position[2] for position in by_use}:
-            unmatched.update(source_positions(company_index, signal_index, None))
+            unmatched.update(position for position in source_positions(company_index, signal_index, None) if position not in seen)
         if not details and unmatched:
             if not _terminal_company_fit_nonmatch(breakdown):
                 raise ExportError("signal_use_without_reference")
@@ -484,11 +557,65 @@ def _verified_runtime_source(resource):
     return origin == "git_checkout" and dirty == "clean" or origin in {"release_marker", "verified_archive_environment"} and dirty == "unknown"
 
 
-def _source_evidence(objects, run, round_row, submission, participant):
+def _corrected_source_binding(run, round_row, submission, participant, history):
+    """Accept only an owner-recorded source revision for this exact execution.
+
+    The existing history RPC projects a receipt only while its source and round
+    still match live state, and names only executions admitted by that receipt.
+    It never supplies a general exemption for noncanonical object paths.
+    """
+    config = round_row.get("configuration_doc") or {}
+    round_id = run["round_id"]
+    baseline_id = "baseline-" + round_id.removeprefix("arena-")
+    if (submission.get("is_king") is not True or participant.get("is_king") is not True
+            or submission.get("status") != "frozen" or run.get("kind") != "execute"
+            or run.get("submission_id") != baseline_id
+            or participant.get("submission_id") != baseline_id
+            or participant.get("miner_hotkey") != run.get("miner_hotkey")
+            or config.get("baseline_hotkey") != run.get("miner_hotkey")
+            or not isinstance(history, Mapping) or history.get("round_id") != round_id
+            or not isinstance(history.get("source_corrections"), list)):
+        raise ExportError("source_correction_authority_missing")
+    matches = [row for row in history["source_corrections"]
+               if isinstance(row, Mapping) and isinstance(row.get("run_ids"), list)
+               and run["run_id"] in row["run_ids"]]
+    if len(matches) != 1:
+        raise ExportError("source_correction_authority_ambiguous")
+    proof = matches[0]
+    fields = ("submission_id", "miner_hotkey", "source_ref", "source_size_bytes",
+              "source_archive_sha256", "source_normalized_sha256")
+    source_url = proof.get("baseline_source_url")
+    match = re.fullmatch(
+        r"https://github[.]com/leadpoet/leadpoet-sales-agent/archive/([0-9a-f]{40})[.]tar[.]gz",
+        source_url if isinstance(source_url, str) else "")
+    if (proof.get("operation") != "baseline_source_supersession_v1"
+            or proof.get("round_id") != round_id
+            or not isinstance(proof.get("request_id"), str) or not proof["request_id"]
+            or any(not isinstance(proof.get(key), str)
+                   or contracts.SHA256_RE.fullmatch(proof[key]) is None
+                   for key in ("request_hash", "source_archive_sha256", "source_normalized_sha256"))
+            or any(proof.get(key) != submission.get(key) for key in fields)
+            or type(proof.get("source_size_bytes")) is not int or proof["source_size_bytes"] < 1
+            or participant.get("source_ref") != proof["source_ref"]
+            or participant.get("source_size_bytes") != proof["source_size_bytes"]
+            or any(proof.get(key) != config.get(key) for key in
+                   ("baseline_source_url", "reasoning_baseline_source_sha256"))
+            or proof.get("reasoning_baseline_source_sha256") != proof["source_archive_sha256"]
+            or any(not isinstance(identity, str) for identity in proof["run_ids"])
+            or len(set(proof["run_ids"])) != len(proof["run_ids"])
+            or match is None):
+        raise ExportError("source_correction_binding_invalid")
+    return {"request_id": proof["request_id"], "request_hash": proof["request_hash"],
+            "commit": match.group(1)}
+
+
+def _source_evidence(objects, run, round_row, submission, participant, history=None):
     source_ref = participant["source_ref"]
     expected_ref = "arena/%s/sources/%s.tar.gz" % (run["round_id"], run["submission_id"])
-    if source_ref != submission.get("source_ref") or source_ref != expected_ref:
+    if source_ref != submission.get("source_ref"):
         raise ExportError("source_ref_mismatch")
+    correction = (_corrected_source_binding(run, round_row, submission, participant, history)
+                  if source_ref != expected_ref else None)
     source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
     facts = source_bundle.validate_source_archive(source)
     if (type(participant.get("source_size_bytes")) is not int
@@ -513,10 +640,19 @@ def _source_evidence(objects, run, round_row, submission, participant):
                 or (round_row.get("configuration_doc") or {}).get("baseline_hotkey") != run.get("miner_hotkey")):
             raise ExportError("source_recorded_hash_missing")
         origin = "computed_from_frozen_object"
-    return {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
+    if correction is not None:
+        from lab_arena import submission_similarity
+        if (source_bundle.source_archive_commit(source) != correction["commit"]
+                or submission_similarity.inspect_archive(source).normalized_sha256
+                != submission["source_normalized_sha256"]):
+            raise ExportError("source_correction_archive_mismatch")
+    evidence = {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
             "hash_origin": origin, "recorded_hash_present": bool(recorded),
             "normalized_sha256": submission.get("source_normalized_sha256"),
             "archive_commit_comment": source_bundle.source_archive_commit(source) or None}
+    if correction is not None:
+        evidence["source_correction"] = correction
+    return evidence
 
 
 def _response_value(terminal, provider):
@@ -555,11 +691,15 @@ def response_entry_id(call):
         or type(terminal) is not int or not 0 < selected <= terminal or len(receipts) != 1):
         raise ExportError("retained_provider_error_identity_invalid")
     receipt = receipts[0]
+    metadata = receipt.get("metadata") or {}
+    successful = (provider == "openrouter" and metadata.get("call_succeeded") is True
+                  and type(call.get("response_status")) is int
+                  and 200 <= call["response_status"] < 300)
     if (receipt.get("terminal_source") != f"entry_doc.call.{provider}_terminal_response"
         or receipt.get("entry_kind") != "uncertain"
-        or (receipt.get("metadata") or {}).get("call_succeeded") is not False
-        or (receipt.get("metadata") or {}).get("status") != call.get("response_status")
-        or call.get("response_status") not in _RETAINED_ERROR_STATUSES[provider]
+        or not (successful or metadata.get("call_succeeded") is False
+                and call.get("response_status") in _RETAINED_ERROR_STATUSES[provider])
+        or metadata.get("status") != call.get("response_status")
         or receipt.get("response_sha256") != call.get("response_sha256")
         or receipt.get("response_ref") != {"field": "response", "entry_id": selected}):
         raise ExportError("retained_provider_error_identity_invalid")
@@ -698,6 +838,7 @@ def _calls(rows, run_ids, objects, run_order):
                      {"settlement", "uncertain", "recovery", "refusal"}]
         response_terminals = terminals
         retained = []
+        retained_success = False
         provider = reserves[0].get("provider") if reserves else None
         if provider in _RETAINED_ERROR_STATUSES:
             terminal_field = f"{provider}_terminal_response"
@@ -708,11 +849,34 @@ def _calls(rows, run_ids, objects, run_order):
                 terminal = saved[terminal_field]
                 try:
                     status, _, body = _decode_terminal(terminal)
-                    if (saved.get("reason") != "missing_provider_cost"
-                        or saved.get("call_succeeded") is not False
-                        or terminal.get("call_succeeded") is not False
-                        or status not in _RETAINED_ERROR_STATUSES[provider]
-                        or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
+                    successful = (provider == "openrouter" and saved.get("call_succeeded") is True
+                                  and type(terminal.get("status")) is int
+                                  and terminal.get("call_succeeded") is True and 200 <= status < 300)
+                    if successful:
+                        retained_success = True
+                        generation = saved.get("openrouter_generation_id")
+                        fingerprint = saved.get("credential_fingerprint")
+                        reservation_doc = reserves[0].get("entry_doc") or {}
+                        if (saved.get("reason") not in {"missing_provider_cost", "settle_failure"}
+                            or reserves[0].get("operation_id") not in {"openrouter.chat", "openrouter.responses"}
+                            or type(saved.get("provider_status")) is not int
+                            or not 200 <= saved["provider_status"] < 300
+                            or not isinstance(fingerprint, str)
+                            or contracts.SHA256_RE.fullmatch(fingerprint) is None
+                            or generation is not None and (not isinstance(generation, str)
+                                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", generation) is None)
+                            or any(saved.get(key) != reservation_doc[key] for key in (
+                                "credential_fingerprint", "openrouter_generation_id", "openrouter_model", "request_hash")
+                                if key in reservation_doc and key in saved)
+                            or len(body) > MAX_RECEIPT_BYTES
+                            or set(terminal) != {"status", "headers", "body_b64", "call_succeeded"}
+                            or any(key.startswith("judgment_cache_source_") for key in terminal)):
+                            raise BrokerError("broker_unavailable")
+                    elif (saved.get("reason") != "missing_provider_cost"
+                          or saved.get("call_succeeded") is not False
+                          or terminal.get("call_succeeded") is not False
+                          or status not in _RETAINED_ERROR_STATUSES[provider]
+                          or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
                         raise BrokerError("broker_unavailable")
                     if provider == "deepline" and status == 402:
                         from lab_arena.operations import GENERIC_UNAVAILABLE_BODY
@@ -755,8 +919,10 @@ def _calls(rows, run_ids, objects, run_order):
             reasons.add("ambiguous_call_lifecycle")
             continue
         reserve = entries[0] if standalone_refusal else reserves[0]
-        if any(any(row.get(key) != reserve.get(key) for key in
-                   ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
+        membership = ("run_id", "round_id", "submission_id", "provider", "operation_id")
+        if retained_success:
+            membership += ("miner_hotkey", "stage", "funding_source")
+        if any(any(row.get(key) != reserve.get(key) for key in membership) for row in entries):
             raise ExportError("ledger_membership_mismatch")
         recovered = _ledger_recovered_response(entries, reserve)
         entry = ((reserve.get("entry_doc") or {}).get("call") if standalone_refusal
@@ -846,7 +1012,8 @@ def _calls(rows, run_ids, objects, run_order):
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
                              "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
-                             "transport_elapsed_ms", "timing_scope"}
+                             "transport_elapsed_ms", "timing_scope",
+                             "transport_not_started", "undispatched_dispatch_entry_id"}
         call["lifecycle"] = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
             metadata = {key: copy.deepcopy(row[key]) for key in
@@ -854,8 +1021,8 @@ def _calls(rows, run_ids, objects, run_order):
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
             if (row.get("entry_kind") == "recovery"
-                    and (row.get("entry_doc") or {}).get("reason") == "attempt_completed_before_dispatch"):
-                metadata["accounting"]["reason"] = "attempt_completed_before_dispatch"
+                    and (row.get("entry_doc") or {}).get("reason") in _UNDISPATCHED_RECOVERY_REASONS):
+                metadata["accounting"]["reason"] = row["entry_doc"]["reason"]
             metadata["accounting"].update({key: copy.deepcopy(value) for key, value in
                 observations(row.get("entry_doc") or {}).items() if key in accounting_fields})
             recorded_call = (row.get("entry_doc") or {}).get("call")
@@ -1422,7 +1589,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
-                               reader: Callable[..., Mapping[str, Any]] | None) -> dict:
+                               reader: Callable[..., Mapping[str, Any]] | None,
+                               source_correction: Mapping[str, Any] | None = None) -> dict:
     """Keep the export-time cost decision separate from the quality label.
 
     The existing SQL authority calculates successful-sourcing cost. Its result
@@ -1481,15 +1649,32 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
         execution = snapshot["execution"]
         if not isinstance(execution, Mapping):
             raise ValueError("execution cost state is not a mapping")
+        source_split = ("excluded_superseded_source_successful_microusd",
+                        "excluded_superseded_source_settled_microusd")
+        source_excluded = any(key in execution for key in source_split)
+        if source_excluded and (
+            not isinstance(source_correction, Mapping)
+            or not isinstance(source_correction.get("request_id"), str)
+            or not source_correction["request_id"]
+            or not isinstance(source_correction.get("request_hash"), str)
+            or contracts.SHA256_RE.fullmatch(source_correction["request_hash"]) is None
+            or configuration.get("baseline_source_url") != (
+                "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                + str(source_correction.get("commit") or "") + ".tar.gz")
+            or run.get("submission_id") != "baseline-" + run["round_id"].removeprefix("arena-")
+            or run.get("miner_hotkey") != configuration.get("baseline_hotkey")
+            or any(type(execution.get(key)) is not int or execution[key] < 0 for key in source_split)
+        ):
+            raise ValueError("superseded source cost authority is invalid")
         successful = execution["successful_microusd"]
         split = ("competition_successful_microusd",
                  "excluded_infrastructure_successful_microusd")
-        if any(key in execution for key in split):
-            # Migration 478 preserves raw spend and excludes proved failed
-            # infrastructure attempts only from competition spend. Both parts
-            # must account for the unchanged raw successful total.
+        if source_excluded or any(key in execution for key in split):
+            # Infrastructure and receipt-bound superseded-source exclusions
+            # are disjoint. Every part must reproduce the raw financial total.
             if (any(type(execution.get(key)) is not int or execution[key] < 0 for key in split)
-                    or successful != sum(execution[key] for key in split)):
+                    or successful != sum(execution[key] for key in split) + (
+                        execution[source_split[0]] if source_excluded else 0)):
                 raise ValueError("execution cost split is invalid")
             successful = execution["competition_successful_microusd"]
         confirmed = execution.get("settled_microusd")
@@ -1498,10 +1683,11 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 raise ValueError("confirmed cost is invalid")
             settled_split = ("competition_settled_microusd",
                              "excluded_infrastructure_settled_microusd")
-            if any(key in execution for key in settled_split):
+            if source_excluded or any(key in execution for key in settled_split):
                 if (any(type(execution.get(key)) is not int or execution[key] < 0
                         for key in settled_split)
-                        or confirmed != sum(execution[key] for key in settled_split)):
+                        or confirmed != sum(execution[key] for key in settled_split) + (
+                            execution[source_split[1]] if source_excluded else 0)):
                     raise ValueError("confirmed competition cost split is invalid")
                 confirmed = execution["competition_settled_microusd"]
         numbers = (
@@ -1649,7 +1835,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         raise ExportError("ambiguous_frozen_participant")
     participant = participants[0]
     try:
-        example["source"] = _source_evidence(objects, run, round_row, submission_row, participant)
+        example["source"] = _source_evidence(
+            objects, run, round_row, submission_row, participant, scoring_policy_history)
     except Exception:
         reasons["source_identity"].add("source_unverified")
     resource = (run.get("result_doc") or {}).get("resource_summary") or {}
@@ -1768,6 +1955,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["competition_cost_eligibility"] = _competition_cost_snapshot(
         run=run, configuration=config, scored=scored, related=related,
         reader=cost_eligibility_reader,
+        source_correction=example.get("source", {}).get("source_correction"),
     )
     if (config.get("sourcing_cost_eligibility_policy")
             in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
@@ -1891,6 +2079,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     )
     if signal_policy or unmarked_signal_evidence:
         try:
+            def read_fit_source_input(source):
+                from lab_arena.training_input import read_input
+                snapshot = read_input(objects, source["run_id"], "score",
+                                      source.get("lease_generation"), source.get("claim_request_hash"))
+                if (snapshot.get("privacy") or {}).get("redacted"):
+                    raise ExportError("fit_checkpoint_source_input_redacted")
+                return snapshot["input"]
             if judge is None or "judgment" not in example or judge["run_id"] not in snapshots:
                 raise ExportError("signal_judge_evidence_missing")
             evidence = _signal_authority_evidence(
@@ -1900,6 +2095,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 uses=signal_judgment_uses, authority_rows=signal_judgment_rows,
                 company_rows=company_judgment_rows, runs=by_id,
                 round_row={**round_row, "configuration_doc": score_configuration(judge)},
+                source_input_reader=read_fit_source_input,
             )
             example["judgment"]["signal_authority_evidence"] = evidence
             # Keep persisted actions as process evidence even when the final
@@ -1997,7 +2193,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
     from lab_arena.training_capture import sanitize_training_value
     example, redactions = sanitize_training_value(
-        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True)
+        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True,
+        clean_text_digests=OrderedDict())
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations

@@ -124,6 +124,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
     "lab_arena_latest_promoted_champion_v1": (
         ("p_network_name", "text"), ("p_netuid", "integer"),
+        ("p_before_evaluation_date", "text"),
     ),
     "lab_arena_freeze_full_thinking_baseline_v1": (
         ("p_round_id", "text"),
@@ -251,6 +252,11 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_judgment_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
+    "lab_arena_release_undispatched_call": (
+        ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_call_identity", "text"), ("p_call_doc", "jsonb"), ("p_reason", "text"),
+        ("p_dispatch_entry_id", "bigint"),
+    ),
     "lab_arena_mark_dispatched": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text")),
     "lab_arena_settle_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_actual_microusd", "bigint"), ("p_terminal_response", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_mark_uncertain": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
@@ -1392,7 +1398,10 @@ class ArenaStore:
             "current_daily_icp_set",
         )
 
-    def code_review_schema(self, *, require_refusal_fallback: bool = False) -> Dict[str, Any]:
+    def code_review_schema(
+        self, *, require_refusal_fallback: bool = False,
+        require_invalid_review_budget: bool = False,
+    ) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
         result = _require_mapping(
@@ -1427,6 +1436,16 @@ class ArenaStore:
             "legacy_structured_refusal_recovery": True,
         }:
             raise ArenaStoreError("code review fallback schema mismatch")
+        if require_invalid_review_budget and result.get("invalid_review_budget") != {
+            "max_reservations": 3,
+            "starts_at": "first_invalid_or_unverified_result",
+            "legacy_untagged_origin": "latest_bound_invalid_or_unverified_result",
+            "counts_expired_and_transport_claims": True,
+            "refusal_does_not_reset": True,
+            "output_tokens": [32_768, 65_536],
+            "truncated_at_limit_terminal": True,
+        }:
+            raise ArenaStoreError("code review invalid budget schema mismatch")
         return result
 
     def validator_scoring_authority_schema(self) -> Dict[str, Any]:
@@ -1766,13 +1785,14 @@ class ArenaStore:
         return rows
 
     def latest_promoted_champion(
-        self, *, network_name: str, netuid: int
+        self, *, network_name: str, netuid: int,
+        before_evaluation_date: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Use the same completed winner ordering as champion funding."""
-        result = self._transport.rpc(
-            "lab_arena_latest_promoted_champion_v1",
-            {"p_network_name": str(network_name), "p_netuid": int(netuid)},
-        )
+        params = {"p_network_name": str(network_name), "p_netuid": int(netuid)}
+        if before_evaluation_date is not None:
+            params["p_before_evaluation_date"] = str(before_evaluation_date)
+        result = self._transport.rpc("lab_arena_latest_promoted_champion_v1", params)
         return None if result is None else _require_mapping(
             result, "latest_promoted_champion"
         )
@@ -2336,6 +2356,16 @@ class ArenaStore:
             ),
             "icp_cost_eligibility",
         )
+
+    def release_undispatched_call(self, *, run_id: str, lease_token_hash: str,
+                                call_identity: str, call_doc: Mapping[str, Any],
+                                reason: str, dispatch_entry_id: Optional[int] = None) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_release_undispatched_call", {
+                "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+                "p_call_identity": call_identity, "p_call_doc": dict(call_doc),
+                "p_reason": reason, "p_dispatch_entry_id": dispatch_entry_id,
+            }), "release_undispatched_call")
 
     def mark_dispatched(self, *, run_id: str, lease_token_hash: str, call_identity: str) -> Dict[str, Any]:
         return _require_mapping(

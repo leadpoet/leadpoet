@@ -156,6 +156,7 @@ def test_later_missing_output_keeps_measured_publication(database, tmp_path, mon
             "UPDATE public.lab_arena_rounds SET configuration_doc=configuration_doc || %s::jsonb "
             "WHERE round_id=%s", (json.dumps({
                 "reasoning_capture_policy": "full_generated_thinking_v1",
+                "reasoning_baseline_source_sha256": harness.frozen_baseline_source_sha256(),
                 "training_minimum_icp_coverage_percent": 80,
                 "execution_icp_cap_microusd": 6_000_000,
                 "cost_per_company_microusd": 6_000_000,

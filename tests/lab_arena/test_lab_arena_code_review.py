@@ -90,7 +90,7 @@ def test_prepare_request_contains_every_file_in_full_and_pydantic_style_passes()
     prepared = code_review.prepare_request(_archive(members))
 
     assert prepared.parameters["model"] == "anthropic/claude-sonnet-5.5"
-    assert prepared.parameters["max_tokens"] == 16_384
+    assert prepared.parameters["max_tokens"] == 32_768
     assert not {"temperature", "top_p", "top_k"} & prepared.parameters.keys()
     assert prepared.parameters["transforms"] == []
     assert prepared.parameters["plugins"] == [
@@ -103,7 +103,7 @@ def test_prepare_request_contains_every_file_in_full_and_pydantic_style_passes()
         "data_collection": "deny",
         "zdr": True,
     }
-    assert prepared.parameters["response_format"] == {"type": "json_object"}
+    assert prepared.parameters["response_format"]["type"] == "json_schema"
     assert prepared.reviewed_files == tuple(sorted(members))
     assert prepared.reviewed_file_bytes == sum(map(len, members.values()))
     submitted = json.loads(prepared.parameters["messages"][1]["content"])
@@ -334,13 +334,15 @@ def test_large_verified_review_still_requires_every_comparison():
     assert failure.value.response_reason == "coverage"
 
 
-def test_prepare_request_rejects_when_output_cannot_list_every_file():
+def test_small_output_limit_is_prepared_but_actual_truncation_cannot_pass():
+    prepared = code_review.prepare_request(
+        _archive(_pydantic_style_source()), max_output_tokens=10,
+    )
+    response = _openrouter_response(prepared, finish_reason="length")
     with pytest.raises(code_review.CodeReviewError) as failure:
-        code_review.prepare_request(
-            _archive(_pydantic_style_source()),
-            max_output_tokens=10,
-        )
-    assert failure.value.code == "review_output_cannot_report_coverage"
+        code_review.parse_response(response, prepared)
+    assert failure.value.code == "review_response_invalid"
+    assert failure.value.response_reason == "truncated"
 
 
 @pytest.mark.parametrize(
@@ -355,7 +357,7 @@ def test_prepare_request_rejects_when_output_cannot_list_every_file():
             lambda response: response["choices"][0].update(
                 {"finish_reason": "length"}
             ),
-            "not_finished",
+            "truncated",
         ),
         (
             lambda response: response["choices"][0]["message"].update(
@@ -409,19 +411,16 @@ def test_parse_response_rejects_incomplete_file_coverage():
     assert failure.value.response_reason == "coverage"
 
 
-def test_parse_response_diagnoses_reordered_complete_coverage_without_accepting_it():
+def test_parse_response_normalizes_reordered_complete_coverage():
     prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
     response = _openrouter_response(prepared)
     content = json.loads(response["choices"][0]["message"]["content"])
     content["reviewed_files"].reverse()
     response["choices"][0]["message"]["content"] = json.dumps(content)
 
-    with pytest.raises(
-        code_review.CodeReviewError, match="review_response_invalid"
-    ) as failure:
-        code_review.parse_response(response, prepared)
-
-    assert failure.value.response_reason == "coverage_order"
+    result = code_review.parse_response(response, prepared)
+    assert result.passed
+    assert result.reviewed_files == prepared.reviewed_files
 
 
 def test_parse_response_rejects_finding_without_exact_source_evidence():

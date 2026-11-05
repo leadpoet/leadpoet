@@ -93,7 +93,12 @@ def export_run(store, objects, run_id):
     if not round_row or not submission:
         raise ExportError("context_missing")
     generation_floor = round_row.get("scoring_generation_floor", 0)
-    policy_history = store.scoring_policy_history(execution["round_id"]) if generation_floor else None
+    canonical_source = "arena/%s/sources/%s.tar.gz" % (
+        execution["round_id"], execution["submission_id"])
+    corrected_source = (submission.get("is_king") is True
+                        and submission.get("source_ref") != canonical_source)
+    policy_history = (store.scoring_policy_history(execution["round_id"])
+                      if generation_floor or corrected_source else None)
     runs = store.list_runs(execution["round_id"])
     related = [row for row in runs if row.get("assignment_id") == execution["assignment_id"]
                or row.get("kind") == "score" and row.get("scored_run_id") == run_id]

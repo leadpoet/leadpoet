@@ -216,14 +216,20 @@ def test_existing_signal_cache_control_and_scope_bind_optional_source_bytes():
 
 
 def test_actual_scorer_sends_only_effective_pages_to_existing_signal_exchange(monkeypatch):
+    from lab_arena import signal_cache_control
     from qualification.scoring.signal_judgment_cache import install_exchange
     requests = []
+    capabilities = []
     async def exchange(request):
+        if request["operation"] == signal_cache_control.FIT_CAPABILITY_OPERATION:
+            capabilities.append(copy.deepcopy(request))
+            return {"status": "unavailable"}  # Original signal-only exchange.
         requests.append(copy.deepcopy(request))
         return {"status": "miss", "reference": {"cache_key": "test"}} if request["operation"] == "claim" else {"status": "stored", "reference": request["reference"]}
     with install_exchange(exchange):
         result, fetch, judge, _ = _run(monkeypatch)
     assert result.final_score > 0 and len(requests) == 2
+    assert len(capabilities) == 1
     assert requests[0]["verified_source_pages"] == requests[1]["verified_source_pages"] == PAGES
     assert fetch.await_count == 1
     assert judge.await_count == 1
@@ -299,11 +305,15 @@ def test_successful_adobe_head_publication_metadata_is_unchanged(monkeypatch, pu
 
 
 def test_unproved_retained_fallback_remains_retryable_and_is_not_cached(monkeypatch):
-    from lab_arena import scoring
+    from lab_arena import scoring, signal_cache_control
     from qualification.scoring.signal_judgment_cache import install_exchange
     from tests.test_same_event_source_local_finality import _score_to_finality
     requests = []
+    capabilities = []
     async def exchange(request):
+        if request["operation"] == signal_cache_control.FIT_CAPABILITY_OPERATION:
+            capabilities.append(copy.deepcopy(request))
+            return {"status": "unavailable"}  # Original signal-only exchange.
         requests.append(copy.deepcopy(request))
         if request["operation"] == "claim":
             return {"status": "miss", "reference": {"cache_key": "test"}}
@@ -313,6 +323,7 @@ def test_unproved_retained_fallback_remains_retryable_and_is_not_cached(monkeypa
         result, fetch, judge, _ = _run(monkeypatch, answer=_answer(status="unable_to_verify"))
     assert "unavailable" in result.failure_reason.lower()
     assert fetch.await_count == judge.await_count == 1 and len(requests) == 2
+    assert len(capabilities) == 1
     row = result.model_dump(mode="json")
     row.update(company_index=0, company_qualified=False, duplicate_company=False,
         company_identity_key="domain:scored0.example.com", company_identity_alias_keys=["domain:scored0.example.com"])

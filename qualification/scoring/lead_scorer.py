@@ -7643,7 +7643,37 @@ def _has_explicitly_unproven_fit_dimensions(
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
                 or (
                     completed_investigation
-                    and _is_bound_homepage_name_conflict(identity_receipt)
+                    and (
+                        _is_bound_homepage_name_conflict(identity_receipt)
+                        or (
+                            # An explicit absent website is not identity proof.
+                            # A completed targeted negative can exhaust it;
+                            # missing, malformed or failed observations cannot.
+                            isinstance(identity_receipt, Mapping)
+                            and identity_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                            and identity_receipt.get("reason_code") == "identity_not_proven"
+                            and identity_receipt.get("evidence_source") == "company_web_reverification"
+                            and verdict.get("observed_company_website") == ""
+                            and identity_receipt.get("observed_domain") == ""
+                            and all(
+                                isinstance(identity_receipt.get(field), str)
+                                and bool(identity_receipt[field].strip())
+                                for field in (
+                                    "submitted_name", "submitted_domain", "observed_name",
+                                )
+                            )
+                            and all(
+                                isinstance(identity_receipt.get(field), str)
+                                and (
+                                    identity_receipt[field] == ""
+                                    or bool(identity_receipt[field].strip())
+                                )
+                                for field in (
+                                    "submitted_linkedin_slug", "observed_linkedin_slug",
+                                )
+                            )
+                        )
+                    )
                     and "rebrand" in (investigation_receipt.get("targets") or ())
                     and isinstance(investigation_claims, Mapping)
                     and isinstance(investigation_claims.get("rebrand"), Mapping)
@@ -12538,8 +12568,69 @@ async def score_company_competition_intent(
         and isinstance(verified_company_fit_retry_cache, MutableMapping)
         else None
     )
+    # Reuse the existing private signal exchange for a typed intermediate
+    # checkpoint. The gateway binds it to this exact accepted execution,
+    # assignment, generation, grading policy and selected reviewer runtime.
+    from qualification.scoring.signal_judgment_cache import current_exchange, invoke_exchange
+    from lab_arena import company_judgments
+    fit_exchange = current_exchange() if integrity_policy else None
+    if fit_exchange is not None:
+        # These free, invocation-dependent guards must precede any reuse.
+        # The adapter still applies verified-identity regrouping afterwards.
+        precheck = await run_company_zero_checks(company, run_time_seconds, seen_companies)
+        if precheck.decision != COMPANY_FIT_MATCH:
+            fit_exchange = None
+            fit_cache = None
+    if fit_exchange is not None:
+        from lab_arena.signal_cache_control import FIT_CAPABILITY_OPERATION, fit_checkpoint_capability
+        capability = await invoke_exchange(fit_exchange, {
+            "operation": FIT_CAPABILITY_OPERATION,
+            "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+            "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+        })
+        if capability == {"status": "unavailable"}:
+            # An old worker rejects the pure support probe before any fit
+            # claim or reuse. Keep its original full native scoring path.
+            fit_exchange = None
+        elif capability != fit_checkpoint_capability():
+            raise SignalJudgmentCacheError("verified fit checkpoint capability is invalid")
+    fit_request = None
+    fit_reference = None
+    if fit_exchange is not None:
+        fit_request = {
+            "operation": "claim", "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+            "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+        }
+        response = await invoke_exchange(fit_exchange, fit_request)
+        if not isinstance(response, Mapping) or not isinstance(response.get("reference"), Mapping):
+            raise SignalJudgmentCacheError("verified fit checkpoint claim is invalid")
+        fit_reference = response["reference"]
+        if response.get("status") == "hit":
+            try:
+                snapshot = company_judgments.validate_verified_fit_checkpoint(response.get("judgment"))
+            except company_judgments.CompanyJudgmentError as exc:
+                raise SignalJudgmentCacheError("verified fit checkpoint hit is invalid") from exc
+            receipt = snapshot["company_fit_receipt"]
+            company_fit = CompanyFitDecisionResult(
+                receipt["decision"], receipt.get("reason"), details={
+                    key: value for key, value in receipt.items()
+                    if key not in {"gate", "contract_id", "contract_version", "decision", "reason"}
+                },
+            )
+            linkedin_profile_source_candidate = snapshot["linkedin_profile_source"]
+            matched_company_source_cache = snapshot["matched_company_sources"]
+            if required_attribute_retry_source_cache is not None:
+                required_attribute_retry_source_cache.update(snapshot["required_attribute_sources"])
+            if fit_cache is not None:
+                fit_cache["verified_fit"] = deepcopy((
+                    company_fit, linkedin_profile_source_candidate, matched_company_source_cache,
+                ))
+        elif response.get("status") != "miss" or "judgment" in response:
+            raise SignalJudgmentCacheError("verified fit checkpoint claim status is invalid")
     retained_fit = fit_cache.get("verified_fit") if fit_cache is not None else None
-    if retained_fit is not None:
+    if fit_request is not None and response.get("status") == "hit":
+        pass
+    elif retained_fit is not None:
         (company_fit, linkedin_profile_source_candidate,
          matched_company_source_cache) = deepcopy(retained_fit)
     else:
@@ -12566,6 +12657,29 @@ async def score_company_competition_intent(
                 company_fit, linkedin_profile_source_candidate,
                 matched_company_source_cache,
             ))
+    if fit_request is not None and response.get("status") == "miss":
+        snapshot = None
+        if company_fit.decision == COMPANY_FIT_MATCH:
+            try:
+                snapshot = company_judgments.validate_verified_fit_checkpoint({
+                    "schema_version": company_judgments.FIT_CHECKPOINT_SCHEMA_VERSION,
+                    "company_fit_receipt": company_fit.receipt("company_fit"),
+                    "linkedin_profile_source": linkedin_profile_source_candidate,
+                    "matched_company_sources": matched_company_source_cache,
+                    "required_attribute_sources": dict(required_attribute_retry_source_cache or {}),
+                })
+            except company_judgments.CompanyJudgmentError:
+                # Optional persistence cannot alter a valid native verdict.
+                # Release an inadmissible or overlarge local snapshot and
+                # continue with every original source byte still in memory.
+                snapshot = None
+        completed = await invoke_exchange(fit_exchange, {
+            **fit_request, "operation": "complete", "reference": fit_reference,
+            "judgment": snapshot,
+        })
+        expected = {"stored", "existing"} if snapshot is not None else {"released"}
+        if not isinstance(completed, Mapping) or completed.get("status") not in expected:
+            raise SignalJudgmentCacheError("verified fit checkpoint completion is invalid")
     _retain_matched_company_retry_sources(
         matched_company_retry_source_cache, matched_company_source_cache, company_fit,
     )

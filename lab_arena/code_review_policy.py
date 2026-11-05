@@ -10,6 +10,10 @@ from lab_arena import code_review
 
 
 LEGACY_MAX_ATTEMPTS = 3
+INVALID_REVIEW_MAX_RESERVATIONS = 3
+INVALID_REVIEW_ERROR_CODES = frozenset({
+    "review_response_invalid", "code_review_research_unverified",
+})
 TRANSIENT_BACKOFF_SECONDS = (60, 120, 240, 480, 900)
 TRANSIENT_ERROR_CODES = frozenset({
     "code_review_preparation_unavailable", "code_review_provider_rate_limited",
@@ -56,7 +60,7 @@ SOURCE_ERROR_CODES = frozenset({
 })
 
 RESPONSE_ERROR_REASONS = frozenset({
-    "envelope", "model_mismatch", "choice", "not_finished", "message",
+    "envelope", "model_mismatch", "choice", "not_finished", "truncated", "truncated_at_limit", "message",
     "refusal_or_tools", "content", "content_json", "document_keys",
     "verdict", "summary", "coverage", "coverage_order", "findings",
     "verdict_findings", "finding_keys", "finding_classification",
@@ -309,8 +313,24 @@ def transient_failure(document: Any) -> bool:
     return isinstance(code, str) and code in TRANSIENT_ERROR_CODES
 
 
+def invalid_review_reservations(document: Any) -> Optional[int]:
+    """Read the server projection; old unfinished rows start at one, not globally.
+
+    SQL recomputes the count from reservations under the submission lock. This
+    local projection is only a discovery optimization, never claim authority.
+    """
+    if not isinstance(document, Mapping):
+        return None
+    count = document.get("review_invalid_attempts")
+    if type(count) is int and count >= 1:
+        return count
+    if document.get("error_code") in INVALID_REVIEW_ERROR_CODES:
+        return 1
+    return None
+
+
 def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
-    """Known reviewer failures use the admission deadline, never an attempt cap.
+    """Bound invalid review episodes separately from transient infrastructure.
 
     Reclassify old diagnostics at read time: a cached retry flag is not a code
     verdict. Unknown legacy errors retain their historical fail-closed limit.
@@ -318,6 +338,14 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
 
     attempts = max(0, int(row.get("code_review_attempts") or 0))
     document = row.get("code_review_doc")
+    if isinstance(document, Mapping) and (
+        document.get("error_code") == "review_response_invalid"
+        and document.get("error_reason") == "truncated_at_limit"
+    ):
+        return attempts
+    invalid_count = invalid_review_reservations(document)
+    if invalid_count is not None and invalid_count >= INVALID_REVIEW_MAX_RESERVATIONS:
+        return attempts
     if refusal_recovery(document):
         return None if recovery_retryable(document) else attempts
     if transient_failure(document):
@@ -338,6 +366,8 @@ def refusal_recovery(document: Any) -> bool:
 
 def recovery_retryable(document: Mapping[str, Any]) -> bool:
     code = document.get("error_code")
+    if code == "review_response_invalid" and document.get("error_reason") == "truncated_at_limit":
+        return False
     allowed = (code in TRANSIENT_ERROR_CODES
                or code in {"code_review_provider_refused"}
                or (code == "code_review_provider_request_rejected"
@@ -354,6 +384,22 @@ def review_model_for(row: Mapping[str, Any]) -> str:
         if primary >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
             return code_review.FALLBACK_REVIEW_MODEL
     return code_review.DEFAULT_REVIEW_MODEL
+
+
+def review_output_tokens_for(row: Mapping[str, Any]) -> int:
+    """Use the server recommendation or a validated saved truncation outcome.
+
+    The reservation rechecks this plan before any paid request. Optional
+    diagnostics, completion token observations and provider prose cannot raise it.
+    """
+    document = row.get("code_review_doc")
+    if isinstance(document, Mapping) and (
+        document.get("review_output_token_recommendation") == code_review.RETRY_MAX_OUTPUT_TOKENS
+        or (document.get("error_code") == "review_response_invalid"
+            and document.get("error_reason") == "truncated")
+    ):
+        return code_review.RETRY_MAX_OUTPUT_TOKENS
+    return code_review.DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def legacy_refusal_candidate(row: Mapping[str, Any]) -> bool:

@@ -152,8 +152,11 @@ def stack(tmp_path_factory):
                 """)
                 cursor.execute((Path(__file__).resolve().parents[2] /
                     "scripts/593-lab-arena-capture-summary-reader.sql").read_text())
+                # Install the current Store write RPC before PostgREST builds
+                # its schema cache; the full-round test compares every RPC.
                 for migration in ("595-lab-arena-capture-called-icps.sql",
-                                  "598-lab-arena-capture-summary-v2.sql"):
+                                  "598-lab-arena-capture-summary-v2.sql",
+                                  "619-lab-arena-release-undispatched-call.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
                 # Current Store probes include these receipt-bound readers.
                 # Install their real definitions and grants, but never the
@@ -176,6 +179,11 @@ def stack(tmp_path_factory):
                     cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
                 cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
                 assert cursor.fetchone()[0] == schema_acl
+            # Install additive current readers before PostgREST takes its
+            # schema snapshot, preserving historical write RPCs and ACLs.
+            arena_pg.prepare_current_service_reads(
+                lambda: pg.connect(**dsn),
+                include_run_reads=False, include_round_reads=False)
             directory = tmp_path_factory.mktemp("private-api-" + suffix)
             directory.chmod(0o700)
             values = {

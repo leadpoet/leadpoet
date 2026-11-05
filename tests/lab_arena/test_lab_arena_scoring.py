@@ -12,6 +12,7 @@ import pytest
 
 from lab_arena import contracts, scoring, verify
 from qualification.scoring import intent_verification_three_stage as intent_verifier
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 ROUND = "arena-2026-09-02"
 
@@ -648,9 +649,9 @@ def test_scorer_linkedin_slug_still_rejects_unsafe_shapes(linkedin):
         candidate_linkedin_prompt_slug(linkedin, "company_linkedin")
 
 
-def test_policy_is_plain_and_binds_environment_fail_closed():
-    policy = scoring.build_scorer_policy()
-    assert policy == scoring.build_scorer_policy()
+def test_legacy_policy_is_plain_and_binds_environment_fail_closed():
+    policy = scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
+    assert policy == scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
     assert policy["env_bindings"] == {} and policy["max_scored_companies"] == 0
     assert policy["fp_penalty_points"] == policy["fp_unverified_primary_penalty_points"] == 10.0
     environ = {}
@@ -674,6 +675,7 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
         "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "",
         "ARENA_JUDGE_PROVIDER_ROUTES": "",
         "ARENA_JUDGE_REQUEST_OPTIONS": "",
+        "ARENA_JUDGE_REASONING_EXCEPTIONS": "",
     }
     assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):

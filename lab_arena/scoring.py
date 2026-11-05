@@ -21,21 +21,36 @@ from lab_arena.contracts import ArenaContractError
 SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
 # Every OpenRouter model the Arena judge calls, by the judge's own role
 # for it. The broker refuses any other model on a scoring run, so this mapping
-# must cover the judge image exactly; ``test_lab_arena_judge_routes`` scans
-# the judge's source for model literals against it.
+# must cover the judge image's policy-bound roles. Historical policies keep
+# their own model map; the qualification modules retain their legacy defaults.
 DEFAULT_JUDGE_MODELS = {
-    "company_fit_reverification": "perplexity/sonar",
-    "intent_signal_judge": "openai/gpt-6-luna",
-    "intent_details_review": "anthropic/claude-sonnet-5.5",
-    "intent_three_stage_stage3": "perplexity/sonar-pro",
-    "intent_fetched_evidence": "openai/gpt-6-luna",
-    "role_batch_check": "google/gemini-3.5-flash-lite",
+    "company_fit_reverification": "deepseek/deepseek-v4.1-flash-1017",
+    "intent_signal_judge": "openai/gpt-oss-120b",
+    "intent_details_review": "openai/gpt-oss-120b",
+    "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
+    "intent_fetched_evidence": "openai/gpt-oss-120b",
+    "role_batch_check": "openai/gpt-oss-120b",
     "industry_evidence_review": "openai/gpt-6.1-sol",
 }
-# A prospective model migration supplies these exact approved routes. Empty
-# preserves existing policies until its real-provider validation is complete.
-DEFAULT_JUDGE_PROVIDER_ROUTES: Dict[str, str] = {}
-DEFAULT_JUDGE_REQUEST_OPTIONS: Dict[str, Any] = {}
+# These reviewed settings are frozen only for the exact prospective model map.
+# Sol remains the industry reviewer after the open-model quality gate failed.
+DEFAULT_JUDGE_PROVIDER_ROUTES = {
+    "deepseek/deepseek-v4.1-flash-1017": "nebius/fp8",
+    "openai/gpt-oss-120b": "near-ai/fp4",
+}
+DEFAULT_JUDGE_REQUEST_OPTIONS = {
+    "deepseek/deepseek-v4.1-flash-1017": {
+        "reasoning": {"effort": "low"}, "max_output_tokens": 8192,
+    },
+    "openai/gpt-oss-120b": {
+        "reasoning": {"effort": "low"}, "max_output_tokens": 4096,
+    },
+}
+DEFAULT_JUDGE_REASONING_EXCEPTIONS = {
+    "openai/gpt-6.1-sol": {
+        "roles": ["industry_evidence_review"], "reason": "quality_gate_not_met",
+    },
+}
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "QUALIFICATION_OPENROUTER_API_KEY",
@@ -99,12 +114,19 @@ def build_scorer_policy(
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
+    default_models = dict(judge_models) == DEFAULT_JUDGE_MODELS
     routes = (dict(DEFAULT_JUDGE_PROVIDER_ROUTES)
-              if judge_provider_routes is None and dict(judge_models) == DEFAULT_JUDGE_MODELS
+              if judge_provider_routes is None and default_models
               else dict(judge_provider_routes or {}))
-    options = ((dict(DEFAULT_JUDGE_REQUEST_OPTIONS) or None)
-               if judge_request_options is None and dict(judge_models) == DEFAULT_JUDGE_MODELS
+    # Explicit empty routes retain capture-off semantics, including absence
+    # of automatic options and the proprietary exception.
+    default_capture = default_models and bool(routes)
+    options = (dict(DEFAULT_JUDGE_REQUEST_OPTIONS)
+               if judge_request_options is None and default_capture
                else judge_request_options)
+    exceptions = (dict(DEFAULT_JUDGE_REASONING_EXCEPTIONS)
+                  if judge_reasoning_exceptions is None and default_capture
+                  else judge_reasoning_exceptions)
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
@@ -124,8 +146,8 @@ def build_scorer_policy(
         "employee_bucket_rule": "lab_relaxed_buckets",
         "env_bindings": {
             **({contracts.JUDGE_REASONING_EXCEPTIONS_BINDING: json.dumps(
-                dict(judge_reasoning_exceptions), sort_keys=True, separators=(",", ":"))}
-               if judge_reasoning_exceptions is not None else {}),
+                dict(exceptions), sort_keys=True, separators=(",", ":"))}
+               if exceptions is not None else {}),
             **({contracts.JUDGE_REQUEST_OPTIONS_BINDING: json.dumps(
                 dict(options), sort_keys=True, separators=(",", ":"))}
                if options is not None else {}),

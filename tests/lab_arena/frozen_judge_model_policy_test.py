@@ -11,12 +11,13 @@ import sys
 import pytest
 
 from lab_arena import scoring
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 
-@pytest.mark.parametrize("historical", [False, True])
-def test_frozen_model_policy_is_bound_before_import_and_sent_on_the_wire(historical):
-    models = dict(scoring.DEFAULT_JUDGE_MODELS)
-    if historical:
+@pytest.mark.parametrize("variant", ["current", "legacy", "historical"])
+def test_frozen_model_policy_is_bound_before_import_and_sent_on_the_wire(variant):
+    models = dict(scoring.DEFAULT_JUDGE_MODELS if variant == "current" else LEGACY_MODELS)
+    if variant == "historical":
         models.update({
             "intent_details_review": "anthropic/claude-sonnet-4.5",
             "role_batch_check": "google/gemini-2.5-flash",
@@ -74,15 +75,19 @@ class Client:
     async def post(self, url, *, json, **kwargs):
         requests.append(json)
         return SimpleNamespace(status_code=200, raise_for_status=lambda: None,
-            json=lambda: {"choices": [{"message": {"content": '[{"id": 1, "match": true}]'}}]})
+            json=lambda: {"choices": [{"finish_reason": "stop", "message": {"content": '[{"id": 1, "match": true}]'}}]})
 
 verification_helpers.httpx.AsyncClient = Client
 asyncio.run(verification_helpers.openrouter_chat(
     "review", model=intent_details.REVIEW_MODEL, max_retries=0, max_tokens=800,
 ))
 assert requests[-1]["model"] == models["intent_details_review"]
-assert requests[-1]["max_tokens"] == 800
-if models["intent_details_review"] == "anthropic/claude-sonnet-5.5":
+capture = policy["env_bindings"].get("ARENA_JUDGE_REASONING_CAPTURE_POLICY") == "full_generated_thinking_v1"
+assert requests[-1]["max_tokens"] == (4096 if capture else 800)
+if capture:
+    assert requests[-1]["provider"] == {"only": ["near-ai/fp4"]}
+    assert requests[-1]["reasoning"] == {"effort": "low", "exclude": False}
+elif models["intent_details_review"] == "anthropic/claude-sonnet-5.5":
     assert not {"temperature", "top_p", "top_k"} & requests[-1].keys()
     assert requests[-1]["reasoning"] == {"effort": "low"}
 else:
@@ -105,6 +110,6 @@ asyncio.run(investigator.investigate_company_evidence(
     targets=("stage",), requested_stage="Series B",
 ))
 assert requests[-1]["model"] == models["role_batch_check"]
-assert requests[-1]["max_tokens"] == investigator.REASONING_MAX_TOKENS
+assert requests[-1]["max_tokens"] == (4096 if capture else investigator.REASONING_MAX_TOKENS)
 assert requests[-1]["temperature"] == 0.0
 '''

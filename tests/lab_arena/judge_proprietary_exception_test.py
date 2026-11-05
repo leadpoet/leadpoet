@@ -195,14 +195,14 @@ def test_industry_packet_preserves_exact_legacy_body_while_open_controller_stays
     assert opts.judge_reasoning_enabled() and opts.judge_reasoning_enabled(MODEL)
 
 
-def test_builder_options_cover_only_full_models_and_no_default_exception():
+def test_builder_options_cover_only_full_models_and_explicit_capture_off_has_no_exception():
     models = {role: MODEL for role in scoring.DEFAULT_JUDGE_MODELS}
     models['industry_evidence_review'] = SOL
     value = scoring.build_scorer_policy(judge_models=models,
         judge_provider_routes={MODEL: 'example/verified'}, judge_reasoning_exceptions=EXCEPTION,
         judge_request_options={MODEL: {'reasoning': {'effort': 'low'}, 'max_output_tokens': 4096}})
     assert rc.validate_judge_registry(registry(), value) == registry()
-    assert BINDING not in scoring.build_scorer_policy()['env_bindings']
+    assert BINDING not in scoring.build_scorer_policy(judge_provider_routes={})['env_bindings']
     value['env_bindings']['ARENA_JUDGE_REQUEST_OPTIONS'] = json.dumps({
         MODEL: {'reasoning': {'effort': 'low'}, 'max_output_tokens': 4096},
         SOL: {'reasoning': {'effort': 'low'}, 'max_output_tokens': 4096}})

@@ -6313,7 +6313,7 @@ async def investigate_company_evidence(
                 )
                 industry_investigation_model = (
                     os.environ.get("ARENA_COMPANY_REVERIFY_MODEL", industry_review_model)
-                    if judge_reasoning_enabled() else industry_review_model
+                    if industry_review_model and judge_reasoning_enabled() else industry_review_model
                 )
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending

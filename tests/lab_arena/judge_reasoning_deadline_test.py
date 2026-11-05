@@ -183,7 +183,7 @@ def test_other_host_defaults_do_not_override_frozen_modes(monkeypatch, mode, cal
     else:
         monkeypatch.setenv('OPENROUTER_API_KEY', 'test-not-secret')
         monkeypatch.setenv('EXA_API_KEY', 'test-not-secret')
-        monkeypatch.setenv('ARENA_COMPANY_REVERIFY_MODEL', model)
+        monkeypatch.setattr(investigator, 'INVESTIGATOR_MODEL', model)
         async def capture(session, url, **kwargs):
             calls.append(kwargs['payload'])
             return 400, {}

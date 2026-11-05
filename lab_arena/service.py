@@ -6070,6 +6070,15 @@ class ArenaService:
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
+        from lab_arena import evidence_judgments
+        if evidence_judgments.enabled(configuration.get("scorer_policy") or {}):
+            advertised = body.get("evidence_judgment_policies")
+            if (not isinstance(advertised, list) or not 1 <= len(advertised) <= 8
+                    or any(not isinstance(policy, str) for policy in advertised)
+                    or evidence_judgments.POLICY not in advertised):
+                # Allocation chooses execution or scoring atomically. Fence an
+                # incompatible worker before it can acquire either lease kind.
+                raise ServiceError("validator_evidence_judgment_upgrade_required", 409)
         required_output_schema = contact_policy.output_schema(configuration)
         if (
             required_output_schema

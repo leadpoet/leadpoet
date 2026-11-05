@@ -633,6 +633,7 @@ ARENA_DENIAL_CODES = frozenset(
         "validator_events_too_large",
         "validator_events_unavailable",
         "validator_checkpoint_upgrade_required",
+        "validator_evidence_judgment_upgrade_required",
         "validator_output_schema_upgrade_required",
         "validator_proxy_execution_upgrade_required",
         "validator_scoring_authority_schema_unavailable",

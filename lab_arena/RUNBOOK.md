@@ -795,6 +795,14 @@ require gateway and scorer Git SHAs to match, add validator attestation, or
 change a frozen round to make the checks pass. Report an incomplete scorer
 release as incomplete even when the host deployment succeeded.
 
+Evidence judgment v2 also requires updated validator workers. Their existing
+signed claim advertises `evidence_judgment_policies: ["evidence_judgment_v2"]`.
+New v2 rounds reject workers without this capability before allocating work.
+The database selects execution or scoring atomically, so this gate applies to
+both kinds of work in v2 rounds. Older frozen rounds keep their existing claim
+rules. Deploy the gateway and managed validator through the canonical paired
+restart; other eligible validators must upgrade before claiming v2 work.
+
 Start the service:
 
 ```bash

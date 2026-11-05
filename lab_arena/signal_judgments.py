@@ -217,6 +217,9 @@ def validate_reference(value: Any, scope: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_judgment(value: Any, scope: Mapping[str, Any]) -> dict[str, Any]:
+    from lab_arena import evidence_judgments
+    if evidence_judgments.enabled(scope):
+        return evidence_judgments.validate_judgment(value, scope)
     if scope.get("checkpoint_kind") == company_judgments.FIT_CHECKPOINT_KIND:
         try:
             return company_judgments.validate_verified_fit_checkpoint(value)

@@ -278,6 +278,14 @@ def build_company_scopes(
     ):
         raise CompanyJudgmentError("company judgment scope is incomplete")
 
+    if policy.get("evidence_judgment_policy") == "evidence_judgment_v2":
+        # A completed company result must not bypass fresh granular source
+        # validation on an independent execution. Exact execution retries keep
+        # their existing whole-company checkpoint.
+        if not isinstance(scoring_input.get("scored_run_id"), str) or not scoring_input["scored_run_id"]:
+            raise CompanyJudgmentError("company judgment execution identity is missing")
+        identity["scored_run_id"] = scoring_input["scored_run_id"]
+
     refs = []
     for company_index, effective in enumerate(effective_company_inputs(scoring_input)):
         company_input_hash = _hash(effective)

@@ -1809,6 +1809,17 @@ class ArenaService:
                 raise ServiceError(
                     "reasoning_capture_activation_not_ready:%s" % unready_reason, 503,
                 )
+        if (document["scorer_policy"].get("env_bindings", {}).get(
+                contracts.JUDGE_REASONING_CAPTURE_BINDING) == reasoning_capture.POLICY):
+            try:
+                registry = document.get("reasoning_route_registry")
+                if registry is None:
+                    source = getattr(self._config, "reasoning_registry_source", None)
+                    registry = source() if source is not None else reasoning_capture.load_registry()
+                document["judge_reasoning_route_registry"] = reasoning_capture.validate_judge_registry(
+                    registry, document["scorer_policy"])
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                raise ServiceError("judge_reasoning_capture_activation_not_ready", 503) from exc
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
@@ -6380,7 +6391,8 @@ class ArenaService:
             reasoning_route_registry=capture_configuration.get("reasoning_route_registry"),
             judge_reasoning_capture_policy=(configuration.get("scorer_policy") or {}).get(
                 "env_bindings", {}).get("ARENA_JUDGE_REASONING_CAPTURE_POLICY"),
-            judge_reasoning_route_registry=configuration.get("reasoning_route_registry"),
+            judge_reasoning_route_registry=configuration.get(
+                "judge_reasoning_route_registry", configuration.get("reasoning_route_registry")),
         )
 
     def handle_signal_judgment(

@@ -803,6 +803,28 @@ both kinds of work in v2 rounds. Older frozen rounds keep their existing claim
 rules. Deploy the gateway and managed validator through the canonical paired
 restart; other eligible validators must upgrade before claiming v2 work.
 
+Prospective judge reasoning capture is separately frozen from miner capture.
+Its scorer policy binds every model to one provider and may bind per-model
+`ARENA_JUDGE_REQUEST_OPTIONS` (`reasoning` mode and `max_output_tokens`).
+Without those options, the reviewed PR1041 request behavior remains unchanged.
+With options, compatible explicit reasoning controls can take precedence, while
+an `enabled: true` route never receives an invented effort control. The exact
+selected model/provider/API and option kind/output cap must match the separately
+frozen `judge_reasoning_route_registry`. Judge-only activation does not enable
+miner full-thinking, alter its baseline or relax its evidence requirements.
+The optional claim comparison still uses its existing 500-token, 15-second
+bound and no retries. A short or failed comparison remains a cache miss; its
+possible provider charge and later native judgment both count in cost checks.
+A separate comparison model or larger bound is not enabled by this change.
+
+No proprietary judge exception is enabled. The minimal proposed mechanism is
+an explicit frozen map of role to exception model, provider and reason, with
+thinking availability labelled unavailable. Its model must not also serve a
+full-thinking role, so the broker can apply the existing request boundary
+without ambiguous model authority. It would retain ordinary raw request/reply
+capture and price/privacy controls, and would never label summaries as full
+thinking. This proposal needs a separate decision and tests before activation.
+
 Start the service:
 
 ```bash

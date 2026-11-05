@@ -91,3 +91,39 @@ def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkey
     assert len(calls) == 1
     assert (industry.REASONING_RESPONSE_CONTRACT in calls[0]['messages'][0]['content']) is enabled
     assert calls[0]['max_tokens'] == (16384 if enabled else 2000)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+@pytest.mark.parametrize('finish', ['stop', 'length'])
+def test_claim_comparison_keeps_500_token_15_second_bound(monkeypatch, enabled, finish):
+    from qualification.scoring import claim_equivalence
+    monkeypatch.setenv('ARENA_JUDGE_REASONING_CAPTURE_POLICY', options.JUDGE_REASONING_POLICY if enabled else '')
+    monkeypatch.setenv('ARENA_JUDGE_PROVIDER_ROUTES', json.dumps({'test/model': 'example/verified'}))
+    monkeypatch.setattr(helpers, 'OPENROUTER_API_KEY', 'test-not-secret')
+    calls = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+                'choices': [{'finish_reason': finish, 'message': {'content':
+                    '{"decision":"equivalent","material_differences":[]}'}}]})
+
+    monkeypatch.setattr(helpers.httpx, 'AsyncClient', Client)
+    source = {'description': 'Acme partnered with Wiz.'}
+    current = {'description': 'Wiz and Acme partnered.'}
+    result = asyncio.run(claim_equivalence.verify_claim_equivalence(source, current, model='test/model'))
+    assert len(calls) == 1
+    assert calls[0]['json']['max_tokens'] == 500
+    assert calls[0]['timeout'] == claim_equivalence.TIMEOUT_SECONDS == 15
+    if enabled:
+        assert calls[0]['json']['provider'] == {'only': ['example/verified']}
+        assert calls[0]['json']['reasoning']['exclude'] is False
+        assert (result is None) == (finish == 'length')
+    else:
+        assert calls[0]['json']['provider'] == {'data_collection': 'deny', 'zdr': True}
+        assert 'reasoning' not in calls[0]['json']

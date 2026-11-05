@@ -1328,7 +1328,8 @@ def _capture_configuration(example: Mapping[str, Any], role: str = 'source') -> 
     except (ValueError, TypeError, AttributeError):
         return {}  # Invalid label authority grants no reviewed judge route.
     return ({'reasoning_capture_policy': policy,
-             'reasoning_route_registry': configuration.get('reasoning_route_registry')}
+             'reasoning_route_registry': configuration.get(
+                 'judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))}
             if policy == POLICY else {})
 
 

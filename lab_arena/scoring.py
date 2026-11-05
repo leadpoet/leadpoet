@@ -35,6 +35,7 @@ DEFAULT_JUDGE_MODELS = {
 # A prospective model migration supplies these exact approved routes. Empty
 # preserves existing policies until its real-provider validation is complete.
 DEFAULT_JUDGE_PROVIDER_ROUTES: Dict[str, str] = {}
+DEFAULT_JUDGE_REQUEST_OPTIONS: Dict[str, Any] = {}
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "QUALIFICATION_OPENROUTER_API_KEY",
@@ -93,12 +94,16 @@ def build_scorer_policy(
     fit_fp_receipt_authority: bool = False,
     evidence_judgment_cache: bool = False,
     judge_provider_routes: Optional[Mapping[str, str]] = None,
+    judge_request_options: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
     routes = (dict(DEFAULT_JUDGE_PROVIDER_ROUTES)
               if judge_provider_routes is None and dict(judge_models) == DEFAULT_JUDGE_MODELS
               else dict(judge_provider_routes or {}))
+    options = ((dict(DEFAULT_JUDGE_REQUEST_OPTIONS) or None)
+               if judge_request_options is None and dict(judge_models) == DEFAULT_JUDGE_MODELS
+               else judge_request_options)
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
@@ -117,6 +122,9 @@ def build_scorer_policy(
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
         "env_bindings": {
+            **({contracts.JUDGE_REQUEST_OPTIONS_BINDING: json.dumps(
+                dict(options), sort_keys=True, separators=(",", ":"))}
+               if options is not None else {}),
             **({
                 contracts.JUDGE_REASONING_CAPTURE_BINDING: "full_generated_thinking_v1",
                 contracts.JUDGE_PROVIDER_ROUTES_BINDING: json.dumps(routes, sort_keys=True, separators=(",", ":")),
@@ -177,7 +185,8 @@ def apply_policy_to_environment(
         raise ScorerPolicyConflict("industry reviewer conflicts with the frozen model policy")
     bindings["ARENA_INDUSTRY_EVIDENCE_MODEL"] = industry_model
     # Ambient settings cannot upgrade an older frozen round's capture or route.
-    for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING, contracts.JUDGE_PROVIDER_ROUTES_BINDING):
+    for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING, contracts.JUDGE_PROVIDER_ROUTES_BINDING,
+                 contracts.JUDGE_REQUEST_OPTIONS_BINDING):
         bindings.setdefault(name, "")
     for name, model in model_bindings.items():
         if model:

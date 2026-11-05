@@ -673,6 +673,7 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
         "ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL": "openai/gpt-6-luna",
         "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "",
         "ARENA_JUDGE_PROVIDER_ROUTES": "",
+        "ARENA_JUDGE_REQUEST_OPTIONS": "",
     }
     assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):

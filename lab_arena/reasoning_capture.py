@@ -133,6 +133,36 @@ def load_registry() -> Dict[str, Any]:
     return validate_registry(json.loads(Path(__file__).with_name("reasoning_models.json").read_text()))
 
 
+def validate_judge_registry(registry: Any, scorer_policy: Mapping[str, Any]) -> Dict[str, Any]:
+    """Freeze judge routes independently of sourcing and its baseline gates."""
+    frozen = validate_registry(registry)
+    bindings = scorer_policy.get("env_bindings") or {}
+    if bindings.get("ARENA_JUDGE_REASONING_CAPTURE_POLICY") != POLICY:
+        raise ValueError("judge reasoning policy unavailable")
+    routes = json.loads(bindings.get("ARENA_JUDGE_PROVIDER_ROUTES", ""))
+    models = scorer_policy.get("judge_models") or {}
+    approved = {(row["model_id"], row["provider"], row["api"]): row
+                for row in frozen["approved_routes"]}
+    options_raw = bindings.get("ARENA_JUDGE_REQUEST_OPTIONS")
+    options = json.loads(options_raw) if options_raw is not None else {}
+    for role, model in models.items():
+        # Company lookup and Stage 1 share the existing company search role.
+        api = "openrouter.responses" if role == "company_fit_reverification" else "openrouter.chat"
+        route = approved.get((model, routes.get(model), api))
+        if route is None:
+            raise ValueError("judge reasoning route unavailable")
+        if options:
+            option = options[model]
+            mode = option["reasoning"]
+            route_mode = route["mode"]
+            budget = "max_tokens" in mode and "budget_tokens" in route_mode
+            if (option["max_output_tokens"] > route["max_output_tokens"]
+                    or not (budget or set(mode) == set(route_mode))
+                    or api == "openrouter.responses" and mode.get("effort") == "max"):
+                raise ValueError("judge request options differ from approved route")
+    return frozen
+
+
 def _apply_full(operation_id: str, parameters: Mapping[str, Any],
                 registry: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     frozen = validate_registry(registry)

@@ -218,3 +218,23 @@ def test_gateway_frame_size_gate_uses_frozen_judge_opt_in(enabled):
     if enabled:
         assert answer.json()['status'] == 200
         assert json.loads(transport.sent[0]['body'])['input'] == frame['parameters']['input']
+
+
+def test_service_uses_judge_registry_without_enabling_source_capture():
+    row, baseline = baseline_round({})
+    configuration = row['configuration_doc']
+    configuration['scorer_policy']['env_bindings']['ARENA_JUDGE_REASONING_CAPTURE_POLICY'] = rc.POLICY
+    configuration['judge_reasoning_route_registry'] = _reviewed_registry()
+    configuration.pop('reasoning_capture_policy', None)
+    configuration.pop('reasoning_route_registry', None)
+    run = dict(baseline, run_id='run', round_id=row['round_id'], assignment_id='assignment',
+               attempt=1, icp_position=0, stage=1, kind='score')
+    service = object.__new__(arena_service.ArenaService)
+    service._store = SimpleNamespace(get_run=lambda _id: run)
+    service._require_round_ownership = lambda _id: None
+    service._hot_round = lambda _id: row
+    _, context = service._run_context('run', 'token')
+    assert br._reasoning_contract(context) == (rc.POLICY, configuration['judge_reasoning_route_registry'])
+    run['kind'] = 'execute'
+    _, context = service._run_context('run', 'token')
+    assert br._reasoning_contract(context) == (None, None)

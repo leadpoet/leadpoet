@@ -18,7 +18,8 @@ def judge_reasoning_enabled() -> bool:
     return os.getenv("ARENA_JUDGE_REASONING_CAPTURE_POLICY") == JUDGE_REASONING_POLICY
 
 
-def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False) -> tuple[str, dict]:
+def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
+                          output_token_floor: int | None = None) -> tuple[str, dict]:
     """Prepare existing judge HTTP calls; legacy rounds keep their exact body.
 
     Native Responses is used for hosted search so the gateway can retain its
@@ -35,6 +36,22 @@ def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False) -> t
             raise ValueError
     except (KeyError, TypeError, ValueError):
         raise ValueError("judge_provider_route_unavailable") from None
+    option = None
+    options_raw = os.environ.get("ARENA_JUDGE_REQUEST_OPTIONS")
+    if options_raw:
+        try:
+            option = json.loads(options_raw)[body["model"]]
+            mode = option["reasoning"]
+            maximum = option["max_output_tokens"]
+            if (not isinstance(option, dict) or set(option) != {"reasoning", "max_output_tokens"}
+                    or type(maximum) is not int or not 1 <= maximum <= 32768
+                    or not isinstance(mode, dict)
+                    or not ((set(mode) == {"effort"} and mode["effort"] in {"minimal", "low", "medium", "high", "xhigh", "max"})
+                            or (set(mode) == {"enabled"} and mode["enabled"] is True)
+                            or (set(mode) == {"max_tokens"} and type(mode["max_tokens"]) is int and 1 <= mode["max_tokens"] < maximum))):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("judge_request_options_unavailable") from None
     # This is a selector, not a caller-owned provider policy. The broker
     # installs ZDR, data_collection=deny, no fallback and exact price bounds.
     body["provider"] = {"only": [provider]}
@@ -59,13 +76,40 @@ def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False) -> t
             or "reasoning_effort" in body and body["reasoning_effort"] != effort
             or hosted_search and effort == "max"):
         raise ValueError("judge_reasoning_controls_unsupported")
-    body["reasoning"] = {"effort": effort, "exclude": False}
+    mode = {"effort": effort}
+    if option is not None:
+        mode = copy.deepcopy(option["reasoning"])
+        explicit_effort = controls.get("effort", body.get("reasoning_effort"))
+        explicit_budget = controls.get("max_tokens", controls.get("budget_tokens"))
+        if controls.get("enabled") is False or controls.get("exclude") is True:
+            raise ValueError("judge_reasoning_controls_unsupported")
+        if explicit_effort is not None:
+            if "effort" not in mode:
+                raise ValueError("judge_reasoning_controls_incompatible")
+            mode = {"effort": effort}
+        if explicit_budget is not None:
+            if ("max_tokens" not in mode or type(explicit_budget) is not int
+                    or not 1 <= explicit_budget < option["max_output_tokens"]):
+                raise ValueError("judge_reasoning_controls_incompatible")
+            mode = {"max_tokens": explicit_budget}
+        if hosted_search and mode.get("effort") == "max":
+            raise ValueError("judge_reasoning_controls_unsupported")
+        body.pop("reasoning_effort", None)
+    body["reasoning"] = {**mode, "exclude": False}
     if body.get("include_reasoning") is False:
         body["include_reasoning"] = True
     limit = body.get("max_tokens", 8192)
     if type(limit) is not int or not 1 <= limit <= 32768:
         raise ValueError("judge_output_limit_invalid")
-    body["max_tokens"] = max(8192, limit)
+    if output_token_floor is not None and (type(output_token_floor) is not int or not 1 <= output_token_floor <= 8192):
+        raise ValueError("judge_output_floor_invalid")
+    # Optional claim comparison is allowed to keep its small original budget.
+    # Incomplete comparisons are cache misses, never factual verdicts.
+    if option is not None:
+        body["max_tokens"] = (option["max_output_tokens"] if output_token_floor is None
+                              else min(option["max_output_tokens"], max(output_token_floor, limit)))
+    else:
+        body["max_tokens"] = max(8192 if output_token_floor is None else output_token_floor, limit)
     if not hosted_search:
         return "/chat/completions", body
     messages = body.pop("messages")
@@ -175,7 +219,7 @@ def project_judge_response(payload: Mapping, *, hosted_search: bool = False) -> 
     if (body.get("status") != "completed" or body.get("error") or body.get("errors")
             or body.get("refusal") or body.get("incomplete_details") or not isinstance(body.get("output"), list)):
         raise ValueError("judge_response_incomplete")
-    messages = []
+    messages, final_messages = [], []
     searched = False
     for item in body["output"]:
         if not isinstance(item, Mapping):
@@ -200,17 +244,27 @@ def project_judge_response(payload: Mapping, *, hosted_search: bool = False) -> 
                 if not isinstance(part.get("annotations", []), list):
                     raise ValueError("judge_response_malformed")
                 annotations.extend(_chat_annotations(part.get("annotations", [])))
-            messages.append({"role": "assistant", "content": "".join(text),
-                             **({"annotations": annotations} if annotations else {})})
+            phase = item.get("phase")
+            if phase not in (None, "commentary", "final_answer"):
+                raise ValueError("judge_response_phase_unsupported")
+            message = {"role": "assistant", "content": "".join(text),
+                       **({"annotations": annotations} if annotations else {})}
+            if phase == "final_answer":
+                final_messages.append(message)
+            elif phase is None:
+                messages.append(message)
         else:
             # A function call or refusal is unfinished judging, not a verdict.
             raise ValueError("judge_response_unfinished_tool")
     if hosted_search and not searched:
         raise ValueError("judge_search_missing")
-    if not messages or not messages[-1]["content"].strip():
+    if len(final_messages) > 1:
+        raise ValueError("judge_response_final_ambiguous")
+    selected = final_messages or messages
+    if not selected or not selected[-1]["content"].strip():
         raise ValueError("judge_response_missing_answer")
     return {**{key: copy.deepcopy(body[key]) for key in ("id", "model", "provider", "usage") if key in body},
-            "choices": [{"index": 0, "finish_reason": "stop", "message": messages[-1]}]}
+            "choices": [{"index": 0, "finish_reason": "stop", "message": selected[-1]}]}
 
 
 def preserve_judge_reasoning(provider_message: Mapping, replay_message: Mapping) -> dict:

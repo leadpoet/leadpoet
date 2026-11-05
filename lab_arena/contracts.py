@@ -990,6 +990,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("training_maximum_missing_reasoning_percent", "int", required=False,
       minimum=0, maximum=100),
     F("reasoning_route_registry", "object", required=False),
+    F("judge_reasoning_route_registry", "object", required=False),
     F("baseline_reasoning_configuration", "object", required=False),
     F("reasoning_baseline_source_sha256", "sha256", required=False),
     F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
@@ -1146,6 +1147,18 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     elif ("reasoning_route_registry" in config
           or "reasoning_baseline_source_sha256" in config):
         raise ArenaContractError("reasoning policy and route metadata must be frozen together")
+    judge_policy = (config.get("scorer_policy") or {}).get("env_bindings", {}).get(
+        JUDGE_REASONING_CAPTURE_BINDING)
+    if judge_policy == "full_generated_thinking_v1":
+        from lab_arena import reasoning_capture
+        try:
+            reasoning_capture.validate_judge_registry(
+                config.get("judge_reasoning_route_registry", config.get("reasoning_route_registry")),
+                config["scorer_policy"])
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ArenaContractError("judge thinking requires its frozen route registry") from exc
+    elif "judge_reasoning_route_registry" in config:
+        raise ArenaContractError("judge reasoning policy and registry must be frozen together")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None
@@ -1421,6 +1434,7 @@ PROVIDER_OBSERVATION_HANDOFF_BINDING = "ARENA_PROVIDER_OBSERVATION_HANDOFF"
 AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
 JUDGE_REASONING_CAPTURE_BINDING = "ARENA_JUDGE_REASONING_CAPTURE_POLICY"
 JUDGE_PROVIDER_ROUTES_BINDING = "ARENA_JUDGE_PROVIDER_ROUTES"
+JUDGE_REQUEST_OPTIONS_BINDING = "ARENA_JUDGE_REQUEST_OPTIONS"
 
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
@@ -1487,6 +1501,25 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
         if (not isinstance(routes, dict) or set(routes) != set(policy["judge_models"].values())
                 or any(not isinstance(v, str) or not v.strip() or len(v) > 128 for v in routes.values())):
             raise ArenaContractError("judge provider routes must cover the frozen model roles")
+    options_raw = policy["env_bindings"].get(JUDGE_REQUEST_OPTIONS_BINDING)
+    if options_raw is not None:
+        try:
+            options = json.loads(options_raw)
+            if capture != "full_generated_thinking_v1" or not isinstance(options, dict) or set(options) != set(policy["judge_models"].values()):
+                raise ValueError
+            for option in options.values():
+                if not isinstance(option, dict) or set(option) != {"reasoning", "max_output_tokens"}:
+                    raise ValueError
+                maximum = option["max_output_tokens"]
+                mode = option["reasoning"]
+                if type(maximum) is not int or not 1 <= maximum <= 32768 or not isinstance(mode, dict):
+                    raise ValueError
+                if not ((set(mode) == {"effort"} and mode["effort"] in {"minimal", "low", "medium", "high", "xhigh", "max"})
+                        or (set(mode) == {"enabled"} and mode["enabled"] is True)
+                        or (set(mode) == {"max_tokens"} and type(mode["max_tokens"]) is int and 1 <= mode["max_tokens"] < maximum)):
+                    raise ValueError
+        except (TypeError, ValueError, KeyError):
+            raise ArenaContractError("invalid frozen judge request options") from None
     if SCORE_NORMALIZATION_BINDING in policy["env_bindings"]:
         if policy["env_bindings"][SCORE_NORMALIZATION_BINDING] != AVAILABLE_INTENT_CAP_NORMALIZATION:
             raise ArenaContractError("unsupported score normalization")

@@ -356,3 +356,26 @@ def test_default_new_round_policy_freezes_exact_current_model_and_route_defaults
     else:
         assert 'ARENA_JUDGE_REASONING_CAPTURE_POLICY' not in policy['env_bindings']
         assert 'ARENA_JUDGE_PROVIDER_ROUTES' not in policy['env_bindings']
+
+
+def test_explicit_final_answer_precedes_trailing_commentary(enabled):
+    response = native({'decision': 'approve'})
+    response['output'][-1]['phase'] = 'final_answer'
+    response['output'].append({'type': 'message', 'role': 'assistant', 'status': 'completed',
+        'phase': 'commentary', 'content': [{'type': 'output_text', 'text': 'I checked the page.'}]})
+    original = copy.deepcopy(response)
+    projected = opts.project_judge_response(response, hosted_search=True)
+    assert json.loads(projected['choices'][0]['message']['content']) == {'decision': 'approve'}
+    assert response == original
+
+
+@pytest.mark.parametrize('phases', [
+    ['final_answer', 'final_answer'], ['unexpected'], ['commentary'],
+])
+def test_native_projection_rejects_ambiguous_or_missing_final_answer(enabled, phases):
+    response = native()
+    answer = response['output'].pop()
+    for phase in phases:
+        response['output'].append({**copy.deepcopy(answer), 'phase': phase})
+    with pytest.raises(ValueError):
+        opts.project_judge_response(response, hosted_search=True)

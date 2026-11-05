@@ -206,3 +206,13 @@ def test_judge_journal_prefix_preserves_verified_pairs_without_claiming_completi
     if got:
         assert got[0]['source_refs'][0]['source_quality']['complete'] is False
         assert got[0]['source_refs'][0]['worker_receipt_ref']['artifact_field'] == 'partial_worker_observation_artifacts'
+
+
+def test_judge_export_uses_separate_frozen_registry():
+    example = judge_example()
+    configuration = example['configuration']
+    configuration['judge_reasoning_route_registry'] = deepcopy(configuration['reasoning_route_registry'])
+    configuration['reasoning_route_registry'] = {'unrelated': 'source registry must not replace judge authority'}
+    got, manifest = records(example, role='judge')
+    assert len(got) == 1
+    assert manifest['coverage']['generated_thinking_texts'] == 1

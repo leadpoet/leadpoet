@@ -3,6 +3,7 @@
 import asyncio
 import gzip
 import json
+import threading
 from datetime import datetime, timezone
 
 import httpx
@@ -241,3 +242,91 @@ def test_invalid_provider_charge_never_becomes_zero(monkeypatch, tmp_path, cost)
     }]})
     assert generator.generate_exclusions_for_icp({"industry": "Software"}) == []
     assert spy.calls[0]["finishes"][0]["cost_microusd"] is None
+
+
+@pytest.mark.parametrize("cancel_at", ["http_request", "client_close"])
+def test_generation_cancellation_finishes_capture_and_preserves_observed_reply(monkeypatch, tmp_path, cancel_at):
+    spy = _capture(monkeypatch, tmp_path)
+    _transport(monkeypatch)
+    ordinary_client = generator.httpx.AsyncClient
+
+    async def exercise():
+        entered = asyncio.Event()
+
+        class Client(ordinary_client):
+            async def post(self, *args, **kwargs):
+                if cancel_at == "http_request":
+                    entered.set()
+                    await asyncio.Future()
+                return await super().post(*args, **kwargs)
+
+            async def __aexit__(self, *args):
+                if cancel_at == "client_close":
+                    entered.set()
+                    await asyncio.Future()
+                return await super().__aexit__(*args)
+
+        monkeypatch.setattr(generator.httpx, "AsyncClient", Client)
+        task = asyncio.create_task(generator.generate_icps_with_openrouter(20261105, total_icps=10))
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    call, = spy.calls
+    assert len(call["finishes"]) == 1
+    outcome = call["finishes"][0]
+    assert outcome["outcome"]["business_outcome"] == "cancelled"
+    assert outcome["outcome"]["committed_outcome"] == "not_attempted"
+    if cancel_at == "http_request":
+        assert call["responses"] == []
+        assert outcome["cost_microusd"] is None
+    else:
+        assert len(call["responses"]) == 1
+        assert outcome["cost_microusd"] == 13
+
+
+def test_cancel_during_exclusion_thread_finishes_generation_without_stopping_thread(monkeypatch, tmp_path):
+    spy = _capture(monkeypatch, tmp_path)
+    _transport(monkeypatch)
+    release, finished = threading.Event(), threading.Event()
+
+    async def active(*, strict=False):
+        return None
+
+    async def no_store(**kwargs):
+        pytest.fail("cancelled pre-storage generation attempted a database write")
+
+    monkeypatch.setattr(generator, "get_active_icp_set", active)
+    monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda set_id: None)
+    monkeypatch.setattr(generator, "store_icp_set", no_store)
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+
+        def exclusions(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            if release.wait(2):
+                finished.set()
+
+        monkeypatch.setattr(generator, "attach_generated_exclusions", exclusions)
+        task = asyncio.create_task(generator.generate_and_activate_icp_set(
+            datetime(2026, 11, 5, tzinfo=timezone.utc), total_icps=10,
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert not finished.is_set()
+            call, = spy.calls
+            assert len(call["responses"]) == len(call["finishes"]) == 1
+            assert call["finishes"][0]["outcome"]["business_outcome"] == "cancelled"
+            assert call["finishes"][0]["outcome"]["committed_outcome"] == "not_attempted"
+        finally:
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 2)
+
+    asyncio.run(exercise())

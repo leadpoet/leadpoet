@@ -1494,8 +1494,9 @@ Each ICP must also return these structured fields for the people to find at ever
                 },
                 json=request,
             )
-
-        capture.response(response)
+            # Save an observed reply before the awaited client close can be
+            # cancelled. Closing the transport is not part of provider output.
+            capture.response(response)
         
         if response.status_code != 200:
             logger.error("openrouter_icp_http_error status=%d", response.status_code)
@@ -1731,6 +1732,10 @@ Each ICP must also return these structured fields for the people to find at ever
 
         return validated_icps, actual_distribution, icp_set_hash
         
+    except asyncio.CancelledError:
+        if capture is not None:
+            capture.outcome["business_outcome"] = "cancelled"
+        raise
     except httpx.TimeoutException:
         logger.error("OpenRouter request timed out (180s)")
         return None
@@ -2501,6 +2506,12 @@ async def generate_and_activate_icp_set(
             icp_hash[:16],
         )
 
+    except asyncio.CancelledError:
+        for capture in capture_calls:
+            capture.finish(business_outcome="cancelled", committed_outcome="not_attempted",
+                           exclusion_call_ids=list(exclusion_call_ids))
+        # Cancelling the waiter does not stop its existing exclusion thread.
+        raise
     except Exception as e:
         logger.error("OpenRouter ICP generation failed error_type=%s", type(e).__name__)
         logger.error("   Will retry automatically on next gateway restart or rotation check")

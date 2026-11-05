@@ -750,6 +750,9 @@ async def openrouter_chat(
 
       * ``max_tokens`` — bounds the response size. Default 200.
     """
+    from qualification.scoring.openrouter_options import (
+        prepare_judge_request, judge_reasoning_enabled, JUDGE_REASONING_TIMEOUT_SECONDS,
+    )
     key = api_key or OPENROUTER_API_KEY
     if not key:
         raise ValueError("No OpenRouter API key configured (neither api_key param nor QUALIFICATION_OPENROUTER_API_KEY env var)")
@@ -783,9 +786,9 @@ async def openrouter_chat(
                     payload["temperature"] = 0.3
                 if response_format is not None:
                     payload["response_format"] = response_format
-
+                path, payload = prepare_judge_request(payload)
                 response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    "https://openrouter.ai/api/v1" + path,
                     headers={
                         "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json",
@@ -793,10 +796,12 @@ async def openrouter_chat(
                         "X-Title": "Leadpoet Qualification"
                     },
                     json=payload,
-                    timeout=LLM_TIMEOUT
+                    timeout=(JUDGE_REASONING_TIMEOUT_SECONDS if judge_reasoning_enabled() else LLM_TIMEOUT)
                 )
                 response.raise_for_status()
                 data = response.json()
+                if judge_reasoning_enabled() and data["choices"][0].get("finish_reason") != "stop":
+                    raise ValueError("judge_response_incomplete")
                 return data["choices"][0]["message"]["content"]
         except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
             last_error = e

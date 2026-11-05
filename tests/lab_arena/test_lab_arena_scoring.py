@@ -666,6 +666,13 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": "anthropic/claude-sonnet-5.5",
         "ARENA_ROLE_BATCH_MODEL": "google/gemini-3.5-flash-lite",
         "ARENA_INDUSTRY_EVIDENCE_MODEL": "openai/gpt-6.1-sol",
+        "ARENA_COMPANY_REVERIFY_MODEL": "perplexity/sonar",
+        "INTENT_THREE_STAGE_S1_MODEL": "perplexity/sonar",
+        "INTENT_THREE_STAGE_S3_MODEL": "perplexity/sonar-pro",
+        "ARENA_INTENT_SIGNAL_MODEL": "openai/gpt-6-luna",
+        "ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL": "openai/gpt-6-luna",
+        "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "",
+        "ARENA_JUDGE_PROVIDER_ROUTES": "",
     }
     assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):

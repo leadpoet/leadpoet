@@ -76,6 +76,10 @@ from qualification.scoring.linkedin_company_size import (
     project_structured_linkedin_company_headquarters,
 )
 from qualification.scoring.pre_checks import _resolve_country
+from qualification.scoring.openrouter_options import (
+    judge_reasoning_enabled, prepare_judge_request, project_judge_response,
+    preserve_judge_reasoning,
+)
 from qualification.scoring.verification_helpers import (
     visible_html_body_empty,
     visible_html_dialog_only,
@@ -89,10 +93,10 @@ from qualification.scoring.verification_helpers import (
 INVESTIGATOR_MODEL = os.environ.get(
     "ARENA_ROLE_BATCH_MODEL", "google/gemini-3.5-flash-lite",
 )
-POSITIVE_SEMANTIC_REVIEW_MODEL = "openai/gpt-6-luna"
+POSITIVE_SEMANTIC_REVIEW_MODEL = os.environ.get("ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL", "openai/gpt-6-luna")
 MAX_REASONING_TURNS = 8
 MAX_INCOMPLETE_SUBMIT_RETRIES = 1
-REASONING_MAX_TOKENS = 3000
+REASONING_MAX_TOKENS = 16384 if judge_reasoning_enabled() else 3000
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 4
 MAX_PREFETCHED_PAGES = 3
@@ -2795,6 +2799,8 @@ async def _post_openrouter_json(
 ) -> tuple[int, Any]:
     """Retry one explicit transient response inside the admission window."""
 
+    path, payload = prepare_judge_request(payload)
+    url = "https://openrouter.ai/api/v1" + path
     status, body = await _post_json(
         session,
         url,
@@ -2907,6 +2913,10 @@ async def _review_industry_sources(
         finding['_industry_review']['reused_completed_packet'] = True
         return finding, '', 0
     payload = industry_classification.request_payload(packet, model=model, research=research)
+    if judge_reasoning_enabled():
+        payload["reasoning"] = {"effort": "low", "exclude": False}
+        payload["max_tokens"] = 16384
+        payload["messages"][0]["content"] += industry_classification.REASONING_RESPONSE_CONTRACT
     try:
         status, body = await _post_openrouter_json(
             session, 'https://openrouter.ai/api/v1/chat/completions',
@@ -3203,7 +3213,8 @@ async def _search_industry_locators(
     """
     unretained_source()
     payload = {
-        'model': 'perplexity/sonar', 'max_tokens': 700, 'temperature': 0,
+        'model': os.environ.get('ARENA_COMPANY_REVERIFY_MODEL', 'perplexity/sonar'),
+        'max_tokens': 700, 'temperature': 0,
         'messages': [
             {'role': 'system', 'content': (
                 'Find company-owned source pages for the requested fact. Return a short '
@@ -3220,13 +3231,15 @@ async def _search_industry_locators(
             })},
         ],
     }
+    path, payload = prepare_judge_request(payload, hosted_search=True)
     status, body = await _post_json(
-        session, 'https://openrouter.ai/api/v1/chat/completions',
+        session, 'https://openrouter.ai/api/v1' + path,
         headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
         payload=payload,
     )
     if status != 200 or (isinstance(body, Mapping) and (body.get('error') or body.get('errors'))):
         raise RuntimeError('search_provider_unavailable')
+    body = project_judge_response(body, hosted_search=True)
     try:
         message = body['choices'][0]['message']
         annotations = message.get('annotations', [])
@@ -6296,7 +6309,10 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
-                industry_investigation_model = industry_review_model
+                industry_investigation_model = (
+                    os.environ.get("ARENA_COMPANY_REVERIFY_MODEL", industry_review_model)
+                    if judge_reasoning_enabled() else industry_review_model
+                )
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
                     and required_tool == "submit_findings"
@@ -6554,6 +6570,7 @@ async def investigate_company_evidence(
                         }
                         if isinstance(message.get("content"), str):
                             assistant_message["content"] = message["content"]
+                        assistant_message = preserve_judge_reasoning(message, assistant_message)
                         messages.extend([
                             assistant_message,
                             {
@@ -6653,7 +6670,7 @@ async def investigate_company_evidence(
                             forced_next_tool = "submit_findings"
                             incomplete_submit_retry_pending = True
                             messages.extend([
-                                {"role": "assistant", "tool_calls": [canonical_call]},
+                                preserve_judge_reasoning(message, {"role": "assistant", "tool_calls": [canonical_call]}),
                                 {
                                     "role": "tool",
                                     "tool_call_id": call_id,
@@ -7621,6 +7638,7 @@ async def investigate_company_evidence(
                 }
                 if isinstance(message.get("content"), str):
                     assistant_message["content"] = message["content"]
+                assistant_message = preserve_judge_reasoning(message, assistant_message)
                 messages.extend([
                     assistant_message,
                     {

@@ -122,7 +122,7 @@ async def test_full_verifier_recovers_rendered_first_party_job_listings(
     ])
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(source_url, "supported", role)
 
@@ -204,7 +204,7 @@ async def test_synoptek_unproved_exact_count_stays_rejected(monkeypatch):
     ])
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(source_url, "partially_supported")
 
@@ -274,7 +274,7 @@ async def test_first_party_linked_greenhouse_root_enumerates_bound_jobs(
     ])
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(
             source_url,
@@ -377,7 +377,7 @@ async def test_first_party_listing_receipt_does_not_autoapprove(monkeypatch):
     ])
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(source_url, "contradicted")
 
@@ -448,7 +448,7 @@ async def test_first_party_careers_page_without_job_links_stops_before_stage3(
     ])
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(source_url, "unable_to_verify")
 
@@ -498,7 +498,7 @@ async def test_unverified_careers_domain_cannot_supply_listing_receipt(
     ])
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(source_url, "unable_to_verify")
 
@@ -575,7 +575,7 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
                 + "Current public careers information. " * 20
             )
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(
             source_url,

@@ -2162,6 +2162,18 @@ class RunContext:
     # agent reasoning. Absent on every round created without the policy.
     reasoning_capture_policy: Optional[str] = None
     reasoning_route_registry: Optional[Mapping[str, Any]] = None
+    # Separate frozen opt-in: an older scorer must keep its exact requests,
+    # even when the sourcing round already requires full thinking.
+    judge_reasoning_capture_policy: Optional[str] = None
+    judge_reasoning_route_registry: Optional[Mapping[str, Any]] = None
+
+
+def _reasoning_contract(context: RunContext) -> Tuple[Optional[str], Optional[Mapping[str, Any]]]:
+    if getattr(context, "kind", "execute") == "score":
+        return (getattr(context, "judge_reasoning_capture_policy", None),
+                getattr(context, "judge_reasoning_route_registry", None))
+    return (getattr(context, "reasoning_capture_policy", None),
+            getattr(context, "reasoning_route_registry", None))
 
 
 @dataclass(frozen=True)
@@ -4684,6 +4696,8 @@ class Broker:
         source_content_fallback: bool = False,
         source_content_response_url: Optional[str] = None,
     ) -> BrokerResult:
+        capture_policy, capture_registry = _reasoning_contract(context)
+        full_thinking = capture_policy == reasoning_capture.POLICY
         operation = (operations.OPERATIONS.get(operation_id)
                      or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
         if operation is None:
@@ -4696,8 +4710,7 @@ class Broker:
         try:
             normalized = operations.validate_operation_request(
                 operation_id, parameters, deepline_catalog=context.deepline_catalog,
-                allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
-                                     and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
+                allow_full_thinking=full_thinking,
             )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
@@ -4834,8 +4847,7 @@ class Broker:
             try:
                 effective_normalized = operations.validate_operation_request(
                     effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
-                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
-                                         and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
+                    allow_full_thinking=full_thinking,
                 )
             except operations.OperationError:
                 # Distinguish an absent frozen score route from malformed input.
@@ -4915,15 +4927,14 @@ class Broker:
                 # holds this amount; historical policies keep their rules.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(
                     effective_normalized, kind=getattr(context, "kind", "execute"),
-                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
-                        and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY))
-                if getattr(context, "kind", "execute") == "execute":
+                    allow_full_thinking=full_thinking)
+                if getattr(context, "kind", "execute") == "execute" or full_thinking:
                     # Before hashing: identity, capture and the sent body all
                     # bind the reasoning parameters actually requested.
                     effective_normalized, reasoning_annotation = agent_reasoning_parameters(
                         effective_operation_id, effective_normalized,
-                        policy=getattr(context, "reasoning_capture_policy", None),
-                        registry=getattr(context, "reasoning_route_registry", None),
+                        policy=capture_policy,
+                        registry=capture_registry,
                         deepline_catalog=context.deepline_catalog,
                     )
                     max_output_tokens = int(effective_normalized.get(
@@ -4971,6 +4982,11 @@ class Broker:
                             component: format(value.normalize(), "f")
                             for component, value in route_prices.items()
                         },
+                        industry_schema_order=(
+                            getattr(context, "kind", "execute") == "score"
+                            and effective_operation_id == "openrouter.chat"
+                            and normalized["model"] == self._judge_model_roles.get("industry_evidence_review")
+                        ),
                     )
                 amount = _max_openrouter_cost_for_pricing(
                     (
@@ -6228,7 +6244,7 @@ class Broker:
         transport_elapsed_ms: Optional[int] = None
 
         def retain_transport_timing(document: Dict[str, Any]) -> None:
-            if (getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY
+            if ((full_thinking or getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY)
                     and transport_elapsed_ms is not None):
                 _retain_broker_observations(document, {
                     "transport_elapsed_ms": transport_elapsed_ms,

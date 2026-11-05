@@ -6209,6 +6209,10 @@ class ArenaService:
             # The worker's request validator receives the frozen round policy
             # through the gateway lease, never through a miner operation frame.
             lease["reasoning_capture_policy"] = reasoning_capture.POLICY
+        if (response.get("kind") == "score"
+                and (configuration.get("scorer_policy") or {}).get("env_bindings", {}).get(
+                    "ARENA_JUDGE_REASONING_CAPTURE_POLICY") == reasoning_capture.POLICY):
+            lease["judge_reasoning_capture_policy"] = reasoning_capture.POLICY
         if configuration.get("deepline_catalog") is not None:
             lease["deepline_catalog"] = configuration["deepline_catalog"]
         checkpoint_policy = configuration.get("checkpoint_deadline_policy")
@@ -6374,6 +6378,9 @@ class ArenaService:
             deepline_catalog=configuration.get("deepline_catalog"),
             reasoning_capture_policy=capture_configuration.get("reasoning_capture_policy"),
             reasoning_route_registry=capture_configuration.get("reasoning_route_registry"),
+            judge_reasoning_capture_policy=(configuration.get("scorer_policy") or {}).get(
+                "env_bindings", {}).get("ARENA_JUDGE_REASONING_CAPTURE_POLICY"),
+            judge_reasoning_route_registry=configuration.get("reasoning_route_registry"),
         )
 
     def handle_signal_judgment(
@@ -7418,15 +7425,14 @@ class ArenaService:
         limits = (contracts.RESPONSES_PROVIDER_FRAME_LIMITS
                   if frame["operation_id"] == "openrouter.responses" else contracts.PROVIDER_FRAME_LIMITS)
         # Decode only a bounded candidate before resolving its existing lease.
-        # The frozen execute policy, never a caller hint, admits larger history.
+        # The frozen run-role policy, never a caller hint, admits larger history.
         candidate_limits = limits
         if frame["operation_id"] in ("openrouter.chat", "openrouter.responses"):
             candidate_limits = (contracts.FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS
                 if frame["operation_id"] == "openrouter.responses" else contracts.FULL_THINKING_PROVIDER_FRAME_LIMITS)
         contracts.check_strict_document(frame, candidate_limits)
         run, context = self._run_context(run_id, lease_token)
-        if not (getattr(context, "kind", "execute") == "execute"
-                and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY):
+        if broker_module._reasoning_contract(context)[0] != reasoning_capture.POLICY:
             contracts.check_strict_document(frame, limits)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])

@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -281,7 +282,7 @@ def run_all_prechecks(signal: Dict[str, Any],
 # Layer 4 — LLM judge
 # ---------------------------------------------------------------------------
 
-JUDGE_MODEL = "openai/gpt-6-luna"
+JUDGE_MODEL = os.environ.get("ARENA_INTENT_SIGNAL_MODEL", "openai/gpt-6-luna")
 
 JUDGE_SYSTEM_PROMPT = """You are a strict intent-signal auditor for a B2B sales platform. A miner submitted an intent signal — (URL, claim description, matched buyer ICP signal) — and you must judge whether the URL content genuinely supports the claim AND the claim genuinely fulfills the buyer's ICP signal.
 
@@ -490,6 +491,8 @@ async def _call_openrouter_once(payload: Dict[str, Any],
     }
 
     owns_client = client is None
+    from qualification.scoring.openrouter_options import prepare_judge_request, judge_reasoning_enabled
+    path, payload = prepare_judge_request(payload)
     if owns_client:
         client = httpx.AsyncClient(timeout=_OPENROUTER_TIMEOUT)
 
@@ -498,7 +501,7 @@ async def _call_openrouter_once(payload: Dict[str, Any],
             # Explicit per-request timeout so a caller-supplied client without
             # a configured timeout cannot cause this call to hang indefinitely.
             response = await client.post(
-                _OPENROUTER_URL, headers=headers, json=payload,
+                "https://openrouter.ai/api/v1" + path, headers=headers, json=payload,
                 timeout=_OPENROUTER_TIMEOUT,
             )
         except httpx.TimeoutException:
@@ -538,6 +541,8 @@ async def _call_openrouter_once(payload: Dict[str, Any],
         return None, "openrouter returned empty choices array", True
 
     first = choices[0] or {}
+    if judge_reasoning_enabled() and first.get("finish_reason") != "stop":
+        return None, "judge_response_incomplete", True
     content = ((first.get("message") or {}).get("content") or "").strip()
     if not content:
         return None, "model returned empty content", True

@@ -32,6 +32,9 @@ DEFAULT_JUDGE_MODELS = {
     "role_batch_check": "google/gemini-3.5-flash-lite",
     "industry_evidence_review": "openai/gpt-6.1-sol",
 }
+# A prospective model migration supplies these exact approved routes. Empty
+# preserves existing policies until its real-provider validation is complete.
+DEFAULT_JUDGE_PROVIDER_ROUTES: Dict[str, str] = {}
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "QUALIFICATION_OPENROUTER_API_KEY",
@@ -89,9 +92,13 @@ def build_scorer_policy(
     normalize_intent_scale: bool = False,
     fit_fp_receipt_authority: bool = False,
     evidence_judgment_cache: bool = False,
+    judge_provider_routes: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
+    routes = (dict(DEFAULT_JUDGE_PROVIDER_ROUTES)
+              if judge_provider_routes is None and dict(judge_models) == DEFAULT_JUDGE_MODELS
+              else dict(judge_provider_routes or {}))
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
@@ -110,6 +117,10 @@ def build_scorer_policy(
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
         "env_bindings": {
+            **({
+                contracts.JUDGE_REASONING_CAPTURE_BINDING: "full_generated_thinking_v1",
+                contracts.JUDGE_PROVIDER_ROUTES_BINDING: json.dumps(routes, sort_keys=True, separators=(",", ":")),
+            } if routes else {}),
             **({
                 contracts.SCORE_NORMALIZATION_BINDING:
                     contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
@@ -150,6 +161,11 @@ def apply_policy_to_environment(
         "intent_three_stage_stage3"
     )
     model_bindings = {
+        "ARENA_COMPANY_REVERIFY_MODEL": models.get("company_fit_reverification"),
+        "INTENT_THREE_STAGE_S1_MODEL": models.get("company_fit_reverification"),
+        "INTENT_THREE_STAGE_S3_MODEL": models.get("intent_three_stage_stage3"),
+        "ARENA_INTENT_SIGNAL_MODEL": models.get("intent_signal_judge"),
+        "ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL": evidence_model,
         "ARENA_INTENT_EVIDENCE_MODEL": evidence_model,
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": models.get("intent_details_review"),
         "ARENA_ROLE_BATCH_MODEL": models.get("role_batch_check"),
@@ -160,6 +176,9 @@ def apply_policy_to_environment(
     if bindings.get("ARENA_INDUSTRY_EVIDENCE_MODEL", industry_model) != industry_model:
         raise ScorerPolicyConflict("industry reviewer conflicts with the frozen model policy")
     bindings["ARENA_INDUSTRY_EVIDENCE_MODEL"] = industry_model
+    # Ambient settings cannot upgrade an older frozen round's capture or route.
+    for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING, contracts.JUDGE_PROVIDER_ROUTES_BINDING):
+        bindings.setdefault(name, "")
     for name, model in model_bindings.items():
         if model:
             if bindings.get(name, model) != model:

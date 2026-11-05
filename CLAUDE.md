@@ -1,3 +1,14 @@
+## Scoped authorization: November 5 ordered OpenRouter cost reads
+
+The user authorized the smallest fix for repeated active OpenRouter cost-read
+failures. Migration632 may order thin candidates before the unchanged full
+billing proofs, reusing the existing indexes and implied non-null call binding.
+Preserve exact outputs, errors, cursor/run/round scope, ACLs, all costs and data.
+Add no index, provider call, timeout, retry or dependency. Internal agents may
+implement, test and push an isolated PR after independent review. The root
+coordinator owns merge, exact committed SQL application and live verification.
+Internal agents must not change production or renew credentials.
+
 ## Scoped authorization: Arena evidence-bound judge caching
 
 The user authorized the smallest permanent improvement to existing Arena judge

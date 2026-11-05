@@ -220,3 +220,39 @@ def test_nonstore_exception_cannot_claim_store_diagnostics(monkeypatch):
         assert CANARY not in str(span) + str(error)
     finally:
         client.close()
+
+
+@pytest.mark.parametrize('message,expected', [
+    # The Arena's own refusal sentinels name a branch and carry no data.
+    ('lab_arena_reward_slots_mismatch', 'lab_arena_reward_slots_mismatch'),
+    ('lab_arena_slot_policy_invalid', 'lab_arena_slot_policy_invalid'),
+    # Anything else -- including a Postgres message that quotes real input --
+    # is dropped rather than projected.
+    (CANARY, None),
+    ('duplicate key value violates unique constraint "x"', None),
+    ('lab_arena_' + 'a' * 65, None),
+    ('LAB_ARENA_REWARD_SLOTS_MISMATCH', None),
+    ('prefix lab_arena_reward_slots_mismatch', None),
+    (None, None),
+])
+def test_refusal_sentinel_is_the_only_message_projected(message, expected):
+    def handle(request):
+        return httpx.Response(400, json={'code': '22023', 'message': message})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = PostgrestTransport('https://db.example', service_key='sb_secret_test', http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            store.rpc('lab_arena_reward_slot_snapshot', {'p_round_id': 'arena-2026-11-05', 'p_slot_policy': {}})
+    assert caught.value.store_error.get('reason') == expected
+    assert caught.value.store_error['code'] == '22023'
+    assert CANARY not in json.dumps(caught.value.store_error)
+
+
+def test_projected_reason_is_a_conformant_provider_span_field():
+    """A reason must survive the span boundary guard, not be dropped by it."""
+    metadata = {
+        'operation': 'rpc', 'resource': 'lab_arena_reward_slot_snapshot',
+        'http_status': 400, 'code': '22023',
+        'reason': 'lab_arena_reward_slots_mismatch',
+    }
+    assert safe_store_error_metadata(metadata) == metadata
+    assert 'arena.store_reason' in STORE_ERROR_SPAN_FIELDS

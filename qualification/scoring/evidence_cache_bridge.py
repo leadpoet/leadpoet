@@ -6,13 +6,31 @@ from copy import deepcopy
 import os
 from typing import Any, Mapping
 
-from lab_arena.contracts import document_hash
+from lab_arena.contracts import canonical_json, document_hash
+from lab_arena.signal_cache_control import MAX_BYTES, SCHEMA as CONTROL_SCHEMA
 from qualification.scoring.signal_judgment_cache import (
     SignalJudgmentCacheError, invoke_exchange,
 )
 from qualification.scoring.intent_evidence_reuse import reusable_evidence_terminal_judgment
 
 POLICY = "evidence_judgment_v2"
+# Leave room for both the native result and its final scored trace. An exact
+# check below still releases oversized replies rather than affecting scoring.
+_NATIVE_COMPLETION_HEADROOM_BYTES = 131_072
+
+
+def _control_bytes(request):
+    return len(canonical_json({"schema_version": CONTROL_SCHEMA,
+        "request": {**request, "company_index": 4}}).encode("utf-8"))
+
+
+def _native_matches_raw(native, raw):
+    verdict = raw.get("judge_verdict") if isinstance(raw, Mapping) else None
+    trace = verdict.get("verification_trace") if isinstance(verdict, Mapping) else None
+    return (isinstance(native, Mapping) and isinstance(trace, Mapping)
+        and all(trace.get(field) == native.get(source) for field, source in (
+            ("intent_verdict", "verdict"), ("stage1", "stage1"),
+            ("stage3", "stage3"), ("final_disposition", "decision"))))
 
 
 def enabled() -> bool:
@@ -60,6 +78,7 @@ class SignalEvidenceExchange:
                 or not isinstance(value.get("verifier_result"), Mapping)
                 or not isinstance(value.get("claim"), Mapping)
                 or value.get("evidence_input") != self.request["evidence_input"]
+                or not _native_matches_raw(value.get("verifier_result"), value.get("raw_judgment"))
                 or not reusable_evidence_terminal_judgment(value.get("raw_judgment"),
                     evidence_input=self.request["evidence_input"], **self.expected)):
             raise SignalJudgmentCacheError("evidence signal authority is invalid")
@@ -75,6 +94,15 @@ class SignalEvidenceExchange:
         evidence, claim = callback_request["evidence_input"], callback_request["claim"]
         self.request = {**self.base, "evidence_input": deepcopy(evidence),
                         "evidence_hash": document_hash(evidence), "claim": deepcopy(claim)}
+        estimated_complete = {**self.request, "operation": "complete",
+            "reference": {"cache_key": "sha256:" + "0" * 64,
+                "signal_input_hash": "sha256:" + "0" * 64, "authority_slot": 0},
+            "judgment": {"schema_version": "leadpoet.lab_arena.signal_evidence.v2",
+                "evidence_input": evidence, "claim": claim,
+                "raw_judgment": {}, "verifier_result": {}}}
+        if _control_bytes(estimated_complete) + _NATIVE_COMPLETION_HEADROOM_BYTES > MAX_BYTES:
+            self.request = None
+            return {"status": "miss"}
         candidates = await invoke_exchange(self.exchange, {**self.request, "operation": "candidates"})
         rows = candidates.get("candidates") if isinstance(candidates, Mapping) else None
         if not isinstance(rows, list) or len(rows) > 8:
@@ -121,14 +149,19 @@ class SignalEvidenceExchange:
             if raw_judgment != self.hit["raw_judgment"]:
                 raise SignalJudgmentCacheError("reused verifier changed the terminal signal")
             return deepcopy(self.reference)
-        terminal = self.pending is not None and reusable_evidence_terminal_judgment(
+        terminal = _native_matches_raw(self.pending, raw_judgment) and reusable_evidence_terminal_judgment(
             raw_judgment, evidence_input=self.request["evidence_input"], **self.expected)
         envelope = ({"schema_version": "leadpoet.lab_arena.signal_evidence.v2",
                      "raw_judgment": deepcopy(raw_judgment), "verifier_result": self.pending,
                      "evidence_input": self.request["evidence_input"], "claim": self.request["claim"]}
                     if terminal else None)
-        result = await invoke_exchange(self.exchange, {**self.request, "operation": "complete",
-                                      "reference": self.reference, "judgment": envelope})
+        completion = {**self.request, "operation": "complete",
+                      "reference": self.reference, "judgment": envelope}
+        if terminal and _control_bytes(completion) > MAX_BYTES:
+            await self.release()
+            self.reference = None
+            return None
+        result = await invoke_exchange(self.exchange, completion)
         if (result.get("status") not in ({"stored", "existing"} if terminal else {"released"})
                 or result.get("reference") != self.reference):
             raise SignalJudgmentCacheError("evidence signal completion is invalid")

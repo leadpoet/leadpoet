@@ -1413,6 +1413,7 @@ SCORER_POLICY_FIELDS = (
     F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
     F("company_judgment_policy", "str", required=False, choices=("company_judgment_v1",)),
     F("signal_judgment_policy", "str", required=False, choices=("signal_judgment_v1",)),
+    F("evidence_judgment_policy", "str", required=False, choices=("evidence_judgment_v2",)),
     F("intent_details_policy", "str", required=False, choices=("intent_details_v1",)),
     F("fp_penalty_points", "float", minimum=0, maximum=10),
     F("fp_unverified_primary_penalty_points", "float", minimum=0, maximum=10),
@@ -1431,6 +1432,8 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     policy = validate_document(document, SCORER_POLICY_FIELDS)
     if policy.get("signal_judgment_policy") and policy.get("company_judgment_policy") != "company_judgment_v1":
         raise ArenaContractError("signal judgments require company judgment reuse")
+    if policy.get("evidence_judgment_policy") and policy.get("signal_judgment_policy") != "signal_judgment_v1":
+        raise ArenaContractError("evidence judgments require signal judgment reuse")
     if policy.get("company_judgment_policy") and (policy.get("company_quality_policy") or policy["scoring_adapter_version"] != "qualification_integrity_v2"):
         raise ArenaContractError("legacy company judgments require company-only integrity scoring")
     if policy.get("company_quality_policy") and policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
@@ -1446,6 +1449,9 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     for key, value in policy["env_bindings"].items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ArenaContractError("env_bindings must map strings to strings")
+    evidence_policy = policy.get("evidence_judgment_policy", "")
+    if policy["env_bindings"].get("ARENA_EVIDENCE_JUDGMENT_POLICY", evidence_policy) != evidence_policy:
+        raise ArenaContractError("evidence reuse binding differs from frozen policy")
     if SCORE_NORMALIZATION_BINDING in policy["env_bindings"]:
         if policy["env_bindings"][SCORE_NORMALIZATION_BINDING] != AVAILABLE_INTENT_CAP_NORMALIZATION:
             raise ArenaContractError("unsupported score normalization")

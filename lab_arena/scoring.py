@@ -88,6 +88,7 @@ def build_scorer_policy(
     provider_observation_handoff: bool = False,
     normalize_intent_scale: bool = False,
     fit_fp_receipt_authority: bool = False,
+    evidence_judgment_cache: bool = False,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
@@ -96,6 +97,8 @@ def build_scorer_policy(
         "scoring_adapter_version": scoring_adapter_version,
         **({"company_quality_policy": "company_quality_v1"} if company_quality else {}),
         **({"company_judgment_policy": "company_judgment_v1"} if company_judgment_cache else {}),
+        **({"signal_judgment_policy": "signal_judgment_v1",
+            "evidence_judgment_policy": "evidence_judgment_v2"} if evidence_judgment_cache else {}),
         **({"intent_details_policy": "intent_details_v1"} if intent_details else {}),
         "fp_penalty_points": 10.0,
         "fp_unverified_primary_penalty_points": 10.0,
@@ -138,6 +141,9 @@ def apply_policy_to_environment(
 
     validated = contracts.validate_scorer_policy(policy)
     bindings = dict(validated["env_bindings"])
+    # Absence in a historical policy disables evidence reuse even in a newer
+    # image. An ambient value cannot broaden that frozen round's cache keys.
+    bindings["ARENA_EVIDENCE_JUDGMENT_POLICY"] = validated.get("evidence_judgment_policy", "")
     # A new image can serve an older round. Preserve its frozen reviewer.
     models = validated["judge_models"]
     evidence_model = models.get("intent_fetched_evidence") or models.get(
@@ -756,7 +762,10 @@ def _score_legacy_company_work_item(
             signal_exchange = getattr(scorer, "_signal_judgment_exchange", None)
             async def exchange_signal(request):
                 return await signal_exchange({**request, "company_index": index})
-            with install_exchange(exchange_signal) if signal_exchange is not None else nullcontext():
+            from qualification.scoring.evidence_cache_bridge import enabled, install_company_fit_exchange
+            with (install_exchange(exchange_signal) if signal_exchange is not None else nullcontext()), \
+                 (install_company_fit_exchange(exchange_signal)
+                  if signal_exchange is not None and enabled() else nullcontext()):
                 rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
                                        _original_company_indexes=[index])
             if len(rows) != 1:

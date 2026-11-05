@@ -612,6 +612,22 @@ def _validate_target_tools(body, target, op):
                      for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
 
 
+def _outbound_body_exact(call):
+    """Prove an existing wire digest without rewriting its stored identity."""
+    outbound = (call.get('request') or {}).get('outbound') or {}
+    body, digest = outbound.get('body'), outbound.get('body_sha256')
+    try:
+        if digest == (contracts.hash_bytes(b'') if body is None else contracts.document_hash(body)):
+            return True
+        # Only the native industry Chat serializer has a second wire order.
+        # Reproduce its exact bytes; an arbitrary JSON permutation is rejected.
+        return (call.get('operation_id') == 'openrouter.chat' and isinstance(body, dict)
+                and digest == contracts.hash_bytes(operations.serialize_json_body(
+                    body, industry_schema_order=True)))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def _outbound_request_exact(call):
     """Check the retained provider route and the existing outbound body hash."""
     request = call.get('request') or {}
@@ -622,9 +638,7 @@ def _outbound_request_exact(call):
             and outbound.get('host') == (operation.outbound_host or operation.host)
             and outbound.get('path') == (operation.outbound_path or operations._render_path(
                 operation, request.get('hashed_parameters') or {}))
-            and outbound.get('body_sha256') == (
-                contracts.hash_bytes(b'') if outbound.get('body') is None
-                else contracts.document_hash(outbound['body'])))
+            and _outbound_body_exact(call))
 
 
 def _model_request(example, call, *, worker_proofs=None, role='source'):
@@ -654,7 +668,7 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
         _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
     outbound = request.get('outbound') or {}
     body = outbound.get('body')
-    _require(isinstance(body, dict) and contracts.document_hash(body) == outbound.get('body_sha256'), 'outbound_body_hash_mismatch')
+    _require(isinstance(body, dict) and _outbound_body_exact(call), 'outbound_body_hash_mismatch')
     _require(outbound.get('method') == 'POST' and outbound.get('host') == 'openrouter.ai'
              and outbound.get('path') == ('/api/v1/responses' if op.endswith('responses') else '/api/v1/chat/completions'), 'outbound_identity_mismatch')
     _require(isinstance(body.get('model'), str) and body['model']

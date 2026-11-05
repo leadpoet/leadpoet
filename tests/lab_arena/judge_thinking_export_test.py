@@ -100,6 +100,47 @@ def test_judge_capture_uses_current_scorer_even_when_baseline_capture_is_legacy(
     assert len(got) == 1
 
 
+@pytest.mark.parametrize('damage', [None, 'body', 'hash', 'required', 'schema_name', 'other_order'])
+def test_industry_wire_hash_survives_canonical_storage_without_rewriting_receipt(damage):
+    import json
+    from lab_arena import operations
+    example = judge_example()
+    call = example['provider_calls'][-1]
+    body = call['request']['outbound']['body']
+    body['response_format'] = {'type': 'json_schema', 'json_schema': {
+        'name': 'industry_proposal', 'strict': True, 'schema': {
+            'type': 'object', 'properties': {'z_fact': {'type': 'string'}, 'a_verdict': {'type': 'string'}},
+            'required': ['z_fact', 'a_verdict'], 'additionalProperties': False}}}
+    wire = operations.build_outbound_request(
+        'openrouter.chat', body, allow_full_thinking=True, industry_schema_order=True,
+        openrouter_provider_policy={'data_collection': 'deny', 'zdr': True, 'allow_fallbacks': False,
+            'only': ['route-a'], 'require_parameters': True,
+            'max_price': {'prompt': 1, 'completion': 1, 'request': 0}}).body
+    # The private request object is canonically serialized on disk. The
+    # original wire digest still proves the exact provider-visible JSON order.
+    outbound = call['request']['outbound']
+    outbound.update(body=json.loads(contracts.canonical_json(json.loads(wire))),
+                    body_sha256=contracts.hash_bytes(wire))
+    assert contracts.document_hash(outbound['body']) != outbound['body_sha256']
+    if damage == 'body':
+        outbound['body']['messages'][0]['content'] = 'Changed content'
+    elif damage == 'hash':
+        outbound['body_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'required':
+        outbound['body']['response_format']['json_schema']['schema']['required'].reverse()
+    elif damage == 'schema_name':
+        outbound['body']['response_format']['json_schema']['name'] = 'other_schema'
+    elif damage == 'other_order':
+        arbitrary = dict(reversed(list(json.loads(wire).items())))
+        outbound['body_sha256'] = contracts.hash_bytes(json.dumps(
+            arbitrary, separators=(',', ':'), ensure_ascii=False).encode())
+    seal(example)
+    before = deepcopy(example)
+    got, _ = records(example, role='judge')
+    assert len(got) == (1 if damage is None else 0)
+    assert example == before
+
+
 def test_bad_role_fails_instead_of_silently_exporting_sources():
     with pytest.raises(ValueError, match='invalid_target_role'):
         records(judge_example(), role='all')

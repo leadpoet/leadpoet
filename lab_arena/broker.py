@@ -2168,8 +2168,25 @@ class RunContext:
     judge_reasoning_route_registry: Optional[Mapping[str, Any]] = None
 
 
-def _reasoning_contract(context: RunContext) -> Tuple[Optional[str], Optional[Mapping[str, Any]]]:
+def _judge_reasoning_exception(context: RunContext, model: Any, operation_id: Any) -> Optional[Dict[str, Any]]:
+    """Only gateway-owned frozen scorer state may exempt this exact model."""
+    if (getattr(context, "kind", "execute") != "score"
+            or context.judge_reasoning_capture_policy != reasoning_capture.POLICY
+            or operation_id != "openrouter.chat"):
+        return None
+    try:
+        policy = contracts.validate_scorer_policy((context.judgment_cache_scope or {})["scorer_policy"])
+        entry = contracts.judge_reasoning_exceptions(policy).get(model)
+        return ({**entry, "scorer_policy_sha256": contracts.document_hash(policy)} if entry else None)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None  # Missing or invalid authority never weakens full capture.
+
+
+def _reasoning_contract(context: RunContext, model: Any = None,
+                        operation_id: Any = None) -> Tuple[Optional[str], Optional[Mapping[str, Any]]]:
     if getattr(context, "kind", "execute") == "score":
+        if model is not None and _judge_reasoning_exception(context, model, operation_id) is not None:
+            return None, None
         return (getattr(context, "judge_reasoning_capture_policy", None),
                 getattr(context, "judge_reasoning_route_registry", None))
     return (getattr(context, "reasoning_capture_policy", None),
@@ -4696,7 +4713,7 @@ class Broker:
         source_content_fallback: bool = False,
         source_content_response_url: Optional[str] = None,
     ) -> BrokerResult:
-        capture_policy, capture_registry = _reasoning_contract(context)
+        capture_policy, capture_registry = _reasoning_contract(context, parameters.get("model"), operation_id)
         full_thinking = capture_policy == reasoning_capture.POLICY
         operation = (operations.OPERATIONS.get(operation_id)
                      or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
@@ -4839,6 +4856,9 @@ class Broker:
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
+            capture_policy, capture_registry = _reasoning_contract(
+                context, effective_parameters.get("model"), effective_operation_id)
+            full_thinking = capture_policy == reasoning_capture.POLICY
             source_html_profile = (
                 route is not None and route.adapter == "generic_http_raw_html"
                 and route.compatibility_version == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
@@ -4939,6 +4959,17 @@ class Broker:
                     )
                     max_output_tokens = int(effective_normalized.get(
                         "max_output_tokens", effective_normalized.get("max_tokens")))
+                exception = _judge_reasoning_exception(
+                    context, effective_normalized.get("model"), effective_operation_id)
+                if exception is not None:
+                    reasoning_annotation = {
+                        "policy": "provider_exposed_only", "semantic_class": "provider_exposed_only",
+                        "requested": False, "reviewed_route": False,
+                        "full_thinking_available": False,
+                        "model_id": effective_normalized["model"],
+                        "exception_roles": exception["roles"], "exception_reason": exception["reason"],
+                        "scorer_policy_sha256": exception["scorer_policy_sha256"],
+                    }
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
                 # passes that are absent from the caller body. Keep this

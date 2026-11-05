@@ -1435,6 +1435,41 @@ AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
 JUDGE_REASONING_CAPTURE_BINDING = "ARENA_JUDGE_REASONING_CAPTURE_POLICY"
 JUDGE_PROVIDER_ROUTES_BINDING = "ARENA_JUDGE_PROVIDER_ROUTES"
 JUDGE_REQUEST_OPTIONS_BINDING = "ARENA_JUDGE_REQUEST_OPTIONS"
+JUDGE_REASONING_EXCEPTIONS_BINDING = "ARENA_JUDGE_REASONING_EXCEPTIONS"
+
+
+def validate_judge_reasoning_exceptions(raw: Any, models: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Only the quality-gated proprietary industry reviewer may lack full text.
+
+    This grants no route approval. Sol retains its existing host routing; every
+    other frozen model still requires its exact reviewed reasoning route.
+    """
+    try:
+        exceptions = json.loads(raw)
+        model = "openai/gpt-6.1-sol"
+        roles = ["industry_evidence_review"]
+        if not isinstance(exceptions, dict) or set(exceptions) != {model}:
+            raise ValueError
+        entry = exceptions[model]
+        if (not isinstance(entry, dict) or set(entry) != {"roles", "reason"}
+                or entry["roles"] != roles or not isinstance(entry["reason"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{1,79}", entry["reason"]) is None):
+            raise ValueError
+        if models is not None and ([role for role, value in models.items() if value == model] != roles):
+            raise ValueError
+        return exceptions
+    except (TypeError, ValueError, KeyError, AttributeError):
+        raise ArenaContractError("invalid frozen judge reasoning exceptions") from None
+
+
+def judge_reasoning_exceptions(policy: Mapping[str, Any]) -> Dict[str, Any]:
+    bindings = policy.get("env_bindings") or {}
+    raw = bindings.get(JUDGE_REASONING_EXCEPTIONS_BINDING)
+    if raw is None:
+        return {}
+    if bindings.get(JUDGE_REASONING_CAPTURE_BINDING) != "full_generated_thinking_v1":
+        raise ArenaContractError("judge reasoning exceptions require frozen thinking policy")
+    return validate_judge_reasoning_exceptions(raw, policy.get("judge_models") or {})
 
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
@@ -1483,6 +1518,8 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("evidence reuse binding differs from frozen policy")
     capture = policy["env_bindings"].get(JUDGE_REASONING_CAPTURE_BINDING)
     routes_raw = policy["env_bindings"].get(JUDGE_PROVIDER_ROUTES_BINDING)
+    exceptions = judge_reasoning_exceptions(policy)
+    full_models = None
     if capture is not None or routes_raw is not None:
         if capture != "full_generated_thinking_v1" or not routes_raw:
             raise ArenaContractError("judge thinking requires a frozen policy and provider routes")
@@ -1494,18 +1531,19 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
         if (not required_roles <= set(policy["judge_models"])
                 or any(not isinstance(v, str) or not v.strip() for v in policy["judge_models"].values())):
             raise ArenaContractError("judge thinking requires every frozen model role")
+        full_models = set(policy["judge_models"].values()) - set(exceptions)
         try:
             routes = json.loads(routes_raw)
         except (TypeError, ValueError):
             raise ArenaContractError("invalid judge provider routes") from None
-        if (not isinstance(routes, dict) or set(routes) != set(policy["judge_models"].values())
+        if (not isinstance(routes, dict) or set(routes) != full_models
                 or any(not isinstance(v, str) or not v.strip() or len(v) > 128 for v in routes.values())):
             raise ArenaContractError("judge provider routes must cover the frozen model roles")
     options_raw = policy["env_bindings"].get(JUDGE_REQUEST_OPTIONS_BINDING)
     if options_raw is not None:
         try:
             options = json.loads(options_raw)
-            if capture != "full_generated_thinking_v1" or not isinstance(options, dict) or set(options) != set(policy["judge_models"].values()):
+            if capture != "full_generated_thinking_v1" or not isinstance(options, dict) or set(options) != full_models:
                 raise ValueError
             for option in options.values():
                 if not isinstance(option, dict) or set(option) != {"reasoning", "max_output_tokens"}:

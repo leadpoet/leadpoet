@@ -817,13 +817,19 @@ bound and no retries. A short or failed comparison remains a cache miss; its
 possible provider charge and later native judgment both count in cost checks.
 A separate comparison model or larger bound is not enabled by this change.
 
-No proprietary judge exception is enabled. The minimal proposed mechanism is
-an explicit frozen map of role to exception model, provider and reason, with
-thinking availability labelled unavailable. Its model must not also serve a
-full-thinking role, so the broker can apply the existing request boundary
-without ambiguous model authority. It would retain ordinary raw request/reply
-capture and price/privacy controls, and would never label summaries as full
-thinking. This proposal needs a separate decision and tests before activation.
+No proprietary judge exception is enabled by default. An explicit frozen
+`ARENA_JUDGE_REASONING_EXCEPTIONS` map can permit only `openai/gpt-6.1-sol`,
+with `roles: ["industry_evidence_review"]` and a nonempty reason code. This
+model cannot also serve another judge role. Provider routes and request options
+must cover exactly the remaining full-thinking models. Sol Chat requests keep
+the existing Azure regional failover and conservative price/privacy controls;
+the exception grants no Responses or open-model route bypass. Raw exposed text,
+summaries, tool evidence and judgment links remain captured. Sol full thinking
+is labelled unavailable and excluded from full-thinking targets. Independently
+verified open-model turn targets remain exportable with unreviewed quality and
+explicit partial judge-thinking completeness. Enabling this optional policy
+requires a separate reviewed activation decision; frozen older rounds retain
+their original policy.
 
 Start the service:
 

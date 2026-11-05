@@ -1323,14 +1323,37 @@ def _capture_configuration(example: Mapping[str, Any], role: str = 'source') -> 
         return baseline_reasoning.for_example(example)
     try:
         configuration = training_dataset.label_scorer_configuration(example)
-        policy = (configuration.get('scorer_policy') or {}).get('env_bindings', {}).get(
+        scorer_policy = configuration.get('scorer_policy') or {}
+        exceptions = contracts.judge_reasoning_exceptions(scorer_policy)
+        policy = scorer_policy.get('env_bindings', {}).get(
             'ARENA_JUDGE_REASONING_CAPTURE_POLICY')
     except (ValueError, TypeError, AttributeError):
         return {}  # Invalid label authority grants no reviewed judge route.
     return ({'reasoning_capture_policy': policy,
+             'judge_reasoning_exceptions': exceptions,
              'reasoning_route_registry': configuration.get(
                  'judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))}
             if policy == POLICY else {})
+
+
+def _judge_exception(example, call):
+    if (call.get('run_id') != example.get('score_run_id') or _role(example, call) != 'judge'
+            or call.get('operation_id') != 'openrouter.chat'):
+        return None
+    body = (((call.get('request') or {}).get('outbound') or {}).get('body') or {})
+    return _capture_configuration(example, 'judge').get('judge_reasoning_exceptions', {}).get(body.get('model'))
+
+
+def _call_coverage(example, call, registry, *, worker_proofs=None):
+    row = attempt_coverage(call, _role(example, call), registry, worker_proofs=worker_proofs)
+    exception = _judge_exception(example, call)
+    if exception is not None:
+        # Preserve the observed content class (summary/unproved text/empty).
+        # The frozen exception is not evidence of full thinking or a reviewed route.
+        row.update(full_thinking_available=False, exception_reason=exception['reason'],
+                   exception_roles=copy.deepcopy(exception['roles']),
+                   full_thinking_status='proprietary_thinking_unavailable')
+    return row
 
 
 def coverage(examples, *, role=None) -> dict:
@@ -1349,6 +1372,7 @@ def coverage(examples, *, role=None) -> dict:
         seen.add(source)
         bad = False
         has_text = False
+        partial_judge = False
         configuration = example.get("configuration") or {}
         registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         new_policy = training_coverage.MISSING_REASONING_SETTING in configuration
@@ -1364,8 +1388,12 @@ def coverage(examples, *, role=None) -> dict:
                 continue
             call_configuration = _capture_configuration(example, 'judge') if call_role == 'judge' else baseline_reasoning.for_example(example)
             call_registry = call_configuration.get('reasoning_route_registry')
-            row = attempt_coverage(call, call_role, call_registry)
+            row = _call_coverage(example, call, call_registry)
             full, _ = full_text_segments(call, call_role, call_registry)
+            exception = _judge_exception(example, call)
+            if exception is not None:
+                full = []
+                partial_judge = True
             attempts.append(row)
             counts[row["returned"]] += 1
             key = (row["role"], row["model_id"], row["requested_provider_route"], row["api"])
@@ -1376,6 +1404,10 @@ def coverage(examples, *, role=None) -> dict:
                                call.get('run_id') == example.get('score_run_id')
                                and call.get('operation_id') in reasoning_capture.OPERATIONS)
             full_text_calls += execution_model and bool(full)  # Raw exposed text inventory.
+            if exception is not None:
+                # This call stays in the raw inventory and label context, but
+                # cannot veto independently proven full-thinking turn targets.
+                continue
             full_round = call_configuration.get("reasoning_capture_policy") == POLICY
             failed = new_policy and verified_failed_attempt(example, call)
             omitted_truncation = False
@@ -1412,9 +1444,13 @@ def coverage(examples, *, role=None) -> dict:
         trajectories["with_full_thinking"] += has_text
         trajectories["eligible_without_disqualifying_capture"] += not bad
         trajectories["complete_full_thinking"] += bool(
-            not bad and has_text and (example.get("completeness") or {}).get("complete") is True)
+            not bad and has_text and not partial_judge
+            and (example.get("completeness") or {}).get("complete") is True)
+        if partial_judge:
+            trajectories["partial_judge_thinking"] += 1
         trajectories["selected_judge_full_thinking" if role == 'judge' else "selected_research_full_thinking"] += bool(
-            not bad and has_text and selected_research_evidence(example, role='judge' if role == 'judge' else 'source') is not None)
+            not bad and has_text and (role != 'judge' or not partial_judge)
+            and selected_research_evidence(example, role='judge' if role == 'judge' else 'source') is not None)
     return {"attempts": attempts, "returned_classes": dict(sorted(counts.items())),
             "distinct_verified_exports": len(seen),
             "saved_calls": sum(row["storage"] == "saved" for row in attempts),
@@ -1488,6 +1524,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
             segments, summary, opaque = _segments(response, operation)
             full, _ = full_text_segments({**call, "response": response}, _role(example, call), registry,
                                          worker_proofs=worker_proofs)
+            if _judge_exception(example, call) is not None:
+                full = []
             def add_segments(values):
                 for segment in values:
                     classification = ("summary" if "summary" in segment["field"] else
@@ -1585,8 +1623,7 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
                       **({"recovered_response_ref": copy.deepcopy(call["recovered_response_ref"])}
                          if call.get("recovered_response_ref") is not None else {}),
-                      "reasoning_coverage": attempt_coverage(call, _role(example, call), registry,
-                                                           worker_proofs=worker_proofs),
+                      "reasoning_coverage": _call_coverage(example, call, registry, worker_proofs=worker_proofs),
                       **({"target_omission_reason": "explicit_output_cap_private_response"}
                          if verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs) else {}),
                       **({"target_omission_reason": "inferred_output_cap_json_eof"}
@@ -2132,6 +2169,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
     scoped = {}
     coverage_reports = []
     coverage_sources = set()
+    coverage_by_source = {}
 
     def project_candidate(example, candidate):
         # The shared builder calls this while this one source is in memory.
@@ -2144,6 +2182,9 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         call = next((row for row in example.get("provider_calls") or []
                      if row.get("call_identity") == ref["call_identity"] and row.get("run_id") == ref["run_id"]), None)
         if call is None:
+            return
+        if role == 'judge' and _judge_exception(example, call) is not None:
+            reasons["proprietary_thinking_unavailable"] += 1
             return
         source = ref["example_hash"]
         if source not in scoped:
@@ -2186,6 +2227,9 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
                                    "route": copy.deepcopy(call["reasoning_capture"]),
                                    ("selected_judge_evidence" if role == 'judge' else "selected_research_evidence"): {
                                        "complete": not missing_inputs,
+                                       **({"judge_full_thinking_complete": coverage_by_source.get(
+                                           source, {}).get("trajectories", {}).get("complete_full_thinking") == 1}
+                                          if role == 'judge' else {}),
                                        **({"scope": "individual_model_request_result",
                                            "runtime_input_availability": "unavailable",
                                            "missing_runtime_input_run_ids": missing_inputs} if missing_inputs else
@@ -2206,6 +2250,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
                 if report["distinct_verified_exports"]:
                     coverage_sources.add(source)
                     coverage_reports.append(report)
+                    coverage_by_source[source] = report
             yield example
             del example
 

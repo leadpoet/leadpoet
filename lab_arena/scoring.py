@@ -95,6 +95,7 @@ def build_scorer_policy(
     evidence_judgment_cache: bool = False,
     judge_provider_routes: Optional[Mapping[str, str]] = None,
     judge_request_options: Optional[Mapping[str, Any]] = None,
+    judge_reasoning_exceptions: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
@@ -122,6 +123,9 @@ def build_scorer_policy(
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
         "env_bindings": {
+            **({contracts.JUDGE_REASONING_EXCEPTIONS_BINDING: json.dumps(
+                dict(judge_reasoning_exceptions), sort_keys=True, separators=(",", ":"))}
+               if judge_reasoning_exceptions is not None else {}),
             **({contracts.JUDGE_REQUEST_OPTIONS_BINDING: json.dumps(
                 dict(options), sort_keys=True, separators=(",", ":"))}
                if options is not None else {}),
@@ -186,7 +190,7 @@ def apply_policy_to_environment(
     bindings["ARENA_INDUSTRY_EVIDENCE_MODEL"] = industry_model
     # Ambient settings cannot upgrade an older frozen round's capture or route.
     for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING, contracts.JUDGE_PROVIDER_ROUTES_BINDING,
-                 contracts.JUDGE_REQUEST_OPTIONS_BINDING):
+                 contracts.JUDGE_REQUEST_OPTIONS_BINDING, contracts.JUDGE_REASONING_EXCEPTIONS_BINDING):
         bindings.setdefault(name, "")
     for name, model in model_bindings.items():
         if model:

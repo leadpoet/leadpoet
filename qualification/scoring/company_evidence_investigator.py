@@ -2913,7 +2913,7 @@ async def _review_industry_sources(
         finding['_industry_review']['reused_completed_packet'] = True
         return finding, '', 0
     payload = industry_classification.request_payload(packet, model=model, research=research)
-    if judge_reasoning_enabled():
+    if judge_reasoning_enabled(model):
         # This legacy packet default is host-owned, not an explicit caller
         # control. Let prepare_judge_request select the frozen model's mode.
         payload.pop("reasoning", None)

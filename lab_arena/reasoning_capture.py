@@ -135,6 +135,9 @@ def load_registry() -> Dict[str, Any]:
 
 def validate_judge_registry(registry: Any, scorer_policy: Mapping[str, Any]) -> Dict[str, Any]:
     """Freeze judge routes independently of sourcing and its baseline gates."""
+    from lab_arena import contracts
+    scorer_policy = contracts.validate_scorer_policy(scorer_policy)
+    exceptions = contracts.judge_reasoning_exceptions(scorer_policy)
     frozen = validate_registry(registry)
     bindings = scorer_policy.get("env_bindings") or {}
     if bindings.get("ARENA_JUDGE_REASONING_CAPTURE_POLICY") != POLICY:
@@ -146,6 +149,8 @@ def validate_judge_registry(registry: Any, scorer_policy: Mapping[str, Any]) -> 
     options_raw = bindings.get("ARENA_JUDGE_REQUEST_OPTIONS")
     options = json.loads(options_raw) if options_raw is not None else {}
     for role, model in models.items():
+        if model in exceptions:
+            continue
         # Company lookup also runs a Chat tool controller. Conditional social
         # and podcast Stage 3 paths need hosted search as well as ordinary Chat.
         apis = ({"openrouter.chat", "openrouter.responses"} if role in {

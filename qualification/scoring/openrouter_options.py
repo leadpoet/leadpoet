@@ -13,9 +13,15 @@ JUDGE_REASONING_POLICY = "full_generated_thinking_v1"
 JUDGE_REASONING_TIMEOUT_SECONDS = 120
 
 
-def judge_reasoning_enabled() -> bool:
+def judge_reasoning_enabled(model: str | None = None) -> bool:
     """The scorer environment is bound from the round's frozen policy."""
-    return os.getenv("ARENA_JUDGE_REASONING_CAPTURE_POLICY") == JUDGE_REASONING_POLICY
+    if os.getenv("ARENA_JUDGE_REASONING_CAPTURE_POLICY") != JUDGE_REASONING_POLICY:
+        return False
+    raw = os.getenv("ARENA_JUDGE_REASONING_EXCEPTIONS")
+    if model is not None and raw:
+        from lab_arena import contracts
+        return model not in contracts.validate_judge_reasoning_exceptions(raw)
+    return True
 
 
 def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
@@ -26,7 +32,9 @@ def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
     exposed search events and citations. This helper performs no I/O.
     """
     body = copy.deepcopy(dict(payload))
-    if not judge_reasoning_enabled():
+    if not judge_reasoning_enabled(body.get("model")):
+        if hosted_search and judge_reasoning_enabled():
+            raise ValueError("judge_proprietary_exception_api_unsupported")
         return "/chat/completions", body
     try:
         routes = json.loads(os.environ["ARENA_JUDGE_PROVIDER_ROUTES"])

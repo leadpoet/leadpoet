@@ -202,10 +202,16 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         category labels are not required when source facts establish the role
         or type. Do not combine different actors' attributes to satisfy one
         actor's requirements.
-      * Preserve an explicit proof-source qualifier in the target. When it
-        requires a press release, product page, or company announcement, an
-        independent article is not itself one of those sources. Do not invent
-        a first-party-source requirement when the target does not state one.
+      * Preserve explicitly mandatory evidence source types and issuer requirements.
+        For example, 'must be documented in a product page or changelog' requires
+        one of those document types; 'proof must be a company-issued announcement'
+        requires that provenance; 'source must be the company' requires that
+        provenance. Naming the company as the announcing actor alone does not
+        restrict the source publisher. A source requirement does not need the word 'only'
+        to be mandatory. Independent reporting cannot replace a mandatory document
+        type or issuer. When the target leaves proof sources unrestricted or
+        presents source types as examples, reliable independent reporting of the
+        same company event can prove it. Preserve every other event requirement.
       * Judge descriptive qualifiers from the facts the source proves, not
         from exact copied adjectives. For example, `major` need not appear
         verbatim when the source proves a concrete, material new capability;
@@ -272,11 +278,14 @@ BUYER_REQUEST_EVENT_BLOCK = """  BUYER ORIGINAL REQUEST — MATCHED EVENT ONLY:
     announced, previewed, or planned. Do not turn independent company-fit,
     product-fit, contact-role, or attribute requirements in that broader request into
     extra intent gates; those are checked elsewhere.
-    A request for a shipped, released, launched, or currently available
-    capability needs source-body proof that customers could use the exact
-    submitted capability by the claimed event date. Introducing, announcing,
-    previewing, inviting early access, or planning a future release alone does
-    not prove that completed state. A future availability statement for that
+    A request for a shipped or currently available capability needs
+    source-body proof that customers could use the exact submitted capability
+    by the claimed event date. For a launched, released, or introduced product
+    or capability, a source stating that the company launched, released,
+    introduced, or announced it as a present new offering by the claimed event
+    date proves the launch without separate proof of customer use. Previewing,
+    inviting early access, a waitlist, or planning a future release does not
+    prove a launch. A future availability statement for that
     same capability controls over an introduction headline or isolated launch
     quote, even when the announcement is in a first-party press release.
     Preserve the availability level the buyer actually requests. Explicit

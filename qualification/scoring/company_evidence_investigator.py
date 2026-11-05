@@ -261,7 +261,8 @@ activity role, and requested semantics before submitting a finding.
 When a commercial-model or customer-facing capability criterion remains
 unresolved, inspect known relevant first-party product, pricing, subscription,
 or platform links before returning UNPROVEN while fresh fetch calls remain.
-Do not infer a commercial model from a product description or company category.
+Do not infer a commercial model from a product description or company category
+alone.
 For a required launch or hiring criterion, prioritize a relevant submitted
 first-party event locator over generic about or contact pages. Submitted
 source hints are discovery only; fetch their URL and verify the exact text.
@@ -369,21 +370,23 @@ alternative that the source proves; do not require cloud resource management
 when the criterion separately allows infrastructure or internal operations
 workflow management. A component catalog, downloadable artifacts, account or
 login portal, or generic license by itself does not prove a subscription
-management platform. Do not infer recurring subscription terms from the word
-"licensed." Customer use of another vendor's platform and the investigated
-vendor's own internal console or workflow remain customer_user or
+management platform. Customer use of another vendor's platform and the
+investigated vendor's own internal console or workflow remain customer_user or
 internal_function, not supplier_operator.
 Apply the following subscription and commercial-sale evidence rules only when
 the requested criteria require those conditions.
-An explicit monetary platform or workspace plan with monthly or annual fees
-supports a paid subscription model without requiring the literal word
-"subscription." Direct company/product-bound paid SaaS subscription purchase
-evidence also proves the subscription model without a published price or
-billing cadence, unless the exact criterion requires those details. Newsletter
-subscriptions, free-account/demo/free-trial signups, a generic SaaS or product
-label, another vendor's subscription, and a pay-once license alone do not prove
-paid product subscriptions. This proves only the subscription clause; every
-other mandatory clause still requires source evidence.
+Read subscription, recurring, and fee-based qualifiers by ordinary meaning.
+Exact company-bound quotes proving the company now provides the requested
+offering to clients or through paid plans prove only these terms: hosted
+business software, subscription; managed services, ongoing contracts;
+professional firms, fees. Not when the criterion contrasts another model or
+loaded text shows another model or an unreleased, waitlist, pilot, or free-only
+offer. A pricing contact alone proves no sale. Price or billing cadence is
+needed only if the criterion requires it. A priced monthly or annual platform
+or workspace plan supports a paid subscription. Newsletter subscriptions,
+free-account/demo/free-trial signups, a generic SaaS or product label, another
+vendor's subscription, and a pay-once license alone do not prove paid product
+subscriptions. Each other clause still needs source proof.
 A vendor-owned product offering plus current commercial
 customers or deployments of that same product supports that the vendor sells
 it; do not require a public price or invoice. Bind the commercial fact to the
@@ -407,8 +410,7 @@ taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
 Populate observed industry, sub-industry, and value only from the source; never
 copy a prior or requested label as if the source stated it. In reason, concisely
 explain which concrete supplied capability and customer scope the evidence
-proves or fails to prove. Do not infer subscriptions from software, customers,
-licenses, or a funding announcement.
+proves or fails to prove.
 A directly sold B2B workflow platform can satisfy a broad
 infrastructure/workflow criterion without a separate infrastructure product,
 when it proves the requested capability and any requested customer scope.
@@ -430,13 +432,11 @@ For compound attributes, prove every actual condition for the same company and
 product with exact loaded company-bound quotes; explain their joint proof.
 Do not add conditions absent from the criterion. Missing required proof or
 unresolved conflicting facts mean UNPROVEN. CONTRADICTED requires direct
-company-bound counterevidence, not silence. A generic platform, software, pricing
-contact, license, or customer quote never proves recurring terms by inference.
+company-bound counterevidence, not silence.
 Equivalent semantic evidence is sufficient: concrete source facts about the
 capability and its relationship to the same company and product may establish
 a descriptive criterion. The requested taxonomy or marketing label need not
-appear verbatim. For example, an annual fee for the same supplied platform
-proves recurrence without the word subscription.
+appear verbatim.
 When a compound attribute needs more than its primary quote and the separate
 industry finding, put up to two additional exact company-bound loaded-source
 URL/quote pairs in supporting_evidence_url_1 and
@@ -538,6 +538,9 @@ Acquired and does not supersede the buyer's funding stage. Only an acquisition
 OF the investigated company can do that. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
+A later completed equity round of unstated series keeps a proven Series C+
+unless it gave, or may have given, a buyer or PE sponsor control or listed the
+company.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for

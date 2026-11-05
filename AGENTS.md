@@ -1212,3 +1212,13 @@ apply fence and final-scoring cutoff to 02:55 UTC and publication deadline to
 03:00 UTC, with matching native date controls. Preserve all function bodies,
 recovery membership and previously frozen rules. Apply the final reviewed SQL
 before creating recovery leases; do not repair deadlines on existing claims.
+
+## Scoped authorization: PR982 review and prospective deployment
+
+The user authorized reviewing PR982 against current production and recent Arena
+changes, making only necessary fixes, testing, merging and deploying when safe.
+Preserve frozen rounds, baseline execution, miner work, capture, billing and
+rewards. Interpret criteria faithfully; do not trade unsupported approvals for
+fewer rejections. The coordinator owns independent review and canonical release;
+internal agents inspect and test only unless assigned an isolated edit scope.
+Preserve concurrent work. This supersedes the earlier draft-only merge limit.

@@ -1406,6 +1406,8 @@ FIT_FP_CLASSIFICATION_BINDING = "ARENA_FIT_FP_CLASSIFICATION"
 FIT_RECEIPT_AUTHORITY = "company_fit_receipt_v1"
 PROVIDER_OBSERVATION_HANDOFF_BINDING = "ARENA_PROVIDER_OBSERVATION_HANDOFF"
 AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
+JUDGE_REASONING_CAPTURE_BINDING = "ARENA_JUDGE_REASONING_CAPTURE_POLICY"
+JUDGE_PROVIDER_ROUTES_BINDING = "ARENA_JUDGE_PROVIDER_ROUTES"
 
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
@@ -1446,6 +1448,26 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     for key, value in policy["env_bindings"].items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ArenaContractError("env_bindings must map strings to strings")
+    capture = policy["env_bindings"].get(JUDGE_REASONING_CAPTURE_BINDING)
+    routes_raw = policy["env_bindings"].get(JUDGE_PROVIDER_ROUTES_BINDING)
+    if capture is not None or routes_raw is not None:
+        if capture != "full_generated_thinking_v1" or not routes_raw:
+            raise ArenaContractError("judge thinking requires a frozen policy and provider routes")
+        required_roles = {
+            "company_fit_reverification", "intent_signal_judge", "intent_details_review",
+            "intent_three_stage_stage3", "intent_fetched_evidence", "role_batch_check",
+            "industry_evidence_review",
+        }
+        if (not required_roles <= set(policy["judge_models"])
+                or any(not isinstance(v, str) or not v.strip() for v in policy["judge_models"].values())):
+            raise ArenaContractError("judge thinking requires every frozen model role")
+        try:
+            routes = json.loads(routes_raw)
+        except (TypeError, ValueError):
+            raise ArenaContractError("invalid judge provider routes") from None
+        if (not isinstance(routes, dict) or set(routes) != set(policy["judge_models"].values())
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 128 for v in routes.values())):
+            raise ArenaContractError("judge provider routes must cover the frozen model roles")
     if SCORE_NORMALIZATION_BINDING in policy["env_bindings"]:
         if policy["env_bindings"][SCORE_NORMALIZATION_BINDING] != AVAILABLE_INTENT_CAP_NORMALIZATION:
             raise ArenaContractError("unsupported score normalization")

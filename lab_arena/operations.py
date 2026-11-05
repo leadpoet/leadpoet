@@ -2357,7 +2357,7 @@ def build_outbound_request(
                                             allow_full_thinking=allow_full_thinking)
     if type(industry_schema_order) is not bool or industry_schema_order and (
         operation_id != "openrouter.chat"
-        or normalized.get("model") != "openai/gpt-6.1-sol"
+        or (normalized.get("model") != "openai/gpt-6.1-sol" and not allow_full_thinking)
         or openrouter_provider_policy is None
     ):
         raise OperationRequestError("invalid_request")

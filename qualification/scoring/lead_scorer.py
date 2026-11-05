@@ -191,7 +191,7 @@ def _company_fit_failure_reason(
     return f"{gate} failed: {detail}"
 
 
-_SCORER_REVERIFY_MODEL = "perplexity/sonar"
+_SCORER_REVERIFY_MODEL = os.environ.get("ARENA_COMPANY_REVERIFY_MODEL", "perplexity/sonar")
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
 MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
 INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS = "insufficient_fit_evidence"
@@ -8706,6 +8706,7 @@ async def _request_company_reverify_json(
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Execute one bounded independent web-verifier request."""
 
+    from qualification.scoring.openrouter_options import prepare_judge_request, project_judge_response
     request_body = {
         "model": _SCORER_REVERIFY_MODEL,
         "messages": [
@@ -8714,11 +8715,12 @@ async def _request_company_reverify_json(
         ],
         "temperature": 0.0,
     }
+    path, request_body = prepare_judge_request(request_body, hosted_search=True)
     try:
         timeout = aiohttp.ClientTimeout(total=_SCORER_REVERIFY_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://openrouter.ai/api/v1" + path,
                 json=request_body,
                 headers={
                     "Authorization": f"Bearer {key}",
@@ -8734,7 +8736,7 @@ async def _request_company_reverify_json(
                     )
                     return None, f"provider HTTP {resp.status}"
                 try:
-                    body = await resp.json()
+                    body = project_judge_response(await resp.json(), hosted_search=True)
                 except (aiohttp.ContentTypeError, ValueError) as exc:
                     _record_verifier_failure(
                         diagnostic, MALFORMED_RESPONSE_FAILURE_REASON

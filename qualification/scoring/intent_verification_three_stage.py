@@ -4282,10 +4282,12 @@ async def _call_openrouter(
     client: httpx.AsyncClient, model: str, prompt: str,
     *,
     max_attempts: int = 3,
+    hosted_search: bool = False,
 ) -> Dict[str, Any]:
     from qualification.scoring.openrouter_options import (
         include_reasoning_default,
         reasoning_request_unsupported,
+        judge_reasoning_enabled, prepare_judge_request, project_judge_response,
     )
 
     or_key = _get_openrouter_key()
@@ -4319,11 +4321,13 @@ async def _call_openrouter(
     reasoning_dropped = False
     if request_reasoning:
         body["include_reasoning"] = True
+    chat_body = dict(body)
+    path, body = prepare_judge_request(chat_body, hosted_search=hosted_search)
     attempts = max(1, min(int(max_attempts), 3))
     for attempt in range(attempts):
         try:
             r = await client.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
+                f"{OPENROUTER_BASE_URL}{path}",
                 headers={
                     "Authorization": f"Bearer {or_key}",
                     "Content-Type": "application/json",
@@ -4336,7 +4340,7 @@ async def _call_openrouter(
                 await asyncio.sleep(8 * (attempt + 1))
                 continue
             if r.status_code != 200:
-                if request_reasoning and reasoning_request_unsupported(
+                if request_reasoning and not judge_reasoning_enabled() and reasoning_request_unsupported(
                     r.status_code, r.text
                 ):
                     request_reasoning = False
@@ -4348,7 +4352,7 @@ async def _call_openrouter(
                     "_body": r.text[:400],
                 }
             try:
-                resp = r.json()
+                resp = project_judge_response(r.json(), hosted_search=hosted_search)
                 if not isinstance(resp, Mapping):
                     raise ValueError("OpenRouter response envelope must be an object")
             except (json.JSONDecodeError, ValueError) as exc:
@@ -4369,6 +4373,8 @@ async def _call_openrouter(
             }
             choices = resp.get("choices")
             first_choice = choices[0] if isinstance(choices, list) and choices else {}
+            if judge_reasoning_enabled() and first_choice.get("finish_reason") != "stop":
+                return {"_error": "incomplete_response", "provider_usage": provider_usage}
             message = first_choice.get("message") if isinstance(first_choice, Mapping) else {}
             content = message.get("content", "") if isinstance(message, Mapping) else ""
             if not isinstance(content, str):
@@ -4410,12 +4416,17 @@ async def _call_openrouter(
                         "_error": "inconsistent_structured_verdict",
                         "provider_usage": provider_usage,
                     }
-                body["messages"] = [
+                corrected_messages = [
                     {"role": "system", "content": _SYS_MESSAGE},
                     *_openrouter_user_messages(
                         prompt + _STRUCTURED_VERDICT_CORRECTION
                     ),
                 ]
+                if judge_reasoning_enabled():
+                    chat_body["messages"] = corrected_messages
+                    path, body = prepare_judge_request(chat_body, hosted_search=hosted_search)
+                else:
+                    body["messages"] = corrected_messages
                 await asyncio.sleep(1)
                 continue
             return {
@@ -5447,7 +5458,7 @@ async def verify_three_stage(
                 row, verified_identity_context
             )
         s1_envelope = await _call_openrouter(
-            client, stage1_model or STAGE1_MODEL, s1_prompt
+            client, stage1_model or STAGE1_MODEL, s1_prompt, hosted_search=True,
         )
         if s1_envelope.get("_error"):
             stage1_info = {
@@ -5861,6 +5872,9 @@ async def verify_three_stage(
         }
         else STAGE3_MODEL
     )
+    stage3_hosted_search = not integrity_policy or row.get("_evidence_type") in {
+        "SOCIAL_POSTING", "PODCAST_APPEARANCE",
+    }
     ats_ownership = None
     # Publisher credit applies to every Arena evidence type. Keep the stricter
     # hiring approval guard separate from this existing bounded ownership lookup.
@@ -5940,7 +5954,7 @@ async def verify_three_stage(
         verified_identity_context=verified_identity_context,
     )
     s3_envelope = await _call_openrouter(
-        client, selected_stage3_model, s3_prompt
+        client, selected_stage3_model, s3_prompt, hosted_search=stage3_hosted_search,
     )
     if bundle and not s3_envelope.get("_error"):
         evaluations = (s3_envelope.get("answer") or {}).get("signal_evaluations")
@@ -6128,6 +6142,7 @@ async def verify_three_stage(
                     selected_stage3_model,
                     chain_prompt,
                     max_attempts=1,
+                    hosted_search=stage3_hosted_search,
                 )
                 if not chain_envelope.get("_error"):
                     chain_verdict = _apply_guardrails(
@@ -6299,6 +6314,7 @@ async def verify_three_stage(
             selected_stage3_model,
             clarification_prompt,
             max_attempts=1,
+            hosted_search=stage3_hosted_search,
         )
         if clarification_envelope.get("_error"):
             return {

@@ -32,7 +32,11 @@ The component results below are not a claim that the new policy is deployed.
 | ICP generation | Sonnet 5.5 | retained after factual evaluation | existing policy |
 | ICP exclusion research | DeepSeek, from PR1044 | retained after cheaper variants failed complete gates | high / 4096 |
 
-GPT-OSS is an open-weight model despite its `openai/` model identifier. The two
+GPT-OSS is an open-weight model despite its `openai/` model identifier. The
+[GPT-OSS](https://openrouter.ai/openai/gpt-oss-120b) and
+[DeepSeek](https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017) model pages link
+their weights. Route-specific readable thinking is checked from actual replies,
+not inferred from those pages. The two
 selected open models use explicit provider selection, no automatic fallback,
 ZDR/data-collection denial, reviewed route ceilings and frozen request settings.
 Company search uses native Responses so exposed reasoning, search events and
@@ -106,6 +110,29 @@ the original writing-negative control. A preregistered generic writing-rule
 reminder still missed both negative contexts and introduced a quote-binding
 failure on a new positive. That variant did not advance to its reserved
 three-case check. No paragraph prompt change is selected.
+
+A later route-only comparison tested Fireworks and Together against the same
+two new positives and two corrected old negative contexts. Each route, including
+the retained Nebius responses, matched three of four complete Boolean verdicts
+and all four overall accept/reject decisions. Fireworks matched 19/20 individual
+Boolean fields; Nebius and Together matched 18/20. The initial requirement of
+four exact verdicts was not met by either new route. That result remains a
+failed initial gate, not a successful preregistered test.
+
+A separately frozen confirmation then tested Fireworks on the existing twelve
+cases without changing prompts, sources, labels or settings. All twelve matched
+the full verdict and exposed readable thinking on the requested provider, with
+no repair or retry. Thus both Nebius and Fireworks match 15/16 full verdicts and
+16/16 overall decisions across this corrected set. This is confirmation on known
+cases, not an unseen holdout. Together has only the four-case result.
+
+Fireworks' two new positives had median latency 6.67 seconds, versus 14.44 on
+Nebius and 2.41 on Sonnet, and cost $0.007746 versus $0.057048 on Sonnet.
+Its twelve-case confirmation had median latency 6.03 seconds and cost
+$0.028635072. It is not consistently faster than Nebius on every case.
+Changing the model's route would also affect Responses company research and
+search fallbacks. Fireworks therefore remains a private candidate until those
+native full scoring paths pass. The permanent route is still Nebius.
 
 Seven separately retained production requests screened GPT-OSS-120B,
 GPT-OSS-20B, Ling 3.1 Flash, Gemma 4 31B and Nemotron 3.5 Lightning. GPT-OSS-120B

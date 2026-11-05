@@ -77,6 +77,11 @@ def _publication_harness(monkeypatch):
     for run in baseline_runs + baseline_judges:
         run.update(round_id=ROUND_ID, submission_id=BASELINE_ID)
     round_row["configuration_doc"]["reasoning_capture_policy"] = "full_generated_thinking_v1"
+    round_row["champion_funding_frozen"] = True
+    round_row["configuration_doc"].update(
+        baseline_source_url="https://github.com/leadpoet/leadpoet-sales-agent/archive/" + "a" * 40 + ".tar.gz",
+        reasoning_baseline_source_sha256=SOURCE_HASH,
+    )
     round_row["configuration_doc"]["promotion_margin"] = 1.0
     miner_runs = []
     for index, baseline_run in enumerate(baseline_runs):
@@ -110,6 +115,7 @@ def _publication_harness(monkeypatch):
         list_runs=lambda _rid, kind=None: executions if kind == "execute"
             else judgments if kind == "score" else executions + judgments,
         get_submission=lambda submission_id: submissions.get(submission_id),
+        freeze_full_thinking_baseline=lambda _rid, **_selection: {"status": "existing"},
         transition_round=transition,
         cancel_round=lambda rid, reason: writes.append((rid, reason)) or {"status": "cancelled"},
     )

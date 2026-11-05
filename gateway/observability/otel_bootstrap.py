@@ -621,6 +621,7 @@ ARENA_DENIAL_CODES = frozenset(
         "training_observations_conflict",
         "training_observations_digest_mismatch",
         "training_observations_invalid",
+        "training_observations_snapshot_invalid",
         "training_observations_unavailable",
         "unsupported_integrity_policy",
         "validator_events_correlation_invalid",

@@ -661,6 +661,7 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
     assert applied == policy["scoring_adapter_version"]
     assert environ == {
         **credentials,
+        "ARENA_EVIDENCE_JUDGMENT_POLICY": "",
         "ARENA_INTENT_EVIDENCE_MODEL": "openai/gpt-6-luna",
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": "anthropic/claude-sonnet-5.5",
         "ARENA_ROLE_BATCH_MODEL": "google/gemini-3.5-flash-lite",

@@ -22,6 +22,7 @@ MODELS = {
     "intent_fetched_evidence": GPT_OSS,
     "role_batch_check": GPT_OSS,
     "industry_evidence_review": SOL,
+    "industry_research_controller": SOL,
 }
 LEGACY_MODELS = {
     "company_fit_reverification": "perplexity/sonar",
@@ -37,7 +38,7 @@ OPTIONS = {
     DEEPSEEK: {"reasoning": {"effort": "low"}, "max_output_tokens": 8192},
     GPT_OSS: {"reasoning": {"effort": "low"}, "max_output_tokens": 4096},
 }
-EXCEPTIONS = {SOL: {"roles": ["industry_evidence_review"], "reason": "quality_gate_not_met"}}
+EXCEPTIONS = {SOL: {"roles": ["industry_evidence_review", "industry_research_controller"], "reason": "quality_gate_not_met"}}
 
 
 def test_reviewed_default_models_freeze_exact_routes_options_and_exception():

@@ -1439,7 +1439,7 @@ JUDGE_REASONING_EXCEPTIONS_BINDING = "ARENA_JUDGE_REASONING_EXCEPTIONS"
 
 
 def validate_judge_reasoning_exceptions(raw: Any, models: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    """Only the quality-gated proprietary industry reviewer may lack full text.
+    """Only the quality-gated proprietary industry workflow may lack full text.
 
     This grants no route approval. Sol retains its existing host routing; every
     other frozen model still requires its exact reviewed reasoning route.
@@ -1447,15 +1447,16 @@ def validate_judge_reasoning_exceptions(raw: Any, models: Optional[Mapping[str, 
     try:
         exceptions = json.loads(raw)
         model = "openai/gpt-6.1-sol"
-        roles = ["industry_evidence_review"]
+        allowed_roles = (["industry_evidence_review"],
+                         ["industry_evidence_review", "industry_research_controller"])
         if not isinstance(exceptions, dict) or set(exceptions) != {model}:
             raise ValueError
         entry = exceptions[model]
         if (not isinstance(entry, dict) or set(entry) != {"roles", "reason"}
-                or entry["roles"] != roles or not isinstance(entry["reason"], str)
+                or entry["roles"] not in allowed_roles or not isinstance(entry["reason"], str)
                 or re.fullmatch(r"[a-z][a-z0-9_]{1,79}", entry["reason"]) is None):
             raise ValueError
-        if models is not None and ([role for role, value in models.items() if value == model] != roles):
+        if models is not None and sorted(role for role, value in models.items() if value == model) != entry["roles"]:
             raise ValueError
         return exceptions
     except (TypeError, ValueError, KeyError, AttributeError):

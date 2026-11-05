@@ -22,6 +22,7 @@ import os
 import re
 import time
 import unicodedata
+import uuid
 from html.parser import HTMLParser
 from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import unquote, urljoin, urlsplit
@@ -34,6 +35,7 @@ from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
 from gateway.qualification.models import canonical_candidate_prompt_url
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
+from lab_arena.lab_arena_checkpoint import record_judge_tool_event
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import (
@@ -120,6 +122,72 @@ REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
 REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
 ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS = 1_500
 MAX_ALTERNATIVE_PUBLIC_STAGE_CONTEXTS = 2
+
+
+def _local_document_sha256(document):
+    try:
+        raw = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, allow_nan=False).encode()
+        return "sha256:" + hashlib.sha256(raw).hexdigest()
+    except (TypeError, ValueError):
+        return None
+
+
+class _InvestigationToolCapture:
+    """Best-effort host state; no provider identity, gold or scoring authority."""
+
+    def __init__(self, document):
+        self.enabled = judge_reasoning_enabled()
+        self.input_sha256 = _local_document_sha256(document) if self.enabled else None
+        # Identical native retries are distinct local investigations, not one
+        # discontinuous sequence. The stable request digest stays explicit.
+        self.investigation_id = (self.input_sha256 or "local") + ":" + uuid.uuid4().hex
+        self.sequence = 0
+        self.request_sha256 = self.response_sha256 = None
+        self.pending = None
+        self.pending_executed = False
+
+    def model_result(self, payload, body):
+        if not self.enabled:
+            return
+        try:
+            _, prepared = prepare_judge_request(payload)
+            self.request_sha256 = _local_document_sha256(prepared)
+        except Exception:
+            self.request_sha256 = None
+        self.response_sha256 = _local_document_sha256(body)
+        self.pending = None
+        self.pending_executed = False
+
+    def emit(self, call, result, disposition, *, visible_result=None, terminal=False):
+        if not self.enabled:
+            return
+        try:
+            function = call.get("function") if isinstance(call, Mapping) else None
+            function = function if isinstance(function, Mapping) else {}
+            call_id = call.get("id") if isinstance(call, Mapping) else None
+            name = function.get("name")
+            event = {
+                "investigation_id": self.investigation_id, "sequence": self.sequence,
+                "tool_call_id": call_id if isinstance(call_id, str) and call_id else None,
+                "tool_name": name if isinstance(name, str) and name else "invalid_tool_call",
+                "arguments": function.get("arguments"), "result": result,
+                "disposition": disposition,
+                "host_validation": {"kind": "native_host_validation", "gold_label": False,
+                    "terminal": terminal, "model_visible_result": visible_result,
+                    "result_scope": "investigation_terminal_result" if terminal else "local_tool_result_or_instruction",
+                    "investigation_request_sha256": self.input_sha256,
+                    "request_digest_scope": "native_prepared_request_document",
+                    "response_digest_scope": "native_response_document",
+                    "raw_tool_call": call},
+                "request_sha256": self.request_sha256, "response_sha256": self.response_sha256,
+            }
+            self.sequence += 1  # A failed emission remains a visible sequence gap.
+            record_judge_tool_event(event)
+        except Exception:
+            pass  # Capture cannot change native judgments or recovery behavior.
+        self.pending = None
+
 ADMISSION_DEADLINE_SECONDS = 110.0
 # One bounded submit-only repair may follow an admitted positive judgment.
 # Research and ordinary reasoning keep the 110-second admission deadline.
@@ -5439,6 +5507,7 @@ async def investigate_company_evidence(
             bounded_homepage_navigation_locators, current_industry_bindings()['brands'])
         return True
 
+    local_tools = _InvestigationToolCapture(input_document)
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -6311,10 +6380,24 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
-                industry_investigation_model = (
+                industry_controller_model = (
+                    os.environ.get("ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL", "").strip()
+                    if industry_review_model else ""
+                )
+                industry_investigation_model = industry_controller_model or (
                     os.environ.get("ARENA_COMPANY_REVERIFY_MODEL", industry_review_model)
                     if industry_review_model and judge_reasoning_enabled() else industry_review_model
                 )
+                selected_controller_model = industry_investigation_model or (
+                    POSITIVE_SEMANTIC_REVIEW_MODEL if positive_semantic_review else INVESTIGATOR_MODEL
+                )
+                proprietary_controller = bool(
+                    industry_controller_model and not judge_reasoning_enabled(selected_controller_model)
+                )
+                controller_output_limit = 3000 if proprietary_controller else REASONING_MAX_TOKENS
+                def controller_history(provider_message, replay_message):
+                    return (preserve_judge_reasoning(provider_message, replay_message)
+                            if judge_reasoning_enabled(selected_controller_model) else replay_message)
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
                     and required_tool == "submit_findings"
@@ -6329,75 +6412,69 @@ async def investigate_company_evidence(
                     )
                 ):
                     raise ValueError("reasoning_tool_arguments_malformed")
+                controller_payload = {
+                    # The model assessing capability gaps also selects
+                    # the sources and completes the final shared findings.
+                    # Repeated citation repairs must not fall back to the
+                    # weaker researcher; all deterministic gates still apply.
+                    # Frozen policies without this role retain their models.
+                    "model": selected_controller_model,
+                    "messages": [
+                        *_bounded_system_messages(system_prompt),
+                        *messages,
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                key: value
+                                for key, value in tool.items()
+                                if key != "type"
+                            },
+                        }
+                        for tool in _tools(active_submit_targets, industry_sources=bool(industry_review_model))
+                        if (
+                            not correction_turn
+                            and not scoped_correction_active
+                            and not turn_admission.restrict_tools
+                        ) or tool["name"] == "submit_findings"
+                    ],
+                    "tool_choice": (
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": (
+                                    "submit_findings"
+                                    if force_submit
+                                    else required_tool
+                                )
+                            },
+                        }
+                        if force_submit or required_tool
+                        else "required"
+                    ),
+                    "parallel_tool_calls": False,
+                    "temperature": 0.0,
+                    "max_tokens": controller_output_limit,
+                    **(
+                        {"reasoning": {"effort": "low"}}
+                        if not judge_reasoning_enabled(selected_controller_model) and (
+                            industry_investigation_model
+                            or (positive_semantic_review and (
+                                serialization_retry_request or force_submit
+                                or required_tool == "submit_findings"
+                            ))
+                        )
+                        else {}
+                    ),
+                }
                 status, body = await _post_openrouter_json(
-                    session,
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openrouter_key}",
-                        "Content-Type": "application/json",
-                    },
-                    payload={
-                        # The model assessing capability gaps also selects
-                        # the sources and completes the final shared findings.
-                        # Repeated citation repairs must not fall back to the
-                        # weaker researcher; all deterministic gates still apply.
-                        # Frozen policies without this role retain their models.
-                        "model": industry_investigation_model or (
-                            POSITIVE_SEMANTIC_REVIEW_MODEL
-                            if positive_semantic_review
-                            else INVESTIGATOR_MODEL
-                        ),
-                        "messages": [
-                            *_bounded_system_messages(system_prompt),
-                            *messages,
-                        ],
-                        "tools": [
-                            {
-                                "type": "function",
-                                "function": {
-                                    key: value
-                                    for key, value in tool.items()
-                                    if key != "type"
-                                },
-                            }
-                            for tool in _tools(active_submit_targets, industry_sources=bool(industry_review_model))
-                            if (
-                                not correction_turn
-                                and not scoped_correction_active
-                                and not turn_admission.restrict_tools
-                            ) or tool["name"] == "submit_findings"
-                        ],
-                        "tool_choice": (
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": (
-                                        "submit_findings"
-                                        if force_submit
-                                        else required_tool
-                                    )
-                                },
-                            }
-                            if force_submit or required_tool
-                            else "required"
-                        ),
-                        "parallel_tool_calls": False,
-                        "temperature": 0.0,
-                        "max_tokens": REASONING_MAX_TOKENS,
-                        **(
-                            {"reasoning": {"effort": "low"}}
-                            if not judge_reasoning_enabled() and (
-                                industry_investigation_model
-                                or (positive_semantic_review and (
-                                    serialization_retry_request or force_submit
-                                    or required_tool == "submit_findings"
-                                ))
-                            )
-                            else {}
-                        ),
-                    },
+                    session, "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},
+                    payload=controller_payload,
                     started=started,
                 )
+                local_tools.model_result(controller_payload, body)
                 if status != 200:
                     raise RuntimeError("reasoning_provider_unavailable")
                 if not isinstance(body, Mapping):
@@ -6435,7 +6512,7 @@ async def investigate_company_evidence(
                         )
                     )
                     and _response_exhausted_output_budget(
-                        body, max_tokens=REASONING_MAX_TOKENS
+                        body, max_tokens=controller_output_limit
                     )
                 ):
                     # Output exhaustion can consume the whole reply before a
@@ -6463,6 +6540,10 @@ async def investigate_company_evidence(
                             )
                         ),
                     })
+                    local_tools.emit(
+                        {"function": {"name": required_tool or "invalid_tool_call", "arguments": None}},
+                        messages[-1], "repair",
+                    )
                     continue
                 try:
                     message = body["choices"][0]["message"]
@@ -6504,6 +6585,8 @@ async def investigate_company_evidence(
                             "tool choice. Do not emit multiple calls or prose."
                         ),
                     })
+                    for rejected_call in tool_calls:
+                        local_tools.emit(rejected_call, messages[-1], "rejected_not_executed")
                     continue
                 if (
                     not isinstance(message, Mapping)
@@ -6511,8 +6594,12 @@ async def investigate_company_evidence(
                     or len(tool_calls) != 1
                     or not isinstance(tool_calls[0], Mapping)
                 ):
+                    for rejected_call in tool_calls if isinstance(tool_calls, list) else []:
+                        local_tools.emit(rejected_call, {"error": "reasoning_tool_count_invalid"}, "rejected_not_executed")
                     raise ValueError("reasoning_tool_count_invalid")
                 call = tool_calls[0]
+                local_tools.pending = call
+                local_tools.pending_executed = False
                 function = call.get("function")
                 if not isinstance(function, Mapping):
                     raise ValueError("reasoning_tool_call_malformed")
@@ -6559,7 +6646,7 @@ async def investigate_company_evidence(
                             )
                         )
                         and _response_exhausted_output_budget(
-                            body, max_tokens=REASONING_MAX_TOKENS
+                            body, max_tokens=controller_output_limit
                         )
                     )
                     if retry_incomplete_submit:
@@ -6572,7 +6659,7 @@ async def investigate_company_evidence(
                         }
                         if isinstance(message.get("content"), str):
                             assistant_message["content"] = message["content"]
-                        assistant_message = preserve_judge_reasoning(message, assistant_message)
+                        assistant_message = controller_history(message, assistant_message)
                         messages.extend([
                             assistant_message,
                             {
@@ -6605,6 +6692,8 @@ async def investigate_company_evidence(
                                 }),
                             },
                         ])
+                        local_tools.emit(canonical_call, json.loads(messages[-1]["content"]), "repair",
+                                         visible_result=messages[-1]["content"])
                         continue
                     raise ValueError("reasoning_tool_arguments_malformed") from None
                 if required_tool == "search_web" and (
@@ -6628,6 +6717,7 @@ async def investigate_company_evidence(
                     forced_stage_search_pending = False
                 added_industry_sources = []
                 if name == "submit_findings":
+                    local_tools.pending_executed = True
                     if industry_review_model and isinstance(arguments, Mapping):
                         arguments = copy.deepcopy(arguments)
                         raw_findings = arguments.get("findings")
@@ -6672,7 +6762,7 @@ async def investigate_company_evidence(
                             forced_next_tool = "submit_findings"
                             incomplete_submit_retry_pending = True
                             messages.extend([
-                                preserve_judge_reasoning(message, {"role": "assistant", "tool_calls": [canonical_call]}),
+                                controller_history(message, {"role": "assistant", "tool_calls": [canonical_call]}),
                                 {
                                     "role": "tool",
                                     "tool_call_id": call_id,
@@ -6692,6 +6782,8 @@ async def investigate_company_evidence(
                                     }),
                                 },
                             ])
+                            local_tools.emit(canonical_call, json.loads(messages[-1]["content"]), "repair",
+                                             visible_result=messages[-1]["content"])
                             continue
                         raise ValueError("reasoning_findings_malformed")
                     submitted_findings = {
@@ -7406,7 +7498,7 @@ async def investigate_company_evidence(
                         # source transport faults remain in fetch_outcomes.
                         if failure_reason:
                             _record_failure(diagnostic, failure_reason)
-                        return {
+                        terminal_result = {
                             "claims": claims,
                             "_completed_submit": not failure_reason,
                             "_checked_source_provenance": (
@@ -7446,6 +7538,9 @@ async def investigate_company_evidence(
                                if industry_review_model and (current_industry_bindings()['links']
                                                             or current_industry_bindings()['brands']) else {}),
                         }
+                        local_tools.emit(canonical_call, terminal_result,
+                                         "executed" if failure_reason else "accepted_terminal", terminal=True)
+                        return terminal_result
                 elif name == "search_web":
                     elapsed = time.monotonic() - started
                     # A full-text company search can replace one unused exact
@@ -7479,6 +7574,7 @@ async def investigate_company_evidence(
                             tool_result = {"ok": False, "error": "invalid_query"}
                         else:
                             search_calls += 1
+                            local_tools.pending_executed = True
                             search_options = {}
                             alternative_locators = bool(
                                 exchange_fetch_for_search and fetch_call_limit - fetch_calls >= 2
@@ -7583,6 +7679,7 @@ async def investigate_company_evidence(
                         search_loaded_urls.discard(safe_url)
                         prior_outcome_count = len(fetch_outcomes)
                         try:
+                            local_tools.pending_executed = bool(safe_url)
                             tool_result = await fetch_fresh_page(str(safe_url or ""))
                         except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                             if not refresh_search_source or isinstance(exc, _ArenaProviderFetchError):
@@ -7640,7 +7737,7 @@ async def investigate_company_evidence(
                 }
                 if isinstance(message.get("content"), str):
                     assistant_message["content"] = message["content"]
-                assistant_message = preserve_judge_reasoning(message, assistant_message)
+                assistant_message = controller_history(message, assistant_message)
                 messages.extend([
                     assistant_message,
                     {
@@ -7650,6 +7747,13 @@ async def investigate_company_evidence(
                         "content": _bounded_message_json(tool_result),
                     },
                 ])
+                disposition = (
+                    "repair" if name == "submit_findings"
+                    else "executed" if local_tools.pending_executed or tool_result.get("ok")
+                    else "rejected_not_executed"
+                )
+                local_tools.emit(canonical_call, tool_result, disposition,
+                                 visible_result=messages[-1]["content"])
                 if added_industry_sources:
                     packet = industry_classification.prepare(
                         industry_review_arguments['criteria'],
@@ -7661,13 +7765,25 @@ async def investigate_company_evidence(
                     messages.extend(industry_classification.source_messages(packet))
     except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):
         _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
+        result = {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
+        if local_tools.pending is not None:
+            local_tools.emit(local_tools.pending, result,
+                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
+        return result
     except (TypeError, ValueError, KeyError, IndexError):
         _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+        result = {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+        if local_tools.pending is not None:
+            local_tools.emit(local_tools.pending, result,
+                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
+        return result
     except Exception:  # noqa: BLE001
         _record_failure(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}
+        result = {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}
+        if local_tools.pending is not None:
+            local_tools.emit(local_tools.pending, result,
+                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
+        return result
 
     _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
     return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}

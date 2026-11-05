@@ -31,9 +31,10 @@ DEFAULT_JUDGE_MODELS = {
     "intent_fetched_evidence": "openai/gpt-oss-120b",
     "role_batch_check": "openai/gpt-oss-120b",
     "industry_evidence_review": "openai/gpt-6.1-sol",
+    "industry_research_controller": "openai/gpt-6.1-sol",
 }
 # These reviewed settings are frozen only for the exact prospective model map.
-# Sol remains the industry reviewer after the open-model quality gate failed.
+# Sol retains both industry source research and final review after their open-model gates failed.
 DEFAULT_JUDGE_PROVIDER_ROUTES = {
     "deepseek/deepseek-v4.1-flash-1017": "nebius/fp8",
     "openai/gpt-oss-120b": "near-ai/fp4",
@@ -48,7 +49,7 @@ DEFAULT_JUDGE_REQUEST_OPTIONS = {
 }
 DEFAULT_JUDGE_REASONING_EXCEPTIONS = {
     "openai/gpt-6.1-sol": {
-        "roles": ["industry_evidence_review"], "reason": "quality_gate_not_met",
+        "roles": ["industry_evidence_review", "industry_research_controller"], "reason": "quality_gate_not_met",
     },
 }
 CREDENTIAL_ENV_NAMES = (
@@ -210,6 +211,11 @@ def apply_policy_to_environment(
     if bindings.get("ARENA_INDUSTRY_EVIDENCE_MODEL", industry_model) != industry_model:
         raise ScorerPolicyConflict("industry reviewer conflicts with the frozen model policy")
     bindings["ARENA_INDUSTRY_EVIDENCE_MODEL"] = industry_model
+    # An older frozen policy must not inherit the new controller role.
+    controller_model = models.get("industry_research_controller", "")
+    if bindings.get("ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL", controller_model) != controller_model:
+        raise ScorerPolicyConflict("industry controller conflicts with the frozen model policy")
+    bindings["ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL"] = controller_model
     # Ambient settings cannot upgrade an older frozen round's capture or route.
     for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING, contracts.JUDGE_PROVIDER_ROUTES_BINDING,
                  contracts.JUDGE_REQUEST_OPTIONS_BINDING, contracts.JUDGE_REASONING_EXCEPTIONS_BINDING):

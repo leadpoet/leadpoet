@@ -667,6 +667,7 @@ def test_legacy_policy_is_plain_and_binds_environment_fail_closed():
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": "anthropic/claude-sonnet-5.5",
         "ARENA_ROLE_BATCH_MODEL": "google/gemini-3.5-flash-lite",
         "ARENA_INDUSTRY_EVIDENCE_MODEL": "openai/gpt-6.1-sol",
+        "ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL": "",
         "ARENA_COMPANY_REVERIFY_MODEL": "perplexity/sonar",
         "INTENT_THREE_STAGE_S1_MODEL": "perplexity/sonar",
         "INTENT_THREE_STAGE_S3_MODEL": "perplexity/sonar-pro",

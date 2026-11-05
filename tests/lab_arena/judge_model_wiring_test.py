@@ -12,7 +12,7 @@ from qualification.scoring import openrouter_options as opts
 
 MODEL = 'deepseek/deepseek-v4.1-flash-1017'
 ROUTE = 'example/verified'
-ROLES = tuple(scoring.DEFAULT_JUDGE_MODELS)
+ROLES = tuple(role for role in scoring.DEFAULT_JUDGE_MODELS if role != "industry_research_controller")
 
 
 @pytest.fixture(autouse=True)
@@ -347,7 +347,7 @@ def test_default_new_round_policy_freezes_exact_current_model_and_route_defaults
     assert set(policy['judge_models']) == {
         'company_fit_reverification', 'intent_signal_judge', 'intent_details_review',
         'intent_three_stage_stage3', 'intent_fetched_evidence', 'role_batch_check',
-        'industry_evidence_review'}
+        'industry_evidence_review', 'industry_research_controller'}
     routes = scoring.DEFAULT_JUDGE_PROVIDER_ROUTES
     if routes:
         assert set(routes) == set(policy['judge_models'].values()) - set(contracts.judge_reasoning_exceptions(policy))

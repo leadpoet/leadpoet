@@ -1281,7 +1281,21 @@ def _role(example: Mapping[str, Any], call: Mapping[str, Any]) -> str:
     return "unknown"
 
 
-def coverage(examples) -> dict:
+def _capture_configuration(example: Mapping[str, Any], role: str = 'source') -> Mapping[str, Any]:
+    if role != 'judge':
+        return baseline_reasoning.for_example(example)
+    try:
+        configuration = training_dataset.label_scorer_configuration(example)
+        policy = (configuration.get('scorer_policy') or {}).get('env_bindings', {}).get(
+            'ARENA_JUDGE_REASONING_CAPTURE_POLICY')
+    except (ValueError, TypeError, AttributeError):
+        return {}  # Invalid label authority grants no reviewed judge route.
+    return ({'reasoning_capture_policy': policy,
+             'reasoning_route_registry': configuration.get('reasoning_route_registry')}
+            if policy == POLICY else {})
+
+
+def coverage(examples, *, role=None) -> dict:
     counts, grouped, trajectories = Counter(), defaultdict(Counter), Counter()
     attempts = []
     full_text_calls = 0
@@ -1307,23 +1321,30 @@ def coverage(examples) -> dict:
             bad = True
         total_reasoning_tokens = missing_reasoning_tokens = 0
         for call in example.get("provider_calls") or []:
-            row = attempt_coverage(call, _role(example, call), registry)
-            full, _ = full_text_segments(call, _role(example, call), registry)
+            call_role = _role(example, call)
+            if role == 'judge' and call_role != 'judge':
+                continue
+            call_configuration = _capture_configuration(example, 'judge') if call_role == 'judge' else baseline_reasoning.for_example(example)
+            call_registry = call_configuration.get('reasoning_route_registry')
+            row = attempt_coverage(call, call_role, call_registry)
+            full, _ = full_text_segments(call, call_role, call_registry)
             attempts.append(row)
             counts[row["returned"]] += 1
             key = (row["role"], row["model_id"], row["requested_provider_route"], row["api"])
             grouped[key][row["returned"]] += 1
             grouped[key]["requested"] += row["requested"]
             grouped[key]["saved"] += row["storage"] == "saved"
-            execution_model = _execution_model_call(example, call)
+            execution_model = (_execution_model_call(example, call) if role != 'judge' else
+                               call.get('run_id') == example.get('score_run_id')
+                               and call.get('operation_id') in reasoning_capture.OPERATIONS)
             full_text_calls += execution_model and bool(full)  # Raw exposed text inventory.
-            full_round = baseline_reasoning.for_example(example).get("reasoning_capture_policy") == POLICY
+            full_round = call_configuration.get("reasoning_capture_policy") == POLICY
             failed = new_policy and verified_failed_attempt(example, call)
             omitted_truncation = False
             target_usable = not new_policy
             if new_policy and execution_model and not failed:
                 try:
-                    training_steps._candidate(example, call)
+                    training_steps._candidate(example, call, role='judge' if role == 'judge' else 'source')
                     target_usable = True
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
                     private_truncation = verified_private_explicit_truncation(example, call)
@@ -1354,8 +1375,8 @@ def coverage(examples) -> dict:
         trajectories["eligible_without_disqualifying_capture"] += not bad
         trajectories["complete_full_thinking"] += bool(
             not bad and has_text and (example.get("completeness") or {}).get("complete") is True)
-        trajectories["selected_research_full_thinking"] += bool(
-            not bad and has_text and selected_research_evidence(example) is not None)
+        trajectories["selected_judge_full_thinking" if role == 'judge' else "selected_research_full_thinking"] += bool(
+            not bad and has_text and selected_research_evidence(example, role='judge' if role == 'judge' else 'source') is not None)
     return {"attempts": attempts, "returned_classes": dict(sorted(counts.items())),
             "distinct_verified_exports": len(seen),
             "saved_calls": sum(row["storage"] == "saved" for row in attempts),
@@ -1377,9 +1398,10 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
             or example.get("example_hash") != contracts.document_hash(
                 {key: value for key, value in example.items() if key != "example_hash"})):
         raise ValueError("example_hash_mismatch")
-    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
     calls = []
     for ci, call in enumerate(example.get("provider_calls") or []):
+        registry = _capture_configuration(example, 'judge' if _role(example, call) == 'judge'
+                                           else 'source').get('reasoning_route_registry')
         prefix = ["provider_calls", ci]
         body = ((call.get("request") or {}).get("outbound") or {}).get("body")
         events = []
@@ -1757,7 +1779,7 @@ def _selected_input_output_binding(example: Mapping[str, Any]) -> set[str] | Non
     return score_ids
 
 
-def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None) -> frozenset[str] | None:
+def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None, role='source') -> frozenset[str] | None:
     """Bind selected source and labels without an all-attempt or billing veto.
 
     Each candidate separately proves its exact provider input, required tool
@@ -1768,7 +1790,7 @@ def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=Non
         configuration = example.get("configuration") or {}
         training_coverage.missing_reasoning_percent_from_configuration(configuration)
         training_coverage.percent_from_configuration(configuration)
-        if not reasoning_capture.enabled(baseline_reasoning.for_example(example)):
+        if not reasoning_capture.enabled(_capture_configuration(example, role)):
             return None
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -1938,19 +1960,19 @@ def provider_visible_view(example, *, not_dispatched_host_observations=None, wor
         return example, frozenset()  # Invalid diagnostics never grant an exception.
 
 
-def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None) -> frozenset[str] | None:
+def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None, role='source') -> frozenset[str] | None:
     # Raw diagnostic capture remains visible without becoming a second
     # admission gate for independently verified provider-visible pairs.
     view, diagnostic_gaps = provider_visible_view(example, worker_proofs=worker_proofs)
     if diagnostic_gaps and _selected_input_output_binding(view) is None:
         return None
-    result = _selected_research_evidence(view, worker_proofs=worker_proofs)
+    result = _selected_research_evidence(view, worker_proofs=worker_proofs, role=role)
     return None if result is None else result | diagnostic_gaps
 
 
-def _individual_research_evidence(example):
+def _individual_research_evidence(example, *, role='source'):
     """Builder-only absence exception; never establish full-ICP eligibility."""
-    selected = selected_research_evidence(example)
+    selected = selected_research_evidence(example, role=role)
     if selected is not None:
         return selected
     try:
@@ -1981,7 +2003,7 @@ def _individual_research_evidence(example):
         configuration = example.get("configuration") or {}
         training_coverage.missing_reasoning_percent_from_configuration(configuration)
         training_coverage.percent_from_configuration(configuration)
-        if not reasoning_capture.enabled(baseline_reasoning.for_example(example)):
+        if not reasoning_capture.enabled(_capture_configuration(example, role)):
             return None
         judgment = example.get("judgment") or {}
         if (type(judgment.get("per_icp_score")) not in (int, float)
@@ -2058,9 +2080,11 @@ def _combined_coverage(reports):
     return result
 
 
-def build(examples, rules: training_steps.Rules | None = None):
+def build(examples, rules: training_steps.Rules | None = None, *, role='source'):
     """Return private candidates only for proven full generated thinking."""
     rules = rules or training_steps.Rules()
+    if role not in {'source', 'judge'}:
+        raise ValueError('invalid_target_role')
     output = {"train": [], "eval": [], "analysis": []}
     records_by_split: dict[str, dict[str, dict]] = {"train": {}, "eval": {}}
     reasons = Counter()
@@ -2085,7 +2109,7 @@ def build(examples, rules: training_steps.Rules | None = None):
             return
         source = ref["example_hash"]
         if source not in scoped:
-            scoped[source] = _individual_research_evidence(example)
+            scoped[source] = _individual_research_evidence(example, role=role)
         ancillary_gaps = scoped[source]
         if ancillary_gaps is None:
             reasons["trajectory_evidence_incomplete"] += 1
@@ -2097,7 +2121,7 @@ def build(examples, rules: training_steps.Rules | None = None):
             return
         delivered_call = dict(call, response=delivered,
                               response_sha256=ref["delivered_response_sha256"])
-        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
+        registry = _capture_configuration(example, role).get("reasoning_route_registry")
         source = ref["example_hash"]
         segments, status = full_text_segments(delivered_call, _role(example, call), registry)
         if not segments:
@@ -2114,6 +2138,7 @@ def build(examples, rules: training_steps.Rules | None = None):
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if identity not in (example.get("input_snapshots") or {}))
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
+                  **({'role': 'judge'} if role == 'judge' else {}),
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
                   "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
                   "quality": copy.deepcopy(candidate["quality"]),
@@ -2121,7 +2146,7 @@ def build(examples, rules: training_steps.Rules | None = None):
                                        if key != "teacher_reasoning_metadata"},
                                    "response_sha256": ref["delivered_response_sha256"],
                                    "route": copy.deepcopy(call["reasoning_capture"]),
-                                   "selected_research_evidence": {
+                                   ("selected_judge_evidence" if role == 'judge' else "selected_research_evidence"): {
                                        "complete": not missing_inputs,
                                        **({"scope": "individual_model_request_result",
                                            "runtime_input_availability": "unavailable",
@@ -2139,14 +2164,15 @@ def build(examples, rules: training_steps.Rules | None = None):
         for example in examples:
             source = example.get("example_hash")
             if source not in coverage_sources:
-                report = coverage([example])
+                report = coverage([example], role='judge') if role == 'judge' else coverage([example])
                 if report["distinct_verified_exports"]:
                     coverage_sources.add(source)
                     coverage_reports.append(report)
             yield example
             del example
 
-    splits, historical = training_steps._build(sources(), rules, full_thinking_candidate=project_candidate)
+    splits, historical = training_steps._build(sources(), rules, full_thinking_candidate=project_candidate,
+                                               role=role)
     for split in ("train", "eval"):
         for candidate in splits[split]:
             for ref in candidate["source_refs"]:
@@ -2165,6 +2191,7 @@ def build(examples, rules: training_steps.Rules | None = None):
         output[split] = [records[key] for key in sorted(records)]
     output["analysis"] = copy.deepcopy(splits["analysis"])
     manifest = {"schema_version": SCHEMA_VERSION, "rules": historical["rules"],
+                **({'role': 'judge'} if role == 'judge' else {}),
                 "training_permission": copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 "source_dataset_version": historical["dataset_version"],
                 "split_source_hashes": historical["split_source_hashes"],

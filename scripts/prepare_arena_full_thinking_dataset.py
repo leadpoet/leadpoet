@@ -28,6 +28,8 @@ def main(argv=None):
     parser.add_argument("--include-nonproduction-rounds", action="store_true")
     parser.add_argument("--review-sample-size", type=int, default=0)
     parser.add_argument("--review-decisions", type=Path)
+    parser.add_argument("--role", choices=("source", "judge"), default="source",
+                        help="Export sourcing or selected judge targets separately; defaults to sourcing.")
     _example_limit_argument(parser)
     args = parser.parse_args(argv)
     if args.max_example_bytes <= 0:
@@ -38,7 +40,8 @@ def main(argv=None):
             eval_percent=args.eval_percent, seed=args.seed,
             production_rounds_only=not args.include_nonproduction_rounds,
             eval_mode=args.eval_mode, eval_after=args.eval_after)
-        splits, manifest = training_thinking.build(_examples(args.examples, max_example_bytes=args.max_example_bytes), rules)
+        splits, manifest = training_thinking.build(_examples(args.examples, max_example_bytes=args.max_example_bytes),
+                                                   rules, role=args.role)
         curation = training_curation.flag_manifest(splits, manifest["dataset_version"])
         review = None
         if args.review_sample_size:

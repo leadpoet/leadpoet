@@ -1895,6 +1895,14 @@ def registry_image_exporter(client: images.RegistryClient, *, rules: Optional[im
 # ---------------------------------------------------------------------------
 
 
+def _full_thinking_lease(lease: Mapping[str, Any]) -> bool:
+    if lease.get("kind") not in {"execute", "score"}:
+        return False
+    field = ("judge_reasoning_capture_policy" if lease.get("kind") == "score"
+             else "reasoning_capture_policy")
+    return lease.get(field) == shim.FULL_THINKING_POLICY
+
+
 @dataclass
 class RunState:
     lease: Dict[str, Any]
@@ -3464,9 +3472,7 @@ class WorkerSocketServer:
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(
                 raw, deepline_catalog=self._state.lease.get("deepline_catalog"),
-                allow_full_thinking=self._state.lease.get("kind") == "execute"
-                and self._state.lease.get("reasoning_capture_policy")
-                == shim.FULL_THINKING_POLICY,
+                allow_full_thinking=_full_thinking_lease(self._state.lease),
             )
         except shim.OperationFrameError as exc:
             code = str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame"
@@ -3514,9 +3520,7 @@ class WorkerSocketServer:
             operation_id, parameters = operations.match_request(
                 method, url, body, headers,
                 deepline_catalog=self._state.lease.get("deepline_catalog"),
-                allow_full_thinking=self._state.lease.get("kind") == "execute"
-                and self._state.lease.get("reasoning_capture_policy")
-                == shim.FULL_THINKING_POLICY,
+                allow_full_thinking=_full_thinking_lease(self._state.lease),
             )
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
@@ -4577,8 +4581,7 @@ class AssignmentExecutor:
                     input_document["provider_operations"] = sorted(
                         set(operations.OPERATIONS) | set(operations.CATALOG_OPERATIONS)
                     )
-            if (lease.get("kind") == "execute"
-                    and lease.get("reasoning_capture_policy") == shim.FULL_THINKING_POLICY):
+            if _full_thinking_lease(lease):
                 # The shim needs a local parse hint; the worker's lease remains
                 # the authority for the same request after it crosses the socket.
                 extra_environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY

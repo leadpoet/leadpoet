@@ -100,7 +100,10 @@ def test_original_strict_schema_full_source_and_security_policy_preserved(model,
         "require_parameters": True, "data_collection": "deny", "zdr": True}
     assert request.parameters["plugins"] == [{"id": "context-compression", "enabled": False}]
     assert request.parameters["transforms"] == []
-    assert request.parameters["reasoning"] == {"effort": "high", "exclude": False}
+    if model == code_review.DEFAULT_REVIEW_MODEL:
+        assert "reasoning" not in request.parameters
+    else:
+        assert request.parameters["reasoning"] == {"effort": "high", "exclude": False}
     assert request.parameters["max_tokens"] == 32768
     assert request.context_window_tokens == 1000000
     submission = json.loads(request.parameters["messages"][1]["content"])
@@ -108,6 +111,26 @@ def test_original_strict_schema_full_source_and_security_policy_preserved(model,
     assert request.source_archive_sha256 == baseline.source_archive_sha256
     assert all(category in request.parameters["messages"][0]["content"] for category in code_review.REVIEW_CATEGORIES)
     assert "expected" not in submission and "rationale" not in submission
+
+
+@pytest.mark.parametrize("mode", ["low", "high"])
+def test_sonnet_baseline_is_exact_production_request_except_budget_price_cap(monkeypatch, mode):
+    original_prepare = code_review.prepare_request
+    originals = []
+
+    def observe(*args, **kwargs):
+        result = original_prepare(*args, **kwargs)
+        originals.append(copy.deepcopy(result.parameters))
+        return result
+
+    monkeypatch.setattr(code_review, "prepare_request", observe)
+    case = harness.load_cases(["benign_agent"])[0]
+    route = {"pricing": {"prompt": "0.0000022", "completion": "0.000011", "request": "0"}}
+    request = harness.prepare_case(case, model=code_review.DEFAULT_REVIEW_MODEL,
+                                   provider="google-vertex", mode=mode, route=route)
+    actual = copy.deepcopy(request.parameters)
+    assert actual["provider"].pop("max_price") == {"prompt": 2.2, "completion": 11.0, "request": 0.0}
+    assert actual == originals[0]
 
 
 @pytest.mark.parametrize("field,value,error", [("status", -2, "route_unhealthy"),
@@ -133,6 +156,7 @@ def test_google_aggregate_alias_bounds_every_region():
 
 def test_reservation_covers_complete_wire_input_output_and_request_fee():
     _, request, route = prepared()
+    assert request.parameters["reasoning"] == {"effort": "low", "exclude": False}
     route["pricing"]["request"] = "0.02"
     expected = (Decimal(request.input_tokens_upper_bound) * Decimal("0.0000003")
                 + Decimal(32768) * Decimal("0.0000012") + Decimal("0.02"))

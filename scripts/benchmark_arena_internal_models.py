@@ -110,7 +110,10 @@ def prepare_case(case: dict, *, model: str, provider: str, mode: str,
     # Keep the production prompt, bindings, full source and strict original schema.
     parameters["model"] = model
     parameters["provider"]["only"] = [provider]
-    parameters["reasoning"] = {"effort": mode, "exclude": False}
+    # The baseline measures the existing production request, including its
+    # absence of an explicit reasoning mode. Only candidates vary this control.
+    if model != code_review.DEFAULT_REVIEW_MODEL:
+        parameters["reasoning"] = {"effort": mode, "exclude": False}
     if route:
         parameters["provider"]["max_price"] = {
             "prompt": float(decimal(route["pricing"]["prompt"]) * 1_000_000),
@@ -315,7 +318,8 @@ def main(argv=None):
     prepared = [prepare_case(case, model=args.model, provider=provider, mode=args.mode, route=route) for case in cases]
     if not args.live:
         print(json.dumps({"mode": "offline", "model": args.model, "provider": provider,
-                          "reasoning_mode": args.mode, "metadata_verified": bool(route),
+                          "reasoning_mode": "production_default" if args.model == code_review.DEFAULT_REVIEW_MODEL else args.mode,
+                          "metadata_verified": bool(route),
                           "cases": [{"case": c["id"], "files": len(p.files), "source_bytes": p.reviewed_file_bytes,
                                      "expected": c.get("expected", {}),
                                      "max_reservation_usd": str(reservation_usd(p, route)) if route else None}

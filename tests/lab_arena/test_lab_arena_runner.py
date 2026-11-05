@@ -183,6 +183,7 @@ def lease(run_id="r1", position=0):
     return {
         "status": "leased", "run_id": run_id, "assignment_id": "%s:s1:1:%d" % (ROUND, position), "submission_id": "s1", "miner_hotkey": MINER,
         "image_digest": IMAGE, "stage": 1, "icp_position": position, "attempt": 1,
+        "claim_request_hash": "sha256:" + "c" * 64,
         "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00",
         "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
         "image_reference": IMAGE_REFERENCE,

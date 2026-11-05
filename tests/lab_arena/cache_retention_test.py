@@ -117,12 +117,19 @@ def test_runner_close_holds_cache_lock_until_pool_shutdown_succeeds(tmp_path):
     workspace.mkdir()
     lock = workspace_cache_lock(workspace, exclusive=False)
     runner = object.__new__(Runner)
-    runner._config = SimpleNamespace(workspace_cache_lock=lock)
+    events = []
+    runner._config = SimpleNamespace(
+        workspace_cache_lock=lock,
+        input_retention=SimpleNamespace(stop=lambda: events.append("input_retention_stopped")),
+    )
 
     class BrokenPool:
         fail = True
 
         def shutdown(self, *, wait):
+            assert wait is True
+            assert events[-1] == "input_retention_stopped"
+            events.append("pool_shutdown")
             if self.fail:
                 raise RuntimeError("pool failure")
 
@@ -140,6 +147,7 @@ def test_runner_close_holds_cache_lock_until_pool_shutdown_succeeds(tmp_path):
     runner._pool.fail = False
     runner.close()
     assert runner._config.workspace_cache_lock is None
+    assert events == ["input_retention_stopped", "pool_shutdown"] * 2
     with workspace_cache_lock(workspace, exclusive=True):
         pass
 

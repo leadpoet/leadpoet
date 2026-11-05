@@ -1222,3 +1222,20 @@ rewards. Interpret criteria faithfully; do not trade unsupported approvals for
 fewer rejections. The coordinator owns independent review and canonical release;
 internal agents inspect and test only unless assigned an isolated edit scope.
 Preserve concurrent work. This supersedes the earlier draft-only merge limit.
+
+
+## Scoped authorization: November 5 durable runtime input capture
+
+The user authorized the narrow capture reliability fix: retain the original
+runtime input privately and immutably before upload, reuse the existing atomic,
+fsync and flock pattern, and replay distinct saved inputs in one bounded
+background operation through the existing gateway input endpoint. Permit only
+reviewed capture-only terminal grace with the same token, generation and claim,
+anchored to reliable immutable server evidence and the existing 180-second bound.
+Keep failed or expired evidence private for audit. Do not reconstruct missing
+historical inputs, replay paid work, or add a service or scoring dependency.
+Preserve privacy, frozen rules, scoring, billing, qualifications and completed work.
+Internal agents may implement and test, then commit and push a separate PR after
+independent review. The coordinator owns protected merge, canonical gateway and
+normal-validator release, and live verification. Internal agents must not change
+production, restart services, renew credentials, or alter other tasks' releases.

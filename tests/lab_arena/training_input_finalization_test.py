@@ -13,7 +13,7 @@ from lab_arena.store import hash_lease_token
 from tests.lab_arena.test_lab_arena_runner import (
     BridgingRuntime, FakeApi, lease, make_config, scoring_lease, valid_company,
 )
-from tests.lab_arena.training_input_test import CLAIM_HASH, NOW, TOKEN, service_for
+from tests.lab_arena.training_input_test import CLAIM_HASH, NOW, TOKEN, capture_ack, service_for
 
 
 def setup_run(tmp_path, kind, mode, monkeypatch, *, runtime_fails=False, stop_fails=False):
@@ -115,7 +115,7 @@ def test_failed_initial_input_retries_exact_document_before_finalization(tmp_pat
     assert envelope["body"]["result"]["terminal_status"] == "accepted"
     assert envelope["body"]["result"]["resource_summary"]["provider_call_count"] == 1
     assert len(api.provider_frames) == 1
-    assert not list((tmp_path / "work").iterdir())
+    assert not any(path.name.startswith("run-") for path in (tmp_path / "work").iterdir())
 
 
 @pytest.mark.parametrize("kind", ["execute", "score"])
@@ -162,7 +162,7 @@ def test_final_upload_failure_is_bounded_and_preserves_primary_result(
     assert len(attempts) == 3
     assert len(api.provider_frames) == 1
     assert timeline.index("input", 2) < timeline.index("journal.stop")
-    assert not list((tmp_path / "work").iterdir())
+    assert not any(path.name.startswith("run-") for path in (tmp_path / "work").iterdir())
 
 
 @pytest.mark.parametrize("kind", ["execute", "score"])
@@ -181,7 +181,7 @@ def test_failure_before_input_write_has_no_upload_or_retry(tmp_path, kind, monke
     with pytest.raises(OSError):
         execute()
     assert attempts == []
-    assert not list((tmp_path / "work").iterdir())
+    assert not any(path.name.startswith("run-") for path in (tmp_path / "work").iterdir())
 
 
 @pytest.mark.parametrize("kind", ["execute", "score"])
@@ -199,7 +199,7 @@ def test_setup_failure_after_input_write_retries_before_failure_reporting(tmp_pa
     assert "runtime" not in timeline and len(attempts) == 3
     assert timeline.index("input", 2) < timeline.index("runtime.error")
     assert training_input.read_input(objects, "r1", kind, 1, CLAIM_HASH)["input"] == attempts[0]
-    assert not list((tmp_path / "work").iterdir())
+    assert not any(path.name.startswith("run-") for path in (tmp_path / "work").iterdir())
 
 
 @pytest.mark.parametrize("mode,expected,count", [
@@ -213,10 +213,10 @@ def test_input_helper_reports_outcome_without_changing_initial_attempts(mode, ex
         attempts.append(args)
         if mode == "timeout":
             raise httpx.ReadTimeout("synthetic failure")
-        return {"status": "stored" if mode == "stored" else "unavailable"}
+        return capture_ack("r1", {}) if mode == "stored" else {"status": "unavailable"}
 
     config = SimpleNamespace(api=SimpleNamespace(training_input=None if mode == "absent" else send))
-    assert runner._record_training_input(config, {"run_id": "r1"}, TOKEN, {}) is expected
+    assert runner._record_training_input(config, {"run_id": "r1", "lease_generation": 1, "claim_request_hash": CLAIM_HASH}, TOKEN, {}) is expected
     assert len(attempts) == count
 
 

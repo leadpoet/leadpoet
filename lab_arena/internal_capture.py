@@ -247,6 +247,83 @@ def _reasoning(request: Mapping[str, Any], response: Any, api: str, redactions: 
             "registry_sha256": contracts.document_hash(registry) if isinstance(registry, Mapping) else None}
 
 
+def _internal_responses_input(value, *, tools=(), max_tool_calls=None,
+                              allow_reasoning_history=False, allow_tool_error_history=False) -> None:
+    """Check trusted host initial messages without miner dispatch restrictions.
+
+    This validates saved evidence only. It does not alter a request, reserve
+    money, dispatch tools, or change the shared miner input validator.
+    """
+    require = training_steps._require
+    if isinstance(value, str):
+        require(bool(value.strip()), "internal_input_empty")
+    else:
+        require(isinstance(value, list) and 1 <= len(value) <= 256, "internal_input_shape_unsupported")
+        for message in value:
+            require(isinstance(message, Mapping) and set(message) <= {"id", "type", "role", "content"}
+                    and message.get("type", "message") == "message"
+                    and message.get("role") in {"system", "developer", "user"}, "internal_initial_message_unsupported")
+            if "id" in message:
+                require(isinstance(message["id"], str) and 1 <= len(message["id"]) <= 256,
+                        "internal_message_id_invalid")
+            content = message.get("content")
+            require(isinstance(content, str) or isinstance(content, list) and bool(content),
+                    "internal_initial_content_unsupported")
+            if isinstance(content, list):
+                require(all(isinstance(part, Mapping) and set(part) == {"type", "text"}
+                            and part["type"] == "input_text" and isinstance(part["text"], str)
+                            for part in content), "internal_initial_content_unsupported")
+    require(isinstance(tools, (list, tuple)) and len(tools) <= 1, "internal_tools_unsupported")
+    if tools:
+        tool = tools[0]
+        require(isinstance(tool, Mapping) and set(tool) <= {"type", "parameters"}
+                and tool.get("type") == "openrouter:web_search", "internal_tools_unsupported")
+        parameters = tool.get("parameters", {})
+        require(isinstance(parameters, Mapping)
+                and set(parameters) <= {"engine", "max_uses", "max_results", "max_total_results", "max_characters"},
+                "internal_search_controls_unsupported")
+        if "engine" in parameters:
+            require(parameters["engine"] in {"exa", "native"}, "internal_search_engine_invalid")
+        for name, number in parameters.items():
+            if name != "engine":
+                require(type(number) is int and 1 <= number <= 1_000_000,
+                        "internal_search_limit_invalid")
+        require(type(max_tool_calls) is int and 1 <= max_tool_calls <= 1000,
+                "internal_tool_limit_invalid")
+    else:
+        require(max_tool_calls is None, "internal_tool_limit_without_tools")
+
+
+def _search_evidence(response: Any) -> dict:
+    """Distinguish retained provider events, URL references and actual result text."""
+    output = response.get("output") if isinstance(response, Mapping) else None
+    events = []
+    for index, item in enumerate(output if isinstance(output, list) else []):
+        if not isinstance(item, Mapping) or item.get("type") not in training_steps._HOSTED_SEARCH_TYPES:
+            continue
+        action = item.get("action")
+        action = action if isinstance(action, Mapping) else {}
+        sources = action.get("sources")
+        sources = sources if isinstance(sources, list) else []
+        # Native Responses normally exposes URL-only sources. Do not promote
+        # a citation or the model's reasoning into retrieved source content.
+        results = action.get("results")
+        results = results if isinstance(results, list) else []
+        text_results = [row for row in sources + results if isinstance(row, Mapping)
+                        and any(isinstance(row.get(key), str) and row[key].strip()
+                                for key in ("text", "content", "snippet"))]
+        events.append({"output_index": index, "status": item.get("status"),
+                       "source_references": len(sources), "results_with_text": len(text_results),
+                       "result_text_status": "exposed" if text_results else "not_exposed"})
+    return {"scope": "provider_exposed_search_events_only", "search_events": len(events),
+            "events_with_source_references": sum(row["source_references"] > 0 for row in events),
+            "source_references": sum(row["source_references"] for row in events),
+            "events_with_result_text": sum(row["results_with_text"] > 0 for row in events),
+            "all_search_events_have_result_text": bool(events) and all(row["results_with_text"] for row in events),
+            "underlying_page_contents_verified": False, "all_internal_provider_turns_verified": False,
+            "events": events}
+
+
 def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, dict | None]:
     """Read one call; corrupt, missing, redacted and unavailable evidence is explicit."""
     prefix = call_prefix(ref)
@@ -300,6 +377,7 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
            "outcome": (documents.get("outcome") or {}).get("outcome"),
            "cost_microusd": outcome_event.get("cost_microusd"),
            "cost_status": outcome_event.get("cost_status", "unknown"), "reasoning": reasoning,
+           "research_evidence": _search_evidence(response),
            "completeness": {"complete": all(dimensions.values()) and not gaps,
                             "dimensions": dimensions, "gaps": sorted(set(gaps))}}
     candidate, exclusions = None, []
@@ -311,8 +389,13 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
         exclusions.append("provider_http_error")
     else:
         try:
+            if isinstance(response, Mapping) and any(response.get(key) for key in ("error", "errors", "refusal")):
+                raise ValueError("internal_provider_error_or_refusal")
             target, _ = training_steps._target(request, response, first["api"], allow_reasoning_history=True,
-                                               allow_tool_error_history=True)
+                                               allow_tool_error_history=True,
+                                               responses_input_validator=_internal_responses_input)
+            if first["api"] == "openrouter.responses":
+                training_steps._validate_target_tools(request, target, first["api"])
             candidate = {"schema_version": SFT_SCHEMA_VERSION, "actor_type": "arena_internal",
                          "purpose": first.get("purpose"), "call_id": raw["call_id"],
                          "format": first["api"], "input": request, "target": target,
@@ -324,6 +407,7 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
                                     "request_sha256": (events["request"].get("capture") or {}).get("sha256"),
                                     "response_sha256": (events["response"].get("capture") or {}).get("sha256"),
                                     "outcome": raw["outcome"], "cost_status": raw["cost_status"],
+                                    "research_evidence": raw["research_evidence"],
                                     "capture_completeness": raw["completeness"]}}
         except Exception:
             exclusions.append("target_shape_or_completion_unsupported")

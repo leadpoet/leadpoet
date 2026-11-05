@@ -5961,7 +5961,10 @@ async def verify_three_stage(
     if (
         evidence_reuse_callback is not None
         and integrity_policy and stage1_soft_reject
-        and selected_stage3_model == ARENA_EVIDENCE_MODEL
+        # The scorer binds this role from its frozen model policy. Model
+        # identity also stays in the evidence fingerprint, so a replacement
+        # cannot inherit the previous model's judgments.
+        and selected_stage3_model == os.environ.get("ARENA_INTENT_EVIDENCE_MODEL", ARENA_EVIDENCE_MODEL)
         and row.get("_evidence_type") not in {"SOCIAL_POSTING", "PODCAST_APPEARANCE"}
         and len(row["claimed_source_urls"]) == 1 and len(contents["results"]) == 1
         and not incomplete_bundle and not source_absent

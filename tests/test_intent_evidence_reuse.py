@@ -77,7 +77,10 @@ async def test_actual_native_positive_and_false_acquisition_outcomes_are_unchang
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrong_claim", [False, True])
-async def test_exact_text_hit_fetches_again_and_preserves_native_result(monkeypatch, wrong_claim):
+@pytest.mark.parametrize("evidence_model", [None, "openai/gpt-oss-120b"])
+async def test_exact_text_hit_fetches_again_and_preserves_native_result(monkeypatch, wrong_claim, evidence_model):
+    if evidence_model is not None:
+        monkeypatch.setenv("ARENA_INTENT_EVIDENCE_MODEL", evidence_model)
     storage, events = {}, []
     fixture = _fixture()
     inputs = {"claim": fixture["wrong_acquisition_claim"],
@@ -97,6 +100,25 @@ async def test_exact_text_hit_fetches_again_and_preserves_native_result(monkeypa
     assert first_fetch.await_count == second_fetch.await_count == first_judge.await_count == 1
     second_judge.assert_not_awaited()
     assert events == ["lookup", "complete", "lookup"]
+
+
+@pytest.mark.asyncio
+async def test_frozen_evidence_model_change_has_distinct_cache_identity(monkeypatch):
+    captured = []
+    async def exchange(request):
+        if request["operation"] == "lookup":
+            captured.append(request["evidence_input"])
+        return {"status": "miss"}
+    for model in ("openai/gpt-6-luna", "openai/gpt-oss-120b"):
+        monkeypatch.setenv("ARENA_INTENT_EVIDENCE_MODEL", model)
+        result, _, judge = await _run(monkeypatch, callback=exchange)
+        assert result["decision"] == "approve"
+        assert judge.call_args.args[1] == model
+    assert [item["model"] for item in captured] == ["openai/gpt-6-luna", "openai/gpt-oss-120b"]
+    assert reuse.evidence_fingerprint(captured[0]) != reuse.evidence_fingerprint(captured[1])
+    captured.clear()
+    await _run(monkeypatch, callback=exchange, extra={"stage3_model": "openai/gpt-6-luna"})
+    assert not captured  # An explicit different model is still outside the frozen evidence role.
 
 
 @pytest.mark.asyncio

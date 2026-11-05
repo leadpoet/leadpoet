@@ -144,6 +144,11 @@ def test_wording_is_separate_but_dates_are_exact_evidence_identity():
     changed["_evidence_bundle"][0]["date"] = "2026-08-26"
     third, _ = reuse.snapshot(changed, {"results": []}, **kwargs)
     assert reuse.evidence_fingerprint(first) != reuse.evidence_fingerprint(third)
+    with use_evaluation_date("2026-10-24"):
+        today, _ = reuse.snapshot(row, {"results": []}, **kwargs)
+    with use_evaluation_date("2026-10-25"):
+        tomorrow, _ = reuse.snapshot(row, {"results": []}, **kwargs)
+    assert reuse.evidence_fingerprint(today) != reuse.evidence_fingerprint(tomorrow)
 
 
 @pytest.mark.asyncio

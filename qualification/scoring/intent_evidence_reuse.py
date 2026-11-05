@@ -78,6 +78,8 @@ def snapshot(
             "company_quality": bool(company_quality),
             "decision_context": decision_context,
         }
+        from qualification.scoring.evaluation_clock import evaluation_date
+        evidence_input["evaluation_date"] = evaluation_date().isoformat()
         encoded = _canonical({"evidence_input": evidence_input, "claim": claim})
         if len(encoded) > MAX_EVIDENCE_BYTES:
             return None

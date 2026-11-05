@@ -77,12 +77,13 @@ def test_frozen_options_roundtrip_and_remain_bound_to_exact_route(monkeypatch, m
     registry['approved_routes'][0]['mode'] = (
         {'budget_tokens': 1024} if 'max_tokens' in mode else deepcopy(mode))
     search_model = 'test/search'
-    registry['approved_routes'] += _reviewed_registry(
-        model=search_model, api='openrouter.responses')['approved_routes']
+    for api in ('openrouter.chat', 'openrouter.responses'):
+        registry['approved_routes'] += _reviewed_registry(model=search_model, api=api)['approved_routes']
     options = {MODEL: {'reasoning': mode, 'max_output_tokens': 4096},
                search_model: {'reasoning': {'effort': 'low'}, 'max_output_tokens': 4096}}
     models = {role: MODEL for role in scoring.DEFAULT_JUDGE_MODELS}
     models['company_fit_reverification'] = search_model
+    models['intent_three_stage_stage3'] = search_model
     policy = scoring.build_scorer_policy(judge_models=models,
         judge_provider_routes={MODEL: 'example/verified', search_model: 'example/verified'},
         judge_request_options=options)
@@ -150,3 +151,30 @@ def test_compatible_explicit_effort_wins_but_enabled_route_rejects_effort(monkey
         'reasoning': {'enabled': True}, 'max_output_tokens': 2048}}))
     with pytest.raises(ValueError, match='incompatible'):
         opts.prepare_judge_request(body)
+
+
+REACHABLE_JUDGE_APIS = {
+    role: ({'openrouter.chat', 'openrouter.responses'} if role in {
+        'company_fit_reverification', 'intent_three_stage_stage3'} else {'openrouter.chat'})
+    for role in scoring.DEFAULT_JUDGE_MODELS
+}
+
+
+@pytest.mark.parametrize('role,api', [(role, api) for role, apis in REACHABLE_JUDGE_APIS.items() for api in sorted(apis)])
+def test_activation_requires_each_reachable_role_api_before_round_persistence(role, api):
+    models = {name: 'test/' + name for name in REACHABLE_JUDGE_APIS}
+    registry = _reviewed_registry(model='test/fixture_baseline')
+    for name, apis in REACHABLE_JUDGE_APIS.items():
+        for operation in apis:
+            registry['approved_routes'] += _reviewed_registry(model=models[name], api=operation)['approved_routes']
+    policy = scoring.build_scorer_policy(judge_models=models,
+        judge_provider_routes={model:'example/verified' for model in models.values()})
+    assert reasoning_capture.validate_judge_registry(registry, policy) == registry
+    registry['approved_routes'] = [row for row in registry['approved_routes']
+        if (row['model_id'], row['api']) != (models[role], api)]
+    value = service()
+    value._scorer_policy = policy
+    value._config.reasoning_registry_source = lambda: registry
+    with pytest.raises(ServiceError, match='judge_reasoning_capture_activation_not_ready'):
+        value.create_round(NOW, round_id='arena-2026-11-05-test')
+    assert value._store.rows == {}

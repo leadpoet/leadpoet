@@ -146,20 +146,23 @@ def validate_judge_registry(registry: Any, scorer_policy: Mapping[str, Any]) -> 
     options_raw = bindings.get("ARENA_JUDGE_REQUEST_OPTIONS")
     options = json.loads(options_raw) if options_raw is not None else {}
     for role, model in models.items():
-        # Company lookup and Stage 1 share the existing company search role.
-        api = "openrouter.responses" if role == "company_fit_reverification" else "openrouter.chat"
-        route = approved.get((model, routes.get(model), api))
-        if route is None:
-            raise ValueError("judge reasoning route unavailable")
-        if options:
-            option = options[model]
-            mode = option["reasoning"]
-            route_mode = route["mode"]
-            budget = "max_tokens" in mode and "budget_tokens" in route_mode
-            if (option["max_output_tokens"] > route["max_output_tokens"]
-                    or not (budget or set(mode) == set(route_mode))
-                    or api == "openrouter.responses" and mode.get("effort") == "max"):
-                raise ValueError("judge request options differ from approved route")
+        # Company lookup also runs a Chat tool controller. Conditional social
+        # and podcast Stage 3 paths need hosted search as well as ordinary Chat.
+        apis = ({"openrouter.chat", "openrouter.responses"} if role in {
+            "company_fit_reverification", "intent_three_stage_stage3"} else {"openrouter.chat"})
+        for api in apis:
+            route = approved.get((model, routes.get(model), api))
+            if route is None:
+                raise ValueError("judge reasoning route unavailable")
+            if options:
+                option = options[model]
+                mode = option["reasoning"]
+                route_mode = route["mode"]
+                budget = "max_tokens" in mode and "budget_tokens" in route_mode
+                if (option["max_output_tokens"] > route["max_output_tokens"]
+                        or not (budget or set(mode) == set(route_mode))
+                        or api == "openrouter.responses" and mode.get("effort") == "max"):
+                    raise ValueError("judge request options differ from approved route")
     return frozen
 
 

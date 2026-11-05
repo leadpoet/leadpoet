@@ -790,7 +790,8 @@ async def openrouter_chat(
                 # Sonnet 5.5 rejects sampling controls. Its adaptive high
                 # default can consume the small JSON reply's output budget.
                 if payload["model"] == "anthropic/claude-sonnet-5.5":
-                    payload["reasoning"] = {"effort": "low"}
+                    if not judge_reasoning_enabled():
+                        payload["reasoning"] = {"effort": "low"}
                 else:
                     payload["temperature"] = 0.3
                 if response_format is not None:

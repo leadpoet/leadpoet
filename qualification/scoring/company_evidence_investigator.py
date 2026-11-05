@@ -2914,7 +2914,9 @@ async def _review_industry_sources(
         return finding, '', 0
     payload = industry_classification.request_payload(packet, model=model, research=research)
     if judge_reasoning_enabled():
-        payload["reasoning"] = {"effort": "low", "exclude": False}
+        # This legacy packet default is host-owned, not an explicit caller
+        # control. Let prepare_judge_request select the frozen model's mode.
+        payload.pop("reasoning", None)
         payload["max_tokens"] = 16384
         payload["messages"][0]["content"] += industry_classification.REASONING_RESPONSE_CONTRACT
     try:
@@ -6384,7 +6386,7 @@ async def investigate_company_evidence(
                         "max_tokens": REASONING_MAX_TOKENS,
                         **(
                             {"reasoning": {"effort": "low"}}
-                            if (
+                            if not judge_reasoning_enabled() and (
                                 industry_investigation_model
                                 or (positive_semantic_review and (
                                     serialization_retry_request or force_submit

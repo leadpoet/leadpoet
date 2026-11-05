@@ -4315,7 +4315,8 @@ async def _call_openrouter(
     }
     if model == ARENA_EVIDENCE_MODEL:
         body.pop("temperature", None)
-        body["reasoning"] = {"effort": "low"}
+        if not judge_reasoning_enabled():
+            body["reasoning"] = {"effort": "low"}
         body["max_tokens"] = 4096
     request_reasoning = include_reasoning_default()
     reasoning_dropped = False

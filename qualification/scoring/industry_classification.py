@@ -27,13 +27,6 @@ REASONING_RESPONSE_CONTRACT = (
     "Match must have an empty missing_requirements list. Unavailable must name at least one "
     "material missing requirement. Missing proof alone is unavailable, not mismatch. "
     "Describe the company's observed offering in observed_activity, not the decision label."
-    "\nCheck the required actions, their objects, and the intended users separately against the sources. "
-    "A related activity, shared vocabulary, or a possible use does not establish the required action. "
-    "Do not substitute processing information about an activity for performing that activity, "
-    "or a different kind of user for the stated customer base. For each required capability, "
-    "identify the concrete supporting fact or name what is missing. Keep this analysis focused; "
-    "do not repeatedly restate the sources or revisit a completed check. "
-    "In the final JSON, keep observed_activity under 80 words and reason under 120 words."
 )
 CONDITIONAL_SOURCE_KEYS = ('child_source_url', 'parent_source_url', 'parent_quote', 'child_brand',
                            'official_child_homepage', 'parent_body_sha256', 'child_body_sha256',

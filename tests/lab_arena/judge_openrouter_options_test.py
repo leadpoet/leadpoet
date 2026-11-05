@@ -69,7 +69,7 @@ def test_future_request_uses_only_frozen_route_and_real_arena_validator(monkeypa
     path, body = options.prepare_judge_request(payload, hosted_search=search)
     assert payload == original
     assert body['provider'] == {'only': [PROVIDER]}
-    assert body['reasoning']['effort'] == 'medium'
+    assert body['reasoning']['effort'] == 'low'
     assert body['max_output_tokens' if search else 'max_tokens'] == 8192
     operation, normalized = operations.match_request('POST', 'https://openrouter.ai/api/v1' + path,
         json.dumps(body).encode(), {'content-type': 'application/json'}, allow_full_thinking=True)
@@ -96,6 +96,19 @@ def test_opt_in_cannot_fall_back_to_ambient_or_unpinned_provider(monkeypatch, ro
         monkeypatch.setenv('ARENA_JUDGE_PROVIDER_ROUTES', routes)
     with pytest.raises(ValueError, match='judge_provider_route_unavailable'):
         options.prepare_judge_request(request())
+
+
+def test_future_serial_tools_use_supported_parameters_without_relaxing_turn_contract(monkeypatch):
+    payload = dict(request(), parallel_tool_calls=False)
+    assert options.prepare_judge_request(payload)[1] == payload
+    enable(monkeypatch)
+    _, body = options.prepare_judge_request(payload)
+    assert "parallel_tool_calls" not in body
+    assert body["messages"][0] == {"role": "system", "content": "Return exactly one tool call per assistant turn."}
+    assert body["messages"][1:] == payload["messages"]
+    assert options.prepare_judge_request(body)[1] == body
+    with pytest.raises(ValueError, match="judge_parallel_tools_unsupported"):
+        options.prepare_judge_request(dict(payload, parallel_tool_calls=True))
 
 
 def test_native_projection_keeps_final_json_citations_usage_and_original(monkeypatch):

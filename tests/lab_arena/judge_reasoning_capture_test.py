@@ -146,6 +146,39 @@ def test_worker_source_policy_cannot_enable_a_legacy_judge():
 
 
 @pytest.mark.parametrize('enabled', [False, True])
+def test_trusted_judge_consumption_reaches_existing_worker_receipt_path(monkeypatch, enabled):
+    import tempfile
+    from pathlib import Path
+    from lab_arena import runner, shim
+    from scripts.verify_arena_live_capture import BrokerSocketApi
+    from tests.lab_arena.full_thinking_continuation_limit_test import broker_fixture, continuation
+    broker, store, transport, context, objects = broker_fixture()
+    broker._judge_models = (bt.CHAT['model'],)
+    context = replace(context, kind='score', judge_reasoning_capture_policy=rc.POLICY,
+                      judge_reasoning_route_registry=context.reasoning_route_registry)
+    state = runner.RunState(lease={'run_id': context.run_id, 'kind': 'score',
+        'judge_reasoning_capture_policy': rc.POLICY if enabled else None}, lease_token='test-token')
+    with tempfile.TemporaryDirectory(prefix='judge-receipt-', dir='/tmp') as directory:
+        worker = runner.WorkerSocketServer(Path(directory) / 'w.sock', BrokerSocketApi(broker, context), state)
+        worker.start()
+        monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(Path(directory) / 'w.sock'))
+        monkeypatch.setenv(shim.TRUSTED_SCORER_ENV, '1')
+        monkeypatch.setenv('ARENA_JUDGE_REASONING_CAPTURE_POLICY', rc.POLICY if enabled else '')
+        try:
+            status, headers, body = shim.dispatch('openrouter.responses', continuation('reasoning', 10), 1000)
+            assert status == 200
+        finally:
+            worker.stop()
+    reports = state.worker_observations.agent_observations
+    assert len(reports) == int(enabled)
+    if enabled:
+        assert reports[0]['kind'] == 'response_received'
+        assert reports[0]['data']['call_identity'] == headers[shim.CALL_IDENTITY_HEADER]
+        assert reports[0]['data']['body_sha256'] == contracts.hash_bytes(body)
+        assert reports[0]['data']['body_bytes'] == len(body)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
 def test_gateway_frame_size_gate_uses_frozen_judge_opt_in(enabled):
     from fastapi.testclient import TestClient
     from lab_arena.api import create_app

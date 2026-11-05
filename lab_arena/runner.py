@@ -2531,7 +2531,9 @@ class WorkerSocketServer:
         unavailable = contracts.canonical_json({"recorded": False}).encode("utf-8")
         try:
             frame = lab_arena_checkpoint.validate_training_frame(frame)
-            if str(self._state.lease.get("kind") or "execute") != "execute":
+            if (str(self._state.lease.get("kind") or "execute") != "execute"
+                    and not (self._state.lease.get("kind") == "score"
+                             and _full_thinking_lease(self._state.lease))):
                 return unavailable
             data = dict(frame["data"])
             if frame["kind"] == "web_fetch":

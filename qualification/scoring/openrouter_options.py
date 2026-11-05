@@ -37,10 +37,23 @@ def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False) -> t
     # This is a selector, not a caller-owned provider policy. The broker
     # installs ZDR, data_collection=deny, no fallback and exact price bounds.
     body["provider"] = {"only": [provider]}
+    if "parallel_tool_calls" in body:
+        if body.pop("parallel_tool_calls") is not False:
+            raise ValueError("judge_parallel_tools_unsupported")
+        # These routes support tools, but reject this optional Chat parameter.
+        # The existing investigator still validates exactly one tool per turn.
+        instruction = {"role": "system", "content": "Return exactly one tool call per assistant turn."}
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("judge_messages_unsupported")
+        if instruction not in messages:
+            messages.insert(0, instruction)
     controls = body.get("reasoning") or {}
     if not isinstance(controls, Mapping):
         raise ValueError("judge_reasoning_controls_unsupported")
-    effort = controls.get("effort", body.get("reasoning_effort", "medium"))
+    # Keep routine evidence checks bounded. Some reasoning routes map medium
+    # to high compute; an explicit caller setting still takes precedence.
+    effort = controls.get("effort", body.get("reasoning_effort", "low"))
     if (effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}
             or "reasoning_effort" in body and body["reasoning_effort"] != effort
             or hosted_search and effort == "max"):

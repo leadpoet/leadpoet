@@ -164,6 +164,11 @@ _ROUND_COLUMNS = (
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
     ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
 ).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1") + ",status_generation"
+# History lists every entrant, so it keeps the full publication. It still
+# reads only the public configuration, never the frozen route registry.
+_HISTORY_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
+    ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
+)
 
 
 def _competition_round(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1335,7 +1340,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             rows = service._store.list_rounds(
                 status="published", mode=service._config.mode,
                 network_name=network_name, netuid=netuid, limit=25,
-                columns=_ROUND_COLUMNS, history_order=True,
+                columns=_HISTORY_ROUND_COLUMNS, history_order=True,
                 **({"before_round": before} if before else {}),
                 **({"evaluation_date": day} if day else {}),
             )

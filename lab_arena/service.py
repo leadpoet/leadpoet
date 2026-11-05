@@ -1082,6 +1082,18 @@ class _PublicRunLookup(Mapping):
         return len(self._rows)
 
 
+# ``read_snapshot`` distinguishes a store read that failed from a snapshot
+# whose identity, schema, size or privacy projection cannot hold. The refusal
+# collapsed both into one code, so a verify failure could not be attributed.
+_OBSERVATION_VERIFY_DENIALS = {
+    "observations_unavailable": "training_observations_unavailable",
+    "size_limit": "training_observations_snapshot_invalid",
+    "identity_or_hash_invalid": "training_observations_snapshot_invalid",
+    "schema_payload_mismatch": "training_observations_snapshot_invalid",
+    "privacy_invalid": "training_observations_snapshot_invalid",
+}
+
+
 class ArenaService:
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
@@ -6813,8 +6825,17 @@ class ArenaService:
                 objects, run_id, str(run.get("kind") or "execute"),
                 run.get("lease_generation"), run.get("claim_request_hash"),
             )
-        except training_observations.ObservationError:
-            raise ServiceError("training_observations_unavailable", 503) from None
+        except training_observations.ObservationError as exc:
+            # Keep the refusal status, but name which half failed. A stored
+            # snapshot that cannot satisfy this lease identity will never
+            # satisfy it; only a store read is worth looking at as transient.
+            raise ServiceError(
+                _OBSERVATION_VERIFY_DENIALS.get(
+                    str(exc.args[0]) if exc.args else "",
+                    "training_observations_unavailable",
+                ),
+                503,
+            ) from None
         if not hmac.compare_digest(snapshot["payload_sha256"], payload_sha256):
             raise ServiceError("training_observations_digest_mismatch", 412)
         return snapshot["payload_sha256"]

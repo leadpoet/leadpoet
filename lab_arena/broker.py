@@ -5382,6 +5382,9 @@ class Broker:
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
+        if status == "promotion_pending":
+            summary.update(outcome="not_dispatched", reason="baseline_promotion_pending")
+            return _error_result("provider_unavailable", summary)
         reservation_readback_rows = None
         if source_content_fallback and reserved.get("idempotent") is True and status in {
             "reserved", "dispatched", "settled", "uncertain", "recovered",
@@ -6171,6 +6174,9 @@ class Broker:
                 lease_token_hash=context.lease_token_hash,
                 call_identity=call_identity,
             ))
+        if dispatched.get("status") == "promotion_pending":
+            summary.update(outcome="not_dispatched", reason="baseline_promotion_pending")
+            return _error_result("provider_unavailable", summary)
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
             return _error_result("lease_stale", summary)

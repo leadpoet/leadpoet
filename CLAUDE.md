@@ -1,3 +1,14 @@
+## Standing instruction: finish deployment in the owning task
+
+Each task must test, merge, deploy and verify its authorized changes unless the
+user says otherwise. Do not defer deployment to another chat or require its
+release handoff. Preserve concurrent work and canonical release checks. If a
+release lock is held, wait, recheck live state and finish the remaining work.
+Do not bypass a lock or repeat a deployment already verified live. This replaces
+older instructions that reserve deployment for another user-visible task;
+internal subagents still act within their assigned scope. Keep cross-chat
+messaging restrictions unchanged.
+
 ## Scoped authorization: Arena evidence-bound judge caching
 
 The user authorized the smallest permanent improvement to existing Arena judge
@@ -15,8 +26,8 @@ reports and handoffs in the current chat; do not send cross-chat messages.
 Use prospective frozen policy activation; do not repin committed rounds or
 rewrite historical judgments. Use bounded organizer-funded validation only,
 with an initial task ceiling of $10 including failed and pending calls; do not
-use miner keys or replay historical paid calls. Preserve active release owners,
-locks, guards and all unrelated concurrent work.
+use miner keys or replay historical paid calls. Preserve active release locks,
+guards and all unrelated concurrent work.
 
 ## Scoped authorization: November 4 accepted donor evidence correction
 
@@ -175,8 +186,8 @@ and training eligibility bugs, with tests, merge, canonical deployment and live
 verification. Stream existing canonical hashes and avoid redundant whole-example
 JSON copies. Preserve exact hashes and data, strict privacy, identity checks,
 8/10 coverage, 1% missing reasoning, scoring, billing and published outcomes.
-Use read-only retained data for validation; do not replay providers or overlap
-another task's release. The coordinator owns production actions.
+Use read-only retained data for validation; do not replay providers. Preserve
+concurrent work and active canonical release locks. The coordinator owns production actions.
 
 ## Scoped authorization: November 1 judge evidence audit
 
@@ -435,7 +446,7 @@ Internal agents own isolated implementation and review only; the coordinator
 owns production actions through existing AWS administrative and release controls.
 Permanent capture or accounting fixes remain investigation and recommendation
 only until the user approves them. This authority ends after the exact champion
-correction is verified. Preserve all concurrent work and deployment ownership.
+correction is verified. Preserve all concurrent work and active deployment locks.
 
 ## Scoped authorization: October 29 post-migration production audit
 
@@ -1167,7 +1178,7 @@ verified RDS session bridge, and live query-plan and monitoring verification.
 Preserve selector definitions, billing records, accepted work, scoring, deadlines,
 privacy and rewards. Add no retry layer, dependency or service. Internal agents
 may test and review; the coordinator owns merge and production application and
-must preserve the other active task's runtime release ownership.
+must preserve concurrent work and active runtime release locks.
 
 ## Scoped authorization: November 3 prospective verifier accuracy
 
@@ -1177,13 +1188,13 @@ providers, including failed calls and unresolved reservations; the $0.50
 retrieval subcap is part of that total, not a new allowance. Preserve every
 previous charge and use the shared guarded task ledger. Preserve historical
 inputs, judgments, scores, rewards, frozen model policies and rejection rules.
-Keep PR981 numeric identity checks and the production release owner's work.
+Keep PR981 numeric identity checks and concurrent production work.
 Do not include the unproven PR929 wider-context experiment. Internal agents may
 implement, test and commit in this isolated checkout only; they must not push,
 merge, deploy, change production or renew credentials. The coordinator owns
 independent review and any later release after full native positive improvement,
-negative controls and the existing production owner's release handoff. Add no
-new judging system, dependency or unrelated architecture.
+negative controls and canonical release checks. Add no new judging system,
+dependency or unrelated architecture.
 
 ## Scoped authorization: November 4 Arena paid-work reliability
 
@@ -1194,7 +1205,7 @@ recovery. Reuse existing persistence and accounting; preserve scoring, judging,
 frozen rounds, costs and historical results. Internal agents implement/test only.
 The coordinator owns independent review, safe merge, exact committed migrations,
 canonical paired deployment, and fresh worker/OnePatch/Sentry verification.
-Preserve concurrent work and release ownership; do not replay paid historical work.
+Preserve concurrent work and active release locks; do not replay paid historical work.
 
 ## Scoped authorization: November 4 review and checkpoint reliability
 

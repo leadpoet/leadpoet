@@ -95,6 +95,18 @@ RESEARCH_POLICY_HASH = contracts.document_hash({
     "reviewer_version": RESEARCH_REVIEWER_VERSION,
     "instructions": _RESEARCH_PROMPT,
 })
+_RESEARCH_RESPONSE_GUIDANCE = """
+
+Complete the review in this response; do not emit placeholders or an empty
+assessment. Include every supplied file in reviewed_files. For each research
+claim, copy a short, contiguous excerpt directly from the named source file,
+without editing, combining, or paraphrasing it. Put interpretation and cross-file
+connections in explanation, not excerpt. Prefer executable controller statements
+over comments describing them. Include the required claims for the selected
+classification and a nonempty source-only limitations list. If control cannot be
+established, use unverified with actual source evidence for that uncertainty;
+never invent an excerpt to complete the response.
+"""
 _RESPONSE_INVALID_REASONS = frozenset(
     {
         "envelope", "model_mismatch", "choice", "not_finished", "truncated", "truncated_at_limit", "message",
@@ -368,7 +380,7 @@ def _response_schema(
     properties = {
         "verdict": {"type": "string", "enum": ["pass", "reject"]},
         "summary": text,
-        "reviewed_files": {"type": "array", "items": path},
+        "reviewed_files": {"type": "array", "minItems": 1, "items": path},
         "reviewed_comparisons": {"type": "array", "items": (
             {"type": "string", "enum": list(comparison_ids)} if comparison_ids else text)},
         "findings": {"type": "array", "items": (
@@ -379,11 +391,16 @@ def _response_schema(
             **{name: {"type": "string", "enum": [value]}
                for name, value in research_bindings.items()},
             "classification": {"type": "string", "enum": sorted(RESEARCH_CLASSIFICATIONS)},
-            "evidence": {"type": "array", "items": obj({
+            "evidence": {"type": "array", "minItems": 1, "items": obj({
                 "claim": {"type": "string", "enum": sorted(_RESEARCH_CLAIMS)},
-                "file": path, "excerpt": text, "explanation": text,
+                "file": path,
+                "excerpt": {"type": "string", "description": (
+                    "Copy one exact contiguous substring from the named file; "
+                    "12 or more non-whitespace characters, at most 2000 characters. "
+                    "Do not paraphrase or combine separate source passages.")},
+                "explanation": text,
             })},
-            "limitations": {"type": "array", "items": text},
+            "limitations": {"type": "array", "minItems": 1, "items": text},
         })
     return obj(properties)
 
@@ -445,7 +462,8 @@ def prepare_request(
     parameters = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT + (_RESEARCH_PROMPT if research_control else "")},
+            {"role": "system", "content": _SYSTEM_PROMPT + (
+                _RESEARCH_PROMPT + _RESEARCH_RESPONSE_GUIDANCE if research_control else "")},
             {"role": "user", "content": contracts.canonical_json(submission)},
         ],
         "max_tokens": max_output_tokens,

@@ -343,6 +343,10 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
         and document.get("error_reason") == "truncated_at_limit"
     ):
         return attempts
+    if nov06_review_recovery_available(row):
+        # A dated server projection discovers one receipt-bound fourth claim.
+        # SQL independently proves its original source, terminal and cutoff.
+        return 4
     invalid_count = invalid_review_reservations(document)
     if invalid_count is not None and invalid_count >= INVALID_REVIEW_MAX_RESERVATIONS:
         return attempts
@@ -378,12 +382,38 @@ def recovery_retryable(document: Mapping[str, Any]) -> bool:
 def review_model_for(row: Mapping[str, Any]) -> str:
     """Follow committed chain counts; SQL rechecks every paid claim."""
     document = row.get("code_review_doc")
+    if nov06_review_recovery_available(row):
+        return code_review.FALLBACK_REVIEW_MODEL
     if refusal_recovery(document):
         primary = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
         alternate = int(document.get("review_alternate_attempts") or 0)
         if primary >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
             return code_review.FALLBACK_REVIEW_MODEL
+        # A real refusal episode retains its own existing route allowance.
+        return code_review.DEFAULT_REVIEW_MODEL
+    invalid_count = invalid_review_reservations(document)
+    if invalid_count is not None and 2 <= invalid_count < INVALID_REVIEW_MAX_RESERVATIONS:
+        # SQL proves these reservations under the submission lock. Change only
+        # the last existing slot's route, never the finite episode allowance.
+        return code_review.FALLBACK_REVIEW_MODEL
     return code_review.DEFAULT_REVIEW_MODEL
+
+
+def nov06_review_recovery_available(
+    row: Mapping[str, Any], *, now: Optional[datetime] = None,
+) -> bool:
+    """Read only the dated discovery hint; a hint never authorizes a claim."""
+    document = row.get("code_review_doc")
+    moment = datetime.now(timezone.utc) if now is None else now
+    return (moment < datetime(2026, 11, 6, tzinfo=timezone.utc)
+            and row.get("round_id") == "arena-2026-11-06"
+            and row.get("code_review_status") == "error"
+            and row.get("code_review_attempts") == 3
+            and isinstance(document, Mapping)
+            and document.get("nov06_review_recovery") == "nov06-invalid-review635-v1"
+            and document.get("error_code") == "review_response_invalid"
+            and document.get("error_reason") in {"research_evidence", "research_evidence_mismatch"}
+            and document.get("review_invalid_attempts") == 3)
 
 
 def review_output_tokens_for(row: Mapping[str, Any]) -> int:

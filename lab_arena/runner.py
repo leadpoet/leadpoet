@@ -43,7 +43,7 @@ import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import scoring_provider_compat, trajectory, validator_events
-from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, reviewer_runtime, runtime, runtime_version, scoring, shim, source_bundle, training_input, training_observations
+from lab_arena import capture_retention, contracts, images, lab_arena_checkpoint, leased_images, operations, reviewer_runtime, runtime, runtime_version, scoring, shim, source_bundle, training_input, training_observations
 from lab_arena.contracts import ArenaContractError
 from lab_arena.broker import (
     provider_authentication_failure_reason, provider_credit_failure_reason,
@@ -738,7 +738,7 @@ class ArenaApiClient(Protocol):
 
     def trajectory(self, run_id: str, lease_token: str, events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]: ...
 
-    def training_input(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
+    def training_input(self, run_id: str, lease_token: str, document: Mapping[str, Any], *, timeout_seconds: float = TRAINING_CAPTURE_TIMEOUT_SECONDS) -> Dict[str, Any]: ...
 
     def training_observations(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
@@ -859,6 +859,7 @@ class HttpArenaApiClient:
 
     def training_input(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
+        *, timeout_seconds: float = TRAINING_CAPTURE_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
         # Generation and claim identity are taken only from the gateway row.
         training_input.object_ref(run_id, 1)  # Validate the path vocabulary.
@@ -867,7 +868,7 @@ class HttpArenaApiClient:
         return self._post(
             "/arena/v1/runs/%s/training-input" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=TRAINING_CAPTURE_TIMEOUT_SECONDS,
+            timeout_seconds=min(TRAINING_CAPTURE_TIMEOUT_SECONDS, max(0.001, float(timeout_seconds))),
             preserve_http_status=True,
         )
 
@@ -3863,6 +3864,7 @@ class RunnerConfig:
     claim_poll_seconds: float = 30.0
     workspace_cache_lock: Any = None
     operational_logger: Any = None
+    input_retention: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -3882,6 +3884,7 @@ class RunnerConfig:
         self.codex_module_path = Path(self.codex_module_path)
         self.web_bridge_path = Path(self.web_bridge_path)
         self.socket_root.mkdir(parents=True, exist_ok=True)
+        self.input_retention = capture_retention.InputRetention(self)
 
 
 @contextmanager
@@ -3970,7 +3973,26 @@ def _record_training_input(
     send = getattr(config.api, "training_input", None)
     if not callable(send):
         return
+    retention = getattr(config, "input_retention", None)
+    path = None
     try:
+        if retention is not None:
+            try:
+                path = retention.retain(lease, lease_token, document)
+            except Exception as exc:
+                _log_training_capture_failure("input", exc)
+        if path is not None:
+            stored = retention.deliver(path, document=document, max_attempts=max_attempts)
+            if not stored:
+                _log_training_capture_failure("input", training_input.InputCaptureError("input acknowledgment unavailable"))
+            return stored
+        # Local disk/permission faults cannot become a scoring or execution
+        # dependency. The caller keeps the original private runtime input if
+        # neither durable retention nor the exact remote acknowledgment works.
+        expected, _ = training_input.build_snapshot(str(lease["run_id"]), lease.get("kind", "execute"), document,
+            lease_generation=lease["lease_generation"], claim_request_hash=lease["claim_request_hash"],
+            secrets=(lease_token,))
+        record = {**expected, "expected_input_sha256": expected["input_sha256"], "expected_privacy": expected["privacy"]}
         for attempt in range(max_attempts):
             try:
                 response = send(str(lease["run_id"]), lease_token, document)
@@ -3978,15 +4000,45 @@ def _record_training_input(
                 if attempt + 1 < max_attempts:
                     continue
                 raise
-            if not isinstance(response, Mapping) or response.get("status") != "stored":
-                raise RunnerError("training input capture rejected", http_status=getattr(response, "http_status", None))
-            return True
+            return capture_retention.InputRetention.matches(record, response)
     except Exception as exc:
         try:
             _log_training_capture_failure("input", exc)
         except Exception:
             pass
     return False
+
+
+def _cleanup_runtime_input(run_dir: Path, input_path: Path, *, preserve: bool) -> None:
+    if not preserve:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return
+    # Keep only the exact original input and its private parents. In
+    # particular, a capture outage must not retain image/source/output scratch.
+    try:
+        for child in run_dir.iterdir():
+            if child == input_path.parent:
+                for sibling in child.iterdir():
+                    if sibling != input_path:
+                        _remove_cache_path(sibling)
+            else:
+                _remove_cache_path(child)
+    except Exception as exc:
+        _log_training_capture_failure("input", exc)
+    try:
+        descriptor = os.open(input_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid():
+                raise ValueError("original input file is invalid")
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        capture_retention.sync_directory(input_path.parent)
+        capture_retention.sync_directory(run_dir)
+    except Exception as exc:
+        _log_training_capture_failure("input", exc)
 
 
 def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any], lease_token: str, state: RunState) -> Dict[str, Any]:
@@ -4925,7 +4977,7 @@ class AssignmentExecutor:
             if input_capture_stored is False:
                 # Retry the exact retained runtime input once, while ordinary
                 # lease authorization still applies and before abandonment.
-                _record_training_input(
+                input_capture_stored = _record_training_input(
                     config, lease, lease_token, input_document, max_attempts=1,
                 )
             if journal is not None:
@@ -4942,7 +4994,14 @@ class AssignmentExecutor:
                     failure_stage=runtime_failure[1], result=result,
                     status=(runtime_failure_status if stop_exception is None else "abandoned"),
                 )
-            shutil.rmtree(run_dir, ignore_errors=True)
+            retained_input = False
+            if input_capture_stored is False:
+                try:
+                    retained_input = config.input_retention.contains(lease, lease_token, input_document)
+                except Exception:
+                    pass
+            _cleanup_runtime_input(run_dir, input_dir / runtime.INPUT_FILE_NAME,
+                preserve=input_capture_stored is False and not retained_input)
             shutil.rmtree(socket_dir, ignore_errors=True)
             if stop_exception is not None:
                 if pending_exception is None:
@@ -5543,58 +5602,18 @@ class Runner:
         return self._capacity_snapshot()[0]
 
     def _pending_completion_dir(self, *, create: bool = False) -> Optional[Path]:
-        directory = self._config.work_dir / "pending-completions"
-        if create:
-            self._config.work_dir.mkdir(parents=True, exist_ok=True)
-            directory.mkdir(mode=0o700, exist_ok=True)
-        try:
-            details = directory.lstat()
-        except FileNotFoundError:
-            return None
-        if (not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid()
-            or stat.S_IMODE(details.st_mode) != 0o700):
-            raise RunnerError("pending completion directory is not private")
-        return directory
+        return capture_retention.private_directory(self._config.work_dir, "pending-completions",
+            create=create, error=RunnerError, label="completion")
 
     @staticmethod
     def _sync_completion_dir(directory: Path) -> None:
-        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        capture_retention.sync_directory(directory)
 
     @contextmanager
     def _lock_completion(self, path: Path) -> Iterator[Optional[int]]:
-        try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except FileNotFoundError:
-            yield None
-            return
-        try:
-            details = os.fstat(descriptor)
-            if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid()
-                or stat.S_IMODE(details.st_mode) != 0o600
-                or details.st_size > contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes):
-                raise RunnerError("pending completion file is invalid")
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                yield None
-                return
-            # A previous uploader can acknowledge/unlink after this file was
-            # opened. Do not upload its old inode after acquiring the lock.
-            try:
-                current = path.lstat()
-            except FileNotFoundError:
-                yield None
-                return
-            if (current.st_dev, current.st_ino) != (details.st_dev, details.st_ino):
-                yield None
-                return
+        with capture_retention.locked_record(path, contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes,
+                error=RunnerError, label="completion") as descriptor:
             yield descriptor
-        finally:
-            os.close(descriptor)
 
     def _read_pending_completion(self, descriptor: int, path: Path) -> Dict[str, Any]:
         from lab_arena.chain import wallet_signature_verifier
@@ -5639,36 +5658,14 @@ class Runner:
                          ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(raw) > contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes:
             raise RunnerError("completion document is too large")
-        descriptor, temporary = tempfile.mkstemp(prefix=".completion-", dir=directory)
-        try:
-            os.fchmod(descriptor, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with os.fdopen(os.dup(descriptor), "wb") as destination:
-                destination.write(raw)
-                destination.flush()
-                os.fsync(destination.fileno())
-            try:
-                # Publish a fully written locked inode without overwriting an
-                # earlier immutable envelope or creating a separate lock file.
-                os.link(temporary, path, follow_symlinks=False)
-            except FileExistsError:
-                with self._lock_completion(path) as existing:
-                    if existing is None:
-                        raise RunnerError("completion delivery is already active")
-                    saved = self._read_pending_completion(existing, path)
-                    if any(saved[key] != envelope[key] for key in ("scope", "round_id", "hotkey", "request_id", "body")):
-                        raise RunnerError("completion request identity conflict")
-                    yield path
-            else:
-                os.unlink(temporary)
-                self._sync_completion_dir(directory)
-                yield path
-        finally:
-            os.close(descriptor)
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+        with capture_retention.retained_record(path, raw, contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes,
+                error=RunnerError, label="completion") as (descriptor, created):
+            if not created:
+                saved = self._read_pending_completion(descriptor, path)
+                if any(saved[key] != envelope[key] for key in ("scope", "round_id", "hotkey", "request_id", "body")):
+                    raise RunnerError("completion request identity conflict")
+            yield path
+
 
     def _acknowledge_completion(
         self, path: Path, result: Mapping[str, Any], envelope: Mapping[str, Any],
@@ -5910,6 +5907,7 @@ class Runner:
 
         if stop_event is not None and stop_event.is_set():
             return 0
+        self._config.input_retention.poll()
         self._replay_pending_completions()
         log = self._config.operational_logger
         pickup_failed = False
@@ -5938,6 +5936,7 @@ class Runner:
                     timeout=self._config.claim_poll_seconds,
                     return_when=FIRST_COMPLETED,
                 )
+                self._config.input_retention.poll()
                 self._replay_pending_completions()
                 if done:
                     futures.clear()
@@ -5964,6 +5963,7 @@ class Runner:
             while taken < max_claims:
                 if stop_event is not None and stop_event.is_set():
                     break
+                self._config.input_retention.poll()
                 self._replay_pending_completions()
                 done = {future for future in futures if future.done()}
                 futures.difference_update(done)
@@ -6084,6 +6084,7 @@ class Runner:
     def close(self) -> None:
         # A failed drain leaves worker state unproved. Keep the shared cache
         # lease until shutdown succeeds so maintenance cannot remove its files.
+        self._config.input_retention.stop()
         try:
             self._pool.shutdown(wait=True)
         except BaseException:

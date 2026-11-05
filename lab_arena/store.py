@@ -418,6 +418,9 @@ _RUNTIME_JSON_COLUMNS = {
     "source_dirty:content->>validator_source_dirty": "content ->> 'validator_source_dirty' AS source_dirty",
     "start_lease_generation:content->>lease_generation": "content ->> 'lease_generation' AS start_lease_generation",
     "status:content->>status": "content ->> 'status' AS status",
+    "finished_at:content->>finished_at": "content ->> 'finished_at' AS finished_at",
+    "started_at:content->>started_at": "content ->> 'started_at' AS started_at",
+    "resource_summary:content->resource_summary": "content -> 'resource_summary' AS resource_summary",
     "error_class:content->>error_class": "content ->> 'error_class' AS error_class",
     "failure_stage:content->>failure_stage": "content ->> 'failure_stage' AS failure_stage",
     **{
@@ -787,7 +790,7 @@ class PostgrestTransport(StoreTransport):
         for key, value in (filters or {}).items():
             if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid filter column")
-            if (key == "event_kind" and value in ("runtime.started", "runtime.error")
+            if (key == "event_kind" and value in ("runtime.started", "runtime.error", "runtime.finished")
                     and table == "lab_arena_trajectory_events"):
                 query.append((key, "eq." + value))
             elif key == "operation_id" and value is not None:
@@ -1804,6 +1807,12 @@ class ArenaStore:
 
     def get_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
+        return rows[0] if rows else None
+
+    def get_round_capture_state(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """Read only the cancellation authority needed for late input capture."""
+        rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id},
+            limit=1, columns="round_id,status")
         return rows[0] if rows else None
 
     def get_round_baseline_hotkey(self, round_id: str) -> Any:
@@ -2947,6 +2956,13 @@ class ArenaStore:
                     raise ArenaStoreError("referenced run bulk read is invalid")
                 found[run_id] = row
         return found
+
+    def get_input_finish_event(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Use the existing run/created index and project one server finish anchor."""
+        rows = self._transport.select("lab_arena_trajectory_events",
+            filters={"run_id": run_id, "event_kind": "runtime.finished"}, order="created_at", limit=1,
+            columns="run_id,round_id,runner_hotkey,run_kind,event_kind,created_at,status:content->>status,started_at:content->>started_at,finished_at:content->>finished_at,resource_summary:content->resource_summary")
+        return rows[0] if rows else None
 
     def list_trajectory_events(self, run_id: str) -> List[Dict[str, Any]]:
         """Read one private run in bounded pages, including long trajectories."""

@@ -283,6 +283,8 @@ HOST_ARENA_IMPORTS = {
     },
     "qualification/scoring/linkedin_company_size.py": {("lab_arena.scoring_provider_compat", "CompatibilityResponseError"),
                                                        ("lab_arena.scoring_provider_compat", "_firecrawl_response")},
+    # The scorer validates its frozen model-bound exception with pure contracts.
+    "qualification/scoring/openrouter_options.py": {("lab_arena", "contracts")},
 }
 
 

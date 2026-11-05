@@ -15,6 +15,7 @@ from lab_arena import broker as br, contracts, judgment_cache, reviewer_runtime,
 from lab_arena.training_export import ExportError, _competition_cost_snapshot, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, export_run, write_private
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 CLAIM_HASH = "sha256:" + "c" * 64
 OUTPUT_REF = "arena/arena-2026-10-16/outputs/execute:1.json"
@@ -50,7 +51,10 @@ def fixture():
                "intent_signals": [{"matched_icp_signal": 0, "description": "Product launch",
                                    "url": "https://acme.example/launch", "date": None,
                                    "snippet": "A new product", "why_now": "Recent launch"}]}
-    policy = scoring.build_scorer_policy()
+    # This October archive predates the prospective judge capture policy.
+    policy = scoring.build_scorer_policy(
+        judge_models=LEGACY_MODELS, judge_provider_routes={},
+    )
     config = {"scorer_policy": policy, "scorer_image_digest": "sha256:" + "a" * 64,
               "scorer_image_reference": "registry.example/scorer@sha256:" + "a" * 64}
     round_row = {"round_id": "arena-2026-10-16", "configuration_doc": config,

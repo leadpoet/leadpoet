@@ -699,8 +699,10 @@ BEGIN
   OR r.promotion_doc IS NOT NULL OR r.baseline_promoted_at IS NOT NULL
   OR clock_timestamp()>='2026-11-05T01:00:00Z'::TIMESTAMPTZ
   OR encode(extensions.digest((to_jsonb(r)-'updated_at')::TEXT,'sha256'),'hex')<>manifest->>'round_hash'
+  OR (SELECT count(*) FROM public.lab_arena_restart_claim_control WHERE singleton)<>1
   OR EXISTS(SELECT 1 FROM public.lab_arena_restart_claim_control WHERE operator_paused
     OR guard_commitment<>'' OR owner_commitment<>'' OR guard_expires_at IS NOT NULL
+    OR coalesce(candidate_commit,'')<>'' OR coalesce(restart_scope,'')<>'' OR coalesce(restart_phase,'')<>''
     OR coalesce(captured_leases,'[]'::JSONB)<>'[]'::JSONB)
   OR EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE round_id=r.round_id AND status IN('pending','leased','submitted'))
   THEN RAISE EXCEPTION 'Recovery626 round, guard, clock or next baseline differs'; END IF;

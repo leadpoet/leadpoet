@@ -145,10 +145,25 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
         before=scalar(cur,'SELECT jsonb_object_agg(run_id,to_jsonb(a)) FROM public.lab_arena_runs a WHERE round_id=%s',(ROUND,))
         financial=scalar(cur,'SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) FROM public.lab_arena_ledger l')
     p.conn.commit();sql=render(p)
+    ordinary_cost_before=p.store.icp_cost_eligibility(round_id=ROUND,submission_id='source621-miner-0',icp_position=0,qualified_company_count=0)
     # A wrong manifest must roll back helper creation and all writes.
     wrong=sql.replace(json.loads(re.search(r'\$manifest626\$(.*?)\$manifest626\$',sql,re.S)[1])['round_hash'],'0'*64)
     with pytest.raises(p.pg.Error):
         with p.conn.cursor() as cur:cur.execute(wrong)
+    p.conn.rollback()
+    for mutation in [
+        'DELETE FROM public.lab_arena_restart_claim_control',
+    ]:
+        with p.conn.cursor() as cur:
+            cur.execute(mutation)
+            assert scalar(cur,'SELECT count(*) FROM public.lab_arena_restart_claim_control')==0
+        with pytest.raises(p.pg.Error):
+            with p.conn.cursor() as cur:cur.execute(sql)
+        p.conn.rollback()
+    # The live table CHECK also rejects inconsistent candidate metadata.
+    with pytest.raises(p.pg.errors.CheckViolation):
+        with p.conn.cursor() as cur:
+            cur.execute("UPDATE public.lab_arena_restart_claim_control SET candidate_commit='ffffffffffffffffffffffffffffffffffffffff' WHERE singleton")
     p.conn.rollback()
     with p.conn.cursor() as cur:
         assert scalar(cur,"SELECT to_regprocedure('public.lab_arena__source_correction626_v1(public.lab_arena_runs)')") is None
@@ -157,6 +172,7 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
     p.conn.commit()
     row=p.store.get_round(ROUND)
     assert row['status']=='stage2_scoring'
+    assert p.store.icp_cost_eligibility(round_id=ROUND,submission_id='source621-miner-0',icp_position=0,qualified_company_count=0)==ordinary_cost_before
     assert row['configuration_doc']['schedule']['publication_deadline']=='2099-11-05T02:00:00Z'
     with p.conn.cursor() as cur:
         prior.assert_current_table_checks(cur)
@@ -222,6 +238,7 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
     # Native raw financial cost remains12USD; the proved aborted generation
     # contributes6USD to the existing infrastructure exclusion, not comparison.
     with p.conn.cursor() as cur:
+        assert scalar(cur,'SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) FROM public.lab_arena_ledger l WHERE entry_id<=%s',(max(x['entry_id']for x in financial),))==financial
         state=scalar(cur,'SELECT public.lab_arena__successful_icp_cost_state(%s,%s,1)',(ROUND,BASELINE))
         assert state['settled_microusd']==12000000
         assert state['competition_settled_microusd']==6000000

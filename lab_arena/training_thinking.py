@@ -626,7 +626,7 @@ def verified_recovered_provider_retry(example: Mapping[str, Any], call: Mapping[
                 or request.get("request_hash") != call.get("request_hash")
                 or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(body, Mapping)
-                or contracts.document_hash(body) != outbound.get("body_sha256")
+                or not operations.outbound_body_hash_matches(operation, body, outbound.get("body_sha256"))
                 or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
                 or outbound.get("path") != operations.OPERATIONS[operation].path
                 or call.get("response_status") != expected_status or call.get("response") != expected_error
@@ -1033,7 +1033,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                 or not isinstance(request.get("hashed_parameters"), Mapping)
                 or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(body, Mapping)
-                or contracts.document_hash(body) != outbound.get("body_sha256")
+                or not operations.outbound_body_hash_matches(operation, body, outbound.get("body_sha256"))
                 or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
                 or outbound.get("path") != ("/api/v1/responses" if operation.endswith("responses")
                                               else "/api/v1/chat/completions")

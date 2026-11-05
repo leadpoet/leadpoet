@@ -23,7 +23,7 @@ from datetime import date
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
-from lab_arena import contact_policy, contracts, integrity
+from lab_arena import contact_policy, contracts, integrity, operations
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_dataset.v2"
 RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.company_qualification_record.v2"
@@ -644,7 +644,8 @@ def _split_model_request_links(example: Mapping[str, Any]) -> List[str]:
                 or not isinstance(request.get("hashed_parameters"), Mapping)
                 or _hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(body, Mapping) or not isinstance(digest, str)
-                or contracts.SHA256_RE.fullmatch(digest) is None or _hash(body) != digest
+                or contracts.SHA256_RE.fullmatch(digest) is None
+                or not operations.outbound_body_hash_matches(operation, body, digest)
                 or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
                 or outbound.get("path") != path):
             continue

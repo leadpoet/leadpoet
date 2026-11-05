@@ -13,16 +13,16 @@ quality and no higher total verifier cost. Existing frozen rounds, miner
 eligibility, scoring criteria, source authority, prices and completed judgments
 must remain unchanged. New defaults apply only when a new round is created.
 
-This document is being completed with the full-flow and deployment evidence.
-The component results below are not a claim that the new policy is deployed.
+The final native full-flow comparison is complete. Production deployment and
+readback are separate release gates; tests alone do not prove deployment.
 
-## Selected mapping under validation
+## Selected mapping
 
 | Arena work | Previous model | Candidate and exact route | Reasoning / output cap |
 | --- | --- | --- | --- |
 | Company reverification | Sonar | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
 | Intent signal gate and fetched evidence | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
-| Intent paragraph review | Sonnet 5.5 | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192; latency review pending |
+| Intent paragraph review | Sonnet 5.5 | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
 | Role checks and generic company investigator | Gemini 3.5 Flash Lite | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
 | Positive semantic company review | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
 | Claim equivalence for evidence reuse | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / **500, 15 seconds** |
@@ -252,9 +252,59 @@ spans fixed that check; the model request was not repeated.
 
 Sol remains selected for industry research and classification. Admission,
 ICP generation and industry are the three proprietary workflows retained.
+This is four role types: admission, generation, industry research and industry
+classification. Admission also retains its existing Sol fallback.
 The new controller role is optional so existing seven-role frozen policies
 retain their original routing. Its explicit Sol request keeps 3000 tokens,
 low effort and the prior plain tool history. No experimental reminder ships.
+
+## Final native scoring comparison
+
+The final eight-role policy completed all four fresh native flows. Each uses
+one submitted company against the unchanged five-company ICP and evaluation
+date. Positive baseline and miner cases both scored 51, normalized to 12.75.
+Both false-claim cases reached intent adjudication and applied the expected
+primary false-positive penalty. All 37 model calls returned HTTP200. None used
+a replayed model reply, and no new charge remained unresolved.
+
+| Case | Original outcome | Selected outcome | Model cost: original / selected | Seconds: original / selected |
+| --- | --- | --- | --- | --- |
+| Positive baseline | 51 / 12.75 | 51 / 12.75 | $0.31404741 / $0.198948948 | 95.31 / 98.52 |
+| Positive miner | 51 / 12.75 | 51 / 12.75 | $0.18485758 / $0.24301913 | 74.04 / 100.35 |
+| False-claim baseline | Fit unavailable; no intent decision | 0, primary FP count 1 | $0.38638089 / $0.268695314 | 86.80 / 105.41 |
+| False-claim miner | Fit unavailable; no intent decision | 0, primary FP count 1 | $0.31889051 / $0.170437952 | 78.49 / 94.91 |
+
+The four completed original cases cost $1.20417639 for models and $0.058 for
+fresh sources. The selected policy cost $0.881101344 and $0.060 respectively:
+25.44% lower combined cost in this packet set. Median runtime increased from
+82.65 to 99.43 seconds. The positive miner alone was slower and more expensive;
+there is no uniform cost or latency win. These are four actor variants of one
+company/ICP family, not four independent companies or a production forecast.
+The original negative-miner completion came from the separate fresh V9 run.
+The earlier attempt cut short by the private POST ceiling also cost $0.12260886;
+that expense remains in the task ledger, outside the clean four-case comparison.
+
+All 37 saved raw response body hashes and native request wire hashes passed
+independent checks. All 15 Sol controller requests used 3000 tokens, low effort
+and serial tools. All 14 open-model turns exposed readable thinking on their
+actual approved routes: ten DeepSeek turns and four GPT-OSS turns, totaling
+81,884 characters. The other 23 turns used Sol, including eight final reviews.
+Thus this difficult industry packet has full readable thinking on 14/37 calls,
+not on the whole trajectory. Three workflow exceptions can still represent a
+large share of calls; model-role coverage must not be reported as call coverage.
+
+The private exporter retained 37 raw examples and 28 generic SFT diagnostics.
+Only 14 diagnostics contain generated thinking; the other 14 are Sol outputs.
+Nine Sol examples had nonexact privacy exclusions. All diagnostics remain
+unreviewed with training permission unconfirmed. The private scorer harness
+does not implement the new terminal worker-event channel, SQL admission or
+production dataset eligibility. Separate real-worker tests prove that channel;
+the guarded production shadow must prove actual stored and exported records.
+
+The final test manifest is
+`50647eda580b322e46e346ea252795ad016e3c168aad6f3f95acb49a0da36d1d`,
+on native source `e0a331c83c9324aa662505ddfaf55d5c2f226193`. Its 30 frozen file
+hashes, labels, source provenance and financial seed are retained privately.
 
 ## Capture and training value
 
@@ -304,9 +354,17 @@ privacy, permission and dataset quality fields remain applicable.
 
 ## Validation and release evidence
 
-Pending: final full scoring comparison, exact image/worker verification,
-required CI, protected merge, canonical paired deployment and live readback.
-No production completion is asserted by this draft section.
+The final four-flow scoring comparison and independent raw-response checks
+passed. The combined native model, recorder, cache, export and investigator
+suite passed 1,292 tests with 44 existing skips. The final capture metadata
+correction also passed its failing-before regression and independent checks.
+Real worker-socket tests retained terminal outcomes through native snapshot
+serialization and export assembly without adding a provider call.
+
+Required CI, protected merge, exact-image validation, canonical paired release
+and live SQL/object/export readback remain release gates. The final PR1051
+description records their observed status. This document does not claim that
+private scoring or an offline worker test proves a deployed production flow.
 
 ## All 39 whitelist entries
 

@@ -5,16 +5,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import broker as br, contracts, reasoning_capture as rc, service as arena_service
+from lab_arena import broker as br, contracts, reasoning_capture as rc, scoring, service as arena_service
 from tests.lab_arena import test_lab_arena_broker as bt
 from tests.lab_arena.champion_baseline_reasoning_test import baseline_round
 from tests.lab_arena.reasoning_capture_test import _execute, _reviewed_registry
 
 
+def frozen_scope(model=None, provider='example/verified'):
+    model = model or bt.CHAT['model']
+    return {'scorer_policy': scoring.build_scorer_policy(
+        judge_models={role: model for role in scoring.DEFAULT_JUDGE_MODELS},
+        judge_provider_routes={model: provider})}
+
+
 def test_judge_frozen_opt_in_pins_route_and_saves_same_annotation_as_source():
     registry = _reviewed_registry()
     context = replace(bt.CONTEXT, kind='score', judge_reasoning_capture_policy=rc.POLICY,
-                      judge_reasoning_route_registry=registry)
+                      judge_reasoning_route_registry=registry, judgment_cache_scope=frozen_scope())
     result, store, transport = _execute(context)
     assert result.status == 200
     sent = json.loads(transport.sent[0]['body'])
@@ -24,7 +31,7 @@ def test_judge_frozen_opt_in_pins_route_and_saves_same_annotation_as_source():
     assert sent['provider']['zdr'] is True
     assert sent['provider']['allow_fallbacks'] is False
     assert sent['provider']['require_parameters'] is True
-    normalized = br.normalized_request('openrouter.chat', bt.CHAT,
+    normalized = br.normalized_request('openrouter.chat', {**bt.CHAT, 'provider': {'only': ['example/verified']}},
         reasoning_capture_policy=rc.POLICY, reasoning_route_registry=registry)
     assert result.call['request_hash'] == contracts.document_hash(normalized)
     saved = store.calls[result.call['call_identity']]['call_doc']['reasoning_capture']
@@ -47,7 +54,7 @@ def test_source_thinking_policy_does_not_change_legacy_score_requests():
 def test_unreviewed_judge_route_is_refused_before_provider_or_reservation():
     registry = _reviewed_registry(model='other/model')
     context = replace(bt.CONTEXT, kind='score', judge_reasoning_capture_policy=rc.POLICY,
-                      judge_reasoning_route_registry=registry)
+                      judge_reasoning_route_registry=registry, judgment_cache_scope=frozen_scope())
     result, store, transport = _execute(context)
     assert result.status == 400
     assert not transport.sent and not store.calls
@@ -89,7 +96,8 @@ def test_saved_real_provider_tool_continuations_pass_as_judge(model_id, filename
     broker = br.Broker(store=store, key_for=lambda provider: bt.HOST_KEYS[provider],
                        price_table=table, judge_models=(model_id,), transport=transport)
     context = replace(bt.CONTEXT, kind='score', judge_reasoning_capture_policy=rc.POLICY,
-                      judge_reasoning_route_registry=registry)
+                      judge_reasoning_route_registry=registry,
+                      judgment_cache_scope=frozen_scope(model_id, route['provider']))
     for index, attempt in enumerate(proof['attempts']):
         request = attempt['request']
         result = broker.execute(context, operation_id='openrouter.chat',
@@ -114,7 +122,8 @@ def test_worker_accepts_long_judge_history_only_with_frozen_opt_in(tmp_path, int
     broker, store, transport, context, objects = broker_fixture()
     broker._judge_models = (bt.CHAT['model'],)
     context = replace(context, kind='score', judge_reasoning_capture_policy=rc.POLICY if enabled else None,
-                      judge_reasoning_route_registry=context.reasoning_route_registry)
+                      judge_reasoning_route_registry=context.reasoning_route_registry,
+                      judgment_cache_scope=frozen_scope())
     api = BrokerSocketApi(broker, context)
     state = runner.RunState(lease=dict(lease(), kind='score', judge_reasoning_capture_policy=rc.POLICY if enabled else None),
                             lease_token='host-token')
@@ -168,7 +177,8 @@ def test_trusted_judge_consumption_reaches_existing_worker_receipt_path(monkeypa
     broker, store, transport, context, objects = broker_fixture()
     broker._judge_models = (bt.CHAT['model'],)
     context = replace(context, kind='score', judge_reasoning_capture_policy=rc.POLICY,
-                      judge_reasoning_route_registry=context.reasoning_route_registry)
+                      judge_reasoning_route_registry=context.reasoning_route_registry,
+                      judgment_cache_scope=frozen_scope())
     state = runner.RunState(lease={'run_id': context.run_id, 'kind': 'score',
         'judge_reasoning_capture_policy': rc.POLICY if enabled else None}, lease_token='test-token')
     with tempfile.TemporaryDirectory(prefix='judge-receipt-', dir='/tmp') as directory:
@@ -204,7 +214,8 @@ def test_gateway_frame_size_gate_uses_frozen_judge_opt_in(enabled):
     def context(run_id, token):
         run, value = original(run_id, token)
         return run, replace(value, judge_reasoning_capture_policy=rc.POLICY if enabled else None,
-                            judge_reasoning_route_registry=value.reasoning_route_registry)
+                            judge_reasoning_route_registry=value.reasoning_route_registry,
+                            judgment_cache_scope=frozen_scope())
 
     service._run_context = context
     frame = {'operation_id': 'openrouter.responses', 'parameters': continuation('arguments', 160_000, glyph='é'),

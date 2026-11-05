@@ -2193,6 +2193,40 @@ def _reasoning_contract(context: RunContext, model: Any = None,
             getattr(context, "reasoning_route_registry", None))
 
 
+def _frozen_judge_parameters(context: RunContext, operation_id: str,
+                             parameters: Mapping[str, Any]) -> Dict[str, Any]:
+    """Bind score requests to server-owned frozen routes and optional limits."""
+    if (getattr(context, "kind", "execute") != "score"
+            or context.judge_reasoning_capture_policy != reasoning_capture.POLICY):
+        return dict(parameters)
+    try:
+        policy = contracts.validate_scorer_policy(
+            (context.judgment_cache_scope or {})["scorer_policy"])
+        bindings = policy["env_bindings"]
+        if bindings.get(contracts.JUDGE_REASONING_CAPTURE_BINDING) != reasoning_capture.POLICY:
+            raise ValueError("missing frozen judge capture policy")
+        model = parameters["model"]
+        provider = json.loads(bindings[contracts.JUDGE_PROVIDER_ROUTES_BINDING])[model]
+        options_raw = bindings.get(contracts.JUDGE_REQUEST_OPTIONS_BINDING)
+        option = json.loads(options_raw)[model] if options_raw is not None else None
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise BrokerError("broker_unavailable") from exc
+    requested = parameters.get("provider")
+    if requested is not None and requested.get("only") != [provider]:
+        raise BrokerError("invalid_request")
+    result = dict(parameters, provider={"only": [provider]})
+    if option is not None:
+        output_field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
+        if result[output_field] > option["max_output_tokens"]:
+            raise BrokerError("invalid_request")
+        reasoning = dict(result.get("reasoning") or {})
+        if ("reasoning_effort" not in result and not any(
+                key in reasoning for key in ("effort", "max_tokens", "budget_tokens", "enabled"))):
+            reasoning.update(option["reasoning"])
+            result["reasoning"] = reasoning
+    return result
+
+
 @dataclass(frozen=True)
 class BrokerResult:
     status: int
@@ -4955,6 +4989,8 @@ class Broker:
                 if getattr(context, "kind", "execute") == "execute" or full_thinking:
                     # Before hashing: identity, capture and the sent body all
                     # bind the reasoning parameters actually requested.
+                    effective_normalized = _frozen_judge_parameters(
+                        context, effective_operation_id, effective_normalized)
                     effective_normalized, reasoning_annotation = agent_reasoning_parameters(
                         effective_operation_id, effective_normalized,
                         policy=capture_policy,

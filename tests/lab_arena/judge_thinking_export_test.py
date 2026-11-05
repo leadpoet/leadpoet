@@ -3,16 +3,16 @@ from copy import deepcopy
 
 import pytest
 
-from lab_arena import contracts, reasoning_capture, training_steps, training_thinking
+from lab_arena import contracts, reasoning_capture, scoring, training_steps, training_thinking
 from tests.lab_arena.training_steps_test import seal
 from tests.lab_arena.training_thinking_test import full_example
 
 
 def judge_example():
     example = full_example()
-    example['configuration']['scorer_policy'] = {
-        'judge_models': {'industry_evidence_review': 'test/model'},
-        'env_bindings': {'ARENA_JUDGE_REASONING_CAPTURE_POLICY': reasoning_capture.POLICY}}
+    example['configuration']['scorer_policy'] = scoring.build_scorer_policy(
+        judge_models={role: 'test/model' for role in scoring.DEFAULT_JUDGE_MODELS},
+        judge_provider_routes={'test/model': 'route-a'})
     example['configuration']['scorer_image_digest'] = 'sha256:' + 'e' * 64
     call = deepcopy(example['provider_calls'][0])
     call.update(run_id=example['score_run_id'], call_identity='judge-call')

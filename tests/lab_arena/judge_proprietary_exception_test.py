@@ -140,7 +140,8 @@ def test_exception_does_not_allow_open_model_legacy_controls_or_unfrozen_sol():
                     replace(context, kind='execute', reasoning_capture_policy=rc.POLICY,
                             reasoning_route_registry=registry())):
         result, store, transport = dispatch(changed)
-        assert result.status == 400 and not transport.sent and not store.calls
+        assert result.status == (503 if changed.kind == 'score' else 400)
+        assert not transport.sent and not store.calls
     result, store, transport = dispatch(context, MODEL)
     assert result.status == 400 and not transport.sent and not store.calls
     assert br._reasoning_contract(context, SOL, 'openrouter.responses')[0] == rc.POLICY
@@ -212,9 +213,11 @@ def test_builder_options_cover_only_full_models_and_explicit_capture_off_has_no_
 
 def mixed_example():
     example = judge_example()
-    example['configuration']['scorer_policy']['judge_models'] = {
-        'company_fit_reverification': MODEL, 'industry_evidence_review': SOL}
-    example['configuration']['scorer_policy']['env_bindings'][BINDING] = json.dumps(EXCEPTION)
+    models = {role: MODEL for role in scoring.DEFAULT_JUDGE_MODELS}
+    models['industry_evidence_review'] = SOL
+    example['configuration']['scorer_policy'] = scoring.build_scorer_policy(
+        judge_models=models, judge_provider_routes={MODEL: 'route-a'},
+        judge_reasoning_exceptions=EXCEPTION)
     call = deepcopy(example['provider_calls'][-1])
     call.update(call_identity='industry-call', action_sequence=1)
     request = call['request']

@@ -1323,13 +1323,14 @@ def _capture_configuration(example: Mapping[str, Any], role: str = 'source') -> 
         return baseline_reasoning.for_example(example)
     try:
         configuration = training_dataset.label_scorer_configuration(example)
-        scorer_policy = configuration.get('scorer_policy') or {}
+        scorer_policy = contracts.validate_scorer_policy(configuration.get('scorer_policy'))
         exceptions = contracts.judge_reasoning_exceptions(scorer_policy)
         policy = scorer_policy.get('env_bindings', {}).get(
             'ARENA_JUDGE_REASONING_CAPTURE_POLICY')
     except (ValueError, TypeError, AttributeError):
         return {}  # Invalid label authority grants no reviewed judge route.
     return ({'reasoning_capture_policy': policy,
+             'scorer_policy': scorer_policy,
              'judge_reasoning_exceptions': exceptions,
              'reasoning_route_registry': configuration.get(
                  'judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))}
@@ -1344,6 +1345,27 @@ def _judge_exception(example, call):
     return _capture_configuration(example, 'judge').get('judge_reasoning_exceptions', {}).get(body.get('model'))
 
 
+def _judge_frozen_route_error(example, call):
+    if (call.get('run_id') != example.get('score_run_id') or _role(example, call) != 'judge'
+            or call.get('operation_id') not in reasoning_capture.OPERATIONS):
+        return ''
+    configuration = _capture_configuration(example, 'judge')
+    policy = configuration.get('scorer_policy')
+    if policy is None:
+        return 'judge_frozen_policy_unavailable'
+    body = (((call.get('request') or {}).get('outbound') or {}).get('body') or {})
+    model = body.get('model')
+    if model in configuration['judge_reasoning_exceptions']:
+        return ''
+    routes = json.loads(policy['env_bindings'][contracts.JUDGE_PROVIDER_ROUTES_BINDING])
+    expected = routes.get(model)
+    # The existing route/host/worker checks independently prove this observed
+    # annotation. Registry approval alone does not authorize another provider.
+    if not expected or (call.get('reasoning_capture') or {}).get('provider_route') != expected:
+        return 'judge_frozen_provider_route_mismatch'
+    return ''
+
+
 def _call_coverage(example, call, registry, *, worker_proofs=None):
     row = attempt_coverage(call, _role(example, call), registry, worker_proofs=worker_proofs)
     exception = _judge_exception(example, call)
@@ -1353,6 +1375,9 @@ def _call_coverage(example, call, registry, *, worker_proofs=None):
         row.update(full_thinking_available=False, exception_reason=exception['reason'],
                    exception_roles=copy.deepcopy(exception['roles']),
                    full_thinking_status='proprietary_thinking_unavailable')
+    error = _judge_frozen_route_error(example, call)
+    if error:
+        row.update(full_thinking_available=False, full_thinking_status=error)
     return row
 
 
@@ -1391,7 +1416,8 @@ def coverage(examples, *, role=None) -> dict:
             row = _call_coverage(example, call, call_registry)
             full, _ = full_text_segments(call, call_role, call_registry)
             exception = _judge_exception(example, call)
-            if exception is not None:
+            frozen_route_error = _judge_frozen_route_error(example, call)
+            if exception is not None or frozen_route_error:
                 full = []
                 partial_judge = True
             attempts.append(row)
@@ -1404,7 +1430,7 @@ def coverage(examples, *, role=None) -> dict:
                                call.get('run_id') == example.get('score_run_id')
                                and call.get('operation_id') in reasoning_capture.OPERATIONS)
             full_text_calls += execution_model and bool(full)  # Raw exposed text inventory.
-            if exception is not None:
+            if exception is not None or frozen_route_error:
                 # This call stays in the raw inventory and label context, but
                 # cannot veto independently proven full-thinking turn targets.
                 continue
@@ -1524,7 +1550,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
             segments, summary, opaque = _segments(response, operation)
             full, _ = full_text_segments({**call, "response": response}, _role(example, call), registry,
                                          worker_proofs=worker_proofs)
-            if _judge_exception(example, call) is not None:
+            if (_judge_exception(example, call) is not None
+                    or _judge_frozen_route_error(example, call)):
                 full = []
             def add_segments(values):
                 for segment in values:
@@ -2186,6 +2213,11 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         if role == 'judge' and _judge_exception(example, call) is not None:
             reasons["proprietary_thinking_unavailable"] += 1
             return
+        if role == 'judge':
+            error = _judge_frozen_route_error(example, call)
+            if error:
+                reasons[error] += 1
+                return
         source = ref["example_hash"]
         if source not in scoped:
             scoped[source] = _individual_research_evidence(example, role=role)

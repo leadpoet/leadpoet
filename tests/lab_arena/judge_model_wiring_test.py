@@ -350,7 +350,7 @@ def test_default_new_round_policy_freezes_exact_current_model_and_route_defaults
         'industry_evidence_review'}
     routes = scoring.DEFAULT_JUDGE_PROVIDER_ROUTES
     if routes:
-        assert set(routes) == set(policy['judge_models'].values())
+        assert set(routes) == set(policy['judge_models'].values()) - set(contracts.judge_reasoning_exceptions(policy))
         assert json.loads(policy['env_bindings']['ARENA_JUDGE_PROVIDER_ROUTES']) == routes
         assert policy['env_bindings']['ARENA_JUDGE_REASONING_CAPTURE_POLICY'] == opts.JUDGE_REASONING_POLICY
     else:

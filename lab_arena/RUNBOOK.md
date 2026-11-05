@@ -817,8 +817,18 @@ bound and no retries. A short or failed comparison remains a cache miss; its
 possible provider charge and later native judgment both count in cost checks.
 A separate comparison model or larger bound is not enabled by this change.
 
-No proprietary judge exception is enabled by default. An explicit frozen
-`ARENA_JUDGE_REASONING_EXCEPTIONS` map can permit only `openai/gpt-6.1-sol`,
+New rounds use GPT-OSS-120B on `near-ai/fp4` with low reasoning and a 4096-token
+output cap for intent, fetched evidence, paragraph, role and generic/semantic
+investigator checks. Company research and search fallbacks use DeepSeek V4.1
+Flash 1017 on `nebius/fp8`, low reasoning, and an 8192-token cap. Native hosted
+search requests one tool round, `max_uses: 1` and `max_total_results: 5`.
+These settings do not prove the number of internal parallel provider queries.
+The existing cache continues
+to bind the exact frozen model identity. Historical rounds retain their saved
+models, routes, requests and scorer images. See the dated model review for
+measured quality, cost and release evidence.
+
+The default frozen `ARENA_JUDGE_REASONING_EXCEPTIONS` map retains only `openai/gpt-6.1-sol`,
 with `roles: ["industry_evidence_review"]` and a nonempty reason code. This
 model cannot also serve another judge role. Provider routes and request options
 must cover exactly the remaining full-thinking models. Sol Chat requests keep
@@ -827,9 +837,9 @@ the exception grants no Responses or open-model route bypass. Raw exposed text,
 summaries, tool evidence and judgment links remain captured. Sol full thinking
 is labelled unavailable and excluded from full-thinking targets. Independently
 verified open-model turn targets remain exportable with unreviewed quality and
-explicit partial judge-thinking completeness. Enabling this optional policy
-requires a separate reviewed activation decision; frozen older rounds retain
-their original policy.
+explicit partial judge-thinking completeness. Admission review and ICP generation
+retain their separate proprietary models and internal capture. Selecting an
+empty judge route map explicitly disables this prospective capture policy.
 
 Start the service:
 

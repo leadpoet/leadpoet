@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "hardcoded_leads",
+  "files": {
+    "harness.py": "PREPARED = {\"software\": [{\"company_name\": \"Prepared Target\", \"company_website\": \"https://prepared.invalid\", \"qualified\": True}]}\ndef run_icp(icp):\n    return PREPARED.get(icp[\"industry\"], [])\n",
+    "LICENSE": "MIT License\nCopyright (c) 2026 Synthetic Fixture Authors\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction.\nTHE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND.\n"
+  },
+  "expected": {
+    "verdict": "reject",
+    "research_classification": "workflow",
+    "categories": [
+      "hardcoded_prepared_answers"
+    ]
+  },
+  "rationale": "Entrypoint returns a prepared target list keyed by the industry. No discovery occurs."
+}

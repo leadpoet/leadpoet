@@ -91,6 +91,50 @@ OPENROUTER_EXCLUSION_MODEL = "perplexity/sonar-pro"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_COMPLETION_TOKENS = 8000
 
+# Opt-in paired-probe appendix. Production does not apply this until the
+# coordinator selects it after checking source evidence and bank quality.
+ICP_GROUNDING_PROBE_CONTEXT = """CURRENT EXAMPLE EVIDENCE
+Before you finalize each ICP, use retrieved source content to establish that its
+verified_example_company currently matches EVERY hard filter and the required
+primary intent. Check industry/sub-industry, headquarters geography, employee
+band, stage when constrained, and any required attribute. For intent, identify
+the event date and confirm it meets the stated recency window as of generation.
+An article publication date alone does not establish the event date.
+
+Unknown is not a match. Do not guess, round employee counts into another band,
+or treat an old funding announcement as proof of the current funding stage.
+A query, URL, citation title, memory, or missing source text is not evidence of
+an unread fact. Quote only source text actually returned by the search tool.
+If a filter or event is unsupported or contradicted, choose another company or
+adjust permitted filter values while preserving every industry/diversity/stage/
+geography quota and output requirement. Stay within the existing search budget;
+do not claim verification when the budget ends with an unresolved fact.
+
+For each example, include an optional verified_example_evidence object in its
+raw ICP JSON with this shape, using multiple sources where needed:
+{"observed_date":"YYYY-MM-DD","intent_event_date":"YYYY-MM-DD",
+ "sources":[{"url":"https://...","quoted_facts":["exact retrieved excerpt"],
+ "supports":["industry","sub_industry","geography","employee_count",
+             "company_stage","required_attribute","intent_signal"]}]}
+List only the filters each source actually supports. Omit unconstrained filters
+from supports. Do not invent quotations or dates to fill this object. This is
+source evidence for review, not a guarantee of correctness or an ICP filter.
+"""
+
+
+def icp_grounding_probe_context(generation_context: Optional[str] = None, *,
+                                as_of_date: Optional[str] = None) -> str:
+    """Apply the same source-controlled grounding appendix to paired probes."""
+    parts = [generation_context] if generation_context else []
+    if as_of_date is not None:
+        # Parse strictly so an arbitrary instruction cannot enter the date field.
+        parsed = datetime.strptime(as_of_date, "%Y-%m-%d").date().isoformat()
+        if parsed != as_of_date:
+            raise ValueError("icp_grounding_date_invalid")
+        parts.append("Generation as-of UTC date: " + parsed)
+    parts.append(ICP_GROUNDING_PROBE_CONTEXT)
+    return "\n\n".join(parts)
+
 
 def prepare_icp_candidate_request(request: dict, candidate: Optional[dict] = None) -> tuple:
     """Keep the baseline body, or select one explicit prospective Responses route.

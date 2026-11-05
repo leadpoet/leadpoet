@@ -142,11 +142,20 @@ def canonical_fit_company(company):
 
 
 def _receipt_fit(receipt):
-    from qualification.scoring.company_fit_decision import CompanyFitDecisionResult
-    return CompanyFitDecisionResult(receipt["decision"], receipt.get("reason"), details={
+    from qualification.scoring.company_fit_decision import COMPANY_FIT_DIMENSIONS, CompanyFitDecisionResult
+    details = {
         key: deepcopy(value) for key, value in receipt.items()
         if key not in {"gate", "contract_id", "contract_version", "decision", "reason"}
-    })
+    }
+    # Canonical storage sorts object keys. Paragraph verification enumerates
+    # these dimensions, so restore their native order before reusing the fit.
+    evidence = details["dimension_evidence"]
+    details["dimension_evidence"] = {
+        key: evidence[key] for key in (*COMPANY_FIT_DIMENSIONS,
+                                      *(key for key in evidence if key not in COMPANY_FIT_DIMENSIONS))
+        if key in evidence
+    }
+    return CompanyFitDecisionResult(receipt["decision"], receipt.get("reason"), details=details)
 
 
 def _text_pages(captured):

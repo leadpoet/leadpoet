@@ -8,8 +8,9 @@ from typing import Any, Mapping
 
 from lab_arena.contracts import document_hash
 from qualification.scoring.signal_judgment_cache import (
-    SignalJudgmentCacheError, invoke_exchange, reusable_terminal_judgment,
+    SignalJudgmentCacheError, invoke_exchange,
 )
+from qualification.scoring.intent_evidence_reuse import reusable_evidence_terminal_judgment
 
 POLICY = "evidence_judgment_v2"
 
@@ -59,7 +60,8 @@ class SignalEvidenceExchange:
                 or not isinstance(value.get("verifier_result"), Mapping)
                 or not isinstance(value.get("claim"), Mapping)
                 or value.get("evidence_input") != self.request["evidence_input"]
-                or not reusable_terminal_judgment(value.get("raw_judgment"), **self.expected)):
+                or not reusable_evidence_terminal_judgment(value.get("raw_judgment"),
+                    evidence_input=self.request["evidence_input"], **self.expected)):
             raise SignalJudgmentCacheError("evidence signal authority is invalid")
         return deepcopy(dict(value))
 
@@ -119,7 +121,8 @@ class SignalEvidenceExchange:
             if raw_judgment != self.hit["raw_judgment"]:
                 raise SignalJudgmentCacheError("reused verifier changed the terminal signal")
             return deepcopy(self.reference)
-        terminal = self.pending is not None and reusable_terminal_judgment(raw_judgment, **self.expected)
+        terminal = self.pending is not None and reusable_evidence_terminal_judgment(
+            raw_judgment, evidence_input=self.request["evidence_input"], **self.expected)
         envelope = ({"schema_version": "leadpoet.lab_arena.signal_evidence.v2",
                      "raw_judgment": deepcopy(raw_judgment), "verifier_result": self.pending,
                      "evidence_input": self.request["evidence_input"], "claim": self.request["claim"]}

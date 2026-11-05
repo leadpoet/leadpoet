@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 import hashlib
 import json
-from typing import Any, Awaitable, Callable, Iterator, Mapping
+from typing import Any, Awaitable, Callable, Iterator, Mapping, Sequence
 
 from qualification.scoring.signal_judgment_cache import SignalJudgmentCacheError
 
@@ -156,3 +157,80 @@ def terminal_result(
               if isinstance(quote, str) and quote.strip()]
     return bool(quotes and all(any(_grounded_exact_text(text, quote) for text in texts)
                                for quote in quotes))
+
+
+def reusable_evidence_terminal_judgment(
+    row: Any, *, evidence_input: Mapping[str, Any], expected_urls: Sequence[str],
+    expected_index: int, expected_evidence_type: str,
+    allowed_context_urls: Sequence[str] = (),
+) -> bool:
+    """Apply v2 admission to full fresh source text without changing the row.
+
+    A native negative receipt deliberately keeps only a short paragraph window.
+    That window can omit the judge's valid quote. The prospective snapshot is
+    complete and separately hash-bound, so validate every quote against that
+    exact source, then apply the unchanged terminal rules to a validation copy.
+    V1 admission and the persisted native trace are never changed.
+    """
+    from qualification.scoring.signal_judgment_cache import reusable_terminal_judgment
+    from qualification.scoring.intent_verification_three_stage import _grounded_exact_text
+
+    if (not isinstance(row, Mapping) or not isinstance(evidence_input, Mapping)
+            or evidence_input.get("schema_version") != "leadpoet.intent_evidence_input.v1"
+            or not expected_urls):
+        return False
+    native_row = evidence_input.get("row")
+    contents = evidence_input.get("contents")
+    if (not isinstance(native_row, Mapping)
+            or native_row.get("claimed_source_urls") != list(expected_urls)
+            or not isinstance(contents, Mapping)):
+        return False
+    pages = contents.get("results")
+    if not isinstance(pages, list) or not pages:
+        return False
+    texts = {}
+    allowed = set(expected_urls) | set(allowed_context_urls)
+    for page in pages:
+        if (not isinstance(page, Mapping) or page.get("url") not in allowed
+                or page["url"] in texts or not isinstance(page.get("text"), str)
+                or not page["text"].strip()):
+            return False
+        texts[page["url"]] = page["text"]
+    if not set(expected_urls).issubset(texts):
+        return False
+    verdict = row.get("judge_verdict")
+    trace = verdict.get("verification_trace") if isinstance(verdict, Mapping) else None
+    if (not isinstance(trace, Mapping)
+            or trace.get("extracted_signal_date") != native_row.get("signal_date")
+            or any(trace.get(key) is not None for key in (
+                "source_resolution", "identity_clarification", "evidence_clarification",
+            ))):
+        return False
+    intent = trace.get("intent_verdict")
+    evaluations = intent.get("signal_evaluations") if isinstance(intent, Mapping) else None
+    if not isinstance(evaluations, list) or not evaluations:
+        return False
+    for evaluation in evaluations:
+        if not isinstance(evaluation, Mapping):
+            return False
+        used = evaluation.get("evidence_urls_used")
+        if (not isinstance(used, list) or not used
+                or any(not isinstance(url, str) or url not in texts for url in used)):
+            return False
+        quotes = []
+        for field in ("supporting_quotes", "contradicting_quotes"):
+            values = evaluation.get(field) or []
+            if not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values):
+                return False
+            quotes.extend(values)
+        if not quotes or not all(any(_grounded_exact_text(texts[url], quote) for url in used) for quote in quotes):
+            return False
+    validation_row = deepcopy(dict(row))
+    validation_row["judge_verdict"]["verification_trace"]["verified_source_context"] = [
+        {"url": url, "text": text} for url, text in texts.items()
+    ]
+    return reusable_terminal_judgment(
+        validation_row, expected_urls=expected_urls, expected_index=expected_index,
+        expected_evidence_type=expected_evidence_type,
+        allowed_context_urls=allowed_context_urls,
+    )

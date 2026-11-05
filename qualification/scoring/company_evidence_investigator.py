@@ -28,6 +28,8 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import aiohttp
 
+from qualification.scoring.company_fit_evidence_reuse import observed_source
+
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
 from gateway.qualification.models import canonical_candidate_prompt_url
@@ -3368,6 +3370,7 @@ def _prefetched_page_with_industry_bindings(url: str, text: str, final_url: str,
     return page
 
 
+@observed_source("investigator_page", ("url", "stealth_mode", "archive_targets", "archive_company_names"))
 async def _fetch_page(
     session: aiohttp.ClientSession,
     url: str,
@@ -3558,6 +3561,7 @@ async def _fetch_page(
     }
 
 
+@observed_source("investigator_exa", ("url",))
 async def _fetch_exa_exact_page(
     session: aiohttp.ClientSession, url: str,
 ) -> dict[str, Any]:

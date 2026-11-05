@@ -12545,6 +12545,7 @@ async def score_company_competition_intent(
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     provider_observation: Optional[Mapping[str, Any]] = None,
+    fit_evidence_reuse_enabled: bool = False,
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -12573,7 +12574,13 @@ async def score_company_competition_intent(
     # assignment, generation, grading policy and selected reviewer runtime.
     from qualification.scoring.signal_judgment_cache import current_exchange, invoke_exchange
     from lab_arena import company_judgments
-    fit_exchange = current_exchange() if integrity_policy else None
+    fit_evidence_reuse_allowed = bool(integrity_policy and fit_evidence_reuse_enabled)
+    if fit_evidence_reuse_allowed:
+        precheck = await run_company_zero_checks(company, run_time_seconds, seen_companies)
+        if precheck.decision != COMPANY_FIT_MATCH:
+            fit_evidence_reuse_allowed = False
+            fit_cache = None
+    fit_exchange = current_exchange() if integrity_policy and not fit_evidence_reuse_enabled else None
     if fit_exchange is not None:
         # These free, invocation-dependent guards must precede any reuse.
         # The adapter still applies verified-identity regrouping afterwards.
@@ -12633,6 +12640,28 @@ async def score_company_competition_intent(
     elif retained_fit is not None:
         (company_fit, linkedin_profile_source_candidate,
          matched_company_source_cache) = deepcopy(retained_fit)
+    elif fit_evidence_reuse_allowed:
+        from qualification.scoring.company_fit_evidence_reuse import fit_with_evidence_reuse
+        required_sources = (required_attribute_retry_source_cache
+                            if required_attribute_retry_source_cache is not None else {})
+        async def native_fit(fit_company):
+            return await _verify_company_fit(
+                fit_company, icp, run_cost_usd, run_time_seconds, seen_companies,
+                require_https_transport=True, company_quality=company_quality,
+                evidence_investigator=evidence_investigator,
+                required_attribute_retry_source_cache=required_sources,
+                linkedin_profile_source_sink=linkedin_profile_source_candidate,
+                matched_company_source_sink=matched_company_source_cache,
+                matched_company_retry_source_cache=matched_company_retry_source_cache,
+            )
+        company_fit = await fit_with_evidence_reuse(
+            native_fit, company=company, linkedin=linkedin_profile_source_candidate,
+            matched=matched_company_source_cache, required=required_sources,
+        )
+        if fit_cache is not None and company_fit.decision == COMPANY_FIT_MATCH:
+            fit_cache["verified_fit"] = deepcopy((
+                company_fit, linkedin_profile_source_candidate, matched_company_source_cache,
+            ))
     else:
         company_fit = await _verify_company_fit(
             company,

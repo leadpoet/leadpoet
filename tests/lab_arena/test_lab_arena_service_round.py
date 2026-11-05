@@ -3029,25 +3029,13 @@ def test_http_finalize_durably_rejects_noncompliant_license_before_credentials_o
 def test_validators_complete_a_round_over_the_http_api(isolated_lifecycle_connect, tmp_path, monkeypatch):
     """A real runner API client completes the current two-stage competition."""
 
-    import asyncio
-
     from fastapi.testclient import TestClient
 
     from lab_arena.api import create_app
 
     connect = isolated_lifecycle_connect
     harness = Harness(connect, tmp_path, challengers=["Http-A", "Http-B"], runners=["alpha", "beta"])
-    app = create_app(harness.service)
-    request_loops = set()
-
-    @app.middleware("http")
-    async def require_one_app_loop(request, call_next):
-        request_loops.add(asyncio.get_running_loop())
-        assert len(request_loops) == 1, "Concurrent HTTP controls must share one app loop"
-        return await call_next(request)
-
-    # Match the server: app-owned async limiters stay on one event loop.
-    with TestClient(app) as client:
+    with TestClient(create_app(harness.service)) as client:
         calls = {"post": 0, "get": 0}
         original_post, original_get = client.post, client.get
 

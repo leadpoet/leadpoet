@@ -26,7 +26,9 @@ _FROZEN_GRADER = frozen_source(
 
 
 def _sources():
-    repaired = (ROOT / composer.FINALITY_FILE).read_bytes()
+    # Test this historical three-delta seam against its immutable source,
+    # independently of later default-verifier ordering corrections.
+    repaired = frozen_source("native_industry_budget", composer.FINALITY_FILE)
     original = repaired
     for old, new in seam.DELTAS:
         assert original.count(new.encode()) == 1
@@ -229,11 +231,11 @@ def test_actual_frozen_release_sources_compose_and_reproduce(monkeypatch):
     ('test_investigated_unproven_without_identity_gap_does_not_add_call', {}),
     *[('test_identity_repair_failure_cannot_qualify', {'repair': repair})
       for repair in ('missing', 'other_entity', 'conflicting_slug', 'provider_error')],
-    ('test_incomplete_research_does_not_get_identity_repair', {}),
+    ('test_identity_repair_cannot_clear_later_incomplete_research', {'repair_first': False}),
     ('test_repaired_identity_cannot_clear_unresolved_source_fault', {}),
     ('test_investigated_identity_keeps_existing_target_bound', {}),
-    ('test_missing_or_malformed_receipt_does_not_open_repair', {'receipt_shape': 'missing'}),
-    ('test_missing_or_malformed_receipt_does_not_open_repair', {'receipt_shape': 'malformed'}),
+    ('test_missing_or_malformed_later_receipt_remains_unavailable', {'receipt_shape': 'missing', 'repair_first': False}),
+    ('test_missing_or_malformed_later_receipt_remains_unavailable', {'receipt_shape': 'malformed', 'repair_first': False}),
     ('test_identity_repair_preserves_independently_proven_attribute_and_stage', {}),
     ('test_real_targeted_projection_reaches_existing_identity_repair', {}),
 ])

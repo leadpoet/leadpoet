@@ -480,8 +480,8 @@ existing AWS infrastructure. The coordinator may upgrade required validators and
 auditors through canonical controls, retire proved obsolete processes, make
 minimal tested fixes, merge and deploy, and verify fresh startup, gateway
 communication, a complete epoch, scoring and actual weight submission on AWS.
-Preserve accepted work, accounting, rewards, history and concurrent deployment
-ownership. Add no database migration, service or compatibility architecture.
+Preserve accepted work, accounting, rewards, history and active deployment
+locks. Add no database migration, service or compatibility architecture.
 After independent review and AWS-only production proof, preserve necessary
 historical data in AWS, decommission only Supabase project
 `qplwoislplkcegvdmbim`, and verify its ongoing project billing has stopped.
@@ -540,7 +540,7 @@ hashes, training eligibility, scoring, billing, miner behavior and frozen rules.
 Add no receipts, dependencies, provider calls or recovery machinery. Internal
 agents may implement and test in this worktree only. The coordinator owns
 independent review, safe merge, canonical deployment and fresh production
-readback. Preserve active runs and other tasks' migration and restart ownership.
+readback. Preserve active runs, concurrent migrations and active restart locks.
 This authority ends after the scoped fix is deployed and verified.
 
 ## Scoped authorization: October 29 frozen catalog request performance
@@ -629,7 +629,7 @@ costs and delayed settlement, exact worker responses, lost/unknown response
 recovery, submitted miner behavior, scoring, capture and historical records.
 Internal agents may test and commit only; the coordinating task owns push,
 merge, deployment and production verification. Preserve all active leases,
-restart owners and shared guards, including concurrent AWS migration work.
+restart locks and shared guards, including concurrent AWS migration work.
 This authority ends after the scoped fix and live verification are complete.
 
 ## Scoped production authorization: October 28 training readiness fixes
@@ -646,7 +646,7 @@ Training-quality selection must remain separate from raw capture and competition
 eligibility. Do not add new services, dependencies, provider reruns, database
 migrations, or Research Lab machinery. Internal agents own only their assigned
 implementation and tests; the coordinating task owns commits, release and live
-verification. Respect existing deployment locks and other restart owners. This
+verification. Respect active deployment and restart locks. This
 authority ends when the four changes and production verification are complete.
 
 ## Scoped authorization: October 28 aggregate exporter text reuse
@@ -807,7 +807,7 @@ coordinating task owns independent review, push, merge, future scorer image
 selection, canonical rollout and live verification. Internal implementation
 agents may commit only. Preserve frozen judgments, accepted results, costs,
 privacy, rewards and all concurrent work. Do not rewrite historical records or
-interrupt another owner's deployment. This authority ends after the scoped
+interrupt an active deployment. This authority ends after the scoped
 fix and future-flow verification are complete.
 
 ## Scoped authorization: October 28 stage-quota query performance
@@ -968,7 +968,7 @@ explicit model settings and valid tool history, and safely merging and deploying
 these fixes. Apply exact committed migration 582 to expand only the open October
 28 registry. Preserve October 27, baseline identity, scoring, privacy, costs,
 80% coverage, and 1% missing-token rules. Use canonical release controllers and
-respect concurrent restart owners. Proven failed deliveries may consume the
+respect active restart locks. Proven failed deliveries may consume the
 incomplete-ICP allowance, but must not become training targets. This authority
 ends after live verification.
 
@@ -991,7 +991,7 @@ Preserve source/identity and security checks, research and accounting limits,
 frozen scoring policies, miner/baseline fairness, published results and rewards.
 Do not write test judgments into production or apply unrelated migrations.
 The coordinator may apply exact migration603 to hold November 3 scoring until
-the improved verifier is deployed and verified. Preserve restart ownership,
+the improved verifier is deployed and verified. Preserve active restart locks,
 captured leases, costs, results and schedules. Internal agents test and commit
 only. Keep both instruction files identical.
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from lab_arena import contracts, reasoning_capture, training_capture, training_steps, training_thinking
+from lab_arena.runtime_version import SOURCE_METADATA
 
 SCHEMA_VERSION = "leadpoet.lab_arena.internal_capture_event.v1"
 EXAMPLE_SCHEMA_VERSION = "leadpoet.lab_arena.internal_training_example.v1"
@@ -121,6 +122,8 @@ class InternalCall:
         self._stages: dict[str, dict[str, Any]] = {}
         self._common = {"schema_version": SCHEMA_VERSION, "actor_type": "arena_internal",
                         "call_id": self.call_id, "created_at": self.created_at,
+                        "host_source": {key.removeprefix("validator_"): value
+                                        for key, value in SOURCE_METADATA.items()},
                         "capture_source_sha256": CAPTURE_SOURCE_SHA256,
                         "purpose": "unknown", "api": None, "context": {},
                         "model": None, "context_privacy": {"redacted": False, "redactions": []}}
@@ -359,7 +362,7 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
     first = next(iter(events.values()), {})
     for event in events.values():
         if any(event.get(key) != first.get(key) for key in
-               ("purpose", "context", "api", "created_at", "model", "capture_source_sha256")):
+               ("purpose", "context", "api", "created_at", "model", "capture_source_sha256", "host_source")):
             gaps.append("event_context_mismatch")
     request = ((documents.get("request") or {}).get("outbound") or {}).get("body")
     response_document = documents.get("response") or {}
@@ -385,6 +388,7 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
     raw = {"schema_version": EXAMPLE_SCHEMA_VERSION, "actor_type": "arena_internal",
            "call_id": prefix.split("/")[-2], "purpose": first.get("purpose"),
            "api": first.get("api"), "context": first.get("context", {}),
+           "host_source": first.get("host_source", {}),
            "created_at": first.get("created_at"), "event_refs": [prefix + stage + ".json" for stage in STAGES],
            "events": events, "request": request, "response": response,
            **({"response_text": response_document["body_text"]} if "body_text" in response_document else {}),

@@ -20,7 +20,7 @@ The component results below are not a claim that the new policy is deployed.
 
 | Arena work | Previous model | Candidate and exact route | Reasoning / output cap |
 | --- | --- | --- | --- |
-| Company reverification and industry research controller | Sonar; Sol controller | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
+| Company reverification | Sonar | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
 | Intent signal gate and fetched evidence | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
 | Intent paragraph review | Sonnet 5.5 | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192; latency review pending |
 | Role checks and generic company investigator | Gemini 3.5 Flash Lite | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
@@ -28,6 +28,7 @@ The component results below are not a claim that the new policy is deployed.
 | Claim equivalence for evidence reuse | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / **500, 15 seconds** |
 | Search fallback, including social/podcast verification | Sonar Pro | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
 | Final industry classification | GPT-6.1 Sol | retained after expanded quality tests | existing policy |
+| Industry research controller | GPT-6.1 Sol | retained after native research and prompt tests | low / 3000 |
 | Admission and security review | Sonnet 5.5, Sol fallback | retained | existing policy |
 | ICP generation | Sonnet 5.5 | retained after factual evaluation | existing policy |
 | ICP exclusion research | DeepSeek, from PR1044 | retained after cheaper variants failed complete gates | high / 4096 |
@@ -130,9 +131,9 @@ Fireworks' two new positives had median latency 6.67 seconds, versus 14.44 on
 Nebius and 2.41 on Sonnet, and cost $0.007746 versus $0.057048 on Sonnet.
 Its twelve-case confirmation had median latency 6.03 seconds and cost
 $0.028635072. It is not consistently faster than Nebius on every case.
-Changing the model's route would also affect Responses company research and
-search fallbacks. Fireworks therefore remains a private candidate until those
-native full scoring paths pass. The permanent route is still Nebius.
+Changing the model's route also affects Responses company research and search
+fallbacks. Its later native full scoring run failed completion and availability
+checks. Fireworks is not selected. The permanent route is still Nebius.
 
 Seven separately retained production requests screened GPT-OSS-120B,
 GPT-OSS-20B, Ling 3.1 Flash, Gemma 4 31B and Nemotron 3.5 Lightning. GPT-OSS-120B
@@ -197,6 +198,64 @@ deadline. The current DeepSeek high setting remains selected. These thirteen
 native calls cost $0.159101056, with no unresolved charge reservation. Passing
 the bank parser is not proof that example companies satisfy all filters.
 
+## Fresh native scoring checks and failed candidates
+
+The first fresh Fireworks full-flow candidate did not qualify for release.
+The positive baseline reached the source-adjudicated score of 51 (12.75 after
+normalization), but positive miner research remained incomplete after 442
+seconds. Four DeepSeek controller replies used all 8192 output tokens on
+reasoning without a tool action. A later submit reply contained incomplete
+JSON. These are model completion failures, despite readable reasoning and
+successful source retrieval. A negative-case request then received a real
+Fireworks HTTP429. The original run and all failed replies remain preserved.
+
+The unchanged production policy separately completed the positive baseline
+and miner cases with score 51 and no false-positive penalty. Its baseline used
+$0.31404741 in model charges and 95.31 seconds, versus $0.136267382 and 129.18
+seconds for the Fireworks candidate. Its positive miner used $0.18485758 and
+74.04 seconds. These are individual native flows with explicit retained source
+inputs and bounded fresh retrieval, not population latency estimates or total
+production cost forecasts. Source charges are recorded separately.
+
+Both original-policy negative cases returned zero because company-fit evidence
+was unavailable. Neither reached intent adjudication, so neither counts as a
+correct rejection of the false claim. The first negative-miner attempt reached
+the private 40-POST experiment ceiling; its isolated fresh completion used 11
+calls, $0.31889051 in model charges, $0.014 in fresh sources and 78.49 seconds.
+Its industry evidence passed, but its public-listing quote failed issuer binding.
+The earlier negative baseline also lacked mainframe-service evidence. The
+company facts and ICP were identical to the positive cases. Their controllers
+selected abbreviated issuer names or anonymous price cards, whereas the positive
+cases used source quotes with the full issuer name. Gold and native validators
+remain unchanged; fit unavailable is not a negative company-fit training label.
+
+A later exact-history controller screen hit Fireworks rate limits for both
+DeepSeek minimal and GLM Flash. Kimi's pinned provider rejected named function
+selection; its endpoint advertises support for required tool selection instead.
+Those errors are route or API compatibility results, not model accuracy results.
+Sol completed the same difficult forced-submit request in 9.89 seconds for
+$0.107451. Alternate approved routes and a supported Kimi tool format were then
+tested. DeepSeek on Nebius at minimal effort exhausted its output on reasoning;
+GLM 5.2 on Coreweave returned incomplete arguments. Kimi with required tool
+selection completed, but its positive quote was unsupported. These private
+calls lacked the native endpoint-metadata header, so readable text is confirmed
+but selected-route proof is unavailable. Later tests restored that header.
+
+A generic research reminder let DeepSeek low complete both hard forced-submit
+histories with supported quotes. It still stopped an earlier research turn
+while required industry facts were missing and one search plus three fetches
+remained. A conditional reminder and then moving that same reminder to the
+final user message did not fix the premature stop. All failures and charges
+remain recorded. One private quote-check failure was a test defect: an exact
+quote crossed two contiguous source spans. Joining only proven contiguous
+spans fixed that check; the model request was not repeated.
+
+Sol remains selected for industry research and classification. Admission,
+ICP generation and industry are the three proprietary workflows retained.
+The new controller role is optional so existing seven-role frozen policies
+retain their original routing. Its explicit Sol request keeps 3000 tokens,
+low effort and the prior plain tool history. No experimental reminder ships.
+
 ## Capture and training value
 
 PR1044 already captures admission, ICP generation and exclusion calls through
@@ -206,6 +265,15 @@ This work integrates that foundation and fixes native final-answer selection,
 route/API validation, frozen request options, controller role routing and
 evidence-cache model identity. No new service, database table, production
 dependency or secondary verification model is introduced.
+
+The audit also found that a terminal local tool result can have no subsequent
+model request in which to record it. An ordered judge-tool observation now uses
+the existing worker channel for host tool results, validation, repairs, accepted
+terminal submissions and rejected tool proposals. Rejected proposals are marked
+as not executed. Sequence gaps, privacy failures and size failures mark capture
+as incomplete. Miner calls cannot emit this judge-only observation. These
+records show host validation, not human gold labels or proof that a later model
+consumed the result.
 
 Judge training targets retain the frozen ICP, scored miner/baseline input,
 source observations, exact available request/response data, exposed thinking,

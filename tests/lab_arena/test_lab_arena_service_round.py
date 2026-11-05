@@ -3343,7 +3343,7 @@ class FlakyObjectStore:
         return getattr(self._inner, name)
 
 
-def test_result_writes_retry_after_transient_object_store_failures(isolated_lifecycle_connect, tmp_path, request):
+def test_result_writes_retry_after_transient_object_store_failures(isolated_lifecycle_connect, tmp_path):
     """A transient result-store failure does not lose or duplicate a run."""
 
     connect = isolated_lifecycle_connect
@@ -3353,38 +3353,39 @@ def test_result_writes_retry_after_transient_object_store_failures(isolated_life
     harness.service = harness.build_service()
     from fastapi.testclient import TestClient
     from lab_arena.api import create_app
-    client = TestClient(create_app(harness.service), raise_server_exceptions=False)
-    request.addfinalizer(client.close)
-    harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
-    configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(minutes=30),
-        round_id="arena-2026-10-15-flaky",
-    )
-    harness.round_id = configuration["round_id"]
-    harness.submit("Flaky-A", harness.round_id)
+    # Keep one app loop for concurrent requests, as in the real ASGI server.
+    # Per-request TestClient portals cannot share the app's async limiters.
+    with TestClient(create_app(harness.service), raise_server_exceptions=False) as client:
+        harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
+        configuration = harness.service.create_round(
+            datetime.now(timezone.utc) + timedelta(minutes=30),
+            round_id="arena-2026-10-15-flaky",
+        )
+        harness.round_id = configuration["round_id"]
+        harness.submit("Flaky-A", harness.round_id)
 
-    # This test targets runner result delivery. The benchmark write has a
-    # separate driver retry boundary and is allowed through here.
-    flaky.allow("arena/%s/benchmark.json" % harness.round_id)
-    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
-    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
-    participants = harness.service.store.get_round(harness.round_id)["participants"]
-    for participant in participants:
-        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+        # This test targets runner result delivery. The benchmark write has a
+        # separate driver retry boundary and is allowed through here.
+        flaky.allow("arena/%s/benchmark.json" % harness.round_id)
+        harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+        assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+        participants = harness.service.store.get_round(harness.round_id)["participants"]
+        for participant in participants:
+            harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
-    _run_stage_one_to_scoring(harness, len(participants), runners=1)
-    harness.advance_until("published", runners=1)
-    assert flaky.failures > 0
-    row = harness.service.store.get_round(harness.round_id)
-    decision = row["publication_doc"]["king_decision"]
-    winner = decision["winner_submission_id"] or row["publication_doc"][
-        "final_ranking"
-    ][0]["submission_id"]
-    results = harness.service.public_results(harness.round_id, winner)
-    assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 20
-    attempts = harness.service.store.list_runs(harness.round_id)
-    assert all(int(run["attempt"]) == 1 for run in attempts)
-    assert_canary_absent(harness, connect)
+        _run_stage_one_to_scoring(harness, len(participants), runners=1)
+        harness.advance_until("published", runners=1)
+        assert flaky.failures > 0
+        row = harness.service.store.get_round(harness.round_id)
+        decision = row["publication_doc"]["king_decision"]
+        winner = decision["winner_submission_id"] or row["publication_doc"][
+            "final_ranking"
+        ][0]["submission_id"]
+        results = harness.service.public_results(harness.round_id, winner)
+        assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 20
+        attempts = harness.service.store.list_runs(harness.round_id)
+        assert all(int(run["attempt"]) == 1 for run in attempts)
+        assert_canary_absent(harness, connect)
 
 
 

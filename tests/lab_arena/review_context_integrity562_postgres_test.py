@@ -108,7 +108,7 @@ def test_context_integrity_fails_before_migration_then_settles_same_claim(contex
 # enter in the later composed review migration and are checked there.
 @pytest.mark.parametrize("reason", sorted(
     reason for reason in code_review_policy.RESPONSE_ERROR_REASONS
-    if not reason.startswith("research_")
+    if not reason.startswith("research_") and reason not in {"truncated", "truncated_at_limit"}
 ))
 def test_every_canonical_response_reason_is_persisted(context, reason):
     store, connection = context

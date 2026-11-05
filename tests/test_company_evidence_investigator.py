@@ -12211,7 +12211,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "do not require cloud resource management" in system_prompt
     assert "generic license by itself does not prove" in system_prompt
     assert "Customer use of another vendor's platform" in system_prompt
-    assert "monthly or annual fees supports a paid subscription" in system_prompt
+    assert "monthly or annual platform or workspace plan supports a paid subscription" in system_prompt
     assert "current commercial customers or deployments" in system_prompt
     assert "free plan, research study" in system_prompt
     assert "investor's general commercialization claim" in system_prompt

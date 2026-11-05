@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -22,6 +23,7 @@ class SubmissionCodeReviewer:
         credential_for: Callable[[Mapping[str, Any]], str],
         price_table: Mapping[str, Any], transport: broker.ProviderTransport,
         similarity_references_for: Callable[[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None,
+        capture: Any = None,
     ) -> None:
         self._store = store
         self._objects = objects
@@ -29,17 +31,35 @@ class SubmissionCodeReviewer:
         self._prices = broker.validate_price_table(price_table)
         self._transport = transport
         self._similarity_references_for = similarity_references_for
+        self._capture = capture
+
+    @staticmethod
+    def _capture_outcome(call, document, result, actual):
+        if call is not None:
+            try:
+                call.finish(outcome={"host_decision": dict(document),
+                                     "committed_review": dict(result)},
+                            cost_microusd=actual)
+            except Exception:
+                # Private training evidence never changes admission authority.
+                pass
 
     def _finish_review(
         self, row: Mapping[str, Any], token: str, status: str,
         document: Mapping[str, Any], actual: int | None,
         *, attempt: Any, provider_http_status: int = 0,
         funding_route: str = "none",
+        capture_call: Any = None,
     ) -> Mapping[str, Any]:
-        result = self._store.finish_submission_review(
-            str(row["submission_id"]), str(row["miner_hotkey"]),
-            token, status, document, actual,
-        )
+        try:
+            result = self._store.finish_submission_review(
+                str(row["submission_id"]), str(row["miner_hotkey"]),
+                token, status, document, actual,
+            )
+        except Exception:
+            self._capture_outcome(capture_call, document, {"status": "unavailable"}, actual)
+            raise
+        self._capture_outcome(capture_call, document, result, actual)
         try:
             # The database may replace a late pass with a terminal error.
             # Emit only its committed decision, never a stale or replay reply.
@@ -57,7 +77,9 @@ class SubmissionCodeReviewer:
                     "code_review_attempts": committed_attempt,
                     "code_review_doc": document,
                 })
-            if result.get("refusal_recovery") is True and type(result.get("retryable")) is bool:
+            if (result.get("refusal_recovery") is True
+                or type(result.get("review_invalid_attempts")) is int
+            ) and type(result.get("retryable")) is bool:
                 retryable = result["retryable"]
             if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
                 error_code = {
@@ -130,6 +152,7 @@ class SubmissionCodeReviewer:
         submission_id = str(row["submission_id"])
         hotkey = str(row["miner_hotkey"])
         review_model = code_review_policy.review_model_for(row)
+        review_output_tokens = code_review_policy.review_output_tokens_for(row)
         review_context = (
             code_review.FALLBACK_CONTEXT_WINDOW_TOKENS
             if review_model == code_review.FALLBACK_REVIEW_MODEL
@@ -165,6 +188,7 @@ class SubmissionCodeReviewer:
             # skip the paid review. Persisted digests bind rows to object bytes.
             prepared = code_review.prepare_request(
                 payload, model=review_model, context_window_tokens=review_context,
+                max_output_tokens=review_output_tokens,
                 research_control=research_control,
             )
             if (self._similarity_references_for is not None or row.get("source_archive_sha256")
@@ -221,6 +245,7 @@ class SubmissionCodeReviewer:
                     prepared = code_review.prepare_request(
                         payload, similarity_contexts=tuple(contexts),
                         model=review_model, context_window_tokens=review_context,
+                        max_output_tokens=review_output_tokens,
                         research_control=research_control,
                     )
             if not exact_duplicate:
@@ -280,11 +305,26 @@ class SubmissionCodeReviewer:
                  "source_bytes": prepared.reviewed_file_bytes}, 0,
                 attempt=claim.get("attempt"),
             )
+        # Historical standalone callers have no recommendation field and use
+        # only the default plan. Present malformed fields and elevated plans
+        # require an exact match. Production wiring always requires624 first.
+        if claim.get("review_output_token_recommendation", code_review.DEFAULT_MAX_OUTPUT_TOKENS) != review_output_tokens:
+            # A stale reader can reserve a smaller output plan. Settle the
+            # undispatched claim at zero, retaining SQL's authoritative plan
+            # for the next bounded attempt; never send an under-reserved call.
+            return self._finish_review(
+                row, token, "error",
+                {**code_review_policy.diagnostic("code_review_preparation_unavailable", retryable=True),
+                 "model": review_model, "file_count": len(prepared.reviewed_files),
+                 "source_bytes": prepared.reviewed_file_bytes}, 0,
+                attempt=claim.get("attempt"),
+            )
         actual = 0
         status = "error"
         provider_http_status = 0
         provider_observation: dict[str, Any] = {}
         diagnostic_response: tuple[Any, Mapping[str, Any]] | None = None
+        capture_call = None
         funding_route = "none"
         document: dict[str, Any] = code_review_policy.diagnostic(
             "code_review_provider_unavailable"
@@ -321,6 +361,22 @@ class SubmissionCodeReviewer:
                 # This is the owner's stored OpenRouter key; no organizer key
                 # is available on this review route.
                 funding_route = "miner_key"
+                if self._capture is not None:
+                    try:
+                        capture_call = self._capture.start(
+                            purpose="admission_review", api="openrouter.chat",
+                            context={
+                                "round_id": row["round_id"], "submission_id": submission_id,
+                                "attempt": claim.get("attempt"), "funding_source": funding_route,
+                                "source_archive_sha256": contracts.hash_bytes(payload),
+                                "source_manifest_sha256": prepared.source_manifest_sha256,
+                                "research_policy_hash": code_review.RESEARCH_POLICY_HASH if research_control else None,
+                            },
+                            request=prepared.parameters, secrets=(secret,),
+                        )
+                    except Exception:
+                        pass
+                request_started = time.monotonic()
                 response = self._transport.send(
                     method="POST", url="https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": "Bearer " + secret,
@@ -329,6 +385,12 @@ class SubmissionCodeReviewer:
                     body=request_body,
                     timeout_seconds=300,
                 )
+                if capture_call is not None:
+                    try:
+                        capture_call.response(body=response.body, status=response.status,
+                                              elapsed_seconds=time.monotonic() - request_started)
+                    except Exception:
+                        pass
                 provider_http_status = response.status
                 if broker._response_contains_credential(response, secret):
                     document = code_review_policy.diagnostic(
@@ -429,11 +491,12 @@ class SubmissionCodeReviewer:
                             document["provider_http_status"] = provider_http_status
             except code_review.CodeReviewError as exc:
                 # An unusable provider review is not a negative code verdict.
-                # Account this call, then let the admission window and backoff
-                # bound the next independent claim. Never loop within a call.
+                # Account this call; SQL also bounds any invalid-review episode
+                # by durable reservations. Never loop within a call.
                 document = code_review_policy.diagnostic(
                     exc.code, error_reason=exc.response_reason,
-                    retryable=True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None,
+                    retryable=(False if exc.response_reason == "truncated_at_limit" else
+                               True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None),
                 )
             except broker.ProviderTransportError:
                 # The request may have reached the provider, so its cost is unknown.
@@ -492,4 +555,5 @@ class SubmissionCodeReviewer:
             attempt=claim.get("attempt"),
             provider_http_status=provider_http_status,
             funding_route=funding_route,
+            capture_call=capture_call,
         )

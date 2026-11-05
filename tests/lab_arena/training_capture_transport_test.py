@@ -6,11 +6,17 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from lab_arena import contracts, runner
+from lab_arena import contracts, runner, training_input
 
 
 TOKEN = "private-lease-value-do-not-log"
 RUN = "capture:test"
+CLAIM_HASH = "sha256:" + "a" * 64
+
+
+def active_lease():
+    return {"run_id": RUN, "kind": "execute", "lease_generation": 1,
+            "claim_request_hash": CLAIM_HASH}
 
 
 def config(api):
@@ -31,12 +37,21 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
         response = {"status": "stored"}
         if request.url.path.endswith("/training-observations"):
             response["payload_sha256"] = contracts.document_hash(json.loads(request.content))
+        elif request.url.path.endswith("/training-input"):
+            snapshot, _ = training_input.build_snapshot(
+                RUN, "execute", json.loads(request.content), lease_generation=1,
+                claim_request_hash=CLAIM_HASH, secrets=(TOKEN,),
+            )
+            response.update({key: snapshot[key] for key in
+                             ("schema_version", "lease_generation", "claim_request_hash",
+                              "input_sha256", "privacy")})
+            response["ref"] = training_input.object_ref(RUN, 1)
         return httpx.Response(200, json=response)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         api = runner.HttpArenaApiClient("https://arena.invalid", client=client)
-        state = runner.RunState(lease={"run_id": RUN}, lease_token=TOKEN)
-        runner._record_training_input(config(api), state.lease, TOKEN, {"input": "captured"})
+        state = runner.RunState(lease=active_lease(), lease_token=TOKEN)
+        assert runner._record_training_input(config(api), state.lease, TOKEN, {"input": "captured"}) is True
         result = runner._record_training_observations(config(api), state.lease, TOKEN, state)
         assert result["status"] == "stored"
         api.claim({})
@@ -51,7 +66,8 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
 
 
 @pytest.mark.parametrize("failure", ["timeout", "http"])
-def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, capsys):
+@pytest.mark.parametrize("max_attempts", [1, 2])
+def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, max_attempts, capsys):
     attempts = []
     secret = "private-body-token-do-not-log"
 
@@ -63,9 +79,9 @@ def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, 
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         api = runner.HttpArenaApiClient("https://arena.invalid", client=client)
-        state = runner.RunState(lease={"run_id": RUN}, lease_token=TOKEN)
+        state = runner.RunState(lease=active_lease(), lease_token=TOKEN)
         before = (state.action_sequence, list(state.calls), state.local_refusals)
-        assert runner._record_training_input(config(api), state.lease, TOKEN, {}) is None
+        assert runner._record_training_input(config(api), state.lease, TOKEN, {}, max_attempts=max_attempts) is False
         summary = runner._record_training_observations(config(api), state.lease, TOKEN, state)
         assert summary["status"] == "unavailable"
         assert (state.action_sequence, state.calls, state.local_refusals) == before
@@ -79,7 +95,7 @@ def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, 
     input_path = f"/arena/v1/runs/{RUN}/training-input"
     observations_path = f"/arena/v1/runs/{RUN}/training-observations"
     assert attempts == (
-        [("POST", input_path)] * (2 if failure == "timeout" else 1)
+        [("POST", input_path)] * (max_attempts if failure == "timeout" else 1)
         + [("POST", observations_path)] * 2
         + [("HEAD", observations_path)]
     )

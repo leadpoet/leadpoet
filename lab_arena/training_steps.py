@@ -51,7 +51,7 @@ def _exact(value, *, response=False, worker_proofs=None):
     return _exact_stateless(value, response=response)
 
 
-def _exact_stateless(value, *, response=False):
+def _exact_stateless(value, *, response=False, clean_text_digests=None):
     def comparable(item):
         if isinstance(item, dict):
             return {key: comparable(child) for key, child in item.items()
@@ -75,7 +75,8 @@ def _exact_stateless(value, *, response=False):
                     if field in msg and (msg[field] is None or msg[field] == '' or field == 'reasoning_details' and msg[field] == []):
                         msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
-    sanitized, redactions = training_capture.sanitize_training_value(value)
+    sanitized, redactions = training_capture.sanitize_training_value(
+        value, clean_text_digests=clean_text_digests)
     # A provider can return the marker literally. Callers verify capture and
     # receipt redaction flags plus request/response hashes separately.
     return not removed and not redactions and clean == value and sanitized == value
@@ -267,7 +268,7 @@ def _empty_target_message(item):
 
 
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
-            allow_empty_messages=False):
+            allow_empty_messages=False, responses_input_validator=None):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -301,10 +302,11 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
             _require(choice['finish_reason'] == 'stop' and isinstance(msg.get('content'), str)
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
-    _responses_input(body.get('input'), tools=body.get('tools', []),
-                     max_tool_calls=body.get('max_tool_calls'),
-                     allow_reasoning_history=allow_reasoning_history,
-                     allow_tool_error_history=allow_tool_error_history)
+    validate_input = _responses_input if responses_input_validator is None else responses_input_validator
+    validate_input(body.get('input'), tools=body.get('tools', []),
+                   max_tool_calls=body.get('max_tool_calls'),
+                   allow_reasoning_history=allow_reasoning_history,
+                   allow_tool_error_history=allow_tool_error_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')
@@ -316,8 +318,9 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         _require(isinstance(item, dict), 'response_shape_unsupported')
         kind = item.get('type')
         if kind == 'reasoning':
-            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status'}
+            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status', 'encrypted_content'}
                                       | ({'format'} if allow_reasoning_history else set())), 'reasoning_shape_unsupported')
+            _require(item.get('encrypted_content') is None, 'reasoning_shape_unsupported')
             _require('format' not in item or isinstance(item['format'], str)
                      and 1 <= len(item['format']) <= 128, 'reasoning_shape_unsupported')
             _require('id' not in item or isinstance(item['id'], str) and 1 <= len(item['id']) <= 256,
@@ -618,9 +621,8 @@ def _outbound_request_exact(call):
             and outbound.get('host') == (operation.outbound_host or operation.host)
             and outbound.get('path') == (operation.outbound_path or operations._render_path(
                 operation, request.get('hashed_parameters') or {}))
-            and outbound.get('body_sha256') == (
-                contracts.hash_bytes(b'') if outbound.get('body') is None
-                else contracts.document_hash(outbound['body'])))
+            and operations.outbound_body_hash_matches(
+                call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256')))
 
 
 def _model_request(example, call, *, worker_proofs=None):
@@ -642,7 +644,8 @@ def _model_request(example, call, *, worker_proofs=None):
         _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
     outbound = request.get('outbound') or {}
     body = outbound.get('body')
-    _require(isinstance(body, dict) and contracts.document_hash(body) == outbound.get('body_sha256'), 'outbound_body_hash_mismatch')
+    _require(isinstance(body, dict) and operations.outbound_body_hash_matches(
+        op, body, outbound.get('body_sha256')), 'outbound_body_hash_mismatch')
     _require(outbound.get('method') == 'POST' and outbound.get('host') == 'openrouter.ai'
              and outbound.get('path') == ('/api/v1/responses' if op.endswith('responses') else '/api/v1/chat/completions'), 'outbound_identity_mismatch')
     _require(isinstance(body.get('model'), str) and body['model']

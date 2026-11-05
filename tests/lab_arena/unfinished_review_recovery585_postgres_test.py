@@ -3,7 +3,7 @@
 import pytest
 
 from lab_arena import code_review
-from lab_arena.store import ArenaStoreError, new_lease_token
+from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, new_lease_token
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_code_review_postgres import (
     _age_review_error, accepted_recovery_submission, recovery_connect,
@@ -48,17 +48,42 @@ def _verdict(verdict):
     return {**review_doc(verdict, file_count=2, source_bytes=1000), "model": code_review.DEFAULT_REVIEW_MODEL}
 
 
-def test_runtime_recovers_after_old_caps_and_reuses_completed_review(recovery_store, recovery_superuser):
+@pytest.fixture
+def current_runtime_store():
+    """Current Python uses SQL624; keep this module's historical SQL unchanged."""
+    from tests.lab_arena.invalid_review_budget624_postgres_test import (
+        recovery_database as current_database,
+    )
+
+    database = current_database.__wrapped__()
+    try:
+        psycopg2, dsn = next(database)
+        transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+        connection = psycopg2.connect(**dsn)
+        connection.autocommit = True
+        try:
+            yield ArenaStore(transport), connection
+        finally:
+            connection.close()
+            transport.close()
+    finally:
+        database.close()
+
+
+def test_runtime_recovers_after_old_caps_and_reuses_completed_review(current_runtime_store):
+    recovery_store, recovery_superuser = current_runtime_store
     _, submission, _miner = accepted_recovery_submission(recovery_store, "e20")
     payload = _archive(_source())
     responses = 0
     def response(parameters):
         nonlocal responses
         responses += 1
-        body = _review_body(parameters)
+        assert parameters["max_tokens"] == 32768
         if responses <= 7:
-            body["choices"][0]["finish_reason"] = "length"
-        return {"body": body}
+            # Transient provider errors remain recoverable beyond old global
+            # caps. Repeated truncation now has a separate finite SQL624 budget.
+            return {"status": 503, "body": {"usage": {"cost": "0.001234"}}}
+        return {"body": _review_body(parameters)}
     transport = ReviewTransport(response)
     reviewer, _, _, _ = _reviewer(payload, transport, store=recovery_store)
     for attempt in range(1, 9):
@@ -68,6 +93,8 @@ def test_runtime_recovers_after_old_caps_and_reuses_completed_review(recovery_st
         if attempt < 8:
             row = recovery_store.get_submission(submission)
             assert row["status"] == "accepted"
+            assert row["code_review_doc"]["error_code"] == "code_review_provider_unavailable"
+            assert "invalid_episode_start" not in row["code_review_doc"]
             assert reviewer.review(row)["status"] == "backoff"
             assert len(transport.sent) == attempt
             _age_review_error(recovery_superuser, submission)

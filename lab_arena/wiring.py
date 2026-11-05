@@ -495,6 +495,9 @@ def build_service_from_environment(mode: str):
         except Exception:
             capture_objects = None
     request_capture = training_capture.RequestCapture(capture_objects)
+    from lab_arena.internal_capture import InternalCapture
+
+    internal_capture = InternalCapture(capture_objects)
 
     def capture_provider_request(document, *, secrets=()):
         return request_capture.prepare(document, secrets=(*provider_keys.values(), *secrets))
@@ -559,6 +562,7 @@ def build_service_from_environment(mode: str):
         company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
         company_judgment_from=os.environ.get("LAB_ARENA_COMPANY_JUDGMENT_FROM") or None,
         signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
+        evidence_judgment_cache=True,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
         reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
         training_minimum_icp_coverage_percent=_training_coverage_from_environment(),
@@ -663,8 +667,8 @@ def build_service_from_environment(mode: str):
         return store.current_daily_icp_set(set_id)
 
     # The current paid reviewer must not start against a database that lacks
-    # atomic route selection and bounded refusal-recovery reservations.
-    store.code_review_schema(require_refusal_fallback=True)
+    # atomic route selection and both bounded recovery reservation policies.
+    store.code_review_schema(require_refusal_fallback=True, require_invalid_review_budget=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
@@ -678,6 +682,7 @@ def build_service_from_environment(mode: str):
             store=store, objects=objects, credential_for=submission_keys.code_review_key,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
             similarity_references_for=lambda row: service.submission_similarity_references(row),
+            capture=internal_capture,
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
@@ -692,6 +697,13 @@ def build_service_from_environment(mode: str):
                 if chain_config.network_name != "test" else ""
             )
         ),
+        # The canonical gateway env and restart controls live here across
+        # releases. Root operator commands and the ec2-user driver must share
+        # the same inode; Path.home() would split their lock namespaces.
+        publication_lock_dir=Path(os.environ.get(
+            "LAB_ARENA_PUBLICATION_LOCK_DIR",
+            "/home/ec2-user/.config/leadpoet",
+        )),
     )
     service = ArenaService(config)
     app = create_app(service)

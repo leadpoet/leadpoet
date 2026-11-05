@@ -34,6 +34,7 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
+from lab_arena.publication_lock import PublicationLockError, publication_round_lock
 from lab_arena.store import (
     ArenaStore,
     ArenaStoreError,
@@ -73,6 +74,7 @@ class _PublicResultEvidenceReads(dict):
         self.companies: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
         self.exclusions: Dict[str, List[str]] = {}
         self.objects: Dict[Tuple[str, int], bytes] = {}
+        self.source_outputs: Dict[Tuple[str, int], Tuple[bytes, str, Dict[str, Any]]] = {}
         self._bytes = 0
 
     def _read(self, rows: Dict, identity: Any, load: Callable[[], Any]) -> Any:
@@ -105,8 +107,10 @@ class _PublicResultEvidenceReads(dict):
     def submission(self, store: ArenaStore, submission_id: str) -> Optional[Dict[str, Any]]:
         return self._read(self.submissions, submission_id, lambda: store.get_submission(submission_id))
 
-    def uses(self, store: ArenaStore, run_id: str) -> List[Dict[str, Any]]:
-        return self._read(self.signal_uses, run_id, lambda: store.get_signal_judgment_uses(run_id))
+    def uses(self, store: ArenaStore, run_id: str, *, evidence=False) -> List[Dict[str, Any]]:
+        return self._read(self.signal_uses, run_id,
+                          lambda: store.get_signal_judgment_uses(run_id, evidence=True) if evidence
+                          else store.get_signal_judgment_uses(run_id))
 
     def signal(self, store: ArenaStore, cache_key: str, authority_slot: int) -> Optional[Dict[str, Any]]:
         if type(cache_key) is not str or type(authority_slot) is not int:
@@ -129,6 +133,32 @@ class _PublicResultEvidenceReads(dict):
             self.objects[identity] = value
             self._bytes += len(value)
         return value
+
+    def source_output(self, ref: str, max_bytes: int, raw: bytes) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Reuse a successful proof only while its exact raw bytes are held."""
+        if type(raw) is not bytes or type(ref) is not str or type(max_bytes) is not int:
+            return None
+        identity = (ref, max_bytes)
+        cached = self.source_outputs.get(identity)
+        if cached is None or cached[0] is not raw or self.objects.get(identity) is not raw:
+            return None
+        return cached[1], copy.deepcopy(cached[2])
+
+    def remember_source_output(
+        self, ref: str, max_bytes: int, raw: bytes, digest: str, validated: Dict[str, Any],
+    ) -> None:
+        if type(raw) is not bytes or type(ref) is not str or type(max_bytes) is not int:
+            return
+        identity = (ref, max_bytes)
+        if self.objects.get(identity) is not raw or identity in self.source_outputs:
+            return
+        try:
+            size = len(json.dumps(validated, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError, OverflowError):
+            return
+        if len(self.source_outputs) < self.MAX_IDENTITIES and self._bytes + size <= self.MAX_BYTES:
+            self.source_outputs[identity] = (raw, digest, copy.deepcopy(validated))
+            self._bytes += size
 
 _DEEPLINE_BILLING_BATCH_LIMIT = 96
 _DEEPLINE_BILLING_WORKERS = 8
@@ -492,6 +522,26 @@ class LocalObjectStore:
         raise ServiceError("source_upload_not_configured", 503)
 
 
+# The round driver reads and writes this bucket inside advance_round, whose
+# span never closes while a call is in flight. boto3's defaults are 60 s
+# connect, 60 s read and five legacy retry attempts, so one unreachable S3
+# endpoint can hold the driver for tens of minutes; the heartbeat then stops
+# and competitors are refused their next run. Bound the client instead, so a
+# stalled object operation has bounded connect/read waits and retry attempts.
+# These are per-attempt inactivity limits, not a total transfer deadline.
+# (wiring.py already does this for the evidence-capture store, with a much
+# shorter budget because that path must never hold a provider request.)
+OBJECT_STORE_CONNECT_TIMEOUT_SECONDS = float(
+    os.environ.get("LAB_ARENA_OBJECT_CONNECT_TIMEOUT_SECONDS", "10")
+)
+OBJECT_STORE_READ_TIMEOUT_SECONDS = float(
+    os.environ.get("LAB_ARENA_OBJECT_READ_TIMEOUT_SECONDS", "30")
+)
+OBJECT_STORE_MAX_ATTEMPTS = int(
+    os.environ.get("LAB_ARENA_OBJECT_MAX_ATTEMPTS", "3")
+)
+
+
 class S3ObjectStore:
     """Versioned, delete-denied Arena bucket (section 3.1); boto3 imported lazily."""
 
@@ -508,7 +558,19 @@ class S3ObjectStore:
             import boto3  # noqa: WPS433
             from botocore.config import Config
 
-            client = boto3.client("s3", region_name=region_name, config=Config(signature_version="s3v4"))
+            client = boto3.client(
+                "s3",
+                region_name=region_name,
+                config=Config(
+                    signature_version="s3v4",
+                    connect_timeout=OBJECT_STORE_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=OBJECT_STORE_READ_TIMEOUT_SECONDS,
+                    retries={
+                        "total_max_attempts": OBJECT_STORE_MAX_ATTEMPTS,
+                        "mode": "standard",
+                    },
+                ),
+            )
         self._client = client
         self._bucket = bucket
 
@@ -688,6 +750,7 @@ class RoundDefaults:
     company_quality_from: Optional[str] = None
     company_judgment_from: Optional[str] = None
     signal_judgment_from: Optional[str] = None
+    evidence_judgment_cache: bool = False
     intent_details_from: Optional[str] = None
     # Opt-in for future intake windows only; existing rounds keep their policy.
     reasoning_capture_from: Optional[str] = None
@@ -755,6 +818,8 @@ class ServiceConfig:
     ] = None
     # Observational uploads use a separate bounded client in production.
     training_object_store: Optional[ObjectStore] = None
+    # Existing private directory shared by canonical gateway processes.
+    publication_lock_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if (
@@ -1018,6 +1083,18 @@ class _PublicRunLookup(Mapping):
 
     def __len__(self) -> int:
         return len(self._rows)
+
+
+# ``read_snapshot`` distinguishes a store read that failed from a snapshot
+# whose identity, schema, size or privacy projection cannot hold. The refusal
+# collapsed both into one code, so a verify failure could not be attributed.
+_OBSERVATION_VERIFY_DENIALS = {
+    "observations_unavailable": "training_observations_unavailable",
+    "size_limit": "training_observations_snapshot_invalid",
+    "identity_or_hash_invalid": "training_observations_snapshot_invalid",
+    "schema_payload_mismatch": "training_observations_snapshot_invalid",
+    "privacy_invalid": "training_observations_snapshot_invalid",
+}
 
 
 class ArenaService:
@@ -1661,6 +1738,11 @@ class ArenaService:
             >= datetime.fromisoformat(defaults.signal_judgment_from.replace("Z", "+00:00"))):
             document["scorer_policy"] = dict(document["scorer_policy"],
                 signal_judgment_policy="signal_judgment_v1")
+            if defaults.evidence_judgment_cache:
+                document["scorer_policy"] = dict(document["scorer_policy"],
+                    evidence_judgment_policy="evidence_judgment_v2", env_bindings={
+                        **document["scorer_policy"]["env_bindings"],
+                        "ARENA_EVIDENCE_JUDGMENT_POLICY": "evidence_judgment_v2"})
         if defaults.normalize_intent_scale and integrity.enabled(document):
             document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
                 **document["scorer_policy"]["env_bindings"],
@@ -2670,15 +2752,18 @@ class ArenaService:
     ) -> Dict[str, Any]:
         """Freeze the exact promoted source and its original capture contract."""
 
-        if round_row.get("champion_funding_frozen") is True:
-            return {"status": "existing"}
         configuration = round_row.get("configuration_doc") or {}
         source_url = str(configuration["baseline_source_url"])
         source_sha256 = str(configuration["reasoning_baseline_source_sha256"])
         network_name, netuid = self._chain_scope()
-        promoted = self._store.latest_promoted_champion(
-            network_name=network_name, netuid=netuid
-        )
+        # A frozen source can become stale after a prior day's late promotion.
+        # Reuse the SQL gate without downloading or changing its saved source.
+        promoted = (None if round_row.get("champion_funding_frozen") is True
+                    else self._store.latest_promoted_champion(
+                        network_name=network_name, netuid=netuid,
+                        before_evaluation_date=str(round_row.get("evaluation_date") or
+                            _parse_iso(configuration["schedule"]["submission_cutoff"])
+                            .astimezone(timezone.utc).date().isoformat())))
         promotion_round_id = winner_id = commit = None
         if promoted is not None:
             promotion_round_id = str(promoted.get("round_id") or "")
@@ -3389,6 +3474,39 @@ class ArenaService:
             or run.get("run_id") != assignment + ":" + str(run.get("attempt"))
             or run.get("champion_restart_required")):
             return False
+        # An owner-created supersession names the new source generation's
+        # root. Its normal frozen attempt budget applies to that source only.
+        if run.get("kind") == "execute":
+            superseded = [parent for parent in runs
+                if parent.get("assignment_id") == assignment
+                and parent.get("status") == "failed"
+                and parent.get("terminal_cause") == "stage_closed"
+                and isinstance(parent.get("terminal_doc"), Mapping)
+                and parent["terminal_doc"].get("operation") == "baseline_source_supersession_v1"
+                and all(parent.get(key) == run.get(key) for key in
+                    ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "kind"))]
+            # A later receipt may supersede a measured infrastructure-damaged
+            # source generation. Its latest retired parent defines the root.
+            if superseded:
+                superseded = [max(superseded, key=lambda parent: parent.get("attempt", 0))]
+                root_id = str(superseded[0]["terminal_doc"].get("new_execution_run_id") or "")
+                root_text = root_id.removeprefix(assignment + ":")
+                if root_text.isdecimal() and root_id == assignment + ":" + root_text:
+                    root, attempt = int(root_text), run.get("attempt")
+                    parents = [parent for parent in runs if parent.get("assignment_id") == assignment
+                        and type(parent.get("attempt")) is int and type(attempt) is int
+                        and root <= parent["attempt"] < attempt]
+                    if (type(attempt) is int and root > superseded[0].get("attempt", root)
+                        and root <= attempt < root + configuration["max_attempts_per_assignment"]
+                        and len(parents) == attempt - root
+                        and all(parent.get("status") == "failed"
+                            and parent.get("terminal_cause") in ("provider_error", "lease_expired")
+                            and parent.get("output_ref") is None
+                            and not parent.get("champion_restart_required")
+                            and (parent.get("terminal_cause") == "lease_expired"
+                                or (parent.get("result_doc") or {}).get("terminal_status") == parent.get("terminal_cause"))
+                            for parent in parents)):
+                        return True
         if run.get("kind") == "score":
             source = next((r for r in runs if r.get("run_id") == run.get("scored_run_id")), {})
             if (source.get("kind") == "execute" and source.get("status") == "accepted"
@@ -3636,25 +3754,27 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment authority is invalid"
             )
+        source_ref = str(evidence["source_output_ref"])
+        source_limit = scoring.MAX_SCORING_OUTPUT_BYTES
         try:
             get_object = (lambda ref, limit: reads.object(self._objects, ref, limit)) if reads is not None else self._objects.get_bounded
-            source_output = json.loads(
-                get_object(
-                    str(evidence["source_output_ref"]),
-                    scoring.MAX_SCORING_OUTPUT_BYTES,
-                ).decode("utf-8")
-            )
+            raw_source = get_object(source_ref, source_limit)
+            reused_source = reads.source_output(source_ref, source_limit, raw_source) if reads is not None else None
+            if reused_source is None:
+                source_output = json.loads(raw_source.decode("utf-8"))
         except (TypeError, ValueError, UnicodeDecodeError) as exc:
             raise scoring.ScoringError(
                 "accepted company judgment source output is unavailable"
             ) from exc
-        if contracts.document_hash(source_output) != evidence["source_output_hash"]:
+        source_hash = reused_source[0] if reused_source is not None else contracts.document_hash(source_output)
+        if source_hash != evidence["source_output_hash"]:
             raise scoring.ScoringError(
                 "accepted company judgment source output hash is invalid"
             )
         try:
-            validated_output = scoring.validate_scoring_output_document(
-                source_output
+            validated_output = (
+                reused_source[1] if reused_source is not None
+                else scoring.validate_scoring_output_document(source_output)
             )
         except scoring.ScoringError as exc:
             raise scoring.ScoringError(
@@ -3698,6 +3818,8 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment source output is not bound"
             )
+        if reads is not None and reused_source is None:
+            reads.remember_source_output(source_ref, source_limit, raw_source, source_hash, validated_output)
         if evidence_reads is not None and identity is not None:
             # A consumer cannot alter the successful proof used by a later
             # consumer. Failures never populate the map.
@@ -5070,9 +5192,27 @@ class ArenaService:
             return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
 
     def publish(self, round_id: str) -> Dict[str, Any]:
+        lock_dir = getattr(getattr(self, "_config", None), "publication_lock_dir", None)
+        if lock_dir is None:  # Embedded/test services do not have a host directory.
+            return self._publish_locked(round_id)
+        try:
+            with publication_round_lock(lock_dir, round_id) as acquired:
+                if not acquired:
+                    return {"status": "retry", "round_status": "scored",
+                            "reason": "publication_busy"}
+                # Read the current status only after ownership. A former owner
+                # may have published while this process waited for its tick.
+                return self._publish_locked(round_id)
+        except PublicationLockError as exc:
+            raise ServiceError("publication_lock_unavailable", 503) from exc
+
+    def _publish_locked(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
+        if (self._full_thinking_required(round_row)
+                and (round_row.get("configuration_doc") or {}).get("mode") == "live"):
+            self._freeze_full_thinking_baseline(round_id, round_row)
         evaluation_date = str(round_row.get("evaluation_date") or "")
         if _judge_continuation_enabled(round_row):
             self._record_recovered_judgment_scores(round_row)
@@ -5247,6 +5387,8 @@ class ArenaService:
             "publication_doc": publication,
             "published_at": published_at,
         })
+        if transition.get("status") == "promotion_pending":
+            raise ServiceError("baseline_promotion_pending", 503)
         return {
             "status": transition.get("status"),
             "king_outcome": decision["outcome"],
@@ -5928,6 +6070,15 @@ class ArenaService:
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
+        from lab_arena import evidence_judgments
+        if evidence_judgments.enabled(configuration.get("scorer_policy") or {}):
+            advertised = body.get("evidence_judgment_policies")
+            if (not isinstance(advertised, list) or not 1 <= len(advertised) <= 8
+                    or any(not isinstance(policy, str) for policy in advertised)
+                    or evidence_judgments.POLICY not in advertised):
+                # Allocation chooses execution or scoring atomically. Fence an
+                # incompatible worker before it can acquire either lease kind.
+                raise ServiceError("validator_evidence_judgment_upgrade_required", 409)
         required_output_schema = contact_policy.output_schema(configuration)
         if (
             required_output_schema
@@ -6007,6 +6158,8 @@ class ArenaService:
                 lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
             )
         if response.get("status") != "leased":
+            if response.get("status") == "promotion_pending":
+                raise ServiceError("baseline_promotion_pending", 503)
             return (dict(response, claim_recovery="unresolved",
                          claim_recovery_request_id=original["request_id"])
                     if original is not None else response)
@@ -6015,6 +6168,13 @@ class ArenaService:
         ):
             return {"status": "no_work", "claim_recovery": "resolved",
                     "claim_recovery_request_id": original["request_id"]}
+        if (response.get("kind") in ("execute", "score")
+                and response.get("submission_id") == "baseline-%s" % round_id.removeprefix("arena-")
+                and self._full_thinking_required(round_row)
+                and configuration.get("mode") == "live"):
+            # Includes exact saved claim responses recovered after stake loss.
+            # This gate never allocates a second lease or rewrites accepted work.
+            self._freeze_full_thinking_baseline(round_id, round_row)
         self._require_code_review(str(response["submission_id"]), round_row)
         icps = self.evaluation_icps(round_id) if integrity.enabled(configuration) else self.benchmark_icps(round_id)
         position = int(response["icp_position"])
@@ -6242,13 +6402,30 @@ class ArenaService:
             raise ServiceError("signal_judgment_policy_unavailable", 409)
         if not isinstance(request, Mapping):
             raise ServiceError("signal_judgment_request_invalid", 400)
+        from lab_arena import evidence_judgments
+        evidence_v2 = evidence_judgments.enabled(policy)
         operation = request.get("operation")
         company_index = request.get("company_index")
         signal_index = request.get("signal_index")
-        if operation not in ("claim", "complete") or type(company_index) is not int or type(signal_index) is not int:
+        if operation not in (("candidates", "claim", "complete") if evidence_v2 else ("claim", "complete")) or type(company_index) is not int or type(signal_index) is not int:
             raise ServiceError("signal_judgment_request_invalid", 400)
+        fit_checkpoint = request.get("checkpoint_kind") in (
+            company_judgments.FIT_CHECKPOINT_KIND,
+            evidence_judgments.FIT_KIND if evidence_v2 else company_judgments.FIT_CHECKPOINT_KIND)
+        if (fit_checkpoint != (signal_index == company_judgments.FIT_CHECKPOINT_INDEX)
+            or ("checkpoint_kind" in request and not fit_checkpoint)):
+            raise ServiceError("signal_judgment_request_invalid", 400)
+        if fit_checkpoint or evidence_v2:
+            from lab_arena.signal_cache_control import validate_request, validate_evidence_request
+            try:
+                (validate_evidence_request if evidence_v2 else validate_request)(request)
+            except ValueError as exc:
+                raise ServiceError("signal_judgment_request_invalid", 400) from exc
         executed = self._store.get_run(str(run.get("scored_run_id") or ""))
-        if executed is None or executed.get("status") != "accepted" or not executed.get("output_ref"):
+        if (executed is None or executed.get("kind") != "execute"
+            or executed.get("status") != "accepted" or not executed.get("output_ref")
+            or (fit_checkpoint and any(executed.get(key) != run.get(key) for key in
+                ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position")))):
             raise ServiceError("scored_run_missing", 500)
         try:
             output = json.loads(self._objects.get_bounded(
@@ -6277,12 +6454,21 @@ class ArenaService:
                     and provider_observations.enabled(policy) else None
                 ),
             )
-            scope = signal_judgments.build_scope(
+            if evidence_v2:
+                return self._handle_evidence_judgment(
+                    run=run, executed=executed, round_row=round_row, configuration=configuration,
+                    scoring_input=scoring_input, lease_token=lease_token, request=request)
+            scope_builder = signal_judgments.build_fit_scope if fit_checkpoint else signal_judgments.build_scope
+            scope = scope_builder(
                 scoring_input=scoring_input, company_index=company_index,
-                signal_index=signal_index,
-                verified_company_identity=request.get("verified_company_identity"),
-                verified_funding_stage_context=request.get("verified_funding_stage_context"),
-                verified_source_pages=request.get("verified_source_pages"),
+                **({"checkpoint_context": signal_judgments.fit_checkpoint_context(
+                    run, executed, configuration, scoring_input, contracts.document_hash(output),
+                )} if fit_checkpoint else {
+                    "signal_index": signal_index,
+                    "verified_company_identity": request.get("verified_company_identity"),
+                    "verified_funding_stage_context": request.get("verified_funding_stage_context"),
+                    "verified_source_pages": request.get("verified_source_pages"),
+                }),
                 round_id=str(run["round_id"]),
                 network_name=str(round_row.get("arena_network_name") or ""),
                 netuid=int(round_row.get("arena_netuid") or 0),
@@ -6291,7 +6477,7 @@ class ArenaService:
             )
         except (ValueError, TypeError, KeyError, IndexError, OutputInvalid,
                 scoring.ScoringError, signal_judgments.SignalJudgmentError,
-                company_judgments.CompanyJudgmentError) as exc:
+                company_judgments.CompanyJudgmentError, reviewer_runtime.ReviewerRuntimeError) as exc:
             raise ServiceError("signal_judgment_input_invalid", 400) from exc
         lease_hash = hash_lease_token(lease_token)
         if operation == "claim":
@@ -6335,6 +6521,14 @@ class ArenaService:
                         or source.get("source_runner_hotkey") not in exclusions
                         or (run.get("miner_hotkey") in exclusions and not same_current_lease)):
                         raise signal_judgments.SignalJudgmentError("accepted signal source is invalid")
+                    if fit_checkpoint and (
+                        source_run.get("assignment_id") != run.get("assignment_id")
+                        or source_run.get("scoring_generation_floor", 0) != run.get("scoring_generation_floor", 0)
+                        or source_run.get("scored_run_id") != run.get("scored_run_id")
+                        or reviewer_runtime.selected_image(source_run, configuration)
+                        != reviewer_runtime.selected_image(run, configuration)
+                    ):
+                        raise signal_judgments.SignalJudgmentError("verified fit source context differs")
                     return {"status": "hit", "reference": reference, "judgment": judgment}
                 if result.get("status") == "miss":
                     return {"status": "miss", "reference": reference}
@@ -6356,6 +6550,125 @@ class ArenaService:
         if result.get("status") not in ("stored", "existing", "released", "pending"):
             raise ServiceError("signal_judgment_completion_invalid", 500)
         return {"status": result["status"], "reference": reference}
+
+    def _handle_evidence_judgment(self, *, run, executed, round_row, configuration,
+                                   scoring_input, lease_token, request):
+        from lab_arena import evidence_judgments as evidence
+        operation = request["operation"]
+        company_index, signal_index = request["company_index"], request["signal_index"]
+        try:
+            selected = reviewer_runtime.selected_image(run, configuration)
+            scope = evidence.build_scope(
+                scoring_input=scoring_input, company_index=company_index, signal_index=signal_index,
+                round_id=str(run["round_id"]), network_name=str(round_row.get("arena_network_name") or ""),
+                netuid=int(round_row.get("arena_netuid") or 0),
+                scorer_image_digest=str(configuration.get("scorer_image_digest") or ""),
+                scorer_image_reference=str(configuration.get("scorer_image_reference") or ""),
+                runtime_image_digest=selected["image_digest"], runtime_image_reference=selected["image_reference"],
+                evidence_input=request.get("evidence_input"), evidence_hash=request.get("evidence_hash"),
+                verified_company_identity=request.get("verified_company_identity"),
+                verified_funding_stage_context=request.get("verified_funding_stage_context"),
+                verified_source_pages=request.get("verified_source_pages"))
+            if "claim" in request and request["claim"] != scope.get("claim"):
+                raise evidence.Error("current claim differs from frozen scoring input")
+            lease_hash = hash_lease_token(lease_token)
+            if operation == "complete":
+                reference = signal_judgments.validate_reference(request.get("reference"), scope)
+                judgment = evidence.validate_judgment(request["judgment"], scope) if request.get("judgment") is not None else None
+                result = self._store.complete_signal_judgment(
+                    run_id=run["run_id"], lease_token_hash=lease_hash,
+                    company_index=company_index, signal_index=signal_index, scope=scope, reference=reference,
+                    judgment=judgment, judgment_hash=contracts.document_hash(judgment) if judgment is not None else "")
+                if result.get("status") not in {"stored", "existing", "released", "pending"}:
+                    raise evidence.Error("evidence completion is invalid")
+                return {"status": result["status"], "reference": reference}
+            candidate_reference = request.get("candidate_reference")
+            if candidate_reference is not None:
+                source, source_scope = self._validated_evidence_source(candidate_reference, run, configuration, lease_hash)
+                if (source_scope.get("family_doc") != scope.get("family_doc")
+                    or source_scope.get("family_hash") != scope.get("family_hash")
+                    or source_scope.get("evidence_hash") != scope.get("evidence_hash")
+                    or source_scope.get("evidence_input") != scope.get("evidence_input")):
+                    raise evidence.Error("candidate differs from current evidence")
+                evidence.validate_equivalence(request.get("equivalence_receipt"), source_scope.get("claim"),
+                                              scope.get("claim"), scoring_input["scorer_policy"])
+            result = self._store.evidence_judgment(
+                operation=operation, run_id=run["run_id"], lease_token_hash=lease_hash,
+                company_index=company_index, signal_index=signal_index, scope=scope,
+                candidate_reference=candidate_reference, equivalence_receipt=request.get("equivalence_receipt"))
+            if operation == "candidates":
+                candidates = result.get("candidates")
+                if result.get("status") != "candidates" or not isinstance(candidates, list) or len(candidates) > 8:
+                    raise evidence.Error("candidate result is invalid")
+                for candidate in candidates:
+                    source, source_scope = self._validated_evidence_source(candidate.get("reference"), run, configuration, lease_hash)
+                    if (candidate != {"reference": signal_judgments.reference(source_scope, source["authority_slot"]),
+                                      "scope": source_scope, "judgment": source["judgment_doc"]}
+                        or source_scope.get("family_doc") != scope.get("family_doc")
+                        or source_scope.get("family_hash") != scope.get("family_hash")
+                        or (signal_index >= 0 and source_scope.get("evidence_hash") != scope.get("evidence_hash"))):
+                        raise evidence.Error("candidate source changed")
+                from lab_arena.signal_cache_control import MAX_BYTES
+                bounded = []
+                for candidate in candidates:
+                    response = {"status": "candidates", "candidates": [*bounded, candidate]}
+                    if len(contracts.canonical_json(response).encode("utf-8")) <= MAX_BYTES:
+                        bounded.append(candidate)
+                return {"status": "candidates", "candidates": bounded}
+            if result.get("status") in {"busy", "pending"}:
+                return {"status": result["status"]}
+            if result.get("status") == "miss":
+                reference = signal_judgments.validate_reference(result.get("reference"), scope)
+                return {"status": "miss", "reference": reference, "current_scope": scope}
+            if result.get("status") == "hit":
+                source, source_scope = self._validated_evidence_source(result.get("reference"), run, configuration, lease_hash)
+                if candidate_reference is None and source_scope != scope:
+                    raise evidence.Error("exact evidence source changed")
+                if result.get("judgment") != source["judgment_doc"]:
+                    raise evidence.Error("evidence judgment changed")
+                return {"status": "hit", "reference": result["reference"],
+                        "judgment": source["judgment_doc"], "current_scope": scope}
+            raise evidence.Error("evidence claim is invalid")
+        except (evidence.Error, company_judgments.CompanyJudgmentError, KeyError, TypeError, ValueError) as exc:
+            raise ServiceError("signal_judgment_evidence_invalid", 400) from exc
+
+    def _validated_evidence_source(self, reference, run, configuration, lease_hash):
+        from lab_arena import evidence_judgments as evidence
+        if not isinstance(reference, Mapping):
+            raise evidence.Error("candidate reference is invalid")
+        source = self._store.get_signal_judgment(reference.get("cache_key"), reference.get("authority_slot"))
+        if source is None:
+            raise evidence.Error("candidate authority is missing")
+        scope = source.get("scope_doc")
+        if not isinstance(scope, Mapping) or not evidence.enabled(scope):
+            raise evidence.Error("candidate policy is invalid")
+        signal_judgments.validate_reference(reference, scope)
+        judgment = evidence.validate_judgment(source.get("judgment_doc"), scope)
+        if (source.get("signal_input_hash") != reference["signal_input_hash"]
+            or source.get("judgment_hash") != contracts.document_hash(judgment)
+            or scope.get("cache_key") != contracts.document_hash({key: value for key, value in scope.items() if key != "cache_key"})
+            or scope.get("evidence_hash") != contracts.document_hash(scope.get("evidence_input"))):
+            raise evidence.Error("candidate evidence integrity differs")
+        origin = self._store.get_run(str(source.get("source_score_run_id") or ""))
+        execution = self._store.get_run(str(source.get("source_scored_run_id") or ""))
+        exclusions = source.get("runner_authority_exclusions")
+        same_lease = (origin is not None and origin.get("run_id") == run["run_id"]
+                      and origin.get("status") == "leased" and origin.get("lease_token_hash") == lease_hash)
+        if (origin is None or execution is None or execution.get("kind") != "execute"
+            or execution.get("status") != "accepted"
+            or any(execution.get(key) != origin.get(key) for key in
+                   ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))
+            or origin.get("kind") != "score" or origin.get("status") not in {"leased", "accepted", "failed"}
+            or origin.get("round_id") != run.get("round_id")
+            or origin.get("scored_run_id") != source.get("source_scored_run_id")
+            or origin.get("runner_hotkey") != source.get("source_runner_hotkey")
+            or origin.get("claim_request_hash") != source.get("source_claim_request_hash")
+            or origin.get("lease_generation") != source.get("source_lease_generation")
+            or not isinstance(exclusions, list) or source.get("source_runner_hotkey") not in exclusions
+            or (run.get("miner_hotkey") in exclusions and not same_lease)
+            or reviewer_runtime.selected_image(origin, configuration) != reviewer_runtime.selected_image(run, configuration)):
+            raise evidence.Error("candidate source authority differs")
+        return source, scope
 
     def handle_quota_snapshot(
         self,
@@ -6501,11 +6814,92 @@ class ArenaService:
             raise ServiceError("lease_inactive", 409)
         return run
 
+    def _training_input_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Grant only immutable input storage, never renewed execution authority."""
+        try:
+            return self._training_capture_run(run_id, lease_token)
+        except ServiceError as exc:
+            if exc.code not in {"lease_inactive", "lease_expired"}:
+                raise
+            original_error = exc
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
+        if not hmac.compare_digest(str(run.get("lease_token_hash") or ""), hash_lease_token(lease_token)):
+            raise ServiceError("lease_invalid", 401)
+        try:
+            training_input.object_ref(run_id, run.get("lease_generation"))
+            training_input._validate_claim_hash(run.get("claim_request_hash"))
+            claim = run.get("claim_response") or {}
+            if (claim.get("status") != "leased" or not isinstance(run.get("claim_request_id"), str)
+                    or contracts.HEX32_RE.fullmatch(run["claim_request_id"]) is None
+                    or claim.get("request_id") != run["claim_request_id"]
+                    or claim.get("run_id") != run_id or type(claim.get("lease_generation")) is not int
+                    or claim["lease_generation"] != run["lease_generation"]
+                    or claim.get("kind") != run.get("kind") or run.get("terminal_doc")):
+                raise ValueError("input lease binding differs")
+            def instant(value):
+                parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("input timestamp lacks a zone")
+                return parsed.astimezone(timezone.utc)
+            now = self.now()
+            expiry = instant(run.get("lease_expires_at"))
+            anchors = [expiry]
+            if run.get("status") in {"accepted", "failed"}:
+                result = run.get("result_doc")
+                contracts.validate_run_result(result)
+                cause = run.get("terminal_cause")
+                allowed = ({"accepted"} | set(contracts.MODEL_CAUSED_TERMINAL_CAUSES) | {"provider_error"}
+                           if run.get("kind") == "execute" else set(contracts.SCORE_TERMINAL_CAUSES))
+                if (cause not in allowed or result.get("terminal_status") != cause
+                        or (run["status"] == "accepted") != (cause == "accepted")):
+                    raise ValueError("input terminal binding differs")
+                started, finished = instant(result["started_at"]), instant(result["finished_at"])
+                if not started <= finished <= now:
+                    raise ValueError("input finish anchor is invalid")
+                anchors.append(finished)
+                if run["status"] == "accepted":
+                    terminal = instant(run.get("participation_accepted_at"))
+                else:
+                    event = self._store.get_input_finish_event(run_id)
+                    # runtime.finished can be appended only under the live
+                    # token. Its database created_at precedes completion and
+                    # cannot be refreshed by late provider or billing events.
+                    if (not isinstance(event, Mapping) or not isinstance(run.get("runner_hotkey"), str)
+                            or not run["runner_hotkey"]
+                            or any(event.get(key) != run.get(key) for key in ("run_id", "round_id", "runner_hotkey"))
+                            or event.get("run_kind") != run.get("kind")
+                            or event.get("event_kind") != "runtime.finished"
+                            or event.get("status") != cause or event.get("started_at") != result["started_at"]
+                            or event.get("finished_at") != result["finished_at"]
+                            or contracts.canonical_json(event.get("resource_summary")) != contracts.canonical_json(result["resource_summary"])):
+                        raise ValueError("input server finish binding differs")
+                    terminal = instant(event.get("created_at"))
+                if not started <= terminal <= now:
+                    raise ValueError("input server terminal anchor is invalid")
+                anchors.append(terminal)
+            elif run.get("status") != "leased" or run.get("terminal_cause") is not None or expiry > now:
+                raise ValueError("input lease is not eligible")
+            if now >= min(anchors) + _OBSERVATION_FINALIZATION_GRACE:
+                raise ServiceError("lease_expired", 409)
+            round_state = self._store.get_round_capture_state(str(run["round_id"]))
+            if (round_state is None or round_state.get("round_id") != run["round_id"]
+                    or round_state.get("status") == "cancelled"):
+                raise ValueError("input round is not active")
+        except ServiceError:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError, ArenaContractError):
+            raise original_error from None
+        return run
+
     def handle_training_input(
         self, run_id: str, lease_token: str, document: Any,
     ) -> Dict[str, Any]:
-        """Store the final runner input only for this live, owned run lease."""
-        run = self._training_capture_run(run_id, lease_token)
+        """Store only the original owned input, with a bounded capture-only grace."""
+        run = self._training_input_capture_run(run_id, lease_token)
+        identity = {key: run.get(key) for key in ("round_id", "kind", "lease_generation", "claim_request_hash")}
         try:
             snapshot, compressed = training_input.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,
@@ -6515,6 +6909,9 @@ class ArenaService:
             )
         except (ValueError, TypeError, RecursionError):
             raise ServiceError("training_input_invalid", 400) from None
+        current = self._training_input_capture_run(run_id, lease_token)
+        if any(current.get(key) != value for key, value in identity.items()):
+            raise ServiceError("lease_invalid", 401)
         objects = self._config.training_object_store
         if objects is None:
             raise ServiceError("training_input_unavailable", 503)
@@ -6572,8 +6969,17 @@ class ArenaService:
                 objects, run_id, str(run.get("kind") or "execute"),
                 run.get("lease_generation"), run.get("claim_request_hash"),
             )
-        except training_observations.ObservationError:
-            raise ServiceError("training_observations_unavailable", 503) from None
+        except training_observations.ObservationError as exc:
+            # Keep the refusal status, but name which half failed. A stored
+            # snapshot that cannot satisfy this lease identity will never
+            # satisfy it; only a store read is worth looking at as transient.
+            raise ServiceError(
+                _OBSERVATION_VERIFY_DENIALS.get(
+                    str(exc.args[0]) if exc.args else "",
+                    "training_observations_unavailable",
+                ),
+                503,
+            ) from None
         if not hmac.compare_digest(snapshot["payload_sha256"], payload_sha256):
             raise ServiceError("training_observations_digest_mismatch", 412)
         return snapshot["payload_sha256"]
@@ -8531,11 +8937,13 @@ class ArenaService:
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
         evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        evidence_v2: bool = False,
     ) -> None:
         """Credit immutable original signal sources used by this company."""
 
         reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
-        uses = (reads.uses(self._store, company_source_run_id) if reads is not None
+        uses = (reads.uses(self._store, company_source_run_id, evidence=evidence_v2) if reads is not None
+                else self._store.get_signal_judgment_uses(company_source_run_id, evidence=True) if evidence_v2
                 else self._store.get_signal_judgment_uses(company_source_run_id))
         seen: set[tuple[int, int]] = set()
         for use in uses:
@@ -8620,6 +9028,9 @@ class ArenaService:
             == signal_judgments.POLICY
         )
 
+        evidence_v2 = signal_policy and (((self._round_from_context(round_id, round_context).get("configuration_doc") or {})
+                                         .get("scorer_policy") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2")
+
         if score_run.get("company_judgment_refs") is not None:
             try:
                 lease = company_judgments.validate_lease_context(
@@ -8700,7 +9111,7 @@ class ArenaService:
                             company_indexes={int(item["company_index"])},
                             current_score_run_id=score_run_id, round_id=round_id,
                             runs_by_id=runs_by_id,
-                            evidence_reads=evidence_reads,
+                            evidence_reads=evidence_reads, evidence_v2=evidence_v2,
                         )
                     continue
                 hotkey = self._validated_attribution_source(
@@ -8735,7 +9146,7 @@ class ArenaService:
                         company_indexes=source_indexes,
                         current_score_run_id=score_run_id, round_id=round_id,
                         runs_by_id=runs_by_id,
-                        evidence_reads=evidence_reads,
+                        evidence_reads=evidence_reads, evidence_v2=evidence_v2,
                     )
             return attributed
 
@@ -8807,6 +9218,8 @@ class ArenaService:
         signal_companies: Dict[str, set[int]] = {}
         signal_policy = (((round_context.get("configuration_doc") or {}).get("scorer_policy") or {})
                          .get("signal_judgment_policy") == signal_judgments.POLICY)
+        evidence_v2 = (((round_context.get("configuration_doc") or {}).get("scorer_policy") or {})
+                       .get("evidence_judgment_policy") == "evidence_judgment_v2")
         for execution_id, judge in judgments.items():
             if (execution_id not in public_run_ids or judge.get("status") != "accepted"
                     or execution_id not in executions
@@ -8848,12 +9261,14 @@ class ArenaService:
             reads.seed(reads.companies, {pair: rows.get(pair) for pair in pairs})
         uses_reader = getattr(self._store, "get_signal_judgment_uses_batch", None)
         if signal_companies and uses_reader is not None:
-            reads.seed(reads.signal_uses, uses_reader(sorted(signal_companies)))
+            rows = (uses_reader(sorted(signal_companies), evidence=True) if evidence_v2
+                    else uses_reader(sorted(signal_companies)))
+            reads.seed(reads.signal_uses, rows)
         signal_reader = getattr(self._store, "get_signal_judgment_batch", None)
         if signal_companies and signal_reader is not None:
             signal_pairs = set()
             for run_id, indexes in signal_companies.items():
-                for use in reads.uses(self._store, run_id):
+                for use in reads.uses(self._store, run_id, evidence=evidence_v2):
                     key, slot = use.get("cache_key"), use.get("authority_slot")
                     if (use.get("company_index") in indexes and type(key) is str
                             and key and type(slot) is int and 0 <= slot <= 2147483647):

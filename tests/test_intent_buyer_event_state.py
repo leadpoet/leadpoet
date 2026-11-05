@@ -161,3 +161,20 @@ def test_oversized_buyer_context_fails_closed_before_judge():
     ))
     assert result["client_ready"] is False
     assert result["rejection_reason"] == "candidate_prompt_input_unsafe"
+
+
+def test_launch_and_proof_source_rules_reach_the_buyer_context_prompt():
+    from qualification.scoring.prompts._common import build_verification_prompt
+
+    prompt = " ".join(build_verification_prompt({
+        "_buyer_request_context": "Find vendors that launched a product.",
+        "_target_signal_text": TARGET,
+    }).split())
+    # A present launch announcement proves a launch; future or gated access does not.
+    assert "announced it as a present new offering by the claimed event date proves the launch" in prompt
+    assert "inviting early access, a waitlist, or planning a future release does not prove a launch" in prompt
+    assert "A request for a shipped or currently available capability needs source-body proof" in prompt
+    # Unrestricted and illustrative sources permit reliable reporting; mandatory sources do not.
+    assert "reliable independent reporting of the same company event can prove it" in prompt
+    assert "Preserve explicitly mandatory evidence source types and issuer requirements" in prompt
+    assert "does not need the word 'only' to be mandatory" in prompt

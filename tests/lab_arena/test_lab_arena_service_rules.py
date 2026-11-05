@@ -2754,6 +2754,40 @@ def test_checkpoint_round_fences_old_validator_claims_before_leasing():
     assert service.handle_claim({}) == {"status": "empty"}
 
 
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("advertised", [
+    None, [], "evidence_judgment_v2", ["signal_judgment_v1"],
+    ["evidence_judgment_v2", None], ["evidence_judgment_v2"] * 9,
+    ["evidence_judgment_v2"],
+])
+def test_evidence_round_requires_worker_support_before_any_allocation(active, advertised):
+    service = _runner_claim_service(registered=True, role="validator", configured=False)
+    original = service._request_round
+    allocated = []
+
+    def evidence_round(*args, **kwargs):
+        validated, row = original(*args, **kwargs)
+        if advertised is not None:
+            validated["body"]["evidence_judgment_policies"] = advertised
+        if active:
+            row["configuration_doc"]["scorer_policy"] = {
+                "evidence_judgment_policy": "evidence_judgment_v2",
+            }
+        return validated, row
+
+    service._request_round = evidence_round
+    service._store.claim_assignment = lambda **kwargs: allocated.append(kwargs) or {"status": "empty"}
+    if active and advertised != ["evidence_judgment_v2"]:
+        with pytest.raises(ServiceError) as rejected:
+            service.handle_claim({})
+        assert rejected.value.code == "validator_evidence_judgment_upgrade_required"
+        assert rejected.value.status == 409
+        assert allocated == []
+    else:
+        assert service.handle_claim({}) == {"status": "empty"}
+        assert len(allocated) == 1
+
+
 def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     monkeypatch,
 ):

@@ -249,4 +249,3 @@ def test_http_disconnect_retains_active_observation_worker_and_permit(kind):
             assert len(service.observation_calls) == LIMIT + 1
             assert service.observation_active == default.borrowed_tokens == 0
     asyncio.run(scenario())
-

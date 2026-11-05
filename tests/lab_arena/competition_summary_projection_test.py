@@ -1,6 +1,7 @@
 """Competition reads omit frozen catalogs without changing public summaries."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 import threading
 import time
@@ -357,3 +358,103 @@ def test_pending_promotion_uses_narrow_latest_day_without_changing_decision():
     assert transport.calls[0]["columns"] == "round_id,evaluation_date"
     service._store.pending_promotions = lambda **_kwargs: [{"round_id": newer["round_id"]}]
     assert service._pending_promotion_blocks() is True
+
+
+class HistoryTransport(RoundTransport):
+    def select(self, table, **query):
+        if table == "lab_arena_runs":
+            return []
+        assert table == "lab_arena_rounds" and query["order"] == "history_round"
+        query.setdefault("columns", "*")
+        self.calls.append(query)
+        rows = sorted((row for row in self.rows if all(
+            (row["configuration_doc"].get("mode") if key == "configuration_doc->>mode"
+             else row.get(key)) == value for key, value in (query.get("filters") or {}).items()
+        )), key=lambda row: (row["created_at"], row["round_id"]), reverse=True)
+        if query.get("before_round"):
+            rows = [row for row in rows
+                    if (row["created_at"], row["round_id"]) < tuple(query["before_round"])]
+        result = [_project(row, query["columns"]) for row in rows[:query["limit"]]]
+        self.returned.extend(result)
+        return result
+
+
+def _history_pages(rows, **query):
+    service = object.__new__(ArenaService)
+    transport = HistoryTransport(rows)
+    service._store = ArenaStore(transport)
+    service._config = SimpleNamespace(mode="live", pinned_round_id=None)
+    service._chain_scope = lambda: ("finney", 71)
+    service._round = lambda round_id: deepcopy(next(row for row in rows if row["round_id"] == round_id))
+    service._clock = lambda: datetime(2026, 10, 10, tzinfo=timezone.utc)
+    pages, cursor = [], None
+    for _ in range(100):
+        page = dashboard.history_snapshot(service, cursor=cursor, **query)
+        pages.append(page)
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return pages, transport
+    raise AssertionError("history did not finish")
+
+
+@pytest.mark.parametrize("configuration", [
+    {},
+    {"stage_1_icp_count": 1, "stage_2_icp_count": 1, "promotion_margin": 1.5,
+     "benchmark_disclosure_policy": icp_disclosure.CUTOFF_PUBLIC_POLICY,
+     "sourcing_cost_eligibility_policy": contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY},
+    {"sourcing_cost_eligibility_policy": contracts.SUCCESSFUL_CALLS_COST_POLICY},
+])
+@pytest.mark.parametrize("query", [{"limit": 50}, {"limit": 7, "hotkey": "51"}, {"limit": 25, "day": "2026-10-08"}])
+def test_history_matches_full_configuration_without_private_configuration(monkeypatch, configuration, query):
+    rows = [_row(day, **configuration) for day in ("2026-10-09", "2026-10-08", "2026-10-07")]
+    for row in rows:
+        row["configuration_doc"]["schedule"] = {
+            "submission_open": "2026-10-01T00:00:00Z",
+            "submission_cutoff": row["evaluation_date"] + "T00:00:00Z"}
+    rows[1]["configuration_doc"].pop("baseline_reasoning_configuration")
+    rows[2]["configuration_doc"]["baseline_reasoning_configuration"] = None
+    bucket = {key: 0 for key in dashboard._COST_COUNTER_KEYS + dashboard._SUCCESSFUL_CALL_COST_COUNTER_KEYS}
+    bucket["providers"] = []
+    for row in rows:
+        row["publication_doc"]["final_ranking"][3].update(
+            evaluation="not_evaluated", eligibility_reason="eligible", eligible=False, cost_summary={
+                "returned_company_count": 0, "qualified_company_count": 0, "eligible_icp_count": 2,
+                "competition_sourcing_microusd": 0, "execution_icp_cap_microusd": 100,
+                "cost_per_company_cap_microusd": 100, "execution": bucket, "judge": bucket,
+                "per_icp": [{"icp_position": position, "returned_company_count": 0,
+                             "qualified_company_count": 0, "competition_sourcing_microusd": 0,
+                             "eligibility_cap_microusd": 0, "eligible": True,
+                             "eligibility_reason": "eligible"} for position in range(2)],
+            })
+    before = deepcopy(rows)
+    candidate_columns = dashboard._HISTORY_ROUND_COLUMNS
+    monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", dashboard._ROUND_COLUMNS)
+    expected, full = _history_pages(rows, **query)
+    monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", candidate_columns)
+    candidate, transport = _history_pages(rows, **query)
+    assert candidate == expected
+    assert rows == before
+    assert {call["columns"] for call in full.calls} == {dashboard._ROUND_COLUMNS}
+    assert {call["columns"] for call in transport.calls} == {candidate_columns}
+    assert candidate_columns == dashboard._ROUND_COLUMNS.replace(
+        ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",")
+    submissions = [entry for page in expected for entry in page["submissions"]]
+    rounds = {item["round_id"]: item for page in expected for item in page["rounds"]}
+    if "hotkey" not in query and "day" not in query:
+        assert len(submissions) == 145 * 3
+    if "day" in query and "benchmark_disclosure_policy" not in configuration:
+        # Cutoff-public rounds without a bank date have no public day, in both reads.
+        assert len(submissions) == 145
+    if configuration.get("stage_1_icp_count") == 1 and "day" not in query and "hotkey" not in query:
+        # Per-ICP cost projection reads frozen stage counts from the configuration.
+        cost = next(entry for entry in submissions if entry["submission_id"] == "model-3")
+        assert len(cost["cost_summary"]["per_icp"]) == 2
+    if "day" not in query:
+        assert rounds["arena-2026-10-09"]["defending_champion"] == {
+            "submission_id": "prior-champion", "miner_hotkey": "5Prior"}
+        assert rounds["arena-2026-10-07"]["defending_champion"] is None
+    if submissions and "hotkey" not in query:
+        assert rounds["arena-2026-10-08"]["defending_champion"] is None
+    assert transport.returned and all(
+        "private" not in json.dumps(row["configuration_doc"]) for row in transport.returned)
+    assert len(json.dumps(transport.returned)) < len(json.dumps(full.returned)) / 2

@@ -1,6 +1,7 @@
 """Empty legacy contracts retain source proof without exposing private routes."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -137,6 +138,60 @@ def test_real_compact_and_full_summaries_match_for_all_source_proofs(database, m
                     compact = {**row, "configuration_doc": _project(cursor, row)}
                     assert compact["configuration_doc"][MARKER] is (funding is True and isinstance(contract, dict))
                     assert dashboard.round_summary(compact) == dashboard.round_summary(row)
+    finally:
+        transport.close()
+
+
+def test_real_history_matches_full_rows_without_private_routes(database, monkeypatch):
+    pg, dsn = database
+    with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(MIGRATION.read_text())
+    transport = PsycopgTransport(lambda: pg.connect(**dsn))
+    store = ArenaStore(transport)
+    try:
+        service, _ = _service([])
+        service._store = store
+        service._round = store.get_round
+        service._clock = lambda: datetime(2026, 10, 10, tzinfo=timezone.utc)
+        returned = []
+        list_rounds = store.list_rounds
+
+        def recording(**query):
+            rows = list_rounds(**query)
+            returned.append((query["columns"], rows))
+            return rows
+
+        monkeypatch.setattr(store, "list_rounds", recording)
+
+        def pages(**query):
+            result, cursor = [], None
+            for _ in range(100):
+                page = dashboard.history_snapshot(service, cursor=cursor, **query)
+                result.append(page)
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    return result
+            raise AssertionError("history did not finish")
+
+        columns = dashboard._HISTORY_ROUND_COLUMNS
+        for query in ({"limit": 50}, {"limit": 7, "hotkey": "51"}):
+            monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", dashboard._ROUND_COLUMNS)
+            returned.clear()
+            expected = pages(**query)
+            full = json.dumps([rows for _, rows in returned], default=str)
+            monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", columns)
+            returned.clear()
+            assert pages(**query) == expected
+            assert returned and {used for used, _ in returned} == {columns}
+            compact = json.dumps([rows for _, rows in returned], default=str)
+            for private in ("reasoning_route_registry", "private_route", "private_frozen_catalog"):
+                assert private in full and private not in compact
+            assert len(compact) < len(full) / 2
+            if "hotkey" not in query:
+                rounds = {item["round_id"]: item for page in expected for item in page["rounds"]}
+                assert sum(len(page["submissions"]) for page in expected) == 145 * len(CONTRACTS)
+                assert {round_id for round_id, item in rounds.items() if item["defending_champion"]} == {
+                    "arena-2026-09-07", "arena-2026-09-08"}
     finally:
         transport.close()
 

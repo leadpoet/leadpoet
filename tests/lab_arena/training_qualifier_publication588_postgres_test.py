@@ -78,6 +78,7 @@ def test_exact_unknown_marker_and_winner_guard_preserve_scored_costs(
                        "configuration_doc || %s::jsonb WHERE round_id=%s",
                        (json.dumps({
                            "reasoning_capture_policy": "full_generated_thinking_v1",
+                           "reasoning_baseline_source_sha256": harness.frozen_baseline_source_sha256(),
                            "execution_icp_cap_microusd": 6_000_000,
                            "cost_per_company_microusd": 6_000_000,
                            "execution_cap_microusd": 120_000_000,

@@ -209,7 +209,7 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
 
     Historical migration fixtures keep their exact write RPCs, retry rules and
     indexes. The modern service nevertheless reads projections introduced by
-    443, 449, 464, 474, 517 and 541. Install only committed reader definitions and the
+    443, 449, 464, 474, 517, 541 and 627. Install only committed reader definitions and the
     revision-zero round column/view; do not apply their write migrations. This
     is an explicit integration-fixture boundary, never a production fallback.
     Existing readers, including later upgraded definitions, stay unchanged.
@@ -225,9 +225,14 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
                 "AND attname='scoring_generation_floor' AND NOT attisdropped),"
                 "to_regclass('public.lab_arena_published_results_v1'),"
                 "to_regprocedure('public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'),"
-                "to_regprocedure('public.lab_arena_competition_publication_v1(public.lab_arena_rounds)')"
+                "to_regprocedure('public.lab_arena_competition_publication_v1(public.lab_arena_rounds)'),"
+                "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer)'),"
+                "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer,text)')"
             )
-            attempt_reader, failure_reader, has_floor, results_view, configuration_reader, competition_reader = cursor.fetchone()
+            (attempt_reader, failure_reader, has_floor, results_view,
+             configuration_reader, competition_reader, champion_reader,
+             bounded_champion_reader) = cursor.fetchone()
+            needs_bounded_champion_reader = champion_reader and not bounded_champion_reader
             if not include_run_reads:
                 attempt_reader = failure_reader = True
             if results_view:
@@ -239,13 +244,20 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
                 view_has_floor = cursor.fetchone()[0]
             else:
                 view_has_floor = True
-            if (attempt_reader and failure_reader and (not include_round_reads or (
+            if (not needs_bounded_champion_reader and attempt_reader and failure_reader and (not include_round_reads or (
                     has_floor and results_view and view_has_floor and configuration_reader and competition_reader))):
                 return
 
             cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') "
                            "FROM pg_namespace WHERE nspname='public'")
             schema_acl, had_create = cursor.fetchone()
+            if needs_bounded_champion_reader:
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                migration = (SCRIPTS / '627-lab-arena-champion-baseline-freshness.sql').read_text()
+                cursor.execute(migration[
+                    migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_latest_promoted_champion_v1('):
+                    migration.index('DO $restore627$')
+                ])
             if include_round_reads and not configuration_reader:
                 cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
                 migration = (SCRIPTS / '464-lab-arena-public-read-index.sql').read_text()

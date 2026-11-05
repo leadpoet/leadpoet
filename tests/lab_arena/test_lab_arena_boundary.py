@@ -264,7 +264,11 @@ HOST_ARENA_IMPORTS = {
         ("lab_arena.contracts", "canonical_json"),
         ("lab_arena.contracts", "document_hash"),
     },
-    "qualification/scoring/company_evidence_investigator.py": {("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS")},
+    "qualification/scoring/company_evidence_investigator.py": {
+        ("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS"),
+        # Passive worker observations; no service, database, or scorer import.
+        ("lab_arena.lab_arena_checkpoint", "record_judge_tool_event"),
+    },
     "qualification/scoring/company_fit_evidence_reuse.py": {
         ("lab_arena", "contracts"),
         ("lab_arena", "signal_cache_control"),

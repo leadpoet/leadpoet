@@ -12,9 +12,9 @@ reviewer-runtime mapping, recovery and deployed verification.
 
 ## Scoped authorization: November 4 disk-fault baseline recovery
 
-The user explicitly authorized correction through November 5 02:00 UTC.
+The user explicitly authorized correction through November 5 03:00 UTC.
 Exact migration `scripts/626-arena-2026-11-04-baseline-disk-recovery.sql` may
-extend only final scoring to 01:55 UTC and publication to 02:00 UTC, and rerun
+extend only final scoring to 02:55 UTC and publication to 03:00 UTC, and rerun
 only baseline ICP positions 1, 3 and 8 with proved infrastructure disk faults.
 Recover the one unfinished baseline ICP6 judgment with an exact sixth attempt;
 permit no automatic seventh. Preserve the already active November5 baseline
@@ -1165,3 +1165,28 @@ The coordinator owns independent review, controlled organizer-funded validation,
 safe merge, exact migrations, canonical release and fresh production verification.
 Use a task-local $10 validation ceiling including failures and pending charges;
 do not use miner keys or replay historical paid calls. Add no service or dependency.
+
+## Scoped authorization: November 4 damaged miner ICP7 recovery
+
+The user authorized recovery of proved infrastructure-damaged November 4 work
+within the approved November 5 03:00 UTC publication window. This scope covers
+only scripts/628-arena-2026-11-04-miner-disk-recovery.sql and
+scripts/629-arena-2026-11-04-miner-replacement-judge.sql, their read-only canonical
+input preparation helper, and focused native PostgreSQL tests. Retain the exact
+miner sub-2246da743ed59dcfe8b248e9d0ddfe50 ICP7 execution and judgment in existing
+history, recover that one execution through the ordinary bounded miner path, and
+replace only its saved scoring input after the new accepted output is durable.
+Preserve the other 79 miner positions, all baseline work, frozen source/scorer/ICP
+rules, raw financial records, ordinary caps and concurrent work. Add no routing
+exception, API, dependency or retry architecture. Internal agents may test, review,
+commit and push a separate PR; the coordinator owns safe merge and exact committed
+production SQL under the existing locks and checks. Do not renew credentials,
+restart services or apply production changes from an internal agent.
+
+The user approved extending the still-unapplied626 correction window to
+November 5 03:00 UTC. In
+scripts/626-arena-2026-11-04-baseline-disk-recovery.sql change only the operator
+apply fence and final-scoring cutoff to 02:55 UTC and publication deadline to
+03:00 UTC, with matching native date controls. Preserve all function bodies,
+recovery membership and previously frozen rules. Apply the final reviewed SQL
+before creating recovery leases; do not repair deadlines on existing claims.

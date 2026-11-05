@@ -95,7 +95,7 @@ def render(p):
         hashes=scalar(cur,"SELECT jsonb_object_agg(run_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')) FROM public.lab_arena_runs a WHERE round_id=%s",(ROUND,))
         manifest={'round_hash':prior.hash_doc(cur,row),'run_hashes':hashes,'positions':[1,3,8],'future_immutable_hash':scalar(cur,"SELECT encode(extensions.digest((SELECT jsonb_object_agg(key,value) FROM jsonb_each(to_jsonb(r)) WHERE key=ANY(ARRAY['configuration_doc','participants','benchmark_ref','evaluation_date','icp_set_date','arena_network_name','arena_netuid','champion_hotkey','champion_submission_id','champion_funding_frozen','champion_fallback_providers','rewards_enabled','scoring_generation_floor']))::TEXT,'sha256'),'hex') FROM public.lab_arena_rounds r WHERE round_id='arena-2026-11-05'")}
     text=re.sub(r'\$manifest626\$.*?\$manifest626\$',lambda _: '$manifest626$'+json.dumps(manifest,separators=(',',':'))+'$manifest626$',SQL.read_text(),flags=re.S)
-    return text.replace('2026-11-05T01:00:00Z','2099-11-05T01:00:00Z').replace('2026-11-05T01:55:00Z','2099-11-05T01:55:00Z').replace('2026-11-05T02:00:00Z','2099-11-05T02:00:00Z')
+    return text.replace('2026-11-05T01:00:00Z','2099-11-05T01:00:00Z').replace('2026-11-05T02:55:00Z','2099-11-05T02:55:00Z').replace('2026-11-05T03:00:00Z','2099-11-05T03:00:00Z')
 
 
 @pytest.mark.parametrize('sixth_outcome',['accepted','judge_error'])
@@ -156,13 +156,13 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
     ordinary_cost_before=p.store.icp_cost_eligibility(round_id=ROUND,submission_id='source621-miner-0',icp_position=0,qualified_company_count=0)
     # Exercise the whole migration immediately before and exactly at the
     # operator fence, independently of this machine's wall-clock date.
-    fence="clock_timestamp()>='2099-11-05T01:55:00Z'::TIMESTAMPTZ"
+    fence="clock_timestamp()>='2099-11-05T02:55:00Z'::TIMESTAMPTZ"
     assert sql.count(fence)==1
-    before_cutoff=sql.replace(fence,"'2099-11-05T01:54:59.999999Z'::TIMESTAMPTZ>='2099-11-05T01:55:00Z'::TIMESTAMPTZ")
+    before_cutoff=sql.replace(fence,"'2099-11-05T02:54:59.999999Z'::TIMESTAMPTZ>='2099-11-05T02:55:00Z'::TIMESTAMPTZ")
     before_cutoff=before_cutoff.rsplit('COMMIT;',1)[0]+'ROLLBACK;'
     with p.conn.cursor() as cur:cur.execute(before_cutoff)
     p.conn.rollback()
-    at_cutoff=sql.replace(fence,"'2099-11-05T01:55:00Z'::TIMESTAMPTZ>='2099-11-05T01:55:00Z'::TIMESTAMPTZ")
+    at_cutoff=sql.replace(fence,"'2099-11-05T02:55:00Z'::TIMESTAMPTZ>='2099-11-05T02:55:00Z'::TIMESTAMPTZ")
     with pytest.raises(p.pg.Error):
         with p.conn.cursor() as cur:cur.execute(at_cutoff)
     p.conn.rollback()
@@ -201,7 +201,7 @@ def test_exact_disk_recovery_native_lifecycle_preservation_and_replay(prepared,s
     row=p.store.get_round(ROUND)
     assert row['status']=='stage2_scoring'
     assert p.store.icp_cost_eligibility(round_id=ROUND,submission_id='source621-miner-0',icp_position=0,qualified_company_count=0)==ordinary_cost_before
-    assert row['configuration_doc']['schedule']['publication_deadline']=='2099-11-05T02:00:00Z'
+    assert row['configuration_doc']['schedule']['publication_deadline']=='2099-11-05T03:00:00Z'
     with p.conn.cursor() as cur:
         prior.assert_current_table_checks(cur)
         after=scalar(cur,'SELECT jsonb_object_agg(run_id,to_jsonb(a)) FROM public.lab_arena_runs a WHERE round_id=%s',(ROUND,))

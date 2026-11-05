@@ -703,7 +703,7 @@ BEGIN
    'sha256:9df0c4d451043da9fcec15fe86f9bfeb87fd7c048609aaf43736a6cbf0244cc4'  OR r.status<>'scored' OR r.status_generation<>13 OR r.stage_generation<>8 OR r.scoring_generation_floor<>0
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.reward_activated_at IS NOT NULL
   OR r.promotion_doc IS NOT NULL OR r.baseline_promoted_at IS NOT NULL
-  OR clock_timestamp()>='2026-11-05T01:55:00Z'::TIMESTAMPTZ
+  OR clock_timestamp()>='2026-11-05T02:55:00Z'::TIMESTAMPTZ
   OR encode(extensions.digest((to_jsonb(r)-'updated_at')::TEXT,'sha256'),'hex')<>manifest->>'round_hash'
   OR (SELECT count(*) FROM public.lab_arena_restart_claim_control WHERE singleton)<>1
   OR EXISTS(SELECT 1 FROM public.lab_arena_restart_claim_control WHERE operator_paused
@@ -750,8 +750,8 @@ BEGIN
   'new_run_id',old_judge.assignment_id||':6','scored_run_id',old_judge.scored_run_id));
  n:=r; n.status:='stage2_scoring'; n.status_generation:=r.status_generation+1;
  n.configuration_doc:=jsonb_set(jsonb_set(r.configuration_doc,
-  '{schedule,final_scoring_close}','"2026-11-05T01:55:00Z"'),
-  '{schedule,publication_deadline}','"2026-11-05T02:00:00Z"');
+  '{schedule,final_scoring_close}','"2026-11-05T02:55:00Z"'),
+  '{schedule,publication_deadline}','"2026-11-05T03:00:00Z"');
  SELECT coalesce(max(generation_floor),0)+1 INTO revision FROM public.lab_arena_scoring_supersessions WHERE round_id=r.round_id;
  INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,
   transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc)

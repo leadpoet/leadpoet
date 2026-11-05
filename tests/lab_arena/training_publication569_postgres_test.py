@@ -12,6 +12,8 @@ import tarfile
 
 import pytest
 
+from lab_arena import contracts
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
 from tests.lab_arena.complete_baseline_final_authority_postgres_test import (
     test_normal_complete_baseline_publishes_and_activates_with_all_guards as _prove_complete,
 )
@@ -303,6 +305,9 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
         "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
         + old_head + ".tar.gz"
     )
+    # This fixture freezes miner capture; its registry predates judge capture.
+    bind_historical_judge_models(
+        harness.service, role_batch_model="google/gemini-3.5-flash-lite")
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         reasoning_capture_from="2026-01-01T00:00:00Z",
@@ -319,6 +324,7 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
         next_cutoff, round_id="arena-2099-10-17-promoted",
     )
     assert next_config["reasoning_capture_policy"] == "full_generated_thinking_v1"
+    assert contracts.JUDGE_REASONING_CAPTURE_BINDING not in next_config["scorer_policy"]["env_bindings"]
     harness.round_id = next_config["round_id"]
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"

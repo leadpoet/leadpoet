@@ -13,6 +13,7 @@ import pytest
 
 from lab_arena import code_review, contracts, training_reader
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
@@ -379,6 +380,9 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
             + old_head + ".tar.gz"
         )
+        # This fixture freezes miner capture; its registry predates judge capture.
+        bind_historical_judge_models(
+            harness.service, role_batch_model="google/gemini-3.5-flash-lite")
         harness.service.config.defaults = replace(
             harness.service.config.defaults,
             reasoning_capture_from="2026-01-01T00:00:00Z",
@@ -395,6 +399,8 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             round_id="arena-2099-10-23-cov%d%s" % (
                 missing, gap[0]),
         )
+        assert next_config["reasoning_capture_policy"] == "full_generated_thinking_v1"
+        assert contracts.JUDGE_REASONING_CAPTURE_BINDING not in next_config["scorer_policy"]["env_bindings"]
         harness.round_id = next_config["round_id"]
         harness.clock.advance_to(harness.schedule()["submission_cutoff"])
         assert harness.service.advance_round(harness.round_id)["status"] == "ok"

@@ -1,3 +1,21 @@
+## Scoped authorization: November 4 accepted donor evidence correction
+
+The user explicitly approved reusing all ten accepted results of
+sub-0510cb617eabd69f2f0aebeb69b37fe7 as the November 4 baseline. This supersedes
+paid reruns under unapplied626/628/629. The scope is
+scripts/630-arena-2026-11-04-baseline-donor-evidence.sql and its native controls,
+with exact reviewed private input and derived cache-only scoring envelopes.
+Archive the original baseline execution/judgment projections in existing history.
+Retain their original worker claims, participation times and all financial records.
+Mark the replacement comparison projections as operator-derived reuse with donor
+origin; never claim a new execution, signed completion, capture or provider call.
+Preserve all miner results, frozen source/ICPs/scorer/rules, and donor evidence.
+Extend only final scoring/publication deadlines to November 5 02:55/03:00 UTC.
+Keep the existing operator hold until the coordinator verifies and atomically
+resumes normal publication. Internal agents may implement, test, commit and push;
+the coordinator owns independent review, protected merge, exact committed SQL
+application, publication and rewards. No credential renewal or new paid work.
+
 ## Scoped authorization: November 4 completed-negative identity finality
 
 The user authorized the reviewed completed-negative finality correction for any

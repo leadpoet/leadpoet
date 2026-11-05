@@ -20,6 +20,14 @@ MAX_TOTAL_CHARS = 7 * MAX_PAGE_CHARS
 SPAN_CHARS = 1_600
 MAX_SPANS = 128  # Arena's existing list limit also applies to the citation enum.
 ROLES = ("supplier_operator", "customer_user", "partner_other", "unresolved")
+
+# These are existing validator requirements, not additional fit criteria.
+REASONING_RESPONSE_CONTRACT = (
+    "\nOutput contract: match and mismatch must cite at least one supplied evidence_span_id. "
+    "Match must have an empty missing_requirements list. Unavailable must name at least one "
+    "material missing requirement. Missing proof alone is unavailable, not mismatch. "
+    "Describe the company's observed offering in observed_activity, not the decision label."
+)
 CONDITIONAL_SOURCE_KEYS = ('child_source_url', 'parent_source_url', 'parent_quote', 'child_brand',
                            'official_child_homepage', 'parent_body_sha256', 'child_body_sha256',
                            'child_final_url', 'pointer_kind', 'printed_reference')

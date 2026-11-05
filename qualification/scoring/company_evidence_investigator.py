@@ -2914,6 +2914,7 @@ async def _review_industry_sources(
     if judge_reasoning_enabled():
         payload["reasoning"] = {"effort": "low", "exclude": False}
         payload["max_tokens"] = 16384
+        payload["messages"][0]["content"] += industry_classification.REASONING_RESPONSE_CONTRACT
     try:
         status, body = await _post_openrouter_json(
             session, 'https://openrouter.ai/api/v1/chat/completions',

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 
 
 JUDGE_REASONING_POLICY = "full_generated_thinking_v1"
+JUDGE_REASONING_TIMEOUT_SECONDS = 120
 
 
 def judge_reasoning_enabled() -> bool:

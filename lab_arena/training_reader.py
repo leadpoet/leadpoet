@@ -140,8 +140,9 @@ def export_run(store, objects, run_id):
     if ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("signal_judgment_policy") == "signal_judgment_v1":
         if judge is not None:
             origin_ids = {row["source_score_run_id"] for row in company_rows.values()}
+            evidence_v2 = ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2"
             for score_id in sorted({judge["run_id"]} | origin_ids):
-                signal_uses.extend(store.get_signal_judgment_uses(score_id))
+                signal_uses.extend(store.get_signal_judgment_uses(score_id, **({"evidence": True} if evidence_v2 else {})))
             for use in signal_uses:
                 identity = (use["cache_key"], use["authority_slot"])
                 if identity not in signal_rows:

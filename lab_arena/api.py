@@ -32,10 +32,18 @@ PROVIDER_WORKER_LIMIT = 32
 # 10-20 concurrent workers, so the reserve is sized explicitly instead of
 # being whatever the default pool happens to leave over.
 NON_PROVIDER_WORKER_RESERVE = 32
-# Full input snapshots do CPU-heavy privacy, hashing and compression work.
-# Two captures can progress when one storage call is slow, without starting
-# every judge's snapshot work at once.
-TRAINING_INPUT_WORKER_LIMIT = 2
+# Full input snapshots do CPU-heavy privacy, hashing and compression work, so
+# they stay bounded away from the shared pool. Two permits proved far too few:
+# an isolated capture costs about 1.2 s, but judges arrive in bursts of 30-66
+# per ten minutes, and two permits turn that burst into minutes of queueing.
+# Measured server-side p50 for this route went 1.2 s (26 Oct - 1 Nov, before
+# the limit) to 37 s (5 Nov) on unchanged call volume, with p95 at 241 s --
+# far past the runner's TRAINING_CAPTURE_TIMEOUT_SECONDS of 10 s, so the
+# capture is abandoned and retried while its worker is still retained.
+# Eight permits drain a 66-call burst in about ten seconds and still cannot
+# starve the shared pool, which this limiter does not draw from. Peak real
+# concurrency before any limit existed was 0.28, so this is ~28x headroom.
+TRAINING_INPUT_WORKER_LIMIT = 8
 # Segment storage and final verification both perform full privacy/hash scans.
 # Bound these together without consuming control-route worker permits.
 TRAINING_OBSERVATION_WORKER_LIMIT = 2

@@ -105,3 +105,33 @@ def test_product_launch_controls_keep_each_actual_target_visible(
         assert "when the target asks for that\n        kind of launch" in prompt
         assert "one actual requested alternative" in prompt
     assert source in stage_three
+
+
+@pytest.mark.parametrize('target,rule', [
+    ('Launched a major capability in the last year.',
+     "When the target leaves proof sources unrestricted"),
+    ('Launched a major capability; evidence may include a product page or changelog.',
+     "presents source types as examples"),
+    ('Launched a major capability, such as documented in a press release.',
+     "reliable independent reporting of the same company event can prove it"),
+    ('Launched a major capability; must be documented in a product page or changelog.',
+     "'must be documented in a product page or changelog' requires one of those document types"),
+    ('Launched a major capability; proof must be a company-issued announcement.',
+     "'proof must be a company-issued announcement' requires that provenance"),
+    ('Launched a major capability; source must be the company.',
+     "'source must be the company' requires that provenance"),
+    ('Launched a major capability announced by the company.',
+     "Naming the company as the announcing actor alone does not restrict the source publisher"),
+])
+def test_source_requirement_prompt_contract_in_both_intent_stages(target, rule):
+    # Preserve source requirements in the actual prompts; no model decision is simulated.
+    prompts = _prompts(target, 'REBEL launched a major capability.', REBEL_SOURCE)
+    for prompt in prompts:
+        normalized = ' '.join(prompt.split())
+        assert target in normalized
+        assert rule in normalized
+        assert "Preserve explicitly mandatory evidence source types and issuer requirements" in normalized
+        assert "Independent reporting cannot replace a mandatory document type or issuer" in normalized
+        assert "Naming the company as the announcing actor alone does not restrict the source publisher" in normalized
+        assert "'announced by the company' requires that issuer" not in normalized
+        assert "only when the target says the proof must come only from the company" not in normalized

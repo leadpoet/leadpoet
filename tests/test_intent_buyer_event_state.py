@@ -174,6 +174,7 @@ def test_launch_and_proof_source_rules_reach_the_buyer_context_prompt():
     assert "announced it as a present new offering by the claimed event date proves the launch" in prompt
     assert "inviting early access, a waitlist, or planning a future release does not prove a launch" in prompt
     assert "A request for a shipped or currently available capability needs source-body proof" in prompt
-    # Named source kinds describe evidence; a reliable report of the same event also counts.
-    assert "independent publisher reporting the same company event also satisfies it" in prompt
-    assert "only when the target says the proof must come only from the company" in prompt
+    # Unrestricted and illustrative sources permit reliable reporting; mandatory sources do not.
+    assert "reliable independent reporting of the same company event can prove it" in prompt
+    assert "Preserve explicitly mandatory evidence source types and issuer requirements" in prompt
+    assert "does not need the word 'only' to be mandatory" in prompt

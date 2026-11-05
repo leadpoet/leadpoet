@@ -202,12 +202,16 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         category labels are not required when source facts establish the role
         or type. Do not combine different actors' attributes to satisfy one
         actor's requirements.
-      * A proof-source phrase in the target, such as "per a press release,
-        product page, or company announcement", names the kinds of evidence
-        that show the event happened. Exact evidence from a reliable
-        independent publisher reporting the same company event also satisfies
-        it. Require a first-party source only when the target says the proof
-        must come only from the company.
+      * Preserve explicitly mandatory evidence source types and issuer requirements.
+        For example, 'must be documented in a product page or changelog' requires
+        one of those document types; 'proof must be a company-issued announcement'
+        requires that provenance; 'source must be the company' requires that
+        provenance. Naming the company as the announcing actor alone does not
+        restrict the source publisher. A source requirement does not need the word 'only'
+        to be mandatory. Independent reporting cannot replace a mandatory document
+        type or issuer. When the target leaves proof sources unrestricted or
+        presents source types as examples, reliable independent reporting of the
+        same company event can prove it. Preserve every other event requirement.
       * Judge descriptive qualifiers from the facts the source proves, not
         from exact copied adjectives. For example, `major` need not appear
         verbatim when the source proves a concrete, material new capability;

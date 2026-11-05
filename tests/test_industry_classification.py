@@ -191,7 +191,37 @@ def test_research_query_cannot_supply_evidence_or_change_supplier_role():
 def test_listed_customers_and_products_describe_the_offering_but_functions_stay_required():
     system = industry.request_payload(packet(), model='openai/gpt-6.1-sol')['messages'][0]['content']
     assert "Examples introduced by 'such as' or 'including' are illustrative" in system
-    assert "without proof of each listed type, unless the criterion says each, all, both or only" in system
-    assert "making the core listed products meets it without every listed product" in system
+    assert "without proof of each listed type" in system
+    assert "proof of products within that line can establish fit without proof of every listed product" in system
+    assert "Do not turn every grammatical 'and' in a descriptive list into a separate requirement" in system
+    assert "core listed products" not in system
     assert "Each listed function or capability of a required product or service remains required" in system
     assert "a priced monthly or annual plan for the offering proves a subscription" in system
+
+
+@pytest.mark.parametrize('research', [False, True])
+@pytest.mark.parametrize('criterion,rule', [
+    ('Supplies software for sales, support and finance teams.',
+     "without proof of each listed type"),
+    ('Manufactures pumps, valves and fittings.',
+     "proof of products within that line can establish fit without proof of every listed product"),
+    ('Manufactures industrial products such as pumps and valves.',
+     "Examples introduced by 'such as' or 'including' are illustrative"),
+    ('Must serve hospitals and clinics.',
+     "'must serve hospitals and clinics' requires both customer types"),
+    ('Manufactures pumps AND valves.',
+     "'manufactures pumps AND valves' requires both products"),
+    ('Must manufacture pumps and valves.',
+     "'must manufacture pumps and valves' requires both products"),
+])
+def test_customer_and_product_requirement_prompt_contract(criterion, rule, research):
+    # Check the production request contract, not a model's semantic accuracy.
+    value = industry.prepare({**CRITERION, 'product_service': criterion}, COMPANY, [
+        {'source_id': 's0', 'source_url': 'https://example.com/products',
+         'body': 'Example supplies products to commercial customers.'},
+    ], evaluation_date='2026-10-24')
+    request = industry.request_payload(value, model='openai/gpt-6.1-sol', research=research)
+    system = request['messages'][0]['content']
+    assert rule in system
+    assert "Explicit logical AND and mandatory wording take precedence over descriptive-list guidance" in system
+    assert json.loads(request['messages'][1]['content'])['criterion']['product_service'] == criterion

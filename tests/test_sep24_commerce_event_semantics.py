@@ -78,7 +78,8 @@ def test_saved_rebel_projection_keeps_event_and_source_qualifiers() -> None:
         flat = _one_line(prompt)
         assert REBEL_TARGET in flat
         assert REBEL_CLAIM in flat
-        assert "independent publisher reporting the same company event also satisfies" in flat
+        assert "Independent reporting cannot replace a mandatory document type or issuer" in flat
+        assert "presents source types as examples, reliable independent reporting" in flat
         assert "adding merchandise to an existing catalog or marketplace does not by itself" in flat
         assert "do not substitute a separate bundle" in flat
         assert "Existing technology used to sell new goods is not a new shopping capability" in flat

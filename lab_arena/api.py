@@ -36,6 +36,9 @@ NON_PROVIDER_WORKER_RESERVE = 32
 # Two captures can progress when one storage call is slow, without starting
 # every judge's snapshot work at once.
 TRAINING_INPUT_WORKER_LIMIT = 2
+# Segment storage and final verification both perform full privacy/hash scans.
+# Bound these together without consuming control-route worker permits.
+TRAINING_OBSERVATION_WORKER_LIMIT = 2
 # Public result reads fetch run outputs from the object store, so one slow
 # S3 leg holds a worker for the whole call. On 2026-11-04 these reads ran for
 # up to 22 minutes each; 12-19 of them were in flight at once and the shared
@@ -121,7 +124,15 @@ def create_app(service: ArenaService) -> FastAPI:
     # NON_PROVIDER_WORKER_RESERVE workers for every other route.
     provider_limiter: Optional[anyio.CapacityLimiter] = None
     training_input_limiter: Optional[anyio.CapacityLimiter] = None
+    training_observation_limiter: Optional[anyio.CapacityLimiter] = None
     public_object_read_limiter: Optional[anyio.CapacityLimiter] = None
+
+    def _training_observation_limiter() -> anyio.CapacityLimiter:
+        nonlocal training_observation_limiter
+        if training_observation_limiter is None:
+            _ensure_worker_pool()
+            training_observation_limiter = anyio.CapacityLimiter(TRAINING_OBSERVATION_WORKER_LIMIT)
+        return training_observation_limiter
 
     def _public_object_read_limiter() -> anyio.CapacityLimiter:
         nonlocal public_object_read_limiter
@@ -159,6 +170,56 @@ def create_app(service: ArenaService) -> FastAPI:
                 headers=headers,
             )
         return JSONResponse(content=content, headers=headers)
+
+    async def capture_call(
+        request: Request, call: Any, *args: Any,
+        worker_limiter: anyio.CapacityLimiter, json_response: bool = True, **kwargs: Any,
+    ) -> Any:
+        """Drop disconnected queued work; retain active workers until completion."""
+        response: Any = None
+        error: Optional[BaseException] = None
+        disconnected = False
+
+        async def capture() -> None:
+            nonlocal response, error
+            try:
+                # Use the route's capture bound directly for dispatch.
+                # Unrelated default-worker demand cannot starve this lane.
+                if json_response:
+                    response = await no_store_public_call(
+                        call, *args, _worker_limiter=worker_limiter, **kwargs,
+                    )
+                else:
+                    response = await to_thread.run_sync(
+                        partial(call, *args, **kwargs), limiter=worker_limiter,
+                    )
+            except BaseException as exc:
+                # Preserve the original exception without a group envelope.
+                error = exc
+            finally:
+                group.cancel_scope.cancel()
+
+        async def watch_disconnect() -> None:
+            nonlocal disconnected
+            # The body is fully consumed. Keep receiving while queued so a
+            # paused HTTP transport can observe disconnect, without polling.
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    disconnected = True
+                    group.cancel_scope.cancel()
+                    return
+
+        # Cancellation removes queued work. An admitted synchronous capture
+        # remains shielded by the thread pool and retains its permit to finish.
+        async with anyio.create_task_group() as group:
+            group.start_soon(watch_disconnect)
+            group.start_soon(capture)
+        if disconnected:
+            raise HTTPException(status_code=499, detail="client disconnected")
+        if error is not None:
+            raise error
+        return response
 
     @app.exception_handler(ServiceError)
     async def _service_error(request: Request, exc: ServiceError) -> JSONResponse:
@@ -410,51 +471,15 @@ def create_app(service: ArenaService) -> FastAPI:
         if training_input_limiter is None:
             _ensure_worker_pool()
             training_input_limiter = anyio.CapacityLimiter(TRAINING_INPUT_WORKER_LIMIT)
-        response: Optional[JSONResponse] = None
-        error: Optional[BaseException] = None
-        disconnected = False
-
-        async def capture() -> None:
-            nonlocal response, error
-            try:
-                # Use the existing two-input bound directly for dispatch.
-                # Unrelated default-worker demand cannot starve this lane.
-                response = await no_store_public_call(
-                    service.handle_training_input, run_id, lease_token, document,
-                    _worker_limiter=training_input_limiter,
-                )
-            except BaseException as exc:
-                # Preserve the original exception without a group envelope.
-                error = exc
-            finally:
-                group.cancel_scope.cancel()
-
-        async def watch_disconnect() -> None:
-            nonlocal disconnected
-            # The body is fully consumed. Keep receiving while queued so a
-            # paused HTTP transport can observe disconnect, without polling.
-            while True:
-                message = await request.receive()
-                if message["type"] == "http.disconnect":
-                    disconnected = True
-                    group.cancel_scope.cancel()
-                    return
-
-        # Cancellation removes queued work. An admitted synchronous capture
-        # remains shielded by the thread pool and retains its permit to finish.
-        async with anyio.create_task_group() as group:
-            group.start_soon(watch_disconnect)
-            group.start_soon(capture)
-        if disconnected:
-            raise HTTPException(status_code=499, detail="client disconnected")
-        if error is not None:
-            raise error
-        assert response is not None
-        return response
+        return await capture_call(
+            request, service.handle_training_input, run_id, lease_token, document,
+            worker_limiter=training_input_limiter,
+        )
 
     @app.head("/arena/v1/runs/{run_id}/training-observations")
     async def authorize_training_observations(
-        run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None),
+        run_id: str, request: Request,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
         if_match: Optional[str] = Header(default=None),
     ) -> Response:
         lease_token = _lease_header(x_lab_arena_lease)
@@ -468,8 +493,9 @@ def create_app(service: ArenaService) -> FastAPI:
             if (not if_match.startswith('"') or not if_match.endswith('"')
                     or not contracts.SHA256_RE.fullmatch(if_match[1:-1])):
                 raise HTTPException(status_code=400, detail="observation digest invalid")
-            digest = await run_in_threadpool(
-                service.verify_training_observations, run_id, lease_token, if_match[1:-1],
+            digest = await capture_call(
+                request, service.verify_training_observations, run_id, lease_token, if_match[1:-1],
+                worker_limiter=_training_observation_limiter(), json_response=False,
             )
             headers["ETag"] = '"' + digest + '"'
         return Response(status_code=204, headers=headers)
@@ -493,8 +519,9 @@ def create_app(service: ArenaService) -> FastAPI:
             max_total_bytes=training_observations.MAX_OBJECT_BYTES, max_abs_int=None,
             allow_control_characters_in_values=True,
         ))
-        return await no_store_public_call(
-            service.handle_training_observations, run_id, lease_token, document,
+        return await capture_call(
+            request, service.handle_training_observations, run_id, lease_token, document,
+            worker_limiter=_training_observation_limiter(),
         )
 
     @app.post("/arena/v1/runs/{run_id}/training-observation-segments")
@@ -514,8 +541,9 @@ def create_app(service: ArenaService) -> FastAPI:
             max_total_bytes=training_observations.MAX_SEGMENT_BYTES,
             max_abs_int=None, allow_control_characters_in_values=True,
         ))
-        return await no_store_public_call(
-            service.handle_training_observation_segment, run_id, lease_token, document,
+        return await capture_call(
+            request, service.handle_training_observation_segment, run_id, lease_token, document,
+            worker_limiter=_training_observation_limiter(),
         )
 
     @app.get("/arena/v1/runs/{run_id}/quota")

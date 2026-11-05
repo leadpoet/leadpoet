@@ -3999,6 +3999,8 @@ async def _ground_required_attribute_evidence(
         timeout = aiohttp.ClientTimeout(total=8.0, connect=3.0)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                from qualification.scoring.company_fit_evidence_reuse import unretained_source
+                unretained_source()
                 status, final_url, html_text = await _fetch_bounded_html(
                     session,
                     canonical_url,
@@ -4173,6 +4175,8 @@ async def _resolve_observed_linkedin_redirect_alias(
                 (submitted_url, observed_slug),
             ):
                 try:
+                    from qualification.scoring.company_fit_evidence_reuse import unretained_source
+                    unretained_source()
                     _status, final_url, _text = await _fetch_bounded_html(
                         session, requested_url,
                     )
@@ -5470,6 +5474,8 @@ async def _ground_employee_size_observation(
             timeout = aiohttp.ClientTimeout(total=8.0, connect=3.0)
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
+                    from qualification.scoring.company_fit_evidence_reuse import unretained_source
+                    unretained_source()
                     status, final_url, body = await _fetch_bounded_html(session, url)
                 final_url = public_http_url(final_url)
                 if status == 200 and final_url:
@@ -8705,7 +8711,8 @@ async def _request_company_reverify_json(
     diagnostic: Optional[dict[str, str]] = None,
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Execute one bounded independent web-verifier request."""
-
+    from qualification.scoring.company_fit_evidence_reuse import unretained_source
+    unretained_source()
     request_body = {
         "model": _SCORER_REVERIFY_MODEL,
         "messages": [

@@ -45,7 +45,7 @@ class Authority:
         self.operations.append(request["operation"])
         if request["operation"] == "candidates":
             return {"candidates": [{"reference": {"variant": key}, "judgment": deepcopy(value)}
-                                    for key, value in reversed(list(self.rows.items()))][:5]}
+                                    for key, value in reversed(list(self.rows.items()))][:8]}
         key = request["source_snapshot_hash"]
         if request["operation"] == "claim":
             if key in self.rows:
@@ -109,6 +109,55 @@ def test_changed_source_appends_variant_without_overwriting_original(monkeypatch
     assert all(authority.rows[key] == value for key, value in first.items())
     asyncio.run(score())
     assert current["calls"] == 2
+
+
+def test_eight_candidates_use_the_same_bound_as_gateway(monkeypatch):
+    current, authority, score = harness(monkeypatch)
+    asyncio.run(score())
+    first = deepcopy(next(iter(authority.rows.values())))
+    # Older variants can precede the currently matching source. All eight
+    # candidates are valid protocol input; a changed page is only a miss.
+    for index in range(7):
+        other = deepcopy(first)
+        other["evidence_manifest"]["sources"][0]["response_hash"] = "sha256:" + str(index) * 64
+        other["source_snapshot_hash"] = reuse._hash(other["evidence_manifest"])
+        authority.rows[other["source_snapshot_hash"]] = other
+    asyncio.run(score())
+    assert current["calls"] == 1
+
+
+@pytest.mark.parametrize("search_kind", ["web", "industry"])
+def test_unretained_search_prevents_reuse_of_unchanged_cited_pages(monkeypatch, search_kind):
+    from qualification.scoring import company_evidence_investigator as investigator
+    calls = []
+    async def post(*args, **kwargs):
+        calls.append(kwargs["payload"])
+        return 200, {"results": [], "choices": [{"message": {"content": "New funding round", "annotations": []}}]}
+    monkeypatch.setattr(investigator, "_post_json", post)
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+        if search_kind == "web":
+            asyncio.run(investigator._search_web(None, "latest round", key="test-only"))
+        else:
+            asyncio.run(investigator._search_industry_locators(
+                None, "latest company facts", key="test-only", company_locator={"name": "Acme"},
+                include_domains=["acme.example"]))
+    assert calls and not captured.complete
+    assert reuse.build_fit_snapshot(fit_result(), {}, {}, {}, captured) is None
+
+
+def test_unrecorded_optional_context_cannot_enter_or_reenter_fit_cache(monkeypatch):
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+    stale = {"https://acme.example/unrecorded": {
+        "final_url": "https://acme.example/unrecorded", "text": "Old unsupported evidence"}}
+    assert reuse.build_fit_snapshot(fit_result(), {}, stale, {}, captured) is None
+    snapshot = reuse.build_fit_snapshot(fit_result(), {}, {}, {}, captured)
+    snapshot["matched_company_sources"] = stale
+    async def read(entry):
+        record_sources()
+    monkeypatch.setattr(reuse, "_read_source", read)
+    assert not asyncio.run(reuse.revalidate_fit_snapshot(snapshot))
 
 
 def test_fresh_timeout_never_adopts_old_receipt_or_caches_provider_unavailable(monkeypatch):

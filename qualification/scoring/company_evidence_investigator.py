@@ -28,7 +28,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import aiohttp
 
-from qualification.scoring.company_fit_evidence_reuse import observed_source
+from qualification.scoring.company_fit_evidence_reuse import observed_source, unretained_source
 
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
@@ -3074,6 +3074,7 @@ async def _search_web(
 ) -> dict[str, Any]:
     # The same priced search includes source contents. Read them only on the
     # host-issued industry route; snippets and summaries never become proof.
+    unretained_source()
     if read_source_text and not (discovery_highlights and include_domains):
         raise ValueError('source text requires scoped industry discovery')
     result_limit = MAX_INDUSTRY_SEARCH_RESULTS if discovery_highlights else MAX_SEARCH_RESULTS
@@ -3200,6 +3201,7 @@ async def _search_industry_locators(
     Search answers and annotations propose locators only. Their descriptions
     help select a page; a remaining exact-page fetch must establish its facts.
     """
+    unretained_source()
     payload = {
         'model': 'perplexity/sonar', 'max_tokens': 700, 'temperature': 0,
         'messages': [

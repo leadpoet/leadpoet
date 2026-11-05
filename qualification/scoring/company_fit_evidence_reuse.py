@@ -92,6 +92,13 @@ def record_source(kind, request, response, *, ok=True):
         captured.add(kind, request, response, ok=ok)
 
 
+def unretained_source():
+    """Keep native verification when evidence cannot be re-fetched exactly."""
+    captured = _capture.get()
+    if captured is not None:
+        captured.complete = False
+
+
 def observed_source(kind, request_fields, sink_fields=()):
     """Observe an existing retrieval without changing its return or exception."""
     def decorate(function):
@@ -238,9 +245,45 @@ def _source_complete(receipt, captured):
     return bool(decisive)
 
 
+def _contexts_complete(contexts, captured):
+    """Every restored source body must belong to a freshly captured page."""
+    from qualification.scoring.company_evidence_investigator import _plain_text, _quote_occurs
+    pages = []
+    def collect(value, requested=None):
+        if isinstance(value, Mapping):
+            url = value.get("url") or requested
+            final = value.get("final_url") or url
+            body = value.get("text")
+            if isinstance(url, str) and isinstance(final, str) and isinstance(body, str):
+                pages.append((url, final, body))
+                pages.append((url, final, _plain_text(body)))
+            for item in value.values():
+                collect(item, requested)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item, requested)
+    for identity, response in captured.responses.items():
+        request = captured.records[identity]["request"]
+        collect(response, request.get("url") or request.get("profile_url"))
+    def valid(value, requested=None):
+        if not value:
+            return True
+        if not isinstance(value, Mapping):
+            return False
+        if "text" in value:
+            url = value.get("url") or requested
+            final = value.get("final_url") or url
+            text = value["text"]
+            return isinstance(text, str) and bool(text) and any(
+                url == source and final == target and _quote_occurs(text, body)
+                for source, target, body in pages)
+        return all(valid(item, key) for key, item in value.items())
+    return all(valid(context) for context in contexts)
+
+
 def build_fit_snapshot(fit, linkedin, matched, required, captured):
     receipt = fit.receipt("company_fit")
-    if not _source_complete(receipt, captured):
+    if not _source_complete(receipt, captured) or not _contexts_complete((linkedin, matched, required), captured):
         return None
     manifest = captured.manifest()
     snapshot = {"schema_version": SCHEMA, "company_fit_receipt": receipt,
@@ -248,7 +291,13 @@ def build_fit_snapshot(fit, linkedin, matched, required, captured):
                 "required_attribute_sources": required, "evidence_manifest": manifest,
                 "source_snapshot_hash": _hash(manifest)}
     try:
-        return validate_fit_snapshot(snapshot)
+        snapshot = validate_fit_snapshot(snapshot)
+        # The wire request repeats the manifest outside the judgment. Reserve
+        # room for the index, reference and protocol fields added by the host.
+        from lab_arena import contracts, signal_cache_control
+        if len(contracts.canonical_json({"judgment": snapshot, "evidence_input": manifest}).encode()) > signal_cache_control.MAX_BYTES - 4096:
+            return None
+        return snapshot
     except FitEvidenceReuseError:
         return None
 
@@ -363,7 +412,9 @@ async def revalidate_fit_snapshot(snapshot, *, captured_out=None):
         with capture_fit_evidence() as fresh:
             for entry in snapshot["evidence_manifest"]["sources"]:
                 await _read_source(entry)
-        equal = fresh.complete and fresh.manifest() == snapshot["evidence_manifest"]
+        equal = (fresh.complete and fresh.manifest() == snapshot["evidence_manifest"]
+                 and _contexts_complete((snapshot["linkedin_profile_source"], snapshot["matched_company_sources"],
+                                         snapshot["required_attribute_sources"]), fresh))
         if equal and captured_out is not None:
             captured_out.append(fresh)
         return equal
@@ -404,7 +455,7 @@ async def fit_with_evidence_reuse(native, *, company, linkedin, matched, require
     if exchange is None:
         return await native(canonical_fit_company(company))
     response = await exchange({"operation": "candidates"})
-    if not isinstance(response, Mapping) or not isinstance(response.get("candidates"), list) or len(response["candidates"]) > 5:
+    if not isinstance(response, Mapping) or not isinstance(response.get("candidates"), list) or len(response["candidates"]) > 8:
         raise FitEvidenceReuseError("fit evidence candidates are invalid")
     for candidate in response["candidates"]:
         snapshot = validate_fit_snapshot(candidate.get("judgment"))

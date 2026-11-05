@@ -80,7 +80,7 @@ def exercise(monkeypatch, *, missing=True, repaired='valid', attribute=False,
         if preserve_proven:
             verdict = scorer._project_investigator_required_attribute(verdict, claims['required_attribute'])
             verdict[scorer._REQUIRED_ATTRIBUTE_GROUNDING] = {'status': 'grounded'}
-        result = scorer._reverify_decision(verdict, icp.required_attribute, icp.company_stage,
+        result = scorer._reverify_decision(verdict, icp.required_attribute, kwargs['icp_stage'],
                                           icp=icp, company=company, company_quality=True,
                                           validated_stage_finding=claims.get('stage') if preserve_proven else None)
         result.details['investigation_receipt'] = (copy.deepcopy(receipt) if receipt_shape == 'valid'
@@ -133,10 +133,13 @@ def test_identity_repair_failure_cannot_qualify(monkeypatch, repair):
     assert result.details.get('failure_class') != 'insufficient_fit_evidence'
 
 
-def test_incomplete_research_does_not_get_identity_repair(monkeypatch):
-    result, calls, _ = exercise(monkeypatch, completed=False)
-    assert calls == ['lead_scorer_reverify']
+def test_identity_repair_cannot_clear_later_incomplete_research(monkeypatch, *, repair_first=True):
+    result, calls, investigations = exercise(monkeypatch, completed=False)
+    assert calls == (['lead_scorer_reverify', 'lead_scorer_reverify_schema_repair']
+                     if repair_first else ['lead_scorer_reverify'])
+    assert len(investigations) == 1
     assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details.get('failure_class') != 'insufficient_fit_evidence'
 
 
 def test_repaired_identity_cannot_clear_unresolved_source_fault(monkeypatch):
@@ -153,10 +156,14 @@ def test_investigated_identity_keeps_existing_target_bound(monkeypatch):
 
 
 @pytest.mark.parametrize('receipt_shape', ['missing', 'malformed'])
-def test_missing_or_malformed_receipt_does_not_open_repair(monkeypatch, receipt_shape):
-    result, calls, _ = exercise(monkeypatch, receipt_shape=receipt_shape)
-    assert calls == ['lead_scorer_reverify']
+def test_missing_or_malformed_later_receipt_remains_unavailable(
+        monkeypatch, receipt_shape, *, repair_first=True):
+    result, calls, investigations = exercise(monkeypatch, receipt_shape=receipt_shape)
+    assert calls == (['lead_scorer_reverify', 'lead_scorer_reverify_schema_repair']
+                     if repair_first else ['lead_scorer_reverify'])
+    assert len(investigations) == 1
     assert result.decision != COMPANY_FIT_MATCH
+    assert result.details.get('failure_class') != 'insufficient_fit_evidence'
 
 
 def test_identity_repair_preserves_independently_proven_attribute_and_stage(monkeypatch):

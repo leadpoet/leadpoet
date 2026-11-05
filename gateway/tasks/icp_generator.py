@@ -87,7 +87,15 @@ def _rebenchmark_now() -> datetime:
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "anthropic/claude-sonnet-5.5"
-OPENROUTER_EXCLUSION_MODEL = "perplexity/sonar-pro"
+OPENROUTER_EXCLUSION_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+OPENROUTER_EXCLUSION_ROUTE = {
+    "model": OPENROUTER_EXCLUSION_MODEL, "provider": "nebius/fp8",
+    "effort": "high", "max_output_tokens": 4096, "max_tool_calls": 3,
+    "web_search": {"max_uses": 3, "max_results": 5,
+                   "max_total_results": 10, "max_characters": 2000},
+    # OpenRouter provider price limits are dollars per million tokens.
+    "max_price": {"prompt": 0.30, "completion": 1.20},
+}
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_COMPLETION_TOKENS = 8000
 
@@ -146,7 +154,8 @@ def prepare_icp_candidate_request(request: dict, candidate: Optional[dict] = Non
     if candidate is None:
         return "openrouter.chat", body
     if (not isinstance(candidate, dict)
-            or set(candidate) - {"model", "provider", "effort", "max_output_tokens"}
+            or set(candidate) - {"model", "provider", "effort", "max_output_tokens",
+                                 "max_tool_calls", "web_search", "max_price"}
             or not isinstance(candidate.get("model"), str)
             or re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+", candidate["model"]) is None
             or not isinstance(candidate.get("provider"), str)
@@ -156,6 +165,24 @@ def prepare_icp_candidate_request(request: dict, candidate: Optional[dict] = Non
     limit = candidate.get("max_output_tokens", body.pop("max_tokens", 8192))
     if type(limit) is not int or not 1 <= limit <= 131072:
         raise ValueError("icp_candidate_output_limit_invalid")
+    tool_limit = candidate.get("max_tool_calls", 10)
+    search = candidate.get("web_search", {"max_uses": 10})
+    if (type(tool_limit) is not int or not 1 <= tool_limit <= 10
+            or not isinstance(search, dict) or "max_uses" not in search
+            or set(search) - {"max_uses", "max_results", "max_total_results", "max_characters"}
+            or any(type(value) is not int or value < 1 for value in search.values())
+            or search["max_uses"] > tool_limit
+            or search.get("max_results", 5) > 25
+            or search.get("max_total_results", 50) > 250
+            or search.get("max_characters", 4000) > 100000):
+        raise ValueError("icp_candidate_search_limit_invalid")
+    prices = candidate.get("max_price")
+    if prices is not None and (
+        not isinstance(prices, dict) or set(prices) != {"prompt", "completion"}
+        or any(type(value) not in (int, float) or not Decimal(str(value)).is_finite()
+               or value < 0 for value in prices.values())
+    ):
+        raise ValueError("icp_candidate_price_limit_invalid")
     body.pop("max_tokens", None)
     body.pop("temperature", None)
     body.update({
@@ -167,10 +194,12 @@ def prepare_icp_candidate_request(request: dict, candidate: Optional[dict] = Non
         "include": ["reasoning.encrypted_content"],
         "transforms": [], "plugins": [{"id": "context-compression", "enabled": False}],
         "tools": [{"type": "openrouter:web_search", "parameters": {
-            "engine": "exa", "max_uses": 10,
+            "engine": "exa", **search,
         }}],
-        "max_tool_calls": 10,
+        "max_tool_calls": tool_limit,
     })
+    if prices is not None:
+        body["provider"]["max_price"] = copy.deepcopy(prices)
     return "openrouter.responses", body
 
 
@@ -199,7 +228,8 @@ def project_icp_candidate_response(document: dict, *, api: str) -> dict:
             or document.get("error") or document.get("errors") or document.get("refusal")
             or document.get("incomplete_details") or not isinstance(document.get("output"), list)):
         raise ValueError("icp_candidate_response_incomplete")
-    final = None
+    explicit_finals = []
+    unphased = []
     for item in document["output"]:
         if not isinstance(item, dict):
             raise ValueError("icp_candidate_output_invalid")
@@ -212,13 +242,23 @@ def project_icp_candidate_response(document: dict, *, api: str) -> dict:
             if (item.get("role") != "assistant" or item.get("status") not in (None, "completed")
                     or item.get("refusal") or not isinstance(item.get("content"), list)):
                 raise ValueError("icp_candidate_message_invalid")
+            phase = item.get("phase")
+            if phase not in (None, "commentary", "final_answer"):
+                raise ValueError("icp_candidate_message_phase_invalid")
             parts = item["content"]
             if any(not isinstance(part, dict) or part.get("type") != "output_text"
                    or not isinstance(part.get("text"), str) for part in parts):
                 raise ValueError("icp_candidate_message_invalid")
-            final = {"role": "assistant", "content": "".join(part["text"] for part in parts)}
+            message = {"role": "assistant", "content": "".join(part["text"] for part in parts)}
+            if phase == "final_answer":
+                explicit_finals.append(message)
+            elif phase is None:
+                unphased.append(message)
         else:
             raise ValueError("icp_candidate_unfinished_tool")
+    if len(explicit_finals) > 1:
+        raise ValueError("icp_candidate_final_answer_ambiguous")
+    final = explicit_finals[0] if explicit_finals else unphased[-1] if unphased else None
     if final is None or not final["content"].strip():
         raise ValueError("icp_candidate_answer_missing")
     return {"choices": [{"finish_reason": "stop", "message": final}]}
@@ -231,8 +271,9 @@ async def prepare_icp_probe_request(purpose: str, *, set_id: Optional[int] = Non
                                     contacts_required: bool = False) -> dict:
     """Extract the production prompt and request without credentials, I/O or capture.
 
-    Call prepare_icp_candidate_request on the returned baseline request to
-    compare candidate routes against the exact same prompt and industry slots.
+    Generation defaults to the unchanged Sonnet Chat request. Exclusion
+    defaults to the approved DeepSeek Responses route. Generation candidates
+    can reuse the returned Chat body for exact prompt/industry-slot comparisons.
     Only the coordinating caller may dispatch or reserve a paid probe.
     """
     if purpose == "icp_generation" and type(set_id) is int:
@@ -1863,7 +1904,9 @@ def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None
     request = {"model": OPENROUTER_EXCLUSION_MODEL,
                "messages": [{"role": "user", "content": prompt}],
                "temperature": 0.0}
-    api, request = prepare_icp_candidate_request(request, candidate)
+    api, request = prepare_icp_candidate_request(
+        request, OPENROUTER_EXCLUSION_ROUTE if candidate is None else candidate,
+    )
     if _request_only:
         return {"api": api, "path": "/responses" if api.endswith("responses") else "/chat/completions",
                 "request": request}
@@ -1882,7 +1925,7 @@ def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None
             f"{OPENROUTER_BASE_URL}" + ("/responses" if api.endswith("responses") else "/chat/completions"),
             headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
                      "Content-Type": "application/json",
-                     **({"X-OpenRouter-Metadata": "enabled"} if candidate is not None else {})},
+                     **({"X-OpenRouter-Metadata": "enabled"} if api == "openrouter.responses" else {})},
             json=request,
             timeout=timeout_s,
         )

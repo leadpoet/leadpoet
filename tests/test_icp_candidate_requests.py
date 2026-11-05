@@ -35,7 +35,7 @@ def _native(content, *, count=2):
 
 
 @pytest.mark.parametrize("effort", ["low", "high"])
-def test_offline_production_requests_keep_defaults_and_candidates_pin_route(monkeypatch, effort):
+def test_offline_requests_keep_generation_default_and_candidates_pin_route(monkeypatch, effort):
     def no_io(*args, **kwargs):
         pytest.fail("offline preparation performed I/O")
 
@@ -72,9 +72,12 @@ def test_offline_production_requests_keep_defaults_and_candidates_pin_route(monk
     exclusion = asyncio.run(generator.prepare_icp_probe_request(
         "icp_exclusion", icp={"industry": "Software"},
     ))
-    assert exclusion["request"]["model"] == "perplexity/sonar-pro"
-    assert exclusion["request"]["temperature"] == 0.0
-    assert "tools" not in exclusion["request"]
+    # The production exclusion default is now approved DeepSeek Responses;
+    # the prior Sonar benchmark is historical evidence, not a runtime fallback.
+    assert exclusion["api"] == "openrouter.responses"
+    assert exclusion["request"]["model"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert exclusion["request"]["provider"]["only"] == ["nebius/fp8"]
+    assert exclusion["request"]["tools"][0]["parameters"]["max_uses"] == 3
     selected = asyncio.run(generator.prepare_icp_probe_request(
         "icp_exclusion", icp={"industry": "Software"}, candidate=CANDIDATE,
     ))
@@ -169,9 +172,38 @@ def test_candidate_incomplete_or_unfinished_output_never_enters_normalizer(chang
         generator.project_icp_candidate_response({**_native("[]"), **change}, api="openrouter.responses")
 
 
+def test_final_answer_phase_wins_over_later_commentary_and_raw_output_is_unchanged():
+    response = _native('[{"name":"Grounded","domain":"grounded.example"}]')
+    response["output"][-1]["phase"] = "final_answer"
+    response["output"].append({"type": "message", "role": "assistant", "phase": "commentary",
+                               "content": [{"type": "output_text", "text": "I have finished checking."}]})
+    before = copy.deepcopy(response)
+    result = generator.project_icp_candidate_response(response, api="openrouter.responses")
+    assert json.loads(result["choices"][0]["message"]["content"])[0]["domain"] == "grounded.example"
+    assert response == before
+
+
+@pytest.mark.parametrize("phase", ["final_answer", "unknown_phase"])
+def test_multiple_explicit_final_answers_or_unknown_phases_are_rejected(phase):
+    response = _native("[]")
+    response["output"][-1]["phase"] = "final_answer"
+    response["output"].append({"type": "message", "role": "assistant", "phase": phase,
+                               "content": [{"type": "output_text", "text": "[]"}]})
+    with pytest.raises(ValueError):
+        generator.project_icp_candidate_response(response, api="openrouter.responses")
+
+
 @pytest.mark.parametrize("change", [
     {"provider": ""}, {"model": "router/auto", "fallback": True},
     {"effort": "none"}, {"max_output_tokens": True}, {"max_output_tokens": 0},
+    {"max_tool_calls": 11}, {"max_tool_calls": True},
+    {"web_search": {"max_uses": 11}},
+    {"web_search": {"max_uses": 3, "engine": "auto"}},
+    {"web_search": {"max_uses": 3, "max_results": 26}},
+    {"web_search": {"max_uses": 3, "max_characters": 0}},
+    {"max_price": {"prompt": 0.30}},
+    {"max_price": {"prompt": float("nan"), "completion": 1.20}},
+    {"max_price": {"prompt": -1, "completion": 1.20}},
 ])
 def test_candidate_controls_reject_ambiguous_or_unbounded_routes(change):
     with pytest.raises(ValueError):

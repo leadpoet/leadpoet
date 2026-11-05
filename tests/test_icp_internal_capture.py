@@ -78,11 +78,12 @@ def _transport(monkeypatch, *, generation_status=200, generation_body=None, excl
     def post(url, *, headers, json, timeout):
         requests.append(json)
         body = exclusion_body if exclusion_body is not None else {
-            "usage": {"cost": 0}, "choices": [{"finish_reason": "stop", "message": {
-                "role": "assistant",
-                "reasoning": "Checked exclusion source",
-                "content": '[{"name":"Excluded","domain":"https://www.excluded.example/path"}]',
-            }}],
+            "status": "completed", "usage": {"cost": 0}, "output": [
+                {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "Checked exclusion source"}]},
+                {"type": "message", "role": "assistant", "status": "completed", "content": [{
+                    "type": "output_text", "text": '[{"name":"Excluded","domain":"https://www.excluded.example/path"}]',
+                }]},
+            ],
         }
         return httpx.Response(200, json=body)
 
@@ -204,9 +205,11 @@ def test_capture_storage_failure_does_not_change_generation(monkeypatch):
 
 def test_exclusion_parse_failure_captures_reply_and_logs_only_error_type(monkeypatch, tmp_path, caplog):
     spy = _capture(monkeypatch, tmp_path)
-    _transport(monkeypatch, exclusion_body={"choices": [{"message": {
-        "content": '[test-provider-secret]',
-    }}]})
+    _transport(monkeypatch, exclusion_body={"status": "completed", "output": [{
+        "type": "message", "role": "assistant", "content": [{
+            "type": "output_text", "text": '[test-provider-secret]',
+        }],
+    }]})
     assert generator.generate_exclusions_for_icp({"industry": "Software"}) == []
     call, = spy.calls
     assert len(call["responses"]) == len(call["finishes"]) == 1

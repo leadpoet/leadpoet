@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import public_dashboard as dashboard
+from lab_arena import contracts, public_dashboard as dashboard
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows, _security_state
-from tests.lab_arena.competition_summary_projection_test import _row, _service
+from tests.lab_arena.competition_summary_projection_test import COST_ENTRANT, _mark_cost_entrant, _row, _service
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_postgrest_route import DOCKER, make_transport, stack
 
@@ -27,7 +27,9 @@ CONTRACTS = [MISSING, None, False, 1, "legacy", [], {},
 def _rows():
     rows = []
     for index, contract in enumerate(CONTRACTS):
-        row = _row("2026-09-%02d" % (index + 1))
+        row = _row("2026-09-%02d" % (index + 1), stage_1_icp_count=1, stage_2_icp_count=1,
+                   sourcing_cost_eligibility_policy=contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY)
+        _mark_cost_entrant(row)
         if contract is MISSING:
             del row["configuration_doc"]["baseline_reasoning_configuration"]
         else:
@@ -142,38 +144,33 @@ def test_real_compact_and_full_summaries_match_for_all_source_proofs(database, m
         transport.close()
 
 
-def test_real_history_matches_full_rows_without_private_routes(database, monkeypatch):
-    pg, dsn = database
-    with pg.connect(**dsn) as connection, connection.cursor() as cursor:
-        cursor.execute(MIGRATION.read_text())
-    transport = PsycopgTransport(lambda: pg.connect(**dsn))
-    store = ArenaStore(transport)
+def _assert_history_parity(store, monkeypatch):
+    service, _ = _service([])
+    service._store = store
+    service._round = store.get_round
+    service._clock = lambda: datetime(2026, 10, 10, tzinfo=timezone.utc)
+    returned = []
+    list_rounds = store.list_rounds
+
+    def recording(**query):
+        rows = list_rounds(**query)
+        returned.append((query["columns"], rows))
+        return rows
+
+    monkeypatch.setattr(store, "list_rounds", recording)
+
+    def pages(**query):
+        result, cursor = [], None
+        for _ in range(100):
+            page = dashboard.history_snapshot(service, cursor=cursor, **query)
+            result.append(page)
+            cursor = page["next_cursor"]
+            if cursor is None:
+                return result
+        raise AssertionError("history did not finish")
+
+    columns = dashboard._HISTORY_ROUND_COLUMNS
     try:
-        service, _ = _service([])
-        service._store = store
-        service._round = store.get_round
-        service._clock = lambda: datetime(2026, 10, 10, tzinfo=timezone.utc)
-        returned = []
-        list_rounds = store.list_rounds
-
-        def recording(**query):
-            rows = list_rounds(**query)
-            returned.append((query["columns"], rows))
-            return rows
-
-        monkeypatch.setattr(store, "list_rounds", recording)
-
-        def pages(**query):
-            result, cursor = [], None
-            for _ in range(100):
-                page = dashboard.history_snapshot(service, cursor=cursor, **query)
-                result.append(page)
-                cursor = page["next_cursor"]
-                if cursor is None:
-                    return result
-            raise AssertionError("history did not finish")
-
-        columns = dashboard._HISTORY_ROUND_COLUMNS
         for query in ({"limit": 50}, {"limit": 7, "hotkey": "51"}):
             monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", dashboard._ROUND_COLUMNS)
             returned.clear()
@@ -189,15 +186,30 @@ def test_real_history_matches_full_rows_without_private_routes(database, monkeyp
             assert len(compact) < len(full) / 2
             if "hotkey" not in query:
                 rounds = {item["round_id"]: item for page in expected for item in page["rounds"]}
-                assert sum(len(page["submissions"]) for page in expected) == 145 * len(CONTRACTS)
+                submissions = [entry for page in expected for entry in page["submissions"]]
+                assert len(submissions) == 145 * len(CONTRACTS)
+                costs = [entry for entry in submissions if entry["submission_id"] == COST_ENTRANT]
+                assert len(costs) == len(CONTRACTS)
+                assert all(len(entry["cost_summary"]["per_icp"]) == 2 for entry in costs)
                 assert {round_id for round_id, item in rounds.items() if item["defending_champion"]} == {
                     "arena-2026-09-07", "arena-2026-09-08"}
     finally:
+        monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", columns)
+        monkeypatch.setattr(store, "list_rounds", list_rounds)
+
+
+def test_real_history_matches_full_rows_without_private_routes(database, monkeypatch):
+    pg, dsn = database
+    with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(MIGRATION.read_text())
+    transport = PsycopgTransport(lambda: pg.connect(**dsn))
+    try:
+        _assert_history_parity(ArenaStore(transport), monkeypatch)
+    finally:
         transport.close()
 
-
 @pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
-def test_postgrest_preserves_empty_contract_proof_and_excludes_private_routes(stack):
+def test_postgrest_preserves_empty_contract_proof_and_excludes_private_routes(stack, monkeypatch):
     with stack["connection"].cursor() as cursor:
         cursor.execute(MIGRATION.read_text())
     _insert_rows(stack["connection"], _rows())
@@ -215,5 +227,7 @@ def test_postgrest_preserves_empty_contract_proof_and_excludes_private_routes(st
         assert by_id["arena-2026-09-02"]["defending_champion"] is None
         assert "reasoning_route_registry" not in json.dumps(compact)
         assert "private_route" not in json.dumps(compact)
+        # Production History uses PostgREST: projected alias plus keyset cursor.
+        _assert_history_parity(store, monkeypatch)
     finally:
         transport.close()

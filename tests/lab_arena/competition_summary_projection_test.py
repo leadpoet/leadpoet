@@ -379,6 +379,26 @@ class HistoryTransport(RoundTransport):
         return result
 
 
+def _mark_cost_entrant(row):
+    """Give each round's top-scored entrant a frozen-count-dependent cost result."""
+    bucket = {key: 0 for key in dashboard._COST_COUNTER_KEYS + dashboard._SUCCESSFUL_CALL_COST_COUNTER_KEYS}
+    bucket["providers"] = []
+    ranking = row["publication_doc"]["final_ranking"][99]
+    assert ranking["submission_id"] == COST_ENTRANT and ranking["final_score"] == 99
+    ranking.update(evaluation="not_evaluated", eligibility_reason="eligible", eligible=False, cost_summary={
+        "returned_company_count": 0, "qualified_company_count": 0, "eligible_icp_count": 2,
+        "competition_sourcing_microusd": 0, "execution_icp_cap_microusd": 100,
+        "cost_per_company_cap_microusd": 100, "execution": bucket, "judge": bucket,
+        "per_icp": [{"icp_position": position, "returned_company_count": 0,
+                     "qualified_company_count": 0, "competition_sourcing_microusd": 0,
+                     "eligibility_cap_microusd": 0, "eligible": True,
+                     "eligibility_reason": "eligible"} for position in range(2)],
+    })
+
+
+COST_ENTRANT = "model-99"
+
+
 def _history_pages(rows, **query):
     service = object.__new__(ArenaService)
     transport = HistoryTransport(rows)
@@ -413,19 +433,8 @@ def test_history_matches_full_configuration_without_private_configuration(monkey
             "submission_cutoff": row["evaluation_date"] + "T00:00:00Z"}
     rows[1]["configuration_doc"].pop("baseline_reasoning_configuration")
     rows[2]["configuration_doc"]["baseline_reasoning_configuration"] = None
-    bucket = {key: 0 for key in dashboard._COST_COUNTER_KEYS + dashboard._SUCCESSFUL_CALL_COST_COUNTER_KEYS}
-    bucket["providers"] = []
     for row in rows:
-        row["publication_doc"]["final_ranking"][3].update(
-            evaluation="not_evaluated", eligibility_reason="eligible", eligible=False, cost_summary={
-                "returned_company_count": 0, "qualified_company_count": 0, "eligible_icp_count": 2,
-                "competition_sourcing_microusd": 0, "execution_icp_cap_microusd": 100,
-                "cost_per_company_cap_microusd": 100, "execution": bucket, "judge": bucket,
-                "per_icp": [{"icp_position": position, "returned_company_count": 0,
-                             "qualified_company_count": 0, "competition_sourcing_microusd": 0,
-                             "eligibility_cap_microusd": 0, "eligible": True,
-                             "eligibility_reason": "eligible"} for position in range(2)],
-            })
+        _mark_cost_entrant(row)
     before = deepcopy(rows)
     candidate_columns = dashboard._HISTORY_ROUND_COLUMNS
     monkeypatch.setattr(dashboard, "_HISTORY_ROUND_COLUMNS", dashboard._ROUND_COLUMNS)
@@ -445,10 +454,12 @@ def test_history_matches_full_configuration_without_private_configuration(monkey
     if "day" in query and "benchmark_disclosure_policy" not in configuration:
         # Cutoff-public rounds without a bank date have no public day, in both reads.
         assert len(submissions) == 145
-    if configuration.get("stage_1_icp_count") == 1 and "day" not in query and "hotkey" not in query:
-        # Per-ICP cost projection reads frozen stage counts from the configuration.
-        cost = next(entry for entry in submissions if entry["submission_id"] == "model-3")
-        assert len(cost["cost_summary"]["per_icp"]) == 2
+    if configuration.get("stage_1_icp_count") == 1 and "hotkey" not in query and "day" not in query:
+        # Per-ICP cost projection reads frozen stage counts and policy from the
+        # configuration. The top entrant of every round after the first comes
+        # from a projected list row, not from a cursor's full round read.
+        costs = [entry for entry in submissions if entry["submission_id"] == COST_ENTRANT]
+        assert costs and all(len(entry["cost_summary"]["per_icp"]) == 2 for entry in costs)
     if "day" not in query:
         assert rounds["arena-2026-10-09"]["defending_champion"] == {
             "submission_id": "prior-champion", "miner_hotkey": "5Prior"}
@@ -458,3 +469,40 @@ def test_history_matches_full_configuration_without_private_configuration(monkey
     assert transport.returned and all(
         "private" not in json.dumps(row["configuration_doc"]) for row in transport.returned)
     assert len(json.dumps(transport.returned)) < len(json.dumps(full.returned)) / 2
+
+
+def test_history_requests_projected_configuration_with_keyset_order():
+    requests = []
+    with httpx.Client(transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(200, json=[]))) as http:
+        store = ArenaStore(PostgrestTransport("https://example.test", service_key="sb_secret_test", http_client=http))
+        store.list_rounds(status="published", mode="live", network_name="finney", netuid=71, limit=25,
+                          columns=dashboard._HISTORY_ROUND_COLUMNS, history_order=True,
+                          before_round=("2026-10-09T00:00:00+00:00", "arena-2026-10-09"))
+    params = requests[0].url.params
+    assert params["select"] == dashboard._HISTORY_ROUND_COLUMNS
+    assert params["select"].split(",").count(PUBLIC_CONFIGURATION_COLUMN) == 1
+    assert "publication_doc" in params["select"].split(",")
+    assert params["order"] == "created_at.desc,round_id.desc"
+    assert params["or"] == ("(created_at.lt.2026-10-09T00:00:00+00:00,"
+                            "and(created_at.eq.2026-10-09T00:00:00+00:00,round_id.lt.arena-2026-10-09))")
+    assert params["configuration_doc->>mode"] == "eq.live"
+    queries = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def execute(self, sql, values): queries.append((sql, values))
+        def fetchall(self): return []
+
+    direct = object.__new__(PsycopgTransport)
+    direct._acquire = lambda: SimpleNamespace(cursor=lambda: Cursor())
+    direct._release = lambda _connection: None
+    ArenaStore(direct).list_rounds(status="published", mode="live", network_name="finney", netuid=71, limit=25,
+                                   columns=dashboard._HISTORY_ROUND_COLUMNS, history_order=True,
+                                   before_round=("2026-10-09T00:00:00+00:00", "arena-2026-10-09"))
+    sql, values = queries[-1]
+    assert "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc" in sql
+    assert ",publication_doc," in sql and "lab_arena_competition_publication_v1" not in sql
+    assert "(created_at, round_id) < (%s, %s)" in sql
+    assert sql.endswith("ORDER BY created_at DESC, round_id DESC LIMIT 25) t")
+    assert values[-2:] == ["2026-10-09T00:00:00+00:00", "arena-2026-10-09"]

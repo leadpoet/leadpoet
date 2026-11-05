@@ -34,6 +34,19 @@ def database():
                 cursor.execute((SCRIPTS / name).read_text())
             cursor.execute(MIGRATION.read_text())
             cursor.execute(MIGRATION.read_text())
+            # Current service code bounds its reader by the target day. Install
+            # only that additive RPC; keep these historical freeze bodies under
+            # test unchanged, including 567's legacy capture rejection.
+            cursor.execute("SELECT nspacl,has_schema_privilege('lab_arena_owner','public','CREATE') FROM pg_namespace WHERE nspname='public'")
+            acl, had_create = cursor.fetchone()
+            if not had_create:
+                cursor.execute("GRANT CREATE ON SCHEMA public TO lab_arena_owner")
+            source = (SCRIPTS / "627-lab-arena-champion-baseline-freshness.sql").read_text()
+            cursor.execute(source[source.index("CREATE OR REPLACE FUNCTION public.lab_arena_latest_promoted_champion_v1("):source.index("DO $restore627$")])
+            if not had_create:
+                cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
+            cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+            assert cursor.fetchone()[0] == acl
         yield db
     finally:
         fixture.close()

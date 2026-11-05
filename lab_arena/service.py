@@ -2732,15 +2732,18 @@ class ArenaService:
     ) -> Dict[str, Any]:
         """Freeze the exact promoted source and its original capture contract."""
 
-        if round_row.get("champion_funding_frozen") is True:
-            return {"status": "existing"}
         configuration = round_row.get("configuration_doc") or {}
         source_url = str(configuration["baseline_source_url"])
         source_sha256 = str(configuration["reasoning_baseline_source_sha256"])
         network_name, netuid = self._chain_scope()
-        promoted = self._store.latest_promoted_champion(
-            network_name=network_name, netuid=netuid
-        )
+        # A frozen source can become stale after a prior day's late promotion.
+        # Reuse the SQL gate without downloading or changing its saved source.
+        promoted = (None if round_row.get("champion_funding_frozen") is True
+                    else self._store.latest_promoted_champion(
+                        network_name=network_name, netuid=netuid,
+                        before_evaluation_date=str(round_row.get("evaluation_date") or
+                            _parse_iso(configuration["schedule"]["submission_cutoff"])
+                            .astimezone(timezone.utc).date().isoformat())))
         promotion_round_id = winner_id = commit = None
         if promoted is not None:
             promotion_round_id = str(promoted.get("round_id") or "")
@@ -5184,6 +5187,9 @@ class ArenaService:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
+        if (self._full_thinking_required(round_row)
+                and (round_row.get("configuration_doc") or {}).get("mode") == "live"):
+            self._freeze_full_thinking_baseline(round_id, round_row)
         evaluation_date = str(round_row.get("evaluation_date") or "")
         if _judge_continuation_enabled(round_row):
             self._record_recovered_judgment_scores(round_row)
@@ -5358,6 +5364,8 @@ class ArenaService:
             "publication_doc": publication,
             "published_at": published_at,
         })
+        if transition.get("status") == "promotion_pending":
+            raise ServiceError("baseline_promotion_pending", 503)
         return {
             "status": transition.get("status"),
             "king_outcome": decision["outcome"],
@@ -6118,6 +6126,8 @@ class ArenaService:
                 lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
             )
         if response.get("status") != "leased":
+            if response.get("status") == "promotion_pending":
+                raise ServiceError("baseline_promotion_pending", 503)
             return (dict(response, claim_recovery="unresolved",
                          claim_recovery_request_id=original["request_id"])
                     if original is not None else response)
@@ -6126,6 +6136,13 @@ class ArenaService:
         ):
             return {"status": "no_work", "claim_recovery": "resolved",
                     "claim_recovery_request_id": original["request_id"]}
+        if (response.get("kind") in ("execute", "score")
+                and response.get("submission_id") == "baseline-%s" % round_id.removeprefix("arena-")
+                and self._full_thinking_required(round_row)
+                and configuration.get("mode") == "live"):
+            # Includes exact saved claim responses recovered after stake loss.
+            # This gate never allocates a second lease or rewrites accepted work.
+            self._freeze_full_thinking_baseline(round_id, round_row)
         self._require_code_review(str(response["submission_id"]), round_row)
         icps = self.evaluation_icps(round_id) if integrity.enabled(configuration) else self.benchmark_icps(round_id)
         position = int(response["icp_position"])

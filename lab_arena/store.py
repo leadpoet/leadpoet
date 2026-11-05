@@ -124,6 +124,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
     "lab_arena_latest_promoted_champion_v1": (
         ("p_network_name", "text"), ("p_netuid", "integer"),
+        ("p_before_evaluation_date", "text"),
     ),
     "lab_arena_freeze_full_thinking_baseline_v1": (
         ("p_round_id", "text"),
@@ -1784,13 +1785,14 @@ class ArenaStore:
         return rows
 
     def latest_promoted_champion(
-        self, *, network_name: str, netuid: int
+        self, *, network_name: str, netuid: int,
+        before_evaluation_date: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Use the same completed winner ordering as champion funding."""
-        result = self._transport.rpc(
-            "lab_arena_latest_promoted_champion_v1",
-            {"p_network_name": str(network_name), "p_netuid": int(netuid)},
-        )
+        params = {"p_network_name": str(network_name), "p_netuid": int(netuid)}
+        if before_evaluation_date is not None:
+            params["p_before_evaluation_date"] = str(before_evaluation_date)
+        result = self._transport.rpc("lab_arena_latest_promoted_champion_v1", params)
         return None if result is None else _require_mapping(
             result, "latest_promoted_champion"
         )

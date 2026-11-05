@@ -511,7 +511,7 @@ class Recorder:
                     raise
                 finally:
                     _ACTIVE.reset(token)
-                amount = args[0] if args else kwargs.get("amt", kwargs.get("size", -1))
+                amount = args[0] if args else kwargs.get("amt", kwargs.get("size", kwargs.get("n", -1)))
                 if readinto:
                     amount = None
                     if isinstance(value, int) and value >= 0:

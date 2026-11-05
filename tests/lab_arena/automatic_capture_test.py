@@ -1148,6 +1148,48 @@ def test_slot_stream_identity_survives_owner_content_replacement():
         finish(recorder, checkpoint)
 
 
+@pytest.mark.parametrize("provider", [False, True])
+@pytest.mark.parametrize("keyword", [False, True])
+@pytest.mark.parametrize("amount", [0, 3])
+def test_aiohttp_nowait_read_preserves_remaining_body(endpoint, monkeypatch, provider, keyword, amount):
+    aiohttp = pytest.importorskip("aiohttp")
+    monkeypatch.setattr("lab_arena.automatic_capture._PROVIDER_HOSTS", {"127.0.0.1"})
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    path = "/provider" if provider else "/text"
+
+    async def run():
+        async with aiohttp.ClientSession() as client:
+            async with client.get(endpoint[0] + path) as response:
+                reader = response.content
+                # Wait for the real socket body without consuming its bytes.
+                await reader.wait_eof()
+                assert not reader.at_eof()
+                body = recorder._body(reader, "aiohttp", lambda _: None)
+                assert body is not None
+                prefix = reader.read_nowait(n=amount) if keyword else reader.read_nowait(amount)
+                assert prefix == BODY[:amount]
+                assert not body.done
+                assert recorder.counts["responses_complete"] == 0
+                assert prefix + await reader.read() == BODY
+                assert reader.read_nowait(n=0) == b""
+                assert reader.read_nowait(0) == b""
+    try:
+        asyncio.run(run())
+    finally:
+        summary = finish(recorder, checkpoint)
+    if provider:
+        assert checkpoint.web == []
+        assert checkpoint.acks == [{"call_identity": IDENTITY, "status": 200,
+            "body_sha256": "sha256:" + hashlib.sha256(BODY).hexdigest(), "body_bytes": len(BODY)}], summary
+    else:
+        assert checkpoint.acks == []
+        assert len(checkpoint.web) == 1, summary
+        assert_web(checkpoint.web[0], BODY)
+    assert summary["complete"] is True
+    assert endpoint[1].paths == [path]
+
+
 def test_aiohttp_cached_read_and_eof_do_not_duplicate_capture(endpoint):
     aiohttp = pytest.importorskip("aiohttp")
     checkpoint = Checkpoint()

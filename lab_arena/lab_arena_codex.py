@@ -1125,6 +1125,8 @@ def session(
             'multi_agent = false',
             'multi_agent_v2 = false',
             'apps = false',
+            # Apps do not gate the CLI's separate curated plugin bootstrap.
+            'plugins = false',
             'image_generation = false',
             '[model_providers.arena]',
             'name = "Arena"',

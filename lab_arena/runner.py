@@ -1631,7 +1631,7 @@ def _lock_down_dependency_tree(path: Path, *, site: str = "dependency_tree") -> 
 
 
 class SourceCache:
-    """A bounded LRU keyed by the existing server-assigned submission id."""
+    """A bounded per-submission LRU bound to the leased source reference."""
 
     def __init__(
         self,
@@ -1661,6 +1661,19 @@ class SourceCache:
         with self._lock:
             self._load_existing_locked()
 
+    @staticmethod
+    def _ready_source_ref(marker: Path) -> Optional[str]:
+        """Read the exact UTF-8 identity without trusting an unbounded marker."""
+        try:
+            with marker.open("rb") as stream:
+                encoded = stream.read(4097)
+            if len(encoded) > 4096:
+                return None
+            source_ref = encoded.decode("utf-8")
+        except (OSError, UnicodeError):
+            return None
+        return source_ref if 1 <= len(source_ref) <= 1024 else None
+
     def _load_existing_locked(self) -> None:
         existing = []
         for target in sorted(self._root.glob("submission-*"), key=lambda item: item.name):
@@ -1679,6 +1692,7 @@ class SourceCache:
                 not contracts.SUBMISSION_ID_RE.fullmatch(submission_id)
                 or target.name != "submission-" + submission_id
                 or not 1 <= archive_size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                or self._ready_source_ref(marker) is None
                 or source.is_symlink()
                 or not source.is_dir()
                 or dependencies.is_symlink()
@@ -1722,15 +1736,22 @@ class SourceCache:
     def _cached_source_locked(
         self,
         submission_id: str,
+        source_ref: str,
         source_size_bytes: int,
     ) -> Optional[Tuple[Path, Path]]:
         cached = self._ready.get(submission_id)
         if cached is None:
             return None
         archive = cached[0].parent / "source.tar.gz"
-        if archive.is_file() and archive.stat().st_size == source_size_bytes:
+        if (
+            archive.is_file()
+            and archive.stat().st_size == source_size_bytes
+            and self._ready_source_ref(archive.parent / ".ready") == source_ref
+        ):
             self._ready.move_to_end(submission_id)
             return cached
+        if self._in_use.get(submission_id, 0):
+            return None  # The caller waits before replacing an active source.
         self._ready.pop(submission_id, None)
         self._sizes.pop(submission_id, None)
         _remove_cache_path(cached[0].parent)
@@ -1767,7 +1788,10 @@ class SourceCache:
             if requirements.is_file():
                 self._dependency_installer(requirements, dependency_path)
             _lock_down_dependency_tree(dependency_path, site="source_cache")
-            (target / ".ready").touch(mode=0o400)
+            marker = target / ".ready.tmp"
+            marker.write_bytes(source_ref.encode("utf-8"))
+            os.chmod(marker, 0o400)
+            os.replace(marker, target / ".ready")
             size = _cache_path_bytes(target)
             if size > self._max_bytes:
                 raise RunnerError("source exceeds runner cache capacity")
@@ -1800,14 +1824,19 @@ class SourceCache:
             raise RunnerError("source size is invalid")
         must_prepare = False
         with self._condition:
-            while submission_id in self._building:
-                self._condition.wait()
-            paths = self._cached_source_locked(submission_id, source_size_bytes)
-            if paths is None:
-                self._building.add(submission_id)
-                must_prepare = True
-            else:
-                self._in_use[submission_id] = self._in_use.get(submission_id, 0) + 1
+            while True:
+                while submission_id in self._building:
+                    self._condition.wait()
+                paths = self._cached_source_locked(submission_id, source_ref, source_size_bytes)
+                if paths is None and self._in_use.get(submission_id, 0):
+                    self._condition.wait()
+                    continue
+                if paths is None:
+                    self._building.add(submission_id)
+                    must_prepare = True
+                else:
+                    self._in_use[submission_id] = self._in_use.get(submission_id, 0) + 1
+                break
         if must_prepare:
             try:
                 paths, size = self._prepare_source(
@@ -1834,13 +1863,14 @@ class SourceCache:
         try:
             yield paths
         finally:
-            with self._lock:
+            with self._condition:
                 remaining = self._in_use.get(submission_id, 0) - 1
                 if remaining > 0:
                     self._in_use[submission_id] = remaining
                 else:
                     self._in_use.pop(submission_id, None)
                 self._evict_locked()
+                self._condition.notify_all()
 
 
 def registry_image_exporter(client: images.RegistryClient, *, rules: Optional[images.ImageRules] = None) -> ImageExporter:

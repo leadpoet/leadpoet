@@ -158,6 +158,14 @@ def stack(tmp_path_factory):
                                   "598-lab-arena-capture-summary-v2.sql",
                                   "619-lab-arena-release-undispatched-call.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
+                # Current Store probes also cover the prospective evidence RPC.
+                # Reuse the reviewed621 function-only composer and625 upgrade;
+                # dated recovery DML must not enter this fresh-round fixture.
+                from tests.lab_arena import verified_fit_checkpoint625_postgres_test as fit_checkpoint
+                fit_checkpoint.compose_current_claim(cursor)
+                for migration in ("625-lab-arena-verified-fit-checkpoint.sql",
+                                  "631-lab-arena-evidence-judgments-v2.sql"):
+                    cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
                 # Current Store probes include these receipt-bound readers.
                 # Install their real definitions and grants, but never the
                 # dated recovery writes or changes to ordinary write RPCs.

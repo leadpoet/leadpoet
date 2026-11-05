@@ -579,6 +579,7 @@ ARENA_DENIAL_CODES = frozenset(
         "signal_judgment_cache_invalid",
         "signal_judgment_claim_invalid",
         "signal_judgment_completion_invalid",
+        "signal_judgment_evidence_invalid",
         "signal_judgment_input_invalid",
         "signal_judgment_lease_invalid",
         "signal_judgment_policy_unavailable",

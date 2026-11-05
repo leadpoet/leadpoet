@@ -25,6 +25,26 @@ def fit_result(negative=False):
         fit.details["company_fit_decision"] = "mismatch"
         fit.details["company_fit_dimensions"]["industry"] = "mismatch"
         fit.details["dimension_evidence"]["industry"]["decision"] = "mismatch"
+    fit.details["dimension_evidence"]["web_observations"] = {
+        "observed_employee_count": "51-200", "observed_hq_country": "United States",
+        "observed_hq_state": "", "observed_company_stage": "Series A",
+        "observed_industry": "Software", "observed_subindustry": "",
+        "industry_activity_role": "supplier_operator",
+    }
+    claims = {target: {"target": target, "status": "VERIFIED", "evidence_url": PAGE,
+                       "evidence_quote": TEXT}
+              for target in ("industry", "headcount", "geography", "stage")}
+    claims["headcount"]["observed_value"] = "51-200"
+    claims["geography"].update(observed_country="United States", observed_state="")
+    claims["stage"]["observed_value"] = "Series A"
+    claims["industry"].update(observed_industry="Software", observed_subindustry="",
+                              activity_role="supplier_operator", status="CONTRADICTED" if negative else "VERIFIED",
+                              _industry_review={"schema": "industry_evidence_review_v1", "model": "native-model",
+                                  "packet_sha256": "a" * 64, "decision": "mismatch" if negative else "match",
+                                  "evidence": [{"url": PAGE, "quote": TEXT}]})
+    fit.details["supporting_receipts"] = [{"gate": "company_evidence_investigation",
+        "completed_submitted_findings": True, "targets": list(claims), "claims": claims,
+        "failure_reason": ""}]
     return fit
 
 
@@ -175,6 +195,142 @@ def test_incomplete_evidence_and_unproven_negative_stay_native():
         reuse.record_source("homepage", {"url": HOME}, {"status": 200, "final_url": HOME, "text": TEXT})
     assert reuse.build_fit_snapshot(fit_result(), {}, {}, {}, capture) is None
     assert reuse.build_fit_snapshot(company_fit_unavailable("not proven"), {}, {}, {}, capture) is None
+
+
+def test_quote_occurrence_without_independent_findings_does_not_close_discovery():
+    fit = fit_result()
+    fit.details.pop("supporting_receipts")
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda fit: fit.details["supporting_receipts"][0].update(completed_submitted_findings=False),
+    lambda fit: fit.details["supporting_receipts"][0].update(failure_reason="provider_error"),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["industry"].pop("_industry_review"),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["industry"]["_industry_review"].update(decision="unavailable"),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["industry"]["_industry_review"].update(evidence=[{"url": PAGE, "quote": "Not present"}]),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["industry"].update(activity_role="customer_user"),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["stage"].update(observed_value="Series B"),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["headcount"].update(observed_value="201-500"),
+    lambda fit: fit.details["supporting_receipts"][0]["claims"]["geography"].update(observed_country="Canada"),
+])
+def test_incomplete_or_different_independent_fact_stays_native(mutation):
+    fit = fit_result()
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+    mutation(fit)
+    before = deepcopy(fit.receipt("company_fit"))
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+    assert fit.receipt("company_fit") == before
+
+
+def test_native_initial_lookup_can_discover_sources_without_becoming_proof(monkeypatch):
+    class Response:
+        status = 200
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): pass
+        async def json(self):
+            return {"choices": [{"message": {"content": '{"observed_industry":"Software"}'}}]}
+    class Session(Response):
+        def __init__(self, **_kwargs): pass
+        def post(self, *_args, **_kwargs): return Response()
+    monkeypatch.setattr(lead_scorer.aiohttp, "ClientSession", Session)
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+        verdict, error = asyncio.run(lead_scorer._request_company_reverify_json(
+            key="test-only", prompt="unchanged native lookup", telemetry_purpose="test"))
+    assert verdict == {"observed_industry": "Software"} and error == "" and captured.complete
+    assert reuse.build_fit_snapshot(fit_result(), {}, {}, {}, captured) is not None
+    incomplete = fit_result()
+    incomplete.details.pop("supporting_receipts")
+    assert reuse.build_fit_snapshot(incomplete, {}, {}, {}, captured) is None
+
+
+def test_fresh_revalidation_rejects_old_quote_only_snapshot(monkeypatch):
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+    snapshot = reuse.build_fit_snapshot(fit_result(), {}, {}, {}, captured)
+    snapshot["company_fit_receipt"].pop("supporting_receipts")
+    async def read(_entry): record_sources()
+    monkeypatch.setattr(reuse, "_read_source", read)
+    assert not asyncio.run(reuse.revalidate_fit_snapshot(snapshot))
+
+
+def test_captured_current_profile_size_closes_native_numeric_observation():
+    fit = fit_result()
+    profile = "https://www.linkedin.com/company/acme"
+    quote = "Company size\n51-200 employees"
+    fit.details["dimension_evidence"]["employee_size"]["web_evidence"] = {"url": profile, "quote": quote}
+    fit.details["supporting_receipts"][0]["claims"].pop("headcount")
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+        reuse.record_source("linkedin_contents", {"profile_url": profile, "expected_company_identity": {}, "capture_sinks": []},
+                            {"result": {"url": profile, "quote": quote, "employee_count": "51-200"}, "contexts": {}})
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is not None
+    fit.details["dimension_evidence"]["web_observations"]["observed_employee_count"] = "201-500"
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+
+
+def test_captured_structured_size_is_exact_typed_evidence_not_model_quote():
+    from qualification.scoring.linkedin_company_size import project_structured_linkedin_company_size
+    fit = fit_result()
+    profile = "https://www.linkedin.com/company/acme"
+    native = project_structured_linkedin_company_size("acme.example", profile, {"status": 200, "element": {
+        "website": HOME, "linkedinUrl": profile, "employeeCountRange": {"start": 51, "end": 200}}})
+    assert native
+    fit.details["dimension_evidence"]["employee_size"]["web_evidence"] = native
+    fit.details["supporting_receipts"][0]["claims"].pop("headcount")
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+        reuse.record_source("linkedin_structured", {"requested_domain": "acme.example", "profile_url": profile,
+            "company_identity_observed_profile_url": "", "expected_company_name": "Acme", "preserve_identity_website": False,
+            "capture_sinks": []}, {"result": deepcopy(native), "contexts": {}})
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is not None
+    native["employee_count"] = "201-500"
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+
+
+def test_captured_structured_headquarters_closes_native_country_observation():
+    from qualification.scoring.linkedin_company_size import (
+        project_structured_linkedin_company_headquarters, project_structured_linkedin_company_size,
+    )
+    fit = fit_result()
+    profile = "https://www.linkedin.com/company/acme"
+    payload = {
+        "status": 200, "element": {"name": "Acme", "website": HOME, "linkedinUrl": profile,
+            "employeeCountRange": {"start": 51, "end": 200},
+            "locations": [{"headquarter": True, "country": "France", "city": "Paris"}]}}
+    native = project_structured_linkedin_company_headquarters("acme.example", profile, "Acme", payload)
+    assert native
+    fit.details["dimension_evidence"]["geography"]["web_evidence"] = {"url": profile, "quote": native["text"]}
+    fit.details["dimension_evidence"]["web_observations"].update(observed_hq_country="France", observed_hq_state="")
+    fit.details["supporting_receipts"][0]["claims"].pop("geography")
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+        reuse.record_source("linkedin_structured", {"requested_domain": "acme.example", "profile_url": profile,
+            "company_identity_observed_profile_url": "", "expected_company_name": "Acme", "preserve_identity_website": False,
+            "capture_sinks": ["company_headquarters_evidence"]},
+            {"result": project_structured_linkedin_company_size("acme.example", profile, payload),
+             "contexts": {"company_headquarters_evidence": native}})
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is not None
+    fit.details["dimension_evidence"]["web_observations"]["observed_hq_country"] = "Germany"
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+
+
+def test_required_attribute_needs_its_own_completed_grounded_finding():
+    fit = fit_result()
+    fit.details["dimension_evidence"]["required_attribute"] = {
+        "decision": "match", "web_evidence": {"url": PAGE, "quote": TEXT}}
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+    review = fit.details["supporting_receipts"][0]
+    review["targets"].append("required_attribute")
+    review["claims"]["required_attribute"] = {"target": "required_attribute", "status": "VERIFIED",
+                                              "evidence_url": PAGE, "evidence_quote": TEXT}
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is not None
 
 
 def test_no_source_copy_or_input_mutation_when_observation_is_disabled():

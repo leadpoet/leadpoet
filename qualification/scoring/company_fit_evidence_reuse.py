@@ -171,8 +171,106 @@ def _text_pages(captured):
     return pages
 
 
+def _grounded_finding(receipt, dimension, web, pages):
+    """Find an existing completed review that produced this exact final fact."""
+    from qualification.scoring.company_evidence_investigator import _quote_occurs
+    from qualification.scoring import lead_scorer
+    target = {"employee_size": "headcount"}.get(dimension, dimension)
+    observed = receipt["dimension_evidence"].get("web_observations") or {}
+    item = receipt["dimension_evidence"][dimension]
+    decision = item.get("observed_decision", item.get("decision"))
+    status = {"match": "VERIFIED", "mismatch": "CONTRADICTED"}.get(decision)
+    for review in receipt.get("supporting_receipts") or []:
+        if (not isinstance(review, Mapping)
+            or review.get("gate") != "company_evidence_investigation"
+            or review.get("completed_submitted_findings") is not True
+            or review.get("failure_reason") or target not in (review.get("targets") or [])):
+            continue
+        finding = (review.get("claims") or {}).get(target)
+        if (not isinstance(finding, Mapping) or finding.get("target") != target
+            or finding.get("status") != status
+            or finding.get("evidence_url") != web.get("url")
+            or finding.get("evidence_quote") != web.get("quote")
+            or (finding.get("supporting_evidence") or []) != (web.get("supporting_evidence") or [])):
+            continue
+        if dimension == "industry":
+            industry = finding.get("_industry_review")
+            if (not isinstance(industry, Mapping)
+                or industry.get("schema") != "industry_evidence_review_v1"
+                or industry.get("decision") != decision or not industry.get("model")
+                or re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", str(industry.get("packet_sha256") or "")) is None
+                or finding.get("activity_role") != observed.get("industry_activity_role")
+                or finding.get("observed_industry") != observed.get("observed_industry")
+                or (finding.get("observed_subindustry") or "") != (observed.get("observed_subindustry") or "")):
+                continue
+            sources = industry.get("evidence")
+            if not isinstance(sources, list) or not sources or any(
+                not isinstance(source, Mapping) or not isinstance(source.get("quote"), str)
+                or not _quote_occurs(source["quote"], pages.get(source.get("url"), ""))
+                for source in sources
+            ):
+                continue
+        elif dimension == "stage":
+            if (not observed.get("observed_company_stage")
+                or lead_scorer._normalize_company_stage(finding.get("observed_value"))
+                != lead_scorer._normalize_company_stage(observed["observed_company_stage"])):
+                continue
+        elif dimension == "employee_size":
+            value = finding.get("observed_value")
+            if (lead_scorer._normalize_linkedin_employee_bucket(value) or value) != observed.get("observed_employee_count"):
+                continue
+        elif dimension == "geography":
+            if any(str(finding.get(field) or "").strip() != str(observed.get(native) or "").strip()
+                   for field, native in (("observed_country", "observed_hq_country"),
+                                         ("observed_state", "observed_hq_state"))):
+                continue
+        return True
+    return False
+
+
+def _captured_profile_fact(receipt, dimension, web, captured):
+    """Use the existing native profile projections, never a model lookalike."""
+    from qualification.scoring import company_evidence_investigator as cei
+    observed = receipt["dimension_evidence"].get("web_observations") or {}
+    identity = receipt["dimension_evidence"]["identity"].get("identity") or {}
+    anchor = {"verified_name": identity.get("observed_name"),
+              "verified_domain": identity.get("observed_domain"),
+              "verified_linkedin_slug": identity.get("observed_linkedin_slug")}
+    finding = {"status": "VERIFIED", "evidence_url": web.get("url"),
+               "evidence_quote": web.get("quote"),
+               "observed_country": observed.get("observed_hq_country"),
+               "observed_state": observed.get("observed_hq_state")}
+    for key, response in captured.responses.items():
+        kind = captured.records[key]["kind"]
+        if kind not in {"linkedin_contents", "linkedin_structured"}:
+            continue
+        result = response.get("result")
+        contexts = response.get("contexts") or {}
+        if dimension == "employee_size" and isinstance(result, Mapping):
+            if kind == "linkedin_structured" and result == web:
+                return True  # Exact native typed size projection and source request.
+            if (kind == "linkedin_contents" and result.get("employee_count")
+                and result.get("employee_count") == observed.get("observed_employee_count")
+                and result.get("url") == web.get("url") and result.get("quote") == web.get("quote")):
+                return True
+        if dimension == "geography":
+            source = contexts.get("company_headquarters_evidence")
+            if isinstance(source, Mapping) and cei._bound_structured_headquarters_finding(finding, source, anchor):
+                return True
+            source = contexts.get("source_text_sink")
+            if (isinstance(source, Mapping) and isinstance(source.get("text"), str)
+                and cei._bound_linkedin_headquarters_finding(finding, source["text"], source.get("url"), anchor)):
+                return True
+    return False
+
+
 def _source_complete(receipt, captured):
-    """Conservatively require a captured source for each active native fact."""
+    """Require each final fact to have native proof independent of discovery.
+
+    Sonar's initial lookup may select sources. Quote occurrence alone does not
+    make its observations independently reviewed: retain only existing grounded
+    findings or exact native profile projections, with unchanged criteria.
+    """
     from qualification.scoring.company_fit_decision import COMPANY_FIT_REQUIRED_DIMENSIONS
     if not captured.complete:
         return False
@@ -225,6 +323,10 @@ def _source_complete(receipt, captured):
             decisive.append(name)
             continue
         web = item.get("web_evidence")
+        if (isinstance(web, Mapping) and name in {"employee_size", "geography"}
+            and _captured_profile_fact(receipt, name, web, captured)):
+            decisive.append(name)
+            continue
         if isinstance(web, Mapping) and isinstance(web.get("url"), str) and isinstance(web.get("quote"), str):
             if not _quote_occurs(web["quote"], pages.get(web["url"], "")):
                 return False
@@ -237,10 +339,11 @@ def _source_complete(receipt, captured):
                 for source in support
             ):
                 return False
+            if not _grounded_finding(receipt, name, web, pages):
+                return False
             decisive.append(name)
             continue
-        # Structured profile projections do not expose a complete fetched page.
-        # Do not infer completeness from a model quote or a URL alone.
+        # Neither a model quote nor a URL proves independent adjudication.
         return False
     return bool(decisive)
 
@@ -413,6 +516,7 @@ async def revalidate_fit_snapshot(snapshot, *, captured_out=None):
             for entry in snapshot["evidence_manifest"]["sources"]:
                 await _read_source(entry)
         equal = (fresh.complete and fresh.manifest() == snapshot["evidence_manifest"]
+                 and _source_complete(snapshot["company_fit_receipt"], fresh)
                  and _contexts_complete((snapshot["linkedin_profile_source"], snapshot["matched_company_sources"],
                                          snapshot["required_attribute_sources"]), fresh))
         if equal and captured_out is not None:

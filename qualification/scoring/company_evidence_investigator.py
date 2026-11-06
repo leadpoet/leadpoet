@@ -6468,6 +6468,9 @@ async def investigate_company_evidence(
                         else {}
                     ),
                 }
+                # Frozen model options may lower the provider-visible cap.
+                # Read that cap for repair checks without changing the request.
+                controller_output_limit = prepare_judge_request(controller_payload)[1]["max_tokens"]
                 status, body = await _post_openrouter_json(
                     session, "https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},

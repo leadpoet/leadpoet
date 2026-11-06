@@ -1,12 +1,3 @@
-## Scoped authorization: prior reward baseline dependency
-
-The owning task authorized a narrow permanent gate in the existing baseline
-source-current helper. Wait for an authoritative earlier live reward round;
-preserve superseded-day authority, existing bills, frozen sources, scoring,
-privacy, capture, attempts and all current data. Add no refresh API or source
-repinning. Internal agents may test, commit and push an isolated review PR.
-The root agent owns merge, deployment and live verification.
-
 ## Scoped authorization: November 6 exact eight late admission recovery
 
 The user approved recovering the exact eight infrastructure-invalid November 6

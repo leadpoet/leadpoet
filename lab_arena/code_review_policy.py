@@ -426,7 +426,13 @@ def nov06_late_review_available(
             and document.get("review_invalid_attempts") == 3):
         return False
     hint = document.get("nov06_late_review")
-    if not isinstance(hint, Mapping) or hint.get("request_id") != "nov06-late-review635-v1":
+    if not isinstance(hint, Mapping):
+        return False
+    request_id = hint.get("request_id")
+    if request_id != "nov06-late-review635-v1" and not (
+        request_id == "nov06-ninth-review637-v1"
+        and row.get("submission_id") == "sub-43a929eb0e2e487f68014f48e7d80e6b"
+    ):
         return False
     try:
         expiry = datetime.fromisoformat(str(hint.get("expires_at")).replace("Z", "+00:00"))

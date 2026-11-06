@@ -1,3 +1,20 @@
+## Scoped authorization: November 6 ninth exact late review
+
+The user approved one unchanged-artifact alternate review for
+sub-43a929eb0e2e487f68014f48e7d80e6b. Add only one receipt-bound Sol attempt4
+within thirty minutes, and enroll only a genuine settled full-source pass.
+Preserve all twenty-nine other rows, prior635/636 receipts and windows, original
+eighteen participants, charges, frozen rules, round schedules, current operator
+state, and existing baseline jobs. The round has advanced to baseline-only stage1
+with no operator hold. The exact ninth review may proceed without pausing it.
+The user explicitly approved this exact late recovery after 04:30, before miner
+planning. Begin, finish and passing admission must fit thirty minutes from the
+new receipt. No round schedule changes. Preserve legitimate baseline progress
+between atomic audited steps.
+Do not create execution jobs, reopen the completed eight, or allow
+a fifth attempt. Internal agents implement, test and commit only; the root owns
+independent review, push, merge, canonical release, production and paid calls.
+
 ## Scoped authorization: November 6 exact eight late admission recovery
 
 The user approved recovering the exact eight infrastructure-invalid November 6

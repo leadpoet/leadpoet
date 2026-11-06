@@ -268,7 +268,7 @@ def _empty_target_message(item):
 
 
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
-            allow_empty_messages=False, responses_input_validator=None):
+            allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -292,7 +292,13 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         if details is not None:
             _require(isinstance(details, list) and all(training_capture.readable_reasoning_item(item) for item in details), 'reasoning_shape_unsupported')
             reasoning.extend(copy.deepcopy(details))
-        _require(set(msg) <= {'role', 'content', 'tool_calls', 'refusal'}
+        fields = {'role', 'content', 'tool_calls', 'refusal'}
+        if 'annotations' in msg and chat_annotations_validator is not None:
+            # Trusted internal export may validate retained provider citations.
+            # The shared miner path supplies no callback and stays unchanged.
+            chat_annotations_validator(body, msg)
+            fields.add('annotations')
+        _require(set(msg) <= fields
                  and not msg.get('refusal') and (isinstance(msg.get('content'), str) or msg.get('content') is None), 'assistant_shape_unsupported')
         msg.pop('refusal', None)
         if msg.get('tool_calls'):

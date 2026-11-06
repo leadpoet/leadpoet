@@ -183,12 +183,13 @@ BEGIN
   OR c.restart_scope IS DISTINCT FROM '' OR c.restart_phase IS DISTINCT FROM ''
   OR c.captured_leases IS DISTINCT FROM '[]'::JSONB
   OR ((r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_scoring'::TEXT,11::BIGINT,9::BIGINT)
-    AND (r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_judged'::TEXT,12::BIGINT,10::BIGINT))
+    AND (r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_judged'::TEXT,12::BIGINT,10::BIGINT)
+    AND (r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('scored'::TEXT,13::BIGINT,10::BIGINT))
   OR r.scoring_generation_floor IS DISTINCT FROM 0
-  OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM 'b45de077ebb68e93809f28309ddf0f8729341033c83d01e6ca145b38d6b1cacc'
+  OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '489f605b2dc4f6f68b31c15c21c3b8bedf3b0ff8f38dfd6ba4e7b2fd72f62048'
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.reward_activated_at IS NOT NULL
-  OR r.configuration_doc#>>'{schedule,final_scoring_close}' IS DISTINCT FROM '2026-11-06T10:30:00Z'
-  OR r.configuration_doc#>>'{schedule,publication_deadline}' IS DISTINCT FROM '2026-11-06T10:35:00Z'
+  OR r.configuration_doc#>>'{schedule,final_scoring_close}' IS DISTINCT FROM '2026-11-06T11:30:00Z'
+  OR r.configuration_doc#>>'{schedule,publication_deadline}' IS DISTINCT FROM '2026-11-06T11:35:00Z'
   OR clock_timestamp()>=(r.configuration_doc#>>'{schedule,final_scoring_close}')::TIMESTAMPTZ
   OR clock_timestamp()>=(r.configuration_doc#>>'{schedule,publication_deadline}')::TIMESTAMPTZ
   OR (r.configuration_doc->>'scoring_cap_microusd')::BIGINT IS DISTINCT FROM 50000000

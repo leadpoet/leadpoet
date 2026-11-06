@@ -317,7 +317,7 @@ def test_normal_stage2_open_recreates_original_miner_jobs(database):
     service._round = lambda round_id: store.get_round(round_id)
     service._load_scoring_plan = lambda round_row, stage: plan
     service.evaluation_icps = lambda round_id: daily_icps()[:10]
-    service._outputs_by_run = lambda round_id, stage: {
+    service._outputs_by_run = lambda round_id, stage, *, executions=None: {
         item["scored_run_id"]: [] for item in work_items
     }
     service._verified_breakdowns = lambda run, **kwargs: []

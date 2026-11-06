@@ -3292,9 +3292,14 @@ class ArenaService:
             raise ServiceError("scoring_plan_invalid", 500)
         return validated
 
-    def _outputs_by_run(self, round_id: str, stage: int) -> Dict[str, List[Dict[str, Any]]]:
+    def _outputs_by_run(
+        self, round_id: str, stage: int, *,
+        executions: Optional[Sequence[Mapping[str, Any]]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         outputs: Dict[str, List[Dict[str, Any]]] = {}
-        for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
+        if executions is None:
+            executions = self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute")
+        for run in executions:
             document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
             outputs[str(run["run_id"])] = list(document["companies"])
         return outputs
@@ -4188,7 +4193,6 @@ class ArenaService:
         policy = contracts.validate_scorer_policy(round_row["configuration_doc"]["scorer_policy"])
         plan = self._load_scoring_plan(round_row, stage)
         icps = self.evaluation_icps(round_id)
-        outputs = self._outputs_by_run(round_id, stage)
         chosen = self._scoring_outputs(round_id, stage, round_row=round_row)
         baseline_ids = {
             str(participant["submission_id"])
@@ -4254,6 +4258,14 @@ class ArenaService:
             and incomplete_items.get(item["scored_run_id"]) == "stage_closed"
             for item in plan["work_items"]
         )
+        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
+        needed = {item["scored_run_id"] for item in plan["work_items"]
+                  if item["scored_run_id"] not in failed_items
+                  and item["scored_run_id"] not in incomplete_items}
+        outputs = self._outputs_by_run(round_id, stage, executions=[
+            run for run in runs if run.get("status") == "accepted" and run["run_id"] in needed
+        ])
+        evidence_reads = _PublicResultEvidenceReads()
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
         for item in plan["work_items"]:
@@ -4265,7 +4277,8 @@ class ArenaService:
             companies = outputs[scored_run_id]
             try:
                 breakdowns_by_item[scored_run_id] = self._verified_breakdowns(
-                    run, icp=icp, companies=companies, policy=policy
+                    run, icp=icp, companies=companies, policy=policy,
+                    evidence_reads=evidence_reads, round_context=round_row,
                 )
             except scoring.ScoringError:
                 return self._store.cancel_round(
@@ -4305,7 +4318,6 @@ class ArenaService:
             breakdowns_by_item=breakdowns_by_item,
             configuration=round_row.get("configuration_doc"),
         )
-        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
         recorded = self._record_current_run_scores(round_row, stage, scoring.run_scores_for_store(stage_scores, runs))
         if recorded.get("status") != "ok":
             # The per-run scores are part of the published result; a write the
@@ -4983,6 +4995,7 @@ class ArenaService:
         configuration = row["configuration_doc"]
         policy = contracts.validate_scorer_policy(configuration["scorer_policy"])
         icps = self.evaluation_icps(round_id)
+        evidence_reads = _PublicResultEvidenceReads()
         for stage in (1, 2):
             sources = self._store.list_runs(round_id, stage=stage, kind="execute")
             score_runs = self._store.list_runs(round_id, stage=stage, kind="score")
@@ -4994,7 +5007,7 @@ class ArenaService:
                 and judges.get(str(source["run_id"]), {}).get("status") == "accepted"]
             if not ready:
                 continue
-            outputs = self._outputs_by_run(round_id, stage)
+            outputs = self._outputs_by_run(round_id, stage, executions=ready)
             rows = []
             for source in ready:
                 judge = judges[str(source["run_id"])]
@@ -5003,7 +5016,8 @@ class ArenaService:
                 position = int(source["icp_position"])
                 companies = outputs[str(source["run_id"])]
                 breakdowns = self._verified_breakdowns(
-                    judge, icp=icps[position], companies=companies, policy=policy)
+                    judge, icp=icps[position], companies=companies, policy=policy,
+                    evidence_reads=evidence_reads, round_context=row)
                 rows.append(verify.scored_row(str(source["submission_id"]),
                     position, str(source["run_id"]), icps[position], companies,
                     breakdowns, policy))

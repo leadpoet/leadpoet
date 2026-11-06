@@ -356,7 +356,7 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
         monkeypatch.setattr(service, "_qualified_company_counts", qualified_counts)
         monkeypatch.setattr(service_module, "_PublicationReads", publication_reads)
         assert service.publish(harness.round_id)["status"] == "ok"
-        assert authority_reads == Counter(execution_runs=5, icp_bank=1)
+        assert authority_reads == Counter(execution_runs=4, icp_bank=1)
         aggregation_reads = reads - authority_reads
         assert aggregation_reads["execution_runs"] == 1
         assert aggregation_reads["icp_bank"] == 1

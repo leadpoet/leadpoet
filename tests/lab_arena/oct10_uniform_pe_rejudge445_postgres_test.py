@@ -250,7 +250,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
         def get_bounded(ref, max_bytes):
             return json.dumps({'schema_version': contact_policy.output_schema(store.get_round(ROUND)['configuration_doc']), 'companies': []}).encode()
     service._objects = Objects()
-    service._outputs_by_run = lambda rid, stage: {r['run_id']: [] for r in store.list_runs(rid, stage=stage, kind='execute') if r['status'] == 'accepted'}
+    service._outputs_by_run = lambda rid, stage, *, executions=None: {r['run_id']: [] for r in store.list_runs(rid, stage=stage, kind='execute') if r['status'] == 'accepted'}
     service._verified_breakdowns = lambda *args, **kwargs: []
     monkeypatch.setattr(provider_observations, 'resolve_observations', lambda *args, **kwargs: [])
     statuses = []
@@ -752,7 +752,7 @@ def test_current_archive_prefixes_uniform_driver_and_no_execution_generation(see
         def get_bounded(ref, max_bytes):
             return json.dumps({'schema_version': contact_policy.output_schema(store.get_round(ROUND)['configuration_doc']), 'companies': []}).encode()
     service._objects = Objects()
-    service._outputs_by_run = lambda rid, stage: {r['run_id']: [] for r in store.list_runs(rid, stage=stage, kind='execute') if r['status'] == 'accepted'}
+    service._outputs_by_run = lambda rid, stage, *, executions=None: {r['run_id']: [] for r in store.list_runs(rid, stage=stage, kind='execute') if r['status'] == 'accepted'}
     service._verified_breakdowns = lambda *args, **kwargs: []
     monkeypatch.setattr(provider_observations, 'resolve_observations', lambda *args, **kwargs: [])
     statuses = []

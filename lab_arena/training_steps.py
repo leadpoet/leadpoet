@@ -683,6 +683,64 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
     return op, body, tools
 
 
+def _training_provenance(example):
+    """Recorded training context, separate from prompts, targets and gold labels.
+
+    Source-page publication dates and observation timestamps stay in their
+    original evidence payloads. Never infer them from host round dates.
+    """
+    round_dates = example.get('round_dates') or {}
+    runtime = example.get('runtime') or {}
+    judgment = example.get('judgment') or {}
+    judge_runtime = judgment.get('runtime') or {}
+    outcomes = []
+    for row in example.get('companies') or []:
+        if not isinstance(row, Mapping) or type(row.get('company_index')) is not int:
+            continue
+        label, reason = training_dataset.classify(row)
+        provenance = (training_dataset._provenance(example, row['company_index'])
+                      if row.get('label_status') == 'scored' and isinstance(row.get('judgment'), Mapping)
+                      else {'judgment_source': 'unavailable', 'source_score_run_id': None})
+        outcomes.append({'company_index': row['company_index'], 'label_status': row.get('label_status'),
+                         'class': label, 'sub_reason': reason, 'label_provenance': provenance})
+    source = example.get('source') or {}
+    try:
+        configuration = training_dataset.label_scorer_configuration(example)
+        policy_status = 'recorded'
+    except ValueError:
+        # Unverified ancillary label policy must not invalidate an otherwise
+        # proven observed model step, or become a replacement policy claim.
+        configuration = {}
+        policy_status = 'unverified'
+    history = example.get('scoring_policy_history')
+    return {
+        'schema_version': 'leadpoet.lab_arena.training_provenance.v1',
+        'dates': {'evaluation_date': example.get('evaluation_date'),
+                  'round_created_at': round_dates.get('created_at'),
+                  'round_published_at': round_dates.get('published_at'),
+                  'execution_started_at': runtime.get('started_at'),
+                  'execution_finished_at': runtime.get('finished_at'),
+                  'judge_started_at': judge_runtime.get('started_at'),
+                  'judge_finished_at': judge_runtime.get('finished_at')},
+        'source': {key: copy.deepcopy(source[key]) for key in (
+            'ref', 'sha256', 'normalized_sha256', 'hash_origin', 'source_correction') if key in source},
+        'label_authority': {
+            'origin': 'automated_native_scorer' if judgment else 'unavailable',
+            'ground_truth': 'not_established', 'external_adjudication': 'not_established_by_export',
+            'input_output_label_verified': (example.get('completeness') or {}).get(
+                'dimensions', {}).get('input_output_label') is True},
+        'score_run_id': example.get('score_run_id'),
+        'judgment_sha256': contracts.document_hash(judgment) if judgment else None,
+        'scorer_policy_sha256': (contracts.document_hash(configuration.get('scorer_policy') or {})
+                                 if policy_status == 'recorded' else None),
+        'scorer_image_digest': configuration.get('scorer_image_digest') if policy_status == 'recorded' else None,
+        'label_policy_status': policy_status,
+        'scoring_generation_floor': example.get('scoring_generation_floor'),
+        'scoring_policy_history_sha256': contracts.document_hash(history) if isinstance(history, Mapping) else None,
+        'company_outcomes': outcomes,
+    }
+
+
 def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False,
                role='source'):
     # Individual exporters may retain a proven prefix pair. The full-ICP
@@ -804,6 +862,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
                                                 and example.get('round_status') == 'published'),
                              'outcome': {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'), 'score_run_id': example.get('score_run_id')},
+                             'training_provenance': _training_provenance(example),
                              'source_quality': copy.deepcopy(example.get('completeness') or {})}]}
 
 

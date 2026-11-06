@@ -7466,6 +7466,30 @@ def _is_same_domain_unproven_web_identity(
     )
 
 
+def _is_explicitly_missing_web_linkedin_identity(
+    verdict: Mapping[str, Any],
+    receipt: Optional[Mapping[str, Any]],
+) -> bool:
+    """Recognize a typed, same-entity observation without LinkedIn proof."""
+    value = receipt or {}
+    return bool(
+        all(isinstance(verdict.get(field), str) for field in (
+            "observed_company_name", "observed_company_website",
+            "observed_company_linkedin",
+        ))
+        and verdict.get("observed_company_linkedin") == ""
+        and value.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and value.get("reason_code") == "identity_not_proven"
+        and value.get("evidence_source") == "company_web_reverification"
+        and all(isinstance(value.get(field), str) and bool(value[field].strip())
+                for field in ("submitted_name", "submitted_domain", "observed_name",
+                              "observed_domain", "submitted_linkedin_slug"))
+        and value.get("submitted_name") == value.get("observed_name")
+        and value.get("submitted_domain") == value.get("observed_domain")
+        and value.get("observed_linkedin_slug") == ""
+    )
+
+
 def _is_verified_homepage_web_identity_conflict(
     receipt: Optional[Mapping[str, Any]],
 ) -> bool:
@@ -7523,6 +7547,7 @@ def _has_explicitly_unproven_fit_dimensions(
     linkedin_refresh_outcome: str = "",
     identity_receipt: Optional[Mapping[str, Any]] = None,
     investigation_receipt: Optional[Mapping[str, Any]] = None,
+    completed_identity_repair: bool = False,
 ) -> bool:
     """Recognize unavailable proof after one complete repair response."""
 
@@ -7645,7 +7670,14 @@ def _has_explicitly_unproven_fit_dimensions(
             continue
         if dimension == "identity":
             if not (
-                _is_same_domain_unproven_web_identity(identity_receipt)
+                (
+                    completed_identity_repair
+                    and _is_explicitly_missing_web_linkedin_identity(verdict, identity_receipt)
+                    and not review_has_transport_fault
+                    and linkedin_refresh_outcome != "retryable_failure"
+                    and (investigation_receipt is None or completed_investigation)
+                )
+                or _is_same_domain_unproven_web_identity(identity_receipt)
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
                 or (
                     completed_investigation
@@ -9801,6 +9833,7 @@ def _settle_completed_company_investigation(
     icp_attribute: str,
     icp_stage: str,
     current_profile_cache: Mapping[str, Any],
+    completed_identity_repair: bool = False,
 ) -> Optional[CompanyFitDecisionResult]:
     """Reuse bounded-investigation finality before semantic early returns.
 
@@ -9816,6 +9849,8 @@ def _settle_completed_company_investigation(
          "geography": "geography"}[target]
         for target in investigation_targets
     }
+    if completed_identity_repair:
+        investigated_dimensions.add("identity")
     if not incomplete or not investigation_targets or not set(incomplete).issubset(
         investigated_dimensions
     ):
@@ -9913,6 +9948,7 @@ def _settle_completed_company_investigation(
             verdict,
             incomplete,
             icp=icp,
+            completed_identity_repair=completed_identity_repair,
             linkedin_refresh_outcome=(
                 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
                 if malformed_profile_exhausted or resolved_profile_obligations else refresh_outcome
@@ -10949,6 +10985,21 @@ async def _llm_reverify_company(
         # may describe the newly observed entity, so reject the whole response
         # instead of mixing them with the prior entity's validated findings.
         return result
+    # The existing repair explicitly requested fresh identity research. A typed
+    # same-entity answer that still has no LinkedIn is completed missing proof,
+    # never a match. Do not grant this finality to an initial answer or failure.
+    completed_identity_repair = bool(
+        "identity" in incomplete
+        and not repair_error
+        and not repair_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)
+        and not (
+            verified_homepage_identity is not None
+            and _homepage_identity_has_retryable_failure(verified_homepage_identity)
+        )
+        and _is_explicitly_missing_web_linkedin_identity(
+            repaired_verdict, repaired_identity_receipt,
+        )
+    )
     repaired_verdict = _preserve_unrelated_validated_stage_evidence(
         verdict,
         result,
@@ -11220,6 +11271,7 @@ async def _llm_reverify_company(
                     investigation_targets=post_repair_investigation_targets,
                     icp=icp, icp_attribute=icp_attribute, icp_stage=icp_stage,
                     current_profile_cache=current_profile_cache,
+                    completed_identity_repair=completed_identity_repair,
                 )
                 if settled is not None:
                     return settled
@@ -11230,6 +11282,7 @@ async def _llm_reverify_company(
                         icp_attribute=icp_attribute, icp_stage=icp_stage,
                     ),
                     icp=icp,
+                    completed_identity_repair=completed_identity_repair,
                     linkedin_refresh_outcome=str(
                         current_profile_cache.get("refresh_outcome") or ""
                     ),
@@ -11253,6 +11306,7 @@ async def _llm_reverify_company(
                 investigation_targets=investigation_targets,
                 icp=icp, icp_attribute=icp_attribute, icp_stage=icp_stage,
                 current_profile_cache=current_profile_cache,
+                completed_identity_repair=completed_identity_repair,
             )
             if settled is not None and settled.details.get("_completed_investigation_settled") is True:
                 return settled
@@ -11315,6 +11369,7 @@ async def _llm_reverify_company(
                 repaired_verdict,
                 other_incomplete,
                 icp=icp,
+                completed_identity_repair=completed_identity_repair,
                 linkedin_refresh_outcome=linkedin_refresh_outcome,
                 identity_receipt=(
                     repaired_result.details.get("identity_receipt")
@@ -11379,6 +11434,7 @@ async def _llm_reverify_company(
                 repaired_verdict,
                 other_than_entity_conflicts,
                 icp=icp,
+                completed_identity_repair=completed_identity_repair,
                 linkedin_refresh_outcome=linkedin_refresh_outcome,
                 identity_receipt=(
                     repaired_result.details.get("identity_receipt")
@@ -11433,6 +11489,7 @@ async def _llm_reverify_company(
             repaired_verdict,
             repaired_incomplete,
             icp=icp,
+            completed_identity_repair=completed_identity_repair,
             linkedin_refresh_outcome=linkedin_refresh_outcome,
             identity_receipt=(
                 repaired_result.details.get("identity_receipt")

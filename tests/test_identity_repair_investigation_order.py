@@ -18,7 +18,8 @@ from tests.test_company_evidence_investigator import (
 
 def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
               repair="valid", investigation_failure="", source_fault=False,
-              industry="UNPROVEN", initial_rebrand=False, company_quality=True):
+              industry="UNPROVEN", initial_rebrand=False, company_quality=True,
+              initial_missing_name=False, profile_failure=""):
     company, icp = _company(), _icp(required_attribute="Supplies software.")
     initial = _complete_verdict(
         observed_company_linkedin="" if missing_identity else company.company_linkedin,
@@ -28,6 +29,8 @@ def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
     if initial_rebrand:
         initial.update(observed_company_website="https://other.example",
                        observed_company_linkedin="https://www.linkedin.com/company/other")
+    if initial_missing_name:
+        initial.pop("observed_company_name")
     repaired = _complete_verdict(
         observed_employee_count="51-200", employee_size_matches=False,
         employee_size_evidence_quote="Acme has 51-200 employees.",
@@ -43,6 +46,19 @@ def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
                         observed_company_linkedin="https://www.linkedin.com/company/other")
     elif repair == "missing":
         repaired["observed_company_linkedin"] = ""
+    elif repair in {"omitted", "null", "number", "whitespace", "invalid"}:
+        repaired["observed_company_linkedin"] = {
+            "omitted": "", "null": None, "number": 3,
+            "whitespace": " ", "invalid": "not a LinkedIn URL",
+        }[repair]
+        if repair == "omitted":
+            repaired.pop("observed_company_linkedin")
+    elif repair in {"wrong_name", "wrong_domain"}:
+        repaired["observed_company_linkedin"] = ""
+        repaired["observed_company_name" if repair == "wrong_name"
+                 else "observed_company_website"] = (
+            "Other" if repair == "wrong_name" else "https://other.example"
+        )
     events, investigations = [], []
 
     async def request(**kwargs):
@@ -54,7 +70,12 @@ def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
             return None, repair
         return copy.deepcopy(repaired), ""
 
-    async def refresh(verdict, *_args, **_kwargs):
+    async def refresh(verdict, *_args, **kwargs):
+        if profile_failure:
+            kwargs["invocation_cache"].update(
+                refresh_outcome="retryable_failure",
+                failure_reason_code=profile_failure,
+            )
         return verdict
 
     async def no_redirect(_company, verdict):
@@ -208,3 +229,136 @@ def test_post_repair_investigation_keeps_provider_faults_retryable(monkeypatch, 
     assert competition.scorer_breakdown_has_retryable_infrastructure_failure({
         "verifier_gate_receipts": [result.receipt("company_fit")],
     })
+
+
+@pytest.mark.parametrize("geography,industry", [
+    ("VERIFIED", "VERIFIED"), ("UNPROVEN", "UNPROVEN"),
+])
+@pytest.mark.parametrize("initial_missing_name", [False, True])
+def test_explicit_identity_repair_can_exhaust_missing_linkedin(
+    monkeypatch, geography, industry, initial_missing_name,
+):
+    result, events, investigations = _exercise(
+        monkeypatch, repair="missing", geography=geography, industry=industry,
+        initial_missing_name=initial_missing_name,
+    )
+    assert events == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair", "investigate"]
+    assert len(investigations) == 1
+    assert "rebrand" not in investigations[0]["targets"]
+    assert result.decision == "unavailable"
+    assert result.details["identity_decision"] == "unavailable"
+    assert result.details["identity_receipt"]["reason_code"] == "identity_not_proven"
+    assert result.details["failure_class"] == "insufficient_fit_evidence"
+    assert not competition.scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+@pytest.mark.parametrize("repair", [
+    "omitted", "null", "number", "whitespace", "invalid", "wrong_name",
+    "provider_error", "malformed_response",
+])
+def test_only_explicit_typed_same_entity_identity_repair_can_exhaust(monkeypatch, repair):
+    result, events, investigations = _exercise(monkeypatch, repair=repair)
+    assert events.count("lead_scorer_reverify_schema_repair") == 1
+    assert len(investigations) <= 1
+    assert result.decision != "match"
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+@pytest.mark.parametrize("failure,source_fault,profile_failure", [
+    ("provider_error", False, ""), ("malformed_response", False, ""),
+    ("", True, ""), ("", False, "provider_error"),
+])
+def test_missing_linkedin_repair_does_not_clear_other_faults(
+    monkeypatch, failure, source_fault, profile_failure,
+):
+    result, _events, _investigations = _exercise(
+        monkeypatch, repair="missing", investigation_failure=failure,
+        source_fault=source_fault, profile_failure=profile_failure,
+    )
+    assert result.decision != "match"
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+def test_unrelated_completed_investigation_cannot_exhaust_missing_identity(monkeypatch):
+    result, _events, _investigations = _exercise(monkeypatch, repair="missing")
+    assert not scorer._is_same_domain_unproven_web_identity(result.details["identity_receipt"])
+    assert not scorer._has_explicitly_unproven_fit_dimensions(
+        {"observed_company_name": "Acme", "observed_company_website": "https://acme.example",
+         "observed_company_linkedin": ""},
+        ("identity",), identity_receipt=result.details["identity_receipt"],
+        investigation_receipt=result.details["investigation_receipt"],
+    )
+
+
+def test_missing_linkedin_terminal_zero_survives_public_retry_and_checkpoints(monkeypatch):
+    from lab_arena import scoring
+
+    result, events, investigations = _exercise(monkeypatch, repair="missing")
+    terminal = {
+        "company_name": "Acme", "final_score": 0.0,
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    }
+    attempts, checkpoints = [], []
+
+    def judge(companies, _buyer, _reference):
+        attempts.append([row["company_name"] for row in companies])
+        rows = []
+        for company in companies:
+            if company["company_name"] == "Acme":
+                rows.append(copy.deepcopy(terminal))
+            else:
+                rows.append({"company_name": "Other", "final_score": 0.0,
+                             "failure_reason": "provider error"})
+        return rows
+
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "identity-finality-test"},
+            icp={"employee_count": ["11-50"], "max_companies": 2},
+            companies=[{"company_name": name, "employee_count": "11-50"}
+                       for name in ("Acme", "Other")],
+            scorer=judge, on_terminal_breakdowns=lambda rows: checkpoints.append(copy.deepcopy(rows)),
+        )
+    assert attempts == [["Acme", "Other"], ["Other"], ["Other"]]
+    assert checkpoints == [[terminal]]
+    assert events == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair", "investigate"]
+    assert len(investigations) == 1
+
+
+def test_changed_domain_keeps_existing_genuine_negative_without_identity_proof(monkeypatch):
+    result, _events, _investigations = _exercise(monkeypatch, repair="wrong_domain")
+    assert result.decision != "match"
+    assert result.details["identity_decision"] != "match"
+    assert not scorer._is_explicitly_missing_web_linkedin_identity(
+        {"observed_company_name": "Acme", "observed_company_website": "https://other.example",
+         "observed_company_linkedin": ""}, result.details["identity_receipt"],
+    )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("observed_company_name", None), ("observed_company_name", ""),
+    ("observed_company_website", None), ("observed_company_website", ""),
+    ("observed_company_website", "not a URL"),
+    ("observed_company_linkedin", None), ("observed_company_linkedin", " "),
+])
+def test_missing_linkedin_proof_requires_complete_typed_identity_fields(field, value):
+    verdict = _complete_verdict(observed_company_linkedin="")
+    verdict[field] = value
+    receipt = scorer._web_identity_receipt(_company(), verdict)
+    assert not scorer._is_explicitly_missing_web_linkedin_identity(verdict, receipt)
+
+
+@pytest.mark.parametrize("linkedin", ["", "not a LinkedIn URL"])
+def test_missing_linkedin_proof_requires_valid_submitted_slug(linkedin):
+    company = _company().model_copy(update={"company_linkedin": linkedin})
+    verdict = _complete_verdict(observed_company_linkedin="")
+    receipt = scorer._web_identity_receipt(company, verdict)
+    assert not scorer._is_explicitly_missing_web_linkedin_identity(verdict, receipt)

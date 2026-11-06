@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, verify
+from lab_arena import code_review, code_review_policy, contracts, icp_disclosure, source_disclosure, verify
 from lab_arena.store import COMPETITION_CONFIGURATION_FIELDS, PUBLIC_CONFIGURATION_COLUMN
 
 
@@ -865,12 +865,68 @@ def _submitted_at(submission: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _admission_reason(row, document, categories, round_row):
+    """Explain stored review evidence without creating admission authority."""
+    status = row.get("code_review_status")
+    excluded = row.get("status") == "rejected" and row.get("rejection_rule") in (
+        "code_review_rejected", "code_review_incomplete",
+    )
+    if status == "rejected":
+        if categories:
+            return "source_policy_violation"
+        research = document.get("research_control")
+        configuration = (round_row or {}).get("configuration_doc")
+        digest = row.get("source_archive_sha256")
+        if (document.get("categories") == []
+                and isinstance(configuration, Mapping)
+                and configuration.get("reasoning_capture_policy") == "full_generated_thinking_v1"
+                and isinstance(research, Mapping)
+                and isinstance(digest, str) and contracts.SHA256_RE.fullmatch(digest)
+                and research.get("source_archive_sha256") == digest
+                and isinstance(research.get("source_manifest_sha256"), str)
+                and contracts.SHA256_RE.fullmatch(research["source_manifest_sha256"])
+                and research.get("policy_id") == code_review.RESEARCH_POLICY_ID
+                and research.get("policy_hash") == code_review.RESEARCH_POLICY_HASH
+                and research.get("reviewer_version") == code_review.RESEARCH_REVIEWER_VERSION
+                and research.get("classification") == "workflow"
+                and research.get("evidence_claims") == ["fixed_control"]
+                and type(research.get("evidence_count")) is int
+                and 1 <= research["evidence_count"] <= 16):
+            return "model_directed_research_required"
+        return "review_incomplete"
+    if status == "passed" and excluded and row.get("rejection_rule") == "code_review_incomplete":
+        return "source_review_unverified"
+    if status == "error":
+        code = document.get("error_code")
+        reason = document.get("error_reason")
+        if code == "review_response_invalid" and isinstance(reason, str):
+            if reason in {
+                "coverage", "coverage_order", "context_integrity", "finding_evidence",
+                "finding_evidence_mismatch", "finding_classification", "research_binding",
+                "research_evidence", "research_evidence_mismatch",
+            }:
+                return "review_evidence_invalid"
+            if reason in {"truncated", "truncated_at_limit", "not_finished"}:
+                return "review_response_incomplete"
+        if isinstance(code, str) and code in code_review_policy.ERROR_CODES:
+            return "review_error"
+        return "review_incomplete"
+    return "review_incomplete" if excluded else None
+
+
 def code_review_summary(
     row: Mapping[str, Any], *, round_row: Optional[Mapping[str, Any]] = None,
     now: Optional[datetime] = None,
 ) -> dict:
     """Project review metadata, never source or provider-authored prose."""
-    document = row.get("code_review_doc") or {}
+    document = row.get("code_review_doc")
+    document = document if isinstance(document, Mapping) else {}
+    raw_categories = document.get("categories")
+    categories = sorted({category for category in raw_categories
+                         if isinstance(category, str) and category in code_review.REVIEW_CATEGORIES}) if (
+        row.get("code_review_status") == "rejected" and isinstance(raw_categories, list)
+    ) else []
+    error_code = document.get("error_code")
     result = {
         "status": row.get("code_review_status") or "pending",
         "model": document.get("model"),
@@ -879,9 +935,12 @@ def code_review_summary(
         "cost_microusd": document.get("cost_microusd"),
         "review_cost_microusd": document.get("review_cost_microusd"),
         "cost_status": document.get("cost_status"),
-        "error_code": document.get("error_code"),
-        "categories": document.get("categories") or [],
+        "error_code": error_code if isinstance(error_code, str) and error_code in code_review_policy.ERROR_CODES else None,
+        "categories": categories,
     }
+    reason = _admission_reason(row, document, categories, round_row)
+    if reason is not None:
+        result["admission_reason"] = reason
     if "code_review_attempts" in row:
         result["attempts"] = row["code_review_attempts"]
     if type(document.get("retryable")) is bool or code_review_policy.transient_failure(document):
@@ -1161,7 +1220,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         columns=(
             "submission_id,round_id,miner_hotkey,status,is_king,updated_at,"
             "accepted_at,frozen_at,source_ref,consent,rejection_rule,"
-            "replaced_by_submission_id,code_review_status,code_review_attempts,"
+            "replaced_by_submission_id,source_archive_sha256,code_review_status,code_review_attempts,"
             "code_review_started_at,code_review_doc"
         ),
     )

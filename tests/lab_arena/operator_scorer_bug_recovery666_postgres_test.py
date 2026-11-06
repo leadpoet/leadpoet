@@ -352,3 +352,87 @@ def test_migration_is_replay_safe_and_rejects_unknown_helper_source(case):
     with p.c.cursor() as q:
         assert old.scalar(q,"SELECT pg_get_functiondef('public.lab_arena__operator_scorer_bug_child_v1(public.lab_arena_runs)'::regprocedure)") == original
     assert snapshot(p) == before
+
+
+@pytest.mark.parametrize("field", ["parent_hash", "runtime"])
+def test_null_required_hash_is_rejected_at_input_validation(case, field):
+    p = case
+    before = snapshot(p)
+    with pytest.raises(p.pg.Error, match="request invalid"):
+        grant(p, **{field: None})
+    p.c.rollback()
+    assert snapshot(p) == before
+
+
+def test_claim_locks_mapping_until_the_existing_runtime_pin_commits(case):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    import time
+
+    p = case
+    child_id = grant(p)['child_identity']['run_id']
+    with p.c.cursor() as q:
+        cfg = old.scalar(q,'SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s',(old.ROUND,))
+        q.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '1 hour' WHERE run_id=%s",(child_id,))
+        # Test-only barrier after the real candidate predicate, before the real
+        # runtime-pin trigger. This does not replace either production function.
+        q.execute("""CREATE FUNCTION public.test_pause_runtime666() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF OLD.status='pending' AND NEW.status='leased' THEN
+            PERFORM pg_advisory_xact_lock(666300); END IF; RETURN NEW; END; $$;
+          CREATE TRIGGER aaa_pause_runtime666 BEFORE UPDATE ON public.lab_arena_runs
+            FOR EACH ROW EXECUTE FUNCTION public.test_pause_runtime666();""")
+        q.execute('SELECT pg_advisory_lock(666300)')
+    p.c.commit()
+    old.release_guard(p)
+    watcher = p.pg.connect(**p.dsn)
+    watcher.autocommit = True
+    claimant = SimpleNamespace(pg=p.pg,dsn={**p.dsn,'application_name':'arena666-race-claim'})
+    registrar = SimpleNamespace(pg=p.pg,dsn={**p.dsn,'application_name':'arena666-race-register'})
+
+    def waiting(name, event=None):
+        with watcher.cursor() as q:
+            return old.scalar(q,"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=%s AND wait_event_type='Lock' AND (%s IS NULL OR wait_event=%s))",(name,event,event))
+
+    def wait_until(predicate):
+        end = time.monotonic()+5
+        while time.monotonic()<end:
+            if predicate():
+                return
+            time.sleep(0.01)
+        raise AssertionError('runtime race barrier did not reach the expected lock')
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claim = pool.submit(old.claim,claimant)
+            registered = None
+            try:
+                wait_until(lambda: waiting('arena666-race-claim','advisory'))
+                different = 'sha256:'+'3'*64
+                registered = pool.submit(old.rpc,registrar,
+                    'lab_arena_register_reviewer_runtime_v1(%s,%s,%s,%s)',(
+                        cfg['scorer_image_digest'],cfg['scorer_image_reference'],different,REPOSITORY+'@'+different))
+                # Before the fix this registration commits while the claim is
+                # paused, and the subsequent pin silently selects the new image.
+                wait_until(lambda: registered.done() or waiting('arena666-race-register'))
+                blocked = not registered.done()
+            finally:
+                with p.c.cursor() as q:
+                    q.execute('SELECT pg_advisory_unlock(666300)')
+                p.c.commit()
+            lease = claim.result(timeout=5)
+            assert registered is not None
+            registered.result(timeout=5)
+        assert blocked
+        assert lease['status']=='leased' and lease['run_id']==child_id
+        with p.c.cursor() as q:
+            pinned = old.scalar(q,'SELECT reviewer_runtime_doc FROM public.lab_arena_runs WHERE run_id=%s',(child_id,))
+            assert pinned['runtime_image_digest']==RUNTIME
+            assert old.scalar(q,'SELECT runtime_image_digest FROM public.lab_arena_reviewer_runtimes WHERE grading_image_digest=%s',(cfg['scorer_image_digest'],))==different
+    finally:
+        watcher.close()
+        p.c.rollback()
+        with p.c.cursor() as q:
+            q.execute('SELECT pg_advisory_unlock(666300)')
+            q.execute('DROP TRIGGER aaa_pause_runtime666 ON public.lab_arena_runs')
+            q.execute('DROP FUNCTION public.test_pause_runtime666()')
+        p.c.commit()

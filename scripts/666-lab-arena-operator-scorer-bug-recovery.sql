@@ -17,8 +17,8 @@ BEGIN
  FOR expected IN SELECT * FROM (VALUES
  ('public.lab_arena__operator_scorer_bug_child_v1(public.lab_arena_runs)','52470b9f7bc12e4e7789c47513ab09e26bd4be49cbd684d0863f31172b7fc4de','s','sql'),
  ('public.lab_arena__operator_scorer_bug_host_v1(public.lab_arena_runs)','7cdaf78e4d0bc2a88eacf32e0142f2d4859a6f9d7bc06db438cb041205ebb749','s','sql'),
- ('public.lab_arena__operator_scorer_bug_claim_v1(public.lab_arena_rounds,public.lab_arena_runs)','f311303db711af3fd8ef0d0b85e34882429928eb67e933dd2d0fe29c8165296d','s','sql'),
- ('public.lab_arena_grant_scorer_bug_recovery_v1(text,text,text,text,text,text,boolean)','fa770960743e6136d9ce5461253c4f942607f261711a41ce1042376ccd4a4d95','v','plpgsql')
+ ('public.lab_arena__operator_scorer_bug_claim_v1(public.lab_arena_rounds,public.lab_arena_runs)','9f8de76cd4f39c9ecb14d5b05fc9ad140c9b26881872d80b77163866f69f3235','v','sql'),
+ ('public.lab_arena_grant_scorer_bug_recovery_v1(text,text,text,text,text,text,boolean)','967e7add12fe07a4222d677903a622fb6d0e67a282775faa655749b4253028c6','v','plpgsql')
  ) functions(signature,source_sha256,volatility,language) LOOP
   SELECT p.*,l.lanname INTO actual FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
    WHERE p.oid=to_regprocedure(expected.signature);
@@ -62,10 +62,11 @@ ALTER FUNCTION public.lab_arena__operator_scorer_bug_host_v1(public.lab_arena_ru
 REVOKE ALL ON FUNCTION public.lab_arena__operator_scorer_bug_host_v1(public.lab_arena_runs)
  FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
 
+-- Claim holds the selected mapping through the existing runtime pin and commit.
 -- Only claim authority is live-state dependent; payer identity above is durable.
 CREATE OR REPLACE FUNCTION public.lab_arena__operator_scorer_bug_claim_v1(
  p_round public.lab_arena_rounds,p_run public.lab_arena_runs)
-RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $claim666$
+RETURNS BOOLEAN LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,public AS $claim666$
  SELECT coalesce(public.lab_arena__operator_scorer_bug_child_v1(p_run)
   AND p_run.scoring_generation_floor=p_round.scoring_generation_floor
   AND p_round.status NOT IN('published','cancelled') AND p_round.published_at IS NULL
@@ -82,7 +83,8 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,
     AND m.runtime_image_reference=h.recovery_doc->>'runtime_image_reference'
    WHERE h.round_id=p_run.round_id
     AND h.recovery_doc->>'recovery_kind'='operator_scorer_bug_recovery_v1'
-    AND h.recovery_doc->'child_identity'=jsonb_build_object('run_id',p_run.run_id,'assignment_id',p_run.assignment_id,'round_id',p_run.round_id,'submission_id',p_run.submission_id,'miner_hotkey',p_run.miner_hotkey,'stage',p_run.stage,'icp_position',p_run.icp_position,'attempt',p_run.attempt,'scored_run_id',p_run.scored_run_id,'stage_generation',p_run.stage_generation,'scoring_generation_floor',p_run.scoring_generation_floor,'judgment_cache_key',p_run.judgment_cache_key,'judgment_input_hash',p_run.judgment_input_hash,'judgment_scope_doc',p_run.judgment_scope_doc,'company_judgment_refs',p_run.company_judgment_refs)),FALSE);
+    AND h.recovery_doc->'child_identity'=jsonb_build_object('run_id',p_run.run_id,'assignment_id',p_run.assignment_id,'round_id',p_run.round_id,'submission_id',p_run.submission_id,'miner_hotkey',p_run.miner_hotkey,'stage',p_run.stage,'icp_position',p_run.icp_position,'attempt',p_run.attempt,'scored_run_id',p_run.scored_run_id,'stage_generation',p_run.stage_generation,'scoring_generation_floor',p_run.scoring_generation_floor,'judgment_cache_key',p_run.judgment_cache_key,'judgment_input_hash',p_run.judgment_input_hash,'judgment_scope_doc',p_run.judgment_scope_doc,'company_judgment_refs',p_run.company_judgment_refs)
+   FOR SHARE OF m),FALSE);
 $claim666$;
 ALTER FUNCTION public.lab_arena__operator_scorer_bug_claim_v1(public.lab_arena_rounds,public.lab_arena_runs) OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena__operator_scorer_bug_claim_v1(public.lab_arena_rounds,public.lab_arena_runs)
@@ -97,8 +99,9 @@ DECLARE parent public.lab_arena_runs; child public.lab_arena_runs; r public.lab_
  prior public.lab_arena_scoring_supersessions; revision BIGINT; proof JSONB; request_hash TEXT;
  checkpoints JSONB; signal_checkpoints JSONB; parent_hash TEXT; response JSONB; organizer BOOLEAN;
 BEGIN
- IF p_parent_run_id IS NULL OR p_parent_sha256 !~ '^sha256:[0-9a-f]{64}$'
-  OR p_runtime_image_digest !~ '^sha256:[0-9a-f]{64}$'
+ IF p_parent_run_id IS NULL OR p_parent_sha256 IS NULL
+  OR p_parent_sha256 !~ '^sha256:[0-9a-f]{64}$'
+  OR p_runtime_image_digest IS NULL OR p_runtime_image_digest !~ '^sha256:[0-9a-f]{64}$'
   OR p_request_id IS NULL OR length(p_request_id) NOT BETWEEN 1 AND 160
   OR p_actor_ref IS NULL OR length(p_actor_ref) NOT BETWEEN 1 AND 200
   OR p_correction_ref IS NULL OR length(p_correction_ref) NOT BETWEEN 1 AND 500

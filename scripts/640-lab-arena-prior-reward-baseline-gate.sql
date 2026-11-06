@@ -38,6 +38,7 @@ DECLARE
       )
   ) THEN RETURN FALSE; END IF;$new640$;
 BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('lab_arena.baseline_promotion',0));
   SELECT pg_get_functiondef(p.oid),p.prosrc,to_jsonb(p)-'prosrc',
     jsonb_build_array(pg_get_userbyid(p.proowner),p.proacl::TEXT,p.prosecdef,
       p.provolatile,p.proconfig,l.lanname,p.proisstrict,p.proleakproof,p.proparallel)

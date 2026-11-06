@@ -215,6 +215,27 @@ def test_existing_current_round_exemptions_remain(prepared, mutation):
     assert prior.current(p) is True
 
 
+def test_migration_waits_for_existing_promotion_readers_without_partial_change(prepared):
+    p = prepared
+    pending_predecessor(p)
+    before = data_snapshot(p)
+    with p.pg.connect(**p.dsn) as holder, holder.cursor() as q:
+        q.execute("SELECT pg_advisory_xact_lock_shared("
+                  "hashtextextended('lab_arena.baseline_promotion',0))")
+        original = scalar(q, "SELECT pg_get_functiondef(%s::regprocedure)", (SIGNATURE,))
+        with pytest.raises(p.pg.Error, match="lock timeout") as error:
+            apply(p)
+        assert error.value.pgcode == "55P03"
+        p.conn.rollback()
+        assert scalar(q, "SELECT pg_get_functiondef(%s::regprocedure)", (SIGNATURE,)) == original
+        assert data_snapshot(p) == before
+        assert prior.current(p) is True
+        holder.rollback()
+    apply(p)
+    assert prior.current(p) is False
+    assert data_snapshot(p) == before
+
+
 def test_function_only_replay_preserves_rows_oid_and_security(prepared):
     p = prepared
     before = data_snapshot(p)

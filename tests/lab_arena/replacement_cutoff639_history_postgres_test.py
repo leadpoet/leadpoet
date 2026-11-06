@@ -40,7 +40,7 @@ def test_633_native_recovery_claim_completion_publication_and_history_after639(d
                 assert history['revisions']
                 frozen={key:row for key,row in original_snapshot(p)['rounds'].items() if row['status']!='open'}
                 with p.conn.cursor() as q:
-                    q.execute((SCRIPTS/'639-lab-arena-prospective-replacement-cutoff.sql').read_text())
+                    q.execute((SCRIPTS/'642-lab-arena-prospective-replacement-cutoff.sql').read_text())
                 p.conn.commit();applied=True
                 assert p.store.scoring_policy_history(recovery.ROUND)==history
                 for key,row in frozen.items():

@@ -18,7 +18,7 @@ def test_completed635_receipts_and_terminal_rows_survive_cutoff_metadata(context
     ledgers={sid:store.list_ledger(submission_id=sid) for sid in rows}
     with c.cursor() as q:
         q.execute('SELECT jsonb_agg(to_jsonb(h) ORDER BY generation_floor) FROM public.lab_arena_scoring_supersessions h WHERE round_id=%s',(ROUND,));receipts=q.fetchone()[0]
-    apply(c,(SCRIPTS/'639-lab-arena-prospective-replacement-cutoff.sql').read_text())
+    apply(c,(SCRIPTS/'642-lab-arena-prospective-replacement-cutoff.sql').read_text())
     assert store.scoring_policy_history(ROUND)==history
     apply(c,M636.read_text())
     with c.cursor() as q:

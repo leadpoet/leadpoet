@@ -14,7 +14,7 @@ from tests.lab_arena.test_lab_arena_source_migration_postgres import _hotkey
 from tests.lab_arena.refusal_review_fallback599_postgres_test import begin, PRIMARY
 from tests.postgres_migration_harness import SCRIPTS
 
-MIGRATION = SCRIPTS/'639-lab-arena-prospective-replacement-cutoff.sql'
+MIGRATION = SCRIPTS/'642-lab-arena-prospective-replacement-cutoff.sql'
 SIGNATURES = (
  'public.lab_arena__register_submission_v2(text,text,text,jsonb,text,bigint,text)',
  'public.lab_arena_accept_submission_with_credentials(text,text,text,jsonb)',

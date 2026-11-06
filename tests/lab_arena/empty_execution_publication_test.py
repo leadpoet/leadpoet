@@ -94,12 +94,24 @@ def test_forged_later_trajectory_success_cannot_mask_native_route_failure():
     assert service._empty_execution_infrastructure_failure(reads) is True
 
 
-def test_nonempty_output_does_not_read_provider_history():
+@pytest.mark.parametrize("score", [None, 0.0, 1.0])
+def test_nonempty_output_does_not_read_provider_history(score):
     service, reads, _, _, _, calls = case()
     reads.outputs_by_ref["saved-output"] = {"companies": [{"company_name": "already validated"}]}
-    reads.runs[0]["per_icp_score"] = 1.0
+    reads.runs[0]["per_icp_score"] = score
     assert service._empty_execution_infrastructure_failure(reads) is False
     assert calls == []
+
+
+def test_nonempty_unjudged_output_does_not_require_a_settled_model_call():
+    service, reads, _, ledger, _, calls = case()
+    reads.outputs_by_ref["saved-output"] = {"companies": [{"company_name": "already validated"}]}
+    reads.runs[0]["per_icp_score"] = None
+    ledger[-1].update(entry_kind="uncertain", terminal_response=None)
+    before = copy.deepcopy((reads.runs, ledger))
+    assert service._execution_infrastructure_failures(reads) == {}
+    assert calls == []
+    assert (reads.runs, ledger) == before
 
 
 def test_nonparticipant_runs_are_not_examined():

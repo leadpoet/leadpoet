@@ -583,8 +583,8 @@ For a proven stage, observed_value must be a non-null canonical value: Seed,
 Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the proven
 value, not the requested value by default. Series C+ represents
 completed Series C and later priced-equity rounds, including a completed
-extension of that round. Return observed_value="Series C+" for such evidence;
-an extension does not require a new stage label. Debt, grants, planned rounds,
+extension of that round. Return observed_value="Series C+" for such evidence.
+Debt, grants, planned rounds,
 or pending deals do not establish that value.
 
 A currently listed company stays Public despite PE control until a later
@@ -601,7 +601,7 @@ ticker, and exchange. Quote one continuous span that includes the registrant
 name and the complete row. Check the filing date and later ownership/listing
 events; an old table does not establish current status or override newer
 private-company evidence. For venture stages, compare dated rounds, acquisitions
-and IPO/listing events; use the latest completed event.
+and IPO/listing events.
 For a Series stage, use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
 A later completed priced-equity round, controlling acquisition, or IPO/listing
@@ -612,9 +612,10 @@ Acquired and does not supersede the buyer's funding stage. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. A competing stage event is material only if the
 source states it completed and changed control, listing or priced-round series.
-Later strategic, minority or unspecified investments, pending or conditional
-deals and unfinished research are not; a proven stage stays. Later private
-financing keeps Series C+ unless stated to give control or a listing.
+Later strategic or minority investments, pending or conditional deals and
+unfinished research are not; a proven stage stays. Later private financing
+keeps Series C+ unless stated to give control or a listing; a later completed
+round of unstated series leaves an earlier stage UNPROVEN.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for

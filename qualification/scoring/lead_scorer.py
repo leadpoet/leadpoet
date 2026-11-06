@@ -10410,8 +10410,10 @@ async def _llm_reverify_company(
             f'parent, IPO/listing change, or later completed priced round, then select '
             f'the newest applicable state. A proven stage stays proven unless a later '
             f'completed event concretely changed control, listing, or the priced-round '
-            f'series; a later strategic, minority, or unspecified investment, a pending '
-            f'or conditional deal, or unfinished research does not erase it. For a venture stage, prefer a first-party '
+            f'series; a later strategic or minority investment, a pending or '
+            f'conditional deal, or unfinished research does not erase it. A later '
+            f'completed round of unstated series keeps Series C+ but leaves an '
+            f'earlier stage unresolved. For a venture stage, prefer a first-party '
             f'completed-round announcement and its full body over a directory table, '
             f'investor summary, funding total, or search snippet. An older Seed, '
             f'Series A, or Series B quote does not establish the current stage when '
@@ -11113,9 +11115,10 @@ async def _llm_reverify_company(
         "stage onto its subsidiary, except that a requested Public stage is met "
         "by a current wholly or majority owned subsidiary, brand, or division "
         "of a currently listed parent; return Acquired with the ownership quote "
-        "for that case. A later strategic, minority, or unspecified investment, "
-        "a pending or conditional deal, or unfinished research does not erase "
-        "a proven stage. Prefer a first-party completed-round "
+        "for that case. A later strategic or minority investment, a pending "
+        "or conditional deal, or unfinished research does not erase a proven "
+        "stage. A later completed round of unstated series keeps Series C+ but "
+        "leaves an earlier stage unresolved. Prefer a first-party completed-round "
         "full-body quote over a directory table, investor summary, or snippet. "
         "Report a different stage or leave it unresolved when the evidence "
         "requires that."

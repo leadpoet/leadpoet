@@ -49,13 +49,15 @@ def test_investigator_keeps_a_proven_stage_through_non_material_later_events():
         "completed and changed control, listing or priced-round series."
     ) in INVESTIGATOR_PROMPT
     assert (
-        "Later strategic, minority or unspecified investments, pending or "
-        "conditional deals and unfinished research are not; a proven stage stays."
+        "Later strategic or minority investments, pending or conditional deals "
+        "and unfinished research are not; a proven stage stays."
     ) in INVESTIGATOR_PROMPT
     assert (
         "Later private financing keeps Series C+ unless stated to give control "
-        "or a listing."
+        "or a listing; a later completed round of unstated series leaves an "
+        "earlier stage UNPROVEN."
     ) in INVESTIGATOR_PROMPT
+    assert "unspecified investment" not in INVESTIGATOR_PROMPT
     # The possibility of control no longer erases a proven Series C+.
     assert "may have given" not in INVESTIGATOR_PROMPT
     assert "Conflicting labels without chronology are UNPROVEN" not in INVESTIGATOR_PROMPT
@@ -72,15 +74,21 @@ def test_investigator_keeps_a_proven_stage_through_non_material_later_events():
 def test_reviewer_prompts_match_the_investigator_stage_persistence_rule():
     sentence = (
         "A proven stage stays proven unless a later completed event concretely "
-        "changed control, listing, or the priced-round series; a later strategic, "
-        "minority, or unspecified investment, a pending or conditional deal, or "
-        "unfinished research does not erase it."
+        "changed control, listing, or the priced-round series; a later strategic "
+        "or minority investment, a pending or conditional deal, or unfinished "
+        "research does not erase it."
     )
     assert sentence in LEAD_SCORER_PROMPTS
     assert (
-        "A later strategic, minority, or unspecified investment, a pending or "
-        "conditional deal, or unfinished research does not erase a proven stage."
+        "A later strategic or minority investment, a pending or conditional "
+        "deal, or unfinished research does not erase a proven stage."
     ) in LEAD_SCORER_PROMPTS
+    # An unnamed later round keeps only Series C+; it does not keep Seed/A/B.
+    assert LEAD_SCORER_PROMPTS.count(
+        "A later completed round of unstated series keeps Series C+ but leaves "
+        "an earlier stage unresolved."
+    ) >= 2  # full-fit and stage-repair prompts (f-string parts are also walked)
+    assert "unspecified investment" not in LEAD_SCORER_PROMPTS
 
 
 # Rule B prompt contract ----------------------------------------------------
@@ -252,6 +260,12 @@ def test_descriptive_scope_lists_and_delivery_words_keep_required_functions():
         "mobile-first and app-based by the same ordinary meaning"
     ) in rules
     assert "it does not supply a missing function or capability" in rules
+    # Web delivery is not mobile-first; each form word keeps its own meaning.
+    assert (
+        "an offering customers reach over the internet, in a browser or by API "
+        "is cloud, online, digital or web-based; one centered on a mobile app "
+        "is mobile-first or app-based."
+    ) in rules
     # Mandatory wording and listed functions keep precedence.
     assert "Explicit logical AND and mandatory wording take precedence over descriptive-list guidance" in rules
     assert "'must serve hospitals and clinics' requires both customer types" in rules

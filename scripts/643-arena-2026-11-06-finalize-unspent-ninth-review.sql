@@ -12,7 +12,7 @@ DECLARE
  r public.lab_arena_rounds; s public.lab_arena_submissions;
  h public.lab_arena_scoring_supersessions; done public.lab_arena_scoring_supersessions;
  c public.lab_arena_restart_claim_control; original JSONB; journal JSONB;
- rows_before JSONB; runs_before JSONB; ledger_before JSONB; receipts_before JSONB;
+ rows_before JSONB; runs_before JSONB; receipts_before JSONB;
  control_before JSONB; target_before JSONB; proof JSONB; generation BIGINT;
 BEGIN
  SELECT * INTO STRICT r FROM public.lab_arena_rounds WHERE round_id=rid FOR UPDATE;
@@ -76,7 +76,9 @@ BEGIN
   RAISE EXCEPTION 'Nov06 unspent643 exact grant, unused source, ledger or miner planning differs'; END IF;
  SELECT jsonb_object_agg(submission_id,to_jsonb(a)) INTO rows_before FROM public.lab_arena_submissions a WHERE round_id=rid AND submission_id<>sid;
  SELECT coalesce(jsonb_object_agg(run_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')),'{}') INTO runs_before FROM public.lab_arena_runs a WHERE round_id=rid;
- SELECT coalesce(jsonb_object_agg(entry_id::TEXT,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')),'{}') INTO ledger_before FROM public.lab_arena_ledger a WHERE round_id=rid;
+ -- journal already pins all nine exact review entries through the submission
+ -- index. This migration and its validation triggers write no ledger rows;
+ -- avoid an unindexed whole-round ledger scan on the active production table.
  SELECT jsonb_agg(to_jsonb(a) ORDER BY generation_floor) INTO receipts_before FROM public.lab_arena_scoring_supersessions a WHERE round_id=rid;
  control_before:=to_jsonb(c);target_before:=to_jsonb(s);
  UPDATE public.lab_arena_submissions SET status='rejected',rejection_rule='code_review_incomplete'
@@ -88,7 +90,7 @@ BEGIN
   OR (SELECT to_jsonb(a) FROM public.lab_arena_rounds a WHERE round_id=rid) IS DISTINCT FROM to_jsonb(r)
   OR (SELECT jsonb_object_agg(submission_id,to_jsonb(a)) FROM public.lab_arena_submissions a WHERE round_id=rid AND submission_id<>sid) IS DISTINCT FROM rows_before
   OR (SELECT coalesce(jsonb_object_agg(run_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')),'{}') FROM public.lab_arena_runs a WHERE round_id=rid) IS DISTINCT FROM runs_before
-  OR (SELECT coalesce(jsonb_object_agg(entry_id::TEXT,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')),'{}') FROM public.lab_arena_ledger a WHERE round_id=rid) IS DISTINCT FROM ledger_before
+  OR (SELECT jsonb_agg(to_jsonb(a) ORDER BY entry_id) FROM public.lab_arena_ledger a WHERE submission_id=sid AND operation_id='openrouter.code_review') IS DISTINCT FROM journal
   OR (SELECT to_jsonb(a) FROM public.lab_arena_restart_claim_control a WHERE singleton) IS DISTINCT FROM control_before
   OR (SELECT jsonb_agg(to_jsonb(a) ORDER BY generation_floor) FROM public.lab_arena_scoring_supersessions a WHERE round_id=rid) IS DISTINCT FROM receipts_before THEN
   RAISE EXCEPTION 'Nov06 unspent643 changed preserved authority'; END IF;

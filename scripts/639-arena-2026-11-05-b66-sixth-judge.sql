@@ -118,7 +118,7 @@ DO $patch639$
 DECLARE target RECORD; d TEXT; updated TEXT; metadata JSONB; function_oid OID;
 BEGIN
  FOR target IN SELECT * FROM (VALUES
- ('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c','e0715a0a01f53c68d5ec9c020d90bc13848e12580c49e5de41e30b0e536ed575','v','plpgsql',$old639$      OR public.lab_arena__nov03_captify_judge614_v1(v_round,runs))$old639$,$new639$      OR public.lab_arena__nov03_captify_judge614_v1(v_round,runs)
+ ('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)','6aabab38cf3474db8e97c0b2aaffd1f071541b694020b0411a023acd780fe637','2acc6ff6c64ed797299cd18f203b3d62459720e2ae1ab9cb1f03a7850e62dd82','v','plpgsql',$old639$      OR public.lab_arena__nov03_captify_judge614_v1(v_round,runs))$old639$,$new639$      OR public.lab_arena__nov03_captify_judge614_v1(v_round,runs)
       OR public.lab_arena__nov05_b66_judge639_v1(v_round,runs))$new639$),
  ('public.lab_arena_scoring_policy_history_v1(text)','5fdfee1a65c755a862b17998607514941a222c5912d60852a00bf21e027777bd','34123c2c2c2e68d4056a94c2f9f5bba4889d158ee8ac38869f6e68da88a2eb84','s','sql',$old639$'nov05_recovery_window641_v1') THEN$old639$,$new639$'nov05_recovery_window641_v1','nov05_b66_post_repair639_v1') THEN$new639$)
  ) AS patches(signature,preimage,postimage,volatility,language,old_text,new_text) LOOP

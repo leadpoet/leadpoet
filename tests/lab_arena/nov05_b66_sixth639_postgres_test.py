@@ -65,8 +65,10 @@ def database():
             q.execute(recovery.SQL.read_text().split('-- Exact one-time data correction.')[0]+'COMMIT;');c.commit()
             for name,expected in [('lab_arena_complete_attempt','6c5ee308109b55b3b23ee1f1631d894cd72b8582ad1180c898e25f7ae9106ac0'),('lab_arena_expire_leases','b5887c1e2afa6ac5ff342f1dc4ed1f0fc390b92b7302533a3ba31db964dbfaca'),('lab_arena__score_attempt_count_v1','41f2a3f5fa3a5abf0e6106df52e98c59121a55e99e22daad88673ff8f45d9b84')]:
                 assert scalar(q,"SELECT encode(extensions.digest(pg_get_functiondef(p.oid),'sha256'),'hex') FROM pg_proc p WHERE proname=%s",(name,))==expected
+            route_text=(SCRIPTS/'645-lab-arena-expiring-round-claim-routing.sql').read_text()
+            q.execute(route_text.split('-- Exact authorized Nov5 primary-only activation')[0]+'COMMIT;');c.commit()
             definitions={sig:scalar(q,'SELECT pg_get_functiondef(%s::regprocedure)',(sig,))for sig in (CLAIM,HISTORY)}
-            assert hashlib.sha256(definitions[CLAIM].encode()).hexdigest()=='a5dc7e6f4370dbffa6e390609a584e5d317cdba33445e58b5bf58bd8ec9f1f6c'
+            assert hashlib.sha256(definitions[CLAIM].encode()).hexdigest()=='6aabab38cf3474db8e97c0b2aaffd1f071541b694020b0411a023acd780fe637'
             assert hashlib.sha256(definitions[HISTORY].encode()).hexdigest()=='e56c877e3c2ba5440b2fc7b55caa65b2e94935c5117dddd12ed1320c9e3f4a45'
         yield pg,dsn,definitions
     finally:gen.close()

@@ -508,7 +508,8 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
                          "purpose": first.get("purpose"), "call_id": raw["call_id"],
                          "format": first["api"], "input": request, "target": target,
                          "available_reasoning": reasoning["available_segments"],
-                         "generated_thinking": reasoning["full_generated_thinking"],
+                         # A projected response grants no new full-thinking target.
+                         "generated_thinking": [] if opaque_projection else reasoning["full_generated_thinking"],
                          "quality": {"status": "unreviewed", "correct_action": "not_established"},
                          "training_permission": {"status": "unconfirmed"},
                          "source": {"event_refs": raw["event_refs"], "context": raw["context"],

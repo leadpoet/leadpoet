@@ -6,6 +6,7 @@ import pytest
 from lab_arena import contracts, internal_capture, training_export
 from lab_arena.service import LocalObjectStore
 from scripts.export_arena_internal_training import main
+from tests.lab_arena import internal_capture_core_test as core
 
 
 def saved(tmp_path, *, api='openrouter.chat', request_secret=False, context_secret=False,
@@ -65,6 +66,22 @@ def test_only_opaque_response_is_a_marked_projection_with_raw_privacy_unchanged(
     assert candidate['target']==target
     assert 'synthetic-opaque-state' not in json.dumps(raw)
     assert candidate['quality']['status']=='unreviewed' and candidate['training_permission']['status']=='unconfirmed'
+
+
+def test_projection_does_not_promote_approved_raw_reasoning_to_candidate_full_thinking(tmp_path):
+    registry=core.reviewed_registry()
+    payload,_=internal_capture.reasoning_capture.apply('openrouter.chat',core.request(),
+        policy=internal_capture.reasoning_capture.POLICY,registry=registry)
+    provider=core.response()
+    provider.update(provider='Route A',openrouter_metadata={'endpoints':{'available':[
+        {'selected':True,'model':'test/model','provider':'Route A'}]}})
+    provider['choices'][0]['message']['reasoning_details']=[{'type':'reasoning.encrypted','data':'opaque'}]
+    objects,call=core.captured(tmp_path,provider=provider,payload=payload)
+    raw,candidate=internal_capture.read_call(objects,call.prefix+'request.json',registry=registry)
+    assert raw['reasoning']['full_generated_thinking'][0]['text']=='Check the original source.'
+    assert candidate['available_reasoning']==raw['reasoning']['available_segments']
+    assert candidate['generated_thinking']==[]
+    assert candidate['source']['response_projection']['exact_provider_replay'] is False
 
 
 @pytest.mark.parametrize('where',['request','context','outcome','response'])

@@ -34,6 +34,8 @@ from gateway.observability.otel_bootstrap import (
     ARENA_LIFECYCLE_STAGES,
     LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES,
     PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST,
+    PROVIDER_REFUSAL_SPAN_FIELDS,
+    ARENA_PROVIDER_REFUSAL_TYPES,
     RUN_IDENTITY_ATTRIBUTE_ALLOWLIST,
     REVIEW_SPAN_ATTRIBUTE_ALLOWLIST,
     RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST,
@@ -463,6 +465,44 @@ def test_provider_span_carries_only_the_approved_attributes():
     assert span.attributes["arena.cost_microusd"] == 1375
     assert span.attributes["arena.attempts"] == 2
     assert span.attributes["arena.tool"] == ARENA_TOOL_NONE
+
+
+def test_provider_refusal_fields_are_optional_and_do_not_drop_the_span():
+    """A refusal carries two extra attributes; the span must still be emitted.
+
+    The provider envelope is a closed allowlist and an unrecognised attribute
+    drops the whole span, so these two have to be declared optional rather
+    than simply set.
+    """
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        "openrouter",
+        "openrouter.responses",
+        "refused",
+        error_code="miner_credentials_unavailable",
+        http_status=402,
+        provider_status=401,
+        credential_fingerprint="0123456789ab",
+        provider_refusal_type="rate_limit_exceeded",
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert set(span.attributes) == (
+        PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST | PROVIDER_REFUSAL_SPAN_FIELDS
+    )
+    assert span.attributes["arena.credential_fingerprint"] == "0123456789ab"
+    assert span.attributes["arena.provider_refusal_type"] == "rate_limit_exceeded"
+    assert span.attributes["arena.provider_status"] == 401
+
+
+def test_provider_refusal_vocabulary_matches_the_broker():
+    """The telemetry layer bounds itself, so the two lists must not drift."""
+    from lab_arena import broker as broker_module
+
+    assert ARENA_PROVIDER_REFUSAL_TYPES == frozenset(
+        broker_module._OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES
+    ) | {"unmapped"}
 
 
 def test_provider_span_names_the_deepline_tool():

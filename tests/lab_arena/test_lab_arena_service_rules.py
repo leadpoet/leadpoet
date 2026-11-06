@@ -1002,6 +1002,43 @@ def test_provider_telemetry_uses_registered_provider_and_safe_fallbacks():
     )
 
 
+def test_provider_refusal_telemetry_carries_bounded_discriminators():
+    """A refusal must say which credential we sent and what the provider called it."""
+
+    fields = _provider_telemetry_fields(
+        {"operation_id": "openrouter.responses", "provider": "openrouter",
+         "error_code": "miner_credentials_unavailable", "provider_status": 401,
+         "credential_fingerprint_short": "0123456789ab",
+         "provider_refusal_type": "rate_limit_exceeded"},
+        402, 1,
+    )
+    assert fields["credential_fingerprint"] == "0123456789ab"
+    assert fields["provider_refusal_type"] == "rate_limit_exceeded"
+    assert fields["provider_status"] == 401
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        {"credential_fingerprint_short": "sha256:" + "a" * 64},
+        {"credential_fingerprint_short": "not-hex-at-al"},
+        {"credential_fingerprint_short": "0123456789abcdef"},
+        {"provider_refusal_type": "sk-or-v1-a-real-looking-secret"},
+        {"provider_refusal_type": "the provider said no"},
+    ],
+)
+def test_provider_refusal_telemetry_drops_anything_off_vocabulary(call):
+    """Nothing reaches the span that is not a digest prefix or a known token."""
+
+    fields = _provider_telemetry_fields(
+        {"operation_id": "openrouter.responses", "provider": "openrouter",
+         "provider_status": 401, **call},
+        402, 1,
+    )
+    assert "credential_fingerprint" not in fields
+    assert "provider_refusal_type" not in fields
+
+
 @pytest.mark.parametrize(
     ("proof_reason", "accepted"),
     [

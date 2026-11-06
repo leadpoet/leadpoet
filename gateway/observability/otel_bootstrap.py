@@ -809,6 +809,28 @@ STORE_ERROR_SPAN_FIELDS = frozenset({
     "arena.store_code", "arena.store_transport_error",
 })
 
+# Present only on a provider authorisation refusal, and optional like the
+# store-error fields above. A truncated digest of the credential we actually
+# presented, and the provider's own typed name for the refusal. Without them
+# a refusal and a dead key look identical after the fact.
+PROVIDER_REFUSAL_SPAN_FIELDS = frozenset({
+    "arena.credential_fingerprint", "arena.provider_refusal_type",
+})
+_ARENA_CREDENTIAL_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{12}$")
+# Held here rather than imported so the telemetry layer bounds what it emits
+# independently of the broker. Mirrors the broker's OpenRouter error-type
+# vocabulary; a test keeps the two in step.
+ARENA_PROVIDER_REFUSAL_TYPES = frozenset({
+    "context_length_exceeded", "max_tokens_exceeded", "token_limit_exceeded",
+    "string_too_long", "authentication", "permission_denied", "payment_required",
+    "rate_limit_exceeded", "provider_overloaded", "provider_unavailable",
+    "invalid_request", "invalid_prompt", "not_found", "precondition_failed",
+    "payload_too_large", "unprocessable", "content_policy_violation", "refusal",
+    "invalid_image", "image_too_large", "image_too_small",
+    "unsupported_image_format", "image_not_found", "image_download_failed",
+    "server", "timeout", "unmapped",
+})
+
 PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(PROVIDER_SPAN_ATTRIBUTE_TYPES)
 
 # The ONLY attributes a run-outcome span may carry. There is deliberately no
@@ -1181,7 +1203,19 @@ def _validating_exporter(
             metadata = {key.removeprefix("arena.store_"): value for key, value in store_fields.items()}
             if safe_store_error_metadata(metadata) != metadata or attributes.get("arena.outcome") != "failed":
                 return "store_error"
-        provider_fields = {key: value for key, value in attributes.items() if key not in store_fields}
+        fingerprint = attributes.get("arena.credential_fingerprint")
+        if fingerprint is not None and (
+            not isinstance(fingerprint, str)
+            or _ARENA_CREDENTIAL_FINGERPRINT_RE.fullmatch(fingerprint) is None
+        ):
+            return "credential_fingerprint"
+        refusal_type = attributes.get("arena.provider_refusal_type")
+        if refusal_type is not None and refusal_type not in ARENA_PROVIDER_REFUSAL_TYPES:
+            return "provider_refusal_type"
+        provider_fields = {
+            key: value for key, value in attributes.items()
+            if key not in store_fields and key not in PROVIDER_REFUSAL_SPAN_FIELDS
+        }
         run_identity_error = _attributed_run_violation(provider_fields, PROVIDER_SPAN_ATTRIBUTE_TYPES)
         if run_identity_error is not None:
             return run_identity_error
@@ -1747,6 +1781,8 @@ class ArenaTelemetry:
         attempts: int = 1,
         cost_microusd: int = 0,
         duration_ms: float = 0.0,
+        credential_fingerprint: str = "",
+        provider_refusal_type: str = "",
         start_ns: Optional[int] = None,
         run_identity: Optional[Mapping[str, Any]] = None,
         store_error: Optional[Mapping[str, Any]] = None,
@@ -1765,6 +1801,8 @@ class ArenaTelemetry:
                 attempts=attempts,
                 cost_microusd=cost_microusd,
                 duration_ms=duration_ms,
+                credential_fingerprint=credential_fingerprint,
+                provider_refusal_type=provider_refusal_type,
                 start_ns=start_ns,
                 run_identity=run_identity,
                 store_error=store_error,
@@ -1787,6 +1825,8 @@ class ArenaTelemetry:
         attempts: int,
         cost_microusd: int,
         duration_ms: float,
+        credential_fingerprint: str,
+        provider_refusal_type: str,
         start_ns: Optional[int],
         run_identity: Optional[Mapping[str, Any]],
         store_error: Optional[Mapping[str, Any]],
@@ -1812,6 +1852,13 @@ class ArenaTelemetry:
         span.set_attribute("arena.attempts", int(attempts))
         span.set_attribute("arena.cost_microusd", int(cost_microusd))
         span.set_attribute("duration_ms", float(duration_ms))
+        # Only present on a provider authorisation refusal. Together they
+        # separate "we presented a different key" from "the provider refused
+        # the key it answered a minute ago", which is otherwise unknowable.
+        if credential_fingerprint:
+            span.set_attribute("arena.credential_fingerprint", str(credential_fingerprint))
+        if provider_refusal_type:
+            span.set_attribute("arena.provider_refusal_type", str(provider_refusal_type))
         if store_error:
             from lab_arena.store import safe_store_error_metadata
             for key, value in safe_store_error_metadata(store_error).items():

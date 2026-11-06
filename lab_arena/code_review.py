@@ -285,6 +285,21 @@ path that establishes both the unsupported substitution and its reachable
 output; do not infer a violation merely from a missing citation. Apply this
 same behavior test to every submission, regardless of author or prior review.
 
+Distinguish emitted factual assertions from selection and control metadata.
+An internal candidate/pass flag or a routing index such as matched_icp_signal
+does not by itself attest that a company fact was independently verified. Trace
+the actual output text and field meaning. Genuine source quotes, weak matches,
+and explicitly hypothetical commercial relevance are not fabrication solely
+because relevance is uncertain. A real quote does not support added facts.
+A hedge does not excuse an unsupported factual premise: "may help expand its
+offering" can still assert that the company already has that offering. Consider
+independent evidence across fields and checks; another required check may
+establish the same fact even without a label-specific pass. For each fabrication
+finding, explain the precise unsupported factual assertion and its reachable emitted field,
+including why required evidence checks do not establish it. If hypothetical
+versus factual meaning remains unresolved, apply the same clear-evidence
+threshold above; do not assume either verification or fabrication.
+
 The user message is a JSON document whose submission_files array is the entire
 validated archive. Inspect every item and return each supplied path exactly
 once, in the supplied order, in reviewed_files. A reject verdict requires at

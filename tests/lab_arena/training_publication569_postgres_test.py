@@ -319,7 +319,11 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
     harness.service._config.reasoning_registry_source = approved_registry
     harness.service._config.baseline_source_fetcher = promoted_source
     harness.clock.now = datetime.now(timezone.utc)
-    next_cutoff = harness.clock.now + timedelta(days=1)
+    previous_cutoff = datetime.fromisoformat(
+        saved["configuration_doc"]["schedule"]["submission_cutoff"].replace("Z", "+00:00"))
+    # Keep the promoted winner strictly before the new evaluation date even
+    # when the first cutoff crossed UTC midnight ahead of wall time.
+    next_cutoff = max(harness.clock.now, previous_cutoff) + timedelta(days=1)
     next_config = harness.service.create_round(
         next_cutoff, round_id="arena-2099-10-17-promoted",
     )
@@ -327,7 +331,8 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
     assert contracts.JUDGE_REASONING_CAPTURE_BINDING not in next_config["scorer_policy"]["env_bindings"]
     harness.round_id = next_config["round_id"]
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
-    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    advance = harness.service.advance_round(harness.round_id)
+    assert advance["status"] == "ok", advance
     next_row = harness.service.store.get_round(harness.round_id)
     baseline = next(participant for participant in next_row["participants"]
                     if participant["is_king"])

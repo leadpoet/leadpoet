@@ -49,8 +49,9 @@ def test_nonempty_unjudged_uncertain_call_does_not_cancel_or_bypass_sql(database
         result = h.service.publish(h.round_id)
         assert result == {'status': 'retry', 'round_status': 'scored', 'reason': 'judge_incomplete'}
     else:
-        # The unchanged SQL receipt guard remains authoritative. The service
-        # must reach it, never convert this valid output into cancellation.
+        # Historical540 still requires a settled receipt. Current664 separately
+        # proves narrow unknown-bill omission without changing that helper.
+        # This before-664 control must never become cancellation.
         with pytest.raises(ArenaStoreError, match='Arena execution receipt binding invalid'):
             h.service.publish(h.round_id)
     row = h.service.store.get_round(h.round_id)

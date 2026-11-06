@@ -31,12 +31,17 @@ def bind(monkeypatch, frozen):
         monkeypatch.setenv(name, value)
 
 
-def industry(research=False):
+def industry(research=False, *, chunked=False):
+    pages = [{"source_id": "s0", "source_url": "https://fixture.example.org",
+              "body": "Fixture Works manufactures and sells its own industrial valves."}]
+    if chunked:
+        pages[0]["body"] += " Fixture Works tests its manufactured industrial valves at its Montréal workshop before sale." * 100
+        pages.append({"source_id": "s1", "source_url": "https://fixture.example.org/valves",
+                      "body": "Fixture Works sells valve hardware to industrial operators."})
     packet = industry_classification.prepare(
         {"industry": "", "subindustry": "", "product_service": "Manufactures valves."},
         {"name": "Fixture Works", "website": "https://fixture.example.org", "linkedin": ""},
-        [{"source_id": "s0", "source_url": "https://fixture.example.org",
-          "body": "Fixture Works manufactures and sells its own industrial valves."}],
+        pages,
         evaluation_date="2026-11-06")
     request = industry_classification.request_payload(packet, model=MODEL, research=research)
     request.pop("reasoning")  # The unchanged native investigator does this under its opt-in.
@@ -50,6 +55,7 @@ def registry():
     result["approved_routes"] += _reviewed_registry(model=MODEL, api="openrouter.responses")["approved_routes"]
     for route in result["approved_routes"]:
         route["max_output_tokens"] = 32768
+        route["context_tokens"] = 131072  # Input headroom for the multi-page wire fixture.
     return result
 
 
@@ -70,12 +76,22 @@ def dispatch(parameters, frozen, *, api="openrouter.chat"):
 
 @pytest.mark.parametrize("research", [False, True])
 @pytest.mark.parametrize("reason_minimum", [False, True])
-def test_native_industry_override_reaches_exact_broker_wire(monkeypatch, research, reason_minimum):
+@pytest.mark.parametrize("chunked", [False, True])
+def test_native_industry_override_reaches_exact_broker_wire(monkeypatch, research, reason_minimum, chunked):
     frozen = policy()
     assert contracts.validate_scorer_policy(json.loads(json.dumps(frozen))) == frozen
     assert reasoning_capture.validate_judge_registry(registry(), frozen) == registry()
     bind(monkeypatch, frozen)
-    original = industry(research)
+    original = industry(research, chunked=chunked)
+    if chunked:
+        assert len(original["messages"]) > 3
+        pages = [page for message in original["messages"][2:]
+                 for page in json.loads(message["content"])["untrusted_source_pages"]]
+        assert {page["source_id"] for page in pages} == {"s0", "s1"}
+        assert sum(page["source_id"] == "s0" for page in pages) > 1
+        texts = [span["text"] for page in pages if page["source_id"] == "s0" for span in page["spans"]]
+        assert sum(map(len, texts)) > 4800
+        assert any(len(text.encode("utf-8")) > len(text) for text in texts)
     if reason_minimum:
         original["response_format"]["json_schema"]["schema"]["properties"]["reason"]["minLength"] = 1
     path, prepared = openrouter_options.prepare_judge_request(original)
@@ -177,6 +193,63 @@ def test_broker_enforces_frozen_override_before_reservation(monkeypatch):
     prepared = openrouter_options.prepare_judge_request(industry())[1]
     prepared["max_tokens"] = 16385
     result, store, transport = dispatch(prepared, frozen)
+    assert result.status == 400 and not store.calls and not transport.sent
+
+
+@pytest.mark.parametrize("damage", ["role", "json", "duplicate", "omitted", "reordered"])
+def test_later_source_messages_cannot_escape_native_packet_binding(monkeypatch, damage):
+    frozen = policy()
+    bind(monkeypatch, frozen)
+    request = industry(chunked=True)
+    assert len(request["messages"]) > 4
+    if damage == "role":
+        request["messages"][-1]["role"] = "assistant"
+    elif damage == "json":
+        request["messages"][-1]["content"] = "invalid source packet"
+    elif damage == "duplicate":
+        request["messages"].append(deepcopy(request["messages"][-1]))
+    elif damage == "omitted":
+        request["messages"].pop()
+    elif damage == "reordered":
+        request["messages"][2:] = reversed(request["messages"][2:])
+    assert openrouter_options.prepare_judge_request(request)[1]["max_tokens"] == 8192
+    result, store, transport = dispatch(request, frozen)
+    assert result.status == 400 and not store.calls and not transport.sent
+
+
+@pytest.mark.parametrize("damage", ["date", "empty_name", "empty_website", "empty_criterion",
+    "source_url", "span_id", "source_id", "byte_length", "byte_offset"])
+def test_non_native_metadata_and_span_shapes_cannot_claim_override(monkeypatch, damage):
+    frozen = policy()
+    bind(monkeypatch, frozen)
+    request = industry()
+    metadata = json.loads(request["messages"][1]["content"])
+    source = json.loads(request["messages"][2]["content"])
+    page = source["untrusted_source_pages"][0]
+    span = page["spans"][0]
+    if damage == "date":
+        metadata["evaluation_date"] = "2026-99-99"
+    elif damage == "empty_name":
+        metadata["company_locator"]["name"] = " "
+    elif damage == "empty_website":
+        metadata["company_locator"]["website"] = ""
+    elif damage == "empty_criterion":
+        metadata["criterion"] = {key: "" for key in metadata["criterion"]}
+    elif damage == "source_url":
+        page["source_url"] = "https://"
+    elif damage == "source_id":
+        page["source_id"] = "different"
+    else:
+        prefix, source_id, start, end = span["span_id"].split(":")
+        span["span_id"] = ("forged" if damage == "span_id" else
+            f"{prefix}:{source_id}:{int(start) + (damage == 'byte_offset')}:{int(end) + 1}")
+        # A fabricated reference cannot gain authority just by being copied
+        # into the decoder's allowed citation enum.
+        request["response_format"]["json_schema"]["schema"]["properties"]["evidence_span_ids"]["items"]["enum"] = [span["span_id"]]
+    request["messages"][1]["content"] = json.dumps(metadata)
+    request["messages"][2]["content"] = json.dumps(source)
+    assert openrouter_options.prepare_judge_request(request)[1]["max_tokens"] == 8192
+    result, store, transport = dispatch(request, frozen)
     assert result.status == 400 and not store.calls and not transport.sent
 
 

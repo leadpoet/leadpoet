@@ -1482,23 +1482,50 @@ def judge_request_max_output_tokens(option: Mapping[str, Any], *, model: str,
         if declaration.get("name") != "industry_proposal":
             return maximum
         messages = parameters["messages"]
-        if (not isinstance(messages, list) or len(messages) != 3
-                or [message.get("role") for message in messages] != ["system", "user", "user"]):
+        if (not isinstance(messages, list) or len(messages) < 3
+                or messages[0].get("role") != "system"
+                or any(message.get("role") != "user" for message in messages[1:])):
             return maximum
-        metadata, sources = json.loads(messages[1]["content"]), json.loads(messages[2]["content"])
+        metadata = json.loads(messages[1]["content"])
         if (set(metadata["criterion"]) != {"industry", "subindustry", "product_service"}
                 or set(metadata["company_locator"]) != {"name", "website", "linkedin"}
                 or any(not isinstance(value, str) for section in ("criterion", "company_locator")
                        for value in metadata[section].values())
                 or not isinstance(metadata["evaluation_date"], str)):
             return maximum
-        pages = sources["untrusted_source_pages"]
-        if not isinstance(pages, list) or not pages:
-            return maximum
+        pages = []
+        for message in messages[2:]:
+            sources = json.loads(message["content"])["untrusted_source_pages"]
+            if not isinstance(sources, list) or not sources:
+                return maximum
+            pages.extend(sources)
         if any(not isinstance(page["source_id"], str) or not page["source_id"]
                or not isinstance(page["source_url"], str) or not page["source_url"].startswith("https://")
                or not isinstance(page["spans"], list) or not page["spans"] for page in pages):
             return maximum
+        from copy import deepcopy
+        from qualification.scoring.industry_classification import SCHEMA, prepare
+        source_shapes, offsets, prefixes = {}, {}, set()
+        for page in pages:
+            source_id = page["source_id"]
+            if source_id in source_shapes and source_shapes[source_id]["source_url"] != page["source_url"]:
+                return maximum
+            source_shapes[source_id] = {"source_id": source_id, "source_url": page["source_url"],
+                                        "body": page["spans"][0]["text"]}
+            for span in page["spans"]:
+                match = re.fullmatch(r"([0-9a-f]{16}):([A-Za-z0-9_.-]{1,120}):(0|[1-9][0-9]*):(0|[1-9][0-9]*)", span["span_id"])
+                if (not match or match[2] != source_id or int(match[3]) != offsets.get(source_id, 0)
+                        or int(match[4]) - int(match[3]) != len(span["text"].encode("utf-8"))):
+                    return maximum
+                offsets[source_id] = int(match[4])
+                prefixes.add(match[1])
+        if len(prefixes) != 1:
+            return maximum
+        # Reuse native date, locator, source-ID and absolute-URL checks with
+        # one retained span per source. Do not rebuild the packet digest or
+        # source authority: the native resolver remains the grounding gate.
+        prepare(metadata["criterion"], metadata["company_locator"], list(source_shapes.values()),
+                evaluation_date=metadata["evaluation_date"])
         spans = [span for page in pages for span in page["spans"]]
         ids = [span["span_id"] for span in spans]
         if (not ids or len(ids) != len(set(ids))
@@ -1508,8 +1535,6 @@ def judge_request_max_output_tokens(option: Mapping[str, Any], *, model: str,
         # This module is pure schema/packet code: no scorer runtime, provider
         # client or environment is imported. Reuse its native schema rather
         # than maintaining a second industry response validator here.
-        from copy import deepcopy
-        from qualification.scoring.industry_classification import SCHEMA
         expected = deepcopy(SCHEMA)
         if "research_query" in schema["properties"]:
             expected["properties"]["research_query"] = {"type": "string", "maxLength": 300}

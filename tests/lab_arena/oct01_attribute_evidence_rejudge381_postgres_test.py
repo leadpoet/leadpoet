@@ -181,7 +181,7 @@ def test_rejudge_archives_old_scores_preserves_miner_and_resumes(database, monke
             cursor.execute('SET session_replication_role=origin')
     assert store.close_scoring(ROUND, 1)['status'] == 'closed'
     plan = store.get_round(ROUND)['stage1_scoring_plan_doc']
-    service._outputs_by_run = lambda rid, stage: {
+    service._outputs_by_run = lambda rid, stage, *, executions=None: {
         item['scored_run_id']: [] for item in plan['work_items']}
     service._verified_breakdowns = lambda run, **kwargs: []
     assert service.score_stage(ROUND, 1)['status'] == 'ok'

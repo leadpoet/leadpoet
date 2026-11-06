@@ -1,5 +1,6 @@
 """Exact progression RPCs use control -> round/run, with unchanged final guards."""
 from copy import deepcopy
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -260,6 +261,30 @@ def _publication_row(pg, dsn, proven, count=25):
         return publication._expand(cur, proven, count)
 
 
+def test_reordered_capture_preserves_latest_paid_ledger_heads(database, proven_round):
+    pg,dsn=database
+    row,tables=deepcopy(proven_round)
+    # A SELECT without ORDER BY may return any heap/index order. Reversing the
+    # durable journal order must not turn a settled call into an in-flight one
+    # when the expansion assigns new entry IDs.
+    tables['lab_arena_ledger'].sort(key=lambda entry:entry['entry_id'],reverse=True)
+    original_heads={}
+    for entry in tables['lab_arena_ledger']:
+        identity=entry.get('call_identity')
+        if identity and identity not in original_heads:original_heads[identity]=entry
+    expected=Counter((entry['entry_kind'],entry['amount_microusd'],entry['operation_id'])
+                     for entry in original_heads.values())
+    rid,document=_publication_row(pg,dsn,(row,tables),2)
+    with pg.connect(**dsn) as conn,conn.cursor() as cur:
+        cur.execute('SELECT entry_kind,amount_microusd,operation_id FROM '
+                    '(SELECT DISTINCT ON(call_identity) * FROM public.lab_arena_ledger '
+                    'WHERE round_id=%s AND call_identity IS NOT NULL ORDER BY call_identity,entry_id DESC) heads',(rid,))
+        assert Counter(cur.fetchall())==expected
+        for ranking in document['final_ranking']:
+            cur.execute('SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)',(rid,json.dumps(ranking)))
+            assert cur.fetchone()==(True,)
+
+
 def test_real_publication_old_deadlock_then_fixed_claim_progress(database, proven_round, record_property):
     pg, dsn = database
     rid, document = _publication_row(pg, dsn, proven_round)
@@ -417,7 +442,7 @@ def test_final_hold_guards_remain_fail_closed(database, migrated, proven_round, 
         cur.execute('SET LOCAL ROLE lab_arena_service')
         with pytest.raises(pg.Error) as error:
             cur.execute(sql, args)
-        assert error.value.pgcode == '55000'
+        assert error.value.pgcode == '55000', str(error.value)
         conn.rollback()
         cur.execute('SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s', (rid,))
         assert cur.fetchone() == original_round

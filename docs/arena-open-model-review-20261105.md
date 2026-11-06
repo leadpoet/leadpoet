@@ -417,3 +417,73 @@ Route counts distinguish APIs, so the same provider can appear twice.
 | `z-ai/glm-5.3-flash` | 2 / 2 | no / no completed answer |
 | `z-ai/glm-5.3-flashx` | 2 / 2 | no / no completed answer |
 | `z-ai/glm-5v-turbo` | 2 / 2 | no / no completed answer |
+
+## November 6: GLM industry research, with Sol final classification
+
+The next default uses `z-ai/glm-5.3-flash` on the pinned `near-ai/fp8`
+Chat route, low effort and 8192 output tokens, for industry source research.
+Sol remains the final industry classifier. No prompt, research allowance,
+scoring rule, cache rule, fallback, or historical policy changes.
+
+The additional route passed a real three-turn tool/JSON reasoning probe and
+three retained native requests. Full baseline-positive and miner-negative
+scoring controls then completed with the expected company scores 51 and 0
+(per-ICP 12.75 and 0). All eight GLM calls in those two flows exposed readable
+thinking. Eighteen raw request/response pairs passed storage/hash checks;
+14 replies contained readable reasoning. These private native tests are not
+production worker acceptance or a complete production SFT dataset.
+
+Fresh industry investigations used retained verified identities, then normal
+search/fetch tools without saved source pages. Both controllers retained these
+verdicts under the same criteria and native limits:
+
+| Company/control | Sol research | GLM research | Total fresh cost, Sol / GLM | Seconds, Sol / GLM |
+| --- | --- | --- | --- | --- |
+| PowerLattice, accelerator-chip role boundary | mismatch | mismatch | $0.06421 / $0.04005 | 25.23 / 63.09 |
+| Rackspace, previously labelled fit | unavailable | unavailable | $0.13425 / $0.06235 | 40.47 / 39.60 |
+| Hoover Treated Wood Products, building products | match | match | $0.11281 / $0.03592 | 74.95 / 43.55 |
+
+Rackspace remains a false negative against the retained label: neither path
+established that Rackspace supplies mainframe modernization, beyond discussing
+it. This is not a recovered positive or grounds to change the label. An extra
+research instruction added work without improving the verdict, so it is not
+included. An initial Hoover test collided with a concurrent private harness
+retrieval identity before any model call. Its 409 and reservation are retained;
+the corrected private harness assigns the case identity before first retrieval.
+
+Replacing the final classifier did not qualify. On all 137 labelled saved-source
+cases, GLM/Near AI returned TP53/TN63/FP11/FN10 (84.67%), versus the current Sol
+TP52/TN70/FP4/FN11 (89.05%). DeepSeek Pro and Mistral also fell below the gate.
+The 89.05% figure is a retained-source classifier result, not an accuracy estimate
+for the new research pipeline. The smaller fresh comparisons above show no
+changed verdicts, but do not prove a population-wide error rate.
+
+The existing recorder and exporter preserve exposed thinking, wire requests,
+responses, tool results, source context, costs and outcomes. Unreviewed labels,
+unconfirmed training permission, opaque Sol reasoning, missing evidence and
+incomplete trajectories stay explicit. Near AI through OpenRouter is not claimed
+to be end-to-end confidential inference. The new shared registry entry also
+permits that exact route for future sourcing requests; the sourcing baseline
+and existing approved routes are unchanged.
+
+The initial research proof is
+`docs/evidence/full-thinking/glm-nearai-research-proof-20261106.json`. The route
+now binds to `docs/evidence/full-thinking/glm-nearai-worker-capture-20261106.json`:
+all eight retained real research requests and responses matched their original
+hashes through the native Broker, disposable PostgreSQL, worker socket delivery,
+agent acknowledgement and strict unscored action export. This replay made no
+provider requests and did not reexecute research tools. Both trajectories concern
+EPAM; the rejected tool batch remains explicit and unreviewed. These are not
+complete SFT examples or new production executions.
+
+Fresh synthetic SQL/worker probes completed both expected tool/JSON scenarios
+under named, auto and required tool selection. All eighteen requests and replies
+were captured exactly, but eleven replies reported one reasoning token without
+readable thinking (4/6 named, 3/6 auto, 4/6 required). They therefore failed the
+full-thinking conformance check. The manifest preserves this counterevidence;
+the route can expose readable reasoning, but cannot guarantee it on every call.
+The existing per-call completeness and generated-thinking exclusion rules are
+unchanged. Missing text is not relabelled as zero reasoning or complete capture.
+
+Production image selection and subsequent real judge storage/export remain
+separate live release checks. Existing November 6–7 frozen policies are unchanged.

@@ -14,6 +14,7 @@ from tests.lab_arena.judge_policy_integration_test import NOW, service
 DEEPSEEK = "deepseek/deepseek-v4.1-flash-1017"
 GPT_OSS = "openai/gpt-oss-120b"
 SOL = "openai/gpt-6.1-sol"
+GLM = "z-ai/glm-5.3-flash"
 MODELS = {
     "company_fit_reverification": DEEPSEEK,
     "intent_signal_judge": GPT_OSS,
@@ -22,7 +23,7 @@ MODELS = {
     "intent_fetched_evidence": GPT_OSS,
     "role_batch_check": GPT_OSS,
     "industry_evidence_review": SOL,
-    "industry_research_controller": SOL,
+    "industry_research_controller": GLM,
 }
 LEGACY_MODELS = {
     "company_fit_reverification": "perplexity/sonar",
@@ -33,12 +34,13 @@ LEGACY_MODELS = {
     "role_batch_check": "google/gemini-3.5-flash-lite",
     "industry_evidence_review": SOL,
 }
-ROUTES = {DEEPSEEK: "nebius/fp8", GPT_OSS: "near-ai/fp4"}
+ROUTES = {DEEPSEEK: "nebius/fp8", GPT_OSS: "near-ai/fp4", GLM: "near-ai/fp8"}
 OPTIONS = {
     DEEPSEEK: {"reasoning": {"effort": "low"}, "max_output_tokens": 8192},
     GPT_OSS: {"reasoning": {"effort": "low"}, "max_output_tokens": 4096},
+    GLM: {"reasoning": {"effort": "low"}, "max_output_tokens": 8192},
 }
-EXCEPTIONS = {SOL: {"roles": ["industry_evidence_review", "industry_research_controller"], "reason": "quality_gate_not_met"}}
+EXCEPTIONS = {SOL: {"roles": ["industry_evidence_review"], "reason": "quality_gate_not_met"}}
 
 
 def test_reviewed_default_models_freeze_exact_routes_options_and_exception():
@@ -80,6 +82,24 @@ def test_custom_historical_models_keep_original_policy_bytes_and_explicit_route_
     assert contracts.JUDGE_REASONING_EXCEPTIONS_BINDING not in explicit["env_bindings"]
 
 
+def test_saved_sol_research_policy_is_not_upgraded():
+    previous = scoring.build_scorer_policy(
+        judge_models={**MODELS, "industry_research_controller": SOL},
+        judge_provider_routes={k: v for k, v in ROUTES.items() if k != GLM},
+        judge_request_options={k: v for k, v in OPTIONS.items() if k != GLM},
+        judge_reasoning_exceptions={SOL: {
+            "roles": ["industry_evidence_review", "industry_research_controller"],
+            "reason": "quality_gate_not_met",
+        }},
+    )
+    assert contracts.document_hash(previous) == "sha256:0148cfb34001c5162e20f81a0ecfc72170a1eee2560dc3592ecd16f109692595"
+    environment = {}
+    scoring.apply_policy_to_environment(previous, environ=environment,
+        credentials={name: "test-not-secret" for name in scoring.CREDENTIAL_ENV_NAMES})
+    assert environment["ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL"] == SOL
+    assert GLM not in environment[contracts.JUDGE_PROVIDER_ROUTES_BINDING]
+
+
 def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical():
     app = service()
     app._scorer_policy = scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
@@ -102,6 +122,7 @@ def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical
     (DEEPSEEK, "nebius/fp8", "openrouter.chat"),
     (DEEPSEEK, "nebius/fp8", "openrouter.responses"),
     (GPT_OSS, "near-ai/fp4", "openrouter.chat"),
+    (GLM, "near-ai/fp8", "openrouter.chat"),
 ])
 def test_new_default_round_fails_closed_before_persistence_if_exact_route_is_missing(model, provider, api):
     registry = reasoning_capture.load_registry()

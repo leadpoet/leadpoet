@@ -1,30 +1,47 @@
-"""Real durable admission claims on the exact637 recovery function bodies."""
+"""Forward-only642 then643 on native cutoffs and retained637 finality."""
+from datetime import datetime, timedelta, timezone
+import hashlib
 import re
 import time
 
 import pytest
 
 from lab_arena import code_review, code_review_policy
-from lab_arena.store import ArenaStoreError, new_lease_token
+from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, new_lease_token
 from tests.lab_arena import nov06_late_review635_postgres_test as late
 from tests.lab_arena import nov06_ninth_review637_postgres_test as ninth
 from tests.lab_arena.refusal_review_fallback599_postgres_test import (
-    PRIMARY, ALTERNATE, SIGNATURES, accepted_recovery_submission, begin, failure, verdict,
+    PRIMARY, ALTERNATE, SIGNATURES, begin, failure, verdict,
 )
 from tests.lab_arena.test_lab_arena_code_review_postgres import (
     _age_review_error, recovery_connect, recovery_store, recovery_superuser,
 )
 from tests.lab_arena.prospective_admission_primary_test import DEEPSEEK, receipt, reviewer
 from tests.lab_arena.test_lab_arena_code_review_runtime import _archive, _source
+from tests.lab_arena.test_lab_arena_migration_postgres import (
+    encrypted_runtime_credentials, hotkey, round_config, source_submission_doc,
+)
+from tests.lab_arena.replacement_cutoff639_postgres_test import clock
+from tests.lab_arena.queued_submission_replacement_postgres_test import _doc
 from tests.postgres_migration_harness import SCRIPTS
 
 MIGRATION = SCRIPTS / '643-lab-arena-prospective-admission-primary.sql'
-parent_database = ninth.database
+CUTOFF = SCRIPTS / '642-lab-arena-prospective-replacement-cutoff.sql'
 
 
 @pytest.fixture
-def ninth_context(parent_database):
-    yield from ninth.context.__wrapped__(parent_database)
+def ninth_context():
+    # Each finality outcome needs a true pre642 database, not a prior test's
+    # additive column/trigger combined with regenerated historical receipts.
+    database = ninth.database.__wrapped__()
+    context = None
+    try:
+        context = ninth.context.__wrapped__(next(database))
+        yield next(context)
+    finally:
+        if context is not None:
+            context.close()
+        database.close()
 
 
 def restore_predecessor(cursor):
@@ -46,12 +63,35 @@ def function_snapshot(cursor):
     return {name: (definition, metadata) for name, definition, metadata in cursor.fetchall()}
 
 
+def accepted_recovery_submission(store, suffix, *, cutoff_minutes=5):
+    """Use a real review window for new600 rounds; change no frozen fields."""
+    now = datetime.now(timezone.utc)
+    round_id = 'arena-2099-03-01-' + hashlib.sha256(suffix.encode()).hexdigest()[:12]
+    submission = suffix + '-recovery'
+    miner = hotkey('primary643-' + suffix)
+    config = round_config(round_id, [hotkey('runner643-' + suffix)])
+    config['schedule'].update({
+        'submission_open': (now - timedelta(hours=2)).isoformat(),
+        'submission_cutoff': (now + timedelta(minutes=cutoff_minutes)).isoformat(),
+        'benchmark_deadline': (now + timedelta(minutes=cutoff_minutes + 60)).isoformat(),
+    })
+    assert store.create_round(round_id, config)['status'] == 'created'
+    assert store.register_submission(round_id, submission, miner,
+                                     source_submission_doc(round_id, submission))['status'] == 'registered'
+    assert store.accept_submission_with_credentials(round_id, submission, miner,
+               encrypted_runtime_credentials(submission))['status'] == 'ok'
+    return round_id, submission, miner
+
+
 @pytest.fixture(scope='module')
 def recovery_database():
     generator = late.database.__wrapped__()
+    connection = None
     try:
         pg, dsn, _ = next(generator)
-        with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        connection = pg.connect(**dsn)
+        connection.autocommit = True
+        with connection.cursor() as cursor:
             sql = late.M635.read_text()
             # Install only committed function definitions; no dated receipt,
             # recovery membership, row changes, or additional claims are made.
@@ -60,15 +100,131 @@ def recovery_database():
             ninth = (SCRIPTS / '637-arena-2026-11-06-ninth-review-recovery.sql').read_text()
             cursor.execute(ninth.split('DO $recover637$')[0]
                            + 'DO $restore637$' + ninth.split('DO $restore637$', 1)[1])
+            # Retain actual old Sonnet episodes through the642 backfill. Their
+            # prior native claims make NULL/legacy policy durable, not invented.
+            store = ArenaStore(PsycopgTransport(lambda: pg.connect(**dsn)))
+            try:
+                for delta in (-1, 0, 1):
+                    rid, sid, miner = accepted_recovery_submission(
+                        store, 'primary643-legacyedge-' + str(delta), cutoff_minutes=180)
+                    cutoff = datetime.fromisoformat(store.get_round(rid)['configuration_doc']['schedule']['submission_cutoff'])
+                    with clock(connection, cutoff - timedelta(seconds=3600)):
+                        token = new_lease_token()
+                        assert begin(store, sid, miner, PRIMARY, token)['status'] == 'claimed'
+                        assert store.finish_submission_review(sid, miner, token, 'error',
+                            failure(PRIMARY, 'code_review_transport_error'), None)['status'] == 'error'
+                    _age_review_error(connection, sid)
+            finally:
+                store.close()
+            cursor.execute(CUTOFF.read_text())
             cursor.execute(MIGRATION.read_text())
         yield pg, dsn
     finally:
+        if connection is not None:
+            connection.close()
         generator.close()
 
 
 def finish(store, submission, miner, token, model, *, error='code_review_provider_refused', actual=1234, **extra):
     return store.finish_submission_review(submission, miner, token, 'error',
         {**failure(model, error), **extra}, actual)
+
+
+def test_requires_exact642_body_and_retains_native_cutoff(recovery_superuser):
+    with recovery_superuser.cursor() as cursor:
+        restore_predecessor(cursor)
+        cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURES[0],))
+        cutoff_definition = cursor.fetchone()[0]
+        assert hashlib.sha256(cutoff_definition.encode()).hexdigest() == 'd101aa5610e1c64aa92a975754a45cfdbfb70b1d7fff20832ddb1ea72dc148ff'
+        cutoff = '- pg_catalog.make_interval(secs => COALESCE(v_round.replacement_freeze_seconds,3600))'
+        old = cutoff_definition.replace(cutoff, "- INTERVAL '1 hour'")
+        assert hashlib.sha256(old.encode()).hexdigest() == '44e1e4125cd373913cb1f02419ba17b7ffb1f45e8b55e7190aa256e85f5a6b1c'
+        cursor.execute(old)
+        before = function_snapshot(cursor)
+        try:
+            with pytest.raises(Exception, match='primary643 preimage differs'):
+                cursor.execute(MIGRATION.read_text())
+            cursor.execute('ROLLBACK')
+            assert function_snapshot(cursor) == before
+        finally:
+            cursor.execute('ROLLBACK')
+            cursor.execute(cutoff_definition)
+        before = function_snapshot(cursor)
+        cursor.execute(MIGRATION.read_text())
+        after = function_snapshot(cursor)
+        combined = after[SIGNATURES[0].removeprefix('public.')][0]
+        assert hashlib.sha256(combined.encode()).hexdigest() == '03009634a9dcde9342a7428d73eaf4285bf341811241a1d51e5d54bc8b8b04b9'
+        assert combined.count(cutoff) == 1
+        # Independent composition check: the exact cutoff is the only delta
+        # from the previously qualified643 function body.
+        assert hashlib.sha256(combined.replace(cutoff, "- INTERVAL '1 hour'").encode()).hexdigest() == 'b1af0faa9fddadf702b56bd30d98d9dd4c86b1ffc4cf020e72b1b57ea431214b'
+        for name in before:
+            if name not in {signature.removeprefix('public.') for signature in SIGNATURES}:
+                assert after[name] == before[name]
+
+
+@pytest.mark.parametrize('delta', [-1, 0, 1])
+@pytest.mark.parametrize('operation', ['register', 'credentials', 'source', 'review'])
+def test_new600_native_cutoff_edges(recovery_store, recovery_superuser, delta, operation):
+    rid, original, miner = accepted_recovery_submission(
+        recovery_store, f'primary643-edge-{operation}-{delta}', cutoff_minutes=180)
+    row = recovery_store.get_round(rid)
+    assert row['replacement_freeze_seconds'] == 600
+    cutoff = datetime.fromisoformat(row['configuration_doc']['schedule']['submission_cutoff'])
+    replacement = f'primary643-replacement-{operation}-{delta}'
+    if operation in ('credentials', 'source'):
+        assert recovery_store.register_submission(rid, replacement, miner,
+            _doc(rid, replacement, 124))['status'] == 'registered'
+    moment = cutoff - timedelta(seconds=600) + timedelta(microseconds=delta)
+    original_row = recovery_store.get_submission(original)
+    with clock(recovery_superuser, moment):
+        if operation == 'register':
+            result = recovery_store.register_submission(rid, replacement, miner,
+                _doc(rid, replacement, 124))
+        elif operation == 'credentials':
+            result = recovery_store.accept_submission_with_credentials(rid, replacement, miner,
+                encrypted_runtime_credentials(replacement))
+        elif operation == 'source':
+            result = recovery_store.accept_submission_source_with_credentials(rid, replacement, miner,
+                encrypted_runtime_credentials(replacement), 'sha256:' + '1' * 64, 'sha256:' + '2' * 64)
+        else:
+            result = begin(recovery_store, original, miner, DEEPSEEK)
+        if operation == 'review':
+            assert result['status'] == ('deferred' if delta < 0 else 'claimed')
+        else:
+            assert result['status'] == (('registered' if operation == 'register' else 'ok')
+                                       if delta < 0 else 'replacement_closed')
+    if operation != 'review' or delta < 0:
+        assert recovery_store.list_ledger(submission_id=original) == []
+    if operation == 'review' and delta < 0 or operation != 'review' and delta >= 0:
+        assert recovery_store.get_submission(original) == original_row
+
+
+@pytest.mark.parametrize('delta', [-1, 0, 1])
+def test_retained_null_round_native3600_review_edges(recovery_store, recovery_superuser, delta):
+    suffix = 'primary643-legacyedge-' + str(delta)
+    sid = suffix + '-recovery'
+    row = recovery_store.get_submission(sid)
+    round_row = recovery_store.get_round(row['round_id'])
+    assert round_row['replacement_freeze_seconds'] is None
+    cutoff = datetime.fromisoformat(round_row['configuration_doc']['schedule']['submission_cutoff'])
+    before = recovery_store.list_ledger(submission_id=sid)
+    assert [entry['entry_doc']['review_model'] for entry in before if entry['entry_kind'] == 'reservation'] == [PRIMARY]
+    with clock(recovery_superuser, cutoff - timedelta(seconds=3600) + timedelta(microseconds=delta)):
+        # Even with new host preference, the actual old primary remains bound.
+        if delta >= 0:
+            assert begin(recovery_store, sid, row['miner_hotkey'], DEEPSEEK) == {
+                'status': 'route_required', 'review_model': PRIMARY}
+        result = begin(recovery_store, sid, row['miner_hotkey'], PRIMARY)
+        assert result['status'] == ('deferred' if delta < 0 else 'claimed')
+    after = recovery_store.list_ledger(submission_id=sid)
+    assert after[:len(before)] == before
+    if delta < 0:
+        assert after == before
+        assert recovery_store.get_submission(sid) == row
+    else:
+        assert result['attempt'] == 2
+        assert [entry['entry_doc']['review_model'] for entry in after if entry['entry_kind'] == 'reservation'] == [PRIMARY, PRIMARY]
 
 
 @pytest.mark.parametrize('locked_table,key', [
@@ -190,13 +346,23 @@ def test_unknown_parent_recovery_helper_is_rejected_without_function_changes(rec
         cursor.execute(original)
 
 
-def test_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth_context):
+@pytest.mark.parametrize('status', ['passed', 'rejected', 'error'])
+def test_finalized_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth_context, status):
     store, connection, sql, target, *_ = ninth_context
     ninth.apply(connection, sql)
+    assert ninth.finish_ninth(store, target, status)['status'] == status
+    ninth.apply(connection, ninth.M638.read_text())
     before_row = store.get_submission(ninth.SID)
     before_ledger = store.list_ledger(submission_id=ninth.SID)
+    before_history = store.scoring_policy_history(ninth.ROUND)
+    before_runs = store.list_runs(ninth.ROUND)
     with connection.cursor() as cursor:
         functions = function_snapshot(cursor)
+        cursor.execute('SELECT to_jsonb(c) FROM public.lab_arena_restart_claim_control c')
+        before_control = cursor.fetchall()
+        cursor.execute('SELECT to_jsonb(h) FROM public.lab_arena_scoring_supersessions h ORDER BY to_jsonb(h)::TEXT')
+        before_receipts = cursor.fetchall()
+    ninth.apply(connection, CUTOFF.read_text())
     ninth.apply(connection, MIGRATION.read_text())
     assert store.get_submission(ninth.SID) == before_row
     assert store.list_ledger(submission_id=ninth.SID) == before_ledger
@@ -205,19 +371,24 @@ def test_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth_context):
     for signature in ('lab_arena__nov06_late_review635_v1(lab_arena_rounds,lab_arena_submissions)',
                       'lab_arena_submissions_frozen_v1()'):
         assert after[signature] == functions[signature]
-    assert begin(store, ninth.SID, before_row['miner_hotkey'], DEEPSEEK) == {
-        'status': 'route_required', 'review_model': ALTERNATE}
-    assert ninth.finish_ninth(store, target)['status'] == 'error'
-    row = store.get_submission(ninth.SID)
-    assert row['code_review_attempts'] == 4
-    assert row['code_review_doc']['model'] == ALTERNATE
-    ledger = store.list_ledger(submission_id=ninth.SID)
-    assert ledger[:len(before_ledger)] == before_ledger
-    assert [entry['entry_doc']['review_model'] for entry in ledger if entry['entry_kind'] == 'reservation'] == [
+    assert before_row['code_review_attempts'] == 4
+    assert before_row['code_review_doc']['model'] == ALTERNATE
+    assert [entry['entry_doc']['review_model'] for entry in before_ledger if entry['entry_kind'] == 'reservation'] == [
         PRIMARY, PRIMARY, PRIMARY, ALTERNATE]
-    _age_review_error(connection, ninth.SID)
-    assert begin(store, ninth.SID, row['miner_hotkey'], ALTERNATE)['status'] == 'exhausted'
-    assert store.list_ledger(submission_id=ninth.SID) == ledger
+    assert store.scoring_policy_history(ninth.ROUND) == before_history
+    assert store.list_runs(ninth.ROUND) == before_runs
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT to_jsonb(c) FROM public.lab_arena_restart_claim_control c')
+        assert cursor.fetchall() == before_control
+        cursor.execute('SELECT to_jsonb(h) FROM public.lab_arena_scoring_supersessions h ORDER BY to_jsonb(h)::TEXT')
+        assert cursor.fetchall() == before_receipts
+    if status == 'passed':
+        assert begin(store, ninth.SID, before_row['miner_hotkey'], ALTERNATE)['status'] == 'existing'
+    else:
+        with pytest.raises(ArenaStoreError, match='submission_missing'):
+            begin(store, ninth.SID, before_row['miner_hotkey'], ALTERNATE)
+    assert store.get_submission(ninth.SID) == before_row
+    assert store.list_ledger(submission_id=ninth.SID) == before_ledger
 
 
 @pytest.mark.parametrize('primary', [PRIMARY, DEEPSEEK])

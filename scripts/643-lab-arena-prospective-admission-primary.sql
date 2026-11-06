@@ -1,6 +1,6 @@
 -- Prospective DeepSeek admission primary; existing Sonnet/Sol episodes remain bound.
 -- Function-only, append-only ledger semantics: no row/counter/deadline changes.
--- Requires exact deployed637 recovery wrappers; preserves them byte for byte.
+-- Requires exact642 cutoff and deployed637 recovery wrappers; preserves them.
 -- Apply this additive database change before paired startup preflight.
 -- The canonical controller then drains work before activating the new host.
 BEGIN;
@@ -30,8 +30,8 @@ $requires637_643$;
 DO $primary643_0$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)';
-  v_preimage CONSTANT TEXT := '44e1e4125cd373913cb1f02419ba17b7ffb1f45e8b55e7190aa256e85f5a6b1c';
-  v_postimage CONSTANT TEXT := 'b1af0faa9fddadf702b56bd30d98d9dd4c86b1ffc4cf020e72b1b57ea431214b';
+  v_preimage CONSTANT TEXT := 'd101aa5610e1c64aa92a975754a45cfdbfb70b1d7fff20832ddb1ea72dc148ff';
+  v_postimage CONSTANT TEXT := '03009634a9dcde9342a7428d73eaf4285bf341811241a1d51e5d54bc8b8b04b9';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;

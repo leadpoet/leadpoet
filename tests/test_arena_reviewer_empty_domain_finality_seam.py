@@ -3,10 +3,11 @@ import ast
 import copy
 import hashlib
 import json
+import sys
+from types import ModuleType
 
 import pytest
 
-from qualification.scoring import lead_scorer
 from scripts import build_arena_reviewer_runtime as composer
 from scripts.arena_reviewer_empty_domain_finality_seam import (
     CORRECTION_ID, FINALITY_FILE, ORIGINAL_SHA256, PREDICATE, REPAIRED_SHA256,
@@ -14,12 +15,20 @@ from scripts.arena_reviewer_empty_domain_finality_seam import (
 )
 from tests.lab_arena.reviewer_runtime_composition_test import layer
 from tests.reviewer_frozen_sources import frozen_source
-from tests.test_arena_reviewer_finality_seam import _predicate
 from tests import test_completed_empty_domain_negative as controls
 
 
 ORIGINAL = frozen_source("empty_domain_finality79cd", FINALITY_FILE)
 CORRECTED = convert_empty_domain_finality_seam(ORIGINAL)
+
+
+def _install_frozen_scorer(monkeypatch, source=CORRECTED):
+    """Keep historical predicates and their callers in the same generation."""
+    module = ModuleType("_arena_empty_domain_finality79cd")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(source, "exact_frozen79cd_lead_scorer.py", "exec"), vars(module))
+    monkeypatch.setattr(controls, "scorer", module)
+    return module
 
 
 def test_exact_frozen_source_changes_only_the_reviewed_predicate():
@@ -29,7 +38,10 @@ def test_exact_frozen_source_changes_only_the_reviewed_predicate():
     before, after = ast.parse(ORIGINAL), ast.parse(CORRECTED)
     original_predicate = next(n for n in before.body if isinstance(n, ast.FunctionDef) and n.name == PREDICATE)
     corrected_predicate = next(n for n in after.body if isinstance(n, ast.FunctionDef) and n.name == PREDICATE)
-    reviewed = next(n for n in ast.parse(composer.ROOT.joinpath(FINALITY_FILE).read_text()).body
+    # Frozen2dc retains the reviewed empty-domain postimage. Later current
+    # predicates can add separate behavior without changing this old overlay.
+    reviewed_source = frozen_source("identity_repair_finality_2dc", FINALITY_FILE)
+    reviewed = next(n for n in ast.parse(reviewed_source).body
                     if isinstance(n, ast.FunctionDef) and n.name == PREDICATE)
     assert ast.dump(corrected_predicate) == ast.dump(reviewed)
     old_segment = ast.get_source_segment(ORIGINAL.decode(), original_predicate)
@@ -113,10 +125,10 @@ def test_overlay_rejects_extra_or_changed_files():
 def test_frozen_corrected_predicate_passes_all_finality_controls(monkeypatch):
     # The original frozen predicate is the same reviewed pre-fix AST. Its
     # complete negative fails only because no terminal class is attached.
-    original = _predicate(ORIGINAL)
+    original = _install_frozen_scorer(monkeypatch, ORIGINAL)._has_explicitly_unproven_fit_dimensions
     assert not original(controls._verdict(), ("identity",), identity_receipt=controls._identity(),
                         investigation_receipt=controls._receipt())
-    monkeypatch.setattr(lead_scorer, PREDICATE, _predicate(CORRECTED))
+    _install_frozen_scorer(monkeypatch)
     controls.test_saved_empty_website_observation_finishes_as_unavailable_not_a_match()
     controls.test_wrong_entity_remains_a_mismatch()
     controls.test_valid_identity_and_complete_negative_cases_keep_existing_finality()
@@ -124,11 +136,11 @@ def test_frozen_corrected_predicate_passes_all_finality_controls(monkeypatch):
 
 @pytest.mark.parametrize("semantic", [False, True])
 def test_composed_predicate_survives_full_company_fit_and_arena(monkeypatch, semantic):
-    monkeypatch.setattr(lead_scorer, PREDICATE, _predicate(CORRECTED))
+    _install_frozen_scorer(monkeypatch)
     controls.test_empty_domain_negative_survives_the_company_fit_wrapper(monkeypatch, semantic)
 
 
 @pytest.mark.parametrize("fault", controls.test_empty_website_keeps_incomplete_or_failed_research_retryable.pytestmark[0].args[1])
 def test_composed_predicate_keeps_failed_or_incomplete_evidence_retryable(monkeypatch, fault):
-    monkeypatch.setattr(lead_scorer, PREDICATE, _predicate(CORRECTED))
+    _install_frozen_scorer(monkeypatch)
     controls.test_empty_website_keeps_incomplete_or_failed_research_retryable(fault)

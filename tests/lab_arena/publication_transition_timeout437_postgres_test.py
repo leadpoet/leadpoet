@@ -185,9 +185,9 @@ def _expand(cur, proven, count):
                 stage1.append(_rewrite(ranking, replacements))
         for table, values in selected.items():
             if table == "lab_arena_ledger":
-                # Source reads have no row-order guarantee. New IDs must retain
-                # the append order that determines each provider call's head.
-                values = sorted(values, key=lambda row: row["entry_id"])
+                # Scans need not return append-only events in their original
+                # order. Preserve the latest call head when assigning clone IDs.
+                values = sorted(values, key=lambda value: value["entry_id"])
             for value in values:
                 cloned = _rewrite(value, replacements)
                 if table == "lab_arena_ledger":

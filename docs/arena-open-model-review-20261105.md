@@ -181,8 +181,12 @@ reservation, separate from the selected-response cost above. No label was
 changed after testing, and no unsuccessful model result was replaced by a
 better repeat. New private test dispatches check free disk space first.
 
-Admission remains security sensitive. Prior realistic complete-source tests
-found unsafe acceptances by DeepSeek and Kimi. The additional GLM Flash screen
+Admission remains security sensitive. The initial audit called DeepSeek and
+Kimi acceptances of one complete-source archive unsafe. A later independent
+source review did not establish that label: intermediate draft values were
+subject to later verification and output gates. The original archive and
+responses remain unlabelled stress evidence, not confirmed false acceptances
+or proof of safety. The additional GLM Flash screen
 passed native schema on only three of six examples and the combined expected
 labels on two. Exact source excerpts, reachable research control and all
 misconduct checks remain required. Short benign snippets alone do not justify

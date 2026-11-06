@@ -184,6 +184,10 @@ def _expand(cur, proven, count):
             if index and ranking["submission_id"] == template["submission_id"]:
                 stage1.append(_rewrite(ranking, replacements))
         for table, values in selected.items():
+            if table == "lab_arena_ledger":
+                # Source reads have no row-order guarantee. New IDs must retain
+                # the append order that determines each provider call's head.
+                values = sorted(values, key=lambda row: row["entry_id"])
             for value in values:
                 cloned = _rewrite(value, replacements)
                 if table == "lab_arena_ledger":
@@ -253,6 +257,29 @@ def test_large_real_publication_and_forgery_rejection(database, proven_round, pa
         cur.execute("SELECT status,publication_doc FROM public.lab_arena_rounds WHERE round_id=%s", (round_id,))
         status, actual = cur.fetchone()
         assert status == "published" and actual == publication
+
+
+def test_expansion_preserves_ledger_heads_with_unordered_source(database, proven_round):
+    """A source SELECT order must not replace a settlement head with a reservation."""
+    psycopg, dsn = database
+    source, tables = proven_round
+    unordered = {
+        **tables,
+        "lab_arena_ledger": sorted(
+            tables["lab_arena_ledger"], key=lambda row: row["entry_id"], reverse=True,
+        ),
+    }
+    with psycopg.connect(**dsn) as c, c.cursor() as cur:
+        cur.execute(MIGRATION.read_text())
+        round_id, publication = _expand(cur, (source, unordered), 2)
+        cur.execute("SET ROLE lab_arena_service")
+        cur.execute(
+            "SELECT public.lab_arena_transition_round(%s,'scored','published',%s::jsonb)",
+            (round_id, json.dumps(dict(
+                publication_doc=publication, published_at=publication["published_at"],
+            ))),
+        )
+        assert cur.fetchone()[0]["status"] == "ok"
 
 
 class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):

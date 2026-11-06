@@ -259,6 +259,29 @@ def test_large_real_publication_and_forgery_rejection(database, proven_round, pa
         assert status == "published" and actual == publication
 
 
+def test_expansion_preserves_ledger_heads_with_unordered_source(database, proven_round):
+    """A source SELECT order must not replace a settlement head with a reservation."""
+    psycopg, dsn = database
+    source, tables = proven_round
+    unordered = {
+        **tables,
+        "lab_arena_ledger": sorted(
+            tables["lab_arena_ledger"], key=lambda row: row["entry_id"], reverse=True,
+        ),
+    }
+    with psycopg.connect(**dsn) as c, c.cursor() as cur:
+        cur.execute(MIGRATION.read_text())
+        round_id, publication = _expand(cur, (source, unordered), 2)
+        cur.execute("SET ROLE lab_arena_service")
+        cur.execute(
+            "SELECT public.lab_arena_transition_round(%s,'scored','published',%s::jsonb)",
+            (round_id, json.dumps(dict(
+                publication_doc=publication, published_at=publication["published_at"],
+            ))),
+        )
+        assert cur.fetchone()[0]["status"] == "ok"
+
+
 class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
     def build_service(self):
         service = super().build_service()

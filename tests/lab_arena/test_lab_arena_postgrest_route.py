@@ -152,9 +152,46 @@ def stack(tmp_path_factory):
                 """)
                 cursor.execute((Path(__file__).resolve().parents[2] /
                     "scripts/593-lab-arena-capture-summary-reader.sql").read_text())
+                # Install the current Store write RPC before PostgREST builds
+                # its schema cache; the full-round test compares every RPC.
                 for migration in ("595-lab-arena-capture-called-icps.sql",
-                                  "598-lab-arena-capture-summary-v2.sql"):
+                                  "598-lab-arena-capture-summary-v2.sql",
+                                  "619-lab-arena-release-undispatched-call.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
+                # Current Store probes also cover the prospective evidence RPC.
+                # Reuse the reviewed621 function-only composer and625 upgrade;
+                # dated recovery DML must not enter this fresh-round fixture.
+                from tests.lab_arena import verified_fit_checkpoint625_postgres_test as fit_checkpoint
+                fit_checkpoint.compose_current_claim(cursor)
+                for migration in ("625-lab-arena-verified-fit-checkpoint.sql",
+                                  "631-lab-arena-evidence-judgments-v2.sql"):
+                    cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
+                # Current Store probes include these receipt-bound readers.
+                # Install their real definitions and grants, but never the
+                # dated recovery writes or changes to ordinary write RPCs.
+                cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') "
+                               "FROM pg_namespace WHERE nspname='public'")
+                schema_acl, had_create = cursor.fetchone()
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                for migration, start, end in (
+                    ("604-arena-2026-11-03-forward-only-verifier.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_preserved_judge_v1",
+                     "DO $helpers_verify604$"),
+                    ("605-arena-2026-11-03-admission-review-recovery.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_review605_v1",
+                     "DO $patch605_0$"),
+                ):
+                    source = (Path(__file__).resolve().parents[2] / "scripts" / migration).read_text()
+                    cursor.execute(source[source.index(start):source.index(end)])
+                if not had_create:
+                    cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
+                cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+                assert cursor.fetchone()[0] == schema_acl
+            # Install additive current readers before PostgREST takes its
+            # schema snapshot, preserving historical write RPCs and ACLs.
+            arena_pg.prepare_current_service_reads(
+                lambda: pg.connect(**dsn),
+                include_run_reads=False, include_round_reads=False)
             directory = tmp_path_factory.mktemp("private-api-" + suffix)
             directory.chmod(0o700)
             values = {

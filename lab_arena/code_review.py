@@ -21,6 +21,14 @@ from lab_arena import contracts, source_bundle
 
 DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5.5"
 FALLBACK_REVIEW_MODEL = "openai/gpt-6.1-sol"
+# The standalone default and saved Sonnet requests remain historical. Production
+# wiring opts new, unclaimed episodes into this separately bound primary.
+PROSPECTIVE_REVIEW_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+PROSPECTIVE_CONTEXT_WINDOW_TOKENS = 1_048_576
+PROSPECTIVE_MAX_OUTPUT_TOKENS = 32_768
+# Exact Nebius FP8 endpoint prices, verified 2026-11-06. Reserve at least these
+# ceilings even when the model catalog advertises a cheaper provider.
+PROSPECTIVE_PRICE_CEILING = {"prompt": "0.0000003", "completion": "0.0000012"}
 FALLBACK_CONTEXT_WINDOW_TOKENS = 1_050_000
 FALLBACK_MAX_PROMPT_TOKENS = 922_000
 # Exact public catalog id -> canonical_slug, verified 2026-10-19 (Claude)
@@ -31,10 +39,12 @@ FALLBACK_MAX_PROMPT_TOKENS = 922_000
 _REVIEW_MODEL_CANONICAL_SLUGS = {
     DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5.5-20260928",
     FALLBACK_REVIEW_MODEL: "openai/gpt-6.1-sol-20260929",
+    PROSPECTIVE_REVIEW_MODEL: "deepseek/deepseek-v4.1-flash-20261017",
     # Preserve validation for prepared reviews that selected the old model.
     "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
-DEFAULT_MAX_OUTPUT_TOKENS = 16_384
+DEFAULT_MAX_OUTPUT_TOKENS = 32_768
+RETRY_MAX_OUTPUT_TOKENS = 65_536
 DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
 REQUEST_TOKEN_OVERHEAD = 16
 _ALLOWED_TEXT_CONTROLS = frozenset("\t\n\r\f")
@@ -94,9 +104,35 @@ RESEARCH_POLICY_HASH = contracts.document_hash({
     "reviewer_version": RESEARCH_REVIEWER_VERSION,
     "instructions": _RESEARCH_PROMPT,
 })
+_RESEARCH_RESPONSE_GUIDANCE = """
+
+Complete the review in this response; do not emit placeholders or an empty
+assessment. Include every supplied file in reviewed_files. For each research
+claim, copy a short, contiguous excerpt directly from the named source file,
+without editing, combining, or paraphrasing it. Put interpretation and cross-file
+connections in explanation, not excerpt. Prefer executable controller statements
+over comments describing them. Include the required claims for the selected
+classification and a nonempty source-only limitations list. If control cannot be
+established, use unverified with actual source evidence for that uncertainty;
+never invent an excerpt to complete the response.
+"""
+_PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE = """
+
+Final research_control output format: every evidence excerpt must contain at
+least 12 non-whitespace characters and be an exact contiguous substring of its
+named source file. Choose adjacent source lines if needed to meet that minimum;
+do not edit, combine separate spans, or paraphrase the excerpt.
+The unique set of evidence claim tags must be exactly the set for the selected
+classification, with no tags from another classification:
+model_directed: observation_to_action, finish_continue
+workflow: fixed_control
+unverified: uncertainty
+Describe other scaffolding and interpretation in explanation or limitations,
+not as additional evidence claim tags.
+"""
 _RESPONSE_INVALID_REASONS = frozenset(
     {
-        "envelope", "model_mismatch", "choice", "not_finished", "message",
+        "envelope", "model_mismatch", "choice", "not_finished", "truncated", "truncated_at_limit", "message",
         "refusal_or_tools", "content", "content_json", "document_keys",
         "verdict", "summary", "coverage", "coverage_order", "findings",
         "verdict_findings", "finding_keys", "finding_classification",
@@ -272,6 +308,21 @@ path that establishes both the unsupported substitution and its reachable
 output; do not infer a violation merely from a missing citation. Apply this
 same behavior test to every submission, regardless of author or prior review.
 
+Distinguish emitted factual assertions from selection and control metadata.
+An internal candidate/pass flag or a routing index such as matched_icp_signal
+does not by itself attest that a company fact was independently verified. Trace
+the actual output text and field meaning. Genuine source quotes, weak matches,
+and explicitly hypothetical commercial relevance are not fabrication solely
+because relevance is uncertain. A real quote does not support added facts.
+A hedge does not excuse an unsupported factual premise: "may help expand its
+offering" can still assert that the company already has that offering. Consider
+independent evidence across fields and checks; another required check may
+establish the same fact even without a label-specific pass. For each fabrication
+finding, explain the precise unsupported factual assertion and its reachable emitted field,
+including why required evidence checks do not establish it. If hypothetical
+versus factual meaning remains unresolved, apply the same clear-evidence
+threshold above; do not assume either verification or fabrication.
+
 The user message is a JSON document whose submission_files array is the entire
 validated archive. Inspect every item and return each supplied path exactly
 once, in the supplied order, in reviewed_files. A reject verdict requires at
@@ -343,6 +394,55 @@ def _read_all_text_files(source_archive: bytes) -> Tuple[ReviewFile, ...]:
     return tuple(sorted(files, key=lambda item: item.path))
 
 
+def _response_schema(
+    *, paths: Tuple[str, ...], comparison_ids: Tuple[str, ...],
+    research_bindings: Mapping[str, str] | None,
+) -> Mapping[str, Any]:
+    """Guide supported pinned routes; the source-aware parser stays authoritative.
+
+    Keep to the shared strict-schema subset, with every object closed and all
+    fields required. Semantic relations and exact excerpts still need validation.
+    """
+    def obj(properties):
+        return {"type": "object", "properties": properties,
+                "required": list(properties), "additionalProperties": False}
+
+    text = {"type": "string"}
+    path = {"type": "string", "enum": list(paths)}
+    finding = {"category": {"type": "string", "enum": [
+        category for category in REVIEW_CATEGORIES if category != "duplicate_submission"
+    ]}, "file": path, "evidence": text, "explanation": text}
+    duplicate = {**finding, "category": {"type": "string", "enum": ["duplicate_submission"]},
+                 "comparison_id": {"type": "string", "enum": list(comparison_ids)},
+                 "confidence": {"type": "number"}}
+    properties = {
+        "verdict": {"type": "string", "enum": ["pass", "reject"]},
+        "summary": text,
+        "reviewed_files": {"type": "array", "minItems": 1, "items": path},
+        "reviewed_comparisons": {"type": "array", "items": (
+            {"type": "string", "enum": list(comparison_ids)} if comparison_ids else text)},
+        "findings": {"type": "array", "items": (
+            {"anyOf": [obj(finding), obj(duplicate)]} if comparison_ids else obj(finding))},
+    }
+    if research_bindings is not None:
+        properties["research_control"] = obj({
+            **{name: {"type": "string", "enum": [value]}
+               for name, value in research_bindings.items()},
+            "classification": {"type": "string", "enum": sorted(RESEARCH_CLASSIFICATIONS)},
+            "evidence": {"type": "array", "minItems": 1, "items": obj({
+                "claim": {"type": "string", "enum": sorted(_RESEARCH_CLAIMS)},
+                "file": path,
+                "excerpt": {"type": "string", "description": (
+                    "Copy one exact contiguous substring from the named file; "
+                    "12 or more non-whitespace characters, at most 2000 characters. "
+                    "Do not paraphrase or combine separate source passages.")},
+                "explanation": text,
+            })},
+            "limitations": {"type": "array", "minItems": 1, "items": text},
+        })
+    return obj(properties)
+
+
 def prepare_request(
     source_archive: bytes,
     *,
@@ -361,6 +461,10 @@ def prepare_request(
     if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens < 1:
         raise CodeReviewError("review_output_limit_invalid")
     if not isinstance(context_window_tokens, int) or isinstance(context_window_tokens, bool) or context_window_tokens < 1:
+        raise CodeReviewError("review_context_limit_invalid")
+    if model == PROSPECTIVE_REVIEW_MODEL and max_output_tokens > PROSPECTIVE_MAX_OUTPUT_TOKENS:
+        raise CodeReviewError("review_output_limit_invalid")
+    if model == PROSPECTIVE_REVIEW_MODEL and context_window_tokens > PROSPECTIVE_CONTEXT_WINDOW_TOKENS:
         raise CodeReviewError("review_context_limit_invalid")
 
     files = _read_all_text_files(source_archive)
@@ -400,7 +504,10 @@ def prepare_request(
     parameters = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT + (_RESEARCH_PROMPT if research_control else "")},
+            {"role": "system", "content": _SYSTEM_PROMPT + (
+                _RESEARCH_PROMPT + _RESEARCH_RESPONSE_GUIDANCE + (
+                    _PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
+                    if model == PROSPECTIVE_REVIEW_MODEL else "") if research_control else "")},
             {"role": "user", "content": contracts.canonical_json(submission)},
         ],
         "max_tokens": max_output_tokens,
@@ -411,16 +518,28 @@ def prepare_request(
         "provider": {
             # Admission chooses one approved full-source route per durable
             # claim. Provider-internal fallback must not hide extra attempts.
-            "only": ["azure" if model == FALLBACK_REVIEW_MODEL else "google-vertex"],
+            "only": ["azure" if model == FALLBACK_REVIEW_MODEL else
+                     "nebius/fp8" if model == PROSPECTIVE_REVIEW_MODEL else "google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
             "zdr": True,
         },
-        # JSON-object generation keeps the ZDR route eligible. parse_response
-        # below remains the strict, fail-closed contract boundary.
-        "response_format": {"type": "json_object"},
+        "response_format": ({"type": "json_schema", "json_schema": {
+            "name": "arena_full_source_review", "strict": True,
+            "schema": _response_schema(
+                paths=paths, comparison_ids=tuple(context["comparison_id"] for context in similarity_contexts),
+                research_bindings=submission.get("research_control"),
+            ),
+        }} if model in {DEFAULT_REVIEW_MODEL, FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL}
+            else {"type": "json_object"}),
     }
+    if model == PROSPECTIVE_REVIEW_MODEL:
+        parameters["reasoning"] = {"effort": "low", "exclude": False}
+        parameters["provider"].update({
+            "max_price": {"prompt": 0.3, "completion": 1.2, "request": 0.0},
+            "enforce_distillable_text": True,
+        })
     # UTF-8 bytes are a conservative token ceiling even for non-ASCII source,
     # not an exact tokenizer count. Exceeding this ceiling cannot prove that
     # the actual request is too large; require router integrity and actual
@@ -433,32 +552,13 @@ def prepare_request(
     if max_output_tokens >= context_window_tokens:
         raise CodeReviewError("review_source_exceeds_context")
     requires_context_integrity = (
-        model == FALLBACK_REVIEW_MODEL
+        model in {FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL}
         or input_bound + max_output_tokens > context_window_tokens
     )
 
-    minimum_coverage_response = {
-        "verdict": "pass",
-        "summary": "review complete",
-        "reviewed_files": list(paths),
-        "findings": [],
-    }
-    if similarity_contexts:
-        minimum_coverage_response["reviewed_comparisons"] = [
-            context["comparison_id"] for context in similarity_contexts
-        ]
-    if research_control:
-        excerpt_file = next((item for item in files if item.content.strip()), None)
-        if excerpt_file is None:
-            raise CodeReviewError("review_output_cannot_report_coverage")
-        minimum_coverage_response["research_control"] = {
-            **submission["research_control"], "classification": "unverified",
-            "evidence": [{"claim": "uncertainty", "file": excerpt_file.path,
-                          "excerpt": excerpt_file.content.strip()[:1],
-                          "explanation": "Unresolved route."}],
-            "limitations": ["Source-only assessment."],
-        }
-    if len(contracts.canonical_json(minimum_coverage_response).encode("utf-8")) > max_output_tokens:
+    # Research evidence still needs nonblank source. Output JSON byte length
+    # cannot establish its provider token requirement; validate actual replies.
+    if research_control and not any(item.content.strip() for item in files):
         raise CodeReviewError("review_output_cannot_report_coverage")
     return PreparedCodeReview(
         parameters, files, input_bound, similarity_contexts,
@@ -516,6 +616,10 @@ def context_integrity_failure(
     if selected[0]["model"] not in allowed_endpoint_models:
         return "selected_model"
     if requested_model == FALLBACK_REVIEW_MODEL and selected[0]["provider"] != "Azure":
+        return "selected_provider"
+    if requested_model == PROSPECTIVE_REVIEW_MODEL and selected[0]["provider"] != "Nebius":
+        return "selected_provider"
+    if requested_model == PROSPECTIVE_REVIEW_MODEL and response.get("provider") not in (None, "Nebius"):
         return "selected_provider"
     usage = response.get("usage")
     if not isinstance(usage, Mapping):
@@ -647,6 +751,9 @@ def parse_response(
         choice = choices[0]
         if not isinstance(choice, Mapping):
             invalid("choice")
+        if any(choice.get(name) in {"length", "max_tokens"}
+               for name in ("finish_reason", "native_finish_reason")):
+            invalid("truncated_at_limit" if prepared.parameters["max_tokens"] >= RETRY_MAX_OUTPUT_TOKENS else "truncated")
         if choice.get("finish_reason") != "stop":
             invalid("not_finished")
         message = choice.get("message")
@@ -668,10 +775,13 @@ def parse_response(
             expected_keys.add("research_control")
         if not expected_keys.issubset(document) or set(document) - expected_keys - {"summary", "reviewed_comparisons"}:
             invalid("document_keys")
-        if (prepared.similarity_contexts or "reviewed_comparisons" in document) and document["reviewed_comparisons"] != [
-            context["comparison_id"] for context in prepared.similarity_contexts
-        ]:
-            invalid("coverage")
+        if prepared.similarity_contexts or "reviewed_comparisons" in document:
+            comparisons = document["reviewed_comparisons"]
+            expected = {context["comparison_id"] for context in prepared.similarity_contexts}
+            if (not isinstance(comparisons, list)
+                or not all(isinstance(item, str) for item in comparisons)
+                or len(comparisons) != len(expected) or set(comparisons) != expected):
+                invalid("coverage")
         research_control = (
             _parse_research_control(document["research_control"], prepared)
             if prepared.research_control else None
@@ -689,13 +799,8 @@ def parse_response(
             isinstance(path, str) for path in reviewed_files
         ):
             invalid("coverage")
-        if tuple(reviewed_files) != prepared.reviewed_files:
-            if (
-                len(reviewed_files) == len(prepared.reviewed_files)
-                and len(set(reviewed_files)) == len(reviewed_files)
-                and set(reviewed_files) == set(prepared.reviewed_files)
-            ):
-                invalid("coverage_order")
+        if (len(reviewed_files) != len(prepared.reviewed_files)
+            or set(reviewed_files) != set(prepared.reviewed_files)):
             invalid("coverage")
         if not isinstance(findings, list) or len(findings) > 32:
             invalid("findings")
@@ -756,7 +861,7 @@ def parse_response(
     result = CodeReviewResult(
         verdict=verdict,
         summary=summary,
-        reviewed_files=tuple(reviewed_files),
+        reviewed_files=prepared.reviewed_files,
         reviewed_file_bytes=prepared.reviewed_file_bytes,
         findings=tuple(normalized_findings),
         research_control=research_control,

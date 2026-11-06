@@ -19,6 +19,7 @@ from tests.lab_arena.test_lab_arena_postgrest_route import (
 
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/443-lab-arena-competition-publication-projection.sql"
+DEFENDER_MIGRATION = MIGRATION.with_name("601-lab-arena-defending-champion-proof.sql")
 SIGNATURE = "public.lab_arena_competition_publication_v1(public.lab_arena_rounds)"
 
 
@@ -54,7 +55,14 @@ def projected_database(database):
 
 @pytest.fixture(scope="module")
 def current_database():
-    yield from current_service_database()
+    database = current_service_database()
+    try:
+        value = next(database)
+        with value[0].connect(**value[1]) as connection, connection.cursor() as cursor:
+            cursor.execute(DEFENDER_MIGRATION.read_text())
+        yield value
+    finally:
+        database.close()
 
 
 def _project(cursor, row):
@@ -234,13 +242,16 @@ def _insert_rows(connection, rows):
                 cursor.execute("INSERT INTO public.lab_arena_rounds "
                                "(round_id,status,configuration_doc,participants,publication_doc,created_at,"
                                "published_at,cancel_reason,promotion_required,baseline_promoted_at,"
-                               "evaluation_date,icp_set_date) VALUES "
-                               "(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)",
+                               "evaluation_date,icp_set_date,champion_funding_frozen,"
+                               "champion_submission_id,champion_hotkey) VALUES "
+                               "(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                                (row["round_id"], row["status"], json.dumps(row["configuration_doc"]),
                                 json.dumps(row["participants"]), json.dumps(row["publication_doc"]),
                                 row["created_at"], row["published_at"], row["cancel_reason"],
                                 row["promotion_required"], row["baseline_promoted_at"],
-                                row["evaluation_date"], row["icp_set_date"]))
+                                row["evaluation_date"], row["icp_set_date"],
+                                row.get("champion_funding_frozen", True),
+                                row.get("champion_submission_id"), row.get("champion_hotkey")))
         finally:
             cursor.execute("SET session_replication_role=origin")
 
@@ -255,6 +266,9 @@ def _response_controls(store, rows, monkeypatch):
         monkeypatch.setattr(dashboard, "_COMPETITION_ROUND_COLUMNS", columns)
         assert dashboard.competition_snapshot(service, limit=limit) == expected
     assert expected["rounds"][-1]["promotion_status"] == "superseded"
+    assert expected["rounds"][-1]["defending_champion"] == {
+        "submission_id": "prior-champion", "miner_hotkey": "5Prior",
+    }
     # Generic reads, results, miner history and pinned reads retain full docs.
     full = store.get_round(rows[-1]["round_id"])
     assert len(full["publication_doc"]["final_ranking"]) == 145
@@ -295,6 +309,7 @@ def test_actual_postgrest_computed_selection_and_response(stack, monkeypatch):
     rows = _history_rows()
     with stack["connection"].cursor() as cursor:
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+        cursor.execute(DEFENDER_MIGRATION.read_text(encoding="utf-8"))
     _insert_rows(stack["connection"], rows)
     transport = make_transport(stack, "lab_arena_service")
     try:

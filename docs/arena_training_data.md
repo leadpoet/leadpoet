@@ -531,6 +531,11 @@ Mixed eligible scorer image or policy cohorts fail dataset preparation. Use
 `--scorer-image-digest` and `--scorer-policy-hash` to select one exact cohort;
 analysis-only records from other cohorts do not block it.
 
+The November 3 preserved judgments keep their original grading image and policy
+for qualification records, cohort filters, and readiness reports. These tools
+use the exporter's verified preservation authority and selected score attempt.
+The export retains the current round configuration and the original verdicts.
+
 🔹 Training permission is not yet confirmed. Submission consent records only
 public rerun permission; confirm the terms before training on these records.
 The manifest says so explicitly. Label accuracy still needs a manual sample

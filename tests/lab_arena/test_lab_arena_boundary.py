@@ -257,12 +257,38 @@ HOST_ARENA_IMPORTS = {
     "gateway/middleware/body_size.py": {("lab_arena", "training_observations")},
     "gateway/observability/otel_bootstrap.py": {("lab_arena.store", "safe_store_error_metadata")},
     "gateway/tasks/icp_generator.py": {("lab_arena", "contracts"), ("lab_arena.integrity", "company_only_icp"),
+                                        ("lab_arena.internal_capture", "from_environment"),
                                         ("lab_arena.store", "ArenaStore"), ("lab_arena.store", "PostgrestTransport")},
     "leadpoet_canonical/arena_weights.py": {("lab_arena", "contracts")},
-    "qualification/scoring/company_evidence_investigator.py": {("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS")},
+    "qualification/scoring/claim_equivalence.py": {
+        ("lab_arena.contracts", "canonical_json"),
+        ("lab_arena.contracts", "document_hash"),
+    },
+    "qualification/scoring/company_evidence_investigator.py": {
+        ("lab_arena.operations", "OPENROUTER_MAX_CONTENT_CHARS"),
+        # Passive worker observations; no service, database, or scorer import.
+        ("lab_arena.lab_arena_checkpoint", "record_judge_tool_event"),
+    },
+    "qualification/scoring/company_fit_evidence_reuse.py": {
+        ("lab_arena", "contracts"),
+        ("lab_arena", "signal_cache_control"),
+    },
     "qualification/scoring/competition.py": {("lab_arena.provider_observations", "company_observation")},
+    "qualification/scoring/evidence_cache_bridge.py": {
+        ("lab_arena.contracts", "canonical_json"),
+        ("lab_arena.contracts", "document_hash"),
+        ("lab_arena.signal_cache_control", "MAX_BYTES"),
+        ("lab_arena.signal_cache_control", "SCHEMA"),
+    },
+    "qualification/scoring/lead_scorer.py": {
+        ("lab_arena", "company_judgments"),
+        ("lab_arena.signal_cache_control", "FIT_CAPABILITY_OPERATION"),
+        ("lab_arena.signal_cache_control", "fit_checkpoint_capability"),
+    },
     "qualification/scoring/linkedin_company_size.py": {("lab_arena.scoring_provider_compat", "CompatibilityResponseError"),
                                                        ("lab_arena.scoring_provider_compat", "_firecrawl_response")},
+    # The scorer validates its frozen model-bound exception with pure contracts.
+    "qualification/scoring/openrouter_options.py": {("lab_arena", "contracts")},
 }
 
 

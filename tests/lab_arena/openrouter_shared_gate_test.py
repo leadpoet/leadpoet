@@ -1032,8 +1032,43 @@ def test_early_429_pause_does_not_authorize_uncertain_worker_retry():
         assert state.throttle_count == 1
 
 
-def test_reservation_boundary_oversleep_keeps_dispatch_and_settlement(monkeypatch):
-    class SlowStore(FakeLedgerStore):
+class _UndispatchedRecoveryStore(FakeLedgerStore):
+    """Model only the exact current-call recovery contract used below."""
+
+    def release_undispatched_call(self, *, run_id, lease_token_hash,
+                                 call_identity, call_doc, reason, dispatch_entry_id=None):
+        with self.lock:
+            call = self.calls[call_identity]
+            assert call["run_id"] == run_id
+            assert call["provider"] == "openrouter"
+            assert call["call_doc"] == call_doc
+            assert reason in {"provider_admission_cancelled", "provider_admission_deadline"}
+            if dispatch_entry_id is None:
+                assert call["kind"] == "reservation"
+            else:
+                assert call["kind"] == "dispatch"
+                assert type(dispatch_entry_id) is int
+                assert self.dispatch_result["idempotent"] is False
+                assert dispatch_entry_id == self.dispatch_result["dispatch_entry_id"]
+            self.release_arguments = {
+                "run_id": run_id, "lease_token_hash": lease_token_hash,
+                "call_identity": call_identity, "call_doc": dict(call_doc),
+                "reason": reason, "dispatch_entry_id": dispatch_entry_id,
+            }
+            self.log.append("release")
+            self.openrouter_capacity += call["amount"]
+            call.update(kind="recovery", recovery_doc={
+                "reason": reason, "reserved_microusd": call["amount"],
+                **({"transport_not_started": True,
+                    "undispatched_dispatch_entry_id": dispatch_entry_id}
+                   if dispatch_entry_id is not None else {}),
+            })
+            return {"status": "recovered", "idempotent": False,
+                    "call_identity": call_identity, "amount_microusd": 0}
+
+
+def test_reservation_boundary_oversleep_recovers_without_transport(monkeypatch):
+    class SlowStore(_UndispatchedRecoveryStore):
         def reserve_call(self, **kwargs):
             result = super().reserve_call(**kwargs)
             time.sleep(0.06)
@@ -1054,18 +1089,25 @@ def test_reservation_boundary_oversleep_keeps_dispatch_and_settlement(monkeypatc
         action_sequence=1, timeout_ms=50,
     )
 
-    assert result.status == 200
-    assert result.call["outcome"] == "settled"
-    assert result.call["actual_microusd"] == 12
-    assert store.log == ["reserve", "dispatch", "settle"]
-    assert len(transport.sent) == 1
-    assert next(iter(store.calls.values()))["kind"] == "settlement"
+    assert result.status == 502
+    assert result.call["outcome"] == "not_dispatched"
+    assert result.call["reason"] == "provider_admission_deadline"
+    assert "actual_microusd" not in result.call and "provider_status" not in result.call
+    assert store.log == ["reserve", "release"] and transport.sent == []
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "recovery" and "actual" not in call and "terminal" not in call
+    assert call["recovery_doc"] == {
+        "reason": "provider_admission_deadline", "reserved_microusd": call["amount"],
+    }
+    assert store.release_arguments["lease_token_hash"] == context(7).lease_token_hash
+    assert store.release_arguments["dispatch_entry_id"] is None
+    assert store.openrouter_capacity == 10_000_000
 
 
-def test_disconnect_during_reserve_keeps_one_dispatch_and_settlement():
+def test_disconnect_during_reserve_recovers_without_transport():
     cancelled = threading.Event()
 
-    class CancellingStore(FakeLedgerStore):
+    class CancellingStore(_UndispatchedRecoveryStore):
         def reserve_call(self, **kwargs):
             result = super().reserve_call(**kwargs)
             cancelled.set()
@@ -1082,20 +1124,26 @@ def test_disconnect_during_reserve_keeps_one_dispatch_and_settlement():
         cancel_requested=cancelled.is_set,
     )
 
-    assert result.status == 200
-    assert result.call["outcome"] == "settled"
-    assert result.call["actual_microusd"] == 12
-    assert store.log == ["reserve", "dispatch", "settle"]
-    assert len(transport.sent) == 1
-    settlement = next(iter(store.calls.values()))
-    assert settlement["kind"] == "settlement"
-    assert settlement["actual"] == 12
+    assert result.status == 502
+    assert result.call["outcome"] == "not_dispatched"
+    assert result.call["reason"] == "provider_admission_cancelled"
+    assert "actual_microusd" not in result.call and "provider_status" not in result.call
+    assert store.log == ["reserve", "release"] and transport.sent == []
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "recovery" and "actual" not in call and "terminal" not in call
+    assert call["recovery_doc"] == {
+        "reason": "provider_admission_cancelled", "reserved_microusd": call["amount"],
+    }
+    assert store.release_arguments["lease_token_hash"] == context(9).lease_token_hash
+    assert store.release_arguments["dispatch_entry_id"] is None
+    assert store.openrouter_capacity == 10_000_000
 
 
-def test_slow_dispatch_marker_keeps_one_transport_and_settlement(monkeypatch):
-    class SlowDispatchStore(FakeLedgerStore):
+def test_slow_dispatch_marker_recovers_only_owned_unsent_call(monkeypatch):
+    class SlowDispatchStore(_UndispatchedRecoveryStore):
         def mark_dispatched(self, **kwargs):
             result = super().mark_dispatched(**kwargs)
+            self.dispatch_result = dict(result)
             time.sleep(0.06)
             return result
 
@@ -1114,11 +1162,22 @@ def test_slow_dispatch_marker_keeps_one_transport_and_settlement(monkeypatch):
         action_sequence=1, timeout_ms=50,
     )
 
-    assert result.status == 200
-    assert result.call["outcome"] == "settled"
-    assert result.call["actual_microusd"] == 12
-    assert store.log == ["reserve", "dispatch", "settle"]
-    assert len(transport.sent) == 1
+    assert result.status == 502
+    assert result.call["outcome"] == "not_dispatched"
+    assert result.call["reason"] == "provider_admission_deadline"
+    assert "actual_microusd" not in result.call and "provider_status" not in result.call
+    assert store.log == ["reserve", "dispatch", "release"] and transport.sent == []
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "recovery" and "actual" not in call and "terminal" not in call
+    assert store.dispatch_result["idempotent"] is False
+    assert call["recovery_doc"] == {
+        "reason": "provider_admission_deadline", "reserved_microusd": call["amount"],
+        "transport_not_started": True,
+        "undispatched_dispatch_entry_id": store.dispatch_result["dispatch_entry_id"],
+    }
+    assert store.release_arguments["lease_token_hash"] == context(8).lease_token_hash
+    assert store.release_arguments["dispatch_entry_id"] == store.dispatch_result["dispatch_entry_id"]
+    assert store.openrouter_capacity == 10_000_000
 
 
 def test_idle_gate_preserves_short_responses_timeout():

@@ -72,7 +72,8 @@ class AvailabilityReadView:
 def _ledger(store, run_id):
     rows, cursor = [], None
     while True:
-        page = store.list_ledger(run_id=run_id, after_entry_id=cursor, limit=1000)
+        page = store.list_ledger(run_id=run_id, after_entry_id=cursor, limit=1000,
+                                  training_responses=True)
         rows.extend(page)
         if len(page) < 1000:
             return rows
@@ -92,7 +93,12 @@ def export_run(store, objects, run_id):
     if not round_row or not submission:
         raise ExportError("context_missing")
     generation_floor = round_row.get("scoring_generation_floor", 0)
-    policy_history = store.scoring_policy_history(execution["round_id"]) if generation_floor else None
+    canonical_source = "arena/%s/sources/%s.tar.gz" % (
+        execution["round_id"], execution["submission_id"])
+    corrected_source = (submission.get("is_king") is True
+                        and submission.get("source_ref") != canonical_source)
+    policy_history = (store.scoring_policy_history(execution["round_id"])
+                      if generation_floor or corrected_source else None)
     runs = store.list_runs(execution["round_id"])
     related = [row for row in runs if row.get("assignment_id") == execution["assignment_id"]
                or row.get("kind") == "score" and row.get("scored_run_id") == run_id]
@@ -134,8 +140,9 @@ def export_run(store, objects, run_id):
     if ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("signal_judgment_policy") == "signal_judgment_v1":
         if judge is not None:
             origin_ids = {row["source_score_run_id"] for row in company_rows.values()}
+            evidence_v2 = ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2"
             for score_id in sorted({judge["run_id"]} | origin_ids):
-                signal_uses.extend(store.get_signal_judgment_uses(score_id))
+                signal_uses.extend(store.get_signal_judgment_uses(score_id, **({"evidence": True} if evidence_v2 else {})))
             for use in signal_uses:
                 identity = (use["cache_key"], use["authority_slot"])
                 if identity not in signal_rows:
@@ -157,6 +164,7 @@ def export_run(store, objects, run_id):
                             signal_judgment_rows=[row for row in signal_rows.values() if row is not None],
                             signal_source_ledger_rows=signal_source_ledger,
                             scoring_policy_history=policy_history,
+                            preserved_judgment_policy_reader=getattr(store, "preserved_judgment_policy", None),
                             cost_eligibility_reader=cost_eligibility_reader)
 
 

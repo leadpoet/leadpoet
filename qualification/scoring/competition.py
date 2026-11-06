@@ -92,6 +92,7 @@ _EXA_TARGET_CRAWL_FAILURES = frozenset({
     ("CRAWL_LIVECRAWL_TIMEOUT", 504),
     ("CRAWL_UNKNOWN_ERROR", 500),
     ("SOURCE_NOT_AVAILABLE", 403),
+    ("CRAWL_HTTP_403", 403),
 })
 
 
@@ -1343,6 +1344,9 @@ class CompetitionCompanyScorer:
                 verified_company_fit_retry_cache=verified_company_fit_retry_cache,
                 intent_terminal_retry_cache=intent_terminal_retry_cache,
                 retry_evidence_context_key=retry_evidence_context_key,
+                **({"fit_evidence_reuse_enabled": True}
+                   if self.integrity_policy and os.environ.get("ARENA_EVIDENCE_JUDGMENT_POLICY") == "evidence_judgment_v2"
+                   else {}),
                 **(
                     {"provider_observation": provider_observation}
                     if provider_observation is not None else {}

@@ -11,11 +11,12 @@ import base64
 import copy
 import json
 import re
+from collections import OrderedDict
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
-from lab_arena import company_judgments, contracts, contact_policy, integrity, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
+from lab_arena import company_judgments, contracts, contact_policy, integrity, operations, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
@@ -26,6 +27,9 @@ MAX_EXAMPLE_NODES = 2_000_000
 _RETAINED_ERROR_STATUSES = {
     "openrouter": (400, 402, 403, 404, 422, 502),
     "deepline": (400, 402, 403, 404, 422),
+}
+_UNDISPATCHED_RECOVERY_REASONS = {
+    "attempt_completed_before_dispatch", "provider_admission_cancelled", "provider_admission_deadline",
 }
 
 
@@ -53,6 +57,7 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             result = {}
             kind = reasoning_kind(item)
             for key, child in item.items():
+                key = key if type(key) is str else copy.deepcopy(key)
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
                 if (normalized == "reasoning_content" and isinstance(child, str)
@@ -81,7 +86,9 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
                 else:
                     kept.append(walk(child, (*path, str(index))))
             return kept
-        return item
+        # Ordinary JSON scalars are immutable. Accepted scalar subclasses can
+        # carry mutable attributes, so detach them while copying the context.
+        return item if item is None or type(item) in (str, bool, int, float) else copy.deepcopy(item)
 
     return walk(value), removed
 
@@ -90,7 +97,7 @@ class _Rows:
     """Minimal read-only store for the existing accepted-evidence validators."""
 
     def __init__(self, runs, submission, caches, companies, *, round_row,
-                 signal_uses, signal_rows):
+                 signal_uses, signal_rows, preserved_judgment_policy_reader=None):
         self.runs = runs
         self.submission = submission
         self.round_row = round_row
@@ -98,6 +105,8 @@ class _Rows:
         self.companies = {(row["cache_key"], row["authority_slot"]): row for row in companies}
         self.signal_uses = signal_uses
         self.signals = {(row["cache_key"], row["authority_slot"]): row for row in signal_rows}
+        self._preserved_policy_reader = preserved_judgment_policy_reader
+        self._preserved_policies = {}
         if len(self.caches) != len(caches) or len(self.companies) != len(companies):
             raise ExportError("ambiguous_cache_rows")
         if len(self.signals) != len(signal_rows):
@@ -117,6 +126,14 @@ class _Rows:
 
     def get_company_judgment(self, key, slot):
         return self.companies.get((key, slot))
+
+    def preserved_judgment_policy(self, round_id, judge_run_id, source_run_id, refs):
+        identity = (round_id, judge_run_id, source_run_id, contracts.document_hash(refs))
+        if identity not in self._preserved_policies:
+            self._preserved_policies[identity] = (
+                self._preserved_policy_reader(round_id, judge_run_id, source_run_id, refs)
+                if self._preserved_policy_reader is not None else None)
+        return copy.deepcopy(self._preserved_policies[identity])
 
     def signal_authority_exclusions(self, run_id):
         """Replay the immutable union in signal_authority_exclusions_v1."""
@@ -171,6 +188,8 @@ def _evidence_reader(store, objects):
         _validated_company_judgment_lease = ArenaService._validated_company_judgment_lease
         _company_judgment_evidence = ArenaService._company_judgment_evidence
         _round_from_context = ArenaService._round_from_context
+        _preserved_judgment_configuration = ArenaService._preserved_judgment_configuration
+        _score_generation_floor = staticmethod(ArenaService._score_generation_floor)
 
         def _round(self, round_id):
             # Offline assembly has one exact frozen round, with no service
@@ -214,7 +233,7 @@ def _terminal_company_fit_nonmatch(breakdown):
 
 def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                                scoring_input, uses, authority_rows, company_rows, runs,
-                               round_row):
+                               round_row, source_input_reader=None):
     """Resolve every emitted signal reference against its original frozen row."""
     if (scoring_input.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_judgments.POLICY:
         if uses or any(
@@ -246,10 +265,21 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
     if set(scoring_input) - runtime_fields != set(fields):
         raise ExportError("signal_scoring_input_changed")
     frozen_input = {field: scoring_input[field] for field in fields}
+    def evidence_scope(use, row, company_index, signal_index):
+        from lab_arena.training_evidence_cache import validate_use
+        try:
+            return validate_use(
+                use=use, row=row, judge=judge, scoring_input=frozen_input,
+                company_index=company_index, signal_index=signal_index, runs=runs,
+                round_row=round_row, source_input_reader=source_input_reader,
+                fields=fields, runtime_fields=runtime_fields)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ExportError("evidence_cache_use_invalid") from exc
     by_use = {}
     for use in uses:
         position = (use.get("run_id"), use.get("company_index"), use.get("signal_index"))
-        if (position in by_use or any(type(value) is not int or value < 0 for value in position[1:])):
+        if (position in by_use or type(position[1]) is not int or position[1] < 0
+            or type(position[2]) is not int or position[2] < company_judgments.FIT_CHECKPOINT_INDEX):
             raise ExportError("signal_use_invalid")
         by_use[position] = use
     by_authority = {}
@@ -299,11 +329,84 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             positions.append(position)
         return positions
     for company_index, breakdown in zip(scored_company_indexes, breakdowns):
+        fit_position = (judge["run_id"], company_index, company_judgments.FIT_CHECKPOINT_INDEX)
+        fit_use = by_use.get(fit_position)
+        if fit_use is None:
+            positions = source_positions(company_index, company_judgments.FIT_CHECKPOINT_INDEX, None)
+            fit_position = positions[0] if len(positions) == 1 else None
+            fit_use = by_use.get(fit_position)
+        if fit_use is not None:
+            row = by_authority.get((fit_use.get("cache_key"), fit_use.get("authority_slot")))
+            fit_judge = runs.get(fit_position[0])
+            execution = runs.get(fit_judge.get("scored_run_id")) if fit_judge is not None else None
+            if row is None or execution is None or fit_position in seen:
+                raise ExportError("fit_checkpoint_authority_missing")
+            fit_input = frozen_input
+            if fit_judge["run_id"] != judge["run_id"]:
+                if source_input_reader is None:
+                    raise ExportError("fit_checkpoint_source_input_missing")
+                source_input = source_input_reader(fit_judge)
+                if not isinstance(source_input, Mapping) or set(source_input) - runtime_fields != set(fields):
+                    raise ExportError("fit_checkpoint_source_input_invalid")
+                fit_input = {field: source_input[field] for field in fields}
+                current_effective = company_judgments.effective_company_inputs(frozen_input)[company_index]
+                source_effective = company_judgments.effective_company_inputs(fit_input)[fit_position[1]]
+                if current_effective != source_effective:
+                    raise ExportError("fit_checkpoint_company_input_mismatch")
+            evidence_v2 = (row.get("scope_doc") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2"
+            if evidence_v2:
+                scope, judgment = evidence_scope(fit_use, row, company_index, -1)
+            else:
+                execution_hash = contracts.document_hash({
+                    "schema_version": contact_policy.output_schema(config),
+                    "companies": fit_input["companies"],
+                })
+                scope = signal_judgments.build_fit_scope(
+                    scoring_input=fit_input, company_index=fit_position[1],
+                    checkpoint_context=signal_judgments.fit_checkpoint_context(
+                        fit_judge, execution, config, fit_input, execution_hash,
+                    ),
+                    round_id=judge["round_id"], network_name=round_row["arena_network_name"],
+                    netuid=int(round_row.get("arena_netuid") or 0),
+                    scorer_image_digest=config["scorer_image_digest"],
+                    scorer_image_reference=config["scorer_image_reference"],
+                )
+                judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
+            from arena_reviewer_runtime.checkpoint_io import normalize_evidence_quotes
+            fit_receipts = [receipt for receipt in breakdown.get("verifier_gate_receipts") or []
+                            if isinstance(receipt, Mapping) and receipt.get("gate") == "company_fit"]
+            source = runs.get(row.get("source_score_run_id"))
+            if (row.get("scope_doc") != scope
+                or fit_receipts != [normalize_evidence_quotes(judgment["company_fit_receipt"])]
+                or row.get("cache_key") != scope["cache_key"]
+                or row.get("signal_input_hash") != scope["signal_input_hash"]
+                or row.get("judgment_hash") != contracts.document_hash(judgment)
+                or any(fit_use.get(key) != row.get(key) for key in (
+                    "cache_key", "authority_slot", "signal_input_hash", "source_score_run_id", "judgment_hash",
+                )) or source is None or source.get("kind") != "score"
+                or source.get("status") not in {"accepted", "failed", "leased"}
+                or source.get("round_id") != judge["round_id"]
+                or (not evidence_v2 and (
+                    source.get("assignment_id") != fit_judge.get("assignment_id")
+                    or source.get("scoring_generation_floor", 0) != fit_judge.get("scoring_generation_floor", 0)
+                    or source.get("scored_run_id") != fit_judge.get("scored_run_id")))
+                or source.get("scored_run_id") != row.get("source_scored_run_id")
+                or source.get("runner_hotkey") != row.get("source_runner_hotkey")
+                or source.get("claim_request_hash") != row.get("source_claim_request_hash")
+                or source.get("lease_generation") != row.get("source_lease_generation")
+                or reviewer_runtime.selected_image(source, config) != reviewer_runtime.selected_image(fit_judge, config)):
+                raise ExportError("fit_checkpoint_source_mismatch")
+            seen.add(fit_position)
+            evidence.append({
+                "company_index": company_index, "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+                "reference": signal_judgments.reference(scope, row["authority_slot"]),
+                "use": copy.deepcopy(fit_use), "authority": copy.deepcopy(row),
+            })
         details = _signal_details(breakdown)
         unmatched = {position for position in by_use
-                     if position[0] == judge["run_id"] and position[1] == company_index}
+                     if position[0] == judge["run_id"] and position[1] == company_index and position not in seen}
         for signal_index in {position[2] for position in by_use}:
-            unmatched.update(source_positions(company_index, signal_index, None))
+            unmatched.update(position for position in source_positions(company_index, signal_index, None) if position not in seen)
         if not details and unmatched:
             if not _terminal_company_fit_nonmatch(breakdown):
                 raise ExportError("signal_use_without_reference")
@@ -332,18 +435,22 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             if row is None or not isinstance(row.get("scope_doc"), Mapping):
                 raise ExportError("signal_authority_missing")
             scope_doc = row["scope_doc"]
-            scope = signal_judgments.build_scope(
-                scoring_input=frozen_input, company_index=company_index,
-                signal_index=signal_index,
-                verified_company_identity=scope_doc.get("verified_company_identity"),
-                verified_funding_stage_context=scope_doc.get("verified_funding_stage_context"),
-                verified_source_pages=scope_doc.get("verified_source_pages"),
-                round_id=judge["round_id"],
-                network_name=round_row["arena_network_name"],
-                netuid=int(round_row.get("arena_netuid") or 0),
-                scorer_image_digest=config["scorer_image_digest"],
-                scorer_image_reference=config["scorer_image_reference"],
-            )
+            evidence_v2 = scope_doc.get("evidence_judgment_policy") == "evidence_judgment_v2"
+            if evidence_v2:
+                scope, judgment = evidence_scope(use, row, company_index, signal_index)
+            else:
+                scope = signal_judgments.build_scope(
+                    scoring_input=frozen_input, company_index=company_index,
+                    signal_index=signal_index,
+                    verified_company_identity=scope_doc.get("verified_company_identity"),
+                    verified_funding_stage_context=scope_doc.get("verified_funding_stage_context"),
+                    verified_source_pages=scope_doc.get("verified_source_pages"),
+                    round_id=judge["round_id"],
+                    network_name=round_row["arena_network_name"],
+                    netuid=int(round_row.get("arena_netuid") or 0),
+                    scorer_image_digest=config["scorer_image_digest"],
+                    scorer_image_reference=config["scorer_image_reference"],
+                )
             if (scope_doc != scope
                     or signal_judgments.validate_reference(reference, scope) != reference
                     or identity != (reference["cache_key"], reference["authority_slot"])
@@ -356,7 +463,7 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
             source_id = row.get("source_score_run_id")
             source = runs.get(source_id)
-            if (raw != judgment
+            if (raw != (judgment["raw_judgment"] if evidence_v2 else judgment)
                     or row.get("judgment_hash") != contracts.document_hash(judgment)
                     or use.get("judgment_hash") != row["judgment_hash"]
                     or use.get("source_score_run_id") != source_id
@@ -469,11 +576,65 @@ def _verified_runtime_source(resource):
     return origin == "git_checkout" and dirty == "clean" or origin in {"release_marker", "verified_archive_environment"} and dirty == "unknown"
 
 
-def _source_evidence(objects, run, round_row, submission, participant):
+def _corrected_source_binding(run, round_row, submission, participant, history):
+    """Accept only an owner-recorded source revision for this exact execution.
+
+    The existing history RPC projects a receipt only while its source and round
+    still match live state, and names only executions admitted by that receipt.
+    It never supplies a general exemption for noncanonical object paths.
+    """
+    config = round_row.get("configuration_doc") or {}
+    round_id = run["round_id"]
+    baseline_id = "baseline-" + round_id.removeprefix("arena-")
+    if (submission.get("is_king") is not True or participant.get("is_king") is not True
+            or submission.get("status") != "frozen" or run.get("kind") != "execute"
+            or run.get("submission_id") != baseline_id
+            or participant.get("submission_id") != baseline_id
+            or participant.get("miner_hotkey") != run.get("miner_hotkey")
+            or config.get("baseline_hotkey") != run.get("miner_hotkey")
+            or not isinstance(history, Mapping) or history.get("round_id") != round_id
+            or not isinstance(history.get("source_corrections"), list)):
+        raise ExportError("source_correction_authority_missing")
+    matches = [row for row in history["source_corrections"]
+               if isinstance(row, Mapping) and isinstance(row.get("run_ids"), list)
+               and run["run_id"] in row["run_ids"]]
+    if len(matches) != 1:
+        raise ExportError("source_correction_authority_ambiguous")
+    proof = matches[0]
+    fields = ("submission_id", "miner_hotkey", "source_ref", "source_size_bytes",
+              "source_archive_sha256", "source_normalized_sha256")
+    source_url = proof.get("baseline_source_url")
+    match = re.fullmatch(
+        r"https://github[.]com/leadpoet/leadpoet-sales-agent/archive/([0-9a-f]{40})[.]tar[.]gz",
+        source_url if isinstance(source_url, str) else "")
+    if (proof.get("operation") != "baseline_source_supersession_v1"
+            or proof.get("round_id") != round_id
+            or not isinstance(proof.get("request_id"), str) or not proof["request_id"]
+            or any(not isinstance(proof.get(key), str)
+                   or contracts.SHA256_RE.fullmatch(proof[key]) is None
+                   for key in ("request_hash", "source_archive_sha256", "source_normalized_sha256"))
+            or any(proof.get(key) != submission.get(key) for key in fields)
+            or type(proof.get("source_size_bytes")) is not int or proof["source_size_bytes"] < 1
+            or participant.get("source_ref") != proof["source_ref"]
+            or participant.get("source_size_bytes") != proof["source_size_bytes"]
+            or any(proof.get(key) != config.get(key) for key in
+                   ("baseline_source_url", "reasoning_baseline_source_sha256"))
+            or proof.get("reasoning_baseline_source_sha256") != proof["source_archive_sha256"]
+            or any(not isinstance(identity, str) for identity in proof["run_ids"])
+            or len(set(proof["run_ids"])) != len(proof["run_ids"])
+            or match is None):
+        raise ExportError("source_correction_binding_invalid")
+    return {"request_id": proof["request_id"], "request_hash": proof["request_hash"],
+            "commit": match.group(1)}
+
+
+def _source_evidence(objects, run, round_row, submission, participant, history=None):
     source_ref = participant["source_ref"]
     expected_ref = "arena/%s/sources/%s.tar.gz" % (run["round_id"], run["submission_id"])
-    if source_ref != submission.get("source_ref") or source_ref != expected_ref:
+    if source_ref != submission.get("source_ref"):
         raise ExportError("source_ref_mismatch")
+    correction = (_corrected_source_binding(run, round_row, submission, participant, history)
+                  if source_ref != expected_ref else None)
     source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
     facts = source_bundle.validate_source_archive(source)
     if (type(participant.get("source_size_bytes")) is not int
@@ -498,10 +659,19 @@ def _source_evidence(objects, run, round_row, submission, participant):
                 or (round_row.get("configuration_doc") or {}).get("baseline_hotkey") != run.get("miner_hotkey")):
             raise ExportError("source_recorded_hash_missing")
         origin = "computed_from_frozen_object"
-    return {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
+    if correction is not None:
+        from lab_arena import submission_similarity
+        if (source_bundle.source_archive_commit(source) != correction["commit"]
+                or submission_similarity.inspect_archive(source).normalized_sha256
+                != submission["source_normalized_sha256"]):
+            raise ExportError("source_correction_archive_mismatch")
+    evidence = {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
             "hash_origin": origin, "recorded_hash_present": bool(recorded),
             "normalized_sha256": submission.get("source_normalized_sha256"),
             "archive_commit_comment": source_bundle.source_archive_commit(source) or None}
+    if correction is not None:
+        evidence["source_correction"] = correction
+    return evidence
 
 
 def _response_value(terminal, provider):
@@ -540,11 +710,15 @@ def response_entry_id(call):
         or type(terminal) is not int or not 0 < selected <= terminal or len(receipts) != 1):
         raise ExportError("retained_provider_error_identity_invalid")
     receipt = receipts[0]
+    metadata = receipt.get("metadata") or {}
+    successful = (provider == "openrouter" and metadata.get("call_succeeded") is True
+                  and type(call.get("response_status")) is int
+                  and 200 <= call["response_status"] < 300)
     if (receipt.get("terminal_source") != f"entry_doc.call.{provider}_terminal_response"
         or receipt.get("entry_kind") != "uncertain"
-        or (receipt.get("metadata") or {}).get("call_succeeded") is not False
-        or (receipt.get("metadata") or {}).get("status") != call.get("response_status")
-        or call.get("response_status") not in _RETAINED_ERROR_STATUSES[provider]
+        or not (successful or metadata.get("call_succeeded") is False
+                and call.get("response_status") in _RETAINED_ERROR_STATUSES[provider])
+        or metadata.get("status") != call.get("response_status")
         or receipt.get("response_sha256") != call.get("response_sha256")
         or receipt.get("response_ref") != {"field": "response", "entry_id": selected}):
         raise ExportError("retained_provider_error_identity_invalid")
@@ -557,6 +731,101 @@ def response_entry_id(call):
             or (heads[0].get("accounting") or {}).get("reconciled_uncertainty_entry_id") != selected):
             raise ExportError("retained_provider_error_identity_invalid")
     return selected
+
+
+def recovered_response_ref(call):
+    """Validate the separate saved Deepline response; it is not a ledger row."""
+    ref = call.get("recovered_response_ref")
+    if ref is None:
+        return None
+    if not isinstance(ref, Mapping) or not isinstance(ref.get("metadata"), Mapping):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    metadata = ref["metadata"]
+    terminals = [row for row in call.get("lifecycle", [])
+                 if row.get("entry_kind") in {"settlement", "uncertain", "recovery", "refusal"}]
+    reservations = [row for row in call.get("lifecycle", []) if row.get("entry_kind") == "reservation"]
+    request = call.get("request") or {}
+    parameters = request.get("effective_parameters") or {}
+    operation = operations.get_operation(call.get("operation_id"))
+    tool = (operation.deepline_tool or parameters.get("tool")) if operation is not None else None
+    provider_cost = metadata.get("provider_cost") or {}
+    if (ref.get("table") != "lab_arena_deepline_call_responses"
+        or call.get("provider") != "deepline"
+        or operation is None or operation.provider != "deepline"
+        or any(ref.get(key) != call.get(key) for key in
+               ("call_identity", "reservation_entry_id", "run_id", "terminal_entry_id", "request_hash"))
+        or type(ref.get("reservation_entry_id")) is not int
+        or type(ref.get("terminal_entry_id")) is not int
+        or len(reservations) != 1 or reservations[0].get("entry_id") != ref["reservation_entry_id"]
+        or not terminals or max(row["entry_id"] for row in terminals) != ref["terminal_entry_id"]
+        or not any(row.get("entry_id") == ref["terminal_entry_id"]
+                   and row.get("entry_kind") in {"settlement", "uncertain"} for row in terminals)
+        or not isinstance(ref.get("created_at"), str) or not ref["created_at"]
+        or not isinstance(ref.get("request_id"), str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", ref["request_id"]) is None
+        or re.fullmatch(r"ctx-tool-[0-9a-f]{32}", ref["request_id"]) is not None
+        or not isinstance(ref.get("tool"), str) or not ref["tool"]
+        or tool != ref["tool"]
+        or request.get("request_hash") != ref["request_hash"]
+        or metadata.get("call_succeeded") is not True
+        or type(metadata.get("status")) is not int or not 200 <= metadata["status"] < 300
+        or metadata["status"] != call.get("response_status")
+        or "body_b64" in metadata
+        or any(provider_cost.get(key) != ref[field] for key, field in
+               (("request_id", "request_id"), ("operation", "tool")) if key in provider_cost)
+        or ref.get("response_ref") != {"field": "response"}
+        or ref.get("response_sha256") != call.get("response_sha256")
+        or contracts.document_hash(call.get("response")) != ref.get("response_sha256")
+        or ref.get("privacy_redactions") != call.get("response_privacy_redactions")
+        or type(ref.get("wire_body_bytes")) is not int or ref["wire_body_bytes"] < 0
+        or not isinstance(ref.get("wire_body_sha256"), str)
+        or contracts.SHA256_RE.fullmatch(ref["wire_body_sha256"]) is None):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    return ref
+
+
+def _ledger_recovered_response(entries, reserve):
+    saved = [(row, row["training_recovered_response"]) for row in entries
+             if row.get("training_recovered_response") is not None]
+    if not saved:
+        return None
+    row, ref = saved[0]
+    entry = reserve.get("entry_doc") or {}
+    if not isinstance(ref, Mapping) or not isinstance(ref.get("terminal_response"), Mapping):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    terminal = ref["terminal_response"]
+    cost = (row.get("terminal_response") or {}).get("provider_cost") or {}
+    recovered_cost = terminal.get("provider_cost") or {}
+    if (len(saved) != 1
+        or reserve.get("provider") != "deepline"
+        or row["entry_kind"] not in {"settlement", "uncertain"}
+        or row["entry_id"] != max(item["entry_id"] for item in entries)
+        or ref.get("table") != "lab_arena_deepline_call_responses"
+        or any(ref.get(key) != reserve.get(key) for key in ("call_identity", "run_id"))
+        or ref.get("reservation_entry_id") != reserve["entry_id"]
+        or ref.get("terminal_entry_id") != row["entry_id"]
+        or ref.get("request_hash") != entry.get("request_hash")
+        or ref.get("tool") != entry.get("tool")
+        or not ref.get("request_id") or not ref.get("created_at")
+        or terminal.get("call_succeeded") is not True
+        or type(terminal.get("status")) is not int or not 200 <= terminal["status"] < 300
+        or row["entry_kind"] == "settlement" and cost.get("request_id") != ref.get("request_id")
+        or any(recovered_cost.get(key) != ref.get(field) for key, field in
+               (("request_id", "request_id"), ("operation", "tool")) if key in recovered_cost)):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    if terminal == row.get("terminal_response"):
+        return None  # The ledger already retains the exact delivered reply.
+    return ref
+
+
+def recovered_response_for_write(call, write):
+    """Join a host receipt to the exact separately retained successful reply."""
+    ref = recovered_response_ref(call)
+    if (ref is not None and ref["wire_body_sha256"] == write.get("body_sha256")
+        and ref["wire_body_bytes"] == write.get("body_bytes")
+        and ref["metadata"]["status"] == write.get("status")):
+        return ref
+    return None
 
 
 def _calls(rows, run_ids, objects, run_order):
@@ -588,6 +857,7 @@ def _calls(rows, run_ids, objects, run_order):
                      {"settlement", "uncertain", "recovery", "refusal"}]
         response_terminals = terminals
         retained = []
+        retained_success = False
         provider = reserves[0].get("provider") if reserves else None
         if provider in _RETAINED_ERROR_STATUSES:
             terminal_field = f"{provider}_terminal_response"
@@ -598,11 +868,34 @@ def _calls(rows, run_ids, objects, run_order):
                 terminal = saved[terminal_field]
                 try:
                     status, _, body = _decode_terminal(terminal)
-                    if (saved.get("reason") != "missing_provider_cost"
-                        or saved.get("call_succeeded") is not False
-                        or terminal.get("call_succeeded") is not False
-                        or status not in _RETAINED_ERROR_STATUSES[provider]
-                        or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
+                    successful = (provider == "openrouter" and saved.get("call_succeeded") is True
+                                  and type(terminal.get("status")) is int
+                                  and terminal.get("call_succeeded") is True and 200 <= status < 300)
+                    if successful:
+                        retained_success = True
+                        generation = saved.get("openrouter_generation_id")
+                        fingerprint = saved.get("credential_fingerprint")
+                        reservation_doc = reserves[0].get("entry_doc") or {}
+                        if (saved.get("reason") not in {"missing_provider_cost", "settle_failure"}
+                            or reserves[0].get("operation_id") not in {"openrouter.chat", "openrouter.responses"}
+                            or type(saved.get("provider_status")) is not int
+                            or not 200 <= saved["provider_status"] < 300
+                            or not isinstance(fingerprint, str)
+                            or contracts.SHA256_RE.fullmatch(fingerprint) is None
+                            or generation is not None and (not isinstance(generation, str)
+                                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", generation) is None)
+                            or any(saved.get(key) != reservation_doc[key] for key in (
+                                "credential_fingerprint", "openrouter_generation_id", "openrouter_model", "request_hash")
+                                if key in reservation_doc and key in saved)
+                            or len(body) > MAX_RECEIPT_BYTES
+                            or set(terminal) != {"status", "headers", "body_b64", "call_succeeded"}
+                            or any(key.startswith("judgment_cache_source_") for key in terminal)):
+                            raise BrokerError("broker_unavailable")
+                    elif (saved.get("reason") != "missing_provider_cost"
+                          or saved.get("call_succeeded") is not False
+                          or terminal.get("call_succeeded") is not False
+                          or status not in _RETAINED_ERROR_STATUSES[provider]
+                          or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
                         raise BrokerError("broker_unavailable")
                     if provider == "deepline" and status == 402:
                         from lab_arena.operations import GENERIC_UNAVAILABLE_BODY
@@ -645,9 +938,12 @@ def _calls(rows, run_ids, objects, run_order):
             reasons.add("ambiguous_call_lifecycle")
             continue
         reserve = entries[0] if standalone_refusal else reserves[0]
-        if any(any(row.get(key) != reserve.get(key) for key in
-                   ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
+        membership = ("run_id", "round_id", "submission_id", "provider", "operation_id")
+        if retained_success:
+            membership += ("miner_hotkey", "stage", "funding_source")
+        if any(any(row.get(key) != reserve.get(key) for key in membership) for row in entries):
             raise ExportError("ledger_membership_mismatch")
+        recovered = _ledger_recovered_response(entries, reserve)
         entry = ((reserve.get("entry_doc") or {}).get("call") if standalone_refusal
                  else reserve.get("entry_doc")) or {}
         call = {"call_identity": identity, "run_id": reserve["run_id"],
@@ -735,7 +1031,8 @@ def _calls(rows, run_ids, objects, run_order):
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
                              "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
-                             "transport_elapsed_ms", "timing_scope"}
+                             "transport_elapsed_ms", "timing_scope",
+                             "transport_not_started", "undispatched_dispatch_entry_id"}
         call["lifecycle"] = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
             metadata = {key: copy.deepcopy(row[key]) for key in
@@ -743,8 +1040,8 @@ def _calls(rows, run_ids, objects, run_order):
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
             if (row.get("entry_kind") == "recovery"
-                    and (row.get("entry_doc") or {}).get("reason") == "attempt_completed_before_dispatch"):
-                metadata["accounting"]["reason"] = "attempt_completed_before_dispatch"
+                    and (row.get("entry_doc") or {}).get("reason") in _UNDISPATCHED_RECOVERY_REASONS):
+                metadata["accounting"]["reason"] = row["entry_doc"]["reason"]
             metadata["accounting"].update({key: copy.deepcopy(value) for key, value in
                 observations(row.get("entry_doc") or {}).items() if key in accounting_fields})
             recorded_call = (row.get("entry_doc") or {}).get("call")
@@ -767,6 +1064,11 @@ def _calls(rows, run_ids, objects, run_order):
             latest_digest = contracts.document_hash(latest_response)
         except Exception:
             pass  # Missing receipt is recorded below; no failed proof is hidden.
+        recovered_value, recovered_redactions, recovered_digest = None, [], None
+        if recovered is not None:
+            recovered_terminal = recovered["terminal_response"]
+            recovered_value, recovered_redactions = _response_value(recovered_terminal, reserve.get("provider"))
+            recovered_digest = contracts.document_hash(recovered_value)
         saved_bodies = {}
         for row in sorted(response_terminals, key=lambda row: int(row["entry_id"])):
             terminal = row.get("terminal_response") or {}
@@ -790,7 +1092,7 @@ def _calls(rows, run_ids, objects, run_order):
                 receipt["wire_body_bytes"] = len(wire_body)
                 digest = latest_digest if reuse_latest else contracts.document_hash(response)
                 receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
-                if digest == latest_digest:
+                if digest == (recovered_digest if recovered is not None else latest_digest):
                     receipt["response_ref"] = {"field": "response", "entry_id": latest_id}
                 elif digest in saved_bodies:
                     receipt["response_ref"] = {"entry_id": saved_bodies[digest]}
@@ -850,11 +1152,29 @@ def _calls(rows, run_ids, objects, run_order):
                 call["response_status"] = latest_terminal.get("status")
                 if retained and latest_id == retained[0]["entry_id"]:
                     call["response_entry_id"] = latest_id
-            else:
+            elif recovered is None:
                 call_reasons.add("full_response_unavailable")
             for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
                 if key in terminal:
                     call[key] = terminal[key]
+            if recovered is not None:
+                wire = base64.b64decode(recovered_terminal["body_b64"], validate=True)
+                call.update(response=recovered_value, response_sha256=recovered_digest,
+                            response_status=recovered_terminal["status"],
+                            response_hidden_reasoning_removed="hidden_reasoning" in recovered_redactions,
+                            response_privacy_redactions=recovered_redactions)
+                call.pop("response_entry_id", None)
+                call["recovered_response_ref"] = {
+                    **{key: copy.deepcopy(value) for key, value in recovered.items() if key != "terminal_response"},
+                    "metadata": {key: copy.deepcopy(value) for key, value in recovered_terminal.items()
+                                 if key not in {"body_b64", "upstream_response_receipt"}},
+                    "wire_body_sha256": contracts.hash_bytes(wire), "wire_body_bytes": len(wire),
+                    "response_sha256": recovered_digest, "privacy_redactions": recovered_redactions,
+                    "response_ref": {"field": "response"}}
+                recovered_response_ref(call)
+                call["response_provenance"]["source"] = "lab_arena_deepline_call_responses"
+                if "credential" in recovered_redactions:
+                    call_reasons.add("response_privacy_nonexact")
         call["evidence_gaps"] = sorted(call_reasons)
         reasons.update(call_reasons)
         calls.append(call)
@@ -997,6 +1317,7 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                    if item.get("wire_body_sha256") == receipt["body_sha256"]
                    and item.get("wire_body_bytes") == receipt["body_bytes"]
                    and item.get("metadata", {}).get("status") == receipt["status"]]
+        recovered = recovered_response_for_write(call, receipt)
         observed = error_observations.get(receipt["ordinal"])
         worker_error_body = False
         if observed is not None:
@@ -1012,10 +1333,10 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                                       or contracts.hash_bytes(base64.b64decode(response["body_b64"], validate=True))
                                       == receipt["body_sha256"]))
         identity = receipt["call_identity"]
-        if (not matches and not worker_error_body) or identity in linked:
+        if (not matches and recovered is None and not worker_error_body) or identity in linked:
             errors.add("worker_response_receipt_link_invalid")
             continue
-        if worker_error_body and not matches and any(
+        if worker_error_body and not matches and recovered is None and any(
                 item.get("wire_body_sha256") for item in call["response_receipts"]):
             errors.add("worker_provider_response_mismatch")
         linked[identity] = receipt
@@ -1025,9 +1346,14 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                                    "payload_sha256": snapshot["payload_sha256"]},
             "agent_receipt": "not_reported",
             "worker_received_receipt_entry_ids": sorted(item["entry_id"] for item in matches),
-            "worker_body_source": "ledger_terminal" if matches else "worker_error_observation",
-            "worker_body_exact_in_artifact": bool(matches or worker_error_body and not observed["privacy"]["redacted"]),
+            "worker_body_source": ("lab_arena_deepline_call_responses" if recovered is not None
+                                   else "ledger_terminal" if matches else "worker_error_observation"),
+            "worker_body_exact_in_artifact": bool(matches or recovered is not None
+                                                   or worker_error_body and not observed["privacy"]["redacted"]),
         })
+        if recovered is not None:
+            call["response_provenance"]["worker_recovered_response_ref"] = {
+                "table": recovered["table"], "call_identity": recovered["call_identity"]}
         if worker_error_body:
             call["response_provenance"]["worker_error_observation_ref"] = {
                 "run_id": run["run_id"], "ordinal": observed["ordinal"],
@@ -1060,7 +1386,8 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
         ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
         call["response_provenance"].setdefault("agent_receipt_refs", []).append(ref)
         call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
-        latest_acknowledged = response_entry_id(call) in call["response_provenance"]["worker_received_receipt_entry_ids"]
+        latest_acknowledged = (recovered_response_for_write(call, receipt) is not None
+                               or response_entry_id(call) in call["response_provenance"]["worker_received_receipt_entry_ids"])
         call["response_provenance"]["selected_response_acknowledged"] = latest_acknowledged
         if not latest_acknowledged and call["response_provenance"].get("worker_body_source") == "worker_error_observation":
             call["response_provenance"]["worker_error_body_acknowledged"] = True
@@ -1105,7 +1432,11 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
         errors.add(code)
         per_run_errors.setdefault(run_id, set()).add(code)
     for run in related:
-        run_id = run["run_id"]
+        # Only these small identity fields come from caller rows. Payloads
+        # below are independently decoded; do not copy their full trees.
+        artifact_identity = copy.deepcopy({key: run.get(key) for key in
+                                           ("run_id", "kind", "lease_generation", "claim_request_hash")})
+        run_id = artifact_identity["run_id"]
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
         capture = summary.get("worker_observations")
         paid = [call for call in calls if call["run_id"] == run_id]
@@ -1133,9 +1464,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                 if partial is not None:
                     partial_artifacts[run_id] = {
                         "schema_version": training_observations.JOURNAL_SCHEMA_VERSION,
-                        "run_id": run_id, "kind": run["kind"],
-                        "lease_generation": run["lease_generation"],
-                        "claim_request_hash": run["claim_request_hash"],
+                        **artifact_identity,
                         "complete": False, "payload": partial,
                         "payload_sha256": contracts.document_hash(partial),
                         "segment_refs": [training_observations.segment_ref(
@@ -1279,7 +1608,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
-                               reader: Callable[..., Mapping[str, Any]] | None) -> dict:
+                               reader: Callable[..., Mapping[str, Any]] | None,
+                               source_correction: Mapping[str, Any] | None = None) -> dict:
     """Keep the export-time cost decision separate from the quality label.
 
     The existing SQL authority calculates successful-sourcing cost. Its result
@@ -1338,15 +1668,32 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
         execution = snapshot["execution"]
         if not isinstance(execution, Mapping):
             raise ValueError("execution cost state is not a mapping")
+        source_split = ("excluded_superseded_source_successful_microusd",
+                        "excluded_superseded_source_settled_microusd")
+        source_excluded = any(key in execution for key in source_split)
+        if source_excluded and (
+            not isinstance(source_correction, Mapping)
+            or not isinstance(source_correction.get("request_id"), str)
+            or not source_correction["request_id"]
+            or not isinstance(source_correction.get("request_hash"), str)
+            or contracts.SHA256_RE.fullmatch(source_correction["request_hash"]) is None
+            or configuration.get("baseline_source_url") != (
+                "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                + str(source_correction.get("commit") or "") + ".tar.gz")
+            or run.get("submission_id") != "baseline-" + run["round_id"].removeprefix("arena-")
+            or run.get("miner_hotkey") != configuration.get("baseline_hotkey")
+            or any(type(execution.get(key)) is not int or execution[key] < 0 for key in source_split)
+        ):
+            raise ValueError("superseded source cost authority is invalid")
         successful = execution["successful_microusd"]
         split = ("competition_successful_microusd",
                  "excluded_infrastructure_successful_microusd")
-        if any(key in execution for key in split):
-            # Migration 478 preserves raw spend and excludes proved failed
-            # infrastructure attempts only from competition spend. Both parts
-            # must account for the unchanged raw successful total.
+        if source_excluded or any(key in execution for key in split):
+            # Infrastructure and receipt-bound superseded-source exclusions
+            # are disjoint. Every part must reproduce the raw financial total.
             if (any(type(execution.get(key)) is not int or execution[key] < 0 for key in split)
-                    or successful != sum(execution[key] for key in split)):
+                    or successful != sum(execution[key] for key in split) + (
+                        execution[source_split[0]] if source_excluded else 0)):
                 raise ValueError("execution cost split is invalid")
             successful = execution["competition_successful_microusd"]
         confirmed = execution.get("settled_microusd")
@@ -1355,10 +1702,11 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 raise ValueError("confirmed cost is invalid")
             settled_split = ("competition_settled_microusd",
                              "excluded_infrastructure_settled_microusd")
-            if any(key in execution for key in settled_split):
+            if source_excluded or any(key in execution for key in settled_split):
                 if (any(type(execution.get(key)) is not int or execution[key] < 0
                         for key in settled_split)
-                        or confirmed != sum(execution[key] for key in settled_split)):
+                        or confirmed != sum(execution[key] for key in settled_split) + (
+                            execution[source_split[1]] if source_excluded else 0)):
                     raise ValueError("confirmed competition cost split is invalid")
                 confirmed = execution["competition_settled_microusd"]
         numbers = (
@@ -1424,6 +1772,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                      signal_source_ledger_rows: Sequence[Mapping[str, Any]] = (),
                      input_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
                      scoring_policy_history: Mapping[str, Any] | None = None,
+                     preserved_judgment_policy_reader: Callable[..., Mapping[str, Any] | None] | None = None,
                      cost_eligibility_reader: Callable[..., Mapping[str, Any]] | None = None) -> dict:
     """Assemble one exact execution. Missing evidence produces explicit gaps.
 
@@ -1445,6 +1794,34 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     config = round_row.get("configuration_doc") or {}
     policy_versions = _scoring_policy_versions(round_row, scoring_policy_history)
     generation_floor = round_row.get("scoring_generation_floor", 0)
+    reader = _evidence_reader(_Rows(
+        by_id, submission_row, cache_rows, company_judgment_rows,
+        round_row=round_row, signal_uses=signal_judgment_uses,
+        signal_rows=signal_judgment_rows,
+        preserved_judgment_policy_reader=preserved_judgment_policy_reader,
+    ), objects)
+    preserved_policies = {}
+
+    def score_configuration(row):
+        preserved = reader._preserved_judgment_configuration(row, round_row)
+        if preserved is None:
+            refs = row.get("company_judgment_refs")
+            if (row.get("round_id") == "arena-2026-11-03"
+                    and row.get("status") == "accepted" and isinstance(refs, list)
+                    and any(not isinstance(ref, Mapping) or any(
+                        (ref.get("scope_doc") or {}).get(key) != config.get(key)
+                        for key in ("scorer_image_digest", "scorer_image_reference"))
+                        for ref in refs)):
+                raise ExportError("preserved_judgment_policy_missing")
+            return config
+        preserved_policies[row["run_id"]] = {
+            key: copy.deepcopy(preserved[key]) for key in (
+                "operation", "scoring_generation_floor", "scorer_policy",
+                "scorer_image_digest", "scorer_image_reference",
+                "current_scorer_image_digest", "current_scorer_image_reference")}
+        return {**config, **{key: copy.deepcopy(preserved[key]) for key in
+                            ("scorer_policy", "scorer_image_digest", "scorer_image_reference")}}
+
     reasons = {name: set() for name in ("context", "source_identity", "input_output_label", "exact_inputs", "costs", "research_process")}
     example = {"schema_version": SCHEMA_VERSION,
                "example_id": contracts.document_hash({"schema_version": SCHEMA_VERSION, "run_id": run_id}),
@@ -1452,6 +1829,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                "round_status": round_row.get("status"), "rewards_enabled": round_row.get("rewards_enabled"),
                "arena_network_name": round_row.get("arena_network_name"),
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
+               # Host round timestamps are not publication dates of source pages.
+               # Preserve absence; do not substitute evaluation or export time.
+               "round_dates": {key: copy.deepcopy(round_row.get(key))
+                               for key in ("created_at", "published_at")},
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
     from lab_arena import baseline_reasoning
@@ -1477,7 +1858,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         raise ExportError("ambiguous_frozen_participant")
     participant = participants[0]
     try:
-        example["source"] = _source_evidence(objects, run, round_row, submission_row, participant)
+        example["source"] = _source_evidence(
+            objects, run, round_row, submission_row, participant, scoring_policy_history)
     except Exception:
         reasons["source_identity"].add("source_unverified")
     resource = (run.get("result_doc") or {}).get("resource_summary") or {}
@@ -1521,13 +1903,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         reasons["input_output_label"].add("final_judge_unavailable")
     elif output is not None and icp is not None:
         try:
-            policy = config["scorer_policy"]
+            judge_config = score_configuration(judge)
+            policy = judge_config["scorer_policy"]
             sliced = verify.slice_first_n(output["companies"], verify.icp_company_goal(icp))
-            reader = _evidence_reader(_Rows(
-                by_id, submission_row, cache_rows, company_judgment_rows,
-                round_row=round_row, signal_uses=signal_judgment_uses,
-                signal_rows=signal_judgment_rows,
-            ), objects)
             breakdowns = reader._verified_breakdowns(judge, icp=icp, companies=sliced, policy=policy)
             result = verify.scored_row(run["submission_id"], run["icp_position"], run_id, icp, output["companies"], breakdowns, policy)
             if run.get("per_icp_score") is None or abs(Decimal(str(result["per_icp_score"])) - Decimal(str(run["per_icp_score"]))) > Decimal("0.000001"):
@@ -1537,6 +1915,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                                    "runtime": _runtime(judge),
                                    "judgment_cache_source_run_id": judge.get("judgment_cache_source_run_id"),
                                    "company_judgment_refs": judge.get("company_judgment_refs")}
+            if judge["run_id"] in preserved_policies:
+                example["judgment"]["preserved_judgment_policy"] = copy.deepcopy(preserved_policies[judge["run_id"]])
             if judge.get("company_judgment_refs") is not None:
                 needed = {(row["cache_key"], row["authority_slot"]) for row in
                           ((judge.get("claim_response") or {}).get("company_judgment_cache") or {}).get("hits", [])}
@@ -1598,6 +1978,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["competition_cost_eligibility"] = _competition_cost_snapshot(
         run=run, configuration=config, scored=scored, related=related,
         reader=cost_eligibility_reader,
+        source_correction=example.get("source", {}).get("source_correction"),
     )
     if (config.get("sourcing_cost_eligibility_policy")
             in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
@@ -1614,6 +1995,17 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             launched_ids.add(row["run_id"])
     snapshot_ids = selected_ids | launched_ids
     attempt_by_id = {row["run_id"]: row for row in example["attempts"]}
+
+    def attempt_gap(attempt_id, dimension, code):
+        if attempt_id in selected_ids:
+            reasons[dimension].add(code)
+        else:
+            # Historical inputs and runtime identities remain diagnostic
+            # evidence, not authority for the selected replacement's labels.
+            prior_code = "prior_attempt_" + code
+            reasons["research_process"].add(prior_code)
+            related_gaps[attempt_id]["research_process"].add(prior_code)
+
     for selected_id in sorted(snapshot_ids):
         attempt_policy = config.get("scorer_policy")
         if by_id[selected_id]["kind"] == "score":
@@ -1629,13 +2021,18 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     scoring_generation_floor=revision,
                     scoring_policy_hash=contracts.document_hash(attempt_policy))
             try:
-                identity = _reviewer_runtime_identity(by_id[selected_id], config)
+                attempt_config = score_configuration(by_id[selected_id])
+                if selected_id in preserved_policies:
+                    attempt_policy = attempt_config["scorer_policy"]
+                    attempt_by_id[selected_id].update(
+                        stage_generation=generation, scoring_generation_floor=revision,
+                        scoring_policy_hash=contracts.document_hash(attempt_policy))
+                identity = _reviewer_runtime_identity(by_id[selected_id], attempt_config)
                 attempt_by_id[selected_id]["runtime_identity"] = identity
                 if selected_id == example.get("score_run_id"):
                     example["judgment"]["runtime_identity"] = copy.deepcopy(identity)
             except (reviewer_runtime.ReviewerRuntimeError, KeyError, TypeError, ValueError):
-                dimension = "source_identity" if selected_id in selected_ids else "research_process"
-                reasons[dimension].add("reviewer_runtime_identity_unverified")
+                attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
         selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
         if selected_id in selected_ids and not _verified_runtime_source(selected_resource):
             reasons["source_identity"].add("runtime_source_unverified")
@@ -1643,15 +2040,19 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             reasons["research_process"].add("prior_attempt_source_unverified")
         if selected_id not in snapshots:
             try:
-                from lab_arena.training_input import read_input
+                from lab_arena.training_input import InputCaptureError, read_input
                 selected = by_id[selected_id]
                 snapshots[selected_id] = read_input(objects, selected_id, selected["kind"],
                                                      selected.get("lease_generation"), selected.get("claim_request_hash"))
-            except Exception:
-                if selected_id in selected_ids:
+            except InputCaptureError as exc:
+                if str(exc) != "input_unavailable":
+                    attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
+                elif selected_id in selected_ids:
                     reasons["exact_inputs"].add("runtime_input_snapshot_missing")
                 else:
                     reasons["research_process"].add("prior_attempt_input_missing")
+            except Exception:
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
         if selected_id in snapshots:
             snapshot = snapshots[selected_id]
             document = snapshot.get("input")
@@ -1659,22 +2060,30 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             if (not isinstance(privacy, dict) or type(privacy.get("redacted")) is not bool
                     or not isinstance(privacy.get("redactions"), list)
                     or privacy["redacted"] != bool(privacy["redactions"])):
-                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
             if (snapshot.get("privacy") or {}).get("redacted") is True:
-                reasons["exact_inputs"].add("runtime_input_privacy_nonexact")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_privacy_nonexact")
             if (snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
                     or snapshot.get("run_id") != selected_id or snapshot.get("kind") != by_id[selected_id]["kind"]
                     or snapshot.get("lease_generation") != by_id[selected_id].get("lease_generation")
                     or snapshot.get("claim_request_hash") != by_id[selected_id].get("claim_request_hash")
                     or not isinstance(document, dict) or snapshot.get("input_sha256") != contracts.document_hash(document)):
-                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                attempt_gap(selected_id, "exact_inputs", "runtime_input_snapshot_invalid")
                 del snapshots[selected_id]
             elif by_id[selected_id]["kind"] == "score" and (
                     document.get("scored_run_id") != run_id or output is None
                     or document.get("companies") != output["companies"]
                     or document.get("scorer_policy") != attempt_policy
                     or document.get("evaluation_date") != round_row.get("evaluation_date")):
-                reasons["exact_inputs"].add("judge_input_context_mismatch")
+                attempt_gap(selected_id, "exact_inputs", "judge_input_context_mismatch")
+                if (round_row.get("round_id") == "arena-2026-11-03"
+                        and document.get("scorer_policy") != attempt_policy):
+                    # Contradictory saved inputs cannot establish that an old
+                    # receipt ran under the current round's grading identity.
+                    attempt_by_id[selected_id].pop("runtime_identity", None)
+                    if selected_id == example.get("score_run_id"):
+                        example["judgment"].pop("runtime_identity", None)
+                    attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
             if isinstance(document, dict) and icp is not None:
                 actual_icp = dict(document.get("icp") or {})
                 expected_icp = integrity.agent_visible_icp(icp, contacts_required=contact_policy.enabled(config)) if integrity.enabled(config) else dict(icp)
@@ -1683,7 +2092,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 for key in ("output_schema_version", "company_quality_policy", "company_requirements", "intent_details_policy", "_arena_provider_observations"):
                     actual_icp.pop(key, None)
                 if actual_icp != expected_icp or document.get("evaluation_date") != round_row.get("evaluation_date"):
-                    reasons["exact_inputs"].add("runtime_input_context_mismatch")
+                    attempt_gap(selected_id, "exact_inputs", "runtime_input_context_mismatch")
     signal_policy = (config.get("scorer_policy") or {}).get("signal_judgment_policy") == signal_judgments.POLICY
     unmarked_signal_evidence = bool(signal_judgment_uses or signal_judgment_rows or signal_source_ledger_rows) or any(
         "signal_judgment_reference" in detail
@@ -1693,6 +2102,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     )
     if signal_policy or unmarked_signal_evidence:
         try:
+            def read_fit_source_input(source):
+                from lab_arena.training_input import read_input
+                snapshot = read_input(objects, source["run_id"], "score",
+                                      source.get("lease_generation"), source.get("claim_request_hash"))
+                if (snapshot.get("privacy") or {}).get("redacted"):
+                    raise ExportError("fit_checkpoint_source_input_redacted")
+                return snapshot["input"]
             if judge is None or "judgment" not in example or judge["run_id"] not in snapshots:
                 raise ExportError("signal_judge_evidence_missing")
             evidence = _signal_authority_evidence(
@@ -1701,7 +2117,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 scoring_input=snapshots[judge["run_id"]]["input"],
                 uses=signal_judgment_uses, authority_rows=signal_judgment_rows,
                 company_rows=company_judgment_rows, runs=by_id,
-                round_row=round_row,
+                round_row={**round_row, "configuration_doc": score_configuration(judge)},
+                source_input_reader=read_fit_source_input,
             )
             example["judgment"]["signal_authority_evidence"] = evidence
             # Keep persisted actions as process evidence even when the final
@@ -1799,7 +2216,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
     from lab_arena.training_capture import sanitize_training_value
     example, redactions = sanitize_training_value(
-        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True)
+        example, max_nodes=MAX_EXAMPLE_NODES, aggregate_parts=True,
+        clean_text_digests=OrderedDict())
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations
@@ -1831,13 +2249,18 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              "dimensions": {key: not value for key, value in reasons.items()},
                              "incomplete_reasons": sorted({reason for values in reasons.values() for reason in values}),
                              "reasons_by_dimension": {key: sorted(value) for key, value in reasons.items()}}
-    clean["related_run_gap_attribution"] = {
+    clean["related_run_gap_attribution"] = copy.deepcopy({
         row["run_id"]: {"kind": row["kind"], "status": row["status"],
                         "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
-        for row in related}
+        for row in related})
+    clean["label_authority"] = {
+        "origin": "automated_native_scorer" if "judgment" in clean else "unavailable",
+        "ground_truth": "not_established",
+        "external_adjudication": "not_established_by_export",
+    }
     clean["example_hash"] = contracts.document_hash(clean)
-    # The privacy pass normalized context, and worker artifacts came from
-    # validated JSON. Keep caller isolation without expanding shared history
-    # strings into a second serialized document and then parsing it again.
-    return copy.deepcopy(clean)
+    # Both privacy walks own their context containers. Worker artifacts and
+    # journal prefixes come from freshly decoded JSON, with no caller-owned
+    # containers in their metadata. Return that owned tree without copying it.
+    return clean

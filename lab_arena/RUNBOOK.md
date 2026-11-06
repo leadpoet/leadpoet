@@ -258,7 +258,8 @@ digest, or release manifest is part of miner admission. The service validates
 the declared archive size and safe source structure, then uses its own
 submission ID for execution and recovery. The private source reference for
 each submission is write-once. The service allows one current-submission
-replacement before the one-hour replacement freeze; it supersedes the prior
+replacement before its published replacement freeze (ten minutes before intake
+closes for new and eligible open rounds; legacy frozen rounds retain one hour); it supersedes the prior
 submission and uses a new source reference. After the freeze, replacement is
 closed. A miner can use any harness, model, prompts, packages, routing, or
 orchestration behind the one callable.
@@ -566,6 +567,17 @@ pin and every other round setting remain immutable.
 
 ### Frozen grading and repairable reviewer runtime
 
+For the approved completed-negative empty-website correction on frozen scorer
+`sha256:79cd4bc932acf572df035d734afc66309a801862e8f080ed797cd11420f6902b`, use
+`--empty-domain-negative-finality-only` for both build and `--verify-image`.
+This exclusive mode extracts only the exact frozen `lead_scorer.py`, applies the
+reviewed predicate delta, and verifies its complete original and corrected file
+hashes. It adds no current runtime package or other grading source. It preserves
+unavailable identity and all source-failure guards. After independent verification,
+the coordinator can register the candidate through the existing reviewer-runtime
+mapping for unfinished score leases. Keep completed judgments and the round's
+frozen grading/cache identity unchanged.
+
 The round's `scorer_image_digest/reference` remains its immutable grading and
 cache identity. Never change it to repair unfinished reviews. Grading prompts,
 models, evidence rules, scoring code and dependencies remain in that image.
@@ -578,6 +590,30 @@ admission/transport interface and scorer checkpoint/output IO. Unknown source
 shapes fail the build. The tool
 checks the actual added image layer and unchanged process configuration.
 For already separated graders, the grading file remains byte-identical.
+
+For the reviewed native Exa `CRAWL_HTTP_403` target-denial diagnostic, build and
+verify with `--intent-target-denial`. This exclusive mode adds only that exact
+403 alias to the two frozen intent retrieval/finality allowlists. It copies no
+current runtime package or other grader source. Unknown or partly repaired
+module pairs fail closed. Register the verified image through the existing
+reviewer-runtime command only after the gateway and each executing validator
+have the matching competition validator. Both hosts recheck retained source
+traces; an older host can reject the corrected runtime's terminal company judgment.
+New leases record the actual repair runtime separately;
+the frozen grading/cache identity, prompts, evidence criteria and score formula
+stay unchanged. Accepted work, existing leases, costs and deadlines stay unchanged.
+
+For the reviewed old-homepage LinkedIn vanity repair, build and verify with
+`--homepage-profile-alias`. This exclusive mode overlays exactly four frozen
+modules: the two native target-denial files above and the two exact canonical
+profile lookup/validation files. It retains both target-denial corrections,
+copies no current runtime package and rejects unknown or partial source pairs.
+The old homepage URL must receive its own authoritative canonical response;
+a prior reply for the current profile cannot be relabeled. Retain the matching
+gateway and executing-validator target-denial consumers required above. The
+identity receipt is compatible with the existing f69461adb host; this alias
+repair does not require a second host restart.
+The grading image, cache identity, prior leases and completed judgments stay fixed.
 
 For a frozen grader whose unresolved semantic-review return bypasses its
 completed-investigation settlement, explicitly add
@@ -759,6 +795,57 @@ These are release acceptance checks, not a new runtime identity gate. Do not
 require gateway and scorer Git SHAs to match, add validator attestation, or
 change a frozen round to make the checks pass. Report an incomplete scorer
 release as incomplete even when the host deployment succeeded.
+
+Evidence judgment v2 also requires updated validator workers. Their existing
+signed claim advertises `evidence_judgment_policies: ["evidence_judgment_v2"]`.
+New v2 rounds reject workers without this capability before allocating work.
+The database selects execution or scoring atomically, so this gate applies to
+both kinds of work in v2 rounds. Older frozen rounds keep their existing claim
+rules. Deploy the gateway and managed validator through the canonical paired
+restart; other eligible validators must upgrade before claiming v2 work.
+
+Prospective judge reasoning capture is separately frozen from miner capture.
+Its scorer policy binds every model to one provider and may bind per-model
+`ARENA_JUDGE_REQUEST_OPTIONS` (`reasoning` mode and `max_output_tokens`).
+Without those options, the reviewed PR1041 request behavior remains unchanged.
+With options, compatible explicit reasoning controls can take precedence, while
+an `enabled: true` route never receives an invented effort control. The exact
+selected model/provider/API and option kind/output cap must match the separately
+frozen `judge_reasoning_route_registry`. Judge-only activation does not enable
+miner full-thinking, alter its baseline or relax its evidence requirements.
+The optional claim comparison still uses its existing 500-token, 15-second
+bound and no retries. A short or failed comparison remains a cache miss; its
+possible provider charge and later native judgment both count in cost checks.
+A separate comparison model or larger bound is not enabled by this change.
+
+New rounds use GPT-OSS-120B on `near-ai/fp4` with low reasoning and a 4096-token
+output cap for intent, fetched evidence, role and generic/semantic
+investigator checks. Company research, paragraph review and search fallbacks use DeepSeek V4.1
+Flash 1017 on `nebius/fp8`, low reasoning, and an 8192-token cap. Native hosted
+search requests one tool round, `max_uses: 1` and `max_total_results: 5`.
+These settings do not prove the number of internal parallel provider queries.
+The existing cache continues
+to bind the exact frozen model identity. Historical rounds retain their saved
+models, routes, requests and scorer images. See the dated model review for
+measured quality, cost and release evidence.
+
+New industry source research uses `z-ai/glm-5.3-flash` on `near-ai/fp8`, with low
+reasoning and an 8192-token output cap. The native research prompt, tools,
+deadlines, repair limits and source budgets are unchanged.
+The default frozen `ARENA_JUDGE_REASONING_EXCEPTIONS` map retains only `openai/gpt-6.1-sol`,
+with `roles: ["industry_evidence_review"]` and a nonempty reason code.
+Historical two-role exceptions remain valid and retain Sol's original
+3000-token research allowance and low effort. Sol cannot serve another judge
+role outside its exact frozen exception. Provider routes and request options
+must cover exactly the remaining full-thinking models. Sol Chat requests keep
+the existing Azure regional failover and conservative price/privacy controls;
+the exception grants no Responses or open-model route bypass. Raw exposed text,
+summaries, tool evidence and judgment links remain captured. Sol full thinking
+is labelled unavailable and excluded from full-thinking targets. Independently
+verified open-model turn targets remain exportable with unreviewed quality and
+explicit partial judge-thinking completeness. Admission review and ICP generation
+retain their separate proprietary models and internal capture. Selecting an
+empty judge route map explicitly disables this prospective capture policy.
 
 Start the service:
 

@@ -191,7 +191,7 @@ def _company_fit_failure_reason(
     return f"{gate} failed: {detail}"
 
 
-_SCORER_REVERIFY_MODEL = "perplexity/sonar"
+_SCORER_REVERIFY_MODEL = os.environ.get("ARENA_COMPANY_REVERIFY_MODEL", "perplexity/sonar")
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
 MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
 INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS = "insufficient_fit_evidence"
@@ -1178,7 +1178,8 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:completed|completes|closed)\s+(?:(?:the|its|an?)\s+)?"
+        r"\b(?:completed|completes|closed|announced\s+(?:today\s+)?the\s+completion\s+of)"
+        r"\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
         r'(?:\s+\((?P<alias>"[^"()\r\n]{1,120}"|“[^”()\r\n]{1,120}”)'
@@ -1445,7 +1446,10 @@ def _acquired_stage_quote_supports_names(
     company_names: Sequence[Any],
     quote: str,
 ) -> bool:
-    """Require completed acquisition/current-parent proof for named entities."""
+    """Require completed acquisition/current-parent proof for named entities.
+
+    Callers must bind short identities to submitted/verified or proven aliases.
+    """
 
     if not isinstance(quote, str) or not quote.strip():
         return False
@@ -1456,7 +1460,7 @@ def _acquired_stage_quote_supports_names(
         for name in company_names
     }
     normalized_names = {
-        name for name in normalized_names if name and len("".join(name)) >= 4
+        name for name in normalized_names if name
     }
     if not normalized_names:
         return False
@@ -1534,8 +1538,12 @@ def _acquired_stage_quote_supports_company(
 
     if company is None:
         return False
+    # The submitted identity can be short; an unverified observed alias cannot
+    # introduce a new short company identity into saved-stage proof.
     return _acquired_stage_quote_supports_names(
-        (company.company_name, observed_company_name),
+        (company.company_name, observed_company_name)
+        if len(_compact_company_name(observed_company_name)) >= 4
+        else (company.company_name,),
         quote,
     )
 
@@ -3991,6 +3999,8 @@ async def _ground_required_attribute_evidence(
         timeout = aiohttp.ClientTimeout(total=8.0, connect=3.0)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                from qualification.scoring.company_fit_evidence_reuse import unretained_source
+                unretained_source()
                 status, final_url, html_text = await _fetch_bounded_html(
                     session,
                     canonical_url,
@@ -4165,6 +4175,8 @@ async def _resolve_observed_linkedin_redirect_alias(
                 (submitted_url, observed_slug),
             ):
                 try:
+                    from qualification.scoring.company_fit_evidence_reuse import unretained_source
+                    unretained_source()
                     _status, final_url, _text = await _fetch_bounded_html(
                         session, requested_url,
                     )
@@ -4903,6 +4915,46 @@ def _unresolved_homepage_web_identity_conflict(
     name = str(organization.get("normalized_name") or "")
     domain = str(organization.get("registrable_dns_domain") or "")
     slug = str(organization.get("linkedin_company_slug") or "")
+    proof = web_receipt.get("structured_profile_identity")
+    if (
+        (
+            (slug.isascii() and slug.isdigit()
+             and observed.get("reason_code") == "identity_linkedin_alias_unresolved")
+            or (slug.isascii() and slug and not slug.isdigit()
+                and observed.get("reason_code") in {"identity_not_proven", "identity_linkedin_alias_unresolved"})
+        )
+        and isinstance(proof, Mapping)
+        and set(proof) == {
+            "name", "provider", "source_field", "url", "website",
+            "company_id", "requested_url",
+        }
+        and all(isinstance(value, str) for value in proof.values())
+        and proof.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and proof.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and (
+            (slug.isdigit() and proof.get("company_id") == slug)
+            or (not slug.isdigit()
+                and re.fullmatch(r"[1-9][0-9]*", proof.get("company_id", "")))
+        )
+        and linkedin_company_page_slug(proof.get("requested_url")) == slug
+        and _strict_linkedin_company_profile_url(proof.get("requested_url"))
+        and _strict_linkedin_company_profile_url(proof.get("url"))
+        and linkedin_company_page_slug(proof.get("url"))
+        == web_receipt.get("submitted_linkedin_slug")
+        == web_receipt.get("observed_linkedin_slug")
+        and not str(web_receipt.get("observed_linkedin_slug") or "").isdigit()
+        and _company_name(proof.get("name"))
+        == web_receipt.get("submitted_name") == web_receipt.get("observed_name")
+        and _canonical_company_domain(proof.get("website"))
+        == domain == observed.get("observed_domain")
+        == web_receipt.get("submitted_domain") == web_receipt.get("observed_domain")
+        and slug == observed.get("observed_linkedin_slug")
+        and name == observed.get("observed_name")
+    ):
+        # The exact old-locator main profile proves its canonical web identity.
+        # A short homepage brand name cannot turn that independently bound
+        # alias into an unresolved conflict.
+        return False
     return bool(
         name and domain and slug
         and name == observed.get("observed_name")
@@ -4913,6 +4965,40 @@ def _unresolved_homepage_web_identity_conflict(
         and name != web_receipt.get("observed_name")
         and slug != web_receipt.get("observed_linkedin_slug")
     )
+
+
+def _conflicting_homepage_numeric_profile_lookup(
+    homepage: Optional[CompanyFitDecisionResult], web_receipt: Mapping[str, Any],
+) -> dict[str, str]:
+    """Locate exact numeric or old-vanity proof; the lookup grants no match."""
+    if homepage is None or not _unresolved_homepage_web_identity_conflict(homepage, web_receipt):
+        return {}
+    observed = homepage.details.get("identity") or {}
+    slug = str(observed.get("observed_linkedin_slug") or "")
+    vanity = str(web_receipt.get("observed_linkedin_slug") or "")
+    numeric_locator = (
+        slug.isascii() and slug.isdigit()
+        and observed.get("reason_code") == "identity_linkedin_alias_unresolved"
+    )
+    vanity_locator = (
+        slug.isascii() and slug and not slug.isdigit()
+        and _strict_linkedin_company_profile_url(f"https://www.linkedin.com/company/{slug}")
+        and observed.get("reason_code") in {"identity_not_proven", "identity_linkedin_alias_unresolved"}
+    )
+    if (
+        not (numeric_locator or vanity_locator)
+        or not vanity or vanity.isdigit()
+        or vanity != web_receipt.get("submitted_linkedin_slug")
+        or web_receipt.get("submitted_name") != web_receipt.get("observed_name")
+    ):
+        return {}
+    return {
+        "normalized_name": str(web_receipt["observed_name"]),
+        "registrable_dns_domain": str(web_receipt["observed_domain"]),
+        "linkedin_company_slug": vanity,
+        "requested_profile_url": f"https://www.linkedin.com/company/{slug}",
+        "observed_profile_url": f"https://www.linkedin.com/company/{vanity}",
+    }
 
 
 def _schema_repair_changes_grounded_identity(
@@ -5388,6 +5474,8 @@ async def _ground_employee_size_observation(
             timeout = aiohttp.ClientTimeout(total=8.0, connect=3.0)
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
+                    from qualification.scoring.company_fit_evidence_reuse import unretained_source
+                    unretained_source()
                     status, final_url, body = await _fetch_bounded_html(session, url)
                 final_url = public_http_url(final_url)
                 if status == 200 and final_url:
@@ -6921,6 +7009,20 @@ def _reverify_decision(
             COMPANY_FIT_UNAVAILABLE,
         }:
             identity_decision = COMPANY_FIT_UNAVAILABLE
+        if (
+            isinstance(structured_profile_identity_evidence, Mapping)
+            and set(structured_profile_identity_evidence) == {
+                "name", "provider", "source_field", "url", "website",
+                "company_id", "requested_url",
+            }
+            and all(isinstance(value, str) and len(value) <= 2048
+                    for value in structured_profile_identity_evidence.values())
+        ):
+            # Keep the fetched numeric alias proof with the identity receipt;
+            # the final homepage-conflict gate revalidates every binding.
+            identity_receipt["structured_profile_identity"] = dict(
+                structured_profile_identity_evidence
+            )
 
     entity_attribution_conflicts: list[str] = []
     if icp is None:
@@ -7547,7 +7649,37 @@ def _has_explicitly_unproven_fit_dimensions(
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
                 or (
                     completed_investigation
-                    and _is_bound_homepage_name_conflict(identity_receipt)
+                    and (
+                        _is_bound_homepage_name_conflict(identity_receipt)
+                        or (
+                            # An explicit absent website is not identity proof.
+                            # A completed targeted negative can exhaust it;
+                            # missing, malformed or failed observations cannot.
+                            isinstance(identity_receipt, Mapping)
+                            and identity_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                            and identity_receipt.get("reason_code") == "identity_not_proven"
+                            and identity_receipt.get("evidence_source") == "company_web_reverification"
+                            and verdict.get("observed_company_website") == ""
+                            and identity_receipt.get("observed_domain") == ""
+                            and all(
+                                isinstance(identity_receipt.get(field), str)
+                                and bool(identity_receipt[field].strip())
+                                for field in (
+                                    "submitted_name", "submitted_domain", "observed_name",
+                                )
+                            )
+                            and all(
+                                isinstance(identity_receipt.get(field), str)
+                                and (
+                                    identity_receipt[field] == ""
+                                    or bool(identity_receipt[field].strip())
+                                )
+                                for field in (
+                                    "submitted_linkedin_slug", "observed_linkedin_slug",
+                                )
+                            )
+                        )
+                    )
                     and "rebrand" in (investigation_receipt.get("targets") or ())
                     and isinstance(investigation_claims, Mapping)
                     and isinstance(investigation_claims.get("rebrand"), Mapping)
@@ -8580,6 +8712,7 @@ async def _request_company_reverify_json(
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Execute one bounded independent web-verifier request."""
 
+    from qualification.scoring.openrouter_options import prepare_judge_request, project_judge_response
     request_body = {
         "model": _SCORER_REVERIFY_MODEL,
         "messages": [
@@ -8588,11 +8721,12 @@ async def _request_company_reverify_json(
         ],
         "temperature": 0.0,
     }
+    path, request_body = prepare_judge_request(request_body, hosted_search=True)
     try:
         timeout = aiohttp.ClientTimeout(total=_SCORER_REVERIFY_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://openrouter.ai/api/v1" + path,
                 json=request_body,
                 headers={
                     "Authorization": f"Bearer {key}",
@@ -8608,7 +8742,7 @@ async def _request_company_reverify_json(
                     )
                     return None, f"provider HTTP {resp.status}"
                 try:
-                    body = await resp.json()
+                    body = project_judge_response(await resp.json(), hosted_search=True)
                 except (aiohttp.ContentTypeError, ValueError) as exc:
                     _record_verifier_failure(
                         diagnostic, MALFORMED_RESPONSE_FAILURE_REASON
@@ -10167,6 +10301,19 @@ async def _llm_reverify_company(
         web_identity_receipt,
         verified_transport_domain,
     )
+    numeric_conflict_lookup = (
+        _conflicting_homepage_numeric_profile_lookup(
+            verified_homepage_identity, web_identity_receipt,
+        ) if require_company_fit_dimensions else {}
+    )
+    if numeric_conflict_lookup:
+        # Reuse the invocation's one structured profile request, addressing
+        # the homepage's numeric locator so its returned ID must prove the
+        # observed vanity URL. No model-authored alias can satisfy this.
+        profile_identity = numeric_conflict_lookup
+        await _fetch_structured_linkedin_profile_once(
+            profile_identity, current_profile_cache, collect_identity=True,
+        )
     investigation_identity = verified_identity
     if not profile_identity:
         lookup_receipt: Mapping[str, Any] = web_identity_receipt
@@ -10466,6 +10613,26 @@ async def _llm_reverify_company(
         # identity repair before asking for rebrand proof. A verified redirect
         # still follows the normal rebrand investigation. The repair cannot
         # replace source-bound identity or any independent fit proof.
+        investigation_targets = ()
+    identity_fields = ("observed_company_name", "observed_company_website")
+    if company.company_linkedin:
+        identity_fields += ("observed_company_linkedin",)
+    if (
+        investigation_targets
+        and "rebrand" not in investigation_targets
+        and "identity" in _incomplete_company_reverify_dimensions(
+            result, icp_attribute=icp_attribute, icp_stage=icp_stage,
+        )
+        and any(
+            not isinstance(verdict.get(field), str) or not verdict[field].strip()
+            for field in identity_fields
+        )
+    ):
+        # Repair the missing identity before spending the single bounded
+        # investigation. Its full response can leave a different fact gap
+        # (for example geography), which must join that same investigation.
+        # No completed finding exists yet; never copy proof from this
+        # incomplete identity or add a second investigation budget.
         investigation_targets = ()
     claims: Mapping[str, Any] = {}
     repair_missing_identity = False
@@ -12406,6 +12573,7 @@ async def score_company_competition_intent(
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     provider_observation: Optional[Mapping[str, Any]] = None,
+    fit_evidence_reuse_enabled: bool = False,
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -12429,10 +12597,99 @@ async def score_company_competition_intent(
         and isinstance(verified_company_fit_retry_cache, MutableMapping)
         else None
     )
+    # Reuse the existing private signal exchange for a typed intermediate
+    # checkpoint. The gateway binds it to this exact accepted execution,
+    # assignment, generation, grading policy and selected reviewer runtime.
+    from qualification.scoring.signal_judgment_cache import current_exchange, invoke_exchange
+    from lab_arena import company_judgments
+    fit_evidence_reuse_allowed = bool(integrity_policy and fit_evidence_reuse_enabled)
+    if fit_evidence_reuse_allowed:
+        precheck = await run_company_zero_checks(company, run_time_seconds, seen_companies)
+        if precheck.decision != COMPANY_FIT_MATCH:
+            fit_evidence_reuse_allowed = False
+            fit_cache = None
+    fit_exchange = current_exchange() if integrity_policy and not fit_evidence_reuse_enabled else None
+    if fit_exchange is not None:
+        # These free, invocation-dependent guards must precede any reuse.
+        # The adapter still applies verified-identity regrouping afterwards.
+        precheck = await run_company_zero_checks(company, run_time_seconds, seen_companies)
+        if precheck.decision != COMPANY_FIT_MATCH:
+            fit_exchange = None
+            fit_cache = None
+    if fit_exchange is not None:
+        from lab_arena.signal_cache_control import FIT_CAPABILITY_OPERATION, fit_checkpoint_capability
+        capability = await invoke_exchange(fit_exchange, {
+            "operation": FIT_CAPABILITY_OPERATION,
+            "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+            "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+        })
+        if capability == {"status": "unavailable"}:
+            # An old worker rejects the pure support probe before any fit
+            # claim or reuse. Keep its original full native scoring path.
+            fit_exchange = None
+        elif capability != fit_checkpoint_capability():
+            raise SignalJudgmentCacheError("verified fit checkpoint capability is invalid")
+    fit_request = None
+    fit_reference = None
+    if fit_exchange is not None:
+        fit_request = {
+            "operation": "claim", "signal_index": company_judgments.FIT_CHECKPOINT_INDEX,
+            "checkpoint_kind": company_judgments.FIT_CHECKPOINT_KIND,
+        }
+        response = await invoke_exchange(fit_exchange, fit_request)
+        if not isinstance(response, Mapping) or not isinstance(response.get("reference"), Mapping):
+            raise SignalJudgmentCacheError("verified fit checkpoint claim is invalid")
+        fit_reference = response["reference"]
+        if response.get("status") == "hit":
+            try:
+                snapshot = company_judgments.validate_verified_fit_checkpoint(response.get("judgment"))
+            except company_judgments.CompanyJudgmentError as exc:
+                raise SignalJudgmentCacheError("verified fit checkpoint hit is invalid") from exc
+            receipt = snapshot["company_fit_receipt"]
+            company_fit = CompanyFitDecisionResult(
+                receipt["decision"], receipt.get("reason"), details={
+                    key: value for key, value in receipt.items()
+                    if key not in {"gate", "contract_id", "contract_version", "decision", "reason"}
+                },
+            )
+            linkedin_profile_source_candidate = snapshot["linkedin_profile_source"]
+            matched_company_source_cache = snapshot["matched_company_sources"]
+            if required_attribute_retry_source_cache is not None:
+                required_attribute_retry_source_cache.update(snapshot["required_attribute_sources"])
+            if fit_cache is not None:
+                fit_cache["verified_fit"] = deepcopy((
+                    company_fit, linkedin_profile_source_candidate, matched_company_source_cache,
+                ))
+        elif response.get("status") != "miss" or "judgment" in response:
+            raise SignalJudgmentCacheError("verified fit checkpoint claim status is invalid")
     retained_fit = fit_cache.get("verified_fit") if fit_cache is not None else None
-    if retained_fit is not None:
+    if fit_request is not None and response.get("status") == "hit":
+        pass
+    elif retained_fit is not None:
         (company_fit, linkedin_profile_source_candidate,
          matched_company_source_cache) = deepcopy(retained_fit)
+    elif fit_evidence_reuse_allowed:
+        from qualification.scoring.company_fit_evidence_reuse import fit_with_evidence_reuse
+        required_sources = (required_attribute_retry_source_cache
+                            if required_attribute_retry_source_cache is not None else {})
+        async def native_fit(fit_company):
+            return await _verify_company_fit(
+                fit_company, icp, run_cost_usd, run_time_seconds, seen_companies,
+                require_https_transport=True, company_quality=company_quality,
+                evidence_investigator=evidence_investigator,
+                required_attribute_retry_source_cache=required_sources,
+                linkedin_profile_source_sink=linkedin_profile_source_candidate,
+                matched_company_source_sink=matched_company_source_cache,
+                matched_company_retry_source_cache=matched_company_retry_source_cache,
+            )
+        company_fit = await fit_with_evidence_reuse(
+            native_fit, company=company, linkedin=linkedin_profile_source_candidate,
+            matched=matched_company_source_cache, required=required_sources,
+        )
+        if fit_cache is not None and company_fit.decision == COMPANY_FIT_MATCH:
+            fit_cache["verified_fit"] = deepcopy((
+                company_fit, linkedin_profile_source_candidate, matched_company_source_cache,
+            ))
     else:
         company_fit = await _verify_company_fit(
             company,
@@ -12457,6 +12714,29 @@ async def score_company_competition_intent(
                 company_fit, linkedin_profile_source_candidate,
                 matched_company_source_cache,
             ))
+    if fit_request is not None and response.get("status") == "miss":
+        snapshot = None
+        if company_fit.decision == COMPANY_FIT_MATCH:
+            try:
+                snapshot = company_judgments.validate_verified_fit_checkpoint({
+                    "schema_version": company_judgments.FIT_CHECKPOINT_SCHEMA_VERSION,
+                    "company_fit_receipt": company_fit.receipt("company_fit"),
+                    "linkedin_profile_source": linkedin_profile_source_candidate,
+                    "matched_company_sources": matched_company_source_cache,
+                    "required_attribute_sources": dict(required_attribute_retry_source_cache or {}),
+                })
+            except company_judgments.CompanyJudgmentError:
+                # Optional persistence cannot alter a valid native verdict.
+                # Release an inadmissible or overlarge local snapshot and
+                # continue with every original source byte still in memory.
+                snapshot = None
+        completed = await invoke_exchange(fit_exchange, {
+            **fit_request, "operation": "complete", "reference": fit_reference,
+            "judgment": snapshot,
+        })
+        expected = {"stored", "existing"} if snapshot is not None else {"released"}
+        if not isinstance(completed, Mapping) or completed.get("status") not in expected:
+            raise SignalJudgmentCacheError("verified fit checkpoint completion is invalid")
     _retain_matched_company_retry_sources(
         matched_company_retry_source_cache, matched_company_source_cache, company_fit,
     )
@@ -12517,6 +12797,8 @@ async def score_company_competition_intent(
                if funding_stage_context else {}),
             intent_terminal_retry_cache=intent_terminal_retry_cache,
             retry_evidence_context_key=retry_evidence_context_key,
+            **({"verified_source_pages": matched_company_source_cache}
+               if integrity_policy and matched_company_source_cache else {}),
         )
         if _intent_verifier_unavailable(
             signal_results, integrity_policy=integrity_policy
@@ -12879,6 +13161,7 @@ def _company_stage_matches(observed: str, requested: str) -> bool:
 def _intent_terminal_retry_key(
     context_key, verified_company_identity, evidence_group, target_signal,
     evidence_type, max_age_days, scoring_flags, verified_funding_stage_context=None,
+    verified_source_pages=None,
 ) -> str:
     return _semantic_hash({
         "schema_version": "leadpoet.intent_terminal_retry.v1",
@@ -12890,6 +13173,7 @@ def _intent_terminal_retry_key(
         "scoring_flags": dict(scoring_flags),
         **({"verified_funding_stage_context": verified_funding_stage_context}
            if verified_funding_stage_context else {}),
+        **({"verified_source_pages": verified_source_pages} if verified_source_pages else {}),
     })
 
 
@@ -12988,6 +13272,7 @@ async def score_company_competition_intent_signal(
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -13004,6 +13289,10 @@ async def score_company_competition_intent_signal(
     benchmark layer can build per-signal funnel / coverage stats without
     re-scoring.  Aggregate scoring is unchanged.
     """
+    from contextlib import nullcontext
+    from qualification.scoring.evidence_cache_bridge import SignalEvidenceExchange, enabled
+    from qualification.scoring.intent_evidence_reuse import install_evidence_reuse
+
     icp_criteria = None
     seen_domains: set = set()
     signal_results = []
@@ -13029,6 +13318,7 @@ async def score_company_competition_intent_signal(
         evidence_groups = [[signal] for signal in company.intent_signals]
 
     signal_exchange = current_exchange() if integrity_policy else None
+    evidence_cache_enabled = signal_exchange is not None and enabled()
     for signal_index, evidence_group in enumerate(evidence_groups):
         signal = evidence_group[0]
         domain = _extract_domain(signal.url)
@@ -13092,6 +13382,11 @@ async def score_company_competition_intent_signal(
                     }
                 )
         evidence_urls = [item.url for item in evidence_group]
+        from qualification.scoring.intent_verification_three_stage import _verified_submitted_source_pages
+        signal_source_pages = _verified_submitted_source_pages(
+            verified_source_pages, evidence_urls, verified_company_identity,
+            company_name=company.company_name, claim=str(signal.description or ""),
+        ) if integrity_policy and _evidence_type_for(matched_idx) != "HIRING" else {}
         funding_stage_context = (
             verified_funding_stage_context
             if integrity_policy and _evidence_type_for(matched_idx) == "FUNDING"
@@ -13119,7 +13414,7 @@ async def score_company_competition_intent_signal(
                     "no_time_decay": no_time_decay,
                     "integrity_policy": integrity_policy,
                     "company_quality": company_quality,
-                }, funding_stage_context,
+                }, funding_stage_context, signal_source_pages,
             )
             if terminal_cache_key in intent_terminal_retry_cache:
                 cached = intent_terminal_retry_cache[terminal_cache_key]
@@ -13134,7 +13429,20 @@ async def score_company_competition_intent_signal(
                 intent_terminal_retry_cache.pop(terminal_cache_key, None)
         exchange_request = None
         exchange_reference = None
-        if signal_exchange is not None:
+        evidence_bridge = None
+        if evidence_cache_enabled:
+            evidence_bridge = SignalEvidenceExchange(
+                signal_exchange,
+                {"signal_index": signal_index,
+                 "verified_company_identity": deepcopy(verified_company_identity),
+                 "verified_funding_stage_context": deepcopy(list(funding_stage_context or [])),
+                 **({"verified_source_pages": deepcopy(signal_source_pages)}
+                    if signal_source_pages else {})},
+                expected_urls=evidence_urls, expected_index=matched_idx,
+                expected_evidence_type=_evidence_type_for(matched_idx),
+                allowed_context_urls=funding_context_urls,
+            )
+        if signal_exchange is not None and not evidence_cache_enabled:
             exchange_request = {
                 "operation": "claim",
                 "signal_index": signal_index,
@@ -13142,6 +13450,8 @@ async def score_company_competition_intent_signal(
                 "verified_funding_stage_context": deepcopy(
                     list(funding_stage_context or [])
                 ),
+                **({"verified_source_pages": deepcopy(signal_source_pages)}
+                   if signal_source_pages else {}),
             }
             response = await invoke_exchange(signal_exchange, exchange_request)
             if not isinstance(response, Mapping) or response.get("reference") is None:
@@ -13163,33 +13473,38 @@ async def score_company_competition_intent_signal(
             if response.get("status") != "miss" or "judgment" in response:
                 raise SignalJudgmentCacheError("signal cache claim status is invalid")
         try:
-            score, confidence, date_status, content_found_date, _matched_idx = (
-            await _score_single_intent_signal(
-                signal,
-                signal_icp,
-                icp_criteria,
-                company.company_name,
-                company.company_website,
-                api_key=api_key,
-                company_linkedin=getattr(company, "company_linkedin", "") or "",
-                product_service_context=getattr(icp, "product_service", "") or "",
-                trust_signal_date=trust_signal_date,
-                # Let Stage 3 make the content decision.
-                stage1_soft_reject=True,
-                # Skip the keyword/length
-                # genericity pre-gate so the three-stage LLM verifier is the sole
-                # intent judge.
-                llm_only_intent_gate=True,
-                integrity_policy=integrity_policy,
-                company_quality=company_quality,
-                verified_company_identity=verified_company_identity,
-                verdict_out=signal_verdicts,
-                **({"verified_funding_stage_context": funding_stage_context}
-                   if funding_stage_context else {}),
-                **({"evidence_signals": evidence_group} if integrity_policy else {}),
-            )
-            )
+            with install_evidence_reuse(evidence_bridge) if evidence_bridge is not None else nullcontext():
+                score, confidence, date_status, content_found_date, _matched_idx = await _score_single_intent_signal(
+                    signal,
+                    signal_icp,
+                    icp_criteria,
+                    company.company_name,
+                    company.company_website,
+                    api_key=api_key,
+                    company_linkedin=getattr(company, "company_linkedin", "") or "",
+                    product_service_context=getattr(icp, "product_service", "") or "",
+                    trust_signal_date=trust_signal_date,
+                    # Let Stage 3 make the content decision.
+                    stage1_soft_reject=True,
+                    # Skip the keyword/length
+                    # genericity pre-gate so the three-stage LLM verifier is the sole
+                    # intent judge.
+                    llm_only_intent_gate=True,
+                    integrity_policy=integrity_policy,
+                    company_quality=company_quality,
+                    verified_company_identity=verified_company_identity,
+                    verdict_out=signal_verdicts,
+                    **({"verified_funding_stage_context": funding_stage_context}
+                       if funding_stage_context else {}),
+                    **({"verified_source_pages": signal_source_pages} if signal_source_pages else {}),
+                    **({"evidence_signals": evidence_group} if integrity_policy else {}),
+                )
         except BaseException:
+            if evidence_bridge is not None:
+                try:
+                    await evidence_bridge.release()
+                except BaseException as release_error:
+                    logger.error("Evidence cache release failed after scoring error: %s", type(release_error).__name__)
             if exchange_request is not None:
                 try:
                     await invoke_exchange(signal_exchange, {
@@ -13204,95 +13519,107 @@ async def score_company_competition_intent_signal(
                         type(release_error).__name__,
                     )
             raise
-        if no_time_decay:
-            after_decay, decay = score, 1.0 if score > 0 else 0.0
-        else:
-            after_decay, decay = _apply_signal_time_decay(
-                score, signal.date, date_status,
-                signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
-                content_found_date=content_found_date,
+        try:
+            if no_time_decay:
+                after_decay, decay = score, 1.0 if score > 0 else 0.0
+            else:
+                after_decay, decay = _apply_signal_time_decay(
+                    score, signal.date, date_status,
+                    signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
+                    content_found_date=content_found_date,
+                )
+            # Prefer the verifier's authoritative matched index; fall back to the
+            # company-asserted one when the verifier didn't resolve a match.
+            resolved_idx = _matched_idx if isinstance(_matched_idx, int) and _matched_idx >= 0 else matched_idx
+            judge_verdict = signal_verdicts[-1] if signal_verdicts else {}
+            if freshness_reason:
+                # Fetch and judge the supplied page first so a stale signal still
+                # has a complete, source-grounded receipt. Freshness is a terminal
+                # publication gate and can never be rescued by a positive content
+                # verdict.
+                logger.info(
+                    "Competition intent signal rejected after source verification: %s  "
+                    "source=%s",
+                    freshness_reason,
+                    signal.url[:60],
+                )
+                score = 0.0
+                after_decay = 0.0
+                decay = 0.0
+                confidence = 0
+                date_status = "out_of_window"
+                judge_verdict = {
+                    **judge_verdict,
+                    "decision_before_freshness": judge_verdict.get("decision"),
+                    "decision": "rejected_freshness",
+                    "rejection_reason": "signal_out_of_window",
+                    "freshness_explanation": freshness_reason,
+                    "client_ready": False,
+                }
+            integrity_date_status = (
+                date_status
+                if date_status in {"in_window", "out_of_window", "uncertain"}
+                else "not_evaluated"
             )
-        # Prefer the verifier's authoritative matched index; fall back to the
-        # company-asserted one when the verifier didn't resolve a match.
-        resolved_idx = _matched_idx if isinstance(_matched_idx, int) and _matched_idx >= 0 else matched_idx
-        judge_verdict = signal_verdicts[-1] if signal_verdicts else {}
-        if freshness_reason:
-            # Fetch and judge the supplied page first so a stale signal still
-            # has a complete, source-grounded receipt. Freshness is a terminal
-            # publication gate and can never be rescued by a positive content
-            # verdict.
-            logger.info(
-                "Competition intent signal rejected after source verification: %s  "
-                "source=%s",
-                freshness_reason,
-                signal.url[:60],
-            )
-            score = 0.0
-            after_decay = 0.0
-            decay = 0.0
-            confidence = 0
-            date_status = "out_of_window"
-            judge_verdict = {
-                **judge_verdict,
-                "decision_before_freshness": judge_verdict.get("decision"),
-                "decision": "rejected_freshness",
-                "rejection_reason": "signal_out_of_window",
-                "freshness_explanation": freshness_reason,
-                "client_ready": False,
+            signal_result = {
+                "raw": score,
+                "after_decay": after_decay,
+                "decay": decay,
+                "confidence": confidence,
+                "date_status": date_status,
+                **(
+                    {"date_verdict": integrity_date_status}
+                    if integrity_policy else {}
+                ),
+                **(
+                    {"claim_support_verdict": judge_verdict.get(
+                        "claim_support_verdict",
+                        "supported" if score > 0 else "unverified",
+                    )}
+                    if integrity_policy else {}
+                ),
+                "matched_icp_signal": resolved_idx,
+                "evidence_type": _evidence_type_for(resolved_idx),
+                **({"evidence_urls": evidence_urls}
+                   if integrity_policy else {}),
+                **({"judge_verdict": judge_verdict} if judge_verdict else {}),
             }
-        integrity_date_status = (
-            date_status
-            if date_status in {"in_window", "out_of_window", "uncertain"}
-            else "not_evaluated"
-        )
-        signal_result = {
-            "raw": score,
-            "after_decay": after_decay,
-            "decay": decay,
-            "confidence": confidence,
-            "date_status": date_status,
-            **(
-                {"date_verdict": integrity_date_status}
-                if integrity_policy else {}
-            ),
-            **(
-                {"claim_support_verdict": judge_verdict.get(
-                    "claim_support_verdict",
-                    "supported" if score > 0 else "unverified",
-                )}
-                if integrity_policy else {}
-            ),
-            "matched_icp_signal": resolved_idx,
-            "evidence_type": _evidence_type_for(resolved_idx),
-            **({"evidence_urls": evidence_urls}
-               if integrity_policy else {}),
-            **({"judge_verdict": judge_verdict} if judge_verdict else {}),
-        }
-        if exchange_request is not None:
-            terminal = reusable_terminal_judgment(
-                signal_result, expected_urls=evidence_urls,
-                expected_index=matched_idx,
-                expected_evidence_type=_evidence_type_for(matched_idx),
-                allowed_context_urls=funding_context_urls,
-            )
-            response = await invoke_exchange(signal_exchange, {
-                **exchange_request,
-                "operation": "complete",
-                "reference": exchange_reference,
-                "judgment": deepcopy(signal_result) if terminal else None,
-            })
-            if (
-                not isinstance(response, Mapping)
-                or response.get("reference") != exchange_reference
-                or response.get("status") not in (
-                    {"stored", "existing"} if terminal else {"released"}
+            if evidence_bridge is not None:
+                evidence_reference = await evidence_bridge.finish(signal_result)
+                if evidence_reference is not None:
+                    signal_result["signal_judgment_reference"] = deepcopy(evidence_reference)
+            if exchange_request is not None:
+                terminal = reusable_terminal_judgment(
+                    signal_result, expected_urls=evidence_urls,
+                    expected_index=matched_idx,
+                    expected_evidence_type=_evidence_type_for(matched_idx),
+                    allowed_context_urls=funding_context_urls,
                 )
-            ):
-                raise SignalJudgmentCacheError("signal cache completion is invalid")
-            if terminal:
-                signal_result["signal_judgment_reference"] = deepcopy(
-                    response["reference"]
-                )
+                response = await invoke_exchange(signal_exchange, {
+                    **exchange_request,
+                    "operation": "complete",
+                    "reference": exchange_reference,
+                    "judgment": deepcopy(signal_result) if terminal else None,
+                })
+                if (
+                    not isinstance(response, Mapping)
+                    or response.get("reference") != exchange_reference
+                    or response.get("status") not in (
+                        {"stored", "existing"} if terminal else {"released"}
+                    )
+                ):
+                    raise SignalJudgmentCacheError("signal cache completion is invalid")
+                if terminal:
+                    signal_result["signal_judgment_reference"] = deepcopy(
+                        response["reference"]
+                    )
+        except BaseException:
+            if evidence_bridge is not None:
+                try:
+                    await evidence_bridge.release()
+                except BaseException as release_error:
+                    logger.error("Evidence cache release failed after completion error: %s", type(release_error).__name__)
+            raise
         signal_results.append(signal_result)
         if (
             terminal_cache_key
@@ -13723,6 +14050,7 @@ async def _score_single_intent_signal(
     verdict_out: Optional[List[dict]] = None,
     evidence_signals: Optional[Sequence["IntentSignal"]] = None,
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -14008,6 +14336,7 @@ async def _score_single_intent_signal(
                 buyer_max_age_days=buyer_max_age_days,
                 **({"verified_funding_stage_context": verified_funding_stage_context}
                    if verified_funding_stage_context else {}),
+                **({"verified_source_pages": verified_source_pages} if verified_source_pages else {}),
                 **({"evidence_bundle": [
                     {"url": item.url, "description": item.description,
                      "date": item.date, "snippet": item.snippet}

@@ -171,8 +171,9 @@ class _Caller:
         self.calls = 0
         self.s3_env = s3_env
 
-    async def __call__(self, client, model, prompt):
+    async def __call__(self, client, model, prompt, *, hosted_search=None):
         self.calls += 1
+        assert hosted_search is True
         return _S1_REVIEW if self.calls == 1 else self.s3_env
 
 

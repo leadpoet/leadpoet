@@ -1,0 +1,58 @@
+{
+  "provenance": "Public fields extracted from saved Nov3 ICP8 provider receipts7954233,7954240,7954562. Homepage excerpt retains exact identity metadata; no private headers, credentials or unrelated profile fields.",
+  "homepage_url": "https://www.fogelman.com/",
+  "homepage_html": "<html><head><title>Investment Management and Property Services | Fogelman</title><meta content=\"Fogelman |\" property=\"og:site_name\"/><meta content=\"Investment Management and Property Services | Fogelman\" property=\"og:title\"/><meta content=\"https://www.fogelman.com/\" property=\"og:url\"/><script class=\"aioseo-schema\" type=\"application/ld+json\">\n\t\t\t{\"@context\":\"https:\\/\\/schema.org\",\"@graph\":[{\"@type\":\"Organization\",\"@id\":\"https:\\/\\/www.fogelman.com\\/#organization\",\"name\":\"Fogelman\",\"url\":\"https:\\/\\/www.fogelman.com\\/\",\"logo\":{\"@type\":\"ImageObject\",\"url\":\"http:\\/\\/fogelman.rfgdemo.com\\/wp-content\\/uploads\\/2023\\/05\\/logo-fogelman-navy.png\",\"@id\":\"https:\\/\\/www.fogelman.com\\/#organizationLogo\"},\"image\":{\"@id\":\"https:\\/\\/www.fogelman.com\\/#organizationLogo\"}},{\"@type\":\"WebPage\",\"@id\":\"https:\\/\\/www.fogelman.com\\/#webpage\",\"url\":\"https:\\/\\/www.fogelman.com\\/\",\"name\":\"Investment Management and Property Services | Fogelman\",\"description\":\"Fogelman is built on more than 50 years of experience, innovation, and results-driven. We are recognized as one of the leading property management firms.\",\"inLanguage\":\"en-US\",\"isPartOf\":{\"@id\":\"https:\\/\\/www.fogelman.com\\/#website\"},\"datePublished\":\"2023-05-15T13:55:29+00:00\",\"dateModified\":\"2026-04-15T17:41:11+00:00\"},{\"@type\":\"WebSite\",\"@id\":\"https:\\/\\/www.fogelman.com\\/#website\",\"url\":\"https:\\/\\/www.fogelman.com\\/\",\"name\":\"Fogelman\",\"inLanguage\":\"en-US\",\"publisher\":{\"@id\":\"https:\\/\\/www.fogelman.com\\/#organization\"}}]}\n\t\t</script></head><body><a href=\"https://www.linkedin.com/company/455285/\" target=\"_blank\">\n<img alt=\"LinkedIn Logo\" height=\"24\" src=\"https://www.fogelman.com/wp-content/themes/Fogelman2023Theme/_images/linkedin.svg\" width=\"24\"/>\n<img alt=\"LinkedIn Logo\" class=\"yimg\" height=\"24\" src=\"https://www.fogelman.com/wp-content/themes/Fogelman2023Theme/_images/linkedin_hover.svg\" width=\"24\"/>\n</a></body></html>",
+  "company": {
+    "company_name": "Fogelman Properties",
+    "company_website": "http://www.fogelman.com/",
+    "company_linkedin": "https://www.linkedin.com/company/fogelman-properties/",
+    "employee_count": "501-1,000",
+    "country": "United States of America"
+  },
+  "sonar": {
+    "observed_company_name": "Fogelman Properties",
+    "observed_company_website": "https://www.fogelman.com/",
+    "observed_company_linkedin": "https://www.linkedin.com/company/fogelman-properties",
+    "observed_employee_count": 501,
+    "employee_size_matches": true,
+    "employee_size_evidence_url": "https://www.linkedin.com/company/fogelman-properties",
+    "employee_size_evidence_quote": "Privately Held \u00b7 Founded 1963 \u00b7 501-1000 employees",
+    "observed_industry": "real estate",
+    "observed_subindustry": "multifamily investment and property management",
+    "industry_matches": true,
+    "industry_activity_role": "supplier_operator",
+    "industry_evidence_url": "https://www.fogelman.com/who-we-are/news-insights/fogelman-surpasses-35000-units-under-management-with-addition-of-5200-units-across-six-states/",
+    "industry_evidence_quote": "Fogelman is one of the country\u2019s largest and most experienced privately-owned multifamily investment and property services companies. As a fully integrated company with more than 60 years in the industry, Fogelman specializes in multifamily acquisitions, asset management, property management and construction management.",
+    "observed_hq_country": "United States",
+    "observed_hq_state": "Tennessee",
+    "geography_matches": true,
+    "geography_evidence_url": "https://www.linkedin.com/company/fogelman-properties",
+    "geography_evidence_quote": "6060 Poplar Avenue Suite 200, Memphis, TN 38119, US, Memphis, Tennessee, United States (HQ)",
+    "observed_company_stage": "established private company",
+    "stage_matches": true,
+    "stage_evidence_url": "https://www.fogelman.com/who-we-are/history/",
+    "stage_evidence_quote": "For six decades, Fogelman has been creating and caring for apartment communities.",
+    "attribute_satisfied": true,
+    "required_attribute_evidence_url": "https://www.fogelman.com/",
+    "required_attribute_evidence_quote": "Fogelman is a fully-integrated multifamily real estate company that invests in and manages apartment properties in thriving cities across the United States.",
+    "reason": "Fogelman Properties is a U.S.-based established private multifamily real estate company with 501-1000 employees that explicitly invests in and manages apartment properties, matching the requested fit criteria."
+  },
+  "structured": {
+    "result": {
+      "data": {
+        "status": 200,
+        "element": {
+          "id": "455285",
+          "name": "Fogelman Properties",
+          "website": "http://www.fogelman.com",
+          "linkedinUrl": "https://www.linkedin.com/company/fogelman-properties/",
+          "universalName": "fogelman-properties",
+          "employeeCountRange": {
+            "start": 501,
+            "end": 1000
+          }
+        }
+      }
+    }
+  }
+}

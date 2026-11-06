@@ -87,6 +87,8 @@ def _scoring_input() -> Dict[str, Any]:
         [_company()], schema_version=intent_details_policy.OUTPUT_SCHEMA
     )
     policy = scoring.build_scorer_policy(
+        judge_models=real_judge.LEGACY_MODELS,
+        judge_provider_routes={},
         scoring_adapter_version="qualification_integrity_v2",
         intent_details=True,
     )

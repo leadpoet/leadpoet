@@ -327,14 +327,15 @@ def test_selected_run_full_trace_allows_empty_tool_turn_without_dataset_filters(
         "model_calls": 3, "full_thinking_calls": 2, "tool_only_empty_calls": 1}}
 
 
-@pytest.mark.parametrize("extra", ["summary", "opaque"])
+@pytest.mark.parametrize("extra", ["summary", "summary_alias", "opaque"])
 def test_full_text_remains_eligible_with_additional_summary_or_opaque_continuation(extra):
     example = captured_example()
     example["round_status"] = "published"
     call = example["provider_calls"][2]
-    if extra == "summary":
-        call["response"]["choices"][0]["message"]["reasoning_details"].append(
-            {"type": "reasoning.summary", "summary": "A separate short summary."})
+    if extra in {"summary", "summary_alias"}:
+        message = call["response"]["choices"][0]["message"]
+        message["reasoning_details"].append({"type": "reasoning.summary", "summary":
+            message["reasoning"] if extra == "summary_alias" else "A separate short summary."})
         refresh_response_links(example, 2)
     else:
         call["response_privacy_redactions"] = ["hidden_reasoning"]
@@ -351,7 +352,7 @@ def test_full_text_remains_eligible_with_additional_summary_or_opaque_continuati
                for record in records)
     if extra == "summary":
         assert "A separate short summary." not in json.dumps(records)
-    else:
+    elif extra == "opaque":
         assert all(record["source_refs"][0]["response_projection"]["opaque_reasoning_omitted"]
                    for record in records if record["source_refs"][0]["call_identity"] == call["call_identity"])
     assert manifest["coverage"]["generated_thinking_texts"] == 2
@@ -362,7 +363,7 @@ def test_full_text_remains_eligible_with_additional_summary_or_opaque_continuati
 
 
 @pytest.mark.parametrize("damage", ["summary_only", "opaque_only", "unapproved_text",
-                                    "summary_alias", "truncated", "receipt_mismatch",
+                                    "truncated", "receipt_mismatch",
                                     "route_unverified", "empty_route_unverified"])
 def test_capture_and_strict_export_both_reject_unverified_full_text(damage):
     example = captured_example()
@@ -381,10 +382,6 @@ def test_capture_and_strict_export_both_reject_unverified_full_text(damage):
         refresh_response_links(example, 2)
     elif damage == "unapproved_text":
         message["reasoning_content"] = "Unapproved second text."
-        refresh_response_links(example, 2)
-    elif damage == "summary_alias":
-        message["reasoning_details"].append(
-            {"type": "reasoning.summary", "summary": message["reasoning"]})
         refresh_response_links(example, 2)
     elif damage == "truncated":
         call["response"]["choices"][0]["finish_reason"] = "length"

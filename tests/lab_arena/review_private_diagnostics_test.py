@@ -42,7 +42,7 @@ def _run(change=lambda body: None):
 
 
 @pytest.mark.parametrize("finish,status,reason", [
-    ("stop", "passed", None), ("length", "error", "not_finished"),
+    ("stop", "passed", None), ("length", "error", "truncated"),
     ("content_filter", "error", None), (None, "error", "not_finished"),
 ])
 def test_runtime_retains_private_provider_outcome_without_changing_decision(finish, status, reason):
@@ -54,7 +54,7 @@ def test_runtime_retains_private_provider_outcome_without_changing_decision(fini
     assert document.get("error_reason") == reason
     assert document["provider_diagnostic"] == {
         "finish_reason": finish if finish is not None else "missing",
-        "native_finish_reason": "end_turn", "max_output_tokens": 16384,
+        "native_finish_reason": "end_turn", "max_output_tokens": 32768,
         "prompt_tokens": 200, "completion_tokens": 33, "reasoning_tokens": 9,
         "context_integrity": "not_required",
         "response_model": code_review.DEFAULT_REVIEW_MODEL,
@@ -152,7 +152,7 @@ def test_context_branch_observation_preserves_existing_parse_order(change, reaso
     assert code_review._context_integrity_verified(body, prepared) is (reason is None)
     with pytest.raises(code_review.CodeReviewError) as caught:
         code_review.parse_response(body, prepared)
-    assert caught.value.response_reason == ("context_integrity" if reason else "not_finished")
+    assert caught.value.response_reason == ("context_integrity" if reason else "truncated")
     diagnostic = code_review_policy.private_response_diagnostic(body, prepared)
     assert diagnostic["context_integrity"] == (reason or "verified")
     assert diagnostic["context_integrity"] in code_review_policy.REVIEW_CONTEXT_REASONS

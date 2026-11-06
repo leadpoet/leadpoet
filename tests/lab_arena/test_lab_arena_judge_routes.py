@@ -22,6 +22,7 @@ from lab_arena import broker as br
 from lab_arena import contracts
 from lab_arena import operations as ops
 from lab_arena import scoring, shim
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 EVALUATOR_SEARCH = {"query": "Acme series B funding announcement", "type": "auto", "numResults": 5, "contents": {"highlights": {"query": "raised a Series B", "maxCharacters": 400}}}
 EVALUATOR_CONTENTS = {"ids": ["https://example.com/news"], "text": {"maxCharacters": 12000}, "maxAgeHours": 0}
@@ -156,9 +157,9 @@ def judge_source_models() -> set:
     return found
 
 
-def test_signed_judge_models_cover_every_model_literal_in_the_judge_source():
+def test_legacy_signed_judge_models_cover_every_fallback_model_literal_in_the_judge_source():
     pytest.importorskip("qualification.scoring.lead_scorer")
-    policy_models = set(scoring.build_scorer_policy()["judge_models"].values())
+    policy_models = set(scoring.build_scorer_policy(judge_models=LEGACY_MODELS)["judge_models"].values())
     source_models = judge_source_models()
     assert source_models, "no judge model literals found; the scan pattern is stale"
     assert source_models <= policy_models, sorted(source_models - policy_models)
@@ -166,8 +167,8 @@ def test_signed_judge_models_cover_every_model_literal_in_the_judge_source():
 
 
 @pytest.mark.parametrize("historical", [False, True])
-def test_current_and_frozen_judge_policies_use_exact_catalog_models(historical):
-    models = dict(scoring.DEFAULT_JUDGE_MODELS)
+def test_legacy_and_older_frozen_judge_policies_use_exact_catalog_models(historical):
+    models = dict(LEGACY_MODELS)
     assert models["intent_details_review"] == "anthropic/claude-sonnet-5.5"
     assert models["role_batch_check"] == "google/gemini-3.5-flash-lite"
     if historical:

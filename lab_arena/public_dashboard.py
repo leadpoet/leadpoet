@@ -158,11 +158,17 @@ _SUCCESSFUL_CALL_COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation"
+    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation,"
+    "champion_funding_frozen,champion_submission_id,champion_hotkey"
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
-    "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
+    ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
 ).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1") + ",status_generation"
+# History lists every entrant, so it keeps the full publication. It still
+# reads only the public configuration, never the frozen route registry.
+_HISTORY_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
+    ",configuration_doc,", "," + PUBLIC_CONFIGURATION_COLUMN + ",",
+)
 
 
 def _competition_round(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -591,6 +597,27 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
+def _defending_champion(row: Mapping[str, Any]) -> Optional[dict]:
+    # Name the defender only when the baseline provably ran its code. The
+    # champion-baseline freeze (migration 585) runs the frozen champion's
+    # promoted source and copies that champion's reasoning contract. Older
+    # freezes could fund a legacy champion while the baseline ran another
+    # source. An empty contract still proves the legacy champion's source was
+    # frozen. Compact reads carry only the derived boolean, never its routes.
+    submission_id = str(row.get("champion_submission_id") or "")
+    miner_hotkey = str(row.get("champion_hotkey") or "")
+    configuration = row.get("configuration_doc")
+    configuration = configuration if isinstance(configuration, Mapping) else {}
+    contract = configuration.get("baseline_reasoning_configuration")
+    source_frozen = (isinstance(contract, Mapping)
+                     if "baseline_reasoning_configuration" in configuration
+                     else configuration.get("baseline_champion_source_frozen") is True)
+    if (not submission_id or not miner_hotkey
+            or row.get("champion_funding_frozen") is not True or not source_frozen):
+        return None
+    return {"submission_id": submission_id, "miner_hotkey": miner_hotkey}
+
+
 def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[str, Any]] = None) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
@@ -630,6 +657,7 @@ def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[
         "baseline": baseline,
         "champion": champion,
         "promotion_status": promotion_status,
+        "defending_champion": _defending_champion(row),
     }
 
 
@@ -1237,6 +1265,22 @@ __all__ = [
 ]
 
 
+def _history_participants(row: Mapping[str, Any], rankings: Mapping[str, Mapping[str, Any]],
+                          exclusions: Mapping[str, Mapping[str, Any]]) -> list:
+    """A published round's public entrants, highest final score first.
+
+    Unscored and recovery-excluded entrants follow; the submission id breaks
+    ties. Published rankings never change, so pages resume at a stable place.
+    """
+    def order(item: Mapping[str, Any]) -> tuple:
+        submission_id = str(item.get("submission_id") or "")
+        score = None if submission_id in exclusions else _score(
+            (rankings.get(submission_id) or {}).get("final_score"))
+        return (score is None, -(score or 0.0), submission_id)
+    return sorted((item for item in (*_participants(row), *exclusions.values())
+                   if item.get("submission_id")), key=order)
+
+
 def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int = 25,
                      day: Optional[str] = None, hotkey: str = "") -> dict:
     """Bounded keyset pagination over immutable, published score records."""
@@ -1248,6 +1292,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
     entries, summaries, evaluation_floors = [], {}, {}
     before = None
     resume = None
+    resume_round = None
     if cursor:
         try:
             state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
@@ -1263,6 +1308,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             if resume.get("status") != "published" or _timestamp(resume.get("created_at")) != created:
                 raise ValueError()
             before = (str(resume["created_at"]), round_id)
+            resume_round = round_id
         except (ValueError, TypeError, KeyError):
             raise ServiceError("history_cursor_invalid", 400)
     else:
@@ -1294,7 +1340,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             rows = service._store.list_rounds(
                 status="published", mode=service._config.mode,
                 network_name=network_name, netuid=netuid, limit=25,
-                columns=_ROUND_COLUMNS, history_order=True,
+                columns=_HISTORY_ROUND_COLUMNS, history_order=True,
                 **({"before_round": before} if before else {}),
                 **({"evaluation_date": day} if day else {}),
             )
@@ -1312,14 +1358,19 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             champion_id = _champion_submission_id(row)
             exclusions = _recovery_exclusions(service, row)
             evaluation_floors[str(row["round_id"])] = int(row.get("scoring_generation_floor") or 0)
-            last_submission = after_submission
-            public_participants = (*_participants(row), *exclusions.values())
-            for participant in sorted(public_participants, key=lambda item: str(item.get("submission_id") or "")):
+            participants = _history_participants(row, rankings, exclusions)
+            # A cursor resumes only its own round, just after its last entrant.
+            last_submission = after_submission if str(row["round_id"]) == resume_round else ""
+            start = 0
+            if last_submission:
+                ids = [str(item["submission_id"]) for item in participants]
+                if last_submission not in ids:
+                    raise ServiceError("history_cursor_invalid", 400)
+                start = ids.index(last_submission) + 1
+            for participant in participants[start:]:
                 submission_id = str(participant.get("submission_id") or "")
                 miner_hotkey = str(participant.get("miner_hotkey") or "")
-                if submission_id <= after_submission:
-                    continue
-                if not submission_id or not miner_hotkey or (needle and needle not in miner_hotkey.lower()):
+                if not miner_hotkey or (needle and needle not in miner_hotkey.lower()):
                     last_submission = submission_id
                     continue
                 if len(entries) == limit:
@@ -1343,10 +1394,10 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
                     exclusion = exclusions[submission_id]
                     _mark_recovery_excluded(entries[-1], exclusion["status"], reason=exclusion.get("reason"))
                 last_submission = submission_id
-            after_submission = ""
         if fetched < 25 or pinned is not None:
             return page()
         last = rows[-1]
         before = (str(last["created_at"]), str(last["round_id"]))
-    public_participants = (*_participants(last), *_recovery_exclusions(service, last).values())
-    return page(last, max((str(p.get("submission_id") or "") for p in public_participants), default=""))
+    participants = _history_participants(last, _rankings(last, "final_ranking"),
+                                         _recovery_exclusions(service, last))
+    return page(last, str(participants[-1]["submission_id"]) if participants else "")

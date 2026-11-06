@@ -24,6 +24,15 @@ TOKEN = "a" * 64
 CLAIM_HASH = "sha256:" + "c" * 64
 
 
+def capture_ack(run_id, document, *, kind="execute", token=TOKEN):
+    snapshot, _ = training_input.build_snapshot(run_id, kind, document, lease_generation=1,
+        claim_request_hash=CLAIM_HASH, secrets=(token,))
+    return {"status": "stored", "schema_version": training_input.SCHEMA_VERSION,
+        "ref": training_input.object_ref(run_id, 1), "lease_generation": 1,
+        "claim_request_hash": CLAIM_HASH, "input_sha256": snapshot["input_sha256"],
+        "privacy": snapshot["privacy"]}
+
+
 def service_for(tmp_path, **changes):
     run = {
         "run_id": "r1", "round_id": "arena-test", "kind": "execute",
@@ -211,13 +220,13 @@ def test_capture_matches_final_runtime_boundary_without_affecting_execution(tmp_
             snapshots.append(copy.deepcopy(document))
             if capture_fails:
                 raise RuntimeError("private upload failure")
-            return {"status": "stored"}
+            return capture_ack(run_id, document, kind=kind, token=token)
     api = CapturingApi([active])
     output = scoring.build_scoring_output("r1", [{"final_score": 71.0, "failure_reason": ""}, {"final_score": 44.5, "failure_reason": ""}]) if kind == "score" else {"companies": [valid_company(1)]}
     sandbox = BridgingRuntime(output=output, calls=0)
     (tmp_path / "work").mkdir()
     assert runner.Runner(make_config(tmp_path, api, sandbox)).run_once() == 1
-    assert len(snapshots) == (2 if capture_fails else 1)
+    assert len(snapshots) == (3 if capture_fails else 1)
     assert all(saved == sandbox.input_documents[0] for saved in snapshots)
     assert snapshots[0]["deepline_catalog"] == active["deepline_catalog"]
     assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"
@@ -265,7 +274,7 @@ def test_judge_capture_retains_validated_recovery_context(tmp_path, context):
     class CapturingApi(FakeApi):
         def training_input(self, run_id, token, value):
             snapshots.append(copy.deepcopy(value))
-            return {"status": "stored"}
+            return capture_ack(run_id, value, kind="score", token=token)
     api = CapturingApi([active])
     sandbox = BridgingRuntime(output=scoring.build_scoring_failure("r1", "judge_error"), calls=0)
     (tmp_path / "work").mkdir()

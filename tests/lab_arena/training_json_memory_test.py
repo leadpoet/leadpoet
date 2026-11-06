@@ -65,6 +65,37 @@ def test_hash_memory_does_not_scale_with_repeated_history_size():
     assert peak < 8 * 1024**2
 
 
+def test_hash_batches_small_encoder_fragments_without_changing_bytes(monkeypatch):
+    value = {"catalog": [{"name": str(i), "description": "evidence " * 24}
+                         for i in range(2000)]}
+    expected = legacy_hash(value)
+    real_sha256 = hashlib.sha256
+    sizes = []
+
+    class MeasuredHash:
+        def __init__(self):
+            self.inner = real_sha256()
+
+        def update(self, data):
+            sizes.append(len(data))
+            self.inner.update(data)
+
+        def hexdigest(self):
+            return self.inner.hexdigest()
+
+    monkeypatch.setattr(contracts.hashlib, "sha256", MeasuredHash)
+    assert contracts.document_hash(value) == expected
+    # Thousands of schema fragments must not each cross the hashlib boundary.
+    assert len(sizes) < 20
+    assert max(sizes) <= 64 * 1024
+
+
+@pytest.mark.parametrize("length", [65533, 65534, 65535, 65536, 65537, 131072])
+def test_hash_buffer_boundaries_preserve_unicode_and_surrounding_values(length):
+    value = ["small", {"text": "x" * length, "unicode": "日本語 🌍" * 12000}, None]
+    assert contracts.document_hash(value) == legacy_hash(value)
+
+
 def test_export_preserves_json_values_hash_privacy_and_input_isolation():
     values = fixture()
     values["round_row"]["configuration_doc"]["extra"] = {

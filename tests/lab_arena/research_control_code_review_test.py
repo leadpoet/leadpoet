@@ -152,6 +152,36 @@ def test_binding_fix_keeps_existing_research_policy_identity():
     assert code_review.RESEARCH_POLICY_HASH == "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c"
 
 
+@pytest.mark.parametrize("model", [code_review.DEFAULT_REVIEW_MODEL, code_review.FALLBACK_REVIEW_MODEL])
+@pytest.mark.parametrize("empty_field", ["reviewed_files", "evidence", "limitations"])
+def test_strict_schema_rejects_observed_empty_review_sections(model, empty_field):
+    # Nov6 replies stopped normally with empty coverage/evidence/limitations.
+    # These must fail generation's schema as well as the source-aware parser.
+    import jsonschema
+    prepared = code_review.prepare_request(_archive(SOURCE), model=model, research_control=True)
+    schema = prepared.parameters["response_format"]["json_schema"]["schema"]
+    document = {"verdict": "pass", "summary": "Complete source reviewed.",
+                "reviewed_files": list(prepared.reviewed_files), "reviewed_comparisons": [],
+                "findings": [], "research_control": _assessment(prepared)}
+    jsonschema.validate(document, schema)
+    target = document if empty_field == "reviewed_files" else document["research_control"]
+    target[empty_field] = []
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, schema)
+
+
+def test_response_guidance_preserves_policy_and_does_not_accept_paraphrased_evidence():
+    prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
+    system = prepared.parameters["messages"][0]["content"]
+    assert code_review._RESEARCH_PROMPT in system
+    assert "without editing, combining, or paraphrasing" in system
+    assessment = _assessment(prepared)
+    assessment["evidence"][0]["excerpt"] = "choice = model.decide(icp, previous_observations)"
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(_response(prepared, assessment), prepared)
+    assert failure.value.response_reason == "research_evidence_mismatch"
+
+
 def test_research_evidence_rejects_one_character_quote_but_accepts_code_context():
     prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
     assessment = _assessment(prepared)
@@ -195,7 +225,7 @@ def test_active_truncated_reply_fails_closed():
     response["choices"][0]["finish_reason"] = "length"
     with pytest.raises(code_review.CodeReviewError) as failure:
         code_review.parse_response(response, prepared)
-    assert failure.value.response_reason == "not_finished"
+    assert failure.value.response_reason == "truncated"
 
 
 def test_untrusted_source_instruction_cannot_change_schema_or_misconduct_finding():

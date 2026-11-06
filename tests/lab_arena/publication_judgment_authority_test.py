@@ -152,7 +152,7 @@ def test_recovered_score_writer_uses_the_same_authority(format, monkeypatch):
     writes = []
     verified = []
     instance.evaluation_icps = lambda *_: [{}, {}]
-    instance._outputs_by_run = lambda *_: {source["run_id"]: [] for source in sources}
+    instance._outputs_by_run = lambda *_, executions=None: {source["run_id"]: [] for source in sources}
     instance._verified_breakdowns = lambda judge, **_kwargs: verified.append(judge["run_id"]) or []
     instance._store.record_run_scores = lambda *args, **kwargs: writes.append((args, kwargs)) or {"status": "ok"}
     monkeypatch.setattr(service.verify, "scored_row", lambda *args: {"run_id": args[2]})
@@ -170,7 +170,7 @@ def test_recovered_score_writer_rejects_missing_integrity_scope():
     sources[0]["per_icp_score"] = None
     judges[0].pop("judgment_scope_doc")
     instance.evaluation_icps = lambda *_: [{}, {}]
-    instance._outputs_by_run = lambda *_: {}
+    instance._outputs_by_run = lambda *_, executions=None: {}
     instance._store.record_run_scores = lambda *_, **_kwargs: pytest.fail("unbound score persisted")
     with pytest.raises(service.ServiceError, match="recovered_judgment_binding_invalid"):
         instance._record_recovered_judgment_scores(row)
@@ -185,7 +185,7 @@ def test_recovered_score_writer_skips_ready_excluded_sources(format):
                            if p["submission_id"] != excluded]
     before = copy.deepcopy((sources, judges))
     instance.evaluation_icps = lambda *_: [{}, {}]
-    instance._outputs_by_run = lambda *_: pytest.fail("excluded output read for materialization")
+    instance._outputs_by_run = lambda *_, executions=None: pytest.fail("excluded output read for materialization")
     instance._verified_breakdowns = lambda *_args, **_kwargs: pytest.fail("excluded judgment revalidated")
     instance._store.record_run_scores = lambda *_args, **_kwargs: pytest.fail("excluded score persisted")
     instance._record_recovered_judgment_scores(row)
@@ -205,7 +205,7 @@ def test_recovered_score_writer_keeps_admitted_recovery_with_excluded_ready_peer
     writes = []
     verified = []
     instance.evaluation_icps = lambda *_: [{}, {}]
-    instance._outputs_by_run = lambda *_: {sources[0]["run_id"]: []}
+    instance._outputs_by_run = lambda *_, executions=None: {sources[0]["run_id"]: []}
     instance._verified_breakdowns = lambda judge, **_kwargs: verified.append(judge["run_id"]) or []
     instance._store.record_run_scores = lambda *args, **kwargs: writes.append((args, kwargs)) or {"status": "ok"}
     monkeypatch.setattr(service.verify, "scored_row", lambda *args: {"run_id": args[2]})

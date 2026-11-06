@@ -183,6 +183,7 @@ def lease(run_id="r1", position=0):
     return {
         "status": "leased", "run_id": run_id, "assignment_id": "%s:s1:1:%d" % (ROUND, position), "submission_id": "s1", "miner_hotkey": MINER,
         "image_digest": IMAGE, "stage": 1, "icp_position": position, "attempt": 1,
+        "claim_request_hash": "sha256:" + "c" * 64,
         "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00",
         "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
         "image_reference": IMAGE_REFERENCE,
@@ -876,11 +877,12 @@ def test_committed_dispatch_response_loss_maps_real_broker_run_to_provider_error
     assert next(iter(store.calls.values()))["kind"] == "dispatch"
 
 
-def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
+def test_run_once_respects_max_claims_and_images_export_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
     leases = [lease("r%d" % i, i) for i in range(5)]
     api = FakeApi(leases)
     exports = []
-    cache = rn.ImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
+    cache = FakeExportImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
     config.image_cache = cache
@@ -904,6 +906,10 @@ def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
     assert all(
         c["body"]["output_schema_versions"]
         == sorted(rn.SUPPORTED_OUTPUT_SCHEMA_VERSIONS)
+        for c in api.claims
+    )
+    assert all(
+        c["body"]["evidence_judgment_policies"] == ["evidence_judgment_v2"]
         for c in api.claims
     )
 
@@ -1373,6 +1379,7 @@ def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_pat
 
 
 def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
     digests = ["sha256:" + character * 64 for character in "123"]
     exports = []
 
@@ -1380,6 +1387,7 @@ def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, mo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     cache.rootfs_for(digests[0])
     cache.rootfs_for(digests[1])
@@ -1401,6 +1409,7 @@ def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, mo
 
 
 def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
     first = "sha256:" + "1" * 64
     second = "sha256:" + "2" * 64
     third = "sha256:" + "3" * 64
@@ -1410,6 +1419,7 @@ def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_expo
         exports.append(digest)
         (target / "rootfs").mkdir()
 
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=64 * 1024**3))
     cache = rn.ImageCache(tmp_path / "images", exporter)
     with cache.acquire(first) as active_rootfs:
         cache.rootfs_for(second)
@@ -1432,8 +1442,8 @@ def test_image_cache_export_error_is_not_retried_and_partial_target_is_removed(t
         (target / "rootfs").mkdir()
         raise ValueError("bad image layer")
 
-    cache = rn.ImageCache(tmp_path / "images", exporter)
     monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
+    cache = rn.ImageCache(tmp_path / "images", exporter)
     with pytest.raises(ValueError, match="bad image layer"):
         cache.rootfs_for(digest)
     assert exports == [digest]

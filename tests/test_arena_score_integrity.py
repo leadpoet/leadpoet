@@ -287,7 +287,7 @@ def test_combined_verifier_fetches_all_sources_and_issues_one_final_judgment(mon
         fetches.append(values)
         return {"results": [{"url": url, "text": "Acme launched a new product.",
                              "source_publication_date": day} for url, day in zip(urls, ["2026-08-01", "2026-09-01"])], "statuses": []}
-    async def judge(client, model, prompt):
+    async def judge(client, model, prompt, *, hosted_search=False):
         calls.append(prompt)
         return supported(urls[0])
     monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)

@@ -857,7 +857,7 @@
       "symbol": "__module__"
     },
     {
-      "ast_sha256": "sha256:9328b118094413e39023ed08b4caf5e4aa5ef98982fe64ac9f83505a2e7e47d6",
+      "ast_sha256": "sha256:ba6f4169f1122f9641f585158ca792f13a8ebba99a231a196a9d117f320dd2db",
       "path": "leadpoet_canonical/subtensor_events_v2.py",
       "symbol": "__module__"
     },
@@ -867,7 +867,7 @@
       "symbol": "_decision_from_observed_employee_size"
     },
     {
-      "ast_sha256": "sha256:556331fc669ccf86ec5412ac6866dc32bffba370d108f86358a8593ec68bbbb1",
+      "ast_sha256": "sha256:ae456213206886c81bd2a505c882af900ea9d23a0d696431cd5f457ff0880404",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_has_explicitly_unproven_fit_dimensions"
     },
@@ -877,12 +877,12 @@
       "symbol": "_is_bound_homepage_name_conflict"
     },
     {
-      "ast_sha256": "sha256:d218c1345d69aa86cd031a0467aa01bd30fdb416186b47e985cb72441b5b6792",
+      "ast_sha256": "sha256:42d0615915424304c27d5faf8f979adfa34e3bd7359b37bd82698441449ef38d",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
     {
-      "ast_sha256": "sha256:fdc629ca1b74f7be58306fe88bdfac9cb16f34d965d9805c17003593efe12415",
+      "ast_sha256": "sha256:a0d6b61672628a276e64abfaf21c8be94f2bb4180e5d12b5a10ff950bd3c9714",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_reverify_decision"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9ee542fba4e200a281d3f6ea3c52c1641b971a20e39d99699ca2017295b87f91",
-  "protected_source_commit": "b69ea88d301091f06a895ccbb87cb475487ed68a",
+  "manifest_hash": "sha256:4c8c15646da3bb36f770b337088e0f0da09091958f9762d30017bcd6ae4a3023",
+  "protected_source_commit": "d1ff106051a923261a423aff7f1233c36ba3397c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

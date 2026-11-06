@@ -40,7 +40,13 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
             # versions of a run using filename or caller order.
             rejected["conflicting_export_versions"] += len(versions)
             continue
-        valid.append(next(iter(versions.values())))
+        example = next(iter(versions.values()))
+        try:
+            training_dataset.label_scorer_configuration(example)
+        except ValueError:
+            rejected["preserved_judgment_policy_invalid"] += 1
+            continue
+        valid.append(example)
 
     dimensions, gaps, call_gaps, calls, recorder_counts = Counter(), Counter(), Counter(), Counter(), Counter()
     recorder_runs, recorder_missing, complete, selected_research_complete, cohorts = 0, 0, 0, 0, defaultdict(list)
@@ -101,7 +107,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                                        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
                                     "recorder_buffer_complete": recorder_complete,
                                     "response_receipts": receipts}})
-        config = example.get("configuration") or {}
+        config = training_dataset.label_scorer_configuration(example)
         cohorts[(config.get("scorer_image_digest"), contracts.document_hash(config.get("scorer_policy") or {}))].append(example)
 
     qualification, qualification_totals = [], Counter()

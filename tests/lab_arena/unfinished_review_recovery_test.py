@@ -47,7 +47,7 @@ def test_unfinished_provider_reply_remains_error_and_requests_recovery(finish_re
     assert len(transport.sent) == 1
     diagnostic = store.finish_calls[0][4]
     assert diagnostic["error_code"] == "review_response_invalid"
-    assert diagnostic["error_reason"] == ("envelope" if finish_reason == "error" else "not_finished")
+    assert diagnostic["error_reason"] == ("envelope" if finish_reason == "error" else "truncated" if finish_reason == "length" else "not_finished")
     assert diagnostic["retryable"] is True
     assert store.finish_calls[0][5] == 1234
 

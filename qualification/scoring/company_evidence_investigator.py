@@ -22,16 +22,20 @@ import os
 import re
 import time
 import unicodedata
+import uuid
 from html.parser import HTMLParser
 from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import unquote, urljoin, urlsplit
 
 import aiohttp
 
+from qualification.scoring.company_fit_evidence_reuse import observed_source, unretained_source
+
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
 from gateway.qualification.models import canonical_candidate_prompt_url
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
+from lab_arena.lab_arena_checkpoint import record_judge_tool_event
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import (
@@ -74,6 +78,10 @@ from qualification.scoring.linkedin_company_size import (
     project_structured_linkedin_company_headquarters,
 )
 from qualification.scoring.pre_checks import _resolve_country
+from qualification.scoring.openrouter_options import (
+    judge_reasoning_enabled, prepare_judge_request, project_judge_response,
+    preserve_judge_reasoning,
+)
 from qualification.scoring.verification_helpers import (
     visible_html_body_empty,
     visible_html_dialog_only,
@@ -87,10 +95,10 @@ from qualification.scoring.verification_helpers import (
 INVESTIGATOR_MODEL = os.environ.get(
     "ARENA_ROLE_BATCH_MODEL", "google/gemini-3.5-flash-lite",
 )
-POSITIVE_SEMANTIC_REVIEW_MODEL = "openai/gpt-6-luna"
+POSITIVE_SEMANTIC_REVIEW_MODEL = os.environ.get("ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL", "openai/gpt-6-luna")
 MAX_REASONING_TURNS = 8
 MAX_INCOMPLETE_SUBMIT_RETRIES = 1
-REASONING_MAX_TOKENS = 3000
+REASONING_MAX_TOKENS = 16384 if judge_reasoning_enabled() else 3000
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 4
 MAX_PREFETCHED_PAGES = 3
@@ -114,6 +122,72 @@ REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
 REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
 ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS = 1_500
 MAX_ALTERNATIVE_PUBLIC_STAGE_CONTEXTS = 2
+
+
+def _local_document_sha256(document):
+    try:
+        raw = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, allow_nan=False).encode()
+        return "sha256:" + hashlib.sha256(raw).hexdigest()
+    except (TypeError, ValueError):
+        return None
+
+
+class _InvestigationToolCapture:
+    """Best-effort host state; no provider identity, gold or scoring authority."""
+
+    def __init__(self, document):
+        self.enabled = judge_reasoning_enabled()
+        self.input_sha256 = _local_document_sha256(document) if self.enabled else None
+        # Identical native retries are distinct local investigations, not one
+        # discontinuous sequence. The stable request digest stays explicit.
+        self.investigation_id = (self.input_sha256 or "local") + ":" + uuid.uuid4().hex
+        self.sequence = 0
+        self.request_sha256 = self.response_sha256 = None
+        self.pending = None
+        self.pending_executed = False
+
+    def model_result(self, payload, body):
+        if not self.enabled:
+            return
+        try:
+            _, prepared = prepare_judge_request(payload)
+            self.request_sha256 = _local_document_sha256(prepared)
+        except Exception:
+            self.request_sha256 = None
+        self.response_sha256 = _local_document_sha256(body)
+        self.pending = None
+        self.pending_executed = False
+
+    def emit(self, call, result, disposition, *, visible_result=None, terminal=False):
+        if not self.enabled:
+            return
+        try:
+            function = call.get("function") if isinstance(call, Mapping) else None
+            function = function if isinstance(function, Mapping) else {}
+            call_id = call.get("id") if isinstance(call, Mapping) else None
+            name = function.get("name")
+            event = {
+                "investigation_id": self.investigation_id, "sequence": self.sequence,
+                "tool_call_id": call_id if isinstance(call_id, str) and call_id else None,
+                "tool_name": name if isinstance(name, str) and name else "invalid_tool_call",
+                "arguments": function.get("arguments"), "result": result,
+                "disposition": disposition,
+                "host_validation": {"kind": "native_host_validation", "gold_label": False,
+                    "terminal": terminal, "model_visible_result": visible_result,
+                    "result_scope": "investigation_terminal_result" if terminal else "local_tool_result_or_instruction",
+                    "investigation_request_sha256": self.input_sha256,
+                    "request_digest_scope": "native_prepared_request_document",
+                    "response_digest_scope": "native_response_document",
+                    "raw_tool_call": call},
+                "request_sha256": self.request_sha256, "response_sha256": self.response_sha256,
+            }
+            self.sequence += 1  # A failed emission remains a visible sequence gap.
+            record_judge_tool_event(event)
+        except Exception:
+            pass  # Capture cannot change native judgments or recovery behavior.
+        self.pending = None
+
 ADMISSION_DEADLINE_SECONDS = 110.0
 # One bounded submit-only repair may follow an admitted positive judgment.
 # Research and ordinary reasoning keep the 110-second admission deadline.
@@ -261,7 +335,8 @@ activity role, and requested semantics before submitting a finding.
 When a commercial-model or customer-facing capability criterion remains
 unresolved, inspect known relevant first-party product, pricing, subscription,
 or platform links before returning UNPROVEN while fresh fetch calls remain.
-Do not infer a commercial model from a product description or company category.
+Do not infer a commercial model from a product description or company category
+alone.
 For a required launch or hiring criterion, prioritize a relevant submitted
 first-party event locator over generic about or contact pages. Submitted
 source hints are discovery only; fetch their URL and verify the exact text.
@@ -369,21 +444,23 @@ alternative that the source proves; do not require cloud resource management
 when the criterion separately allows infrastructure or internal operations
 workflow management. A component catalog, downloadable artifacts, account or
 login portal, or generic license by itself does not prove a subscription
-management platform. Do not infer recurring subscription terms from the word
-"licensed." Customer use of another vendor's platform and the investigated
-vendor's own internal console or workflow remain customer_user or
+management platform. Customer use of another vendor's platform and the
+investigated vendor's own internal console or workflow remain customer_user or
 internal_function, not supplier_operator.
 Apply the following subscription and commercial-sale evidence rules only when
 the requested criteria require those conditions.
-An explicit monetary platform or workspace plan with monthly or annual fees
-supports a paid subscription model without requiring the literal word
-"subscription." Direct company/product-bound paid SaaS subscription purchase
-evidence also proves the subscription model without a published price or
-billing cadence, unless the exact criterion requires those details. Newsletter
-subscriptions, free-account/demo/free-trial signups, a generic SaaS or product
-label, another vendor's subscription, and a pay-once license alone do not prove
-paid product subscriptions. This proves only the subscription clause; every
-other mandatory clause still requires source evidence.
+Read subscription, recurring, and fee-based qualifiers by ordinary meaning.
+Exact company-bound quotes proving the company now provides the requested
+offering to clients or through paid plans prove only these terms: hosted
+business software, subscription; managed services, ongoing contracts;
+professional firms, fees. Not when the criterion contrasts another model or
+loaded text shows another model or an unreleased, waitlist, pilot, or free-only
+offer. A pricing contact alone proves no sale. Price or billing cadence is
+needed only if the criterion requires it. A priced monthly or annual platform
+or workspace plan supports a paid subscription. Newsletter subscriptions,
+free-account/demo/free-trial signups, a generic SaaS or product label, another
+vendor's subscription, and a pay-once license alone do not prove paid product
+subscriptions. Each other clause still needs source proof.
 A vendor-owned product offering plus current commercial
 customers or deployments of that same product supports that the vendor sells
 it; do not require a public price or invoice. Bind the commercial fact to the
@@ -407,8 +484,7 @@ taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
 Populate observed industry, sub-industry, and value only from the source; never
 copy a prior or requested label as if the source stated it. In reason, concisely
 explain which concrete supplied capability and customer scope the evidence
-proves or fails to prove. Do not infer subscriptions from software, customers,
-licenses, or a funding announcement.
+proves or fails to prove.
 A directly sold B2B workflow platform can satisfy a broad
 infrastructure/workflow criterion without a separate infrastructure product,
 when it proves the requested capability and any requested customer scope.
@@ -430,13 +506,11 @@ For compound attributes, prove every actual condition for the same company and
 product with exact loaded company-bound quotes; explain their joint proof.
 Do not add conditions absent from the criterion. Missing required proof or
 unresolved conflicting facts mean UNPROVEN. CONTRADICTED requires direct
-company-bound counterevidence, not silence. A generic platform, software, pricing
-contact, license, or customer quote never proves recurring terms by inference.
+company-bound counterevidence, not silence.
 Equivalent semantic evidence is sufficient: concrete source facts about the
 capability and its relationship to the same company and product may establish
 a descriptive criterion. The requested taxonomy or marketing label need not
-appear verbatim. For example, an annual fee for the same supplied platform
-proves recurrence without the word subscription.
+appear verbatim.
 When a compound attribute needs more than its primary quote and the separate
 industry finding, put up to two additional exact company-bound loaded-source
 URL/quote pairs in supporting_evidence_url_1 and
@@ -538,6 +612,9 @@ Acquired and does not supersede the buyer's funding stage. Only an acquisition
 OF the investigated company can do that. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
+A later completed equity round of unstated series keeps a proven Series C+
+unless it gave, or may have given, a buyer or PE sponsor control or listed the
+company.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for
@@ -2392,6 +2469,51 @@ def _quote_names_company(quote: str, identity_names: set[str]) -> bool:
     )
 
 
+def _quote_names_verified_display_brand(
+    quote: str, url: str, final_url: str, domains: set[str], identity: Mapping[str, Any],
+) -> bool:
+    """Recognize a named brand in a verified 'Brand (part of Parent)' label.
+
+    This is citation attribution, not a new identity or ownership verdict.
+    Keep the full identity checks for unnamed quotes and all other targets.
+    """
+    name = str(identity.get("verified_name") or "").strip()
+    match = re.fullmatch(r"([^()]+?)\s+\(part of ([^()]+)\)", name, re.I)
+    if not match or _normalized_span(name) != _normalized_span(identity.get("submitted_name")):
+        return False
+    brand = match[1].replace("®", "").replace("™", "").strip()
+    brand_key = re.sub(r"[^a-z0-9]+", "", _normalized_span(brand))
+    slug = str(identity.get("verified_linkedin_slug") or "").strip().casefold()
+    if (
+        len(brand_key) < 3
+        or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug)
+        or brand_key != slug.replace("-", "")
+        or identity.get("submitted_linkedin_slug") != slug
+        or identity.get("observed_linkedin_slug") not in (None, "", slug)
+    ):
+        return False
+    domain = identity.get("verified_domain")
+    if not domain or any(identity.get(key) != domain for key in ("submitted_domain", "observed_domain")):
+        return False
+    if not all(
+        _registrable_domain(value) == domain
+        and _independently_bound_first_party_url(value, domains, identity)
+        for value in (url, final_url)
+    ):
+        return False
+    # Require the leading named actor/product. Mentioning the parent or a
+    # related company's activity does not establish the brand's activity.
+    actor = re.match(
+        rf"^(?:through\s+)?{re.escape(_normalized_span(brand))}"
+        r"(?=\s|[,;:]|['’]s\s)(?P<rest>.*)",
+        _normalized_span(quote),
+    )
+    return bool(actor and not re.search(
+        r"\b(?:parents?|owners?|subsidiar(?:y|ies)|sisters?|affiliates?|partners?|customers?)\b",
+        actor["rest"],
+    ))
+
+
 def _quote_names_domain_styled_stage_company(
     quote: str,
     identity_anchor: Mapping[str, Any],
@@ -2745,6 +2867,8 @@ async def _post_openrouter_json(
 ) -> tuple[int, Any]:
     """Retry one explicit transient response inside the admission window."""
 
+    path, payload = prepare_judge_request(payload)
+    url = "https://openrouter.ai/api/v1" + path
     status, body = await _post_json(
         session,
         url,
@@ -2857,6 +2981,12 @@ async def _review_industry_sources(
         finding['_industry_review']['reused_completed_packet'] = True
         return finding, '', 0
     payload = industry_classification.request_payload(packet, model=model, research=research)
+    if judge_reasoning_enabled(model):
+        # This legacy packet default is host-owned, not an explicit caller
+        # control. Let prepare_judge_request select the frozen model's mode.
+        payload.pop("reasoning", None)
+        payload["max_tokens"] = 16384
+        payload["messages"][0]["content"] += industry_classification.REASONING_RESPONSE_CONTRACT
     try:
         status, body = await _post_openrouter_json(
             session, 'https://openrouter.ai/api/v1/chat/completions',
@@ -3024,6 +3154,7 @@ async def _search_web(
 ) -> dict[str, Any]:
     # The same priced search includes source contents. Read them only on the
     # host-issued industry route; snippets and summaries never become proof.
+    unretained_source()
     if read_source_text and not (discovery_highlights and include_domains):
         raise ValueError('source text requires scoped industry discovery')
     result_limit = MAX_INDUSTRY_SEARCH_RESULTS if discovery_highlights else MAX_SEARCH_RESULTS
@@ -3150,8 +3281,10 @@ async def _search_industry_locators(
     Search answers and annotations propose locators only. Their descriptions
     help select a page; a remaining exact-page fetch must establish its facts.
     """
+    unretained_source()
     payload = {
-        'model': 'perplexity/sonar', 'max_tokens': 700, 'temperature': 0,
+        'model': os.environ.get('ARENA_COMPANY_REVERIFY_MODEL', 'perplexity/sonar'),
+        'max_tokens': 700, 'temperature': 0,
         'messages': [
             {'role': 'system', 'content': (
                 'Find company-owned source pages for the requested fact. Return a short '
@@ -3168,13 +3301,15 @@ async def _search_industry_locators(
             })},
         ],
     }
+    path, payload = prepare_judge_request(payload, hosted_search=True)
     status, body = await _post_json(
-        session, 'https://openrouter.ai/api/v1/chat/completions',
+        session, 'https://openrouter.ai/api/v1' + path,
         headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
         payload=payload,
     )
     if status != 200 or (isinstance(body, Mapping) and (body.get('error') or body.get('errors'))):
         raise RuntimeError('search_provider_unavailable')
+    body = project_judge_response(body, hosted_search=True)
     try:
         message = body['choices'][0]['message']
         annotations = message.get('annotations', [])
@@ -3320,6 +3455,7 @@ def _prefetched_page_with_industry_bindings(url: str, text: str, final_url: str,
     return page
 
 
+@observed_source("investigator_page", ("url", "stealth_mode", "archive_targets", "archive_company_names"))
 async def _fetch_page(
     session: aiohttp.ClientSession,
     url: str,
@@ -3510,6 +3646,7 @@ async def _fetch_page(
     }
 
 
+@observed_source("investigator_exa", ("url",))
 async def _fetch_exa_exact_page(
     session: aiohttp.ClientSession, url: str,
 ) -> dict[str, Any]:
@@ -4029,7 +4166,12 @@ def _required_attribute_support_rejection(
             first_party_domains, identity_anchor,
         )
     )
-    if not (same_company_source or _quote_names_company(quote, identity_names)):
+    named_brand = _quote_names_verified_display_brand(
+        quote, url, str((fetched_final_urls or {}).get(url) or ""),
+        first_party_domains, identity_anchor,
+    )
+    if not (same_company_source or _quote_names_company(quote, identity_names)
+            or named_brand):
         return REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
     return None
 
@@ -4055,6 +4197,12 @@ def _validated_findings(
     findings: dict[str, dict[str, Any]] = {}
     attribution_names = set(identity_names or set())
     stage_attribution_names = set(attribution_names)
+    # Newly admitted short acquisition names need identity authority; an
+    # arbitrary prior observed name is not a submitted or verified alias.
+    acquisition_short_identity_names = {
+        re.sub(r"[^a-z0-9]+", "", _normalized_span((identity_anchor or {}).get(key)))
+        for key in ("submitted_name", "verified_name")
+    } - {""}
     proven_rebrand_domains: set[str] = set()
     # Validate rebrand continuity first so only a proven old/new identity can
     # bind stage evidence under the former name, regardless of submitted order.
@@ -4287,6 +4435,16 @@ def _validated_findings(
                 )
                 and not (target == "stage" and semantic_pe_ownership)
                 and not (
+                    target in {"industry", "required_attribute"}
+                    and status == "VERIFIED"
+                    and (target == "required_attribute" or finding["activity_role"] == "supplier_operator")
+                    and _quote_names_verified_display_brand(
+                        finding["evidence_quote"], evidence_url,
+                        str((fetched_final_urls or {}).get(evidence_url) or ""),
+                        first_party_domains, identity_anchor or {},
+                    )
+                )
+                and not (
                     target == "stage"
                     and _quote_names_domain_styled_stage_company(
                         finding["evidence_quote"], identity_anchor or {}
@@ -4409,7 +4567,10 @@ def _validated_findings(
                     )
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
-                        tuple(stage_attribution_names),
+                        tuple(name for name in stage_attribution_names
+                              if len(acquisition_name := re.sub(
+                                  r"[^a-z0-9]+", "", _normalized_span(name),
+                              )) >= 4 or acquisition_name in acquisition_short_identity_names),
                         finding["evidence_quote"],
                     )
                 ):
@@ -4665,6 +4826,11 @@ def _validated_findings(
                 finding["supporting_evidence"] = validated_support
         findings[target] = finding
         if target == "rebrand" and finding["status"] == "VERIFIED":
+            acquisition_short_identity_names.update(
+                re.sub(r"[^a-z0-9]+", "", _normalized_span(name))
+                for name in (finding["old_name"], finding["new_name"])
+                if name
+            )
             proven_rebrand_domains.update({
                 domain
                 for domain in (
@@ -5341,6 +5507,7 @@ async def investigate_company_evidence(
             bounded_homepage_navigation_locators, current_industry_bindings()['brands'])
         return True
 
+    local_tools = _InvestigationToolCapture(input_document)
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -6213,7 +6380,24 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
-                industry_investigation_model = industry_review_model
+                industry_controller_model = (
+                    os.environ.get("ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL", "").strip()
+                    if industry_review_model else ""
+                )
+                industry_investigation_model = industry_controller_model or (
+                    os.environ.get("ARENA_COMPANY_REVERIFY_MODEL", industry_review_model)
+                    if industry_review_model and judge_reasoning_enabled() else industry_review_model
+                )
+                selected_controller_model = industry_investigation_model or (
+                    POSITIVE_SEMANTIC_REVIEW_MODEL if positive_semantic_review else INVESTIGATOR_MODEL
+                )
+                proprietary_controller = bool(
+                    industry_controller_model and not judge_reasoning_enabled(selected_controller_model)
+                )
+                controller_output_limit = 3000 if proprietary_controller else REASONING_MAX_TOKENS
+                def controller_history(provider_message, replay_message):
+                    return (preserve_judge_reasoning(provider_message, replay_message)
+                            if judge_reasoning_enabled(selected_controller_model) else replay_message)
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
                     and required_tool == "submit_findings"
@@ -6228,75 +6412,72 @@ async def investigate_company_evidence(
                     )
                 ):
                     raise ValueError("reasoning_tool_arguments_malformed")
+                controller_payload = {
+                    # The model assessing capability gaps also selects
+                    # the sources and completes the final shared findings.
+                    # Repeated citation repairs must not fall back to the
+                    # weaker researcher; all deterministic gates still apply.
+                    # Frozen policies without this role retain their models.
+                    "model": selected_controller_model,
+                    "messages": [
+                        *_bounded_system_messages(system_prompt),
+                        *messages,
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                key: value
+                                for key, value in tool.items()
+                                if key != "type"
+                            },
+                        }
+                        for tool in _tools(active_submit_targets, industry_sources=bool(industry_review_model))
+                        if (
+                            not correction_turn
+                            and not scoped_correction_active
+                            and not turn_admission.restrict_tools
+                        ) or tool["name"] == "submit_findings"
+                    ],
+                    "tool_choice": (
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": (
+                                    "submit_findings"
+                                    if force_submit
+                                    else required_tool
+                                )
+                            },
+                        }
+                        if force_submit or required_tool
+                        else "required"
+                    ),
+                    "parallel_tool_calls": False,
+                    "temperature": 0.0,
+                    "max_tokens": controller_output_limit,
+                    **(
+                        {"reasoning": {"effort": "low"}}
+                        if not judge_reasoning_enabled(selected_controller_model) and (
+                            industry_investigation_model
+                            or (positive_semantic_review and (
+                                serialization_retry_request or force_submit
+                                or required_tool == "submit_findings"
+                            ))
+                        )
+                        else {}
+                    ),
+                }
+                # Frozen model options may lower the provider-visible cap.
+                # Read that cap for repair checks without changing the request.
+                effective_controller_output_limit = prepare_judge_request(controller_payload)[1]["max_tokens"]
                 status, body = await _post_openrouter_json(
-                    session,
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openrouter_key}",
-                        "Content-Type": "application/json",
-                    },
-                    payload={
-                        # The model assessing capability gaps also selects
-                        # the sources and completes the final shared findings.
-                        # Repeated citation repairs must not fall back to the
-                        # weaker researcher; all deterministic gates still apply.
-                        # Frozen policies without this role retain their models.
-                        "model": industry_investigation_model or (
-                            POSITIVE_SEMANTIC_REVIEW_MODEL
-                            if positive_semantic_review
-                            else INVESTIGATOR_MODEL
-                        ),
-                        "messages": [
-                            *_bounded_system_messages(system_prompt),
-                            *messages,
-                        ],
-                        "tools": [
-                            {
-                                "type": "function",
-                                "function": {
-                                    key: value
-                                    for key, value in tool.items()
-                                    if key != "type"
-                                },
-                            }
-                            for tool in _tools(active_submit_targets, industry_sources=bool(industry_review_model))
-                            if (
-                                not correction_turn
-                                and not scoped_correction_active
-                                and not turn_admission.restrict_tools
-                            ) or tool["name"] == "submit_findings"
-                        ],
-                        "tool_choice": (
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": (
-                                        "submit_findings"
-                                        if force_submit
-                                        else required_tool
-                                    )
-                                },
-                            }
-                            if force_submit or required_tool
-                            else "required"
-                        ),
-                        "parallel_tool_calls": False,
-                        "temperature": 0.0,
-                        "max_tokens": REASONING_MAX_TOKENS,
-                        **(
-                            {"reasoning": {"effort": "low"}}
-                            if (
-                                industry_investigation_model
-                                or (positive_semantic_review and (
-                                    serialization_retry_request or force_submit
-                                    or required_tool == "submit_findings"
-                                ))
-                            )
-                            else {}
-                        ),
-                    },
+                    session, "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},
+                    payload=controller_payload,
                     started=started,
                 )
+                local_tools.model_result(controller_payload, body)
                 if status != 200:
                     raise RuntimeError("reasoning_provider_unavailable")
                 if not isinstance(body, Mapping):
@@ -6334,7 +6515,7 @@ async def investigate_company_evidence(
                         )
                     )
                     and _response_exhausted_output_budget(
-                        body, max_tokens=REASONING_MAX_TOKENS
+                        body, max_tokens=effective_controller_output_limit
                     )
                 ):
                     # Output exhaustion can consume the whole reply before a
@@ -6362,6 +6543,7 @@ async def investigate_company_evidence(
                             )
                         ),
                     })
+                    local_tools.emit(None, messages[-1], "repair")
                     continue
                 try:
                     message = body["choices"][0]["message"]
@@ -6403,6 +6585,8 @@ async def investigate_company_evidence(
                             "tool choice. Do not emit multiple calls or prose."
                         ),
                     })
+                    for rejected_call in tool_calls:
+                        local_tools.emit(rejected_call, messages[-1], "rejected_not_executed")
                     continue
                 if (
                     not isinstance(message, Mapping)
@@ -6410,8 +6594,12 @@ async def investigate_company_evidence(
                     or len(tool_calls) != 1
                     or not isinstance(tool_calls[0], Mapping)
                 ):
+                    for rejected_call in tool_calls if isinstance(tool_calls, list) else []:
+                        local_tools.emit(rejected_call, {"error": "reasoning_tool_count_invalid"}, "rejected_not_executed")
                     raise ValueError("reasoning_tool_count_invalid")
                 call = tool_calls[0]
+                local_tools.pending = call
+                local_tools.pending_executed = False
                 function = call.get("function")
                 if not isinstance(function, Mapping):
                     raise ValueError("reasoning_tool_call_malformed")
@@ -6458,7 +6646,7 @@ async def investigate_company_evidence(
                             )
                         )
                         and _response_exhausted_output_budget(
-                            body, max_tokens=REASONING_MAX_TOKENS
+                            body, max_tokens=effective_controller_output_limit
                         )
                     )
                     if retry_incomplete_submit:
@@ -6471,6 +6659,7 @@ async def investigate_company_evidence(
                         }
                         if isinstance(message.get("content"), str):
                             assistant_message["content"] = message["content"]
+                        assistant_message = controller_history(message, assistant_message)
                         messages.extend([
                             assistant_message,
                             {
@@ -6503,6 +6692,8 @@ async def investigate_company_evidence(
                                 }),
                             },
                         ])
+                        local_tools.emit(canonical_call, json.loads(messages[-1]["content"]), "repair",
+                                         visible_result=messages[-1]["content"])
                         continue
                     raise ValueError("reasoning_tool_arguments_malformed") from None
                 if required_tool == "search_web" and (
@@ -6526,6 +6717,7 @@ async def investigate_company_evidence(
                     forced_stage_search_pending = False
                 added_industry_sources = []
                 if name == "submit_findings":
+                    local_tools.pending_executed = True
                     if industry_review_model and isinstance(arguments, Mapping):
                         arguments = copy.deepcopy(arguments)
                         raw_findings = arguments.get("findings")
@@ -6570,7 +6762,7 @@ async def investigate_company_evidence(
                             forced_next_tool = "submit_findings"
                             incomplete_submit_retry_pending = True
                             messages.extend([
-                                {"role": "assistant", "tool_calls": [canonical_call]},
+                                controller_history(message, {"role": "assistant", "tool_calls": [canonical_call]}),
                                 {
                                     "role": "tool",
                                     "tool_call_id": call_id,
@@ -6590,6 +6782,8 @@ async def investigate_company_evidence(
                                     }),
                                 },
                             ])
+                            local_tools.emit(canonical_call, json.loads(messages[-1]["content"]), "repair",
+                                             visible_result=messages[-1]["content"])
                             continue
                         raise ValueError("reasoning_findings_malformed")
                     submitted_findings = {
@@ -7304,7 +7498,7 @@ async def investigate_company_evidence(
                         # source transport faults remain in fetch_outcomes.
                         if failure_reason:
                             _record_failure(diagnostic, failure_reason)
-                        return {
+                        terminal_result = {
                             "claims": claims,
                             "_completed_submit": not failure_reason,
                             "_checked_source_provenance": (
@@ -7344,6 +7538,9 @@ async def investigate_company_evidence(
                                if industry_review_model and (current_industry_bindings()['links']
                                                             or current_industry_bindings()['brands']) else {}),
                         }
+                        local_tools.emit(canonical_call, terminal_result,
+                                         "executed" if failure_reason else "accepted_terminal", terminal=True)
+                        return terminal_result
                 elif name == "search_web":
                     elapsed = time.monotonic() - started
                     # A full-text company search can replace one unused exact
@@ -7377,6 +7574,7 @@ async def investigate_company_evidence(
                             tool_result = {"ok": False, "error": "invalid_query"}
                         else:
                             search_calls += 1
+                            local_tools.pending_executed = True
                             search_options = {}
                             alternative_locators = bool(
                                 exchange_fetch_for_search and fetch_call_limit - fetch_calls >= 2
@@ -7481,6 +7679,7 @@ async def investigate_company_evidence(
                         search_loaded_urls.discard(safe_url)
                         prior_outcome_count = len(fetch_outcomes)
                         try:
+                            local_tools.pending_executed = bool(safe_url)
                             tool_result = await fetch_fresh_page(str(safe_url or ""))
                         except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                             if not refresh_search_source or isinstance(exc, _ArenaProviderFetchError):
@@ -7538,6 +7737,7 @@ async def investigate_company_evidence(
                 }
                 if isinstance(message.get("content"), str):
                     assistant_message["content"] = message["content"]
+                assistant_message = controller_history(message, assistant_message)
                 messages.extend([
                     assistant_message,
                     {
@@ -7547,6 +7747,13 @@ async def investigate_company_evidence(
                         "content": _bounded_message_json(tool_result),
                     },
                 ])
+                disposition = (
+                    "repair" if name == "submit_findings"
+                    else "executed" if local_tools.pending_executed or tool_result.get("ok")
+                    else "rejected_not_executed"
+                )
+                local_tools.emit(canonical_call, tool_result, disposition,
+                                 visible_result=messages[-1]["content"])
                 if added_industry_sources:
                     packet = industry_classification.prepare(
                         industry_review_arguments['criteria'],
@@ -7558,13 +7765,25 @@ async def investigate_company_evidence(
                     messages.extend(industry_classification.source_messages(packet))
     except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):
         _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
+        result = {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
+        if local_tools.pending is not None:
+            local_tools.emit(local_tools.pending, result,
+                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
+        return result
     except (TypeError, ValueError, KeyError, IndexError):
         _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+        result = {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+        if local_tools.pending is not None:
+            local_tools.emit(local_tools.pending, result,
+                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
+        return result
     except Exception:  # noqa: BLE001
         _record_failure(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}
+        result = {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}
+        if local_tools.pending is not None:
+            local_tools.emit(local_tools.pending, result,
+                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
+        return result
 
     _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
     return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}

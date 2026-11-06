@@ -1461,6 +1461,11 @@ async def verify_company_exists(
                         session,
                         request_url,
                     )
+                # Optional private source fingerprint; no decision or fetch changes.
+                from qualification.scoring.company_fit_evidence_reuse import record_source
+                record_source("homepage", {"url": request_url}, {
+                    "status": status, "final_url": observed_url, "text": text,
+                }, ok=status < 400)
                 break
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                 if attempt + 1 >= _TRANSIENT_FETCH_ATTEMPTS:
@@ -1644,6 +1649,10 @@ async def verify_company_exists(
                     source_status, source_final_url, source_text = (
                         await _fetch_bounded_html(session, source_url)
                     )
+                from qualification.scoring.company_fit_evidence_reuse import record_source
+                record_source("homepage", {"url": source_url}, {
+                    "status": source_status, "final_url": source_final_url, "text": source_text,
+                }, ok=source_status < 400)
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
             else:

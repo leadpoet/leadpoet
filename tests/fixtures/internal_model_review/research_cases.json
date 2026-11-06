@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "adaptive_json",
+      "research_case": "adaptive_json",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "model_directed",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "native_tools",
+      "research_case": "native_tools",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "model_directed",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "bounded_hybrid",
+      "research_case": "bounded_hybrid",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "model_directed",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "fixed_extractor",
+      "research_case": "fixed_extractor",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "workflow",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "fixed_query_plan",
+      "research_case": "fixed_query_plan",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "workflow",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "ignored_model_decoy",
+      "research_case": "ignored_model_decoy",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "workflow",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "forced_tool_decoy",
+      "research_case": "forced_tool_decoy",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "workflow",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "unreachable_adaptive",
+      "research_case": "unreachable_adaptive",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "workflow",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "posthoc_explanation",
+      "research_case": "posthoc_explanation",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "workflow",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    },
+    {
+      "id": "dynamic_helper",
+      "research_case": "dynamic_helper",
+      "expected": {
+        "verdict": "pass",
+        "research_classification": "unverified",
+        "categories": []
+      },
+      "rationale": "Existing causal intervention fixture; source-only capability, not runtime attestation."
+    }
+  ]
+}

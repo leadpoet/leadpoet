@@ -12211,7 +12211,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "do not require cloud resource management" in system_prompt
     assert "generic license by itself does not prove" in system_prompt
     assert "Customer use of another vendor's platform" in system_prompt
-    assert "monthly or annual fees supports a paid subscription" in system_prompt
+    assert "monthly or annual platform or workspace plan supports a paid subscription" in system_prompt
     assert "current commercial customers or deployments" in system_prompt
     assert "free plan, research study" in system_prompt
     assert "investor's general commercialization claim" in system_prompt
@@ -12574,8 +12574,10 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     }
 
 
-def test_positive_semantic_review_model_is_already_in_judge_allowlist():
-    assert arena_scoring.DEFAULT_JUDGE_MODELS["intent_fetched_evidence"] == (
+def test_legacy_positive_semantic_review_model_is_already_in_frozen_judge_allowlist():
+    from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
+    policy = arena_scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
+    assert policy["judge_models"]["intent_fetched_evidence"] == (
         investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     )
 

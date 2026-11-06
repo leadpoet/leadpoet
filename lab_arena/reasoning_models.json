@@ -3137,6 +3137,40 @@
         "verified_at": "2026-10-27T08:00:31.518332Z",
         "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
       }
+    },
+    {
+      "model_id": "z-ai/glm-5.3-flash",
+      "model_version": "z-ai/glm-5.3-flash-20260826",
+      "provider": "near-ai/fp8",
+      "provider_name": "Near AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "low"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000008",
+        "completion": "0.0000005",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-nearai-native-research-capture-20261106",
+        "verified_at": "2026-11-06T06:25:05.534384Z",
+        "probe_manifest_sha256": "b18b3fb24dc43bd52c1fea455bc576c613567d6095399633b78908da4b5c6374"
+      }
     }
   ],
   "baseline_route": {

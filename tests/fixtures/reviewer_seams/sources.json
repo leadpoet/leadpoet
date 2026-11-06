@@ -55,5 +55,23 @@
         "sha256": "3928db13fbc3b37dbd8cc56b0085abf142310a44b2ab883e91db16368c3dfe5c"
       }
     }
+  },
+  "empty_domain_finality79cd": {
+    "image_digest": "sha256:79cd4bc932acf572df035d734afc66309a801862e8f080ed797cd11420f6902b",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "empty_domain_finality79cd-lead_scorer.py.gz",
+        "sha256": "125c0303aa5e100df746499bc1ca76dc8e381b2bda8f3a1ad5132d688df15d58"
+      }
+    }
+  },
+  "identity_repair_order_b699": {
+    "image_digest": "sha256:b69931916a8ddfae0836876f20c162799c0b26b1e3b160389885f9d5e656361b",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "identity_repair_order_b699-lead_scorer.py.gz",
+        "sha256": "559e5283eb9fe971bee6dc10abd106d08d02e39b2a9a2ee6bdb8c4eefe9b9af9"
+      }
+    }
   }
 }

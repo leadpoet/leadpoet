@@ -1,0 +1,489 @@
+# Arena open-weight model review — 2026-11-05
+
+This review builds on the committed implementation in PR1041 and the deployed
+internal capture work in PR1044. It tests exact provider routes, not model names
+alone. A catalog reasoning flag or token count is not proof of readable thinking.
+“Full” here means provider-exposed readable thinking; it does not mean access to
+undisclosed provider internals.
+
+## Scope and release gate
+
+The goal is useful sales research and judgment data for CPT/SFT, at comparable
+quality and no higher total verifier cost. Existing frozen rounds, miner
+eligibility, scoring criteria, source authority, prices and completed judgments
+must remain unchanged. New defaults apply only when a new round is created.
+
+The final native full-flow comparison is complete. Production deployment and
+readback are separate release gates; tests alone do not prove deployment.
+
+## Selected mapping
+
+| Arena work | Previous model | Candidate and exact route | Reasoning / output cap |
+| --- | --- | --- | --- |
+| Company reverification | Sonar | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
+| Intent signal gate and fetched evidence | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
+| Intent paragraph review | Sonnet 5.5 | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
+| Role checks and generic company investigator | Gemini 3.5 Flash Lite | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
+| Positive semantic company review | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / 4096 |
+| Claim equivalence for evidence reuse | GPT-6 Luna | GPT-OSS-120B, `near-ai/fp4` | low / **500, 15 seconds** |
+| Search fallback, including social/podcast verification | Sonar Pro | DeepSeek V4.1 Flash 1017, `nebius/fp8` | low / 8192 |
+| Final industry classification | GPT-6.1 Sol | retained after expanded quality tests | existing policy |
+| Industry research controller | GPT-6.1 Sol | retained after native research and prompt tests | low / 3000 |
+| Admission and security review | Sonnet 5.5, Sol fallback | retained | existing policy |
+| ICP generation | Sonnet 5.5 | retained after factual evaluation | existing policy |
+| ICP exclusion research | DeepSeek, from PR1044 | retained after cheaper variants failed complete gates | high / 4096 |
+
+GPT-OSS is an open-weight model despite its `openai/` model identifier. The
+[GPT-OSS](https://openrouter.ai/openai/gpt-oss-120b) and
+[DeepSeek](https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017) model pages link
+their weights. Route-specific readable thinking is checked from actual replies,
+not inferred from those pages. The two
+selected open models use explicit provider selection, no automatic fallback,
+ZDR/data-collection denial, reviewed route ceilings and frozen request settings.
+Company search uses native Responses so exposed reasoning, search events and
+citations survive capture. Serial local tools remain Chat calls with their
+arguments, results and reasoning history.
+
+## Component evaluation
+
+The frozen evaluation contains 63 cases: real retained source/production
+examples, adversarial edits to those examples, and declared synthetic role
+controls. Gold constraints were set before responses. Twelve paid cases for
+the four smaller roles were kept out of calibration. The candidate was locked
+before those requests. Cases sharing a company/event family stay together.
+These small suites are regression evidence, not an estimate of population
+accuracy or a substitute for full scoring.
+
+The frozen manifest hash is
+`0371a6af73a4bccdf92c970a538feac11a4819c7494d947448e75a9dfa7578e6`.
+The candidate lock hash is
+`863c55df7177fa4fbfa176c70fd37477c111501829c6715b09f6273fb38733ce`.
+Raw requests, responses, endpoint metadata, source hashes, labels and assessments
+remain in private review artifacts, not in this repository.
+
+| Role | Calibration expected fields: current / Near AI | Holdout: current / Near AI | Holdout cost: current / Near AI |
+| --- | --- | --- | --- |
+| Intent | 8/9 / 8/9 | 2/3 / 3/3 | $0.00325215 / $0.00081351 |
+| Paragraph | 9/9 / 8/9 | 3/3 / 3/3 | $0.046932 / $0.00051168 |
+| Role | 7/9 / 8/9 | 2/3 / 3/3 | $0.0033886 / $0.00033384 |
+| Claim equivalence | 9/9 / 9/9 | 3/3 / 3/3 | $0.000218 / $0.00007719 |
+
+All 48 Near AI calibration/holdout replies passed schema/native parsing and
+returned readable thinking. The held-out 12 cost $0.00173622 versus $0.05379075
+for the current models. No prompt change or retry followed the holdout.
+One deterministic unsafe claim comparison was rejected before any paid call.
+
+The calibration errors remain relevant. Near AI made one paragraph
+factual-support error, but the complete paragraph gate still rejected that
+example. It also missed a valid role. The intent subtype disagreement was a
+safe rejection shared by the baseline. The held-out baseline had one native
+false acceptance of a wrong-year event and one malformed role reply. A format
+failure is counted as unavailable, never as a correct negative.
+
+The same GPT-OSS model on DeepInfra BF16 was less reliable on these requests:
+two malformed outputs and one unsupported date receipt. Changing to Near AI
+also changes precision to FP4; this experiment cannot isolate provider effects
+from precision or generation variation. Median holdout latency in seconds was
+6.35/7.07 for intent, 1.80/3.71 for paragraphs, 1.04/1.62 for roles and 2.33/1.50
+for comparisons (current/Near AI). Lower token cost does not imply lower latency
+for every role. The later full scoring test exposed paragraph quote-binding
+failures after the existing repair attempt. These component results therefore
+do not qualify GPT-OSS as the final paragraph reviewer.
+
+Manual and independent review also found incorrect positive labels in two
+later EPAM request contexts. They contained the same paragraph, whose wording
+referred to the requested company filters. The existing writing rule requires
+`natural_paragraph=false` for that selection commentary, even when all business
+facts and the partnership event are supported. Original requests, labels and
+results are preserved as disputed calibration. They are not two independent
+positive examples, and their original expected company score of 51 is invalid.
+New client-facing wordings have separate labels set before any model response.
+The old paragraph remains a negative writing control, distinct from a false
+primary-event claim.
+
+DeepSeek with the original paragraph prompt passed all 12 frozen cases and
+both new positive wordings, without repairs, invalid replies or timeouts.
+The two paired new positives cost $0.057048 on Sonnet versus $0.0134982 on
+DeepSeek. Latency was 2.35–2.48 seconds versus 12.24–16.64 seconds, so route
+latency remains a release concern. Across all 14 DeepSeek checks, median
+latency was 5.72 seconds. GLM Flash also passed these 14 checks, but failed
+the original writing-negative control. A preregistered generic writing-rule
+reminder still missed both negative contexts and introduced a quote-binding
+failure on a new positive. That variant did not advance to its reserved
+three-case check. No paragraph prompt change is selected.
+
+A later route-only comparison tested Fireworks and Together against the same
+two new positives and two corrected old negative contexts. Each route, including
+the retained Nebius responses, matched three of four complete Boolean verdicts
+and all four overall accept/reject decisions. Fireworks matched 19/20 individual
+Boolean fields; Nebius and Together matched 18/20. The initial requirement of
+four exact verdicts was not met by either new route. That result remains a
+failed initial gate, not a successful preregistered test.
+
+A separately frozen confirmation then tested Fireworks on the existing twelve
+cases without changing prompts, sources, labels or settings. All twelve matched
+the full verdict and exposed readable thinking on the requested provider, with
+no repair or retry. Thus both Nebius and Fireworks match 15/16 full verdicts and
+16/16 overall decisions across this corrected set. This is confirmation on known
+cases, not an unseen holdout. Together has only the four-case result.
+
+Fireworks' two new positives had median latency 6.67 seconds, versus 14.44 on
+Nebius and 2.41 on Sonnet, and cost $0.007746 versus $0.057048 on Sonnet.
+Its twelve-case confirmation had median latency 6.03 seconds and cost
+$0.028635072. It is not consistently faster than Nebius on every case.
+Changing the model's route also affects Responses company research and search
+fallbacks. Its later native full scoring run failed completion and availability
+checks. Fireworks is not selected. The permanent route is still Nebius.
+
+Seven separately retained production requests screened GPT-OSS-120B,
+GPT-OSS-20B, Ling 3.1 Flash, Gemma 4 31B and Nemotron 3.5 Lightning. GPT-OSS-120B
+completed all seven with readable thinking. The smaller alternatives had
+truncation, invalid output or timeouts on this packet set. These seven were
+positive development examples and are not counted as independent accuracy data.
+
+## Harder exceptions and broader search
+
+The full 39-model whitelist and its 95 approved model/provider/API routes were
+reviewed against fresh endpoint metadata and the saved PR1041 capability calls.
+The fresh catalog matched 86 routes exactly; 80 had status zero, nine were
+missing and six had another status. Saved simple probes returned readable
+text for 26 models. Neither result qualifies every model for every Arena task.
+
+PR1041's industry data has 137 historical slots but only 111 distinct
+company/ICP clusters. Its saved Sol baseline had 122/137 correct labels,
+four false positives and eleven false negatives. Kimi's full run increased
+false positives to ten. Failed budget admission is separate from model failure
+in all comparisons.
+
+Fresh 35-case industry tests initially gave Sol 29/35, DeepSeek 27/35 with four
+invalid replies, and GLM Flash 24/35 with four HTTP429 failures. DeepSeek's three
+empty explanations were invalid under the existing native parser. A generic
+nonempty explanation schema/prompt experiment then completed all 35 with the
+same confusion counts as Sol: TP14, TN15, FP2, FN4. It cost $0.360286992 versus
+$2.30229175 for the saved Sol calls. Across all 137 slots, this variant then
+scored 120/137 with TP53, TN67, FP6, FN9 and two truncated outputs. All 137
+returned readable thinking, but the extra false positives and incomplete
+outputs fail the replacement gate. The run cost $1.388905020.
+
+GLM 5.2 on `coreweave/fp4`, low reasoning and 8192 output tokens, improved the
+35-case screen to 32/35 with one false positive. On all 137 fixed slots it
+scored 120/137: TP55, TN65, FP9, FN7 and one truncated reply. This does not meet
+Sol's quality result. All 137 exposed readable reasoning and the expected
+provider route. The selected responses cost $2.34161746; median measured
+latency was 8.714 seconds across 135 calls, with two conservative wall-time
+upper bounds kept separate. Sol remains selected.
+
+A local disk-full error left 83 attempts without saved responses during the
+first larger GLM run.
+Every complete response was kept; only lost responses were repeated with the
+same request bytes. The unknown original charges retain a $6.740806 budget
+reservation, separate from the selected-response cost above. No label was
+changed after testing, and no unsuccessful model result was replaced by a
+better repeat. New private test dispatches check free disk space first.
+
+Admission remains security sensitive. The initial audit called DeepSeek and
+Kimi acceptances of one complete-source archive unsafe. A later independent
+source review did not establish that label: intermediate draft values were
+subject to later verification and output gates. The original archive and
+responses remain unlabelled stress evidence, not confirmed false acceptances
+or proof of safety. The additional GLM Flash screen
+passed native schema on only three of six examples and the combined expected
+labels on two. Exact source excerpts, reachable research control and all
+misconduct checks remain required. Short benign snippets alone do not justify
+replacing the admission reviewer.
+
+Prior ICP candidates passed some structural checks but produced false hard
+filters or exhausted reasoning without a complete bank. A fresh GLM Flash bank
+passed the ten-item parser but missed the international quota and included
+incorrect employee bands and event dates. Sonnet remains selected. Cheaper
+DeepSeek exclusion variants each passed only three of four factual cases.
+GLM Flash passed four factual cases, but one exceeded the existing 45-second
+deadline. The current DeepSeek high setting remains selected. These thirteen
+native calls cost $0.159101056, with no unresolved charge reservation. Passing
+the bank parser is not proof that example companies satisfy all filters.
+
+## Fresh native scoring checks and failed candidates
+
+The first fresh Fireworks full-flow candidate did not qualify for release.
+The positive baseline reached the source-adjudicated score of 51 (12.75 after
+normalization), but positive miner research remained incomplete after 442
+seconds. Four DeepSeek controller replies used all 8192 output tokens on
+reasoning without a tool action. A later submit reply contained incomplete
+JSON. These are model completion failures, despite readable reasoning and
+successful source retrieval. A negative-case request then received a real
+Fireworks HTTP429. The original run and all failed replies remain preserved.
+
+The unchanged production policy separately completed the positive baseline
+and miner cases with score 51 and no false-positive penalty. Its baseline used
+$0.31404741 in model charges and 95.31 seconds, versus $0.136267382 and 129.18
+seconds for the Fireworks candidate. Its positive miner used $0.18485758 and
+74.04 seconds. These are individual native flows with explicit retained source
+inputs and bounded fresh retrieval, not population latency estimates or total
+production cost forecasts. Source charges are recorded separately.
+
+Both original-policy negative cases returned zero because company-fit evidence
+was unavailable. Neither reached intent adjudication, so neither counts as a
+correct rejection of the false claim. The first negative-miner attempt reached
+the private 40-POST experiment ceiling; its isolated fresh completion used 11
+calls, $0.31889051 in model charges, $0.014 in fresh sources and 78.49 seconds.
+Its industry evidence passed, but its public-listing quote failed issuer binding.
+The earlier negative baseline also lacked mainframe-service evidence. The
+company facts and ICP were identical to the positive cases. Their controllers
+selected abbreviated issuer names or anonymous price cards, whereas the positive
+cases used source quotes with the full issuer name. Gold and native validators
+remain unchanged; fit unavailable is not a negative company-fit training label.
+
+A later exact-history controller screen hit Fireworks rate limits for both
+DeepSeek minimal and GLM Flash. Kimi's pinned provider rejected named function
+selection; its endpoint advertises support for required tool selection instead.
+Those errors are route or API compatibility results, not model accuracy results.
+Sol completed the same difficult forced-submit request in 9.89 seconds for
+$0.107451. Alternate approved routes and a supported Kimi tool format were then
+tested. DeepSeek on Nebius at minimal effort exhausted its output on reasoning;
+GLM 5.2 on Coreweave returned incomplete arguments. Kimi with required tool
+selection completed, but its positive quote was unsupported. These private
+calls lacked the native endpoint-metadata header, so readable text is confirmed
+but selected-route proof is unavailable. Later tests restored that header.
+
+A generic research reminder let DeepSeek low complete both hard forced-submit
+histories with supported quotes. It still stopped an earlier research turn
+while required industry facts were missing and one search plus three fetches
+remained. A conditional reminder and then moving that same reminder to the
+final user message did not fix the premature stop. All failures and charges
+remain recorded. One private quote-check failure was a test defect: an exact
+quote crossed two contiguous source spans. Joining only proven contiguous
+spans fixed that check; the model request was not repeated.
+
+Sol remains selected for industry research and classification. Admission,
+ICP generation and industry are the three proprietary workflows retained.
+This is four role types: admission, generation, industry research and industry
+classification. Admission also retains its existing Sol fallback.
+The new controller role is optional so existing seven-role frozen policies
+retain their original routing. Its explicit Sol request keeps 3000 tokens,
+low effort and the prior plain tool history. No experimental reminder ships.
+
+## Final native scoring comparison
+
+The final eight-role policy completed all four fresh native flows. Each uses
+one submitted company against the unchanged five-company ICP and evaluation
+date. Positive baseline and miner cases both scored 51, normalized to 12.75.
+Both false-claim cases reached intent adjudication and applied the expected
+primary false-positive penalty. All 37 model calls returned HTTP200. None used
+a replayed model reply, and no new charge remained unresolved.
+
+| Case | Original outcome | Selected outcome | Model cost: original / selected | Seconds: original / selected |
+| --- | --- | --- | --- | --- |
+| Positive baseline | 51 / 12.75 | 51 / 12.75 | $0.31404741 / $0.198948948 | 95.31 / 98.52 |
+| Positive miner | 51 / 12.75 | 51 / 12.75 | $0.18485758 / $0.24301913 | 74.04 / 100.35 |
+| False-claim baseline | Fit unavailable; no intent decision | 0, primary FP count 1 | $0.38638089 / $0.268695314 | 86.80 / 105.41 |
+| False-claim miner | Fit unavailable; no intent decision | 0, primary FP count 1 | $0.31889051 / $0.170437952 | 78.49 / 94.91 |
+
+The four completed original cases cost $1.20417639 for models and $0.058 for
+fresh sources. The selected policy cost $0.881101344 and $0.060 respectively:
+25.44% lower combined cost in this packet set. Median runtime increased from
+82.65 to 99.43 seconds. The positive miner alone was slower and more expensive;
+there is no uniform cost or latency win. These are four actor variants of one
+company/ICP family, not four independent companies or a production forecast.
+The original negative-miner completion came from the separate fresh V9 run.
+The earlier attempt cut short by the private POST ceiling also cost $0.12260886;
+that expense remains in the task ledger, outside the clean four-case comparison.
+
+All 37 saved raw response body hashes and native request wire hashes passed
+independent checks. All 15 Sol controller requests used 3000 tokens, low effort
+and serial tools. All 14 open-model turns exposed readable thinking on their
+actual approved routes: ten DeepSeek turns and four GPT-OSS turns, totaling
+81,884 characters. The other 23 turns used Sol, including eight final reviews.
+Thus this difficult industry packet has full readable thinking on 14/37 calls,
+not on the whole trajectory. Three workflow exceptions can still represent a
+large share of calls; model-role coverage must not be reported as call coverage.
+
+The private exporter retained 37 raw examples and 28 generic SFT diagnostics.
+Only 14 diagnostics contain generated thinking; the other 14 are Sol outputs.
+Nine Sol examples had nonexact privacy exclusions. All diagnostics remain
+unreviewed with training permission unconfirmed. The private scorer harness
+does not implement the new terminal worker-event channel, SQL admission or
+production dataset eligibility. Separate real-worker tests prove that channel;
+the guarded production shadow must prove actual stored and exported records.
+
+The final test manifest is
+`50647eda580b322e46e346ea252795ad016e3c168aad6f3f95acb49a0da36d1d`,
+on native source `e0a331c83c9324aa662505ddfaf55d5c2f226193`. Its 30 frozen file
+hashes, labels, source provenance and financial seed are retained privately.
+
+## Capture and training value
+
+PR1044 already captures admission, ICP generation and exclusion calls through
+the existing private internal recorder/exporter. PR1041 adds prospective judge
+capture through the existing broker, worker, storage and training exporter.
+This work integrates that foundation and fixes native final-answer selection,
+route/API validation, frozen request options, controller role routing and
+evidence-cache model identity. No new service, database table, production
+dependency or secondary verification model is introduced.
+
+The audit also found that a terminal local tool result can have no subsequent
+model request in which to record it. An ordered judge-tool observation now uses
+the existing worker channel for host tool results, validation, repairs, accepted
+terminal submissions and rejected tool proposals. Rejected proposals are marked
+as not executed. Sequence gaps, privacy failures and size failures mark capture
+as incomplete. Miner calls cannot emit this judge-only observation. These
+records show host validation, not human gold labels or proof that a later model
+consumed the result.
+
+Judge training targets retain the frozen ICP, scored miner/baseline input,
+source observations, exact available request/response data, exposed thinking,
+tool order and arguments/results, provider identity, token/cost/latency data,
+verdicts and links to scoring outcomes. Failed attempts and corrections remain
+visible. Miner research, judge work and other internal tasks remain distinct.
+Cache reuse keeps the original evidence and judgment origin; it is not counted
+as a new independent model decision.
+
+The narrow proprietary exception cannot claim full thinking. Its available
+output, evidence and judgment links stay in raw exports, while independently
+proved open-model turns can still become SFT candidates. A mixed trajectory is
+explicitly partial. Export checks reject damaged route identity, request hashes
+and worker evidence. Model-generated labels remain unreviewed until separately
+admitted; an accepted score is not human-verified truth.
+
+The most useful datasets are source-grounded company-fit decisions, explicit
+negative examples, dated intent verification, rejected unsupported claims,
+research corrections, and paired miner output/judge feedback. Preserve the full
+context, source date and provenance when extracting these records. Split by
+company/event and source lineage to reduce leakage and duplicate cache labels.
+
+Coverage is not 100%. Proprietary hidden reasoning remains unavailable. Native
+hosted search can expose URLs and events without the fetched page text or every
+internal provider turn. Retain that distinction; do not reconstruct missing
+evidence or promote incomplete transcripts to full-trajectory targets. Existing
+privacy, permission and dataset quality fields remain applicable.
+
+## Validation and release evidence
+
+The final four-flow scoring comparison and independent raw-response checks
+passed. The combined native model, recorder, cache, export and investigator
+suite passed 1,292 tests with 44 existing skips. The final capture metadata
+correction also passed its failing-before regression and independent checks.
+Real worker-socket tests retained terminal outcomes through native snapshot
+serialization and export assembly without adding a provider call.
+
+Required CI, protected merge, exact-image validation, canonical paired release
+and live SQL/object/export readback remain release gates. The final PR1051
+description records their observed status. This document does not claim that
+private scoring or an offline worker test proves a deployed production flow.
+
+## All 39 whitelist entries
+
+This table reports saved simple capability probes and the fresh exact-route
+catalog check. A successful probe is not a task-specific quality approval.
+Route counts distinguish APIs, so the same provider can appear twice.
+
+| Model | Healthy exact routes / registered | Saved probe: readable text / completion |
+| --- | --- | --- |
+| `deepseek/deepseek-v4-pro-0813` | 2 / 2 | yes / stop |
+| `deepseek/deepseek-v4.1-flash-1017` | 6 / 8 | yes / stop |
+| `fireworks/ember-1` | 2 / 2 | no / no completed answer |
+| `google/gemma-4-31b-it` | 2 / 2 | yes / stop |
+| `inclusionai/ling-3.1-flash` | 2 / 2 | yes / stop |
+| `meta/muse-spark-open` | 0 / 2 | no / no completed answer |
+| `minimax/minimax-m3` | 2 / 2 | no / stop |
+| `minimax/minimax-m3.1-flash` | 0 / 2 | no / stop |
+| `mistralai/mistral-large-4-0` | 2 / 2 | yes / stop |
+| `mistralai/mistral-medium-3-5` | 2 / 2 | yes / stop |
+| `moonshotai/kimi-k2-thinking` | 1 / 1 | no / no completed answer |
+| `moonshotai/kimi-k2.5` | 2 / 2 | no / no completed answer |
+| `moonshotai/kimi-k2.6` | 2 / 2 | yes / stop |
+| `moonshotai/kimi-k2.7-code` | 4 / 4 | yes / stop |
+| `moonshotai/kimi-k3` | 2 / 2 | yes / stop |
+| `moonshotai/kimi-k3.1-pro` | 4 / 4 | yes / stop |
+| `nvidia/nemotron-3.5-lightning` | 2 / 2 | yes / stop |
+| `nvidia/nemotron-3.5-super-vl` | 2 / 2 | yes / stop |
+| `openai/gpt-oss-120b` | 5 / 5 | yes / stop |
+| `openai/gpt-oss-20b` | 3 / 3 | yes / stop |
+| `qwen/qwen3.8-2.4t-a95b` | 2 / 2 | yes / stop |
+| `qwen/qwen3.8-27b` | 2 / 2 | yes / stop |
+| `reflection/beam-1.0-501b-a23b` | 2 / 5 | no / no completed answer |
+| `stepfun/step-5-preview` | 0 / 2 | no / no completed answer |
+| `tencent/hy4-preview` | 2 / 2 | yes / length |
+| `upstage/solar-mini4` | 2 / 2 | yes / stop |
+| `upstage/solar-pro4` | 2 / 2 | yes / stop |
+| `xiaomi/mimo-v2.6-flash` | 0 / 2 | yes / stop |
+| `z-ai/glm-4.5v` | 2 / 2 | no / no completed answer |
+| `z-ai/glm-4.6` | 2 / 2 | yes / stop |
+| `z-ai/glm-4.6v` | 2 / 2 | no / no completed answer |
+| `z-ai/glm-4.7` | 2 / 2 | yes / stop |
+| `z-ai/glm-5` | 2 / 2 | yes / stop |
+| `z-ai/glm-5.1` | 2 / 2 | no / stop |
+| `z-ai/glm-5.2` | 1 / 1 | yes / stop |
+| `z-ai/glm-5.3` | 2 / 4 | yes / stop |
+| `z-ai/glm-5.3-flash` | 2 / 2 | no / no completed answer |
+| `z-ai/glm-5.3-flashx` | 2 / 2 | no / no completed answer |
+| `z-ai/glm-5v-turbo` | 2 / 2 | no / no completed answer |
+
+## November 6: GLM industry research, with Sol final classification
+
+The next default uses `z-ai/glm-5.3-flash` on the pinned `near-ai/fp8`
+Chat route, low effort and 8192 output tokens, for industry source research.
+Sol remains the final industry classifier. No prompt, research allowance,
+scoring rule, cache rule, fallback, or historical policy changes.
+
+The additional route passed a real three-turn tool/JSON reasoning probe and
+three retained native requests. Full baseline-positive and miner-negative
+scoring controls then completed with the expected company scores 51 and 0
+(per-ICP 12.75 and 0). All eight GLM calls in those two flows exposed readable
+thinking. Eighteen raw request/response pairs passed storage/hash checks;
+14 replies contained readable reasoning. These private native tests are not
+production worker acceptance or a complete production SFT dataset.
+
+Fresh industry investigations used retained verified identities, then normal
+search/fetch tools without saved source pages. Both controllers retained these
+verdicts under the same criteria and native limits:
+
+| Company/control | Sol research | GLM research | Total fresh cost, Sol / GLM | Seconds, Sol / GLM |
+| --- | --- | --- | --- | --- |
+| PowerLattice, accelerator-chip role boundary | mismatch | mismatch | $0.06421 / $0.04005 | 25.23 / 63.09 |
+| Rackspace, previously labelled fit | unavailable | unavailable | $0.13425 / $0.06235 | 40.47 / 39.60 |
+| Hoover Treated Wood Products, building products | match | match | $0.11281 / $0.03592 | 74.95 / 43.55 |
+
+Rackspace remains a false negative against the retained label: neither path
+established that Rackspace supplies mainframe modernization, beyond discussing
+it. This is not a recovered positive or grounds to change the label. An extra
+research instruction added work without improving the verdict, so it is not
+included. An initial Hoover test collided with a concurrent private harness
+retrieval identity before any model call. Its 409 and reservation are retained;
+the corrected private harness assigns the case identity before first retrieval.
+
+Replacing the final classifier did not qualify. On all 137 labelled saved-source
+cases, GLM/Near AI returned TP53/TN63/FP11/FN10 (84.67%), versus the current Sol
+TP52/TN70/FP4/FN11 (89.05%). DeepSeek Pro and Mistral also fell below the gate.
+The 89.05% figure is a retained-source classifier result, not an accuracy estimate
+for the new research pipeline. The smaller fresh comparisons above show no
+changed verdicts, but do not prove a population-wide error rate.
+
+The existing recorder and exporter preserve exposed thinking, wire requests,
+responses, tool results, source context, costs and outcomes. Unreviewed labels,
+unconfirmed training permission, opaque Sol reasoning, missing evidence and
+incomplete trajectories stay explicit. Near AI through OpenRouter is not claimed
+to be end-to-end confidential inference. The new shared registry entry also
+permits that exact route for future sourcing requests; the sourcing baseline
+and existing approved routes are unchanged.
+
+The initial research proof is
+`docs/evidence/full-thinking/glm-nearai-research-proof-20261106.json`. The route
+now binds to `docs/evidence/full-thinking/glm-nearai-worker-capture-20261106.json`:
+all eight retained real research requests and responses matched their original
+hashes through the native Broker, disposable PostgreSQL, worker socket delivery,
+agent acknowledgement and strict unscored action export. This replay made no
+provider requests and did not reexecute research tools. Both trajectories concern
+EPAM; the rejected tool batch remains explicit and unreviewed. These are not
+complete SFT examples or new production executions.
+
+Fresh synthetic SQL/worker probes completed both expected tool/JSON scenarios
+under named, auto and required tool selection. All eighteen requests and replies
+were captured exactly, but eleven replies reported one reasoning token without
+readable thinking (4/6 named, 3/6 auto, 4/6 required). They therefore failed the
+full-thinking conformance check. The manifest preserves this counterevidence;
+the route can expose readable reasoning, but cannot guarantee it on every call.
+The existing per-call completeness and generated-thinking exclusion rules are
+unchanged. Missing text is not relabelled as zero reasoning or complete capture.
+
+Production image selection and subsequent real judge storage/export remain
+separate live release checks. Existing November 6–7 frozen policies are unchanged.

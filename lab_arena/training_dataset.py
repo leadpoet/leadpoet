@@ -23,7 +23,7 @@ from datetime import date
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
-from lab_arena import contact_policy, contracts, integrity
+from lab_arena import contact_policy, contracts, integrity, operations
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_dataset.v2"
 RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.company_qualification_record.v2"
@@ -87,6 +87,47 @@ def _hash(value: Any) -> str:
     return contracts.document_hash(value)
 
 
+def label_scorer_configuration(example: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Keep labels with the grading policy verified by the existing exporter."""
+    configuration = example.get("configuration") or {}
+    judgment = example.get("judgment") or {}
+    if not isinstance(judgment, Mapping):
+        raise ValueError("preserved_judgment_policy_invalid")
+    if "preserved_judgment_policy" not in judgment:
+        return configuration
+    authority = judgment["preserved_judgment_policy"]
+    fields = {"operation", "scoring_generation_floor", "scorer_policy",
+              "scorer_image_digest", "scorer_image_reference",
+              "current_scorer_image_digest", "current_scorer_image_reference"}
+    selected = [row for row in example.get("attempts") or ()
+                if isinstance(row, Mapping) and row.get("run_id") == example.get("score_run_id")]
+    identity = judgment.get("runtime_identity") or {}
+    valid = (isinstance(authority, Mapping) and set(authority) == fields
+             and example.get("round_id") == "arena-2026-11-03"
+             and authority.get("operation") == "nov03_forward_only_verifier_v1"
+             and type(authority.get("scoring_generation_floor")) is int
+             and authority["scoring_generation_floor"] == 0
+             and isinstance(authority.get("scorer_policy"), Mapping)
+             and isinstance(authority.get("scorer_image_digest"), str)
+             and contracts.SHA256_RE.fullmatch(authority["scorer_image_digest"]) is not None
+             and isinstance(authority.get("scorer_image_reference"), str)
+             and authority["scorer_image_reference"].endswith("@" + authority["scorer_image_digest"])
+             and isinstance(identity, Mapping)
+             and len(selected) == 1 and selected[0].get("kind") == "score"
+             and selected[0].get("status") == selected[0].get("terminal_cause") == "accepted"
+             and type(selected[0].get("scoring_generation_floor")) is int
+             and selected[0]["scoring_generation_floor"] == 0
+             and selected[0].get("scoring_policy_hash") == _hash(authority["scorer_policy"])
+             and selected[0].get("runtime_identity") == identity
+             and all(authority.get("current_" + key) == configuration.get(key)
+                     and identity.get("grading_" + key.removeprefix("scorer_")) == authority.get(key)
+                     for key in ("scorer_image_digest", "scorer_image_reference")))
+    if not valid:
+        raise ValueError("preserved_judgment_policy_invalid")
+    return {**configuration, **{key: authority[key] for key in
+                               ("scorer_policy", "scorer_image_digest", "scorer_image_reference")}}
+
+
 def example_exclusion(example: Mapping[str, Any], rules: Rules) -> Optional[str]:
     """Why an exported execution cannot supply labels, or ``None``."""
 
@@ -95,7 +136,10 @@ def example_exclusion(example: Mapping[str, Any], rules: Rules) -> Optional[str]
     # The exporter hashes every other field; an edited file no longer matches.
     if example.get("example_hash") != _hash({key: value for key, value in example.items() if key != "example_hash"}):
         return "example_hash_mismatch"
-    configuration = example.get("configuration") or {}
+    try:
+        configuration = label_scorer_configuration(example)
+    except ValueError:
+        return "preserved_judgment_policy_invalid"
     if rules.production_rounds_only and (
         not _PRODUCTION_ROUND_RE.fullmatch(str(example.get("round_id") or ""))
         or example.get("round_status") != "published"
@@ -463,6 +507,7 @@ def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """One record per submitted company of a usable exported execution."""
 
     configuration = example.get("configuration") or {}
+    scorer_configuration = label_scorer_configuration(example)
     icp, icp_source = agent_icp(example)
     fingerprint = integrity.requirement_fingerprint(example.get("icp") or {},
                                                     contacts_required=_contacts(configuration))
@@ -488,8 +533,8 @@ def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
                 "role": example.get("role"), "stage": example.get("stage"),
                 "icp_position": example.get("icp_position"), "company_index": index,
                 "evaluation_date": example.get("evaluation_date"),
-                "scorer_image_digest": configuration.get("scorer_image_digest"),
-                "scorer_policy_hash": _hash(configuration.get("scorer_policy") or {}),
+                "scorer_image_digest": scorer_configuration.get("scorer_image_digest"),
+                "scorer_policy_hash": _hash(scorer_configuration.get("scorer_policy") or {}),
             },
             "input": {"icp": icp, "icp_source": icp_source,
                       "evaluation_date": example.get("evaluation_date"), "company": company,
@@ -599,7 +644,8 @@ def _split_model_request_links(example: Mapping[str, Any]) -> List[str]:
                 or not isinstance(request.get("hashed_parameters"), Mapping)
                 or _hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(body, Mapping) or not isinstance(digest, str)
-                or contracts.SHA256_RE.fullmatch(digest) is None or _hash(body) != digest
+                or contracts.SHA256_RE.fullmatch(digest) is None
+                or not operations.outbound_body_hash_matches(operation, body, digest)
                 or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
                 or outbound.get("path") != path):
             continue

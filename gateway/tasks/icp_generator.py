@@ -34,6 +34,8 @@ import random
 import asyncio
 import logging
 import httpx
+import copy
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
@@ -85,9 +87,262 @@ def _rebenchmark_now() -> datetime:
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "anthropic/claude-sonnet-5.5"
-OPENROUTER_EXCLUSION_MODEL = "perplexity/sonar-pro"
+OPENROUTER_EXCLUSION_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+OPENROUTER_EXCLUSION_ROUTE = {
+    "model": OPENROUTER_EXCLUSION_MODEL, "provider": "nebius/fp8",
+    "effort": "high", "max_output_tokens": 4096, "max_tool_calls": 3,
+    "web_search": {"max_uses": 3, "max_results": 5,
+                   "max_total_results": 10, "max_characters": 2000},
+    # OpenRouter provider price limits are dollars per million tokens.
+    "max_price": {"prompt": 0.30, "completion": 1.20},
+}
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_COMPLETION_TOKENS = 8000
+
+# Opt-in paired-probe appendix. Production does not apply this until the
+# coordinator selects it after checking source evidence and bank quality.
+ICP_GROUNDING_PROBE_CONTEXT = """CURRENT EXAMPLE EVIDENCE
+Before you finalize each ICP, use retrieved source content to establish that its
+verified_example_company currently matches EVERY hard filter and the required
+primary intent. Check industry/sub-industry, headquarters geography, employee
+band, stage when constrained, and any required attribute. For intent, identify
+the event date and confirm it meets the stated recency window as of generation.
+An article publication date alone does not establish the event date.
+
+Unknown is not a match. Do not guess, round employee counts into another band,
+or treat an old funding announcement as proof of the current funding stage.
+A query, URL, citation title, memory, or missing source text is not evidence of
+an unread fact. Quote only source text actually returned by the search tool.
+If a filter or event is unsupported or contradicted, choose another company or
+adjust permitted filter values while preserving every industry/diversity/stage/
+geography quota and output requirement. Stay within the existing search budget;
+do not claim verification when the budget ends with an unresolved fact.
+
+For each example, include an optional verified_example_evidence object in its
+raw ICP JSON with this shape, using multiple sources where needed:
+{"observed_date":"YYYY-MM-DD","intent_event_date":"YYYY-MM-DD",
+ "sources":[{"url":"https://...","quoted_facts":["exact retrieved excerpt"],
+ "supports":["industry","sub_industry","geography","employee_count",
+             "company_stage","required_attribute","intent_signal"]}]}
+List only the filters each source actually supports. Omit unconstrained filters
+from supports. Do not invent quotations or dates to fill this object. This is
+source evidence for review, not a guarantee of correctness or an ICP filter.
+"""
+
+
+def icp_grounding_probe_context(generation_context: Optional[str] = None, *,
+                                as_of_date: Optional[str] = None) -> str:
+    """Apply the same source-controlled grounding appendix to paired probes."""
+    parts = [generation_context] if generation_context else []
+    if as_of_date is not None:
+        # Parse strictly so an arbitrary instruction cannot enter the date field.
+        parsed = datetime.strptime(as_of_date, "%Y-%m-%d").date().isoformat()
+        if parsed != as_of_date:
+            raise ValueError("icp_grounding_date_invalid")
+        parts.append("Generation as-of UTC date: " + parsed)
+    parts.append(ICP_GROUNDING_PROBE_CONTEXT)
+    return "\n\n".join(parts)
+
+
+def prepare_icp_candidate_request(request: dict, candidate: Optional[dict] = None) -> tuple:
+    """Keep the baseline body, or select one explicit prospective Responses route.
+
+    Responses exposes typed search/reasoning items. It does not prove that the
+    router exposed every internal provider turn. No model default changes here.
+    """
+    body = copy.deepcopy(request)
+    if candidate is None:
+        return "openrouter.chat", body
+    if (not isinstance(candidate, dict)
+            or set(candidate) - {"model", "provider", "effort", "max_output_tokens",
+                                 "max_tool_calls", "web_search", "max_price"}
+            or not isinstance(candidate.get("model"), str)
+            or re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+", candidate["model"]) is None
+            or not isinstance(candidate.get("provider"), str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", candidate["provider"]) is None
+            or candidate.get("effort", "low") not in {"low", "medium", "high"}):
+        raise ValueError("icp_candidate_route_invalid")
+    limit = candidate.get("max_output_tokens", body.pop("max_tokens", 8192))
+    if type(limit) is not int or not 1 <= limit <= 131072:
+        raise ValueError("icp_candidate_output_limit_invalid")
+    tool_limit = candidate.get("max_tool_calls", 10)
+    search = candidate.get("web_search", {"max_uses": 10})
+    if (type(tool_limit) is not int or not 1 <= tool_limit <= 10
+            or not isinstance(search, dict) or "max_uses" not in search
+            or set(search) - {"max_uses", "max_results", "max_total_results", "max_characters"}
+            or any(type(value) is not int or value < 1 for value in search.values())
+            or search["max_uses"] > tool_limit
+            or search.get("max_results", 5) > 25
+            or search.get("max_total_results", 50) > 250
+            or search.get("max_characters", 4000) > 100000):
+        raise ValueError("icp_candidate_search_limit_invalid")
+    prices = candidate.get("max_price")
+    if prices is not None and (
+        not isinstance(prices, dict) or set(prices) != {"prompt", "completion"}
+        or any(type(value) not in (int, float) or not Decimal(str(value)).is_finite()
+               or value < 0 for value in prices.values())
+    ):
+        raise ValueError("icp_candidate_price_limit_invalid")
+    body.pop("max_tokens", None)
+    body.pop("temperature", None)
+    body.update({
+        "model": candidate["model"], "input": body.pop("messages"),
+        "max_output_tokens": limit, "stream": False, "store": False,
+        "provider": {"only": [candidate["provider"]], "allow_fallbacks": False,
+                     "require_parameters": True, "zdr": True, "data_collection": "deny"},
+        "reasoning": {"effort": candidate.get("effort", "low"), "context": "all_turns"},
+        "include": ["reasoning.encrypted_content"],
+        "transforms": [], "plugins": [{"id": "context-compression", "enabled": False}],
+        "tools": [{"type": "openrouter:web_search", "parameters": {
+            "engine": "exa", **search,
+        }}],
+        "max_tool_calls": tool_limit,
+    })
+    if prices is not None:
+        body["provider"]["max_price"] = copy.deepcopy(prices)
+    return "openrouter.responses", body
+
+
+def icp_search_capture_status(document: dict) -> dict:
+    """Compare exposed events with reported search usage, without inferring turns."""
+    output = document.get("output") if isinstance(document, dict) else None
+    events = [item for item in (output if isinstance(output, list) else []) if isinstance(item, dict)
+              and item.get("type") in {"openrouter:web_search", "web_search_call"}]
+    usage = document.get("usage") if isinstance(document, dict) else None
+    details = usage.get("server_tool_use_details") if isinstance(usage, dict) else None
+    details = details if isinstance(details, dict) else {}
+    reported = details.get("web_search_requests")
+    completed = sum(item.get("status") == "completed" for item in events)
+    known = type(reported) is int and reported >= 0
+    return {"reported_search_requests": reported if known else None,
+            "exposed_search_events": len(events), "completed_search_events": completed,
+            "search_event_count_matches": known and reported == completed == len(events),
+            "all_internal_provider_turns_verified": False}
+
+
+def project_icp_candidate_response(document: dict, *, api: str) -> dict:
+    """Use final text for existing normalizers; capture keeps native output intact."""
+    if api == "openrouter.chat":
+        return document
+    if (not isinstance(document, dict) or document.get("status") != "completed"
+            or document.get("error") or document.get("errors") or document.get("refusal")
+            or document.get("incomplete_details") or not isinstance(document.get("output"), list)):
+        raise ValueError("icp_candidate_response_incomplete")
+    explicit_finals = []
+    unphased = []
+    for item in document["output"]:
+        if not isinstance(item, dict):
+            raise ValueError("icp_candidate_output_invalid")
+        kind = item.get("type")
+        if kind in {"reasoning", "openrouter:web_search", "web_search_call"}:
+            if (item.get("status") not in (None, "completed")
+                    or kind != "reasoning" and item.get("status") != "completed"):
+                raise ValueError("icp_candidate_output_incomplete")
+        elif kind == "message":
+            if (item.get("role") != "assistant" or item.get("status") not in (None, "completed")
+                    or item.get("refusal") or not isinstance(item.get("content"), list)):
+                raise ValueError("icp_candidate_message_invalid")
+            phase = item.get("phase")
+            if phase not in (None, "commentary", "final_answer"):
+                raise ValueError("icp_candidate_message_phase_invalid")
+            parts = item["content"]
+            if any(not isinstance(part, dict) or part.get("type") != "output_text"
+                   or not isinstance(part.get("text"), str) for part in parts):
+                raise ValueError("icp_candidate_message_invalid")
+            message = {"role": "assistant", "content": "".join(part["text"] for part in parts)}
+            if phase == "final_answer":
+                explicit_finals.append(message)
+            elif phase is None:
+                unphased.append(message)
+        else:
+            raise ValueError("icp_candidate_unfinished_tool")
+    if len(explicit_finals) > 1:
+        raise ValueError("icp_candidate_final_answer_ambiguous")
+    final = explicit_finals[0] if explicit_finals else unphased[-1] if unphased else None
+    if final is None or not final["content"].strip():
+        raise ValueError("icp_candidate_answer_missing")
+    return {"choices": [{"finish_reason": "stop", "message": final}]}
+
+
+async def prepare_icp_probe_request(purpose: str, *, set_id: Optional[int] = None,
+                                    total_icps: int = 10, icp: Optional[dict] = None,
+                                    candidate: Optional[dict] = None,
+                                    generation_context: Optional[str] = None,
+                                    contacts_required: bool = False) -> dict:
+    """Extract the production prompt and request without credentials, I/O or capture.
+
+    Generation defaults to the unchanged Sonnet Chat request. Exclusion
+    defaults to the approved DeepSeek Responses route. Generation candidates
+    can reuse the returned Chat body for exact prompt/industry-slot comparisons.
+    Only the coordinating caller may dispatch or reserve a paid probe.
+    """
+    if purpose == "icp_generation" and type(set_id) is int:
+        return await generate_icps_with_openrouter(
+            set_id, total_icps, generation_context=generation_context, api_key="",
+            contacts_required=contacts_required, candidate=candidate, _request_only=True,
+        )
+    if purpose == "icp_exclusion" and isinstance(icp, dict):
+        return generate_exclusions_for_icp(icp, candidate=candidate, _request_only=True)
+    raise ValueError("icp_probe_input_invalid")
+
+
+class _IcpCapture:
+    """Observe internal calls without changing bank generation or retries."""
+
+    def __init__(self, purpose, context, request, api_key, *, api="openrouter.chat"):
+        self.call = None
+        self.cost = None
+        self.outcome = {"provider_outcome": "unavailable", "business_outcome": "failed"}
+        self.finished = False
+        self.started = time.monotonic()
+        try:
+            from lab_arena.internal_capture import from_environment
+            self.call = from_environment().start(
+                purpose=purpose, context=context, request=request, api=api, secrets=(api_key,),
+            )
+        except Exception:
+            pass
+
+    @property
+    def call_id(self):
+        return getattr(self.call, "call_id", None)
+
+    def response(self, response):
+        try:
+            self.outcome["provider_http_status"] = response.status_code
+            self.outcome["provider_outcome"] = "response_received"
+            body = response.content
+            if isinstance(body, bytes):
+                self.call.response(body=body, status=response.status_code,
+                                   elapsed_seconds=time.monotonic() - self.started)
+                try:
+                    self.usage(json.loads(body))
+                except (ValueError, UnicodeError):
+                    pass
+        except Exception:
+            pass
+
+    def usage(self, document):
+        # Only the provider's reported dollar charge can establish a cost.
+        # Missing, malformed, negative, or non-finite charges remain unknown.
+        try:
+            value = document.get("usage", {}).get("cost")
+            if value is None or isinstance(value, bool):
+                return
+            amount = Decimal(str(value))
+            if amount.is_finite() and amount >= 0:
+                self.cost = int((amount * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
+        except (AttributeError, InvalidOperation, ValueError, OverflowError):
+            pass
+
+    def finish(self, **outcome):
+        if self.finished:
+            return
+        self.finished = True
+        try:
+            self.call.finish(outcome={**self.outcome, **outcome}, cost_microusd=self.cost)
+        except Exception:
+            pass
 
 # =============================================================================
 # Configuration
@@ -975,6 +1230,9 @@ async def generate_icps_with_openrouter(
     *, generation_context: Optional[str] = None,
     api_key: Optional[str] = None,
     contacts_required: bool = False,
+    _capture_calls: Optional[list] = None,
+    candidate: Optional[dict] = None,
+    _request_only: bool = False,
 ) -> tuple:
     """
     Generate ICP prompts using OpenRouter Sonar Pro.
@@ -994,7 +1252,7 @@ async def generate_icps_with_openrouter(
         or None if LLM generation fails (falls back to template-based)
     """
     api_key = OPENROUTER_API_KEY if api_key is None else api_key
-    if not api_key:
+    if not api_key and not _request_only:
         logger.warning("OPENROUTER_API_KEY not set, falling back to template-based generation")
         return None
 
@@ -1198,41 +1456,57 @@ Each ICP must also return these structured fields for the people to find at ever
     if generation_context:
         user_prompt += "\n\n" + generation_context
 
+    capture = None
+    deferred_capture = False
     try:
-        logger.info(f"Calling OpenRouter {OPENROUTER_MODEL} to generate {total_icps} ICPs...")
+        request = {
+            "model": OPENROUTER_MODEL,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_prompt}],
+            "reasoning": {"effort": "medium"},
+            "tools": [{"type": "openrouter:web_search", "parameters": {
+                "engine": "native", "max_uses": 10,
+            }}],
+            "max_tool_calls": 10,
+            "max_tokens": max(OPENROUTER_MAX_COMPLETION_TOKENS, total_icps * 1200),
+        }
+        api, request = prepare_icp_candidate_request(request, candidate)
+        if _request_only:
+            return {"api": api, "path": "/responses" if api.endswith("responses") else "/chat/completions",
+                    "request": request}
+        logger.info("Calling OpenRouter %s to generate %d ICPs...", request["model"], total_icps)
+        capture = _IcpCapture("icp_generation", {
+            "set_id": set_id,
+            "date": f"{str(set_id)[:4]}-{str(set_id)[4:6]}-{str(set_id)[6:8]}",
+            "call_order": 0,
+            "requested_icp_count": total_icps,
+        }, request, api_key, api=api)
         
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
+                f"{OPENROUTER_BASE_URL}" + ("/responses" if api.endswith("responses") else "/chat/completions"),
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://leadpoet.ai",
-                    "X-Title": "LeadPoet ICP Generator"
+                    "X-Title": "LeadPoet ICP Generator",
+                    **({"X-OpenRouter-Metadata": "enabled"} if candidate is not None else {}),
                 },
-                json={
-                    "model": OPENROUTER_MODEL,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    # Sonnet 5.5 does not support sampling parameters. Medium
-                    # reasoning gave better factual examples in the paired audit.
-                    "reasoning": {"effort": "medium"},
-                    "tools": [{"type": "openrouter:web_search", "parameters": {
-                        "engine": "native", "max_uses": 10,
-                    }}],
-                    "max_tool_calls": 10,
-                    # The completion allowance includes reasoning and bank JSON.
-                    "max_tokens": max(OPENROUTER_MAX_COMPLETION_TOKENS, total_icps * 1200),
-                }
+                json=request,
             )
+            # Save an observed reply before the awaited client close can be
+            # cancelled. Closing the transport is not part of provider output.
+            capture.response(response)
         
         if response.status_code != 200:
             logger.error("openrouter_icp_http_error status=%d", response.status_code)
             return None
         
         result = response.json()
+        capture.usage(result)
+        if api == "openrouter.responses":
+            capture.outcome["search_capture"] = icp_search_capture_status(result)
+        result = project_icp_candidate_response(result, api=api)
         choice = result.get("choices", [{}])[0]
         finish_reason = choice.get("finish_reason")
         safe_finish_reason = (
@@ -1448,14 +1722,29 @@ Each ICP must also return these structured fields for the people to find at ever
         # Compute hash
         icp_set_hash = compute_icp_set_hash(validated_icps)
 
+        capture.outcome.update({
+            "business_outcome": "generated", "normalized_icps": validated_icps,
+            "industry_distribution": actual_distribution, "icp_set_hash": icp_set_hash,
+        })
+        if _capture_calls is not None:
+            _capture_calls.append(capture)
+            deferred_capture = True
+
         return validated_icps, actual_distribution, icp_set_hash
         
+    except asyncio.CancelledError:
+        if capture is not None:
+            capture.outcome["business_outcome"] = "cancelled"
+        raise
     except httpx.TimeoutException:
         logger.error("OpenRouter request timed out (180s)")
         return None
     except Exception as e:
         logger.error("openrouter_icp_generation_failed error_type=%s", type(e).__name__)
         return None
+    finally:
+        if capture is not None and not deferred_capture:
+            capture.finish(committed_outcome="not_attempted")
 
 
 # =============================================================================
@@ -1592,11 +1881,14 @@ def _exclusions_count() -> int:
 
 
 def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None,
-                                timeout_s: float = 45.0) -> List[str]:
+                                timeout_s: float = 45.0, *,
+                                _capture_context: Optional[dict] = None,
+                                candidate: Optional[dict] = None,
+                                _request_only: bool = False) -> List[str]:
     """Real companies matching this ICP's hard profile, as flat exclusion
     entries (domain preferred, name fallback). Fail-open: any provider or
     parse problem returns [] — an ICP without exclusions is always valid."""
-    if not OPENROUTER_API_KEY:
+    if not OPENROUTER_API_KEY and not _request_only:
         logger.warning("icp_exclusions_skipped reason=no_openrouter_key")
         return []
     want = count if count is not None else _exclusions_count()
@@ -1614,24 +1906,50 @@ def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None
         + "Only name companies you can verify exist on the web right now. "
           'Return STRICT JSON only: [{"name": "<company name>", "domain": "<bare homepage domain like example.com>"}]'
     )
+    request = {"model": OPENROUTER_EXCLUSION_MODEL,
+               "messages": [{"role": "user", "content": prompt}],
+               "temperature": 0.0}
+    api, request = prepare_icp_candidate_request(
+        request, OPENROUTER_EXCLUSION_ROUTE if candidate is None else candidate,
+    )
+    if _request_only:
+        return {"api": api, "path": "/responses" if api.endswith("responses") else "/chat/completions",
+                "request": request}
+    context = dict(_capture_context or {})
+    exclusion_call_ids = context.pop("exclusion_call_ids", None)
+    try:
+        context["input_icp_sha256"] = compute_icp_set_hash([icp])
+    except Exception:
+        # Capture cannot make previously accepted caller input fail.
+        pass
+    capture = _IcpCapture("icp_exclusion", context, request, OPENROUTER_API_KEY, api=api)
+    if exclusion_call_ids is not None and capture.call_id:
+        exclusion_call_ids.append(capture.call_id)
     try:
         response = httpx.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
+            f"{OPENROUTER_BASE_URL}" + ("/responses" if api.endswith("responses") else "/chat/completions"),
             headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                     "Content-Type": "application/json"},
-            json={"model": OPENROUTER_EXCLUSION_MODEL,
-                  "messages": [{"role": "user", "content": prompt}],
-                  "temperature": 0.0},
+                     "Content-Type": "application/json",
+                     **({"X-OpenRouter-Metadata": "enabled"} if api == "openrouter.responses" else {})},
+            json=request,
             timeout=timeout_s,
         )
+        capture.response(response)
         if response.status_code != 200:
             logger.warning("icp_exclusions_failed status=%s", response.status_code)
+            capture.finish(normalized_output=[], committed_outcome="not_attempted")
             return []
-        content = response.json()["choices"][0]["message"]["content"]
+        document = response.json()
+        capture.usage(document)
+        if api == "openrouter.responses":
+            capture.outcome["search_capture"] = icp_search_capture_status(document)
+        document = project_icp_candidate_response(document, api=api)
+        content = document["choices"][0]["message"]["content"]
         match = re.search(r"\[.*\]", content, re.S)
         rows = json.loads(match.group(0)) if match else []
     except Exception as exc:  # noqa: BLE001 - fail-open by design
-        logger.warning("icp_exclusions_failed error=%s", str(exc)[:120])
+        logger.warning("icp_exclusions_failed error_type=%s", type(exc).__name__)
+        capture.finish(normalized_output=[], committed_outcome="not_attempted")
         return []
     entries: List[str] = []
     for row in rows[:want] if isinstance(rows, list) else []:
@@ -1646,18 +1964,27 @@ def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None
             entries.append(domain)
         elif name:
             entries.append(name)
-    return list(dict.fromkeys(entries))[:want]
+    result = list(dict.fromkeys(entries))[:want]
+    capture.finish(business_outcome="parsed", normalized_output=result,
+                   committed_outcome="not_attempted")
+    return result
 
 
-def attach_generated_exclusions(icps: List[Dict[str, Any]]) -> None:
+def attach_generated_exclusions(icps: List[Dict[str, Any]], *,
+                                _capture_context: Optional[dict] = None) -> None:
     """Populate excluded_companies on each generated ICP (fail-open per ICP)."""
     if not _exclusions_enabled():
         logger.info("icp_exclusions_disabled via %s", _EXCLUSIONS_ENABLED_ENV)
         for icp in icps:
             icp.setdefault("excluded_companies", [])
         return
-    for icp in icps:
-        icp["excluded_companies"] = generate_exclusions_for_icp(icp)
+    for position, icp in enumerate(icps):
+        if _capture_context is None:
+            icp["excluded_companies"] = generate_exclusions_for_icp(icp)
+        else:
+            icp["excluded_companies"] = generate_exclusions_for_icp(icp, _capture_context={
+                **_capture_context, "icp_position": position, "call_order": position + 1,
+            })
 
 
 def _widen_employee_count_to_stage(icp: Dict[str, Any]) -> None:
@@ -2125,11 +2452,14 @@ async def generate_and_activate_icp_set(
         return None
     
     logger.info("Generating ICPs with OpenRouter LLM (target %d ICPs)...", target_count)
+    capture_calls = []
+    exclusion_call_ids = []
     try:
         result = await generate_icps_with_openrouter(
             set_id,
             total_icps=target_count,
             contacts_required=contacts_required,
+            _capture_calls=capture_calls,
         )
         if not result:
             logger.error("❌ OpenRouter returned None - will retry on next check/restart")
@@ -2139,6 +2469,8 @@ async def generate_and_activate_icp_set(
         bank_error = generated_bank_error(icps, target_count, distribution)
         if bank_error:
             logger.error("generated_icp_bank_invalid reason=%s", bank_error)
+            for capture in capture_calls:
+                capture.finish(business_outcome="invalid_bank", committed_outcome="not_attempted")
             return None
         logger.info(f"✅ OpenRouter generated {len(icps)} ICPs successfully")
 
@@ -2150,9 +2482,16 @@ async def generate_and_activate_icp_set(
         # the transparency-log hash all cover the final ICPs.
         apply_generated_icp_contract(icps)
         try:
-            await asyncio.to_thread(attach_generated_exclusions, icps)
+            if capture_calls:
+                await asyncio.to_thread(attach_generated_exclusions, icps, _capture_context={
+                    "set_id": set_id, "date": active_from.date().isoformat(),
+                    "parent_generation_call_id": capture_calls[0].call_id,
+                    "exclusion_call_ids": exclusion_call_ids,
+                })
+            else:
+                await asyncio.to_thread(attach_generated_exclusions, icps)
         except Exception as exc:  # noqa: BLE001 - exclusions are fail-open
-            logger.warning("icp_exclusions_attach_failed error=%s", str(exc)[:160])
+            logger.warning("icp_exclusions_attach_failed error_type=%s", type(exc).__name__)
             for icp in icps:
                 if isinstance(icp, dict):
                     icp.setdefault("excluded_companies", [])
@@ -2167,36 +2506,49 @@ async def generate_and_activate_icp_set(
             icp_hash[:16],
         )
 
+    except asyncio.CancelledError:
+        for capture in capture_calls:
+            capture.finish(business_outcome="cancelled", committed_outcome="not_attempted",
+                           exclusion_call_ids=list(exclusion_call_ids))
+        # Cancelling the waiter does not stop its existing exclusion thread.
+        raise
     except Exception as e:
-        logger.error(f"❌ OpenRouter ICP generation failed: {e}")
+        logger.error("OpenRouter ICP generation failed error_type=%s", type(e).__name__)
         logger.error("   Will retry automatically on next gateway restart or rotation check")
-        import traceback
-        logger.error(traceback.format_exc())
+        for capture in capture_calls:
+            capture.finish(business_outcome="failed", committed_outcome="not_attempted",
+                           exclusion_call_ids=exclusion_call_ids)
         return None
     
     logger.info(f"Generated {len(icps)} ICPs using OpenRouter LLM, hash={icp_hash[:16]}...")
     
     # Store in database
-    stored = await store_icp_set(
-        set_id=set_id,
-        icps=icps,
-        icp_set_hash=icp_hash,
-        industry_distribution=distribution,
-        active_from=active_from,
-        active_until=active_until,
-        generation_seed=generation_seed
-    )
-    
-    if not stored:
-        return None
-    
-    # Activate the new set
-    activated = await activate_icp_set(set_id)
-    
-    if not activated:
-        return None
-    
-    return set_id
+    committed_outcome = "storage_unavailable"
+    try:
+        stored = await store_icp_set(
+            set_id=set_id,
+            icps=icps,
+            icp_set_hash=icp_hash,
+            industry_distribution=distribution,
+            active_from=active_from,
+            active_until=active_until,
+            generation_seed=generation_seed
+        )
+        if not stored:
+            committed_outcome = "storage_failed"
+            return None
+        committed_outcome = "stored_activation_unavailable"
+        activated = await activate_icp_set(set_id)
+        if not activated:
+            committed_outcome = "stored_activation_failed"
+            return None
+        committed_outcome = "activated"
+        return set_id
+    finally:
+        for capture in capture_calls:
+            capture.finish(normalized_icps=icps, icp_set_hash=icp_hash,
+                           exclusion_call_ids=exclusion_call_ids,
+                           committed_outcome=committed_outcome)
 
 
 async def icp_rotation_task():

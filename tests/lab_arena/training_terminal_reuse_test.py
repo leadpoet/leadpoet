@@ -83,7 +83,16 @@ def test_complete_export_matches_prechange_evidence(case):
     values = values_for(case)
     before_rows = copy.deepcopy(values["ledger_rows"])
     exported = training_export.assemble_example(**values)
-    assert contracts.document_hash(exported) == BEFORE_EXPORT_HASHES[case]
+    # The additive provenance fields have their own exact assertions. Retain
+    # the original hash for every historical payload, receipt and privacy flag.
+    historical = copy.deepcopy(exported)
+    assert historical.pop("round_dates") == {"created_at": None, "published_at": None}
+    assert historical.pop("label_authority") == {
+        "origin": "automated_native_scorer", "ground_truth": "not_established",
+        "external_adjudication": "not_established_by_export"}
+    historical.pop("example_hash")
+    historical["example_hash"] = contracts.document_hash(historical)
+    assert contracts.document_hash(historical) == BEFORE_EXPORT_HASHES[case]
     assert values["ledger_rows"] == before_rows
     call = exported["provider_calls"][0]
     if case == "credential":

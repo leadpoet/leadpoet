@@ -18,6 +18,8 @@ def _free_port() -> int:
 
 
 def _database_with_migrations(migrations, *, setup_sql="", image="postgres:15", network=None):
+    if DOCKER is None:
+        pytest.skip("Docker is unavailable for the Docker-only migration harness")
     psycopg2 = pytest.importorskip("psycopg2")
     port = _free_port()
     container = "migration-contract-%s" % uuid4().hex[:12]

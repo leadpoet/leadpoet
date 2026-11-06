@@ -12,7 +12,7 @@ from lab_arena import broker, company_judgments, contracts, scoring, signal_judg
 from lab_arena.training_export import ExportError, _signal_authority_evidence, assemble_example
 from scripts.export_arena_training import export_run
 from tests.lab_arena.training_export_test import (
-    OUTPUT_REF, add_call, per_icp_cost_fixture, per_icp_cost_reader, save_input,
+    LEGACY_MODELS, OUTPUT_REF, add_call, per_icp_cost_fixture, per_icp_cost_reader, save_input,
 )
 
 
@@ -21,6 +21,8 @@ def _signal_fixture():
     execute, judge = values["runs"]
     config = values["round_row"]["configuration_doc"]
     policy = scoring.build_scorer_policy(
+        judge_models=LEGACY_MODELS,
+        judge_provider_routes={},
         scoring_adapter_version="qualification_integrity_v2",
         company_judgment_cache=True,
     )
@@ -251,7 +253,8 @@ def test_export_entrypoint_fetches_original_signal_ledger_without_current_charge
         def list_runs(self, round_id):
             return values["runs"] if round_id == values["round_row"]["round_id"] else []
 
-        def list_ledger(self, *, run_id, after_entry_id=None, limit=1000):
+        def list_ledger(self, *, run_id, after_entry_id=None, limit=1000, training_responses=False):
+            assert training_responses is True
             rows = values["signal_source_ledger_rows"] if run_id == "judge:source" else []
             return [row for row in rows if after_entry_id is None or row["entry_id"] > after_entry_id]
 
@@ -439,7 +442,8 @@ class _CompanyExportStore:
     def list_runs(self, round_id):
         return [row for row in self.values["runs"] if row["round_id"] == round_id]
 
-    def list_ledger(self, *, run_id, after_entry_id=None, limit=1000):
+    def list_ledger(self, *, run_id, after_entry_id=None, limit=1000, training_responses=False):
+        assert training_responses is True
         return [row for row in self.values["signal_source_ledger_rows"]
                 if row["run_id"] == run_id and (after_entry_id is None or row["entry_id"] > after_entry_id)][:limit]
 

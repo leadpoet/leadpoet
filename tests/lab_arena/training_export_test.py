@@ -7,13 +7,15 @@ import io
 import random
 import stat
 import tarfile
+from collections import OrderedDict
 
 import pytest
 
-from lab_arena import broker as br, contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, training_thinking, verify
+from lab_arena import broker as br, contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, training_thinking, trajectory, verify
 from lab_arena.training_export import ExportError, _competition_cost_snapshot, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, export_run, write_private
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 CLAIM_HASH = "sha256:" + "c" * 64
 OUTPUT_REF = "arena/arena-2026-10-16/outputs/execute:1.json"
@@ -49,7 +51,10 @@ def fixture():
                "intent_signals": [{"matched_icp_signal": 0, "description": "Product launch",
                                    "url": "https://acme.example/launch", "date": None,
                                    "snippet": "A new product", "why_now": "Recent launch"}]}
-    policy = scoring.build_scorer_policy()
+    # This October archive predates the prospective judge capture policy.
+    policy = scoring.build_scorer_policy(
+        judge_models=LEGACY_MODELS, judge_provider_routes={},
+    )
     config = {"scorer_policy": policy, "scorer_image_digest": "sha256:" + "a" * 64,
               "scorer_image_reference": "registry.example/scorer@sha256:" + "a" * 64}
     round_row = {"round_id": "arena-2026-10-16", "configuration_doc": config,
@@ -174,7 +179,7 @@ def test_prior_launched_judge_keeps_its_own_reviewer_runtime_identity():
     binding["lease_generation"] = 2
     result = assemble_example(**values)
     assert result["completeness"]["dimensions"]["source_identity"]
-    assert "reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
+    assert "prior_attempt_reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
 
 
 def test_failed_score_without_resource_summary_keeps_per_run_gap_attribution():
@@ -1314,3 +1319,74 @@ def test_rollback_safe_metadata_cannot_smuggle_response_authority_into_export():
         "broker_observations": {"status": 200, "body_b64": "e30="}}
     with pytest.raises(ExportError, match="broker_observation_invalid"):
         assemble_example(**values)
+
+
+def test_final_export_reuses_only_verified_clean_history_after_text_cache_eviction(monkeypatch):
+    values = fixture()
+    texts = [f"{index:03d}:" + "Public company history. " * 740 for index in range(260)]
+    text_set = set(texts)
+    configuration = values["round_row"]["configuration_doc"]
+    configuration["public_history"] = texts + texts[:64] + [
+        "https://user:pass@example.test/?token=private-value"]
+    configuration["authorization"] = texts[0]
+    configuration["hidden_reasoning"] = texts[1]
+
+    original_sanitize = training_capture.sanitize_training_value
+    original_redact = trajectory.redact_text
+    scans = []
+
+    def count_scans(text, *args, **kwargs):
+        if text in text_set:
+            scans.append(text)
+        return original_redact(text, *args, **kwargs)
+
+    def without_digest_cache(value, *args, **kwargs):
+        kwargs.pop("clean_text_digests", None)
+        return original_sanitize(value, *args, **kwargs)
+
+    monkeypatch.setattr(trajectory, "redact_text", count_scans)
+    monkeypatch.setattr(training_capture, "sanitize_training_value", without_digest_cache)
+    baseline = assemble_example(**values)
+    baseline_scans = list(scans)
+    scans.clear()
+    monkeypatch.setattr(training_capture, "sanitize_training_value", original_sanitize)
+    reused = assemble_example(**values)
+
+    assert reused == baseline
+    assert reused["privacy"]["context_redactions"] == ["credential", "hidden_reasoning"]
+    assert reused["configuration"]["authorization"] == "[REDACTED]"
+    assert "user:pass" not in reused["configuration"]["public_history"][-1]
+    assert "private-value" not in reused["configuration"]["public_history"][-1]
+    assert len(baseline_scans) == 260 + 64
+    assert len(scans) == 260
+    assert baseline_scans.count(texts[0]) == 2
+    assert scans.count(texts[0]) == 1
+
+
+def test_clean_digest_reuse_keeps_secret_context_url_and_custom_type_rules():
+    text = "Public company history with known-private-value. " * 500
+    cache = OrderedDict()
+    assert training_capture.sanitize_training_value([text], clean_text_digests=cache) == ([text], [])
+    assert len(cache) == 1
+
+    value = {"history": [text, text + " changed"], "authorization": text,
+             "url": "https://user:pass@example.test/?token=private-value"}
+    expected = training_capture.sanitize_training_value(
+        value, secrets=("known-private-value",), aggregate_parts=True)
+    actual = training_capture.sanitize_training_value(
+        value, secrets=("known-private-value",), aggregate_parts=True,
+        clean_text_digests=cache)
+    assert actual == expected
+    assert "known-private-value" not in actual[0]["history"][0]
+    assert actual[0]["authorization"] == "[REDACTED]"
+    assert "user:pass" not in actual[0]["url"]
+    assert "private-value" not in actual[0]["url"]
+    assert len(cache) == 1
+
+    class CustomText(str):
+        pass
+
+    custom = [CustomText(text), text + " changed"]
+    assert training_capture.sanitize_training_value(
+        custom, aggregate_parts=True, clean_text_digests=cache) == training_capture.sanitize_training_value(
+            custom, aggregate_parts=True)

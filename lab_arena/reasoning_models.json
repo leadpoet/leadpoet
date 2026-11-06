@@ -3145,7 +3145,7 @@
       "provider_name": "Near AI",
       "api": "openrouter.chat",
       "mode": {
-        "effort": "high"
+        "effort": "low"
       },
       "parser_version": "arena_openrouter_reasoning_v1",
       "semantic_class": "full_generated_thinking",
@@ -3167,9 +3167,9 @@
       "status": "approved",
       "evidence": {
         "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
-        "probe_id": "glm-5.3-flash-nearai-fp8-tool-continuity-20261106",
-        "verified_at": "2026-11-06T04:07:39.973966Z",
-        "probe_manifest_sha256": "aa6d19cd3a26c40baf8a9af43a3ac30344bcc7a8dd6138208caf798469d9cb37"
+        "probe_id": "glm-nearai-native-research-capture-20261106",
+        "verified_at": "2026-11-06T06:25:05.534384Z",
+        "probe_manifest_sha256": "b18b3fb24dc43bd52c1fea455bc576c613567d6095399633b78908da4b5c6374"
       }
     }
   ],

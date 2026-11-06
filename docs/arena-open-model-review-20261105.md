@@ -466,7 +466,24 @@ to be end-to-end confidential inference. The new shared registry entry also
 permits that exact route for future sourcing requests; the sourcing baseline
 and existing approved routes are unchanged.
 
-The committed route proof is
-`docs/evidence/full-thinking/glm-nearai-research-proof-20261106.json`.
+The initial research proof is
+`docs/evidence/full-thinking/glm-nearai-research-proof-20261106.json`. The route
+now binds to `docs/evidence/full-thinking/glm-nearai-worker-capture-20261106.json`:
+all eight retained real research requests and responses matched their original
+hashes through the native Broker, disposable PostgreSQL, worker socket delivery,
+agent acknowledgement and strict unscored action export. This replay made no
+provider requests and did not reexecute research tools. Both trajectories concern
+EPAM; the rejected tool batch remains explicit and unreviewed. These are not
+complete SFT examples or new production executions.
+
+Fresh synthetic SQL/worker probes completed both expected tool/JSON scenarios
+under named, auto and required tool selection. All eighteen requests and replies
+were captured exactly, but eleven replies reported one reasoning token without
+readable thinking (4/6 named, 3/6 auto, 4/6 required). They therefore failed the
+full-thinking conformance check. The manifest preserves this counterevidence;
+the route can expose readable reasoning, but cannot guarantee it on every call.
+The existing per-call completeness and generated-thinking exclusion rules are
+unchanged. Missing text is not relabelled as zero reasoning or complete capture.
+
 Production image selection and subsequent real judge storage/export remain
 separate live release checks. Existing November 6–7 frozen policies are unchanged.

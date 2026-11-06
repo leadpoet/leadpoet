@@ -6,7 +6,9 @@ import ast
 import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -63,6 +65,16 @@ def _predicate(source):
     exec(compile("from __future__ import annotations\n" + _predicate_source(source),
                  "frozen_finality_predicate.py", "exec"), scope)
     return scope[PREDICATE]
+
+
+def _install_frozen_scorer(monkeypatch):
+    """Exercise the historical predicate with callers from the same source."""
+    module = ModuleType("_arena_negative_finality847")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(convert_finality_seam(_original_source()),
+                 "exact_frozen847_lead_scorer.py", "exec"), vars(module))
+    monkeypatch.setattr(controls, "scorer", module)
+    return module
 
 
 def test_exact_frozen847_predicate_gets_only_the_reviewed_pr483_delta():
@@ -239,8 +251,10 @@ def test_composed_predicate_preserves_all_unfinished_evidence_controls(monkeypat
 def test_composed_finality_through_fit_zero_and_existing_arena_completion(
     monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
 ):
-    monkeypatch.setattr(lead_scorer, PREDICATE,
-                        _predicate(convert_finality_seam(_original_source())))
+    _install_frozen_scorer(monkeypatch)
     controls.test_negative_completion_through_fit_and_arena(
         monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
+        # Frozen847 predates completed-investigation homepage recovery. This
+        # predicate-only overlay must preserve its existing transport failures.
+        expected_retryable=bool(investigation_fault or homepage_fault),
     )

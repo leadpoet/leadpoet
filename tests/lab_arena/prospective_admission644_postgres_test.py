@@ -10,6 +10,7 @@ from lab_arena import code_review, code_review_policy
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, new_lease_token
 from tests.lab_arena import nov06_late_review635_postgres_test as late
 from tests.lab_arena import nov06_ninth_review637_postgres_test as ninth
+from tests.lab_arena import nov06_unused_ninth643_postgres_test as unused_ninth
 from tests.lab_arena.refusal_review_fallback599_postgres_test import (
     PRIMARY, ALTERNATE, SIGNATURES, begin, failure, verdict,
 )
@@ -389,6 +390,51 @@ def test_finalized_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth
             begin(store, ninth.SID, before_row['miner_hotkey'], ALTERNATE)
     assert store.get_submission(ninth.SID) == before_row
     assert store.list_ledger(submission_id=ninth.SID) == before_ledger
+
+
+def test_unused_ninth643_then642_then644_preserves_closed_history(ninth_context):
+    store, connection, *_ = ninth_context
+    sql = unused_ninth.prepared(ninth_context)
+    before_closure = unused_ninth.snapshot(store, connection)
+    original = store.get_submission(ninth.SID)
+    original_ledger = store.list_ledger(submission_id=ninth.SID)
+    assert original['code_review_attempts'] == 3
+    assert [entry['entry_doc']['review_model'] for entry in original_ledger
+            if entry['entry_kind'] == 'reservation'] == [PRIMARY] * 3
+
+    ninth.apply(connection, sql)
+    closed = unused_ninth.snapshot(store, connection)
+    proof = closed['receipts'][-1]['recovery_doc']['reviews'][ninth.SID]
+    assert proof['outcome'] == 'preminer_gate_closed_without_fourth'
+    assert proof['additional_reservations'] == proof['additional_cost_microusd'] == 0
+    assert closed['ledger'] == before_closure['ledger']
+    ninth.apply(connection, CUTOFF.read_text())
+    before = unused_ninth.snapshot(store, connection)
+    assert before['rows'] == closed['rows']
+    assert before['ledger'] == closed['ledger']
+    assert before['receipts'] == closed['receipts']
+    assert before['runs'] == closed['runs']
+    assert before['control'] == closed['control']
+    history = store.scoring_policy_history(ninth.ROUND)
+    with connection.cursor() as cursor:
+        functions = function_snapshot(cursor)
+
+    ninth.apply(connection, MIGRATION.read_text())
+    assert unused_ninth.snapshot(store, connection) == before
+    assert store.scoring_policy_history(ninth.ROUND) == history
+    with connection.cursor() as cursor:
+        after_functions = function_snapshot(cursor)
+    assert set(after_functions) == set(functions)
+    for name, previous in functions.items():
+        assert after_functions[name][1] == previous[1]
+        if name not in {signature.removeprefix('public.') for signature in SIGNATURES}:
+            assert after_functions[name] == previous
+    for model in (PRIMARY, ALTERNATE, DEEPSEEK):
+        with pytest.raises(ArenaStoreError, match='submission_missing'):
+            begin(store, ninth.SID, original['miner_hotkey'], model)
+    assert store.get_submission(ninth.SID)['code_review_attempts'] == 3
+    assert store.list_ledger(submission_id=ninth.SID) == original_ledger
+    assert unused_ninth.snapshot(store, connection) == before
 
 
 @pytest.mark.parametrize('primary', [PRIMARY, DEEPSEEK])

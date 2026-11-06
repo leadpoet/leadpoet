@@ -6,6 +6,7 @@ import json
 import hashlib
 import secrets
 import time
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -24,7 +25,10 @@ class SubmissionCodeReviewer:
         price_table: Mapping[str, Any], transport: broker.ProviderTransport,
         similarity_references_for: Callable[[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None,
         capture: Any = None,
+        prospective_primary_model: str = code_review.DEFAULT_REVIEW_MODEL,
     ) -> None:
+        if prospective_primary_model not in {code_review.DEFAULT_REVIEW_MODEL, code_review.PROSPECTIVE_REVIEW_MODEL}:
+            raise ValueError("unsupported admission primary model")
         self._store = store
         self._objects = objects
         self._credential_for = credential_for
@@ -32,6 +36,7 @@ class SubmissionCodeReviewer:
         self._transport = transport
         self._similarity_references_for = similarity_references_for
         self._capture = capture
+        self._prospective_primary_model = prospective_primary_model
 
     @staticmethod
     def _capture_outcome(call, document, result, actual):
@@ -151,11 +156,14 @@ class SubmissionCodeReviewer:
                 return {"status": "busy" if state == "reviewing" else "backoff", "code_review_status": state}
         submission_id = str(row["submission_id"])
         hotkey = str(row["miner_hotkey"])
-        review_model = code_review_policy.review_model_for(row)
+        review_model = code_review_policy.review_model_for(
+            row, prospective_primary_model=self._prospective_primary_model)
         review_output_tokens = code_review_policy.review_output_tokens_for(row)
         review_context = (
             code_review.FALLBACK_CONTEXT_WINDOW_TOKENS
             if review_model == code_review.FALLBACK_REVIEW_MODEL
+            else code_review.PROSPECTIVE_CONTEXT_WINDOW_TOKENS
+            if review_model == code_review.PROSPECTIVE_REVIEW_MODEL
             else code_review.DEFAULT_CONTEXT_WINDOW_TOKENS
         )
         prepared = None
@@ -262,6 +270,13 @@ class SubmissionCodeReviewer:
                         route.reservation_pricing, prepared.parameters,
                         max_output_tokens=prepared.parameters["max_tokens"], model=review_model,
                     )
+                elif review_model == code_review.PROSPECTIVE_REVIEW_MODEL:
+                    pricing = dict(self._prices["models"][review_model])
+                    for component, ceiling in code_review.PROSPECTIVE_PRICE_CEILING.items():
+                        pricing[component] = str(max(Decimal(pricing[component]), Decimal(ceiling)))
+                    reservation = broker._max_openrouter_cost_for_pricing(
+                        pricing, prepared.parameters,
+                        max_output_tokens=prepared.parameters["max_tokens"], model=review_model)
                 else:
                     reservation = broker.max_openrouter_cost_microusd(
                         self._prices, prepared.parameters["model"], prepared.parameters,
@@ -528,7 +543,8 @@ class SubmissionCodeReviewer:
             alternate_before = int(previous.get("review_alternate_attempts") or 0)
             document.update({"refusal_recovery": True,
                 "refusal_episode_start": int(previous.get("refusal_episode_start") or claim.get("attempt") or 1),
-                "review_primary_attempts": primary_before + (review_model == code_review.DEFAULT_REVIEW_MODEL),
+                "review_primary_attempts": primary_before + (review_model in {
+                    code_review.DEFAULT_REVIEW_MODEL, code_review.PROSPECTIVE_REVIEW_MODEL}),
                 "review_alternate_attempts": alternate_before + (review_model == code_review.FALLBACK_REVIEW_MODEL)})
         if status == "error" and review_model == code_review.FALLBACK_REVIEW_MODEL:
             previous = row.get("code_review_doc") or {}

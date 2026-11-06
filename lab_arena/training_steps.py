@@ -893,14 +893,20 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
             analysis.append({'source_example_hash': str(source) if isinstance(source, str) and contracts.SHA256_RE.fullmatch(source) else None, 'reason': reason})
             del example
             continue
+        # Own immutable worker snapshots once per episode, as publication
+        # assessment does. Calls retain every original validation and byte.
+        worker_proofs = training_worker_proof.WorkerProofs()
+        example = worker_proofs.prepare(example)
         for call in example.get('provider_calls') or []:
             if not isinstance(call, dict):
                 counts['malformed_call'] += 1
                 analysis.append({'source_example_hash': source, 'call_ref_hash': None, 'reason': 'malformed_call'})
                 continue
             try:
-                record = (_candidate(example, call, host_observed=True, allow_journal_prefix=True, role=role) if host_observed
-                          else _candidate(example, call, allow_journal_prefix=True, role=role))
+                record = (_candidate(example, call, host_observed=True, worker_proofs=worker_proofs,
+                                     allow_journal_prefix=True, role=role) if host_observed
+                          else _candidate(example, call, worker_proofs=worker_proofs,
+                                          allow_journal_prefix=True, role=role))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])
@@ -915,9 +921,10 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 analysis.append({'source_example_hash': source, 'call_ref_hash': contracts.document_hash(call.get('call_identity')), 'reason': reason})
             else:
                 if full_thinking_candidate is not None:
-                    full_thinking_candidate(example, record)
+                    full_thinking_candidate(example, record, worker_proofs=worker_proofs)
         # Drop the raw source and last raw call before parsing the next episode.
         call = None
+        worker_proofs = None
         del example
     splits = {'train': [], 'eval': [], 'analysis': []}
     future_groups = source_groups.future_groups(rules.eval_after)

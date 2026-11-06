@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture, training_coverage
+from lab_arena import broker as broker_module, chain as chain_module, code_review, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture, training_coverage
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -668,7 +668,8 @@ def build_service_from_environment(mode: str):
 
     # The current paid reviewer must not start against a database that lacks
     # atomic route selection and both bounded recovery reservation policies.
-    store.code_review_schema(require_refusal_fallback=True, require_invalid_review_budget=True)
+    store.code_review_schema(require_refusal_fallback=True, require_invalid_review_budget=True,
+                             require_prospective_primary=True)
     store.submission_replacement_schema(require_per_round_cutoff=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
@@ -684,6 +685,7 @@ def build_service_from_environment(mode: str):
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
             similarity_references_for=lambda row: service.submission_similarity_references(row),
             capture=internal_capture,
+            prospective_primary_model=code_review.PROSPECTIVE_REVIEW_MODEL,
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,

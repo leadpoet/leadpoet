@@ -6468,6 +6468,9 @@ async def investigate_company_evidence(
                         else {}
                     ),
                 }
+                # Frozen model options may lower the provider-visible cap.
+                # Read that cap for repair checks without changing the request.
+                effective_controller_output_limit = prepare_judge_request(controller_payload)[1]["max_tokens"]
                 status, body = await _post_openrouter_json(
                     session, "https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},
@@ -6512,7 +6515,7 @@ async def investigate_company_evidence(
                         )
                     )
                     and _response_exhausted_output_budget(
-                        body, max_tokens=controller_output_limit
+                        body, max_tokens=effective_controller_output_limit
                     )
                 ):
                     # Output exhaustion can consume the whole reply before a
@@ -6643,7 +6646,7 @@ async def investigate_company_evidence(
                             )
                         )
                         and _response_exhausted_output_budget(
-                            body, max_tokens=controller_output_limit
+                            body, max_tokens=effective_controller_output_limit
                         )
                     )
                     if retry_incomplete_submit:

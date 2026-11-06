@@ -1,3 +1,14 @@
+## Scoped authorization: November 6 ninth exact late review
+
+The user approved one unchanged-artifact alternate review for
+sub-43a929eb0e2e487f68014f48e7d80e6b. Add only one receipt-bound Sol attempt4
+within thirty minutes, and enroll only a genuine settled full-source pass.
+Preserve all twenty-nine other rows, prior635/636 receipts and windows, original
+eighteen participants, charges, frozen rules, round schedules, and the existing
+operator hold. Do not create execution jobs, reopen the completed eight, or allow
+a fifth attempt. Internal agents implement, test and commit only; the root owns
+independent review, push, merge, canonical release, production and paid calls.
+
 ## Scoped authorization: November 6 exact eight late admission recovery
 
 The user approved recovering the exact eight infrastructure-invalid November 6

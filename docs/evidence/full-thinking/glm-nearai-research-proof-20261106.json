@@ -1,0 +1,96 @@
+{
+  "probe_id": "glm-5.3-flash-nearai-fp8-tool-continuity-20261106",
+  "verified_at": "2026-11-06T04:07:39.973966Z",
+  "model": "z-ai/glm-5.3-flash",
+  "route": "near-ai/fp8",
+  "api": "openrouter.chat",
+  "probe_sha256": "3d74357d23a1c2ccb1498c5c1440b055685c1823ca0ff4379de88a6e635774a2",
+  "probe_checks": {
+    "two_tool_continuations": true,
+    "final_json": true,
+    "returned_text": true,
+    "no_truncation": true
+  },
+  "real_evidence_calls": [
+    {
+      "case": "call-003",
+      "request_sha256": "6d323096109b707681c5b424dff249e6ccfc8b7526ba0f09a4738a90a61b43cf",
+      "response_sha256": "65e7b6eff2a2aba5b4f1ba4d47ecbbbb9442bee7333f4b041c8824aafa9eddd3",
+      "selected_endpoint": {
+        "provider": "Near AI",
+        "model": "z-ai/glm-5.3-flash-20260826",
+        "selected": true
+      },
+      "thinking_characters": 365,
+      "visible_quote_grounding": null
+    },
+    {
+      "case": "call-007",
+      "request_sha256": "42f1908e4afdfd22e16a215dfab34eed2796bbe6f07e2149b67c5f5b85091633",
+      "response_sha256": "61d27a60207af0160370318a7c3ebd3da03ff601c14ec7657b71985510884b99",
+      "selected_endpoint": {
+        "provider": "Near AI",
+        "model": "z-ai/glm-5.3-flash-20260826",
+        "selected": true
+      },
+      "thinking_characters": 14651,
+      "visible_quote_grounding": true
+    },
+    {
+      "case": "call-025",
+      "request_sha256": "dab2984d5efdf4bfce6e5c35fb72d9091c20f4e171e59952a54fff1ff8267a55",
+      "response_sha256": "248890870ea66746c049a37d749cce3c3454bc31df04ec4d0c7a7830e23a108b",
+      "selected_endpoint": {
+        "provider": "Near AI",
+        "model": "z-ai/glm-5.3-flash-20260826",
+        "selected": true
+      },
+      "thinking_characters": 1693,
+      "visible_quote_grounding": true
+    }
+  ],
+  "privacy": "Pinned provider; ZDR and data_collection=deny; no claim of end-to-end confidential inference through OpenRouter",
+  "limit": "Route capability and bounded research validation only; not a final-classifier approval, production activation, or whole-trajectory SFT proof.",
+  "official_documentation": [
+    "https://docs.z.ai/guides/capabilities/thinking-mode",
+    "https://near.ai/blog/near-ai-cloud-on-openrouter"
+  ],
+  "research_validation": {
+    "full_native_scores": {
+      "positive_company": 51,
+      "positive_per_icp": 12.75,
+      "negative_company": 0,
+      "negative_per_icp": 0
+    },
+    "fresh_industry": {
+      "powerlattice": {
+        "original": "mismatch",
+        "candidate": "mismatch"
+      },
+      "rackspace": {
+        "original": "unavailable",
+        "candidate": "unavailable"
+      },
+      "hoover_treated_wood": {
+        "original": "match",
+        "candidate": "match"
+      }
+    },
+    "final_classification_137": {
+      "current_sol": {
+        "TP": 52,
+        "TN": 70,
+        "FP": 4,
+        "FN": 11
+      },
+      "glm_nearai_not_selected": {
+        "TP": 53,
+        "TN": 63,
+        "FP": 11,
+        "FN": 10
+      }
+    },
+    "prompt_change": false,
+    "scope": "Historical identity anchors with fresh native source retrieval; full-score controls include retained genuine pages and fresh search. Private native harness, not production SQL/worker acceptance."
+  }
+}

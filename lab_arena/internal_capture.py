@@ -479,6 +479,14 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
                                                chat_annotations_validator=_internal_chat_annotations)
             if first["api"] == "openrouter.responses":
                 training_steps._validate_target_tools(request, target, first["api"])
+            elif target.get("tool_calls"):
+                # Hosted search executes at the provider; it cannot declare
+                # a model-authored function call. Preserve mixed requests and
+                # validate only their callable function definitions here.
+                function_tools = [tool for tool in request.get("tools", [])
+                                  if tool.get("type") == "function"]
+                training_steps._validate_target_tools(
+                    {"tools": function_tools}, target, first["api"])
             candidate = {"schema_version": SFT_SCHEMA_VERSION, "actor_type": "arena_internal",
                          "purpose": first.get("purpose"), "call_id": raw["call_id"],
                          "format": first["api"], "input": request, "target": target,

@@ -164,7 +164,9 @@ def validate_judge_registry(registry: Any, scorer_policy: Mapping[str, Any]) -> 
                 mode = option["reasoning"]
                 route_mode = route["mode"]
                 budget = "max_tokens" in mode and "budget_tokens" in route_mode
-                if (option["max_output_tokens"] > route["max_output_tokens"]
+                maximum = contracts.judge_request_max_output_tokens(option, model=model,
+                    industry_model=models.get("industry_evidence_review"), operation_id=api, role=role)
+                if (maximum > route["max_output_tokens"]
                         or not (budget or set(mode) == set(route_mode))
                         or api == "openrouter.responses" and mode.get("effort") == "max"):
                     raise ValueError("judge request options differ from approved route")

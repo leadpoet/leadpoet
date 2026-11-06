@@ -132,3 +132,35 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_publication_hold_is_reported_as_its_own_stage(observed_service, held):
+    """A round held back from publication must not look like a healthy tick."""
+    service, exporter, row = observed_service
+    row["status"] = "scored"
+    service._frozen_unfinished_judgment = lambda _: held
+    published = {"status": "published"}
+    attempts = []
+
+    def publish(round_id):
+        attempts.append(round_id)
+        return published
+
+    service.publish = publish
+    result = service.advance_round("round")
+    spans = {span.attributes["arena.stage"]: span
+             for span in exporter.get_finished_spans()}
+    hold = spans["advance_publish_hold"]
+    if held:
+        assert result == {"status": "waiting", "round_status": "scored",
+                          "reason": "frozen_judgment_incomplete"}
+        assert attempts == []
+        assert hold.attributes["arena.outcome"] == "ok"
+        assert hold.attributes["arena.count"] == 1
+        assert "advance_publish" not in spans
+    else:
+        assert result is published
+        assert attempts == ["round"]
+        assert hold.attributes["arena.outcome"] == "idle"
+        assert spans["advance_publish"].attributes["arena.outcome"] == "ok"

@@ -8124,7 +8124,14 @@ class ArenaService:
                 if _judge_continuation_enabled(round_row):
                     with telemetry.stage("advance_expire_leases"):
                         self._store.expire_leases(round_id)
-                if self._frozen_unfinished_judgment(round_row):
+                # Report the hold. A round parked here is passed over on every
+                # tick with no publish attempt, so without its own stage the
+                # driver looks healthy while the round never publishes.
+                with telemetry.stage("advance_publish_hold") as observed:
+                    held = self._frozen_unfinished_judgment(round_row)
+                    observed.count = 1 if held else 0
+                    observed.idle = not held
+                if held:
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}
                 try:

@@ -1,4 +1,4 @@
-"""Forward-only642 then646 on native cutoffs and retained637 finality."""
+"""Forward-only642 then660 on native cutoffs and retained637 finality."""
 from datetime import datetime, timedelta, timezone
 import hashlib
 import re
@@ -26,7 +26,7 @@ from tests.lab_arena.replacement_cutoff639_postgres_test import clock
 from tests.lab_arena.queued_submission_replacement_postgres_test import _doc
 from tests.postgres_migration_harness import SCRIPTS
 
-MIGRATION = SCRIPTS / '646-lab-arena-prospective-admission-primary.sql'
+MIGRATION = SCRIPTS / '660-lab-arena-prospective-admission-primary.sql'
 CUTOFF = SCRIPTS / '642-lab-arena-prospective-replacement-cutoff.sql'
 
 
@@ -50,7 +50,7 @@ def restore_predecessor(cursor):
     for i, signature in enumerate(SIGNATURES):
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
         fixed = cursor.fetchone()[0]
-        replacements = re.findall(r'v_old:=\$old646_'+str(i)+r'_(\d+)\$(.*?)\$old646_'+str(i)+r'_\1\$;\n  v_new:=\$new646_'+str(i)+r'_\1\$(.*?)\$new646_'+str(i)+r'_\1\$;', text, re.S)
+        replacements = re.findall(r'v_old:=\$old660_'+str(i)+r'_(\d+)\$(.*?)\$old660_'+str(i)+r'_\1\$;\n  v_new:=\$new660_'+str(i)+r'_\1\$(.*?)\$new660_'+str(i)+r'_\1\$;', text, re.S)
         assert replacements
         for _, old, new in reversed(replacements):
             assert new in fixed
@@ -69,8 +69,8 @@ def accepted_recovery_submission(store, suffix, *, cutoff_minutes=5):
     now = datetime.now(timezone.utc)
     round_id = 'arena-2099-03-01-' + hashlib.sha256(suffix.encode()).hexdigest()[:12]
     submission = suffix + '-recovery'
-    miner = hotkey('primary646-' + suffix)
-    config = round_config(round_id, [hotkey('runner646-' + suffix)])
+    miner = hotkey('primary660-' + suffix)
+    config = round_config(round_id, [hotkey('runner660-' + suffix)])
     config['schedule'].update({
         'submission_open': (now - timedelta(hours=2)).isoformat(),
         'submission_cutoff': (now + timedelta(minutes=cutoff_minutes)).isoformat(),
@@ -107,7 +107,7 @@ def recovery_database():
             try:
                 for delta in (-1, 0, 1):
                     rid, sid, miner = accepted_recovery_submission(
-                        store, 'primary646-legacyedge-' + str(delta), cutoff_minutes=180)
+                        store, 'primary660-legacyedge-' + str(delta), cutoff_minutes=180)
                     cutoff = datetime.fromisoformat(store.get_round(rid)['configuration_doc']['schedule']['submission_cutoff'])
                     with clock(connection, cutoff - timedelta(seconds=3600)):
                         token = new_lease_token()
@@ -143,7 +143,7 @@ def test_requires_exact642_body_and_retains_native_cutoff(recovery_superuser):
         cursor.execute(old)
         before = function_snapshot(cursor)
         try:
-            with pytest.raises(Exception, match='primary646 preimage differs'):
+            with pytest.raises(Exception, match='primary660 preimage differs'):
                 cursor.execute(MIGRATION.read_text())
             cursor.execute('ROLLBACK')
             assert function_snapshot(cursor) == before
@@ -157,7 +157,7 @@ def test_requires_exact642_body_and_retains_native_cutoff(recovery_superuser):
         assert hashlib.sha256(combined.encode()).hexdigest() == '03009634a9dcde9342a7428d73eaf4285bf341811241a1d51e5d54bc8b8b04b9'
         assert combined.count(cutoff) == 1
         # Independent composition check: the exact cutoff is the only delta
-        # from the previously qualified646 function body.
+        # from the previously qualified660 function body.
         assert hashlib.sha256(combined.replace(cutoff, "- INTERVAL '1 hour'").encode()).hexdigest() == 'b1af0faa9fddadf702b56bd30d98d9dd4c86b1ffc4cf020e72b1b57ea431214b'
         for name in before:
             if name not in {signature.removeprefix('public.') for signature in SIGNATURES}:
@@ -168,11 +168,11 @@ def test_requires_exact642_body_and_retains_native_cutoff(recovery_superuser):
 @pytest.mark.parametrize('operation', ['register', 'credentials', 'source', 'review'])
 def test_new600_native_cutoff_edges(recovery_store, recovery_superuser, delta, operation):
     rid, original, miner = accepted_recovery_submission(
-        recovery_store, f'primary646-edge-{operation}-{delta}', cutoff_minutes=180)
+        recovery_store, f'primary660-edge-{operation}-{delta}', cutoff_minutes=180)
     row = recovery_store.get_round(rid)
     assert row['replacement_freeze_seconds'] == 600
     cutoff = datetime.fromisoformat(row['configuration_doc']['schedule']['submission_cutoff'])
-    replacement = f'primary646-replacement-{operation}-{delta}'
+    replacement = f'primary660-replacement-{operation}-{delta}'
     if operation in ('credentials', 'source'):
         assert recovery_store.register_submission(rid, replacement, miner,
             _doc(rid, replacement, 124))['status'] == 'registered'
@@ -203,7 +203,7 @@ def test_new600_native_cutoff_edges(recovery_store, recovery_superuser, delta, o
 
 @pytest.mark.parametrize('delta', [-1, 0, 1])
 def test_retained_null_round_native3600_review_edges(recovery_store, recovery_superuser, delta):
-    suffix = 'primary646-legacyedge-' + str(delta)
+    suffix = 'primary660-legacyedge-' + str(delta)
     sid = suffix + '-recovery'
     row = recovery_store.get_submission(sid)
     round_row = recovery_store.get_round(row['round_id'])
@@ -238,7 +238,7 @@ def test_busy_native_rows_refuse_migration_immediately_without_changes(
     with recovery_superuser.cursor() as cursor:
         restore_predecessor(cursor)
     round_id, submission, miner = accepted_recovery_submission(
-        recovery_store, 'primary646-nowait-' + key)
+        recovery_store, 'primary660-nowait-' + key)
     assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'claimed'
 
     def snapshot():
@@ -289,7 +289,7 @@ def test_fail_before_then_upgrade_preserves_rows_and_uses_actual_new_primary(rec
     with recovery_superuser.cursor() as cursor:
         restore_predecessor(cursor)
         functions = function_snapshot(cursor)
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary646-before')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary660-before')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, DEEPSEEK)
@@ -322,9 +322,9 @@ def test_migration_replay_and_unknown_final_body_preserve_all_functions(recovery
         restore_predecessor(cursor)
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURES[-1],))
         original_schema = cursor.fetchone()[0]
-        cursor.execute(original_schema.replace('SELECT', '-- unknown646\n  SELECT', 1))
+        cursor.execute(original_schema.replace('SELECT', '-- unknown660\n  SELECT', 1))
         before = function_snapshot(cursor)
-        with pytest.raises(Exception, match='primary646 preimage differs'):
+        with pytest.raises(Exception, match='primary660 preimage differs'):
             cursor.execute(MIGRATION.read_text())
         cursor.execute('ROLLBACK')
         assert function_snapshot(cursor) == before
@@ -338,9 +338,9 @@ def test_unknown_parent_recovery_helper_is_rejected_without_function_changes(rec
     with recovery_superuser.cursor() as cursor:
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
         original = cursor.fetchone()[0]
-        cursor.execute(original.replace('SELECT', '-- unknown646parent\n SELECT', 1))
+        cursor.execute(original.replace('SELECT', '-- unknown660parent\n SELECT', 1))
         before = function_snapshot(cursor)
-        with pytest.raises(Exception, match='primary646 parent637 differs'):
+        with pytest.raises(Exception, match='primary660 parent637 differs'):
             cursor.execute(MIGRATION.read_text())
         cursor.execute('ROLLBACK')
         assert function_snapshot(cursor) == before
@@ -392,7 +392,7 @@ def test_finalized_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth
     assert store.list_ledger(submission_id=ninth.SID) == before_ledger
 
 
-def test_unused_ninth643_then642_then646_preserves_closed_history(ninth_context):
+def test_unused_ninth643_then642_then660_preserves_closed_history(ninth_context):
     store, connection, *_ = ninth_context
     sql = unused_ninth.prepared(ninth_context)
     before_closure = unused_ninth.snapshot(store, connection)
@@ -439,7 +439,7 @@ def test_unused_ninth643_then642_then646_preserves_closed_history(ninth_context)
 
 @pytest.mark.parametrize('primary', [PRIMARY, DEEPSEEK])
 def test_refusal_episode_keeps_two_real_primary_and_two_alternate_claims(recovery_store, recovery_superuser, primary):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary646-'+('legacy' if primary == PRIMARY else 'new'))
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary660-'+('legacy' if primary == PRIMARY else 'new'))
     for index, model in enumerate([primary, primary, ALTERNATE, ALTERNATE], 1):
         if index > 1:
             _age_review_error(recovery_superuser, submission)
@@ -462,7 +462,7 @@ def test_refusal_episode_keeps_two_real_primary_and_two_alternate_claims(recover
 
 
 def test_deepseek_truncation_uses_next_existing_slot_and_preserves_unknown_cost(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary646-truncated')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary660-truncated')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, DEEPSEEK,
@@ -487,7 +487,7 @@ def test_deepseek_truncation_uses_next_existing_slot_and_preserves_unknown_cost(
 @pytest.mark.parametrize('primary,other', [(PRIMARY, DEEPSEEK), (DEEPSEEK, PRIMARY)])
 def test_transient_episode_cannot_change_primary_model(recovery_store, recovery_superuser, primary, other):
     _, submission, miner = accepted_recovery_submission(recovery_store,
-        'primary646-transient-'+('old' if primary == PRIMARY else 'new'))
+        'primary660-transient-'+('old' if primary == PRIMARY else 'new'))
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, primary, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, primary, error='code_review_transport_error', actual=None)
@@ -499,7 +499,7 @@ def test_transient_episode_cannot_change_primary_model(recovery_store, recovery_
 
 
 def test_native_runtime_primary_pass_is_bound_to_real_ledger_and_final(recovery_store, recovery_superuser):
-    _, submission, _ = accepted_recovery_submission(recovery_store, 'primary646-runtime')
+    _, submission, _ = accepted_recovery_submission(recovery_store, 'primary660-runtime')
     instance, _, _, transport = reviewer(lambda parameters: {'body': receipt(parameters)}, store=recovery_store)
     row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(_archive(_source()))}
     assert instance.review(row)['status'] == 'passed'
@@ -512,7 +512,7 @@ def test_native_runtime_primary_pass_is_bound_to_real_ledger_and_final(recovery_
 
 
 def test_actual_model_binding_and_db_first_schema_remain_fail_closed(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary646-binding')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary660-binding')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     with pytest.raises(ArenaStoreError, match='input_invalid'):

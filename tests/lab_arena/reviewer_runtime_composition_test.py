@@ -227,7 +227,7 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
         _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
-    corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    corrected = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     original = corrected.replace(HELPER.encode(), b'', 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
     ).replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1)
@@ -261,7 +261,7 @@ def test_completed_investigation_upgrades_existing_runtime_finality_only():
         _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
-    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    corrected = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     legacy = corrected.replace(HELPER.encode(), LEGACY_HELPER.encode(), 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
     ).replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1)
@@ -280,7 +280,7 @@ def test_completed_review_recovers_headcount_on_prior_frozen_runtime():
         HELPER, PREVIOUS_HELPER, _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
-    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    corrected = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     prior = corrected.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1).replace(
         _POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1,
     )
@@ -297,7 +297,7 @@ def test_completed_profile_obligations_upgrade_exact_v2_helper_only():
     from scripts.arena_reviewer_investigation_finality_seam import (
         HELPER, PREVIOUS_HELPER_V2, convert_investigation_finality_seam,
     )
-    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    corrected = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     prior = corrected.replace(HELPER.encode(), PREVIOUS_HELPER_V2.encode(), 1)
     assert prior != corrected
     assert convert_investigation_finality_seam(prior) == corrected
@@ -311,7 +311,7 @@ def test_completed_review_rejects_partial_or_unknown_postrepair_source(fault):
         HELPER, PREVIOUS_HELPER, _POST_REPAIR_NEW,
         InvestigationFinalitySeamError, convert_investigation_finality_seam,
     )
-    source = (ROOT / composer.FINALITY_FILE).read_bytes()
+    source = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     if fault == 'partial_helper':
         source = source.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1)
     elif fault == 'unknown_call':
@@ -344,7 +344,7 @@ def test_completed_investigation_wrapper_correction_fails_closed(fault):
         HELPER, LEGACY_HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
         InvestigationFinalitySeamError, convert_investigation_finality_seam,
     )
-    source = (ROOT / composer.FINALITY_FILE).read_bytes()
+    source = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     if fault == 'legacy_helper_new_guard':
         source = source.replace(HELPER.encode(), LEGACY_HELPER.encode(), 1)
     elif fault == 'new_helper_old_guard':
@@ -365,7 +365,7 @@ def test_completed_investigation_correction_fails_closed(fault):
         InvestigationFinalitySeamError,
         convert_investigation_finality_seam,
     )
-    source = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    source = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     if fault == 'partial':
         old, new = DELTAS[-1]
         source = source.replace(new.encode(), old.encode(), 1)
@@ -399,7 +399,7 @@ def test_completed_investigation_correction_rejects_shadowed_helper_binding(
         InvestigationFinalitySeamError,
         convert_investigation_finality_seam,
     )
-    source = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    source = frozen_source("identity_repair_finality_2dc", composer.FINALITY_FILE)
     if not already_corrected:
         assert source.count(HELPER.encode()) == 1
         source = source.replace(HELPER.encode(), b'', 1)

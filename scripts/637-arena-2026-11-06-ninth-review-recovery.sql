@@ -1,6 +1,7 @@
 -- User-approved ninth November6 review. One unchanged-artifact Sol attempt4.
 -- Reuse the existing receipt-version semantics; each exact request has its own
--- thirty-minute exception. No prior receipt, round schedule, hold, or cost changes.
+-- thirty-minute exception, authorized after stage1 close but before miner planning.
+-- No prior receipt, round schedule, operator state, or cost changes.
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
@@ -17,7 +18,7 @@ BEGIN
   jsonb_build_array(o.rolname,p.proacl::TEXT,p.prosecdef,p.provolatile,p.proconfig)
  INTO d,metadata,ident FROM pg_proc p JOIN pg_roles o ON o.oid=p.proowner WHERE p.oid=target;
  IF d IS NULL OR ident IS DISTINCT FROM jsonb_build_array('lab_arena_owner','{lab_arena_owner=X/lab_arena_owner}',TRUE,'s',ARRAY['search_path=pg_catalog, public']::TEXT[]) THEN RAISE EXCEPTION 'Nov06 ninth637 helper security differs'; END IF;
- IF encode(extensions.digest(d,'sha256'),'hex')='515f66f04664bd8cd9ec8327b75db89e41164018d3c07c99869696ea9b8a19f1' THEN RETURN; END IF;
+ IF encode(extensions.digest(d,'sha256'),'hex')='37f4106388a4683a297d46c470684dc17548f7431db6c72016cbae043836530f' THEN RETURN; END IF;
  IF encode(extensions.digest(d,'sha256'),'hex')<>'80a5e95464b11019a55d0faf526a3295070003c1a13686cfefb9f8d35deeb491' THEN RAISE EXCEPTION 'Nov06 ninth637 helper preimage differs'; END IF;
  old:=$old637_helper$ WHERE h.round_id=p_round.round_id AND h.request_id='nov06-late-review635-v1'
   AND h.recovery_doc->>'operation'='nov06_late_review635_v1'$old637_helper$;
@@ -59,15 +60,9 @@ BEGIN
      AND (submission_id IS DISTINCT FROM 'baseline-2026-11-06' OR stage IS DISTINCT FROM 1))))$new637_runs$;
  IF length(updated)-length(replace(updated,old,''))<>length(old) THEN RAISE EXCEPTION 'Nov06 ninth637 helper runs anchor differs'; END IF;
  updated:=replace(updated,old,new);
- old:=$old637_deadline$ SELECT h.created_at+INTERVAL '30 minutes'$old637_deadline$;
- new:=$new637_deadline$ SELECT CASE WHEN h.request_id='nov06-ninth-review637-v1' THEN
-  LEAST(h.created_at+INTERVAL '30 minutes',(h.old_round_doc#>>'{configuration_doc,schedule,stage_1_close}')::TIMESTAMPTZ)
-  ELSE h.created_at+INTERVAL '30 minutes' END$new637_deadline$;
- IF length(updated)-length(replace(updated,old,''))<>length(old) THEN RAISE EXCEPTION 'Nov06 ninth637 helper deadline anchor differs'; END IF;
- updated:=replace(updated,old,new);
- IF encode(extensions.digest(updated,'sha256'),'hex')<>'515f66f04664bd8cd9ec8327b75db89e41164018d3c07c99869696ea9b8a19f1' THEN RAISE EXCEPTION 'Nov06 ninth637 helper postimage differs'; END IF;
+ IF encode(extensions.digest(updated,'sha256'),'hex')<>'37f4106388a4683a297d46c470684dc17548f7431db6c72016cbae043836530f' THEN RAISE EXCEPTION 'Nov06 ninth637 helper postimage differs'; END IF;
  EXECUTE updated;
- IF encode(extensions.digest(pg_get_functiondef(target),'sha256'),'hex')<>'515f66f04664bd8cd9ec8327b75db89e41164018d3c07c99869696ea9b8a19f1'
+ IF encode(extensions.digest(pg_get_functiondef(target),'sha256'),'hex')<>'37f4106388a4683a297d46c470684dc17548f7431db6c72016cbae043836530f'
   OR (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE p.oid=target) IS DISTINCT FROM metadata THEN
   RAISE EXCEPTION 'Nov06 ninth637 helper readback differs'; END IF;
 END;
@@ -111,7 +106,7 @@ BEGIN
   RETURN; -- Never regrant or move the original receipt window.
  END IF;
  SELECT * INTO STRICT c FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;
- deadline:=LEAST(created+INTERVAL '30 minutes',(r.configuration_doc#>>'{schedule,stage_1_close}')::TIMESTAMPTZ);
+ deadline:=created+INTERVAL '30 minutes';
  control_before:=to_jsonb(c);
  SELECT coalesce(jsonb_object_agg(run_id,to_jsonb(a)),'{}') INTO runs_before FROM public.lab_arena_runs a WHERE round_id=r.round_id;
  IF current_setting('session_replication_role')<>'origin' OR c.operator_paused

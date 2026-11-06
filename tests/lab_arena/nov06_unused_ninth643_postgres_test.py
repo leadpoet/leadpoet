@@ -1,5 +1,6 @@
 """Exact unused637 closure after planning, with no new paid or admission authority."""
 import json
+import re
 import pytest
 from psycopg2.extras import Json
 from tests.lab_arena.nov06_ninth_review637_postgres_test import (
@@ -9,6 +10,14 @@ from tests.lab_arena.refusal_review_fallback599_postgres_test import begin,ALTER
 from tests.postgres_migration_harness import SCRIPTS
 
 SQL=SCRIPTS/'643-arena-2026-11-06-finalize-unspent-ninth-review.sql'
+
+
+def test_every_ledger_read_is_bound_to_the_exact_review_journal():
+    reads=re.findall(r'FROM public\.lab_arena_ledger\b([^;)]+)',SQL.read_text())
+    assert len(reads)==3
+    for read in reads:
+        assert 'submission_id=sid' in read
+        assert "operation_id='openrouter.code_review'" in read
 
 
 def prepared(ctx, *, advance=True, fourth=False):
@@ -43,6 +52,10 @@ def snapshot(store,c):
 def test_closure_before_after_exact_preservation_replay_and_no_paid_claim(context):
     store,c,*_=context
     sql=prepared(context)
+    # Unrelated active-round billing remains byte-identical. This is synthetic
+    # audit data; no provider request or paid call is made by the fixture.
+    with c.cursor() as q:
+        q.execute("INSERT INTO public.lab_arena_ledger(entry_kind,round_id,submission_id,miner_hotkey,amount_microusd,entry_doc) SELECT 'reservation',round_id,submission_id,miner_hotkey,123,'{\"fixture\":\"unrelated_billing\"}'::JSONB FROM public.lab_arena_submissions WHERE submission_id='preserved-late635-1'")
     before=snapshot(store,c)
     row=store.get_submission(SID)
     assert begin(store,SID,row['miner_hotkey'],ALTERNATE)['status']=='round_closed'
@@ -74,7 +87,7 @@ def test_closure_before_after_exact_preservation_replay_and_no_paid_claim(contex
     assert store.list_ledger()==before['ledger']
 
 
-@pytest.mark.parametrize('fault',['fourth','passed','source','not_advanced','other','guard','different_receipt'])
+@pytest.mark.parametrize('fault',['fourth','passed','source','target_ledger','not_advanced','other','guard','different_receipt'])
 def test_closure_rejects_changed_authority_without_mutation(context,fault):
     store,c,_,target,*_=context
     sql=prepared(context,advance=fault!='not_advanced',fourth=fault=='fourth')
@@ -84,6 +97,10 @@ def test_closure_rejects_changed_authority_without_mutation(context,fault):
             q.execute("UPDATE public.lab_arena_submissions SET code_review_status='passed',code_review_doc=code_review_doc||'{\"verdict\":\"pass\",\"passed\":true}'::JSONB WHERE submission_id=%s",(SID,))
             q.execute("SET session_replication_role='origin'")
         elif fault=='source':q.execute("UPDATE public.lab_arena_submissions SET source_size_bytes=source_size_bytes+1,submission_doc=jsonb_set(submission_doc,'{source_size_bytes}',to_jsonb(source_size_bytes+1)) WHERE submission_id=%s",(SID,))
+        elif fault=='target_ledger':
+            q.execute("SET session_replication_role='replica'")
+            q.execute("UPDATE public.lab_arena_ledger SET entry_doc=entry_doc||'{\"fixture_tamper\":true}'::JSONB WHERE entry_id=(SELECT min(entry_id) FROM public.lab_arena_ledger WHERE submission_id=%s AND operation_id='openrouter.code_review')",(SID,))
+            q.execute("SET session_replication_role='origin'")
         elif fault=='other':q.execute("UPDATE public.lab_arena_submissions SET updated_at=clock_timestamp() WHERE submission_id='preserved-late635-1'")
         elif fault=='guard':
             from tests.lab_arena.atomic_review_restart_guard587_postgres_test import acquire

@@ -526,16 +526,22 @@ def test_identity_navigation_metadata_alone_is_not_industry_evidence(monkeypatch
     assert calls == 0 and not failure
 
 
-@pytest.mark.parametrize('enabled', [False, True])
-def test_frozen_policy_controls_industry_model_and_blocks_ambient_override(enabled):
+@pytest.mark.parametrize('frozen_model', [
+    pytest.param(MODEL, id='legacy-sol'),
+    pytest.param('deepseek/deepseek-v4.1-flash-1017', id='current-deepseek'),
+    pytest.param('', id='disabled'),
+])
+def test_frozen_policy_controls_industry_model_and_blocks_ambient_override(frozen_model):
     models = dict(scoring.DEFAULT_JUDGE_MODELS)
-    if not enabled:
+    if frozen_model:
+        models['industry_evidence_review'] = frozen_model
+    else:
         models.pop('industry_evidence_review')
     policy = scoring.build_scorer_policy(judge_models=models)
     credentials = {name: 'offline-secret' for name in scoring.CREDENTIAL_ENV_NAMES}
     environment = {}
     scoring.apply_policy_to_environment(policy, environ=environment, credentials=credentials)
-    assert environment['ARENA_INDUSTRY_EVIDENCE_MODEL'] == (MODEL if enabled else '')
+    assert environment['ARENA_INDUSTRY_EVIDENCE_MODEL'] == frozen_model
     with pytest.raises(scoring.ScorerPolicyConflict):
         scoring.apply_policy_to_environment(policy,
             environ={'ARENA_INDUSTRY_EVIDENCE_MODEL': 'another/model'}, credentials=credentials)

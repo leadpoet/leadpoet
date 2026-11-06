@@ -30,11 +30,11 @@ DEFAULT_JUDGE_MODELS = {
     "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
     "intent_fetched_evidence": "openai/gpt-oss-120b",
     "role_batch_check": "openai/gpt-oss-120b",
-    "industry_evidence_review": "openai/gpt-6.1-sol",
+    "industry_evidence_review": "deepseek/deepseek-v4.1-flash-1017",
     "industry_research_controller": "z-ai/glm-5.3-flash",
 }
 # These reviewed settings are frozen only for the exact prospective model map.
-# Sol retains final industry review after the open-model classification gate failed.
+# Industry review has its own frozen output allowance; shared roles keep theirs.
 DEFAULT_JUDGE_PROVIDER_ROUTES = {
     "deepseek/deepseek-v4.1-flash-1017": "nebius/fp8",
     "openai/gpt-oss-120b": "near-ai/fp4",
@@ -43,17 +43,13 @@ DEFAULT_JUDGE_PROVIDER_ROUTES = {
 DEFAULT_JUDGE_REQUEST_OPTIONS = {
     "deepseek/deepseek-v4.1-flash-1017": {
         "reasoning": {"effort": "low"}, "max_output_tokens": 8192,
+        "industry_max_output_tokens": 16384,
     },
     "openai/gpt-oss-120b": {
         "reasoning": {"effort": "low"}, "max_output_tokens": 4096,
     },
     "z-ai/glm-5.3-flash": {
         "reasoning": {"effort": "low"}, "max_output_tokens": 8192,
-    },
-}
-DEFAULT_JUDGE_REASONING_EXCEPTIONS = {
-    "openai/gpt-6.1-sol": {
-        "roles": ["industry_evidence_review"], "reason": "quality_gate_not_met",
     },
 }
 CREDENTIAL_ENV_NAMES = (
@@ -124,14 +120,12 @@ def build_scorer_policy(
               if judge_provider_routes is None and default_models
               else dict(judge_provider_routes or {}))
     # Explicit empty routes retain capture-off semantics, including absence
-    # of automatic options and the proprietary exception.
+    # of automatic options.
     default_capture = default_models and bool(routes)
     options = (dict(DEFAULT_JUDGE_REQUEST_OPTIONS)
                if judge_request_options is None and default_capture
                else judge_request_options)
-    exceptions = (dict(DEFAULT_JUDGE_REASONING_EXCEPTIONS)
-                  if judge_reasoning_exceptions is None and default_capture
-                  else judge_reasoning_exceptions)
+    exceptions = judge_reasoning_exceptions
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,

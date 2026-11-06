@@ -24,6 +24,20 @@ def judge_reasoning_enabled(model: str | None = None) -> bool:
     return True
 
 
+def judge_industry_output_override_enabled(model: str) -> bool:
+    """Only the selected frozen industry allowance opts into its new contract."""
+    if not judge_reasoning_enabled(model):
+        return False
+    options = json.loads(os.getenv("ARENA_JUDGE_REQUEST_OPTIONS") or "{}")
+    option = options.get(model) if isinstance(options, dict) else None
+    if not isinstance(option, dict) or "industry_max_output_tokens" not in option:
+        return False
+    from lab_arena import contracts
+    contracts.validate_judge_request_option(option, model=model,
+        industry_model=os.getenv("ARENA_INDUSTRY_EVIDENCE_MODEL"))
+    return True
+
+
 def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
                           output_token_floor: int | None = None) -> tuple[str, dict]:
     """Prepare existing judge HTTP calls; legacy rounds keep their exact body.
@@ -45,19 +59,16 @@ def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
     except (KeyError, TypeError, ValueError):
         raise ValueError("judge_provider_route_unavailable") from None
     option = None
+    maximum = None
     options_raw = os.environ.get("ARENA_JUDGE_REQUEST_OPTIONS")
     if options_raw:
         try:
             option = json.loads(options_raw)[body["model"]]
-            mode = option["reasoning"]
-            maximum = option["max_output_tokens"]
-            if (not isinstance(option, dict) or set(option) != {"reasoning", "max_output_tokens"}
-                    or type(maximum) is not int or not 1 <= maximum <= 32768
-                    or not isinstance(mode, dict)
-                    or not ((set(mode) == {"effort"} and mode["effort"] in {"minimal", "low", "medium", "high", "xhigh", "max"})
-                            or (set(mode) == {"enabled"} and mode["enabled"] is True)
-                            or (set(mode) == {"max_tokens"} and type(mode["max_tokens"]) is int and 1 <= mode["max_tokens"] < maximum))):
-                raise ValueError
+            from lab_arena import contracts
+            maximum = contracts.judge_request_max_output_tokens(option, model=body["model"],
+                industry_model=os.getenv("ARENA_INDUSTRY_EVIDENCE_MODEL"),
+                operation_id="openrouter.responses" if hosted_search else "openrouter.chat",
+                parameters=body)
         except (KeyError, TypeError, ValueError):
             raise ValueError("judge_request_options_unavailable") from None
     # This is a selector, not a caller-owned provider policy. The broker
@@ -114,8 +125,8 @@ def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
     # Optional claim comparison is allowed to keep its small original budget.
     # Incomplete comparisons are cache misses, never factual verdicts.
     if option is not None:
-        body["max_tokens"] = (option["max_output_tokens"] if output_token_floor is None
-                              else min(option["max_output_tokens"], max(output_token_floor, limit)))
+        body["max_tokens"] = (maximum if output_token_floor is None
+                              else min(maximum, max(output_token_floor, limit)))
     else:
         body["max_tokens"] = max(8192 if output_token_floor is None else output_token_floor, limit)
     if not hosted_search:

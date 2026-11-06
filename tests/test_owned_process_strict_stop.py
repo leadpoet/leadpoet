@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -72,14 +73,22 @@ def test_strict_stop_preserves_receipt_replaced_during_wait(tmp_path, monkeypatc
 @pytest.mark.parametrize('control', ['valid', 'wrong-owner', 'wrong-release', 'receipt-before', 'receipt-after'])
 def test_linux_strict_stop_owns_and_reaps_its_child(tmp_path, monkeypatch, control):
     tmp_path.chmod(0o700)
-    command = [sys.executable, '-u', '-c', 'import time\nwhile True: time.sleep(1)\n']
+    command = [sys.executable, '-u', '-c',
+               'import os, time\nos.write(1, b"ready\\n")\nwhile True: time.sleep(1)\n']
     environment = os.environ | {'GATEWAY_RESTART_INVOCATION_ID': OWNER,
         'LEADPOET_RESTART_INVOCATION_ID': OWNER,
         'GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID': OWNER,
         'LAB_ARENA_RELEASE_ROOT': str(tmp_path), 'LAB_ARENA_RELEASE_COMMIT': SHA}
     child = subprocess.Popen(command, cwd=tmp_path, env=environment, start_new_session=True,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
+        assert child.stdout is not None
+        with child.stdout:
+            # One atomic pipe write proves exec and Python startup completed.
+            # Do not sample /proc while the Popen child is still starting.
+            ready, _, _ = select.select([child.stdout], [], [], 5)
+            assert ready, 'fixture child did not become ready'
+            assert os.read(child.stdout.fileno(), 6) == b'ready\n'
         state = owned._read_process(child.pid)
         assert state is not None and state['argv'] == command
         path = tmp_path / 'process.json'

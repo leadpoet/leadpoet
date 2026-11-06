@@ -2217,7 +2217,10 @@ def _frozen_judge_parameters(context: RunContext, operation_id: str,
     result = dict(parameters, provider={"only": [provider]})
     if option is not None:
         output_field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
-        if result[output_field] > option["max_output_tokens"]:
+        maximum = contracts.judge_request_max_output_tokens(option, model=model,
+            industry_model=policy["judge_models"].get("industry_evidence_review"),
+            operation_id=operation_id, parameters=result)
+        if result[output_field] > maximum:
             raise BrokerError("invalid_request")
         reasoning = dict(result.get("reasoning") or {})
         if ("reasoning_effort" not in result and not any(

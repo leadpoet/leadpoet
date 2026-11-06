@@ -5057,7 +5057,7 @@ class ArenaService:
             selected = self._selected_execution_runs(reads.runs, submission_id)
             for run in selected.values():
                 if run.get("status") == "accepted":
-                    if reads.output(str(run["output_ref"]))["companies"] and run.get("per_icp_score") is not None:
+                    if reads.output(str(run["output_ref"]))["companies"]:
                         continue
                 elif run.get("status") != "failed" or run.get("terminal_cause") not in (
                     "provider_error", "stage_closed"):

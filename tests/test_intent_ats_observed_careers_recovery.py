@@ -182,7 +182,7 @@ def test_full_verifier_threads_observed_ownership_for_the_exact_baseline_job(mon
             assert params["dynamic"] == "true"
             return httpx.Response(200, text=listing_html())
 
-    async def judge(_client, _model, prompt):
+    async def judge(_client, _model, prompt, *, hosted_search=False):
         prompts.append(prompt)
         return _verdict(TARGET, "supported", "Transformation, Change and Delivery Consultant")
 

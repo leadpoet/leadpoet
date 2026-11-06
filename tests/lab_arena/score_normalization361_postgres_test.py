@@ -12,6 +12,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 
 MIGRATION = (
@@ -50,6 +51,8 @@ def _configuration(day: str = "25", *, company_quality: bool = False) -> dict:
         for key, value in config["schedule"].items()
     }
     config["scorer_policy"] = scoring.build_scorer_policy(
+        judge_models=LEGACY_MODELS,
+        judge_provider_routes={},
         scoring_adapter_version="qualification_integrity_v2",
         company_quality=company_quality,
         intent_details=True,

@@ -362,6 +362,15 @@ def _dispatch_with_response_url(
     status, headers, body, response_url = _parse_worker_response_with_url(payload)
     if response_url and operation_id != PAGE_FETCH_OPERATION:
         raise ShimTransportError("invalid_response")
+    if (os.environ.get(TRUSTED_SCORER_ENV) == "1"
+            and os.environ.get("ARENA_JUDGE_REASONING_CAPTURE_POLICY") == FULL_THINKING_POLICY
+            and headers.get(CALL_IDENTITY_HEADER)):
+        # The trusted scorer has consumed this exact socket reply. Reuse the
+        # existing receipt path; this sends no provider call or response text.
+        from lab_arena import lab_arena_checkpoint
+        lab_arena_checkpoint.record_response_received(
+            call_identity=headers[CALL_IDENTITY_HEADER], status=status, body=body,
+        )
     return status, headers, body, response_url
 
 

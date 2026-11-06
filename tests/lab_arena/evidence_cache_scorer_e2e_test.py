@@ -3,6 +3,8 @@
 The real scorer entrypoint, company-fit verifier, signal verifier, claim
 comparison and score aggregation run. Only provider replies and the durable
 host transport are local substitutes. This does not test production SQL.
+The held provider replies preserve the historical protocol. Current provider
+and thinking-capture flows use their own explicit frozen policy.
 """
 from copy import deepcopy
 import json as json_module
@@ -13,6 +15,7 @@ from lab_arena import contracts, evidence_judgments as ej, scorer_entrypoint, sc
 from qualification.scoring import lead_scorer
 from tests.lab_arena.legacy_company_judgments_test import _lease
 from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 from tests.test_arena_evidence_signal_bridge import _setup
 
 ABOUT = "https://epam.com/about"
@@ -97,7 +100,10 @@ class Response:
     async def text(self): return self.raw_text
 
 
-def setup_native(monkeypatch, *, paragraph=False):
+def setup_native(monkeypatch, *, paragraph=False, judge_models=LEGACY_MODELS,
+                 judge_provider_routes=None):
+    if judge_provider_routes is None and dict(judge_models) == LEGACY_MODELS:
+        judge_provider_routes = {}
     fixture, fetch, judge, compare, _ = _setup(monkeypatch)
     host, calls = FitAndSignalTransport(), Counter()
     host.paragraph_inputs = []
@@ -184,6 +190,7 @@ def setup_native(monkeypatch, *, paragraph=False):
         return result
     monkeypatch.setattr(lead_scorer, "_verify_company_fit", observe)
     policy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2",
+        judge_models=judge_models, judge_provider_routes=judge_provider_routes,
         company_judgment_cache=True, evidence_judgment_cache=True, intent_details=paragraph)
     icp = deepcopy(fixture["icp"])
     icp.update(max_companies=1, company_stage="Any", industry="Information Technology",
@@ -210,6 +217,7 @@ def setup_native(monkeypatch, *, paragraph=False):
             current["intent_signals"][0].update(description=claim, snippet=claim)
         host.run = run_id
         current_policy = policy if evidence_cache else scoring.build_scorer_policy(
+            judge_models=judge_models, judge_provider_routes=judge_provider_routes,
             scoring_adapter_version="qualification_integrity_v2", company_judgment_cache=True, intent_details=paragraph)
         document = scoring.build_scoring_input(scored_run_id=run_id, icp=icp,
             companies=[current], policy=current_policy, evaluation_date="2026-10-24")

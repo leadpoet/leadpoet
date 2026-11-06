@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from lab_arena import scoring
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
@@ -83,6 +84,7 @@ def _configuration(round_id: str = ROUND) -> dict:
         "intent_details_policy": "intent_details_v1",
         "benchmark_disclosure_policy": "after_scoring_day2_v1",
         "scorer_policy": scoring.build_scorer_policy(
+            judge_models=LEGACY_MODELS, judge_provider_routes={},
             scoring_adapter_version="qualification_contacts_v3",
             intent_details=True,
         ),

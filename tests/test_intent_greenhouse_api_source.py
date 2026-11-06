@@ -12,7 +12,7 @@ from qualification.scoring import intent_verification_three_stage as intent
 @pytest.fixture(params=["default", "frozen_runtime"], autouse=True)
 def source_variant(request, monkeypatch):
     if request.param == "default":
-        return
+        return request.param
     from scripts.arena_reviewer_greenhouse_api_source_seam import convert_greenhouse_api_source_seam
     from tests.reviewer_frozen_sources import frozen_source
     source = convert_greenhouse_api_source_seam(frozen_source(
@@ -22,6 +22,7 @@ def source_variant(request, monkeypatch):
     monkeypatch.setitem(sys.modules, module.__name__, module)
     exec(compile(source, "frozen_greenhouse_control.py", "exec"), module.__dict__)
     monkeypatch.setattr(sys.modules[__name__], "intent", module)
+    return request.param
 
 API = "https://boards-api.greenhouse.io/v1/boards/equalexperts/jobs/8425346002"
 HUMAN = "https://job-boards.greenhouse.io/equalexperts/jobs/8425346002"
@@ -107,7 +108,7 @@ async def test_api_source_keeps_returned_posting_binding(monkeypatch, replacemen
     ("supported", "other-employer.example", "review"),
     ("supported", None, "review"),
 ])
-async def test_api_source_still_obeys_stage3_verdict(monkeypatch, status, owner, expected):
+async def test_api_source_still_obeys_stage3_verdict(monkeypatch, status, owner, expected, source_variant):
     # A substantive body is a separate control. The retained link-only body
     # below must still fail the existing job-body gate.
     content = "<h2>About the role</h2><p>Senior Delivery Lead</p>"
@@ -116,7 +117,8 @@ async def test_api_source_still_obeys_stage3_verdict(monkeypatch, status, owner,
     calls = transport(monkeypatch, {**POSTING, "content": content})
     prompts = []
 
-    async def judge(_client, _model, prompt):
+    async def judge(_client, _model, prompt, *, hosted_search=None):
+        assert hosted_search is (True if source_variant == "default" else None)
         prompts.append(prompt)
         return {"model": "perplexity/sonar-pro", "usage": {}, "answer": {
             "overall_verdict": "qualified" if status == "supported" else "not_qualified",

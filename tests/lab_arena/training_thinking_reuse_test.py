@@ -234,7 +234,8 @@ def test_delivery_failure_drops_candidates_after_source_evidence_reuse():
         for record in splits[split]:
             for ref in record['source_refs']:
                 ref['delivered_response_sha256'] = contracts.hash_bytes(b'unretained')
-    def deliver_candidates(examples, rules, *, full_thinking_candidate):
+    def deliver_candidates(examples, rules, *, full_thinking_candidate, role='source'):
+        assert role == 'source'
         for source in examples:
             for split in ('train', 'eval'):
                 for record in splits[split]:

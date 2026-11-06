@@ -1897,6 +1897,14 @@ def registry_image_exporter(client: images.RegistryClient, *, rules: Optional[im
 # ---------------------------------------------------------------------------
 
 
+def _full_thinking_lease(lease: Mapping[str, Any]) -> bool:
+    if lease.get("kind") not in {"execute", "score"}:
+        return False
+    field = ("judge_reasoning_capture_policy" if lease.get("kind") == "score"
+             else "reasoning_capture_policy")
+    return lease.get(field) == shim.FULL_THINKING_POLICY
+
+
 @dataclass
 class RunState:
     lease: Dict[str, Any]
@@ -1913,6 +1921,7 @@ class RunState:
     )
     worker_observations: training_observations.Buffer = field(default_factory=training_observations.Buffer)
     worker_observation_ordinal: int = 0
+    judge_local_tool_sequences: Dict[str, int] = field(default_factory=dict)
     worker_observations_pending: set[int] = field(default_factory=set)
     worker_observations_frozen: bool = False
     worker_handlers_inflight: int = 0
@@ -2525,9 +2534,16 @@ class WorkerSocketServer:
         unavailable = contracts.canonical_json({"recorded": False}).encode("utf-8")
         try:
             frame = lab_arena_checkpoint.validate_training_frame(frame)
-            if str(self._state.lease.get("kind") or "execute") != "execute":
-                return unavailable
             data = dict(frame["data"])
+            judge_tool = (frame["kind"] == "judge_local_tool" or
+                          frame["kind"] == "capture_failure" and data["category"] == "judge_local_tool")
+            frozen_judge = (self._state.lease.get("kind") == "score"
+                            and _full_thinking_lease(self._state.lease))
+            if judge_tool and not frozen_judge:
+                return unavailable
+            if (str(self._state.lease.get("kind") or "execute") != "execute"
+                    and not (frozen_judge and (frame["kind"] == "response_received" or judge_tool))):
+                return unavailable
             if frame["kind"] == "web_fetch":
                 body = data["body"].encode("utf-8")
                 data.update(body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
@@ -2552,6 +2568,11 @@ class WorkerSocketServer:
                             return unavailable
                         return contracts.canonical_json({"recorded": True,
                             "observation_id": previous[1]}).encode("utf-8")
+                if frame["kind"] == "judge_local_tool":
+                    expected = self._state.judge_local_tool_sequences.get(data["investigation_id"], 0)
+                    if data["sequence"] != expected:
+                        buffer.failures.add("capture_incomplete")
+                        return unavailable
                 if frame["kind"] == "response_received":
                     matched = [row for row in buffer.response_receipts if row["call_identity"] == data["call_identity"]
                                and row["status"] == data["status"] and row["body_sha256"] == data["body_sha256"]
@@ -2580,6 +2601,8 @@ class WorkerSocketServer:
                     *(os.environ.get(name, "") for name in (
                         "OPENROUTER_API_KEY", "DEEPLINE_API_KEY", "SCRAPINGDOG_API_KEY")),
                 ))
+                if identity is not None and frame["kind"] == "judge_local_tool":
+                    self._state.judge_local_tool_sequences[data["investigation_id"]] = data["sequence"] + 1
                 if identity is not None and retry_token is not None:
                     self._state.training_retry_tokens[retry_token] = (hashlib.sha256(raw).digest(), identity)
             if identity is None:
@@ -3466,9 +3489,7 @@ class WorkerSocketServer:
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(
                 raw, deepline_catalog=self._state.lease.get("deepline_catalog"),
-                allow_full_thinking=self._state.lease.get("kind") == "execute"
-                and self._state.lease.get("reasoning_capture_policy")
-                == shim.FULL_THINKING_POLICY,
+                allow_full_thinking=_full_thinking_lease(self._state.lease),
             )
         except shim.OperationFrameError as exc:
             code = str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame"
@@ -3516,9 +3537,7 @@ class WorkerSocketServer:
             operation_id, parameters = operations.match_request(
                 method, url, body, headers,
                 deepline_catalog=self._state.lease.get("deepline_catalog"),
-                allow_full_thinking=self._state.lease.get("kind") == "execute"
-                and self._state.lease.get("reasoning_capture_policy")
-                == shim.FULL_THINKING_POLICY,
+                allow_full_thinking=_full_thinking_lease(self._state.lease),
             )
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
@@ -4630,8 +4649,7 @@ class AssignmentExecutor:
                     input_document["provider_operations"] = sorted(
                         set(operations.OPERATIONS) | set(operations.CATALOG_OPERATIONS)
                     )
-            if (lease.get("kind") == "execute"
-                    and lease.get("reasoning_capture_policy") == shim.FULL_THINKING_POLICY):
+            if _full_thinking_lease(lease):
                 # The shim needs a local parse hint; the worker's lease remains
                 # the authority for the same request after it crosses the socket.
                 extra_environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY

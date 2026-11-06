@@ -21,16 +21,36 @@ from lab_arena.contracts import ArenaContractError
 SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
 # Every OpenRouter model the Arena judge calls, by the judge's own role
 # for it. The broker refuses any other model on a scoring run, so this mapping
-# must cover the judge image exactly; ``test_lab_arena_judge_routes`` scans
-# the judge's source for model literals against it.
+# must cover the judge image's policy-bound roles. Historical policies keep
+# their own model map; the qualification modules retain their legacy defaults.
 DEFAULT_JUDGE_MODELS = {
-    "company_fit_reverification": "perplexity/sonar",
-    "intent_signal_judge": "openai/gpt-6-luna",
-    "intent_details_review": "anthropic/claude-sonnet-5.5",
-    "intent_three_stage_stage3": "perplexity/sonar-pro",
-    "intent_fetched_evidence": "openai/gpt-6-luna",
-    "role_batch_check": "google/gemini-3.5-flash-lite",
+    "company_fit_reverification": "deepseek/deepseek-v4.1-flash-1017",
+    "intent_signal_judge": "openai/gpt-oss-120b",
+    "intent_details_review": "deepseek/deepseek-v4.1-flash-1017",
+    "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
+    "intent_fetched_evidence": "openai/gpt-oss-120b",
+    "role_batch_check": "openai/gpt-oss-120b",
     "industry_evidence_review": "openai/gpt-6.1-sol",
+    "industry_research_controller": "openai/gpt-6.1-sol",
+}
+# These reviewed settings are frozen only for the exact prospective model map.
+# Sol retains both industry source research and final review after their open-model gates failed.
+DEFAULT_JUDGE_PROVIDER_ROUTES = {
+    "deepseek/deepseek-v4.1-flash-1017": "nebius/fp8",
+    "openai/gpt-oss-120b": "near-ai/fp4",
+}
+DEFAULT_JUDGE_REQUEST_OPTIONS = {
+    "deepseek/deepseek-v4.1-flash-1017": {
+        "reasoning": {"effort": "low"}, "max_output_tokens": 8192,
+    },
+    "openai/gpt-oss-120b": {
+        "reasoning": {"effort": "low"}, "max_output_tokens": 4096,
+    },
+}
+DEFAULT_JUDGE_REASONING_EXCEPTIONS = {
+    "openai/gpt-6.1-sol": {
+        "roles": ["industry_evidence_review", "industry_research_controller"], "reason": "quality_gate_not_met",
+    },
 }
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
@@ -89,9 +109,25 @@ def build_scorer_policy(
     normalize_intent_scale: bool = False,
     fit_fp_receipt_authority: bool = False,
     evidence_judgment_cache: bool = False,
+    judge_provider_routes: Optional[Mapping[str, str]] = None,
+    judge_request_options: Optional[Mapping[str, Any]] = None,
+    judge_reasoning_exceptions: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
+    default_models = dict(judge_models) == DEFAULT_JUDGE_MODELS
+    routes = (dict(DEFAULT_JUDGE_PROVIDER_ROUTES)
+              if judge_provider_routes is None and default_models
+              else dict(judge_provider_routes or {}))
+    # Explicit empty routes retain capture-off semantics, including absence
+    # of automatic options and the proprietary exception.
+    default_capture = default_models and bool(routes)
+    options = (dict(DEFAULT_JUDGE_REQUEST_OPTIONS)
+               if judge_request_options is None and default_capture
+               else judge_request_options)
+    exceptions = (dict(DEFAULT_JUDGE_REASONING_EXCEPTIONS)
+                  if judge_reasoning_exceptions is None and default_capture
+                  else judge_reasoning_exceptions)
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
@@ -110,6 +146,16 @@ def build_scorer_policy(
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
         "env_bindings": {
+            **({contracts.JUDGE_REASONING_EXCEPTIONS_BINDING: json.dumps(
+                dict(exceptions), sort_keys=True, separators=(",", ":"))}
+               if exceptions is not None else {}),
+            **({contracts.JUDGE_REQUEST_OPTIONS_BINDING: json.dumps(
+                dict(options), sort_keys=True, separators=(",", ":"))}
+               if options is not None else {}),
+            **({
+                contracts.JUDGE_REASONING_CAPTURE_BINDING: "full_generated_thinking_v1",
+                contracts.JUDGE_PROVIDER_ROUTES_BINDING: json.dumps(routes, sort_keys=True, separators=(",", ":")),
+            } if routes else {}),
             **({
                 contracts.SCORE_NORMALIZATION_BINDING:
                     contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
@@ -150,6 +196,11 @@ def apply_policy_to_environment(
         "intent_three_stage_stage3"
     )
     model_bindings = {
+        "ARENA_COMPANY_REVERIFY_MODEL": models.get("company_fit_reverification"),
+        "INTENT_THREE_STAGE_S1_MODEL": models.get("company_fit_reverification"),
+        "INTENT_THREE_STAGE_S3_MODEL": models.get("intent_three_stage_stage3"),
+        "ARENA_INTENT_SIGNAL_MODEL": models.get("intent_signal_judge"),
+        "ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL": evidence_model,
         "ARENA_INTENT_EVIDENCE_MODEL": evidence_model,
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": models.get("intent_details_review"),
         "ARENA_ROLE_BATCH_MODEL": models.get("role_batch_check"),
@@ -160,6 +211,15 @@ def apply_policy_to_environment(
     if bindings.get("ARENA_INDUSTRY_EVIDENCE_MODEL", industry_model) != industry_model:
         raise ScorerPolicyConflict("industry reviewer conflicts with the frozen model policy")
     bindings["ARENA_INDUSTRY_EVIDENCE_MODEL"] = industry_model
+    # An older frozen policy must not inherit the new controller role.
+    controller_model = models.get("industry_research_controller", "")
+    if bindings.get("ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL", controller_model) != controller_model:
+        raise ScorerPolicyConflict("industry controller conflicts with the frozen model policy")
+    bindings["ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL"] = controller_model
+    # Ambient settings cannot upgrade an older frozen round's capture or route.
+    for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING, contracts.JUDGE_PROVIDER_ROUTES_BINDING,
+                 contracts.JUDGE_REQUEST_OPTIONS_BINDING, contracts.JUDGE_REASONING_EXCEPTIONS_BINDING):
+        bindings.setdefault(name, "")
     for name, model in model_bindings.items():
         if model:
             if bindings.get(name, model) != model:

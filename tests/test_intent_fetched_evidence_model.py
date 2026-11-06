@@ -8,6 +8,7 @@ import pytest
 from lab_arena import broker, operations, scoring
 from qualification.scoring import intent_verification_three_stage as intent
 from tests.test_intent_three_stage_json_retry import _Client, _Response, _completion
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 
 @pytest.mark.asyncio
@@ -47,7 +48,7 @@ async def test_evidence_model_selection_preserves_search_roles_and_overrides(
 
 @pytest.mark.parametrize("new_role", [True, False])
 def test_frozen_policy_selects_the_reviewer_before_import(new_role):
-    models = dict(scoring.DEFAULT_JUDGE_MODELS)
+    models = dict(LEGACY_MODELS)
     if not new_role:
         del models["intent_fetched_evidence"]
     policy = scoring.build_scorer_policy(judge_models=models)
@@ -86,7 +87,7 @@ async def test_luna_request_passes_real_operation_and_signed_judge_admission(mon
         json.dumps(body).encode(), {"Content-Type": "application/json"},
     )
     assert operation_id == "openrouter.chat"
-    models = scoring.build_scorer_policy()["judge_models"]
+    models = scoring.build_scorer_policy(judge_models=LEGACY_MODELS)["judge_models"]
     assert models["intent_fetched_evidence"] == intent.ARENA_EVIDENCE_MODEL
     table = broker.validate_price_table({
         "schema_version": broker.PRICE_TABLE_SCHEMA_VERSION,

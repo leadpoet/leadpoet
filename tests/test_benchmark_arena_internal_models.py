@@ -231,9 +231,19 @@ def test_cap_cannot_be_raised_even_offline(amount):
 
 
 def test_route_failure_separate_from_schema_and_accuracy(tmp_path):
-    result, _, _ = run(tmp_path, lambda r: r["openrouter_metadata"].update(pipeline=[{"id": "context-compression"}]))
+    def change(r):
+        r["model"] = MODEL
+        r["openrouter_metadata"].update(pipeline=[{"id": "context-compression"}])
+    result, _, _ = run(tmp_path, change)
     assert result["schema_valid"] and result["accuracy_match"]
     assert result["route_verified"] is False
+
+
+def test_unverified_route_cannot_normalize_a_canonical_alias(tmp_path):
+    result, _, _ = run(tmp_path, lambda r: r["openrouter_metadata"].update(attempt=2))
+    assert result["canonical_envelope_changed"] is False
+    assert result["raw_parser"]["schema_error"] == "model_mismatch"
+    assert result["canonical_envelope_parser"]["schema_valid"] is False
 
 
 def test_private_production_source_does_not_infer_historical_gold(tmp_path):
@@ -257,3 +267,192 @@ def test_existing_ten_research_labels_retain_their_causal_controls():
         checked = harness.research.verify_causality(case["research_case"])
         assert checked["causal_check"] == "passed"
         assert checked["expected"] == case["expected"]["research_classification"]
+
+
+def saved_run(tmp_path, *, with_manifest=True):
+    case, request, route = prepared()
+    result, _, _ = run(tmp_path)
+    result.update(harness.case_identity(case))
+    (tmp_path / 'benign_agent.summary.json').write_text(json.dumps(result))
+    (tmp_path / 'fixed-labels.json').write_text(json.dumps([{k:v for k,v in case.items() if k != '_base'}]))
+    (tmp_path / 'endpoint-metadata.json').write_text(json.dumps(metadata()))
+    if with_manifest:
+        (tmp_path / 'manifest.json').write_text(json.dumps(harness.frozen_manifest([case], [request], route, 'original')))
+    return case, request, route
+
+
+def test_prompt_variant_is_generic_bounded_and_preserves_full_source_schema():
+    case, original, route = prepared()
+    audit = harness.prepare_case(case, model=MODEL, provider=PROVIDER, mode='medium', route=route,
+                                 prompt_variant='backward-evidence-audit')
+    assert audit.parameters['messages'][1:] == original.parameters['messages'][1:]
+    assert audit.parameters['response_format'] == original.parameters['response_format']
+    assert audit.parameters['reasoning'] == {'effort': 'medium', 'exclude': False}
+    appendix = harness.PROMPTS['backward-evidence-audit']
+    assert len(appendix) < 2000
+    assert all(c['id'] not in appendix for c in harness.load_cases())
+    assert audit.parameters['messages'][0]['content'] == original.parameters['messages'][0]['content'] + appendix
+    assert audit.input_tokens_upper_bound == code_review.REQUEST_TOKEN_OVERHEAD + len(harness.contracts.canonical_json(audit.parameters).encode())
+    assert harness.reservation_usd(audit, route) > harness.reservation_usd(original, route)
+
+
+def test_registry_model_outside_old_four_is_selectable_offline(monkeypatch, capsys):
+    monkeypatch.setattr(harness, 'fetch_metadata', lambda *_: pytest.fail('network'))
+    assert harness.main(['--model', 'xiaomi/mimo-v2.6-flash', '--provider', 'deepinfra/fp8',
+                         '--mode', 'medium', '--cases', 'benign_agent', '--dry-run']) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['model'] == 'xiaomi/mimo-v2.6-flash'
+    assert report['reasoning_mode'] == 'medium'
+    assert report['manifest']['cases'][0]['request_sha256'].startswith('sha256:')
+
+
+def test_unapproved_route_fails_before_metadata_or_dispatch(monkeypatch):
+    monkeypatch.setattr(harness, 'fetch_metadata', lambda *_: pytest.fail('network'))
+    with pytest.raises(ValueError, match='route_not_registry_authorized'):
+        harness.main(['--model', MODEL, '--provider', 'unapproved/fp8', '--live'])
+
+
+@pytest.mark.parametrize('change,error', [
+    (lambda e: e.update(name='Nebius | deepseek/wrong-model'), 'registry_endpoint_identity_mismatch'),
+    (lambda e: e.update(provider_name='Another Provider'), 'registry_endpoint_identity_mismatch'),
+    (lambda e: e['pricing'].update(prompt='0.01'), 'route_price_above_registry_ceiling'),
+    (lambda e: e.update(supports_zdr=False), 'route_privacy_unsupported'),
+])
+def test_fresh_endpoint_identity_privacy_and_price_gates(change, error):
+    document = metadata()
+    change(document['data']['endpoints'][0])
+    with pytest.raises(ValueError, match=error):
+        harness.validate_route(document, MODEL, PROVIDER)
+
+
+def test_raw_and_canonical_parser_results_are_separate(tmp_path):
+    result, _, _ = run(tmp_path)
+    assert not result['raw_parser']['schema_valid']
+    assert result['raw_parser']['schema_error'] == 'model_mismatch'
+    assert result['canonical_envelope_parser']['schema_valid']
+    assert result['canonical_envelope_changed']
+    assert result['schema_parser'] == 'canonical_envelope_parser'
+
+
+def test_private_or_stale_request_bound_cannot_dispatch(tmp_path):
+    from dataclasses import replace
+    case, request, route = prepared()
+    wire = Transport()
+    budget = SharedBudget(tmp_path / 'budget.json', Decimal('20'))
+    parameters = copy.deepcopy(request.parameters)
+    parameters['provider']['zdr'] = False
+    with pytest.raises(ValueError, match='request_privacy_or_route_controls_invalid'):
+        harness.run_live_case(case, replace(request, parameters=parameters), route,
+                              key=KEY, budget=budget, private_dir=tmp_path, transport=wire)
+    parameters = copy.deepcopy(request.parameters)
+    parameters['messages'][0]['content'] += '\nExtra input must be reserved.'
+    with pytest.raises(ValueError, match='request_bound_mismatch'):
+        harness.run_live_case(case, replace(request, parameters=parameters), route,
+                              key=KEY, budget=budget, private_dir=tmp_path, transport=wire)
+    assert wire.sent == []
+    assert Decimal(json.loads((tmp_path / 'budget.json').read_text())['reserved_usd']) == 0
+
+
+def test_replay_is_network_key_and_budget_free_and_preserves_saved_bytes(tmp_path, monkeypatch, capsys):
+    saved_run(tmp_path)
+    before = {p.name:p.read_bytes() for p in tmp_path.iterdir()}
+    monkeypatch.setattr(harness, 'fetch_metadata', lambda *_: pytest.fail('network'))
+    monkeypatch.setattr(harness, 'SharedBudget', lambda *_: pytest.fail('budget access'))
+    monkeypatch.setattr(harness, 'run_live_case', lambda *_a, **_k: pytest.fail('paid dispatch'))
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    assert harness.main(['--replay-dir', str(tmp_path)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['metrics']['raw_parser_valid'] == 0
+    assert report['metrics']['canonical_envelope_parser_valid'] == 1
+    assert report['results'][0]['saved_manifest_verified'] is True
+    assert before == {p.name:p.read_bytes() for p in tmp_path.iterdir()}
+
+
+def test_legacy_replay_uses_saved_source_without_archive_or_source_execution(tmp_path, monkeypatch):
+    saved_run(tmp_path, with_manifest=False)
+    labels = json.loads((tmp_path / 'fixed-labels.json').read_text())
+    labels[0].pop('files')
+    labels[0]['source_archive'] = '/not-present/do-not-read.tar.gz'
+    (tmp_path / 'fixed-labels.json').write_text(json.dumps(labels))
+    monkeypatch.setattr(harness.research, 'prepared_case', lambda *_: pytest.fail('source execution'))
+    results, manifest = harness.replay_directory(tmp_path)
+    assert results[0]['schema_valid'] and results[0]['accuracy_match']
+    assert manifest['input_manifest_verified'] is False
+
+
+def test_replay_rejects_request_or_gold_tampering(tmp_path):
+    saved_run(tmp_path)
+    path = tmp_path / 'fixed-labels.json'
+    labels = json.loads(path.read_text())
+    labels[0]['expected']['verdict'] = 'reject'
+    path.write_text(json.dumps(labels))
+    with pytest.raises(ValueError, match='replay_request_or_labels_hash_invalid'):
+        harness.replay_directory(tmp_path)
+
+
+def test_replay_never_accepts_invented_source_excerpts(tmp_path):
+    saved_run(tmp_path)
+    path = tmp_path / 'benign_agent.response.json'
+    document = json.loads(path.read_text())
+    mutate_content(document, lambda d: d['research_control']['evidence'][0].update(excerpt='An invented excerpt absent from source.'))
+    path.write_text(json.dumps(document))
+    # Legacy recordings lack a saved response hash; the real source-aware
+    # parser must still reject invented evidence after envelope normalization.
+    summary_path = tmp_path / 'benign_agent.summary.json'
+    summary = json.loads(summary_path.read_text())
+    summary.pop('response_sha256')
+    summary_path.write_text(json.dumps(summary))
+    results, _ = harness.replay_directory(tmp_path)
+    assert not results[0]['schema_valid']
+    assert results[0]['canonical_envelope_parser']['schema_error'] == 'research_evidence_mismatch'
+
+
+def test_replay_rejects_changed_hashed_response(tmp_path):
+    saved_run(tmp_path)
+    path = tmp_path / 'benign_agent.response.json'
+    path.write_bytes(path.read_bytes() + b'\n')
+    with pytest.raises(ValueError, match='replay_response_hash_invalid'):
+        harness.replay_directory(tmp_path)
+
+
+def test_manifest_freezes_request_gold_split_family_and_prompt(tmp_path):
+    case, request, route = prepared()
+    case.update(split='holdout', source_family='independent-source-family')
+    manifest = harness.frozen_manifest([case], [request], route, 'original')
+    identity = manifest['cases'][0]
+    assert identity['split'] == 'holdout' and identity['source_family'] == 'independent-source-family'
+    assert identity['labels_sha256'] == harness.contracts.document_hash(case['expected'])
+    assert identity['request_sha256'] == harness.contracts.hash_bytes(harness.contracts.canonical_json(request.parameters).encode())
+    assert manifest['manifest_sha256'] == harness.contracts.document_hash({k:v for k,v in manifest.items() if k != 'manifest_sha256'})
+
+
+def test_metrics_do_not_turn_schema_failures_into_correct_rejections():
+    result = {'case':'negative', 'expected_verdict':'reject', 'schema_valid':False, 'accuracy_match':None,
+              'transport_ok':True, 'route_verified':True, 'cost_status':'held', 'reserved_usd':'0.1', 'latency_seconds':2}
+    metrics = harness.summarize([result])
+    assert metrics['known_negative_cases'] == 1
+    assert metrics['unsafe_accepts'] == 0
+    assert metrics['labelled_parsed_cases'] == metrics['accuracy_matched'] == 0
+    assert metrics['unknown_charge_reserved_usd'] == '0.1'
+
+
+def test_source_family_cannot_leak_across_development_and_holdout(tmp_path):
+    case, _, _ = prepared()
+    first = {k:v for k,v in case.items() if k != '_base'}
+    first.update(source_family='same-family', split='development')
+    second = {**first, 'id':'renamed_copy', 'split':'holdout'}
+    path = tmp_path / 'leaking-split.json'
+    path.write_text(json.dumps({'cases':[first, second]}))
+    with pytest.raises(ValueError, match='source_family_crosses_splits'):
+        harness.load_cases([str(path)])
+
+
+def test_replay_verifies_frozen_metadata_snapshot(tmp_path):
+    case, request, route = saved_run(tmp_path)
+    manifest = harness.frozen_manifest([case], [request], route, 'original', metadata())
+    (tmp_path / 'manifest.json').write_text(json.dumps(manifest))
+    changed = metadata()
+    changed['data']['endpoints'][0]['uptime_last_30m'] = 99
+    (tmp_path / 'endpoint-metadata.json').write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match='replay_metadata_hash_invalid'):
+        harness.replay_directory(tmp_path)

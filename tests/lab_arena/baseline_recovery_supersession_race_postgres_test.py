@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import pytest
 
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
+
 from lab_arena import scoring
 from lab_arena.store import ArenaStoreError
 from tests.lab_arena import test_lab_arena_service_round as flows
@@ -28,7 +30,7 @@ def test_supersession_after_validated_noop_cannot_publish_old_projection(databas
     h.service.config.daily_icp_source = lambda **kwargs: {"status": "ready", "set_id": kwargs["set_id"], "icps": daily_icps()[:2]}
     _enable_verified_proxy_runtime(h)
     monkeypatch.setattr(flows, "deterministic_scorer", _baseline_first_judge)
-    monkeypatch.setitem(scoring.DEFAULT_JUDGE_MODELS, "role_batch_check", "google/gemini-2.5-flash")
+    bind_historical_judge_models(h.service, role_batch_model='google/gemini-2.5-flash')
     prices = flows.price_table
     monkeypatch.setattr(flows, "price_table", lambda: prices((*flows.PRICED_MODELS, "google/gemini-2.5-flash")))
     h.sandbox.empty_outputs.update((flavor, position) for flavor in ("Control", "PublicBaseline") for position in (0, 1))

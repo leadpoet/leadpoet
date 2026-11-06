@@ -2782,6 +2782,9 @@ Provider errors and malformed verdicts remain retryable. Never convert a
 missing review into an accepted paragraph or a terminal company mismatch.
 """
     from qualification.scoring.verification_helpers import openrouter_chat
+    from qualification.scoring.openrouter_options import (
+        judge_reasoning_enabled, JUDGE_REASONING_TIMEOUT_SECONDS,
+    )
 
     receipt: dict[str, Any] = {
         "gate": "intent_details", "contract_id": "intent-details:v2",
@@ -2831,7 +2834,11 @@ missing review into an accepted paragraph or a terminal company mismatch.
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_evidence_unavailable",
                 "failure_reason_code": "malformed_response"}
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + REVIEW_TIMEOUT_SECONDS
+    # Reasoning generation shares one window with the existing bounded repair.
+    # Do not add retries or extend the deadline after an incomplete review.
+    deadline = loop.time() + (
+        JUDGE_REASONING_TIMEOUT_SECONDS if judge_reasoning_enabled() else REVIEW_TIMEOUT_SECONDS
+    )
 
     async def request_review(
         request_prompt: str,

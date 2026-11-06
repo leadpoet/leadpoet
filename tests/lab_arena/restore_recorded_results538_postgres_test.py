@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import pytest
+
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
 from tests.lab_arena import recovery_latest_call_heads537_postgres_test as prior
 from tests.lab_arena import evaluation_recovery536_postgres_test as recovery
 base=recovery.base
@@ -90,7 +92,7 @@ def test_archived_authority_restores_through_ordinary_aggregate_and_publication(
     harness.service.config.daily_icp_source=lambda **kwargs:{'status':'ready','set_id':kwargs['set_id'],'icps':daily_icps()[:2]}
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(flows,'deterministic_scorer',_baseline_first_judge)
-    monkeypatch.setitem(scoring.DEFAULT_JUDGE_MODELS,'role_batch_check','google/gemini-2.5-flash')
+    bind_historical_judge_models(harness.service, role_batch_model='google/gemini-2.5-flash')
     original_prices=flows.price_table
     monkeypatch.setattr(flows,'price_table',lambda:original_prices((*flows.PRICED_MODELS,'google/gemini-2.5-flash')))
     # Empty saved-output controls exercise the entire real input/claim/output/

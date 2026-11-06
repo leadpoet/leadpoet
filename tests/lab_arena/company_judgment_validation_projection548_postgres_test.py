@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
+
 from tests.lab_arena import unmeasured_terminal_publication547_postgres_test as prior
 from tests.lab_arena import incomplete_participant_publication540_postgres_test as base540
 
@@ -139,8 +141,7 @@ def completed(database, tmp_path_factory):
     base540._enable_verified_proxy_runtime(harness)
     monkey = pytest.MonkeyPatch()
     monkey.setattr(base540.flows, 'deterministic_scorer', base540._baseline_first_judge)
-    monkey.setitem(base540.scoring.DEFAULT_JUDGE_MODELS, 'role_batch_check',
-                   'google/gemini-2.5-flash')
+    bind_historical_judge_models(harness.service, role_batch_model='google/gemini-2.5-flash')
     prices = base540._BASE_PRICE_TABLE
     monkey.setattr(base540.flows, 'price_table', lambda: prices(
         (*base540.flows.PRICED_MODELS, 'google/gemini-2.5-flash')))

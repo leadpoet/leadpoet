@@ -76,8 +76,11 @@ def fit_request(manifest=None,operation="claim"):
 def signal_request(case,*,operation="claim",snapshot=None):
     raw=case[4]
     trace=raw["judge_verdict"]["verification_trace"]
+    store=case[0]._store
+    run=store.get_run(case[1]["run_id"])
+    policy=store.get_round(run["round_id"])["configuration_doc"]["scorer_policy"]
     snapshot=snapshot or {"schema_version":"leadpoet.intent_evidence_input.v1",
-        "model":"openai/gpt-6-luna","evaluation_date":"2099-10-20",
+        "model":policy["judge_models"]["intent_fetched_evidence"],"evaluation_date":"2099-10-20",
         "row":{"claimed_source_urls":raw["evidence_urls"],"signal_date":trace["extracted_signal_date"]},
         "contents":{"results":deepcopy(trace["verified_source_context"]),"statuses":[]}}
     return {**case[3],"operation":operation,"judgment_kind":ej.SIGNAL_KIND,

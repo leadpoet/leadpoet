@@ -1,13 +1,16 @@
 """Future full-thinking rounds freeze approved routes and cost limits atomically."""
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import partial
 import hashlib
 import json
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from lab_arena import contracts, reasoning_capture, source_bundle
+from lab_arena import contracts, reasoning_capture, scoring, source_bundle
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 from lab_arena.service import ArenaService, RoundDefaults, ServiceConfig, ServiceError
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena.test_lab_arena_promotion_git import repository, source, git
@@ -56,6 +59,17 @@ def approved_registry():
 
 def opted_in(registry=None):
     service = _service(lambda **_: frozen())
+    # This source-capture fixture predates judge capture and its separate routes.
+    service._scorer_policy = scoring.build_scorer_policy(
+        judge_models=LEGACY_MODELS, judge_provider_routes={})
+    historical_builder = partial(scoring.build_scorer_policy,
+                                 judge_models=LEGACY_MODELS, judge_provider_routes={})
+    def create_historical_round(self, *args, **kwargs):
+        # Integrity activation rebuilds the policy. Bind this historical
+        # service only for that call, and restore the current builder afterward.
+        with patch.object(scoring, "build_scorer_policy", historical_builder):
+            return ArenaService.create_round(self, *args, **kwargs)
+    service.create_round = MethodType(create_historical_round, service)
     service._config.defaults.flat_per_icp_cost_policy = True
     service._config.defaults.per_icp_cost_policy = False
     service._config.defaults.reasoning_capture_from = "2026-10-01T00:00:00Z"
@@ -63,6 +77,21 @@ def opted_in(registry=None):
     service._config.defaults.reasoning_baseline_source_url = BASELINE_URL
     service._config.reasoning_registry_source = lambda: registry if registry is not None else approved_registry()
     return service
+
+
+@pytest.mark.parametrize("unready", [False, True])
+def test_historical_source_fixture_restores_current_judge_builder(unready):
+    prospective = scoring.build_scorer_policy()
+    service = opted_in()
+    if unready:
+        service._config.defaults.reasoning_baseline_source_sha256 = None
+        with pytest.raises(ServiceError, match="reasoning_capture_activation_not_ready"):
+            service.create_round(OPEN)
+    else:
+        configuration = service.create_round(OPEN)
+        assert configuration["scorer_policy"]["judge_models"] == LEGACY_MODELS
+        assert contracts.JUDGE_REASONING_CAPTURE_BINDING not in configuration["scorer_policy"]["env_bindings"]
+    assert scoring.build_scorer_policy() == prospective
 
 
 def test_future_round_freezes_approved_routes_and_six_dollar_limits():

@@ -99,7 +99,8 @@ async def _run(
             }],
         }
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search):
+        assert hosted_search is False
         prompts.append(prompt)
         return _verdict(claim, stage3_status, quote)
 

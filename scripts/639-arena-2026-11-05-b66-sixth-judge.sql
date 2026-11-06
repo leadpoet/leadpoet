@@ -185,10 +185,10 @@ BEGIN
   OR ((r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_scoring'::TEXT,11::BIGINT,9::BIGINT)
     AND (r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_judged'::TEXT,12::BIGINT,10::BIGINT))
   OR r.scoring_generation_floor IS DISTINCT FROM 0
-  OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '69befd3303a62b7ef7ceb28799f2082c83304b281884ddc6c3de693ba19b6e15'
+  OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '55beda7a80b7ac9e9c76e2e2fa9d1f30495dd6e05d6354be2db7dd5eda605996'
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.reward_activated_at IS NOT NULL
-  OR r.configuration_doc#>>'{schedule,final_scoring_close}' IS DISTINCT FROM '2026-11-06T08:30:00Z'
-  OR r.configuration_doc#>>'{schedule,publication_deadline}' IS DISTINCT FROM '2026-11-06T08:35:00Z'
+  OR r.configuration_doc#>>'{schedule,final_scoring_close}' IS DISTINCT FROM '2026-11-06T09:30:00Z'
+  OR r.configuration_doc#>>'{schedule,publication_deadline}' IS DISTINCT FROM '2026-11-06T09:35:00Z'
   OR clock_timestamp()>=(r.configuration_doc#>>'{schedule,final_scoring_close}')::TIMESTAMPTZ
   OR clock_timestamp()>=(r.configuration_doc#>>'{schedule,publication_deadline}')::TIMESTAMPTZ
   OR (r.configuration_doc->>'scoring_cap_microusd')::BIGINT IS DISTINCT FROM 50000000

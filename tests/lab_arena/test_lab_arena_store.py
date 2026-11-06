@@ -64,6 +64,28 @@ def test_startup_requires_exact_one_replacement_attempt_capability(limit):
             store.submission_replacement_schema()
 
 
+@pytest.mark.parametrize('seconds', [None, 599, True, '600', 600])
+def test_per_round_cutoff_requires_explicit_capability_and_preserves_legacy_rpc(seconds):
+    capability = {
+        'schema_version': 'leadpoet.lab_arena.submission_replacement_schema.v1',
+        'version': 258, 'replacement_freeze_seconds': 3600,
+        'max_replacement_attempts': 1, 'per_round_replacement_freeze_seconds': True,
+        'default_replacement_freeze_seconds': seconds,
+    }
+    class Transport:
+        def rpc(self, name, args):
+            return capability
+    store = ArenaStore(Transport())
+    assert store.submission_replacement_schema() == capability
+    if type(seconds) is int and seconds == 600:
+        assert store.submission_replacement_schema(require_per_round_cutoff=True) == capability
+        assert store.replacement_cutoff_columns == 'replacement_freeze_seconds,'
+    else:
+        with pytest.raises(ArenaStoreError, match='per-round submission replacement schema unavailable'):
+            store.submission_replacement_schema(require_per_round_cutoff=True)
+        assert store.replacement_cutoff_columns == ''
+
+
 @pytest.mark.parametrize("error_type", [
     httpx.ReadTimeout, httpx.ReadError, httpx.ConnectTimeout, httpx.ConnectError,
     httpx.WriteTimeout, httpx.WriteError, httpx.RemoteProtocolError,

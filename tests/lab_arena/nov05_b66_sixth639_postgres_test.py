@@ -87,6 +87,18 @@ def snapshot(p):
     return result
 
 
+def extend_final_window(p):
+    """Fixture of the separate typed deadline-only operation before639."""
+    with p.conn.cursor()as q:
+        old=scalar(q,"SELECT to_jsonb(r)-'updated_at'FROM public.lab_arena_rounds r WHERE round_id=%s FOR UPDATE",(ROUND,))
+        new=json.loads(json.dumps(old))
+        new['configuration_doc']['schedule'].update(final_scoring_close='2099-11-06T10:30:00Z',publication_deadline='2099-11-06T10:35:00Z')
+        manifest={'round_id':ROUND,'configuration_sha256':recovery.source.hash_doc(q,old['configuration_doc']),'new_configuration_sha256':recovery.source.hash_doc(q,new['configuration_doc'])}
+        q.execute("INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc) SELECT %s,coalesce(max(generation_floor),0)+1,'nov05-judge-window-before639-v1','sha256:'||encode(extensions.digest(%s::jsonb::text,'sha256'),'hex'),'nov05-user-approved-judge-window-before639',txid_current(),pg_backend_pid(),%s::jsonb,%s::jsonb,'{}',%s::jsonb FROM public.lab_arena_scoring_supersessions WHERE round_id=%s",(ROUND,json.dumps(manifest),json.dumps(old),json.dumps(new),json.dumps({'operation':'nov05_recovery_window641_v1','manifest':manifest}),ROUND))
+        q.execute('UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s',(json.dumps(new['configuration_doc']),ROUND))
+    p.conn.commit()
+
+
 @pytest.fixture
 def prepared(database):
     pg,dsn,definitions=database
@@ -142,7 +154,8 @@ def prepared(database):
         p.window_sql=window.render(p);window.apply(p)
         p.retry_window_sql=retry_window.render(p);retry_window.apply(p)
         p.held_window_sql=held_window.render(p);held_window.apply(p)
-        assert p.store.get_round(ROUND)['configuration_doc']['schedule']['final_scoring_close']=='2099-11-06T09:30:00Z'
+        extend_final_window(p)
+        assert p.store.get_round(ROUND)['configuration_doc']['schedule']['final_scoring_close']=='2099-11-06T10:30:00Z'
         for _ in range(50):
             lease=recovery.claim(p);assert lease['status']=='leased'and lease['kind']=='execute',lease
             recovery.bill(p,lease);assert recovery.complete(p,lease)['status']=='accepted'
@@ -169,7 +182,7 @@ def render(p):
         for table in ('lab_arena_company_judgments','lab_arena_signal_judgments'):manifest[table+'_row_hashes']=hashes(table,"source_scored_run_id='"+SOURCE+"'")
         cfg=p.store.get_round(ROUND)['configuration_doc'];digest=recovery.source.hash_doc(q,cfg)
     text=re.sub(r'\$manifest639\$.*?\$manifest639\$',lambda _:'$manifest639$'+json.dumps(manifest,separators=(',',':'))+'$manifest639$',SQL.read_text(),flags=re.S)
-    return text.replace('7687d54874aa88d1783c44065e22410c469d6d4cc910549ee967c29b5bfe977e',digest).replace('2026-11-06T09:30:00Z','2099-11-06T09:30:00Z').replace('2026-11-06T09:35:00Z','2099-11-06T09:35:00Z')
+    return text.replace('b45de077ebb68e93809f28309ddf0f8729341033c83d01e6ca145b38d6b1cacc',digest).replace('2026-11-06T10:30:00Z','2099-11-06T10:30:00Z').replace('2026-11-06T10:35:00Z','2099-11-06T10:35:00Z')
 
 
 @pytest.mark.parametrize('outcome',['accepted','judge_error','expired'])
@@ -326,3 +339,30 @@ def test_changed_binding_refuses_exact_sixth_and_rolls_back(prepared,fault):
     p.conn.commit();before=snapshot(p)
     with pytest.raises(p.pg.Error):recovery.apply(p)
     p.conn.rollback();assert snapshot(p)==before
+
+
+def test_fresh_sixth_retains_eight_minute_native_backoff(prepared):
+    p=prepared
+    with p.conn.cursor()as q:before=scalar(q,'SELECT clock_timestamp()')
+    recovery.apply(p)
+    with p.conn.cursor()as q:
+        fresh=scalar(q,'SELECT created_at FROM public.lab_arena_runs WHERE run_id=%s',(RUN,))
+        assert before<=fresh<=scalar(q,'SELECT clock_timestamp()')
+        assert scalar(q,"SELECT configuration_doc#>>'{schedule,final_scoring_close}'FROM public.lab_arena_rounds WHERE round_id=%s",(ROUND,))=='2099-11-06T10:30:00Z'
+        definition=scalar(q,'SELECT pg_get_functiondef(%s::regprocedure)',(CLAIM,))
+    p.conn.commit()
+    try:
+        for seconds,expected in((479,False),(480,True)):
+            instant=(fresh+timedelta(seconds=seconds)).isoformat()
+            frozen=re.sub(r'(?:pg_catalog\.)?clock_timestamp\(\)',"(TIMESTAMPTZ '"+instant+"')",definition)
+            with p.conn.cursor()as q:q.execute(frozen)
+            p.conn.commit();result=claim(p)
+            assert (result.get('status')=='leased')is expected,result
+            if expected:assert result['run_id']==RUN
+        with p.conn.cursor()as q:
+            assert scalar(q,'SELECT created_at FROM public.lab_arena_runs WHERE run_id=%s',(RUN,))==fresh
+            assert scalar(q,'SELECT max(attempt)FROM public.lab_arena_runs WHERE assignment_id=%s',(ASSIGNMENT,))==6
+    finally:
+        p.conn.rollback()
+        with p.conn.cursor()as q:q.execute(definition)
+        p.conn.commit()

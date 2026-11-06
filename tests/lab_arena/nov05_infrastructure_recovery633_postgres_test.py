@@ -142,7 +142,7 @@ def render(p):
             s=scalar(q,"SELECT jsonb_build_object('round_id',round_id,'submission_id',submission_id,'miner_hotkey',miner_hotkey,'source_ref',source_ref,'source_size_bytes',source_size_bytes,'source_archive_sha256',source_archive_sha256) FROM public.lab_arena_submissions WHERE submission_id=%s",(old['submission_id'],));m['sources'][old['submission_id']]=source.hash_doc(q,s)
     text=re.sub(r'\$manifest633\$.*?\$manifest633\$',lambda _:'$manifest633$'+json.dumps(m,separators=(',',':'))+'$manifest633$',SQL.read_text(),flags=re.S)
     # Only disposable test dates move. Production's Nov5 scope stays literal.
-    return text.replace('2026-11-05T20:30:00Z','2099-11-05T20:30:00Z').replace('2026-11-05T23:58:59Z','2099-11-05T23:58:59Z').replace('2026-11-05T23:59:00Z','2099-11-05T23:59:00Z')
+    return text.replace('2026-11-06T05:30:00Z','2099-11-06T05:30:00Z').replace('2026-11-06T07:00:00Z','2099-11-06T07:00:00Z').replace('2026-11-06T07:05:00Z','2099-11-06T07:05:00Z')
 
 
 def apply(p,sql=None):
@@ -316,6 +316,38 @@ def test_restored_second_attempt_failure_cannot_create_third(prepared):
     assert complete(p,lease,cause='provider_error')['status']=='failed'
     p.store.expire_leases(ROUND)
     assert sorted(x['attempt']for x in p.store.list_runs(ROUND,submission_id=lease['submission_id'],kind='execute')if x['assignment_id']==lease['assignment_id'])==[1,2]
+
+
+def test_extended_recovery_changes_only_approved_schedule_fields(prepared):
+    p=prepared;before=snapshot(p);cfg=deepcopy(before['rounds'][ROUND]['configuration_doc'])
+    # The frozen preimage remains the original November5 schedule.
+    assert cfg['schedule']['stage_2_close']=='2026-11-05T14:00:02Z'
+    assert cfg['schedule']['final_scoring_close']=='2026-11-05T20:30:02Z'
+    assert cfg['schedule']['publication_deadline']=='2026-11-05T20:30:03Z'
+    cfg['schedule'].update(stage_2_close='2099-11-06T05:30:00Z',final_scoring_close='2099-11-06T07:00:00Z',publication_deadline='2099-11-06T07:05:00Z')
+    apply(p)
+    assert p.store.get_round(ROUND)['configuration_doc']==cfg
+    with p.conn.cursor()as q:
+        archived=scalar(q,"SELECT old_round_doc->'configuration_doc' FROM public.lab_arena_scoring_supersessions WHERE round_id=%s AND request_id='nov05-approved-infrastructure633-v1'",(ROUND,))
+    assert archived==before['rounds'][ROUND]['configuration_doc']
+    after=snapshot(p)
+    assert {k:v for k,v in after['runs'].items()if v['status']=='accepted'}=={k:v for k,v in before['runs'].items()if v['status']=='accepted'}
+    assert len(after['runs'])==585 and sum(v['status']=='pending'for v in after['runs'].values())==50
+    assert after['ledger']==before['ledger'] and after['triggers']==before['triggers']
+    assert after['rounds']['arena-2026-11-06']==before['rounds']['arena-2026-11-06']
+
+
+@pytest.mark.parametrize('guard',['before_apply','final_readback'])
+def test_extended_recovery_apply_and_final_clock_guards_rollback(prepared,guard):
+    p=prepared;before=snapshot(p)
+    boundary="clock_timestamp()>='2099-11-06T05:30:00Z'"
+    assert p.sql.count(boundary)==2
+    if guard=='before_apply':sql=p.sql.replace(boundary,"clock_timestamp()>='2000-11-06T05:30:00Z'",1)
+    else:
+        head,tail=p.sql.rsplit(boundary,1);sql=head+"clock_timestamp()>='2000-11-06T05:30:00Z'"+tail
+    with pytest.raises(p.pg.Error,match='Recovery633 round, clock, scope or control differs'if guard=='before_apply'else'Recovery633 exact readback differs'):
+        apply(p,sql)
+    p.conn.rollback();assert snapshot(p)==before
 
 
 def test_historical_round_preservation_exceeds_jsonb_aggregate_limit(prepared):

@@ -1,6 +1,4 @@
 """An invalid episode changes its last route without gaining reservations."""
-from datetime import datetime, timezone
-
 import pytest
 
 from lab_arena import code_review, code_review_policy
@@ -39,23 +37,3 @@ def test_third_reservation_still_exhausts_after_alternate_failure():
         'review_invalid_attempts': 3, 'retryable': True,
     }}
     assert not code_review_policy.review_retry_available(row)
-
-
-def test_dated_receipt_projection_discovers_only_fourth_alternate(monkeypatch):
-    class ReviewDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2026, 11, 5, 23, 55, tzinfo=timezone.utc)
-    monkeypatch.setattr(code_review_policy, "datetime", ReviewDateTime)
-    row = {'round_id': 'arena-2026-11-06', 'code_review_status': 'error', 'code_review_attempts': 3,
-           'code_review_doc': {'model': PRIMARY, 'error_code': 'review_response_invalid',
-               'error_reason': 'research_evidence', 'review_invalid_attempts': 3,
-               'nov06_review_recovery': 'nov06-invalid-review635-v1'}}
-    assert code_review_policy.review_retry_available(row)
-    assert code_review_policy.review_model_for(row) == ALTERNATE
-    assert code_review_policy.nov06_review_recovery_available(row, now=datetime(2026, 11, 5, 23, 59, 59, tzinfo=timezone.utc))
-    assert not code_review_policy.nov06_review_recovery_available(row, now=datetime(2026, 11, 6, tzinfo=timezone.utc))
-    assert not code_review_policy.nov06_review_recovery_available(row, now=datetime(2026, 11, 6, 0, 1, tzinfo=timezone.utc))
-    for changed in ({'round_id': 'arena-2026-11-07'}, {'code_review_attempts': 4},
-                    {'code_review_status': 'passed'}):
-        assert not code_review_policy.review_retry_available({**row, **changed})

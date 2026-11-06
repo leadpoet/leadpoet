@@ -38,7 +38,7 @@ def database():
         psycopg2, dsn = next(database)
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
             # The full-service fixture ends at591. Current reviewer writes use
-            # the real605+624 contract, excluding the dated recovery DML.
+            # the real605+624+634 contract, excluding dated recovery DML.
             for migration in (
                 "594-lab-arena-private-review-diagnostics.sql",
                 "599-lab-arena-refusal-review-fallback.sql",
@@ -46,6 +46,7 @@ def database():
                 cursor.execute((SCRIPTS / migration).read_text())
             install_current_review_predecessor(cursor)
             cursor.execute((SCRIPTS / "624-lab-arena-invalid-review-reservation-budget.sql").read_text())
+            cursor.execute((SCRIPTS / "634-lab-arena-invalid-review-alternate.sql").read_text())
         yield psycopg2, dsn
     finally:
         database.close()
@@ -160,6 +161,7 @@ class RecoveryReviewTransport(FakeProviderTransport):
         super().__init__()
         self.attempts: dict[str, int] = {}
         self.output_limits: dict[str, list[int]] = {}
+        self.models: dict[str, list[str]] = {}
         self.first_dispatch = threading.Event()
         self.release_first_dispatch = threading.Event()
 
@@ -174,12 +176,37 @@ class RecoveryReviewTransport(FakeProviderTransport):
 
     def send(self, **request):
         body = json.loads(request["body"].decode("utf-8"))
-        if body.get("model") != code_review.DEFAULT_REVIEW_MODEL:
+        if body.get("model") not in {code_review.DEFAULT_REVIEW_MODEL, code_review.FALLBACK_REVIEW_MODEL}:
             return super().send(**request)
         flavor = self._flavor(body)
         attempt = self.attempts.get(flavor, 0) + 1
         self.attempts[flavor] = attempt
         self.output_limits.setdefault(flavor, []).append(body["max_tokens"])
+        self.models.setdefault(flavor, []).append(body["model"])
+        if body["model"] == code_review.FALLBACK_REVIEW_MODEL:
+            assert request["headers"]["Authorization"] == "Bearer " + CANARY_OPENROUTER_KEY
+            assert body["provider"]["only"] == ["azure"]
+            submitted = json.loads(body["messages"][1]["content"])
+            self.review_requests.append(body)
+            return broker.ProviderResponse(200, {"content-type": "application/json"}, json.dumps({
+                "model": body["model"],
+                "openrouter_metadata": {
+                    "requested": body["model"], "strategy": "direct", "attempt": 1,
+                    "endpoints": {"total": 1, "available": [{
+                        "provider": "Azure", "selected": True,
+                        "model": code_review._REVIEW_MODEL_CANONICAL_SLUGS[body["model"]],
+                    }]},
+                },
+                "choices": [{"finish_reason": "stop", "message": {
+                    "role": "assistant", "content": json.dumps({
+                        "verdict": "pass", "summary": "Every supplied source file was reviewed.",
+                        "reviewed_files": [item["path"] for item in submitted["submission_files"]],
+                        "reviewed_comparisons": [item["comparison_id"] for item in submitted["similarity_contexts"]],
+                        "findings": [],
+                    }),
+                }}],
+                "usage": {"cost": "0", "prompt_tokens": 1000},
+            }).encode("utf-8"))
         if flavor == "RecoveredReplacement":
             if attempt == 1:
                 self.first_dispatch.set()
@@ -226,6 +253,12 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     harness.chain.epoch = 39016
     transport = RecoveryReviewTransport()
     reviewer = harness.service.config.code_reviewer
+    reviewer._prices = broker.validate_price_table({
+        **reviewer._prices, "models": {
+            **reviewer._prices["models"],
+            code_review.FALLBACK_REVIEW_MODEL: dict(reviewer._prices["models"][code_review.DEFAULT_REVIEW_MODEL]),
+        },
+    })
     reviewer._transport = transport
     harness.review_transport = transport
     assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
@@ -362,7 +395,7 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
 
     # Transport/503 failures before unusable content do not consume the invalid
     # episode. Malformed JSON and one truncation then use its first two slots;
-    # Attempt8 passes in the final slot at the increased output capacity.
+    # Attempt8 uses the alternate in the final slot at increased output capacity.
     outcomes = []
     for _attempt in range(2, 9):
         _make_review_retry_ready(connect, replacement_id)
@@ -382,11 +415,18 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     assert recovered["code_review_doc"]["cost_status"] == "settled"
     assert recovered["code_review_doc"]["cost_microusd"] == 0
     assert recovered["code_review_doc"]["review_cost_microusd"] > 0
+    assert recovered["code_review_doc"]["invalid_episode_start"] == 6
+    assert recovered["code_review_doc"]["review_invalid_attempts"] == 3
+    assert recovered["code_review_doc"]["model"] == code_review.FALLBACK_REVIEW_MODEL
     assert transport.attempts["RecoveredReplacement"] == 8
     assert transport.output_limits["RecoveredReplacement"] == [32768] * 7 + [65536]
+    assert transport.models["RecoveredReplacement"] == [code_review.DEFAULT_REVIEW_MODEL] * 7 + [code_review.FALLBACK_REVIEW_MODEL]
     recovered_kinds = _ledger_kinds(harness, replacement_id)
     assert recovered_kinds.count("reservation") == 8
     assert recovered_kinds.count("dispatch") == 8
+    reservations = [entry for entry in harness.service.store.list_ledger(submission_id=replacement_id)
+                    if entry["operation_id"] == "openrouter.code_review" and entry["entry_kind"] == "reservation"]
+    assert [entry["entry_doc"]["review_model"] for entry in reservations] == transport.models["RecoveredReplacement"]
     assert reviewer.review(recovered)["status"] == "existing"
     assert transport.attempts["RecoveredReplacement"] == 8
     assert _ledger_kinds(harness, replacement_id) == recovered_kinds

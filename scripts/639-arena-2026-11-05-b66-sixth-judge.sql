@@ -185,7 +185,7 @@ BEGIN
   OR ((r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_scoring'::TEXT,11::BIGINT,9::BIGINT)
     AND (r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_judged'::TEXT,12::BIGINT,10::BIGINT))
   OR r.scoring_generation_floor IS DISTINCT FROM 0
-  OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '55beda7a80b7ac9e9c76e2e2fa9d1f30495dd6e05d6354be2db7dd5eda605996'
+  OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '7687d54874aa88d1783c44065e22410c469d6d4cc910549ee967c29b5bfe977e'
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.reward_activated_at IS NOT NULL
   OR r.configuration_doc#>>'{schedule,final_scoring_close}' IS DISTINCT FROM '2026-11-06T09:30:00Z'
   OR r.configuration_doc#>>'{schedule,publication_deadline}' IS DISTINCT FROM '2026-11-06T09:35:00Z'

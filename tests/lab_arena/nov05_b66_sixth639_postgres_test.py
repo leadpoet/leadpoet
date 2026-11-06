@@ -10,6 +10,7 @@ from lab_arena import company_judgments, contracts, scoring
 from tests.lab_arena import nov05_infrastructure_recovery633_postgres_test as recovery
 from tests.lab_arena import nov05_recovery_window641_postgres_test as window
 from tests.lab_arena import nov05_retry_window644_postgres_test as retry_window
+from tests.lab_arena import nov05_held_window646_postgres_test as held_window
 from tests.lab_arena.company_judgments_test import _input, _raw
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
 
@@ -140,6 +141,7 @@ def prepared(database):
         assert (p.store.get_round(ROUND)['status_generation'],p.store.get_round(ROUND)['stage_generation'])==(9,7)
         p.window_sql=window.render(p);window.apply(p)
         p.retry_window_sql=retry_window.render(p);retry_window.apply(p)
+        p.held_window_sql=held_window.render(p);held_window.apply(p)
         assert p.store.get_round(ROUND)['configuration_doc']['schedule']['final_scoring_close']=='2099-11-06T09:30:00Z'
         for _ in range(50):
             lease=recovery.claim(p);assert lease['status']=='leased'and lease['kind']=='execute',lease
@@ -167,7 +169,7 @@ def render(p):
         for table in ('lab_arena_company_judgments','lab_arena_signal_judgments'):manifest[table+'_row_hashes']=hashes(table,"source_scored_run_id='"+SOURCE+"'")
         cfg=p.store.get_round(ROUND)['configuration_doc'];digest=recovery.source.hash_doc(q,cfg)
     text=re.sub(r'\$manifest639\$.*?\$manifest639\$',lambda _:'$manifest639$'+json.dumps(manifest,separators=(',',':'))+'$manifest639$',SQL.read_text(),flags=re.S)
-    return text.replace('55beda7a80b7ac9e9c76e2e2fa9d1f30495dd6e05d6354be2db7dd5eda605996',digest).replace('2026-11-06T09:30:00Z','2099-11-06T09:30:00Z').replace('2026-11-06T09:35:00Z','2099-11-06T09:35:00Z')
+    return text.replace('7687d54874aa88d1783c44065e22410c469d6d4cc910549ee967c29b5bfe977e',digest).replace('2026-11-06T09:30:00Z','2099-11-06T09:30:00Z').replace('2026-11-06T09:35:00Z','2099-11-06T09:35:00Z')
 
 
 @pytest.mark.parametrize('outcome',['accepted','judge_error','expired'])

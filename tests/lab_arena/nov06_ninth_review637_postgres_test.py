@@ -6,7 +6,7 @@ import json,re
 import pytest
 from psycopg2.extras import Json
 
-from lab_arena import code_review_policy,submission_similarity
+from lab_arena import code_review_policy,submission_similarity,scoring
 from lab_arena.store import new_lease_token
 from tests.lab_arena.nov06_late_review635_postgres_test import (
     database,context as original_context,apply,row_hash,settle,M636,ROUND,
@@ -65,6 +65,13 @@ def context(database):
         apply(c,oldsql)
         for x in oldtargets:settle(store,x['submission_id'],status='rejected',manifest=x['manifest_sha256'])
         apply(c,M636.read_text())
+        with c.cursor() as q:q.execute('UPDATE public.lab_arena_restart_claim_control SET operator_paused=FALSE WHERE singleton')
+        baseline=next(p for p in participants if p['is_king'])
+        assert store.open_stage(ROUND,1,[{'submission_id':baseline['submission_id'],'miner_hotkey':baseline['miner_hotkey']}],list(range(20)))['status']=='ok'
+        store._ninth_preserved_runs=store.list_runs(ROUND)
+        with c.cursor() as q:
+            q.execute('SELECT to_jsonb(control) FROM public.lab_arena_restart_claim_control control WHERE singleton')
+            store._ninth_preserved_control=q.fetchone()[0]
         sql=M637.read_text();target_text=sql.split('$targets635$')[1];target=json.loads(target_text)[0]
         with c.cursor() as q:
             target['row_sha256']=row_hash(q,'lab_arena_submissions','submission_id',SID)
@@ -72,8 +79,6 @@ def context(database):
             target['manifest_sha256']=oldtargets[0]['manifest_sha256']
             q.execute("SELECT jsonb_agg(entry_id ORDER BY entry_id) FROM public.lab_arena_ledger WHERE submission_id=%s AND operation_id='openrouter.code_review'",(SID,));target['ledger_ids']=q.fetchone()[0]
             sql=sql.replace(target_text,json.dumps([target],separators=(',',':'),sort_keys=True))
-            roundhash=re.search(r"to_jsonb\(r\)::TEXT,'sha256'\),'hex'\)<>'([0-9a-f]{64})'",sql).group(1)
-            sql=sql.replace(roundhash,row_hash(q,'lab_arena_rounds','round_id',ROUND))
             q.execute("SELECT submission_id,encode(extensions.digest(to_jsonb(s)::TEXT,'sha256'),'hex') FROM public.lab_arena_submissions s WHERE round_id=%s AND submission_id<>%s",(ROUND,SID))
             preserved=dict(q.fetchall());assert len(preserved)==29
             sql=sql.replace(sql.split('$preserved635$')[1],json.dumps(preserved,separators=(',',':'),sort_keys=True))
@@ -105,9 +110,9 @@ def assert_preserved(context):
     with c.cursor() as q:
         q.execute("SELECT jsonb_agg(to_jsonb(h) ORDER BY generation_floor) FROM public.lab_arena_scoring_supersessions h WHERE round_id=%s AND request_id IN('nov06-late-review635-v1','nov06-admit-late-reviewed636-v1')",(ROUND,))
         assert q.fetchone()[0]==old_receipts
-        q.execute('SELECT operator_paused,pause_reason FROM public.lab_arena_restart_claim_control WHERE singleton')
-        assert q.fetchone()==(True,'await_reviewed_recovery633_before_publication')
-    assert store.list_runs(ROUND)==[]
+        q.execute('SELECT to_jsonb(control) FROM public.lab_arena_restart_claim_control control WHERE singleton')
+        assert q.fetchone()[0]==store._ninth_preserved_control
+    assert store.list_runs(ROUND)==store._ninth_preserved_runs
     assert store.get_round(ROUND)['participants'][:18]==participants
 
 
@@ -208,18 +213,19 @@ def test_unclaimed_ninth_expiry_excludes_without_fourth_or_extension(context):
     assert_preserved(context)
 
 
-@pytest.mark.parametrize('fault',['hold','source','preserved','round','guard'])
+@pytest.mark.parametrize('fault',['hold','source','preserved','round','guard','stage1_plan'])
 def test_new_receipt_rechecks_exact_state_before_spend_and_enrollment(context,fault):
     store,c,sql,_,oldtargets,participants,_,_,_=context
     apply(c,sql);row=store.get_submission(SID);before=store.list_ledger(submission_id=SID)
     with c.cursor() as q:
-        if fault=='hold':q.execute('UPDATE public.lab_arena_restart_claim_control SET operator_paused=FALSE WHERE singleton')
+        if fault=='hold':q.execute('UPDATE public.lab_arena_restart_claim_control SET operator_paused=TRUE WHERE singleton')
         elif fault=='source':q.execute("UPDATE public.lab_arena_submissions SET source_size_bytes=source_size_bytes+1,submission_doc=jsonb_set(submission_doc,'{source_size_bytes}',to_jsonb(source_size_bytes+1)) WHERE submission_id=%s",(SID,))
         elif fault=='preserved':q.execute('UPDATE public.lab_arena_submissions SET updated_at=clock_timestamp() WHERE submission_id=%s',(oldtargets[0]['submission_id'],))
         elif fault=='round':
             q.execute("SET session_replication_role='replica'")
             q.execute("UPDATE public.lab_arena_rounds SET benchmark_ref=benchmark_ref||'.changed' WHERE round_id=%s",(ROUND,))
             q.execute("SET session_replication_role='origin'")
+        elif fault=='stage1_plan':planning_fault(c,fault)
         else:acquire(c)
     assert begin(store,SID,row['miner_hotkey'],ALTERNATE)['status'] in {'exhausted','paused','round_closed','deadline'}
     assert store.list_ledger(submission_id=SID)==before
@@ -266,6 +272,93 @@ def test_new_selector_preserves_inflight_finish_under_canonical_guard(context):
     assert finish_ninth(store,target,'passed',token)['status']=='passed'
     with pytest.raises(Exception,match='differ'):apply(c,M638.read_text())
     with c.cursor() as q:q.execute("UPDATE public.lab_arena_restart_claim_control SET guard_commitment='',owner_commitment='',guard_expires_at=NULL,candidate_commit='',restart_scope='',restart_phase='',captured_leases='[]'::JSONB WHERE singleton")
+    with c.cursor() as q:
+        q.execute('SELECT to_jsonb(control) FROM public.lab_arena_restart_claim_control control WHERE singleton')
+        store._ninth_preserved_control=q.fetchone()[0]
     apply(c,M638.read_text())
     assert store.get_submission(SID)['status']=='frozen'
+    assert_preserved(context)
+
+
+def test_baseline_progress_survives_review_and_pass_enters_normal_miner_plan(context):
+    store,c,sql,target,_,_,_,_,_=context
+    with c.cursor() as q:
+        q.execute("SELECT pg_get_functiondef('public.lab_arena_rounds_write_once_v1()'::regprocedure)")
+        assert "h.old_round_doc=to_jsonb(OLD)-'updated_at'" in q.fetchone()[0]
+    apply(c,sql)
+    row=store.get_submission(SID);token=new_lease_token()
+    assert begin(store,SID,row['miner_hotkey'],ALTERNATE,token)['status']=='claimed'
+    # Use the native phase transition: source and baseline rows may legitimately
+    # advance during the review. The recovery must preserve their new state.
+    assert store.close_stage(ROUND,1)['status']=='closed'
+    store._ninth_preserved_runs=store.list_runs(ROUND)
+    assert store.get_round(ROUND)['status']=='stage1_closed'
+    current=store.get_round(ROUND)
+    plan=scoring.build_scoring_plan(round_id=ROUND,stage=1,runs=store._ninth_preserved_runs,
+        execution_sequence_policy='baseline_scored_first_v1',configuration=current['configuration_doc'])
+    assert store.transition_round(ROUND,'stage1_closed','stage1_closed',{'stage1_scoring_plan_doc':plan})['status']=='ok'
+    assert finish_ninth(store,target,'passed',token)['status']=='passed'
+    apply(c,M638.read_text());assert_preserved(context)
+    participants=store.get_round(ROUND)['participants']
+    miners=[{'submission_id':p['submission_id'],'miner_hotkey':p['miner_hotkey']} for p in participants if not p['is_king']]
+    # Complete only the disposable phase fixture; the tested stage2 planner is
+    # the unmodified native path and must include all current frozen miners.
+    with c.cursor() as q:
+        q.execute("SET session_replication_role='replica'")
+        q.execute("UPDATE public.lab_arena_rounds SET status='stage1_scored',finalists=%s WHERE round_id=%s",(Json([p['submission_id'] for p in miners]),ROUND))
+        q.execute("SET session_replication_role='origin'")
+    with pytest.raises(Exception,match='stage_participants_invalid'):
+        store.open_stage(ROUND,2,[p for p in miners if p['submission_id']!=SID],list(range(20)))
+    assert store.list_runs(ROUND,stage=2)==[]
+    assert store.open_stage(ROUND,2,miners,list(range(20)))['status']=='ok'
+    assert len(store.list_runs(ROUND,stage=2,submission_id=SID))==20
+    assert store.list_runs(ROUND,stage=1)==store._ninth_preserved_runs
+
+
+def planning_fault(c, fault):
+    with c.cursor() as q:
+        q.execute("SET session_replication_role='replica'")
+        if fault=='phase':q.execute("UPDATE public.lab_arena_rounds SET status='stage2' WHERE round_id=%s",(ROUND,))
+        elif fault=='plan':q.execute("UPDATE public.lab_arena_rounds SET stage2_scoring_plan_doc='{}' WHERE round_id=%s",(ROUND,))
+        elif fault=='finalists':q.execute("UPDATE public.lab_arena_rounds SET finalists='[]' WHERE round_id=%s",(ROUND,))
+        elif fault=='stage1_plan':q.execute("UPDATE public.lab_arena_rounds SET stage1_scoring_plan_doc=%s WHERE round_id=%s",(Json({'work_items':[{'submission_id':'preserved-late635-1'}],'zero_rows':[]}),ROUND))
+        elif fault=='miner':q.execute("UPDATE public.lab_arena_runs SET submission_id='preserved-late635-1' WHERE run_id=(SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s LIMIT 1)",(ROUND,))
+        else:q.execute("UPDATE public.lab_arena_runs SET stage=2 WHERE run_id=(SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s LIMIT 1)",(ROUND,))
+        q.execute("SET session_replication_role='origin'")
+
+
+@pytest.mark.parametrize('fault',['phase','plan','finalists','miner','stage2','stage1_plan'])
+@pytest.mark.parametrize('at_admission',[False,True])
+def test_existing_miner_planning_blocks_grant_or_admission(context,fault,at_admission):
+    store,c,sql,target,_,participants,_,_,_=context
+    if at_admission:
+        apply(c,sql);assert finish_ninth(store,target,'passed')['status']=='passed'
+    before=store.list_ledger(submission_id=SID)
+    planning_fault(c,fault)
+    with pytest.raises(Exception,match='differ'):apply(c,M638.read_text() if at_admission else sql)
+    assert store.get_round(ROUND)['participants']==participants
+    assert store.list_ledger(submission_id=SID)==before
+
+
+def test_receipt_window_shortens_to_original_stage1_close(context):
+    store,c,sql,_,_,_,_,_,_=context
+    close=datetime.fromisoformat(store.get_round(ROUND)['configuration_doc']['schedule']['stage_1_close'].replace('Z','+00:00'))
+    created=close-timedelta(minutes=10)
+    at_close=sql.replace('created TIMESTAMPTZ:=clock_timestamp()',"created TIMESTAMPTZ:='%s'::TIMESTAMPTZ"%close.isoformat())
+    with pytest.raises(Exception,match='differ'):apply(c,at_close)
+    shortened=sql.replace('created TIMESTAMPTZ:=clock_timestamp()',"created TIMESTAMPTZ:='%s'::TIMESTAMPTZ"%created.isoformat())
+    apply(c,shortened)
+    row=store.get_submission(SID)
+    assert datetime.fromisoformat(row['code_review_doc']['nov06_late_review']['expires_at'])==close
+    with c.cursor() as q:
+        q.execute('SELECT public.lab_arena__nov06_late_review635_v1(r,s) FROM public.lab_arena_rounds r,public.lab_arena_submissions s WHERE r.round_id=%s AND s.submission_id=%s',(ROUND,SID))
+        assert q.fetchone()[0]==close
+    apply(c,shortened)
+    assert store.get_submission(SID)['code_review_attempts']==3
+    assert_preserved(context)
+    # At the capped deadline the unspent slot can be excluded truthfully;
+    # this never opens admission after the frozen stage1 boundary.
+    expiry=M638.read_text().replace('clock_timestamp()',"'%s'::TIMESTAMPTZ"%(close+timedelta(seconds=1)).isoformat())
+    apply(c,expiry)
+    assert store.get_submission(SID)['status']=='rejected'
     assert_preserved(context)

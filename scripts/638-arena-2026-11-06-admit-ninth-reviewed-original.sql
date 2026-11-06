@@ -1,6 +1,7 @@
 -- Finalize only the ninth exact receipt-bound review; admit only a real settled pass.
 -- Preserve all twenty-nine other rows, original eighteen participants, costs and windows.
--- The operator hold remains active. Native scheduling later creates all runs.
+-- Preserve current operator state and every existing baseline run. Native scheduling
+-- may plan this miner only after a settled pass is frozen before miner planning.
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
@@ -12,7 +13,7 @@ DECLARE r public.lab_arena_rounds; n public.lab_arena_rounds;
  s public.lab_arena_submissions; c public.lab_arena_restart_claim_control;
  reservation public.lab_arena_ledger; terminal public.lab_arena_ledger;
  sid TEXT; original JSONB; identity TEXT; proof JSONB:='{}'; admitted JSONB:='[]'; excluded JSONB:='[]';
- generation BIGINT; deadline TIMESTAMPTZ; review_cost BIGINT;
+ generation BIGINT; deadline TIMESTAMPTZ; review_cost BIGINT; runs_before JSONB; control_before JSONB;
 BEGIN
  SELECT * INTO STRICT r FROM public.lab_arena_rounds WHERE round_id='arena-2026-11-06' FOR UPDATE;
  SELECT * INTO done FROM public.lab_arena_scoring_supersessions
@@ -28,12 +29,22 @@ BEGIN
  WHERE round_id=r.round_id AND request_id='nov06-ninth-review637-v1'
   AND recovery_doc->>'operation'='nov06_late_review635_v1';
  SELECT * INTO STRICT c FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;
- deadline:=h.created_at+INTERVAL '30 minutes';
- IF current_setting('session_replication_role')<>'origin' OR NOT c.operator_paused
-  OR c.pause_reason IS DISTINCT FROM h.recovery_doc->>'pause_reason' OR c.guard_commitment<>''
-  OR r.status<>'committed' OR (to_jsonb(r)-'updated_at') IS DISTINCT FROM (h.old_round_doc-'updated_at')
-  OR clock_timestamp()>=(r.configuration_doc#>>'{schedule,stage_1_close}')::TIMESTAMPTZ
-  OR EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE round_id=r.round_id)
+ deadline:=LEAST(h.created_at+INTERVAL '30 minutes',(h.old_round_doc#>>'{configuration_doc,schedule,stage_1_close}')::TIMESTAMPTZ);
+ control_before:=to_jsonb(c);
+ SELECT coalesce(jsonb_object_agg(run_id,to_jsonb(a)),'{}') INTO runs_before FROM public.lab_arena_runs a WHERE round_id=r.round_id;
+ IF current_setting('session_replication_role')<>'origin' OR c.operator_paused
+  OR c.guard_commitment<>'' OR c.owner_commitment<>'' OR c.guard_expires_at IS NOT NULL
+  OR c.candidate_commit<>'' OR c.restart_scope<>'' OR c.restart_phase<>'' OR c.captured_leases<>'[]'::JSONB
+  OR r.status NOT IN('stage1','stage1_closed','stage1_scoring','stage1_judged')
+  OR r.configuration_doc->>'execution_sequence_policy' IS DISTINCT FROM 'baseline_scored_first_v1'
+  OR r.stage2_scoring_plan_doc IS NOT NULL OR r.finalists IS NOT NULL
+  OR NOT (r.stage1_scoring_plan_doc IS NULL OR COALESCE((jsonb_typeof(r.stage1_scoring_plan_doc)='object'
+     AND jsonb_typeof(r.stage1_scoring_plan_doc->'work_items')='array' AND jsonb_typeof(r.stage1_scoring_plan_doc->'zero_rows')='array'
+     AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements((CASE WHEN jsonb_typeof(r.stage1_scoring_plan_doc->'work_items')='array' THEN r.stage1_scoring_plan_doc->'work_items' ELSE '[]'::JSONB END)||(CASE WHEN jsonb_typeof(r.stage1_scoring_plan_doc->'zero_rows')='array' THEN r.stage1_scoring_plan_doc->'zero_rows' ELSE '[]'::JSONB END)) plan_item(value)
+      WHERE plan_item.value->>'submission_id' IS DISTINCT FROM 'baseline-2026-11-06')),FALSE))
+  OR (to_jsonb(r)-ARRAY['status','status_generation','stage_generation','stage1_scoring_plan_doc','updated_at']::TEXT[]) IS DISTINCT FROM (h.old_round_doc-ARRAY['status','status_generation','stage_generation','stage1_scoring_plan_doc','updated_at']::TEXT[])
+  OR EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE round_id=r.round_id
+   AND (submission_id IS DISTINCT FROM 'baseline-2026-11-06' OR stage IS DISTINCT FROM 1))
   OR EXISTS(SELECT 1 FROM jsonb_each_text(h.recovery_doc->'preserved') keep
    LEFT JOIN public.lab_arena_submissions p ON p.submission_id=keep.key
    WHERE encode(extensions.digest(to_jsonb(p)::TEXT,'sha256'),'hex') IS DISTINCT FROM keep.value)
@@ -76,7 +87,8 @@ BEGIN
   IF s.code_review_status='passed' THEN
    SELECT sum((value->>'amount_microusd')::BIGINT) INTO review_cost
     FROM jsonb_array_elements(original->'ledger') WHERE value->>'entry_kind'='settlement';
-   IF s.code_review_attempts<>4 OR terminal.entry_kind IS DISTINCT FROM 'settlement'
+   IF clock_timestamp()>=(r.configuration_doc#>>'{schedule,stage_1_close}')::TIMESTAMPTZ
+    OR s.code_review_attempts<>4 OR terminal.entry_kind IS DISTINCT FROM 'settlement'
     OR terminal.created_at>=deadline
     OR s.code_review_doc->'passed' IS DISTINCT FROM 'true'::JSONB
     OR s.code_review_doc->>'verdict' IS DISTINCT FROM 'pass'
@@ -108,8 +120,8 @@ BEGIN
  INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,
   transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc)
  VALUES(r.round_id,generation,'nov06-admit-ninth-reviewed638-v1','sha256:'||encode(extensions.digest(proof::TEXT,'sha256'),'hex'),
-  'operator:nov06-admit-ninth638',txid_current(),pg_backend_pid(),to_jsonb(r),to_jsonb(n),'{}',jsonb_build_object(
-   'operation','nov06_admit_late_reviewed636_v1','admitted',admitted,'excluded',excluded,'reviews',proof));
+  'operator:nov06-admit-ninth638',txid_current(),pg_backend_pid(),to_jsonb(r)-'updated_at',to_jsonb(n)-'updated_at','{}',jsonb_build_object(
+   'operation','nov06_admit_late_reviewed636_v1','baseline_runs_at_admission',runs_before,'control_at_admission',control_before,'admitted',admitted,'excluded',excluded,'reviews',proof));
  FOR sid IN SELECT jsonb_array_elements_text(admitted) LOOP
   UPDATE public.lab_arena_submissions SET status='frozen',frozen_at=clock_timestamp(),rejection_rule=NULL
    WHERE submission_id=sid AND status='accepted' AND code_review_status='passed';
@@ -122,8 +134,9 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'Nov06 ninth638 exclusion differs'; END IF;
  END LOOP;
  UPDATE public.lab_arena_rounds SET participants=n.participants WHERE round_id=r.round_id;
- IF EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE round_id=r.round_id) THEN
-  RAISE EXCEPTION 'Nov06 ninth638 unexpectedly created execution'; END IF;
+ IF (SELECT coalesce(jsonb_object_agg(run_id,to_jsonb(a)),'{}') FROM public.lab_arena_runs a WHERE round_id=r.round_id) IS DISTINCT FROM runs_before
+  OR (SELECT to_jsonb(control) FROM public.lab_arena_restart_claim_control control WHERE singleton) IS DISTINCT FROM control_before THEN
+  RAISE EXCEPTION 'Nov06 ninth638 changed existing baseline work or control'; END IF;
 END;
 $admit638$;
 COMMIT;

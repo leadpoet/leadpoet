@@ -1207,6 +1207,12 @@ class ArenaStore:
     def __init__(self, transport: StoreTransport, *, lease_ttl_seconds: int = LEASE_TTL_SECONDS) -> None:
         self._transport = transport
         self._lease_ttl_seconds = int(lease_ttl_seconds)
+        self._per_round_replacement_cutoff = False
+
+    @property
+    def replacement_cutoff_columns(self) -> str:
+        """Select the additive round field only after schema capability proof."""
+        return "replacement_freeze_seconds," if self._per_round_replacement_cutoff else ""
 
     # -- identity ---------------------------------------------------------
 
@@ -1969,7 +1975,7 @@ class ArenaStore:
 
     # -- submissions ------------------------------------------------------
 
-    def submission_replacement_schema(self) -> Dict[str, Any]:
+    def submission_replacement_schema(self, *, require_per_round_cutoff: bool = False) -> Dict[str, Any]:
         result = _require_mapping(
             self._transport.rpc("lab_arena_submission_replacement_schema_v1", {}),
             "submission_replacement_schema",
@@ -1981,6 +1987,13 @@ class ArenaStore:
                 or type(result.get("max_replacement_attempts")) is not int
                 or result["max_replacement_attempts"] != 1):
             raise ArenaStoreError("submission replacement schema mismatch")
+        self._per_round_replacement_cutoff = (
+            result.get("per_round_replacement_freeze_seconds") is True
+            and type(result.get("default_replacement_freeze_seconds")) is int
+            and result["default_replacement_freeze_seconds"] == 600
+        )
+        if require_per_round_cutoff and not self._per_round_replacement_cutoff:
+            raise ArenaStoreError("per-round submission replacement schema unavailable")
         return result
 
     def submission_similarity_schema(self) -> Dict[str, Any]:

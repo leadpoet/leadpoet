@@ -7,7 +7,7 @@ BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
 SELECT pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
-LOCK TABLE public.lab_arena_rounds,public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.lab_arena_rounds,public.lab_arena_submissions IN SHARE ROW EXCLUSIVE MODE NOWAIT;
 
 DO $requires637_660$
 DECLARE target RECORD;

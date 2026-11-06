@@ -79,8 +79,16 @@ def _advance_active(service) -> str:
     for row in active:
         try:
             with telemetry.stage("advance_round") as observed:
-                service.advance_round(row["round_id"])
-                observed.count = 1
+                advanced = service.advance_round(row["round_id"])
+                # A round that is still open before its submission cutoff, or
+                # one an operator is holding, is advanced by nobody. Report
+                # that as idle the way `active_rounds` and `ensure_daily_round`
+                # already do, so a quiet Arena is distinguishable from a stuck
+                # one. `retry` is NOT idle: billing or admission did work and
+                # asked for another pass.
+                idle = (advanced or {}).get("status") in ("waiting", "paused")
+                observed.count = 0 if idle else 1
+                observed.idle = idle
         except Exception as exc:
             outcomes.append(
                 "failed advance_round %s: %s"

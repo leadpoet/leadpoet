@@ -132,3 +132,40 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+def test_open_round_before_cutoff_is_reported_idle_not_as_work_done(observed_service):
+    """A round nobody can advance yet must not read as a successful advance.
+
+    `active_rounds` and `ensure_daily_round` already distinguish idle from ok;
+    `advance_round` hardcoded count=1/ok on every tick, so an Arena sitting in
+    its open submission window looked exactly like one stuck mid-round.
+    """
+    service, exporter, row = observed_service
+    row["status"] = "open"
+    row["configuration_doc"]["schedule"]["submission_cutoff"] = (
+        service.now() + timedelta(hours=3)
+    ).isoformat().replace("+00:00", "Z")
+    service.admit_uploaded_submissions = lambda *_args, **_kwargs: {"remaining": 0}
+    service.active_rounds = lambda: [{"round_id": "round"}]
+
+    assert _advance_active(service) == "advanced round"
+
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_round"]
+    assert span.attributes["arena.outcome"] == "idle"
+    assert span.attributes["arena.count"] == 0
+
+
+def test_a_real_transition_still_reports_ok_with_one_round_advanced(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "scored"
+    service.publish = lambda _: {"status": "published"}
+    service.active_rounds = lambda: [{"round_id": "round"}]
+
+    assert _advance_active(service) == "advanced round"
+
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_round"]
+    assert span.attributes["arena.outcome"] == "ok"
+    assert span.attributes["arena.count"] == 1

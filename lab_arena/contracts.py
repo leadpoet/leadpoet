@@ -990,6 +990,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("training_maximum_missing_reasoning_percent", "int", required=False,
       minimum=0, maximum=100),
     F("reasoning_route_registry", "object", required=False),
+    F("judge_reasoning_route_registry", "object", required=False),
     F("baseline_reasoning_configuration", "object", required=False),
     F("reasoning_baseline_source_sha256", "sha256", required=False),
     F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
@@ -1146,6 +1147,18 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     elif ("reasoning_route_registry" in config
           or "reasoning_baseline_source_sha256" in config):
         raise ArenaContractError("reasoning policy and route metadata must be frozen together")
+    judge_policy = (config.get("scorer_policy") or {}).get("env_bindings", {}).get(
+        JUDGE_REASONING_CAPTURE_BINDING)
+    if judge_policy == "full_generated_thinking_v1":
+        from lab_arena import reasoning_capture
+        try:
+            reasoning_capture.validate_judge_registry(
+                config.get("judge_reasoning_route_registry", config.get("reasoning_route_registry")),
+                config["scorer_policy"])
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ArenaContractError("judge thinking requires its frozen route registry") from exc
+    elif "judge_reasoning_route_registry" in config:
+        raise ArenaContractError("judge reasoning policy and registry must be frozen together")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None
@@ -1419,6 +1432,45 @@ FIT_FP_CLASSIFICATION_BINDING = "ARENA_FIT_FP_CLASSIFICATION"
 FIT_RECEIPT_AUTHORITY = "company_fit_receipt_v1"
 PROVIDER_OBSERVATION_HANDOFF_BINDING = "ARENA_PROVIDER_OBSERVATION_HANDOFF"
 AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
+JUDGE_REASONING_CAPTURE_BINDING = "ARENA_JUDGE_REASONING_CAPTURE_POLICY"
+JUDGE_PROVIDER_ROUTES_BINDING = "ARENA_JUDGE_PROVIDER_ROUTES"
+JUDGE_REQUEST_OPTIONS_BINDING = "ARENA_JUDGE_REQUEST_OPTIONS"
+JUDGE_REASONING_EXCEPTIONS_BINDING = "ARENA_JUDGE_REASONING_EXCEPTIONS"
+
+
+def validate_judge_reasoning_exceptions(raw: Any, models: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Only the quality-gated proprietary industry workflow may lack full text.
+
+    This grants no route approval. Sol retains its existing host routing; every
+    other frozen model still requires its exact reviewed reasoning route.
+    """
+    try:
+        exceptions = json.loads(raw)
+        model = "openai/gpt-6.1-sol"
+        allowed_roles = (["industry_evidence_review"],
+                         ["industry_evidence_review", "industry_research_controller"])
+        if not isinstance(exceptions, dict) or set(exceptions) != {model}:
+            raise ValueError
+        entry = exceptions[model]
+        if (not isinstance(entry, dict) or set(entry) != {"roles", "reason"}
+                or entry["roles"] not in allowed_roles or not isinstance(entry["reason"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{1,79}", entry["reason"]) is None):
+            raise ValueError
+        if models is not None and sorted(role for role, value in models.items() if value == model) != entry["roles"]:
+            raise ValueError
+        return exceptions
+    except (TypeError, ValueError, KeyError, AttributeError):
+        raise ArenaContractError("invalid frozen judge reasoning exceptions") from None
+
+
+def judge_reasoning_exceptions(policy: Mapping[str, Any]) -> Dict[str, Any]:
+    bindings = policy.get("env_bindings") or {}
+    raw = bindings.get(JUDGE_REASONING_EXCEPTIONS_BINDING)
+    if raw is None:
+        return {}
+    if bindings.get(JUDGE_REASONING_CAPTURE_BINDING) != "full_generated_thinking_v1":
+        raise ArenaContractError("judge reasoning exceptions require frozen thinking policy")
+    return validate_judge_reasoning_exceptions(raw, policy.get("judge_models") or {})
 
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
@@ -1465,6 +1517,48 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     evidence_policy = policy.get("evidence_judgment_policy", "")
     if policy["env_bindings"].get("ARENA_EVIDENCE_JUDGMENT_POLICY", evidence_policy) != evidence_policy:
         raise ArenaContractError("evidence reuse binding differs from frozen policy")
+    capture = policy["env_bindings"].get(JUDGE_REASONING_CAPTURE_BINDING)
+    routes_raw = policy["env_bindings"].get(JUDGE_PROVIDER_ROUTES_BINDING)
+    exceptions = judge_reasoning_exceptions(policy)
+    full_models = None
+    if capture is not None or routes_raw is not None:
+        if capture != "full_generated_thinking_v1" or not routes_raw:
+            raise ArenaContractError("judge thinking requires a frozen policy and provider routes")
+        required_roles = {
+            "company_fit_reverification", "intent_signal_judge", "intent_details_review",
+            "intent_three_stage_stage3", "intent_fetched_evidence", "role_batch_check",
+            "industry_evidence_review",
+        }
+        if (not required_roles <= set(policy["judge_models"])
+                or any(not isinstance(v, str) or not v.strip() for v in policy["judge_models"].values())):
+            raise ArenaContractError("judge thinking requires every frozen model role")
+        full_models = set(policy["judge_models"].values()) - set(exceptions)
+        try:
+            routes = json.loads(routes_raw)
+        except (TypeError, ValueError):
+            raise ArenaContractError("invalid judge provider routes") from None
+        if (not isinstance(routes, dict) or set(routes) != full_models
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 128 for v in routes.values())):
+            raise ArenaContractError("judge provider routes must cover the frozen model roles")
+    options_raw = policy["env_bindings"].get(JUDGE_REQUEST_OPTIONS_BINDING)
+    if options_raw is not None:
+        try:
+            options = json.loads(options_raw)
+            if capture != "full_generated_thinking_v1" or not isinstance(options, dict) or set(options) != full_models:
+                raise ValueError
+            for option in options.values():
+                if not isinstance(option, dict) or set(option) != {"reasoning", "max_output_tokens"}:
+                    raise ValueError
+                maximum = option["max_output_tokens"]
+                mode = option["reasoning"]
+                if type(maximum) is not int or not 1 <= maximum <= 32768 or not isinstance(mode, dict):
+                    raise ValueError
+                if not ((set(mode) == {"effort"} and mode["effort"] in {"minimal", "low", "medium", "high", "xhigh", "max"})
+                        or (set(mode) == {"enabled"} and mode["enabled"] is True)
+                        or (set(mode) == {"max_tokens"} and type(mode["max_tokens"]) is int and 1 <= mode["max_tokens"] < maximum)):
+                    raise ValueError
+        except (TypeError, ValueError, KeyError):
+            raise ArenaContractError("invalid frozen judge request options") from None
     if SCORE_NORMALIZATION_BINDING in policy["env_bindings"]:
         if policy["env_bindings"][SCORE_NORMALIZATION_BINDING] != AVAILABLE_INTENT_CAP_NORMALIZATION:
             raise ArenaContractError("unsupported score normalization")

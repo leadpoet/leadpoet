@@ -160,7 +160,8 @@ def test_fixed_metadata_overflow_fails_instead_of_truncating_required_facts():
 def test_long_evidence_still_requires_stage3_terminal_verdict():
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search):
+        assert hosted_search is True
         prompts.append(prompt)
         operations.validate_operation_request(
             "openrouter.chat", _openrouter_parameters(prompt)
@@ -431,7 +432,8 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_sources(
     }
     prompts = []
 
-    async def call_openrouter(_client, _model, prompt):
+    async def call_openrouter(_client, _model, prompt, *, hosted_search):
+        assert hosted_search is False
         prompts.append(prompt)
         operations.validate_operation_request(
             "openrouter.chat", _openrouter_parameters(prompt)

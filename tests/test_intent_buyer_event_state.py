@@ -98,7 +98,8 @@ def test_arena_scorer_passes_request_and_final_judge_controls_event_state(
             "source_publication_date": "2026-07-28",
         }], "statuses": []}
 
-    async def judge(_client, _model, prompt):
+    async def judge(_client, _model, prompt, *, hosted_search):
+        assert hosted_search is False
         prompts.append(prompt)
         signal = json.loads(prompt.split("Intent signal to verify:\n", 1)[1].split(
             "\n\nThree-part verification", 1,

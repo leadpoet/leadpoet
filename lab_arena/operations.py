@@ -2332,7 +2332,7 @@ def _explicit_responses_open_maps(document: Dict[str, Any]) -> bool:
     return changed
 
 
-def _serialize_outbound_json_body(document: Any, *, industry_schema_order: bool = False) -> bytes:
+def serialize_json_body(document: Any, *, industry_schema_order: bool = False) -> bytes:
     body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
     if industry_schema_order:
         # Structured outputs follow property order. Canonical storage sorts
@@ -2372,7 +2372,7 @@ def outbound_body_hash_matches(operation_id: str, body: Any, digest: Any) -> boo
         if contracts.document_hash(body) == digest:
             return True
         return (operation_id == "openrouter.chat" and isinstance(body, Mapping)
-                and contracts.hash_bytes(_serialize_outbound_json_body(
+                and contracts.hash_bytes(serialize_json_body(
                     body, industry_schema_order=True)) == digest)
     except (AttributeError, TypeError, ValueError):
         return False
@@ -2403,7 +2403,7 @@ def build_outbound_request(
                                             allow_full_thinking=allow_full_thinking)
     if type(industry_schema_order) is not bool or industry_schema_order and (
         operation_id != "openrouter.chat"
-        or normalized.get("model") != "openai/gpt-6.1-sol"
+        or (normalized.get("model") != "openai/gpt-6.1-sol" and not allow_full_thinking)
         or openrouter_provider_policy is None
     ):
         raise OperationRequestError("invalid_request")
@@ -2533,7 +2533,7 @@ def build_outbound_request(
                 schema = catalog.tool_entry(deepline_catalog, normalized["tool"])["input_schema"]
                 if not Draft202012Validator(schema).is_valid(document["payload"]):
                     raise OperationRequestError("invalid_request")
-        body = _serialize_outbound_json_body(document, industry_schema_order=industry_schema_order)
+        body = serialize_json_body(document, industry_schema_order=industry_schema_order)
         if schema_expanded:
             try:
                 contracts.check_strict_document(document, _request_structure_limits(operation_id, allow_full_thinking))

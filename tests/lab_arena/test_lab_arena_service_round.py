@@ -30,6 +30,7 @@ from bittensor_wallet import Keypair
 from lab_arena import chain as chain_module
 from lab_arena import broker as br, code_review, contracts, driver as arena_driver, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
@@ -289,6 +290,7 @@ PRICED_MODELS = (
     "openai/gpt-4o-mini",
     code_review.DEFAULT_REVIEW_MODEL,
     *sorted(set(scoring.DEFAULT_JUDGE_MODELS.values())),
+    *sorted(set(LEGACY_MODELS.values())),
 )
 
 
@@ -679,7 +681,7 @@ class Harness:
                 credential_for=payer.credential_for,
                 funding_source_for=payer.funding_source_for,
                 price_table=price_table(),
-                judge_models=tuple(scoring.DEFAULT_JUDGE_MODELS.values()),
+                judge_models=round_row["configuration_doc"]["scorer_policy"]["judge_models"],
                 transport=FakeProviderTransport(),
                 clock=harness.clock,
             )

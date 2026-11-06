@@ -39,6 +39,7 @@ def test_dump_tools_reject_older_path_binary_for_newer_server(tmp_path, monkeypa
 
 
 def test_dump_tools_select_matching_server_version(tmp_path, monkeypatch):
+    monkeypatch.delenv("LAB_ARENA_PG_BINDIR", raising=False)
     older, matching = tmp_path / "pg15", tmp_path / "pg17"
     _version_tools(older, 15)
     _version_tools(matching, 17)

@@ -440,13 +440,15 @@ def _worker_artifact(example, call, *, allow_journal_prefix=False):
     field = ref.get('artifact_field')
     if field is None:
         return (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    kind = ('execute' if run_id == example.get('run_id') else
+            'score' if run_id == example.get('score_run_id') else None)
     _require(field == 'partial_worker_observation_artifacts' and allow_journal_prefix
              and training_coverage.uses_host_result_evidence(example.get('configuration') or {})
-             and run_id == example.get('run_id'), 'worker_journal_prefix_unavailable')
+             and kind is not None, 'worker_journal_prefix_unavailable')
     artifact = (example.get(field) or {}).get(run_id) or {}
     hashes, refs = artifact.get('segment_sha256'), artifact.get('segment_refs')
     _require(artifact.get('schema_version') == training_observations.JOURNAL_SCHEMA_VERSION
-             and artifact.get('run_id') == run_id and artifact.get('kind') == 'execute'
+             and artifact.get('run_id') == run_id and artifact.get('kind') == kind
              and artifact.get('complete') is False
              and (artifact.get('payload') or {}).get('complete') is False
              and isinstance(hashes, list) and isinstance(refs, list)
@@ -611,6 +613,13 @@ def _validate_target_tools(body, target, op):
                      for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
 
 
+def _outbound_body_exact(call):
+    """Use the shared wire verifier without changing the saved identity."""
+    outbound = (call.get('request') or {}).get('outbound') or {}
+    return operations.outbound_body_hash_matches(
+        call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256'))
+
+
 def _outbound_request_exact(call):
     """Check the retained provider route and the existing outbound body hash."""
     request = call.get('request') or {}
@@ -625,9 +634,17 @@ def _outbound_request_exact(call):
                 call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256')))
 
 
-def _model_request(example, call, *, worker_proofs=None):
+def _model_request(example, call, *, worker_proofs=None, role='source'):
     """Shared exact model request checks, independent of delivery or target."""
-    _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
+    if role == 'judge':
+        selected = [row for row in example.get('attempts') or []
+                    if row.get('run_id') == example.get('score_run_id')]
+        _require(call.get('run_id') == example.get('score_run_id')
+                 and len(selected) == 1 and selected[0].get('kind') == 'score'
+                 and selected[0].get('status') == 'accepted', 'not_selected_judge_call')
+    else:
+        _require(role == 'source', 'invalid_target_role')
+        _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
     op = call.get('operation_id')
     _require(call.get('provider') == 'openrouter' and op in {'openrouter.chat', 'openrouter.responses'}, 'operation_unsupported')
     request = call.get('request') or {}
@@ -650,6 +667,10 @@ def _model_request(example, call, *, worker_proofs=None):
              and outbound.get('path') == ('/api/v1/responses' if op.endswith('responses') else '/api/v1/chat/completions'), 'outbound_identity_mismatch')
     _require(isinstance(body.get('model'), str) and body['model']
              and body['model'] == (request.get('effective_parameters') or {}).get('model'), 'model_identity_mismatch')
+    if role == 'judge':
+        configuration = training_dataset.label_scorer_configuration(example)
+        _require(body['model'] in (configuration.get('scorer_policy') or {}).get('judge_models', {}).values(),
+                 'judge_model_not_allowed')
     _require(not body.get('stream') and not body.get('previous_response_id')
              and not body.get('conversation') and not body.get('prompt')
              and not body.get('plugins') and not body.get('transforms')
@@ -662,10 +683,11 @@ def _model_request(example, call, *, worker_proofs=None):
     return op, body, tools
 
 
-def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False):
+def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False,
+               role='source'):
     # Individual exporters may retain a proven prefix pair. The full-ICP
     # eligibility caller keeps the default final-snapshot requirement.
-    op, body, tools = _model_request(example, call, worker_proofs=worker_proofs)
+    op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -749,11 +771,28 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
         if hosted:
             target_provenance.update(target_semantics='provider_executed_trajectory',
                                      hosted_tool_execution='provider')
+    judge_context = {}
+    if role == 'judge':
+        configuration = training_dataset.label_scorer_configuration(example)
+        judge_context = {'role': 'judge', 'judge_context': {
+            'scored_run_id': example.get('run_id'), 'icp_position': example.get('icp_position'),
+            'icp_sha256': contracts.document_hash(example.get('icp') or {}),
+            'scored_output_sha256': contracts.document_hash(example.get('output') or {}),
+            'judgment_sha256': contracts.document_hash(example.get('judgment') or {}),
+            'scorer_policy_sha256': contracts.document_hash(configuration.get('scorer_policy') or {}),
+            'scorer_image_digest': configuration.get('scorer_image_digest'),
+            'evidence_scope': 'exact_provider_visible_input',
+            'judge_input_sha256': ((example.get('input_snapshots') or {}).get(call['run_id']) or {}).get('input_sha256'),
+            'worker_observation_payload_sha256': (call.get('response_provenance') or {}).get(
+                'worker_receipt_ref', {}).get('payload_sha256'),
+            'provider_call_sequence': call.get('action_sequence')}}
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
+            **({'role': 'judge'} if role == 'judge' else {}),
             'target': target,
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
+                             **judge_context,
                              **({'capture_scope': 'provider_visible_request_result', 'client_consumption': 'not_proved'}
                                 if provider_visible else {}),
                              **target_provenance,
@@ -768,9 +807,10 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'source_quality': copy.deepcopy(example.get('completeness') or {})}]}
 
 
-def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate=None):
+def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate=None, role='source'):
     """Export individual exact pairs; a journal prefix never proves a full ICP."""
     rules = rules or Rules()
+    _require(role in {'source', 'judge'}, 'invalid_target_role')
     candidates, analysis, sources = {}, [], set()
     source_groups = training_dataset._SourceSplitGroups()
     record_groups = {}
@@ -800,8 +840,8 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 analysis.append({'source_example_hash': source, 'call_ref_hash': None, 'reason': 'malformed_call'})
                 continue
             try:
-                record = (_candidate(example, call, host_observed=True, allow_journal_prefix=True) if host_observed
-                          else _candidate(example, call, allow_journal_prefix=True))
+                record = (_candidate(example, call, host_observed=True, allow_journal_prefix=True, role=role) if host_observed
+                          else _candidate(example, call, allow_journal_prefix=True, role=role))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])
@@ -845,6 +885,7 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
     manifest_rules = asdict(rules)
     manifest_rules['split_grouping'] = training_dataset.SPLIT_GROUPING
     manifest = {'schema_version': SCHEMA_VERSION, 'rules': manifest_rules,
+                **({'role': 'judge'} if role == 'judge' else {}),
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
                                        'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',

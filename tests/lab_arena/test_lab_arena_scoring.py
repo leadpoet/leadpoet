@@ -12,6 +12,7 @@ import pytest
 
 from lab_arena import contracts, scoring, verify
 from qualification.scoring import intent_verification_three_stage as intent_verifier
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 ROUND = "arena-2026-09-02"
 
@@ -648,9 +649,9 @@ def test_scorer_linkedin_slug_still_rejects_unsafe_shapes(linkedin):
         candidate_linkedin_prompt_slug(linkedin, "company_linkedin")
 
 
-def test_policy_is_plain_and_binds_environment_fail_closed():
-    policy = scoring.build_scorer_policy()
-    assert policy == scoring.build_scorer_policy()
+def test_legacy_policy_is_plain_and_binds_environment_fail_closed():
+    policy = scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
+    assert policy == scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
     assert policy["env_bindings"] == {} and policy["max_scored_companies"] == 0
     assert policy["fp_penalty_points"] == policy["fp_unverified_primary_penalty_points"] == 10.0
     environ = {}
@@ -666,6 +667,16 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": "anthropic/claude-sonnet-5.5",
         "ARENA_ROLE_BATCH_MODEL": "google/gemini-3.5-flash-lite",
         "ARENA_INDUSTRY_EVIDENCE_MODEL": "openai/gpt-6.1-sol",
+        "ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL": "",
+        "ARENA_COMPANY_REVERIFY_MODEL": "perplexity/sonar",
+        "INTENT_THREE_STAGE_S1_MODEL": "perplexity/sonar",
+        "INTENT_THREE_STAGE_S3_MODEL": "perplexity/sonar-pro",
+        "ARENA_INTENT_SIGNAL_MODEL": "openai/gpt-6-luna",
+        "ARENA_POSITIVE_SEMANTIC_REVIEW_MODEL": "openai/gpt-6-luna",
+        "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "",
+        "ARENA_JUDGE_PROVIDER_ROUTES": "",
+        "ARENA_JUDGE_REQUEST_OPTIONS": "",
+        "ARENA_JUDGE_REASONING_EXCEPTIONS": "",
     }
     assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):

@@ -491,6 +491,7 @@ ARENA_DENIAL_CODES = frozenset(
         "intent_details_activation_invalid",
         "intent_details_policy_requires_integrity",
         "intent_details_scorer_policy_mismatch",
+        "judge_reasoning_capture_activation_not_ready",
         "judgment_cache_authority_invalid",
         "judgment_cache_invalid",
         "lease_expired",

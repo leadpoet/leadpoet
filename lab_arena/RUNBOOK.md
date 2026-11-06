@@ -803,6 +803,47 @@ both kinds of work in v2 rounds. Older frozen rounds keep their existing claim
 rules. Deploy the gateway and managed validator through the canonical paired
 restart; other eligible validators must upgrade before claiming v2 work.
 
+Prospective judge reasoning capture is separately frozen from miner capture.
+Its scorer policy binds every model to one provider and may bind per-model
+`ARENA_JUDGE_REQUEST_OPTIONS` (`reasoning` mode and `max_output_tokens`).
+Without those options, the reviewed PR1041 request behavior remains unchanged.
+With options, compatible explicit reasoning controls can take precedence, while
+an `enabled: true` route never receives an invented effort control. The exact
+selected model/provider/API and option kind/output cap must match the separately
+frozen `judge_reasoning_route_registry`. Judge-only activation does not enable
+miner full-thinking, alter its baseline or relax its evidence requirements.
+The optional claim comparison still uses its existing 500-token, 15-second
+bound and no retries. A short or failed comparison remains a cache miss; its
+possible provider charge and later native judgment both count in cost checks.
+A separate comparison model or larger bound is not enabled by this change.
+
+New rounds use GPT-OSS-120B on `near-ai/fp4` with low reasoning and a 4096-token
+output cap for intent, fetched evidence, role and generic/semantic
+investigator checks. Company research, paragraph review and search fallbacks use DeepSeek V4.1
+Flash 1017 on `nebius/fp8`, low reasoning, and an 8192-token cap. Native hosted
+search requests one tool round, `max_uses: 1` and `max_total_results: 5`.
+These settings do not prove the number of internal parallel provider queries.
+The existing cache continues
+to bind the exact frozen model identity. Historical rounds retain their saved
+models, routes, requests and scorer images. See the dated model review for
+measured quality, cost and release evidence.
+
+The default frozen `ARENA_JUDGE_REASONING_EXCEPTIONS` map retains only `openai/gpt-6.1-sol`,
+with `roles: ["industry_evidence_review", "industry_research_controller"]` and a
+nonempty reason code. These are separate source-research and final-review
+subtasks in the industry workflow. Historical one-role exceptions remain valid;
+Sol cannot serve any other judge role. Its research controller keeps the
+original 3000-token allowance, low effort and native tool/repair limits. Provider routes and request options
+must cover exactly the remaining full-thinking models. Sol Chat requests keep
+the existing Azure regional failover and conservative price/privacy controls;
+the exception grants no Responses or open-model route bypass. Raw exposed text,
+summaries, tool evidence and judgment links remain captured. Sol full thinking
+is labelled unavailable and excluded from full-thinking targets. Independently
+verified open-model turn targets remain exportable with unreviewed quality and
+explicit partial judge-thinking completeness. Admission review and ICP generation
+retain their separate proprietary models and internal capture. Selecting an
+empty judge route map explicitly disables this prospective capture policy.
+
 Start the service:
 
 ```bash

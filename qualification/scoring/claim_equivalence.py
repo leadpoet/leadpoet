@@ -100,10 +100,15 @@ async def verify_claim_equivalence(
     else:
         from qualification.scoring.verification_helpers import openrouter_chat
         try:
+            # Capture and route selection still use the frozen scorer policy.
+            # This optional comparison keeps its original short budget; a
+            # truncated/failed reply is only a cache miss. A separate future
+            # comparison model or larger allowance needs its own evidence.
             result = await asyncio.wait_for(openrouter_chat(
                 canonical_json({"source_claim": source, "current_claim": current}),
                 model=model, max_retries=0, system_prompt=_SYSTEM,
                 response_format=_RESPONSE_FORMAT, max_tokens=500,
+                output_token_floor=500, timeout_seconds=TIMEOUT_SECONDS,
             ), timeout=TIMEOUT_SECONDS)
             answer = json.loads(result)
         except Exception as exc:

@@ -9,6 +9,7 @@ from lab_arena import company_judgments, contracts, scoring
 from tests.lab_arena.company_judgments_test import _input
 from lab_arena.service import ArenaService, ServiceError
 from tests.lab_arena.company_quality_judgment_authority589_postgres_test import canonical
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 
 def context():
@@ -21,7 +22,8 @@ def context():
     old.pop('company_quality_policy')
     old['company_judgment_policy']='company_judgment_v1'
     old['scorer_policy']=scoring.build_scorer_policy(
-        scoring_adapter_version='qualification_integrity_v2',company_judgment_cache=True)
+        scoring_adapter_version='qualification_integrity_v2',company_judgment_cache=True,
+        judge_models=LEGACY_MODELS,judge_provider_routes={})
     document=_input()
     document['scorer_policy']=old['scorer_policy']
     document['evaluation_date']='2026-11-03'

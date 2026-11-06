@@ -227,7 +227,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
     if not isinstance(value, Mapping) or set(value) != required or len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
         raise ObservationError("agent_observation_invalid")
     if (type(value["id"]) is not int or value["id"] < 0
-            or value["kind"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "capture_failure"}
+            or value["kind"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "judge_local_tool", "capture_failure"}
             or not _timestamp(value["observed_at"])
             or value["after_action_sequence"] is not None and
             (type(value["after_action_sequence"]) is not int or value["after_action_sequence"] < 0)
@@ -302,11 +302,16 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
                 or not isinstance(data["body_sha256"], str) or not contracts.SHA256_RE.fullmatch(data["body_sha256"])
                 or type(data["body_bytes"]) is not int or data["body_bytes"] < 0):
             raise ObservationError("response_received_invalid")
+    elif value["kind"] == "judge_local_tool":
+        try:
+            lab_arena_checkpoint.validate_judge_tool_event(data)
+        except ValueError:
+            raise ObservationError("judge_tool_event_invalid") from None
     elif value["kind"] == "state_snapshot" and (set(data) != {"name", "value"} or not isinstance(data["name"], str)
           or not 1 <= len(data["name"]) <= 80 or len(_canonical(data["value"])) > 65_536):
         raise ObservationError("state_snapshot_invalid")
     elif value["kind"] == "capture_failure" and (set(data) != {"category", "reason"}
-          or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot"}
+          or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "judge_local_tool"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ObservationError("agent_failure_invalid")
     cleaned, redactions = training_capture.sanitize_training_value(dict(data), secrets)

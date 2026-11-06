@@ -107,6 +107,46 @@ def test_replacement_deadline_matches_both_public_endpoints_and_is_not_cached():
     assert current.headers['cache-control'] == details.headers['cache-control'] == 'no-store'
 
 
+@pytest.mark.parametrize('delta', [-1, 0, 1])
+def test_prospective_2350_finalize_and_review_boundary(monkeypatch, delta):
+    monkeypatch.setitem(ROUND, 'replacement_freeze_seconds', 600)
+    monkeypatch.setattr(__name__ + '.CUTOFF', datetime(2026, 9, 15, 23, 50, tzinfo=timezone.utc))
+    test_finalize_cutoff_is_exclusive_to_the_microsecond(delta)
+    test_review_does_not_start_while_sources_can_be_replaced(delta, int(delta >= 0))
+
+
+def test_prospective_cutoff_is_published_without_changing_legacy_or_midnight():
+    from tests.lab_arena.test_lab_arena_public_output_policy import _round, _service
+    new = _round('arena-new-2350', 'open')
+    old = _round('arena-legacy-2300', 'committed')
+    for row in (new, old):
+        row['configuration_doc']['schedule']['submission_cutoff'] = '2026-09-16T00:00:00Z'
+    new['replacement_freeze_seconds'] = 600
+    with TestClient(create_app(_service([new, old]))) as http:
+        current = http.get('/arena/v1/current').json()
+        for row, expected in ((new, '23:50'), (old, '23:00')):
+            detail = http.get('/arena/v1/rounds/' + row['round_id']).json()
+            assert detail['submission_replacement_cutoff'] == f'2026-09-15T{expected}:00Z'
+            assert detail['schedule']['submission_cutoff'] == '2026-09-16T00:00:00Z'
+            assert detail['max_replacement_attempts'] == 1
+    assert current['open_round']['submission_replacement_cutoff'] == '2026-09-15T23:50:00Z'
+
+
+@pytest.mark.parametrize('invalid', [0, 599, True, '600', 3601])
+def test_invalid_round_replacement_metadata_fails_closed(invalid):
+    with pytest.raises(ServiceError, match='submission_replacement_policy_invalid'):
+        ArenaService._submission_replacement_cutoff({**ROUND, 'replacement_freeze_seconds': invalid})
+
+
+def test_midnight_disclosure_is_independent_of_the_new_replacement_freeze():
+    from lab_arena import icp_disclosure
+    row = {**ROUND, 'replacement_freeze_seconds': 600}
+    row['configuration_doc'] = {**ROUND['configuration_doc'],
+        'benchmark_disclosure_policy': icp_disclosure.CUTOFF_PUBLIC_POLICY}
+    metadata = icp_disclosure.disclosure_metadata(row)
+    assert metadata['public_at'] == '2026-09-16T00:00:00Z'
+
+
 @pytest.mark.parametrize('code', ['submission_replacement_closed', 'submission_window_closed'])
 def test_final_database_deadline_failure_is_a_clear_conflict(code):
     svc, _ = _service(CUTOFF - timedelta(microseconds=1))

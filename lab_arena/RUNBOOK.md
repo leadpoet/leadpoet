@@ -258,7 +258,8 @@ digest, or release manifest is part of miner admission. The service validates
 the declared archive size and safe source structure, then uses its own
 submission ID for execution and recovery. The private source reference for
 each submission is write-once. The service allows one current-submission
-replacement before the one-hour replacement freeze; it supersedes the prior
+replacement before its published replacement freeze (ten minutes before intake
+closes for new and eligible open rounds; legacy frozen rounds retain one hour); it supersedes the prior
 submission and uses a new source reference. After the freeze, replacement is
 closed. A miner can use any harness, model, prompts, packages, routing, or
 orchestration behind the one callable.

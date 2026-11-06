@@ -604,6 +604,7 @@ ARENA_DENIAL_CODES = frozenset(
         "submission_replacement_closed",
         "submission_replacement_ineligible",
         "submission_replacement_limit_reached",
+        "submission_replacement_policy_invalid",
         "submission_replacement_schema_unavailable",
         "submission_similarity_schema_unavailable",
         "submission_source_immutable",

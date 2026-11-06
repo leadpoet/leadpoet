@@ -216,7 +216,7 @@ Every submission must pass code review before evaluation. Review uses the submit
 
 Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are **10 MiB compressed, 50 MiB unpacked, and 1,000 files**.
 
-Each registered hotkey can submit one model per daily round. First submissions close at **00:00 UTC**. You have **one replacement attempt before 23:00 UTC** using the same command and hotkey. Upload and validation must finish before the cutoff. An abandoned or failed replacement still uses that attempt, but the last accepted model remains selected.
+Each registered hotkey can submit one model per daily round. First submissions close at **00:00 UTC**. New and eligible open rounds allow **one replacement attempt before 23:50 UTC** using the same command and hotkey. The API publishes each round's exact `submission_replacement_cutoff`; earlier frozen rounds retain their original cutoff. Upload and validation must finish before that cutoff. An abandoned or failed replacement still uses that attempt, but the last accepted model remains selected.
 
 Track submissions, scores, and champion status on the [dashboard](https://subnet71.com). See the [miner guide](docs/miner-model-submissions.md) for detailed submission rules.
 

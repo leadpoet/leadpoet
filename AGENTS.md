@@ -1,3 +1,14 @@
+## Scoped authorization: prospective 23:50 replacement cutoff
+
+The user approved moving the daily replacement cutoff to 23:50 UTC for new
+and eligible open rounds only. Bind native admission, review start and public
+API policy to the same immutable round metadata. Preserve legacy frozen rounds,
+signed configuration, midnight intake/disclosure, evaluation windows, the same
+hotkey and one replacement attempt including failed attempts, source and costs.
+Apply migration642 only after the exact November6 recovery is terminal; retain
+its snapshots and receipts unchanged. Internal agents implement, test and commit.
+The root coordinator owns review, push, merge and canonical deployment.
+
 ## Scoped authorization: November 6 ninth exact late review
 
 The user approved one unchanged-artifact alternate review for

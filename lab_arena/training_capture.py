@@ -73,6 +73,22 @@ class CaptureError(ValueError):
     """Request evidence was not complete or did not pass integrity checks."""
 
 
+def model_response_object(text: str) -> dict[str, Any]:
+    """Parse optional model evidence without discarding private field values."""
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise CaptureError("model_response_duplicate_key")
+            result[key] = value
+        return result
+
+    value = json.loads(text, object_pairs_hook=unique_object)
+    if not isinstance(value, dict):
+        raise CaptureError("model_response_object_required")
+    return value
+
+
 def retryable_storage_error(error: Exception) -> bool:
     """Recognize transport availability failures, never missing/denied objects."""
     if isinstance(error, (TimeoutError, ConnectionError)):

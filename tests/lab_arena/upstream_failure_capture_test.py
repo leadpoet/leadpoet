@@ -231,7 +231,81 @@ def test_transport_failure_does_not_claim_an_upstream_response():
     assert "upstream_response_receipt" not in store.calls[result.call["call_identity"]]["uncertain_doc"]
 
 
-def test_malformed_model_response_keeps_private_text_without_final_price():
+@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("body", [
+    b'{"encrypted_content":"opaque-fragment',
+    b'{"api_key":"private-field-fragment',
+    b'{"encrypted_\\u0063ontent":"opaque-fragment',
+])
+def test_completed_malformed_model_json_cannot_bypass_structural_privacy(operation, body):
+    # These are complete HTTP bodies, not transport prefixes. Without valid
+    # JSON, neither opaque nor credential field boundaries can be established.
+    receipt = br._capture_upstream_response(br.ProviderResponse(503, {}, body),
+        operation_id=operation, request_hash="hash", call_identity="call")
+    assert receipt == {"status": "unavailable", "reason": "response_capture_failed"}
+
+
+@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("body", [
+    json.dumps('{"encrypted_content":"opaque-fragment').encode(),
+    b'[{"encrypted_content":"opaque-fragment"}]', b'null', b'123',
+    b'{"encrypted_content":"opaque-fragment","encrypted_content":null}',
+    b'{"api_key":"private-field-fragment","api_key":null}',
+    b'{"error":{"api_key":"private-field-fragment","api_key":null}}',
+    b'{"encrypted_content":"opaque-fragment","encrypted_\\u0063ontent":null}',
+])
+def test_nonobject_and_duplicate_model_json_are_unavailable(operation, body):
+    receipt = br._capture_upstream_response(br.ProviderResponse(503, {}, body),
+        operation_id=operation, request_hash="hash", call_identity="call")
+    assert receipt == {"status": "unavailable", "reason": "response_capture_failed"}
+
+
+@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
+def test_valid_model_json_still_keeps_sanitized_diagnostics(operation):
+    body = json.dumps({"api_key": "private-field-value", "encrypted_content": "opaque-state",
+                       "error": {"message": "safe diagnostic"}}).encode()
+    receipt = br._capture_upstream_response(br.ProviderResponse(503, {}, body),
+        operation_id=operation, request_hash="hash", call_identity="call")
+    assert json.loads(base64.b64decode(receipt["body_b64"])) == {
+        "api_key": "[REDACTED]", "encrypted_content": "[REDACTED]", "error": {"message": "safe diagnostic"}}
+    assert receipt["privacy"] == {"redacted": True, "redactions": ["credential", "hidden_reasoning"]}
+    assert receipt["wire_body_sha256"] == contracts.hash_bytes(body)
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_malformed_model_privacy_capture_preserves_accounting_and_replay(monkeypatch, status):
+    class Malformed(FakeTransport):
+        def send(self, **kwargs):
+            self.sent.append(kwargs)
+            return br.ProviderResponse(status, {"content-type": "application/json"},
+                b'{"encrypted_content":"opaque-fragment')
+
+    args = dict(operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=5000)
+    broker, store, transport = make_broker(transport=Malformed())
+    result = broker.execute(CONTEXT, **args)
+    saved = store.calls[result.call["call_identity"]]
+    assert upstream(saved) == {"status": "unavailable", "reason": "response_capture_failed"}
+    assert result.status == 502 and result.body == operations.GENERIC_UNAVAILABLE_BODY
+    assert saved["kind"] == "uncertain" and "known_actual_microusd" not in saved["uncertain_doc"]
+    replay = broker.execute(CONTEXT, **args)
+    assert replay.status == 409 and replay.call["error_code"] == "call_uncertain"
+    assert len(transport.sent) == 1
+
+    # Optional capture must leave the same public and accounting result as no
+    # evidence sink. It cannot settle or replay this paid request.
+    monkeypatch.setattr(br, "_capture_upstream_response", lambda *args, **kwargs: None)
+    baseline, baseline_store, baseline_transport = make_broker(transport=Malformed())
+    baseline_result = baseline.execute(CONTEXT, **args)
+    baseline_saved = baseline_store.calls[baseline_result.call["call_identity"]]
+    assert (result.status, result.headers, result.body) == (
+        baseline_result.status, baseline_result.headers, baseline_result.body)
+    assert result.call == baseline_result.call
+    assert saved["kind"] == baseline_saved["kind"]
+    assert {k:v for k,v in saved["uncertain_doc"].items() if k != "upstream_response_receipt"} == baseline_saved["uncertain_doc"]
+    assert len(baseline_transport.sent) == 1
+
+
+def test_malformed_model_response_reports_capture_gap_without_final_price():
     class Malformed(FakeTransport):
         def send(self, **kwargs):
             self.sent.append(kwargs)
@@ -241,7 +315,7 @@ def test_malformed_model_response_keeps_private_text_without_final_price():
     saved = store.calls[result.call["call_identity"]]
     assert result.status == 502 and saved["kind"] == "uncertain"
     assert "known_actual_microusd" not in saved["uncertain_doc"]
-    assert base64.b64decode(upstream(saved)["body_b64"]) == b'{"choices":'
+    assert upstream(saved) == {"status": "unavailable", "reason": "response_capture_failed"}
     assert len(transport.sent) == 1
 
 

@@ -102,7 +102,7 @@ REVIEW_CONTEXT_REASONS = frozenset({
     "endpoints_total", "endpoint_shape", "selected_count", "selected_model", "selected_provider",
     "usage_missing", "prompt_tokens", "context_budget",
 })
-REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure"})
+REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure", "Nebius"})
 _GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
 
 
@@ -377,24 +377,39 @@ def recovery_retryable(document: Mapping[str, Any]) -> bool:
     return allowed and int(document.get("review_alternate_attempts") or 0) < 2
 
 
-def review_model_for(row: Mapping[str, Any]) -> str:
+def review_model_for(row: Mapping[str, Any], *,
+                     prospective_primary_model: str = code_review.DEFAULT_REVIEW_MODEL) -> str:
     """Follow committed chain counts; SQL rechecks every paid claim."""
     document = row.get("code_review_doc")
+    primary_models = {code_review.DEFAULT_REVIEW_MODEL, code_review.PROSPECTIVE_REVIEW_MODEL}
+    primary = code_review.DEFAULT_REVIEW_MODEL
+    if not document and row.get("code_review_attempts") == 0:
+        primary = prospective_primary_model
+    if isinstance(document, Mapping):
+        recorded = document.get("review_primary_model", document.get("model"))
+        if recorded in primary_models:
+            primary = recorded
+        if (document.get("model") == code_review.PROSPECTIVE_REVIEW_MODEL
+                and document.get("error_code") == "review_response_invalid"
+                and document.get("error_reason") == "truncated"):
+            # No oversized DeepSeek retry and no extra claim allowance. SQL
+            # proves this exact prior terminal result before authorizing Sol.
+            return code_review.FALLBACK_REVIEW_MODEL
     if nov06_late_review_available(row):
         return code_review.FALLBACK_REVIEW_MODEL
     if refusal_recovery(document):
-        primary = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
+        primary_count = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
         alternate = int(document.get("review_alternate_attempts") or 0)
-        if primary >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
+        if primary_count >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
             return code_review.FALLBACK_REVIEW_MODEL
         # A real refusal episode retains its own existing route allowance.
-        return code_review.DEFAULT_REVIEW_MODEL
+        return primary
     invalid_count = invalid_review_reservations(document)
     if invalid_count is not None and 2 <= invalid_count < INVALID_REVIEW_MAX_RESERVATIONS:
         # SQL proves these reservations under the submission lock. Change only
         # the last existing slot's route, never the finite episode allowance.
         return code_review.FALLBACK_REVIEW_MODEL
-    return code_review.DEFAULT_REVIEW_MODEL
+    return primary
 
 
 def nov06_late_review_available(

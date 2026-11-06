@@ -1409,6 +1409,7 @@ class ArenaStore:
     def code_review_schema(
         self, *, require_refusal_fallback: bool = False,
         require_invalid_review_budget: bool = False,
+        require_prospective_primary: bool = False,
     ) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
@@ -1444,6 +1445,14 @@ class ArenaStore:
             "legacy_structured_refusal_recovery": True,
         }:
             raise ArenaStoreError("code review fallback schema mismatch")
+        if require_prospective_primary and result.get("prospective_primary") != {
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "legacy_primary_model": "anthropic/claude-sonnet-5.5",
+            "episode_binding": "first_primary_reservation",
+            "max_output_tokens": 32768,
+            "truncation_alternate": "openai/gpt-6.1-sol",
+        }:
+            raise ArenaStoreError("code review primary schema mismatch")
         if require_invalid_review_budget and result.get("invalid_review_budget") != {
             "max_reservations": 3,
             "starts_at": "first_invalid_or_unverified_result",

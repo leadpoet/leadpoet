@@ -20,9 +20,11 @@ class LeaseStore(FakeLedgerStore):
         self.paid_at = datetime(2026, 9, 15, 8, tzinfo=timezone.utc)
         self.lease_expires_at = self.paid_at
 
-    def code_review_schema(self, *, require_refusal_fallback=False, require_invalid_review_budget=False):
+    def code_review_schema(self, *, require_refusal_fallback=False, require_invalid_review_budget=False,
+                           require_prospective_primary=False):
         assert require_refusal_fallback is True
         assert require_invalid_review_budget is True
+        assert require_prospective_primary is True
         return {"refusal_fallback": {"max_primary_refusal_claims": 2, "max_alternate_claims": 2}}
 
     def _renew(self, kind: str, ttl: int) -> None:
@@ -99,7 +101,7 @@ def _wired_factory(monkeypatch, *, prices=None):
         champion_score_for = staticmethod(lambda _context: None)
 
     monkeypatch.setattr(wiring, "SubmissionProviderKeys", Keys)
-    monkeypatch.setattr(wiring, "SubmissionCodeReviewer", lambda **kw: object())
+    monkeypatch.setattr(wiring, "SubmissionCodeReviewer", lambda **kw: SimpleNamespace(**kw))
     monkeypatch.setattr(wiring, "ServiceConfig", lambda **kw: SimpleNamespace(**kw))
     monkeypatch.setattr(wiring, "ArenaService", lambda config: SimpleNamespace(
         config=config, scorer_policy={"judge_models": {}},

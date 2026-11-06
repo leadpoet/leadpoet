@@ -26,7 +26,8 @@ REQUEST_GOLDENS = {
 }
 
 
-def run_controller(monkeypatch, variant, shape, finish, *, repeat=False, completion_delta=0, expired=False):
+def run_controller(monkeypatch, variant, shape, finish, *, repeat=False, completion_delta=0, expired=False,
+                   raw_calls=None):
     url = 'https://acme.example/'
     calls, events = [], []
     clock = SimpleNamespace(now=0.0)
@@ -44,8 +45,14 @@ def run_controller(monkeypatch, variant, shape, finish, *, repeat=False, complet
         if expired:
             clock.now = investigator.ADMISSION_DEADLINE_SECONDS + investigator.SERIALIZATION_REPAIR_GRACE_SECONDS
         return 200, reply
+    native_post = investigator._post_openrouter_json
+    async def observe_native_post(*args, **kwargs):
+        if raw_calls is not None:
+            raw_calls.append(deepcopy(kwargs['payload']))
+        return await native_post(*args, **kwargs)
     monkeypatch.setattr(investigator, '_review_industry_sources', review)
     monkeypatch.setattr(investigator, '_post_json', post)
+    monkeypatch.setattr(investigator, '_post_openrouter_json', observe_native_post)
     monkeypatch.setattr(investigator, 'record_judge_tool_event', lambda event, **_: events.append(deepcopy(event)))
     monkeypatch.setattr(investigator, 'evaluation_date', lambda: date(2026, 11, 6))
     monkeypatch.setattr(investigator, 'time', SimpleNamespace(monotonic=lambda: clock.now))
@@ -89,6 +96,15 @@ def test_repeated_glm_exhaustion_cannot_expand_the_repair_allowance(monkeypatch,
     result, calls, _ = run_controller(monkeypatch, 'glm', shape, 'stop', repeat=True)
     assert len(calls) == 2
     assert result.get('_completed_submit') is not True
+
+
+@pytest.mark.parametrize('shape', ['empty', 'malformed_submit'])
+def test_effective_cap_preserves_original_native_payload_on_every_turn(monkeypatch, shape):
+    raw_calls = []
+    _, calls, _ = run_controller(monkeypatch, 'glm', shape, 'stop', raw_calls=raw_calls)
+    assert [payload['max_tokens'] for payload in raw_calls] == [16384, 16384]
+    assert [payload['max_tokens'] for _, payload in calls] == [8192, 8192]
+    assert contracts.document_hash(calls) == REQUEST_GOLDENS['glm', shape]
 
 
 @pytest.mark.parametrize('shape', ['empty', 'malformed_submit'])

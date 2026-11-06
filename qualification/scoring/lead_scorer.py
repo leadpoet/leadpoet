@@ -3117,11 +3117,13 @@ def _retain_matched_investigator_source_contexts(
                 prior = source_sink.get(url)
                 if isinstance(prior, Mapping):
                     page, final_url = prior.get("text"), prior.get("final_url")
-            if _validated_first_party_source_context(
+            context = _validated_first_party_source_context(
                 url, {"final_url": final_url, "text": page}, identity,
                 company_name=company.company_name,
-            ) is None:
+            )
+            if context is None:
                 continue
+            page = context["text"]
             phrase_overlap = _source_overlap_score(company.intent_details, page)
             term_overlap = _source_term_overlap(company.intent_details, page)
             if phrase_overlap or term_overlap >= 3:
@@ -12312,6 +12314,10 @@ def _validated_first_party_source_context(
         {source_url: entry}, submitted_source_urls=(source_url,),
     )
     text = pages.get(source_url)
+    if isinstance(text, str):
+        from qualification.scoring.intent_details import _source_evidence_text
+
+        text = _source_evidence_text(text)
     if (
         not name
         or not isinstance(text, str) or name not in _compact_company_name(text)

@@ -32,6 +32,8 @@ converters and can be selected as a prospective scorer default after verificatio
 
 The exclusive --identity-repair-finality-only mode applies only the reviewed
 completed missing-LinkedIn repair predicate to exact frozen2dc in one file.
+Its --visible-auxiliary-context sub-option also aligns optional context admission
+and ranking with the unchanged paragraph consumer's visible surface.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -480,6 +482,10 @@ def main() -> int:
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
+        "--visible-auxiliary-context", action="store_true",
+        help="apply only the reviewed optional visible-context correction after exact2dc identity finality",
+    )
+    parser.add_argument(
         "--identity-repair-finality-only", action="store_true",
         help="compose only reviewed completed missing-LinkedIn repair finality on exact frozen 2dc; excludes other corrections",
     )
@@ -584,9 +590,11 @@ def main() -> int:
         help="compose verified brand identity and its matching host-validator contract; deploy that host validator too; use the same option for --verify-image",
     )
     args = parser.parse_args()
+    if args.visible_auxiliary_context and not args.identity_repair_finality_only:
+        raise CompositionError("visible-auxiliary-context requires exact2dc identity-repair-finality-only mode")
     if args.identity_repair_finality_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"identity_repair_finality_only", "push"}
+        if name not in {"identity_repair_finality_only", "visible_auxiliary_context", "push"}
     ):
         raise CompositionError("identity-repair-finality-only mode cannot include other corrections")
     if args.identity_repair_before_investigation_only and any(
@@ -647,6 +655,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if set(original) != {FINALITY_FILE}:
                 raise CompositionError("frozen identity finality source is incomplete")
             files = {FINALITY_FILE: convert_identity_repair_finality_seam(original[FINALITY_FILE])}
+            if args.visible_auxiliary_context:
+                from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_visible_auxiliary_context_seam
+                files[FINALITY_FILE] = convert_visible_auxiliary_context_seam(files[FINALITY_FILE])
         elif args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import convert_identity_repair_order_seam
             original = extract_frozen_sources(
@@ -767,6 +778,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-empty-domain-negative-finality" if args.empty_domain_negative_finality_only else "")
             + ("-identity-repair-order" if args.identity_repair_before_investigation_only else "")
             + ("-identity-repair-finality" if args.identity_repair_finality_only else "")
+            + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -796,6 +808,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         if args.identity_repair_finality_only:
             from scripts.arena_reviewer_identity_repair_finality_seam import CORRECTION_ID as IDENTITY_REPAIR_FINALITY_CORRECTION_ID
             corrections.append(IDENTITY_REPAIR_FINALITY_CORRECTION_ID)
+            if args.visible_auxiliary_context:
+                from scripts.arena_reviewer_visible_auxiliary_context_seam import CORRECTION_ID as VISIBLE_AUXILIARY_CORRECTION_ID
+                corrections.append(VISIBLE_AUXILIARY_CORRECTION_ID)
         if args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import CORRECTION_ID as IDENTITY_REPAIR_ORDER_CORRECTION_ID
             corrections.append(IDENTITY_REPAIR_ORDER_CORRECTION_ID)

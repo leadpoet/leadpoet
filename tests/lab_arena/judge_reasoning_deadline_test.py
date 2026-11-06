@@ -67,13 +67,19 @@ def test_existing_repair_uses_remaining_window_not_a_new_deadline(monkeypatch, e
 
 @pytest.mark.parametrize('enabled,exception', [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize('research', [False, True])
-def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkeypatch, enabled, exception, research):
+@pytest.mark.parametrize('industry_override', [False, True])
+def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkeypatch, enabled, exception, research, industry_override):
     import time
     from qualification.scoring import company_evidence_investigator as investigator
     from qualification.scoring import industry_classification as industry
 
     monkeypatch.setenv('ARENA_JUDGE_REASONING_CAPTURE_POLICY', options.JUDGE_REASONING_POLICY if enabled else '')
     model = 'openai/gpt-6.1-sol' if exception else 'test/model'
+    monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', model)
+    option = {'reasoning': {'effort': 'low'}, 'max_output_tokens': 8192}
+    if industry_override:
+        option['industry_max_output_tokens'] = 16384
+    monkeypatch.setenv('ARENA_JUDGE_REQUEST_OPTIONS', json.dumps({model: option}))
     monkeypatch.setenv('ARENA_JUDGE_REASONING_EXCEPTIONS', json.dumps({model: {
         'roles': ['industry_evidence_review'], 'reason': 'quality_gate_not_met'}}) if exception else '')
     calls = []
@@ -102,8 +108,10 @@ def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkey
         expected.pop('reasoning')
         expected['max_tokens'] = 16384
         expected['messages'][0]['content'] += (industry.REASONING_RESPONSE_CONTRACT
-            + '\nProvide a nonempty reason explaining how the cited source spans establish the decision.')
-        expected['response_format']['json_schema']['schema']['properties']['reason']['minLength'] = 1
+            + ('\nProvide a nonempty reason explaining how the cited source spans establish the decision.'
+               if industry_override else ''))
+        if industry_override:
+            expected['response_format']['json_schema']['schema']['properties']['reason']['minLength'] = 1
     assert calls[0] == expected
 
 

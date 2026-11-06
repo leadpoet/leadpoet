@@ -129,12 +129,15 @@ def test_default_industry_cap_does_not_increase_other_role_or_api_caps():
 
 
 @pytest.mark.parametrize("research", [False, True])
-def test_default_native_industry_reaches_broker_with_exact_headroom_contract(monkeypatch, research):
+@pytest.mark.parametrize("industry_override", [False, True])
+def test_native_industry_reaches_broker_with_exact_frozen_contract(monkeypatch, research, industry_override):
     from lab_arena import broker
     from qualification.scoring import company_evidence_investigator as investigator
     from qualification.scoring import industry_classification as industry
     from tests.lab_arena import test_lab_arena_broker as bt
     policy = scoring.build_scorer_policy()
+    if not industry_override:
+        policy["env_bindings"][contracts.JUDGE_REQUEST_OPTIONS_BINDING] = json.dumps(PREVIOUS_OPTIONS)
     environment = {}
     scoring.apply_policy_to_environment(policy, environ=environment,
         credentials={name: "test-not-secret" for name in scoring.CREDENTIAL_ENV_NAMES})
@@ -160,11 +163,14 @@ def test_default_native_industry_reaches_broker_with_exact_headroom_contract(mon
         {"name": "Acme", "website": url, "linkedin": ""},
         [{"source_id": "s0", "source_url": url, "body": text.strip()}],
         evaluation_date="2026-11-05"), model=DEEPSEEK, research=research)
-    expected.update(max_tokens=16384, reasoning={"effort": "low", "exclude": False},
+    maximum = 16384 if industry_override else 8192
+    expected.update(max_tokens=maximum, reasoning={"effort": "low", "exclude": False},
                     provider={"only": ["nebius/fp8"]})
     expected["messages"][0]["content"] += (industry.REASONING_RESPONSE_CONTRACT
-        + "\nProvide a nonempty reason explaining how the cited source spans establish the decision.")
-    expected["response_format"]["json_schema"]["schema"]["properties"]["reason"]["minLength"] = 1
+        + ("\nProvide a nonempty reason explaining how the cited source spans establish the decision."
+           if industry_override else ""))
+    if industry_override:
+        expected["response_format"]["json_schema"]["schema"]["properties"]["reason"]["minLength"] = 1
     assert calls[0] == expected
     assert len(expected["messages"]) > 3
     table = bt.price_table()
@@ -186,7 +192,7 @@ def test_default_native_industry_reaches_broker_with_exact_headroom_contract(mon
     assert wire["provider"]["only"] == ["nebius/fp8"]
     assert wire["provider"]["zdr"] is True and wire["provider"]["data_collection"] == "deny"
     assert wire["provider"]["allow_fallbacks"] is False
-    assert next(iter(store.calls.values()))["call_doc"]["max_output_tokens"] == 16384
+    assert next(iter(store.calls.values()))["call_doc"]["max_output_tokens"] == maximum
 
 
 def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical():

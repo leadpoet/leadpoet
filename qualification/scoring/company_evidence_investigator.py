@@ -79,7 +79,7 @@ from qualification.scoring.linkedin_company_size import (
 )
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.openrouter_options import (
-    judge_reasoning_enabled, prepare_judge_request, project_judge_response,
+    judge_reasoning_enabled, judge_industry_output_override_enabled, prepare_judge_request, project_judge_response,
     preserve_judge_reasoning,
 )
 from qualification.scoring.verification_helpers import (
@@ -2987,9 +2987,10 @@ async def _review_industry_sources(
         payload.pop("reasoning", None)
         payload["max_tokens"] = 16384
         payload["messages"][0]["content"] += industry_classification.REASONING_RESPONSE_CONTRACT
-        payload["messages"][0]["content"] += (
-            "\nProvide a nonempty reason explaining how the cited source spans establish the decision.")
-        payload["response_format"]["json_schema"]["schema"]["properties"]["reason"]["minLength"] = 1
+        if judge_industry_output_override_enabled(model):
+            payload["messages"][0]["content"] += (
+                "\nProvide a nonempty reason explaining how the cited source spans establish the decision.")
+            payload["response_format"]["json_schema"]["schema"]["properties"]["reason"]["minLength"] = 1
     try:
         status, body = await _post_openrouter_json(
             session, 'https://openrouter.ai/api/v1/chat/completions',

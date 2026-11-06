@@ -24,6 +24,20 @@ def judge_reasoning_enabled(model: str | None = None) -> bool:
     return True
 
 
+def judge_industry_output_override_enabled(model: str) -> bool:
+    """Only the selected frozen industry allowance opts into its new contract."""
+    if not judge_reasoning_enabled(model):
+        return False
+    options = json.loads(os.getenv("ARENA_JUDGE_REQUEST_OPTIONS") or "{}")
+    option = options.get(model) if isinstance(options, dict) else None
+    if not isinstance(option, dict) or "industry_max_output_tokens" not in option:
+        return False
+    from lab_arena import contracts
+    contracts.validate_judge_request_option(option, model=model,
+        industry_model=os.getenv("ARENA_INDUSTRY_EVIDENCE_MODEL"))
+    return True
+
+
 def prepare_judge_request(payload: Mapping, *, hosted_search: bool = False,
                           output_token_floor: int | None = None) -> tuple[str, dict]:
     """Prepare existing judge HTTP calls; legacy rounds keep their exact body.

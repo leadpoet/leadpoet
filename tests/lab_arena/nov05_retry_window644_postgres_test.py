@@ -10,21 +10,21 @@ from tests.lab_arena import nov05_recovery_window641_postgres_test as window
 prior = window.prior
 database = window.database
 ROUND = prior.ROUND
-SQL = prior.source.SCRIPTS / '643-arena-2026-11-05-retry-window-extension.sql'
+SQL = prior.source.SCRIPTS / '644-arena-2026-11-05-retry-window-extension.sql'
 scalar = prior.scalar
 snapshot = window.snapshot
 
 
 def render(p):
     text = SQL.read_text().replace('2026-11-06T', '2099-11-06T')
-    manifest = json.loads(re.search(r'\$manifest643\$(.*?)\$manifest643\$', text, re.S)[1])
+    manifest = json.loads(re.search(r'\$manifest644\$(.*?)\$manifest644\$', text, re.S)[1])
     with p.conn.cursor() as q:
         cfg = scalar(q, 'SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s', (ROUND,))
         manifest['configuration_sha256'] = prior.source.hash_doc(q, cfg)
         new = deepcopy(cfg)
         new['schedule'].update(manifest['schedule'])
         manifest['new_configuration_sha256'] = prior.source.hash_doc(q, new)
-    return re.sub(r'\$manifest643\$.*?\$manifest643\$', lambda _: '$manifest643$' + json.dumps(manifest) + '$manifest643$', text, flags=re.S)
+    return re.sub(r'\$manifest644\$.*?\$manifest644\$', lambda _: '$manifest644$' + json.dumps(manifest) + '$manifest644$', text, flags=re.S)
 
 
 def apply(p, sql=None):
@@ -88,7 +88,7 @@ def test_exact_extension_preserves_paid_lease_all_work_and_two_typed_receipts(pr
     assert all(r['generation_floor'] == r['previous_generation_floor'] == 0
                and r['old_scorer_policy'] == r['new_scorer_policy'] for r in windows)
     assert windows[-1]['receipt_generation'] == after['history'][-1]['generation_floor']
-    assert after['history'][-1]['request_id'] == 'nov05-recovery-window643-v1'
+    assert after['history'][-1]['request_id'] == 'nov05-recovery-window644-v1'
     assert after['history_function'] == before['history_function']
 
 
@@ -120,13 +120,13 @@ def test_unsafe_state_rolls_back_without_changes(prepared, fault):
     if fault == 'clock':
         sql = sql.replace("clock_timestamp()>='2099-11-06T07:19:25Z'", "clock_timestamp()>='2000-11-06T07:19:25Z'")
     elif fault == 'postimage':
-        text = re.search(r'\$manifest643\$(.*?)\$manifest643\$', sql, re.S)[1]
+        text = re.search(r'\$manifest644\$(.*?)\$manifest644\$', sql, re.S)[1]
         bad = json.loads(text)
         bad['new_configuration_sha256'] = '0' * 64
         sql = sql.replace(text, json.dumps(bad))
     before = snapshot(p)
     try:
-        with pytest.raises(p.pg.Error, match='Window643'):
+        with pytest.raises(p.pg.Error, match='Window644'):
             apply(p, sql)
         p.conn.rollback()
         assert snapshot(p) == before
@@ -233,7 +233,7 @@ def test_post_update_clock_failure_rolls_back_receipt_and_schedule(prepared):
     before = snapshot(p)
     head, tail = p.retry_window_sql.rsplit("clock_timestamp()>='2099-11-06T07:19:25Z'", 1)
     sql = head + "clock_timestamp()>='2000-11-06T07:19:25Z'" + tail
-    with pytest.raises(p.pg.Error, match='Window643 exact readback differs'):
+    with pytest.raises(p.pg.Error, match='Window644 exact readback differs'):
         apply(p, sql)
     p.conn.rollback()
     assert snapshot(p) == before

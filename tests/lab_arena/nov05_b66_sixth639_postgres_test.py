@@ -9,7 +9,7 @@ import pytest
 from lab_arena import company_judgments, contracts, scoring
 from tests.lab_arena import nov05_infrastructure_recovery633_postgres_test as recovery
 from tests.lab_arena import nov05_recovery_window641_postgres_test as window
-from tests.lab_arena import nov05_retry_window643_postgres_test as retry_window
+from tests.lab_arena import nov05_retry_window644_postgres_test as retry_window
 from tests.lab_arena.company_judgments_test import _input, _raw
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
 

@@ -10,25 +10,25 @@ SET LOCAL statement_timeout='30s';
 SELECT pg_advisory_xact_lock(hashtextextended('lab_arena.baseline_promotion',0));
 SELECT pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
 -- Reuse the existing typed window operation; its reader already preserves floor0.
-DO $window643$
+DO $window644$
 DECLARE
- manifest CONSTANT JSONB:=$manifest643${"configuration_sha256":"69befd3303a62b7ef7ceb28799f2082c83304b281884ddc6c3de693ba19b6e15","new_configuration_sha256":"55beda7a80b7ac9e9c76e2e2fa9d1f30495dd6e05d6354be2db7dd5eda605996","round_id":"arena-2026-11-05","schema_version":"leadpoet.lab_arena.nov05_window643.v1","schedule":{"stage_2_close":"2026-11-06T07:30:00Z","final_scoring_close":"2026-11-06T09:30:00Z","publication_deadline":"2026-11-06T09:35:00Z"}}$manifest643$;
+ manifest CONSTANT JSONB:=$manifest644${"configuration_sha256":"69befd3303a62b7ef7ceb28799f2082c83304b281884ddc6c3de693ba19b6e15","new_configuration_sha256":"55beda7a80b7ac9e9c76e2e2fa9d1f30495dd6e05d6354be2db7dd5eda605996","round_id":"arena-2026-11-05","schema_version":"leadpoet.lab_arena.nov05_window644.v1","schedule":{"stage_2_close":"2026-11-06T07:30:00Z","final_scoring_close":"2026-11-06T09:30:00Z","publication_deadline":"2026-11-06T09:35:00Z"}}$manifest644$;
  r public.lab_arena_rounds; n public.lab_arena_rounds;
  h public.lab_arena_scoring_supersessions; revision BIGINT; request_hash TEXT;
 BEGIN
  IF current_setting('session_replication_role') IS DISTINCT FROM 'origin' THEN
-  RAISE EXCEPTION 'Window643 origin triggers required'; END IF;
+  RAISE EXCEPTION 'Window644 origin triggers required'; END IF;
  PERFORM 1 FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;
  SELECT * INTO STRICT r FROM public.lab_arena_rounds WHERE round_id='arena-2026-11-05' FOR UPDATE;
  request_hash:='sha256:'||encode(extensions.digest(manifest::TEXT,'sha256'),'hex');
  SELECT * INTO h FROM public.lab_arena_scoring_supersessions
- WHERE round_id=r.round_id AND request_id='nov05-recovery-window643-v1';
+ WHERE round_id=r.round_id AND request_id='nov05-recovery-window644-v1';
  IF FOUND THEN
   IF h.request_hash IS DISTINCT FROM request_hash
    OR h.recovery_doc IS DISTINCT FROM jsonb_build_object('operation','nov05_recovery_window641_v1','manifest',manifest)
    OR h.new_round_doc->'configuration_doc' IS DISTINCT FROM r.configuration_doc
    OR r.scoring_generation_floor<>0 THEN
-   RAISE EXCEPTION 'Window643 replay differs'; END IF;
+   RAISE EXCEPTION 'Window644 replay differs'; END IF;
   RETURN; -- Later claims, accepted work and phase changes are never reset.
  END IF;
  IF r.status IS DISTINCT FROM 'stage2' OR r.status_generation IS DISTINCT FROM 9
@@ -51,7 +51,7 @@ BEGIN
    WHERE prior.round_id=r.round_id AND prior.request_id='nov05-recovery-window641-v1'
     AND prior.recovery_doc->>'operation'='nov05_recovery_window641_v1'
     AND prior.new_round_doc->'configuration_doc'=r.configuration_doc) THEN
-  RAISE EXCEPTION 'Window643 exact round, clock, scope or control differs'; END IF;
+  RAISE EXCEPTION 'Window644 exact round, clock, scope or control differs'; END IF;
  IF NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc f ON f.oid=t.tgfoid
   WHERE t.tgrelid='public.lab_arena_rounds'::REGCLASS AND t.tgname='lab_arena_rounds_write_once'
    AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=27
@@ -59,24 +59,24 @@ BEGIN
    AND pg_get_userbyid(f.proowner)='lab_arena_owner' AND NOT f.prosecdef
    AND f.proacl::TEXT='{lab_arena_owner=X/lab_arena_owner}' AND f.proconfig=ARRAY['search_path=pg_catalog']::TEXT[]
    AND encode(extensions.digest(pg_get_functiondef(f.oid),'sha256'),'hex')='fc99c04a17205b97c55f522b445cd6533847eaaf48d2807ebd05e55ea9de5d25') THEN
-  RAISE EXCEPTION 'Window643 immutable round guard differs'; END IF;
+  RAISE EXCEPTION 'Window644 immutable round guard differs'; END IF;
  n:=r;
  n.configuration_doc:=jsonb_set(jsonb_set(jsonb_set(r.configuration_doc,
   '{schedule,stage_2_close}',manifest#>'{schedule,stage_2_close}',FALSE),
   '{schedule,final_scoring_close}',manifest#>'{schedule,final_scoring_close}',FALSE),
   '{schedule,publication_deadline}',manifest#>'{schedule,publication_deadline}',FALSE);
  IF encode(extensions.digest(n.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM manifest->>'new_configuration_sha256' THEN
-  RAISE EXCEPTION 'Window643 configuration postimage differs'; END IF;
+  RAISE EXCEPTION 'Window644 configuration postimage differs'; END IF;
  SELECT coalesce(max(generation_floor),0)+1 INTO revision FROM public.lab_arena_scoring_supersessions WHERE round_id=r.round_id;
  INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,
   transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc)
- VALUES(r.round_id,revision,'nov05-recovery-window643-v1',request_hash,'nov05-user-approved-window643',
+ VALUES(r.round_id,revision,'nov05-recovery-window644-v1',request_hash,'nov05-user-approved-window644',
   txid_current(),pg_backend_pid(),to_jsonb(r)-'updated_at',to_jsonb(n)-'updated_at','{}',
   jsonb_build_object('operation','nov05_recovery_window641_v1','manifest',manifest));
  UPDATE public.lab_arena_rounds SET configuration_doc=n.configuration_doc WHERE round_id=r.round_id;
  IF (SELECT to_jsonb(a)-'updated_at' FROM public.lab_arena_rounds a WHERE a.round_id=r.round_id) IS DISTINCT FROM to_jsonb(n)-'updated_at'
   OR clock_timestamp()>='2026-11-06T07:19:25Z'::TIMESTAMPTZ THEN
-  RAISE EXCEPTION 'Window643 exact readback differs'; END IF;
+  RAISE EXCEPTION 'Window644 exact readback differs'; END IF;
 END;
-$window643$;
+$window644$;
 COMMIT;

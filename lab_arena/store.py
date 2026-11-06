@@ -915,7 +915,10 @@ class PostgrestTransport(StoreTransport):
         try:
             self._raise_for_status(response, "select %s" % table, operation="select", resource=table)
         except ArenaStoreError as exc:
-            if response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES:
+            if (response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES
+                    or (response.status_code == 500 and exc.store_error.get("code") == "57014")):
+                # A cancelled SELECT returned no evidence. Keep it unavailable
+                # without extending the existing retry budget or RPC policy.
                 raise ArenaStoreUnavailable(
                     "select %s temporarily unavailable" % table,
                     **exc.store_error,

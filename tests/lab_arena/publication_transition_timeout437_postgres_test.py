@@ -169,6 +169,9 @@ def _expand(cur, proven, count):
                         (template["miner_hotkey"], hotkey)]
         selected = {table: [r for r in values if r.get("submission_id") == template["submission_id"]]
                     for table, values in source_tables.items()}
+        # New entry IDs must preserve the durable call-head order, regardless
+        # of the capture query's heap/index order or concurrent fixture writes.
+        selected["lab_arena_ledger"].sort(key=lambda entry: entry["entry_id"])
         # Rewrite call identities and all embedded execution-key/local-ID forms.
         for identity in sorted({r["call_identity"] for r in selected["lab_arena_ledger"] if r.get("call_identity")}):
             digest = hashlib.sha256((sid + identity).encode()).hexdigest()

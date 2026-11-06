@@ -1,4 +1,5 @@
 """Forward-only642 then660 on native cutoffs and retained637 finality."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import re
@@ -62,6 +63,34 @@ def function_snapshot(cursor):
     cursor.execute("SELECT oid::regprocedure::TEXT,pg_get_functiondef(oid),to_jsonb(p)-'prosrc' "
                    "FROM pg_proc p WHERE pronamespace='public'::regnamespace AND prokind='f' ORDER BY oid")
     return {name: (definition, metadata) for name, definition, metadata in cursor.fetchall()}
+
+
+def migration_state_snapshot(connection):
+    with connection.cursor() as cursor:
+        functions = function_snapshot(cursor)
+        rows = {}
+        for table in ('lab_arena_rounds', 'lab_arena_submissions',
+                      'lab_arena_ledger', 'lab_arena_restart_claim_control'):
+            cursor.execute(f'SELECT to_jsonb(t) FROM public.{table} t ORDER BY to_jsonb(t)::TEXT')
+            rows[table] = cursor.fetchall()
+        return functions, rows
+
+
+def assert_primary_upgrade(before, after):
+    before_functions, before_rows = before
+    after_functions, after_rows = after
+    assert after_rows == before_rows
+    expected = {
+        SIGNATURES[0].removeprefix('public.'): '03009634a9dcde9342a7428d73eaf4285bf341811241a1d51e5d54bc8b8b04b9',
+        SIGNATURES[1].removeprefix('public.'): '91f4d574ab3d1d704228adac40507f6c4fb80a49fd091019ca713af1a0ff8a96',
+        SIGNATURES[2].removeprefix('public.'): '55c3a3644ed53787bcff9af034e6be7b2a325474503e1bc5aa761de92a6d4d16',
+    }
+    changed = {name for name in before_functions if after_functions[name] != before_functions[name]}
+    assert changed == set(expected)
+    for name, (definition, metadata) in after_functions.items():
+        assert metadata == before_functions[name][1]
+        if name in expected:
+            assert hashlib.sha256(definition.encode()).hexdigest() == expected[name]
 
 
 def accepted_recovery_submission(store, suffix, *, cutoff_minutes=5):
@@ -228,11 +257,134 @@ def test_retained_null_round_native3600_review_edges(recovery_store, recovery_su
         assert [entry['entry_doc']['review_model'] for entry in after if entry['entry_kind'] == 'reservation'] == [PRIMARY, PRIMARY]
 
 
+def test_native_readers_allow_migration_without_row_or_metadata_changes(
+    recovery_connect, recovery_store, recovery_superuser,
+):
+    with recovery_superuser.cursor() as cursor:
+        restore_predecessor(cursor)
+    accepted_recovery_submission(recovery_store, 'primary660-reader')
+    before = migration_state_snapshot(recovery_superuser)
+    reader = recovery_connect()
+    try:
+        with reader.cursor() as cursor:
+            for table in ('lab_arena_rounds', 'lab_arena_submissions'):
+                cursor.execute(f'SELECT count(*) FROM public.{table}')
+                assert cursor.fetchone()[0] > 0
+        with recovery_superuser.cursor() as cursor:
+            cursor.execute("SELECT mode FROM pg_locks WHERE pid=%s AND relation IN "
+                           "('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass)",
+                           (reader.get_backend_pid(),))
+            assert cursor.fetchall() == [('AccessShareLock',), ('AccessShareLock',)]
+            cursor.execute(MIGRATION.read_text())
+        assert_primary_upgrade(before, migration_state_snapshot(recovery_superuser))
+    finally:
+        reader.rollback()
+        reader.close()
+
+
+def test_loaded_old_sonnet_begin_completes_before_prospective_host_activation():
+    # Separate native DB: no other test's unfinished claim can stand in for
+    # the release's required zero-review/in-flight drain condition.
+    database = recovery_database.__wrapped__()
+    controller = blocker = worker_connection = store = worker_store = executor = None
+    try:
+        pg, dsn = next(database)
+        controller = pg.connect(**dsn)
+        controller.autocommit = True
+        store = ArenaStore(PsycopgTransport(lambda: pg.connect(**dsn)))
+        with controller.cursor() as cursor:
+            restore_predecessor(cursor)
+            cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURES[0],))
+            assert hashlib.sha256(cursor.fetchone()[0].encode()).hexdigest() == (
+                'd101aa5610e1c64aa92a975754a45cfdbfb70b1d7fff20832ddb1ea72dc148ff')
+        _, submission, miner = accepted_recovery_submission(store, 'primary660-loaded-old')
+        blocker = pg.connect(**dsn)
+        with blocker.cursor() as cursor:
+            cursor.execute('SELECT 1 FROM public.lab_arena_submissions WHERE submission_id=%s FOR UPDATE',
+                           (submission,))
+            assert cursor.fetchone() == (1,)
+        worker_connection = pg.connect(**dsn)
+        worker_pid = worker_connection.get_backend_pid()
+        worker_store = ArenaStore(PsycopgTransport(lambda: worker_connection, pool_size=1))
+        token = new_lease_token()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(begin, worker_store, submission, miner, PRIMARY, token)
+        deadline = time.monotonic() + 5
+        while True:
+            with controller.cursor() as cursor:
+                cursor.execute('SELECT wait_event_type,pg_blocking_pids(pid) FROM pg_stat_activity WHERE pid=%s',
+                               (worker_pid,))
+                wait = cursor.fetchone()
+            if wait and wait[0] == 'Lock' and blocker.get_backend_pid() in wait[1]:
+                break
+            assert not future.done(), 'old native begin did not reach the row-lock wait'
+            assert time.monotonic() < deadline, 'old native begin did not block in time'
+            time.sleep(.01)
+        with controller.cursor() as cursor:
+            cursor.execute("SELECT DISTINCT mode FROM pg_locks WHERE pid=%s AND granted AND relation IN "
+                           "('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass)",
+                           (worker_pid,))
+            assert 'RowShareLock' in {row[0] for row in cursor.fetchall()}
+        # No altered/instrumented function: the actual old body is already
+        # executing and waits on its native submission FOR UPDATE statement.
+        before = migration_state_snapshot(controller)
+        with controller.cursor() as cursor:
+            cursor.execute(MIGRATION.read_text())
+        assert not future.done()
+        assert_primary_upgrade(before, migration_state_snapshot(controller))
+        blocker.rollback()
+        claimed = future.result(timeout=5)
+        assert claimed['status'] == 'claimed' and claimed['attempt'] == 1
+        assert finish(store, submission, miner, token, PRIMARY,
+                      error='code_review_transport_error')['status'] == 'error'
+        row = store.get_submission(submission)
+        assert row['code_review_doc']['model'] == PRIMARY
+        ledger = store.list_ledger(submission_id=submission)
+        assert [entry['entry_doc']['review_model'] for entry in ledger
+                if entry['entry_kind'] == 'reservation'] == [PRIMARY]
+        # Complete the old invocation, close its DB connection, and observe
+        # zero reviewing rows before simulating prospective host activation.
+        worker_store.close()
+        worker_store = None
+        with controller.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM public.lab_arena_submissions WHERE code_review_status='reviewing'")
+            assert cursor.fetchone() == (0,)
+        deadline = time.monotonic() + 2
+        while True:
+            with controller.cursor() as cursor:
+                cursor.execute('SELECT count(*) FROM pg_stat_activity WHERE pid=%s', (worker_pid,))
+                if cursor.fetchone() == (0,):
+                    break
+            assert time.monotonic() < deadline, 'old review backend did not drain'
+            time.sleep(.01)
+        _, next_submission, next_miner = accepted_recovery_submission(store, 'primary660-after-drain')
+        next_token = new_lease_token()
+        assert begin(store, next_submission, next_miner, DEEPSEEK, next_token)['status'] == 'claimed'
+        assert finish(store, next_submission, next_miner, next_token, DEEPSEEK,
+                      error='code_review_transport_error')['status'] == 'error'
+        assert [entry['entry_doc']['review_model'] for entry in store.list_ledger(submission_id=next_submission)
+                if entry['entry_kind'] == 'reservation'] == [DEEPSEEK]
+        assert store.list_ledger(submission_id=submission) == ledger
+    finally:
+        if blocker is not None:
+            blocker.rollback()
+            blocker.close()
+        if executor is not None:
+            executor.shutdown(wait=True)
+        if worker_store is not None:
+            worker_store.close()
+        if store is not None:
+            store.close()
+        if controller is not None:
+            controller.close()
+        database.close()
+
+
 @pytest.mark.parametrize('locked_table,key', [
     ('lab_arena_rounds', 'round_id'),
     ('lab_arena_submissions', 'submission_id'),
 ])
-def test_busy_native_rows_refuse_migration_immediately_without_changes(
+def test_busy_native_writers_refuse_migration_immediately_without_changes(
     recovery_connect, recovery_store, recovery_superuser, locked_table, key,
 ):
     with recovery_superuser.cursor() as cursor:
@@ -242,22 +394,17 @@ def test_busy_native_rows_refuse_migration_immediately_without_changes(
     assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'claimed'
 
     def snapshot():
-        with recovery_superuser.cursor() as cursor:
-            functions = function_snapshot(cursor)
-            rows = {}
-            for table in ('lab_arena_rounds', 'lab_arena_submissions',
-                          'lab_arena_ledger', 'lab_arena_restart_claim_control'):
-                cursor.execute(f'SELECT to_jsonb(t) FROM public.{table} t ORDER BY to_jsonb(t)::TEXT')
-                rows[table] = cursor.fetchall()
-            return functions, rows
+        return migration_state_snapshot(recovery_superuser)
 
     before_functions, before_rows = snapshot()
     blocker = recovery_connect()
     try:
         with blocker.cursor() as cursor:
-            cursor.execute(f'SELECT 1 FROM public.{locked_table} WHERE {key}=%s FOR UPDATE',
-                           (round_id if key == 'round_id' else submission,))
-            assert cursor.fetchone() == (1,)
+            # UPDATE takes RowExclusive; SELECT FOR UPDATE alone is RowShare.
+            target = round_id if key == 'round_id' else submission
+            cursor.execute(f'UPDATE public.{locked_table} SET {key}={key} WHERE {key}=%s RETURNING {key}',
+                           (target,))
+            assert cursor.fetchone() == (target,)
         started = time.monotonic()
         with recovery_superuser.cursor() as cursor:
             try:

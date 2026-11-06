@@ -5264,6 +5264,10 @@ class ArenaService:
         )
         try:
             infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
+        except ArenaStoreUnavailable:
+            # A failed read cannot prove that saved evaluation is incomplete.
+            # Keep the ordinary store-unavailable path, even after the deadline.
+            raise
         except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
                 TypeError, ValueError, UnicodeDecodeError):
             return self._hold_incomplete_evaluation(

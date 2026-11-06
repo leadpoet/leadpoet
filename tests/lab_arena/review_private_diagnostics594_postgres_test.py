@@ -221,7 +221,7 @@ def test_database_vocabulary_matches_python_projection():
     migration = (
         MIGRATION.read_text()
         + (SCRIPTS / "599-lab-arena-refusal-review-fallback.sql").read_text()
-        + (SCRIPTS / "643-lab-arena-prospective-admission-primary.sql").read_text()
+        + (SCRIPTS / "644-lab-arena-prospective-admission-primary.sql").read_text()
     )
     for value in (code_review_policy.REVIEW_FINISH_REASONS
                   | code_review_policy.REVIEW_CONTEXT_REASONS

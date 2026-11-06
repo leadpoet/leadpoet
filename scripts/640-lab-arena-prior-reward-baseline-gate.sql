@@ -65,4 +65,3 @@ END;
 $prior_reward_baseline640$;
 NOTIFY pgrst,'reload schema';
 COMMIT;
-

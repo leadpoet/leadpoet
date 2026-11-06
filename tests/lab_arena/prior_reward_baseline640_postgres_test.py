@@ -250,4 +250,3 @@ def test_source_and_security_drift_are_rejected_before_replay(prepared, installe
         apply(p)
     p.conn.rollback()
     assert data_snapshot(p) == before
-

@@ -1829,6 +1829,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                "round_status": round_row.get("status"), "rewards_enabled": round_row.get("rewards_enabled"),
                "arena_network_name": round_row.get("arena_network_name"),
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
+               # Host round timestamps are not publication dates of source pages.
+               # Preserve absence; do not substitute evaluation or export time.
+               "round_dates": {key: copy.deepcopy(round_row.get(key))
+                               for key in ("created_at", "published_at")},
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
     from lab_arena import baseline_reasoning
@@ -2250,6 +2254,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                         "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
         for row in related})
+    clean["label_authority"] = {
+        "origin": "automated_native_scorer" if "judgment" in clean else "unavailable",
+        "ground_truth": "not_established",
+        "external_adjudication": "not_established_by_export",
+    }
     clean["example_hash"] = contracts.document_hash(clean)
     # Both privacy walks own their context containers. Worker artifacts and
     # journal prefixes come from freshly decoded JSON, with no caller-owned

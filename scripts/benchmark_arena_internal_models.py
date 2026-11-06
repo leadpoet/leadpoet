@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lab_arena import broker, code_review, contracts, reasoning_capture
+from lab_arena import broker, code_review, contracts, reasoning_capture, training_thinking
 from scripts.verify_arena_live_capture import SharedBudget, _private_write, _json_bytes
 from scripts import verify_arena_research_review as research
 
@@ -254,18 +254,18 @@ def score_review(case, review):
 
 
 def reasoning_observation(document):
-    choices = document.get("choices") or []
-    message = choices[0].get("message", {}) if len(choices) == 1 else {}
+    # Reuse the exporter taxonomy. A summary or an unknown typed text block
+    # must not become evidence that a provider exposed its full reasoning.
+    if not isinstance(document.get("choices"), list) or len(document["choices"]) != 1:
+        return {"full_text_returned": False, "field_characters": {}}
+    segments, _, _ = training_thinking._segments(document, "openrouter.chat")
     counts = {}
-    for key in ("reasoning", "reasoning_content"):
-        value = message.get(key)
-        if isinstance(value, str) and value.strip():
-            counts[key] = len(value)
-    for part in message.get("reasoning_details") or []:
-        if not isinstance(part, dict):
+    for segment in segments:
+        key, value = segment.get("field"), segment.get("text")
+        if key not in {"reasoning", "reasoning_content", "reasoning_details.text"}:
             continue
-        if isinstance(part.get("text"), str) and part["text"].strip():
-            counts["reasoning_details.text"] = counts.get("reasoning_details.text", 0) + len(part["text"])
+        if isinstance(value, str) and value.strip():
+            counts[key] = counts.get(key, 0) + len(value)
     return {"full_text_returned": bool(counts), "field_characters": counts}
 
 

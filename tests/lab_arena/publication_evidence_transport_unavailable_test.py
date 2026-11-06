@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from lab_arena.store import ArenaStore, ArenaStoreUnavailable, PostgrestTransport
+from lab_arena.store import ArenaStore, ArenaStoreError, ArenaStoreUnavailable, PostgrestTransport
 from tests.lab_arena.empty_execution_publication_test import case
 
 
@@ -32,7 +32,7 @@ def publication_case():
 
 
 @pytest.mark.parametrize("phase", ["reservation", "lifecycle"])
-@pytest.mark.parametrize("fault", ["timeout", 429, 502, 503, 504])
+@pytest.mark.parametrize("fault", ["timeout", "statement_timeout", 429, 502, 503, 504])
 def test_unavailable_authenticated_select_does_not_cancel_saved_evaluation(phase, fault):
     service, reads, ledger, output, cancellations = publication_case()
     original = copy.deepcopy((reads.round_row, reads.runs, ledger, output))
@@ -49,6 +49,8 @@ def test_unavailable_authenticated_select_does_not_cancel_saved_evaluation(phase
         if unavailable and (phase == "reservation") == reservation:
             if fault == "timeout":
                 raise httpx.ReadTimeout("synthetic unavailable read", request=request)
+            if fault == "statement_timeout":
+                return httpx.Response(500, json={"code": "57014", "message": "canceling statement due to statement timeout"})
             return httpx.Response(fault, json={})
         return httpx.Response(200, json=[ledger[0]] if reservation else ledger)
 
@@ -66,9 +68,12 @@ def test_unavailable_authenticated_select_does_not_cancel_saved_evaluation(phase
                 assert cancellations == []
         assert caught.value.store_error == {
             "operation": "select", "resource": "lab_arena_ledger",
-            **({"transport_error": "ReadTimeout"} if fault == "timeout" else {"http_status": fault}),
+            **({"transport_error": "ReadTimeout"} if fault == "timeout" else
+               {"http_status": 500, "code": "57014"} if fault == "statement_timeout" else
+               {"http_status": fault}),
         }
-        assert len(requests) == (2 if phase == "reservation" else 3)
+        attempts = 1 if fault == "statement_timeout" else 2
+        assert len(requests) == attempts + int(phase == "lifecycle")
         assert (reads.round_row, reads.runs, ledger, output) == original
 
         # The next ordinary publication attempt can use the same saved result.
@@ -81,7 +86,7 @@ def test_unavailable_authenticated_select_does_not_cancel_saved_evaluation(phase
         service._score_entries_from_runs = ranking
         with pytest.raises(RankingReached):
             service.publish("round")
-        assert len(requests) == (4 if phase == "reservation" else 5)
+        assert len(requests) == attempts + int(phase == "lifecycle") + 2
     assert cancellations == []
     assert (reads.round_row, reads.runs, ledger, output) == original
 
@@ -105,3 +110,33 @@ def test_incomplete_baseline_keeps_existing_deadline_cancellation():
     service._store.latest_execution_model_reservation = lambda _: pytest.fail("baseline gate must come first")
     assert service.publish("round") == {"status": "cancelled"}
     assert cancellations == [("round", "scoring_incomplete")]
+
+
+@pytest.mark.parametrize("operation,code,expected", [
+    ("select", "57014", ArenaStoreUnavailable),
+    ("select", "42501", ArenaStoreError),
+    ("select", "XX000", ArenaStoreError),
+    ("select", "22023", ArenaStoreError),
+    ("rpc", "57014", ArenaStoreError),
+])
+def test_only_select_query_cancellation_is_unavailable_without_added_retry(operation, code, expected):
+    requests = []
+    def handle(request):
+        assert request.headers["apikey"] == "sb_secret_test"
+        requests.append(request)
+        return httpx.Response(500, json={"code": code})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            if operation == "select":
+                store.select("lab_arena_ledger")
+            else:
+                store.rpc("lab_arena_reserve_call", {})
+    assert type(caught.value) is expected
+    assert caught.value.store_error == {
+        "operation": operation,
+        "resource": "lab_arena_ledger" if operation == "select" else "lab_arena_reserve_call",
+        "http_status": 500, "code": code,
+    }
+    assert len(requests) == 1
+    assert requests[0].method == ("GET" if operation == "select" else "POST")

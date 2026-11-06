@@ -107,7 +107,7 @@ def test_reported_zero_and_missing_aggregate_are_distinct():
 
 
 @pytest.mark.parametrize("damage", ["file_url", "http_url", "ip_url", "userinfo_url", "fragment_url",
-                                    "unknown_outer", "unknown_nested", "opaque", "wrong_type", "not_mapping",
+                                    "unknown_outer", "unknown_nested", "wrong_type", "not_mapping",
                                     "bad_title", "bad_content", "negative_offset", "bool_offset", "too_many",
                                     "refusal", "incomplete", "provider_error", "tool_call"])
 def test_invalid_chat_citations_stay_raw_without_sft(tmp_path, damage):
@@ -122,7 +122,6 @@ def test_invalid_chat_citations_stay_raw_without_sft(tmp_path, damage):
         citation["url"] = urls[damage]
     elif damage == "unknown_outer": annotation["opaque"] = "unknown"
     elif damage == "unknown_nested": citation["unreviewed"] = "unknown"
-    elif damage == "opaque": citation["encrypted_content"] = "opaque"
     elif damage == "wrong_type": annotation["type"] = "unknown"
     elif damage == "not_mapping": annotation["url_citation"] = "not a citation"
     elif damage == "bad_title": citation["title"] = 1
@@ -135,13 +134,25 @@ def test_invalid_chat_citations_stay_raw_without_sft(tmp_path, damage):
     elif damage == "provider_error": provider["error"] = {"code": "failed"}
     else: message["tool_calls"] = [{"id": "invented", "type": "function", "function": {"name": "search", "arguments": "{}"}}]
     raw, candidate = export(tmp_path, provider=provider)
-    if damage in {"userinfo_url", "opaque"}:
+    if damage == "userinfo_url":
         assert raw["sft_exclusions"] == ["privacy_nonexact"]
         assert "privacy_redactions" in raw["completeness"]["gaps"]
     else:
         assert raw["response"] == provider
         assert raw["sft_exclusions"] == ["target_shape_or_completion_unsupported"]
     assert candidate is None
+
+
+def test_opaque_chat_citation_projection_keeps_all_visible_citation_fields(tmp_path):
+    provider = response()
+    expected = json.loads(json.dumps(provider["choices"][0]["message"]["annotations"]))
+    provider["choices"][0]["message"]["annotations"][0]["url_citation"]["encrypted_content"] = "opaque"
+    raw, candidate = export(tmp_path, provider=provider)
+    assert candidate["target"]["annotations"] == expected
+    assert candidate["source"]["response_projection"] == {
+        "opaque_reasoning_omitted": True, "exact_provider_replay": False}
+    assert raw["completeness"]["dimensions"]["privacy"] is False
+    assert "privacy_redactions" in raw["completeness"]["gaps"]
 
 
 @pytest.mark.parametrize("damage", ["undeclared", "unknown_tool", "unknown_control", "bad_mode", "bool_limit"])

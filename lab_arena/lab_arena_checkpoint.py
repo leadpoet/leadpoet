@@ -71,10 +71,24 @@ class QuotaUnavailable(RuntimeError):
     """The passive quota snapshot could not be read safely."""
 
 
+def _validate_redirect_url(value: Any) -> None:
+    """Accept only a bounded routing target without private URL components."""
+    if value is None:
+        return
+    if (not isinstance(value, str) or len(value) > 2000
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)):
+        raise ValueError("redirect target is invalid")
+    parts = urlsplit(value)
+    if (parts.scheme not in {"http", "https"} or not parts.hostname
+            or parts.username is not None or parts.password is not None
+            or parts.query or parts.fragment):
+        raise ValueError("redirect target contains private components")
+
+
 def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[str, Any]:
     """Validate reported runtime context; it is not an origin attestation."""
-    if (not isinstance(value, dict) or set(value) != {
-            "source", "complete", "encoding", "received_body_sha256", "received_body_bytes"}
+    fields = {"source", "complete", "encoding", "received_body_sha256", "received_body_bytes"}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | {"redirect_url"})
             or value["source"] != "runtime_http_v1"
             or type(value["complete"]) is not bool
             or not isinstance(value["encoding"], str) or not 1 <= len(value["encoding"]) <= 64
@@ -86,6 +100,7 @@ def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[s
             or type(value["received_body_bytes"]) is not int
             or not 0 <= value["received_body_bytes"] <= MAX_TRAINING_WEB_BODY_BYTES):
         raise ValueError("web capture metadata is invalid")
+    _validate_redirect_url(value.get("redirect_url"))
     codec = codecs.lookup(value["encoding"])
     if not getattr(codec, "_is_text_encoding", False):
         raise ValueError("web capture encoding is invalid")
@@ -99,8 +114,8 @@ def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[s
 
 def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> dict[str, Any]:
     """Validate consumed binary bytes without treating them as trainable text."""
-    if (not isinstance(value, dict) or set(value) != {
-            "source", "complete", "received_body_sha256", "received_body_bytes"}
+    fields = {"source", "complete", "received_body_sha256", "received_body_bytes"}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | {"redirect_url"})
             or value["source"] != "runtime_http_v1"
             or type(value["complete"]) is not bool
             or not isinstance(value["received_body_sha256"], str)
@@ -108,6 +123,7 @@ def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> d
             or type(value["received_body_bytes"]) is not int
             or not 0 <= value["received_body_bytes"] <= MAX_TRAINING_BINARY_BODY_BYTES):
         raise ValueError("binary capture metadata is invalid")
+    _validate_redirect_url(value.get("redirect_url"))
     if body is not None and (len(body) != value["received_body_bytes"]
             or "sha256:" + hashlib.sha256(body).hexdigest() != value["received_body_sha256"]):
         raise ValueError("binary capture bytes do not match")
@@ -128,7 +144,8 @@ def validate_http_response_metadata(data: Any) -> dict[str, Any]:
             raise ValueError("timestamp missing timezone")
         for key in ("url", "redirect_url"):
             value = data[key]
-            if key == "redirect_url" and value is None:
+            if key == "redirect_url":
+                _validate_redirect_url(value)
                 continue
             if (not isinstance(value, str) or len(value) > 2000
                     or any(ord(character) < 32 or ord(character) == 127 for character in value)):
@@ -136,9 +153,6 @@ def validate_http_response_metadata(data: Any) -> dict[str, Any]:
             parts = urlsplit(value)
             if parts.scheme not in {"http", "https"} or not parts.hostname:
                 raise ValueError("url invalid")
-            if key == "redirect_url" and (parts.username is not None or parts.password is not None
-                                          or parts.query or parts.fragment):
-                raise ValueError("redirect target contains private components")
     except (ValueError, TypeError):
         raise ValueError("http response metadata is invalid") from None
     return dict(data)

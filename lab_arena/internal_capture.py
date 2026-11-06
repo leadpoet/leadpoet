@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from lab_arena import contracts, operations, reasoning_capture, training_capture, training_steps, training_thinking
+from lab_arena import contracts, operations, reasoning_capture, training_capture, training_export, training_steps, training_thinking
 from lab_arena.runtime_version import SOURCE_METADATA
 
 SCHEMA_VERSION = "leadpoet.lab_arena.internal_capture_event.v1"
@@ -405,6 +405,21 @@ def _search_evidence(response: Any) -> dict:
                 "count": requests, "path": "/usage/server_tool_use_details/web_search_requests" if requests is not None else None}}
 
 
+def _opaque_response_projection_allowed(events, documents) -> bool:
+    """Keep opaque omission separate from every other nonexact privacy edit."""
+    if set(events) != set(STAGES) or set(documents) != set(STAGES):
+        return False
+    for stage, event in events.items():
+        if any(event.get(field) != {"redacted": False, "redactions": []}
+               for field in ("context_privacy", "event_privacy")):
+            return False
+        pointer = event.get("capture") or {}
+        if (pointer.get("redacted") is not (stage == "response")
+                or pointer.get("redactions") != (["hidden_reasoning"] if stage == "response" else [])):
+            return False
+    return True
+
+
 def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, dict | None]:
     """Read one call; corrupt, missing, redacted and unavailable evidence is explicit."""
     prefix = call_prefix(ref)
@@ -462,10 +477,11 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
            "research_evidence": _search_evidence(response),
            "completeness": {"complete": all(dimensions.values()) and not gaps,
                             "dimensions": dimensions, "gaps": sorted(set(gaps))}}
+    opaque_projection = redactions == ["hidden_reasoning"] and _opaque_response_projection_allowed(events, documents)
     candidate, exclusions = None, []
     if not dimensions["request"] or not dimensions["response"] or "event_context_mismatch" in gaps:
         exclusions.append("request_response_unavailable")
-    elif redactions:
+    elif redactions and not opaque_projection:
         exclusions.append("privacy_nonexact")
     elif events.get("response", {}).get("http_status") != 200:
         exclusions.append("provider_http_error")
@@ -473,7 +489,8 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
         try:
             if isinstance(response, Mapping) and any(response.get(key) for key in ("error", "errors", "refusal")):
                 raise ValueError("internal_provider_error_or_refusal")
-            target, _ = training_steps._target(request, response, first["api"], allow_reasoning_history=True,
+            target_response = training_export.without_hidden_reasoning(response)[0] if opaque_projection else response
+            target, _ = training_steps._target(request, target_response, first["api"], allow_reasoning_history=True,
                                                allow_tool_error_history=True,
                                                responses_input_validator=_internal_responses_input,
                                                chat_annotations_validator=_internal_chat_annotations)
@@ -497,6 +514,9 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
                          "source": {"event_refs": raw["event_refs"], "context": raw["context"],
                                     "request_sha256": (events["request"].get("capture") or {}).get("sha256"),
                                     "response_sha256": (events["response"].get("capture") or {}).get("sha256"),
+                                    **({"response_projection": {"opaque_reasoning_omitted": True,
+                                                                 "exact_provider_replay": False}}
+                                       if opaque_projection else {}),
                                     "outcome": raw["outcome"], "cost_status": raw["cost_status"],
                                     "research_evidence": raw["research_evidence"],
                                     "capture_completeness": raw["completeness"]}}

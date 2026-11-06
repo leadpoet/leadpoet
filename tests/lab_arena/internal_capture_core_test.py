@@ -152,7 +152,11 @@ def test_summary_and_opaque_state_remain_separate_from_full_text(tmp_path):
     assert raw["reasoning"]["contains_opaque"] is True
     assert raw["reasoning"]["full_generated_thinking"] == []
     assert "opaque-state" not in json.dumps(raw)
-    assert candidate is None
+    assert candidate is not None
+    assert candidate["generated_thinking"] == []
+    assert candidate["source"]["response_projection"] == {
+        "opaque_reasoning_omitted": True, "exact_provider_replay": False}
+    assert candidate["source"]["capture_completeness"]["dimensions"]["privacy"] is False
 
 
 def reviewed_registry():

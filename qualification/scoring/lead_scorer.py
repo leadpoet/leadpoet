@@ -1577,6 +1577,8 @@ _LISTED_PARENT_UNIT = (
     r"business\s+unit)\s+of\s+"
 )
 _LISTED_PARENT_RELATION_PATTERNS = (
+    # Only present-tense ownership counts: a past acquisition does not prove
+    # that the parent still owns the company.
     # The investigated company is the subject; the parent is the object.
     re.compile(
         rf"{_LISTED_PARENT_CLAUSE_START}{_LISTED_PARENT_SUBJECT}\s+"
@@ -1597,23 +1599,10 @@ _LISTED_PARENT_RELATION_PATTERNS = (
         rf"{_LISTED_PARENT_NAME}{_LISTED_PARENT_ENTITY_END}",
         re.I,
     ),
-    re.compile(
-        rf"{_LISTED_PARENT_CLAUSE_START}{_LISTED_PARENT_SUBJECT}\s+"
-        r"(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\s+"
-        rf"{_LISTED_PARENT_NAME}{_LISTED_PARENT_ENTITY_END}",
-        re.I,
-    ),
-    re.compile(
-        rf"{_LISTED_PARENT_CLAUSE_START}{_LISTED_PARENT_SUBJECT}\s+"
-        r"(?:today\s+)?announced\s+(?:today\s+)?the\s+(?:closing|completion)\s+"
-        rf"of\s+its\s+acquisition\s+by\s+{_LISTED_PARENT_NAME}"
-        rf"{_LISTED_PARENT_ENTITY_END}",
-        re.I,
-    ),
     # The parent is the subject; the investigated company is the object.
     re.compile(
         rf"{_LISTED_PARENT_SENTENCE_START}{_LISTED_PARENT_NAME}"
-        r"(?:\s*\([^()\n]{1,80}\))?\s+(?:is|remains|became)\s+(?:now\s+)?"
+        r"(?:\s*\([^()\n]{1,80}\))?\s+(?:is|remains)\s+(?:now\s+)?"
         r"the\s+(?:new\s+)?(?:holding|parent)\s+company\s+(?:of|for)\s+"
         rf"{_LISTED_PARENT_SUBJECT}{_LISTED_PARENT_ENTITY_END}",
         re.I,
@@ -1625,19 +1614,33 @@ _LISTED_PARENT_RELATION_PATTERNS = (
         rf"{_LISTED_PARENT_SUBJECT}{_LISTED_PARENT_ENTITY_END}",
         re.I,
     ),
-    re.compile(
-        rf"{_LISTED_PARENT_SENTENCE_START}{_LISTED_PARENT_NAME}"
-        r"(?:\s*\([^()\n]{1,80}\))?\s+(?:has\s+)?(?:completed|closed)\s+"
-        r"(?:(?:the|its|an?)\s+)?(?:previously\s+announced\s+)?"
-        rf"acquisition\s+of\s+{_LISTED_PARENT_SUBJECT}{_LISTED_PARENT_ENTITY_END}",
-        re.I,
-    ),
 )
-_LISTED_PARENT_NO_LONGER_OWNED_RE = re.compile(
-    r"\b(?:later|subsequently|since)\b.{0,100}\b(?:spun?\s+(?:out|off)|"
-    r"became\s+independent|divested|sold)\b|\bis\s+(?:now\s+)?independent\b",
-    re.I | re.S,
+# Any of this wording anywhere in the cited quotes means the ownership may
+# have ended, been shared, or be partial. The route then fails closed.
+_LISTED_PARENT_NOT_HELD_RE = re.compile(
+    r"\b(?:sold|sells|divest\w*|spun\s+(?:off|out)|spin-?\s?(?:off|out)|"
+    r"carve-?\s?out|carved\s+out|independen(?:t|tly|ce)|former(?:ly)?|"
+    r"previously|no\s+longer|bought\b[^.;!?\n]{0,40}\bback|buy-?\s?out|"
+    r"joint(?:ly)?|co-?owned|stakes?|minority|non-?controlling|"
+    r"until\s+(?:\w+\s+){0,2}(?:19|20)\d{2})\b",
+    re.I,
 )
+_LISTED_PARENT_PERCENT_RE = re.compile(
+    r"(?<![\d.])(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)", re.I,
+)
+_LISTED_PARENT_OWNERSHIP_WORD_RE = re.compile(
+    r"\b(?:own\w*|held|holds?|interest|equity|shares?|acquir\w*|controls?)\b",
+    re.I,
+)
+_LISTED_PARENT_JOINT_SUFFIX_RE = re.compile(
+    r"\s*,?\s*(?:and|&)\s+(?:the\s+)?[A-Z0-9]",
+)
+_LISTED_PARENT_ISSUER_SUFFIX_RE = re.compile(
+    r"(?:,?\s+(?:Inc|Incorporated|Corp|Corporation|Co|Company|Ltd|Limited|LLC|"
+    r"plc|N\.?V|S\.?A|AG|SE)\.?)*(?![A-Za-z0-9])",
+    re.I,
+)
+_LISTED_PARENT_ISSUER_TOKEN = "Zqlistedparentissuerzq"
 _LISTED_PARENT_UNSETTLED_RE = re.compile(
     r"\b(?:if|unless|whether|once|upon|after\s+closing)\b", re.I,
 )
@@ -1661,6 +1664,70 @@ def _listed_parent_entity_tokens(value: str) -> tuple[str, ...]:
     return parts
 
 
+def _listed_parent_quotes_not_held(quotes: Sequence[str]) -> bool:
+    """Return true when cited text says ownership ended, is shared or partial."""
+
+    for quote in quotes:
+        if _LISTED_PARENT_NOT_HELD_RE.search(quote):
+            return True
+        for match in _LISTED_PARENT_PERCENT_RE.finditer(quote):
+            window = quote[max(0, match.start() - 120):match.end() + 120]
+            start = match.start() - max(0, match.start() - 120)
+            before = re.split(r"[;!?\n]|\.\s", window[:start])[-1]
+            after = re.split(r"[;!?\n]|\.\s", window[start:])[0]
+            if (
+                float(match.group(1)) < 50
+                and _LISTED_PARENT_OWNERSHIP_WORD_RE.search(before + after)
+            ):
+                return True
+    return False
+
+
+def _listed_parent_issuer_text(quote: str, parent: str) -> str:
+    """Mark only exact issuer-name occurrences of the parent in a quote.
+
+    The name must be the whole issuer name, apart from a trailing legal
+    suffix: "Mars" does not match "Marstons PLC", "Beta" does not match
+    "AlphaBeta Corp", and "Samsung" does not match "Samsung Electronics".
+    Occurrences inside a parenthetical (such as a ticker) are not names.
+    """
+
+    tokens = parent.split()
+    if not tokens:
+        return quote
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9&])"
+        + r"[^A-Za-z0-9\n]{1,3}".join(re.escape(token) for token in tokens),
+        re.I,
+    )
+    parts: list[str] = []
+    position = 0
+    for match in pattern.finditer(quote):
+        if match.start() < position:
+            continue
+        suffix = _LISTED_PARENT_ISSUER_SUFFIX_RE.match(quote, match.end())
+        if suffix is None:
+            continue
+        before = quote[:match.start()]
+        previous = re.search(r"([A-Za-z0-9][\w&'’.-]*)[ \t]+$", before)
+        if (
+            before.count("(") > before.count(")")
+            # A capitalized word directly before or after makes a longer name.
+            or (
+                previous is not None
+                and previous.group(1)[0].isupper()
+                and previous.group(1) != "The"
+            )
+            or re.match(r"[ \t]+[A-Z0-9]", quote[suffix.end():])
+        ):
+            continue
+        parts.append(quote[position:match.start()])
+        parts.append(_LISTED_PARENT_ISSUER_TOKEN)
+        position = suffix.end()
+    parts.append(quote[position:])
+    return "".join(parts)
+
+
 def _listed_parent_names_from_relation(
     company_names: Sequence[Any],
     ownership_quote: str,
@@ -1672,7 +1739,7 @@ def _listed_parent_names_from_relation(
         for name in company_names
         if (tokens := _listed_parent_entity_tokens(str(name or "")))
     }
-    if not names or _LISTED_PARENT_NO_LONGER_OWNED_RE.search(ownership_quote):
+    if not names or _listed_parent_quotes_not_held((ownership_quote,)):
         return ()
     parents: list[str] = []
     for pattern in _LISTED_PARENT_RELATION_PATTERNS:
@@ -1693,7 +1760,10 @@ def _listed_parent_names_from_relation(
                 or _LISTED_PARENT_UNSETTLED_RE.search(prefix)
                 or _LISTED_PARENT_NOT_CURRENT_RE.search(match.group(0))
                 or re.match(_LISTED_PARENT_PENDING_SUFFIX, suffix, re.I)
-                or "minority" in context.casefold()
+                # "a subsidiary of A and B" is joint, not single, ownership.
+                or _LISTED_PARENT_JOINT_SUFFIX_RE.match(
+                    ownership_quote, match.end("parent"),
+                )
                 or _ACQUISITION_CONDITIONAL_RE.search(context)
                 or _ACQUISITION_FAILED_RE.search(context)
             ):
@@ -1738,7 +1808,7 @@ def _listed_parent_public_proof(
     ))
     # A completed take-private, delisting, or PE acquisition in any cited
     # proof means this is not a currently listed parent.
-    if any(
+    if _listed_parent_quotes_not_held(quotes) or any(
         _has_affirmed_stage_proof(
             quote,
             _PUBLIC_STAGE_SUPERSESSION_PATTERNS,
@@ -1748,13 +1818,21 @@ def _listed_parent_public_proof(
     ):
         return False
     parents = _listed_parent_names_from_relation(company_names, ownership_quote)
+    issuer = (_LISTED_PARENT_ISSUER_TOKEN,)
     for parent in parents:
         for quote in quotes:
-            text = _PUBLIC_COMPANY_ALIAS_RE.sub("", quote)
+            # The existing listing helpers match names as substrings. For
+            # this route, the listed issuer must be exactly the parent, so
+            # only exact parent-name occurrences become the bound issuer.
+            text = _listed_parent_issuer_text(
+                _PUBLIC_COMPANY_ALIAS_RE.sub("", quote), parent,
+            )
+            if _LISTED_PARENT_ISSUER_TOKEN not in text:
+                continue
             if (
-                _public_quote_has_bound_market_locator(text, (parent,))
-                or _public_quote_has_bound_status(text, (parent,))
-                or _current_exchange_profile_names_issuer(text, (parent,))
+                _public_quote_has_bound_market_locator(text, issuer)
+                or _public_quote_has_bound_status(text, issuer)
+                or _current_exchange_profile_names_issuer(text, issuer)
             ):
                 return True
     return False
@@ -10410,10 +10488,11 @@ async def _llm_reverify_company(
             f'parent, IPO/listing change, or later completed priced round, then select '
             f'the newest applicable state. A proven stage stays proven unless a later '
             f'completed event concretely changed control, listing, or the priced-round '
-            f'series; a later strategic or minority investment, a pending or '
-            f'conditional deal, or unfinished research does not erase it. A later '
-            f'completed round of unstated series keeps Series C+ but leaves an '
-            f'earlier stage unresolved. For a venture stage, prefer a first-party '
+            f'series. A later completed equity investment or round of unstated '
+            f'series, even one called strategic, keeps Series C+ but leaves an '
+            f'earlier stage unresolved. A pending or conditional deal does not '
+            f'erase a proven stage. For a venture stage, including Seed, use the '
+            f'latest completed event and prefer a first-party '
             f'completed-round announcement and its full body over a directory table, '
             f'investor summary, funding total, or search snippet. An older Seed, '
             f'Series A, or Series B quote does not establish the current stage when '
@@ -11115,10 +11194,10 @@ async def _llm_reverify_company(
         "stage onto its subsidiary, except that a requested Public stage is met "
         "by a current wholly or majority owned subsidiary, brand, or division "
         "of a currently listed parent; return Acquired with the ownership quote "
-        "for that case. A later strategic or minority investment, a pending "
-        "or conditional deal, or unfinished research does not erase a proven "
-        "stage. A later completed round of unstated series keeps Series C+ but "
-        "leaves an earlier stage unresolved. Prefer a first-party completed-round "
+        "for that case. A later completed equity investment or round of "
+        "unstated series, even one called strategic, keeps Series C+ but leaves "
+        "an earlier stage unresolved. A pending or conditional deal does not "
+        "erase a proven stage. Prefer a first-party completed-round "
         "full-body quote over a directory table, investor summary, or snippet. "
         "Report a different stage or leave it unresolved when the evidence "
         "requires that."

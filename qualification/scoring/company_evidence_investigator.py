@@ -601,7 +601,7 @@ ticker, and exchange. Quote one continuous span that includes the registrant
 name and the complete row. Check the filing date and later ownership/listing
 events; an old table does not establish current status or override newer
 private-company evidence. For venture stages, compare dated rounds, acquisitions
-and IPO/listing events.
+and IPO/listing events; use the latest completed event, Seed included.
 For a Series stage, use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
 A later completed priced-equity round, controlling acquisition, or IPO/listing
@@ -612,10 +612,10 @@ Acquired and does not supersede the buyer's funding stage. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. A competing stage event is material only if the
 source states it completed and changed control, listing or priced-round series.
-Later strategic or minority investments, pending or conditional deals and
-unfinished research are not; a proven stage stays. Later private financing
-keeps Series C+ unless stated to give control or a listing; a later completed
-round of unstated series leaves an earlier stage UNPROVEN.
+A later completed equity investment or round of unstated series, even one
+called strategic, keeps Series C+ unless stated to give control or a listing,
+but leaves an earlier stage UNPROVEN. A pending or conditional deal does not
+erase a proven stage.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for

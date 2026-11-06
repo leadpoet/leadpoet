@@ -48,16 +48,24 @@ def test_investigator_keeps_a_proven_stage_through_non_material_later_events():
         "A competing stage event is material only if the source states it "
         "completed and changed control, listing or priced-round series."
     ) in INVESTIGATOR_PROMPT
+    # Review fix 5: a later strategic equity investment keeps Series C+
+    # (for example a corporate investment after a Series C) but leaves Seed,
+    # Series A or Series B unresolved, because most rounds are minority equity.
     assert (
-        "Later strategic or minority investments, pending or conditional deals "
-        "and unfinished research are not; a proven stage stays."
+        "A later completed equity investment or round of unstated series, even "
+        "one called strategic, keeps Series C+ unless stated to give control or "
+        "a listing, but leaves an earlier stage UNPROVEN. A pending or "
+        "conditional deal does not erase a proven stage."
     ) in INVESTIGATOR_PROMPT
-    assert (
-        "Later private financing keeps Series C+ unless stated to give control "
-        "or a listing; a later completed round of unstated series leaves an "
-        "earlier stage UNPROVEN."
-    ) in INVESTIGATOR_PROMPT
+    assert "minority investments" not in INVESTIGATOR_PROMPT
     assert "unspecified investment" not in INVESTIGATOR_PROMPT
+    # Review fix 6: failed or unfinished research is not a stage-keeping
+    # reason; the latest completed event rule covers Seed again.
+    assert "unfinished research" not in INVESTIGATOR_PROMPT
+    assert (
+        "For venture stages, compare dated rounds, acquisitions and IPO/listing "
+        "events; use the latest completed event, Seed included."
+    ) in INVESTIGATOR_PROMPT
     # The possibility of control no longer erases a proven Series C+.
     assert "may have given" not in INVESTIGATOR_PROMPT
     assert "Conflicting labels without chronology are UNPROVEN" not in INVESTIGATOR_PROMPT
@@ -72,23 +80,20 @@ def test_investigator_keeps_a_proven_stage_through_non_material_later_events():
 
 
 def test_reviewer_prompts_match_the_investigator_stage_persistence_rule():
-    sentence = (
-        "A proven stage stays proven unless a later completed event concretely "
-        "changed control, listing, or the priced-round series; a later strategic "
-        "or minority investment, a pending or conditional deal, or unfinished "
-        "research does not erase it."
-    )
-    assert sentence in LEAD_SCORER_PROMPTS
     assert (
-        "A later strategic or minority investment, a pending or conditional "
-        "deal, or unfinished research does not erase a proven stage."
+        "A proven stage stays proven unless a later completed event concretely "
+        "changed control, listing, or the priced-round series."
     ) in LEAD_SCORER_PROMPTS
-    # An unnamed later round keeps only Series C+; it does not keep Seed/A/B.
+    # An unnamed later round or strategic investment keeps only Series C+.
     assert LEAD_SCORER_PROMPTS.count(
-        "A later completed round of unstated series keeps Series C+ but leaves "
-        "an earlier stage unresolved."
+        "A later completed equity investment or round of unstated series, even "
+        "one called strategic, keeps Series C+ but leaves an earlier stage "
+        "unresolved. A pending or conditional deal does not erase a proven stage."
     ) >= 2  # full-fit and stage-repair prompts (f-string parts are also walked)
+    assert "For a venture stage, including Seed, use the latest completed event" in LEAD_SCORER_PROMPTS
     assert "unspecified investment" not in LEAD_SCORER_PROMPTS
+    assert "minority investment" not in LEAD_SCORER_PROMPTS
+    assert "unfinished research" not in LEAD_SCORER_PROMPTS
 
 
 # Rule B prompt contract ----------------------------------------------------
@@ -212,7 +217,12 @@ def test_listed_parent_controls_stay_not_public(ownership, listing):
 @pytest.mark.parametrize(("ownership", "listings", "expected"), [
     ("Parent Group, Inc. (Nasdaq: PGRP), the parent company of Acme Realty, "
      "reported results.", (), True),
+    # Review fix 2: a completed acquisition is past, not current, ownership.
     ("Parent Group, Inc. (NYSE: PGRP) completed its acquisition of Acme Realty.",
+     (), False),
+    ("Acme Realty was acquired by Parent Group, Inc. (NYSE: PGRP).", (), False),
+    ("Acme Realty is wholly owned by Parent Group, Inc. (NYSE: PGRP).", (), True),
+    ("Acme Realty is an operating company of Parent Group, Inc. (NYSE: PGRP).",
      (), True),
     ("Acme Realty, a subsidiary of Parent Group, Inc. (Nasdaq: PGRP), serves "
      "home buyers.", (), True),
@@ -240,6 +250,93 @@ def test_listed_parent_proof_binds_parent_relation_and_listing(
     )
 
 
+# Review regressions: each reproduces a false Public found end to end ------
+
+BARCO_LISTING = "Barco Industries (NYSE: BRC) reported results."
+
+
+@pytest.mark.parametrize(("ownership", "listing"), [
+    # Fix 1: the listed issuer must be exactly the parent, not a name that
+    # merely contains it.
+    ("Acme Realty is a wholly owned subsidiary of Mars.",
+     "Marstons PLC (NYSE: MARS) reported results."),
+    ("Acme Realty is a wholly owned subsidiary of Beta.",
+     "AlphaBeta Corp (NASDAQ: AB) reported results."),
+    ("Acme Realty is a wholly owned subsidiary of Samsung.",
+     "Samsung Electronics (NYSE: SSNLF) reported results."),
+    # Fix 2: a past acquisition followed by a sale, spin-off or buyback.
+    ("Acme Realty was acquired by Barco Industries (NYSE: BRC) in 2010; Barco "
+     "Industries divested Acme Realty in 2022.", BARCO_LISTING),
+    ("Acme Realty was acquired by Barco Industries (NYSE: BRC) in 2010 and is "
+     "now an independent company.", BARCO_LISTING),
+    ("Acme Realty is a subsidiary of Barco Industries. In 2024 Barco Industries "
+     "sold Acme Realty to Qux Corp.", BARCO_LISTING),
+    ("Acme Realty is a subsidiary of Barco Industries until 2025.", BARCO_LISTING),
+    ("Acme Realty is a subsidiary of Barco Industries; in 2020 management "
+     "bought it back.", BARCO_LISTING),
+    # Fix 3: joint ownership is not a single listed parent.
+    ("Acme Realty is a subsidiary of Barco Industries and Qux Corp.",
+     BARCO_LISTING),
+    ("Acme Realty is a joint venture; Acme Realty is a subsidiary of Barco "
+     "Industries.", BARCO_LISTING),
+    # Fix 4: a stated minority percentage or stake.
+    ("Acme Realty is 49% owned by Barco Industries. Acme Realty is an "
+     "operating company of Barco Industries (NYSE: BRC).", BARCO_LISTING),
+    ("Barco Industries holds a 40 percent stake. Acme Realty is a subsidiary "
+     "of Barco Industries.", BARCO_LISTING),
+])
+def test_review_false_public_repros_are_not_public(ownership, listing):
+    assert not lead_scorer._listed_parent_public_stage_matches(
+        "acquired", "public", company_names=("acmerealty",),
+        ownership_quote=ownership, listing_quotes=(listing,),
+    )
+    finding, retained, decision = _decide(ownership, listing, "public")
+    assert finding["status"] != "VERIFIED"
+    assert not retained.get("stage_matches")
+    assert decision != "match"
+
+
+@pytest.mark.parametrize(("ownership", "listing"), [
+    ("Acme Realty is a wholly owned subsidiary of Barco Industries.",
+     BARCO_LISTING),
+    # A trailing legal suffix is not part of the name; ticker case is ignored.
+    ("Acme Realty is a wholly owned subsidiary of Barco Industries, Inc.",
+     "Barco Industries (NYSE: BRC) reported results."),
+    ("Acme Realty is a wholly owned subsidiary of Barco Industries.",
+     "Shares of Barco Industries Inc. (NYSE: BRC) rose."),
+    # A majority percentage is not a minority stake.
+    ("Acme Realty is 80% owned by Barco Industries. Acme Realty is a "
+     "majority-owned subsidiary of Barco Industries.", BARCO_LISTING),
+])
+def test_exact_listed_parent_still_matches_requested_public(ownership, listing):
+    assert lead_scorer._listed_parent_public_stage_matches(
+        "acquired", "public", company_names=("acmerealty",),
+        ownership_quote=ownership, listing_quotes=(listing,),
+    )
+    *_, decision = _decide(ownership, listing, "public")
+    assert decision == "match"
+
+
+@pytest.mark.parametrize("listing", [
+    "Barco Industries Holdings (NYSE: BRC) reported results.",
+    "Tata Barco Industries (NYSE: BRC) reported results.",
+    "Barcos Industries (NYSE: BRC) reported results.",
+])
+def test_listing_issuer_must_equal_the_parent_name(listing):
+    assert not lead_scorer._listed_parent_public_stage_matches(
+        "acquired", "public", company_names=("acmerealty",),
+        ownership_quote="Acme Realty is a subsidiary of Barco Industries.",
+        listing_quotes=(listing,),
+    )
+
+
+def test_direct_public_substring_behavior_is_unchanged():
+    # Fix 1 is scoped to the listed-parent route only.
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        "Marstons PLC (NYSE: MARS) reported results.", ("mars",),
+    )
+
+
 # Rule C ------------------------------------------------------------------
 
 def test_descriptive_scope_lists_and_delivery_words_keep_required_functions():
@@ -247,11 +344,14 @@ def test_descriptive_scope_lists_and_delivery_words_keep_required_functions():
 
     assert (
         "An ordinary descriptive list of lifecycle stages, disease areas or "
-        "indications, markets, regions or use cases states the offering's scope: "
+        "indications, markets or regions states the offering's scope: "
         "proof of an offering within that scope establishes fit without proof of "
         "each listed item, unless must, each, all, both, only or explicit logical "
         "AND requires every item."
     ) in rules
+    # Review fix 7: use cases are not a descriptive scope list, because they
+    # can name required functions ("onboarding, payroll and benefits").
+    assert "use cases" not in rules
     assert "An offering wholly outside that scope does not fit" in rules
     assert "an antibody company does not supply 'genetic medicines'" in rules
     assert "an oncology-only cell therapy does not serve 'genetic and rare diseases'" in rules

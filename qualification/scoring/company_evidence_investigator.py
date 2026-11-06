@@ -2987,6 +2987,9 @@ async def _review_industry_sources(
         payload.pop("reasoning", None)
         payload["max_tokens"] = 16384
         payload["messages"][0]["content"] += industry_classification.REASONING_RESPONSE_CONTRACT
+        payload["messages"][0]["content"] += (
+            "\nProvide a nonempty reason explaining how the cited source spans establish the decision.")
+        payload["response_format"]["json_schema"]["schema"]["properties"]["reason"]["minLength"] = 1
     try:
         status, body = await _post_openrouter_json(
             session, 'https://openrouter.ai/api/v1/chat/completions',

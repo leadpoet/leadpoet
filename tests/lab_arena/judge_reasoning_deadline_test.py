@@ -65,13 +65,17 @@ def test_existing_repair_uses_remaining_window_not_a_new_deadline(monkeypatch, e
     assert result['decision'] == ('mismatch' if elapsed < total else 'unavailable')
 
 
-@pytest.mark.parametrize('enabled', [False, True])
-def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkeypatch, enabled):
+@pytest.mark.parametrize('enabled,exception', [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize('research', [False, True])
+def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkeypatch, enabled, exception, research):
     import time
     from qualification.scoring import company_evidence_investigator as investigator
     from qualification.scoring import industry_classification as industry
 
     monkeypatch.setenv('ARENA_JUDGE_REASONING_CAPTURE_POLICY', options.JUDGE_REASONING_POLICY if enabled else '')
+    model = 'openai/gpt-6.1-sol' if exception else 'test/model'
+    monkeypatch.setenv('ARENA_JUDGE_REASONING_EXCEPTIONS', json.dumps({model: {
+        'roles': ['industry_evidence_review'], 'reason': 'quality_gate_not_met'}}) if exception else '')
     calls = []
 
     async def capture(session, url, **kwargs):
@@ -81,7 +85,7 @@ def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkey
     monkeypatch.setattr(investigator, '_post_openrouter_json', capture)
     url = 'https://acme.example/'
     asyncio.run(investigator._review_industry_sources(
-        None, model='test/model', openrouter_key='test', started=time.monotonic(),
+        None, model=model, openrouter_key='test', started=time.monotonic(), research=research,
         company_locator={'name': 'Acme', 'website': url},
         criteria={'industry': 'Software', 'subindustry': '', 'product_service': 'Reporting'},
         fetched_pages={url: 'Acme supplies reporting software.'}, fetched_final_urls={url: url},
@@ -89,8 +93,18 @@ def test_industry_response_contract_is_explicit_only_for_reasoning_policy(monkey
         identity_anchor={'submitted_domain': 'acme.example', 'observed_domain': 'acme.example',
                          'verified_domain': 'acme.example'}, evaluation_date_value='2026-11-05'))
     assert len(calls) == 1
-    assert (industry.REASONING_RESPONSE_CONTRACT in calls[0]['messages'][0]['content']) is enabled
-    assert calls[0]['max_tokens'] == (16384 if enabled else 2000)
+    packet = industry.prepare({'industry': 'Software', 'subindustry': '', 'product_service': 'Reporting'},
+        {'name': 'Acme', 'website': url, 'linkedin': ''},
+        [{'source_id': 's0', 'source_url': url, 'body': 'Acme supplies reporting software.'}],
+        evaluation_date='2026-11-05')
+    expected = industry.request_payload(packet, model=model, research=research)
+    if enabled and not exception:
+        expected.pop('reasoning')
+        expected['max_tokens'] = 16384
+        expected['messages'][0]['content'] += (industry.REASONING_RESPONSE_CONTRACT
+            + '\nProvide a nonempty reason explaining how the cited source spans establish the decision.')
+        expected['response_format']['json_schema']['schema']['properties']['reason']['minLength'] = 1
+    assert calls[0] == expected
 
 
 @pytest.mark.parametrize('enabled', [False, True])

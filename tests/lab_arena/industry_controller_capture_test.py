@@ -15,7 +15,10 @@ ENV = "ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL"
 
 
 def historical_policy_without_controller():
-    policy = scoring.build_scorer_policy()
+    from tests.lab_arena.judge_default_activation_test import PREVIOUS_MODELS, PREVIOUS_OPTIONS, ROUTES, EXCEPTIONS
+    policy = scoring.build_scorer_policy(judge_models=PREVIOUS_MODELS,
+        judge_provider_routes=ROUTES, judge_request_options=PREVIOUS_OPTIONS,
+        judge_reasoning_exceptions=EXCEPTIONS)
     del policy["judge_models"][ROLE]
     for binding in (contracts.JUDGE_PROVIDER_ROUTES_BINDING, contracts.JUDGE_REQUEST_OPTIONS_BINDING):
         values = json.loads(policy["env_bindings"][binding])
@@ -24,8 +27,11 @@ def historical_policy_without_controller():
     return policy
 
 
-def test_default_sol_exception_covers_only_final_industry_review():
-    policy = scoring.build_scorer_policy()
+def test_historical_sol_exception_covers_only_final_industry_review():
+    from tests.lab_arena.judge_default_activation_test import PREVIOUS_MODELS, PREVIOUS_OPTIONS, ROUTES, EXCEPTIONS
+    policy = scoring.build_scorer_policy(judge_models=PREVIOUS_MODELS,
+        judge_provider_routes=ROUTES, judge_request_options=PREVIOUS_OPTIONS,
+        judge_reasoning_exceptions=EXCEPTIONS)
     assert policy["judge_models"][ROLE] == "z-ai/glm-5.3-flash"
     exception = contracts.judge_reasoning_exceptions(policy)[SOL]
     assert exception["roles"] == ["industry_evidence_review"]
@@ -193,6 +199,7 @@ def test_rejected_source_proposals_never_claim_execution(monkeypatch, name, args
 
 
 def test_new_sol_controller_keeps_legacy_wire_and_repair_bounds(monkeypatch):
+    from tests.lab_arena.judge_default_activation_test import PREVIOUS_OPTIONS, ROUTES
     url = "https://acme.example/"
     async def review(*_, **__):
         return {"target": "industry", "status": "UNPROVEN", "evidence_url": "", "evidence_quote": "",
@@ -216,9 +223,10 @@ def test_new_sol_controller_keeps_legacy_wire_and_repair_bounds(monkeypatch):
         monkeypatch.setenv(ENV, controller)
         monkeypatch.setenv("ARENA_COMPANY_REVERIFY_MODEL", "deepseek/deepseek-v4.1-flash-1017")
         monkeypatch.setenv("ARENA_JUDGE_REASONING_CAPTURE_POLICY", "full_generated_thinking_v1" if capture else "")
-        monkeypatch.setenv("ARENA_JUDGE_REASONING_EXCEPTIONS", json.dumps(scoring.DEFAULT_JUDGE_REASONING_EXCEPTIONS))
-        monkeypatch.setenv("ARENA_JUDGE_PROVIDER_ROUTES", json.dumps(scoring.DEFAULT_JUDGE_PROVIDER_ROUTES))
-        monkeypatch.setenv("ARENA_JUDGE_REQUEST_OPTIONS", json.dumps(scoring.DEFAULT_JUDGE_REQUEST_OPTIONS))
+        monkeypatch.setenv("ARENA_JUDGE_REASONING_EXCEPTIONS", json.dumps({SOL: {
+            "roles": ["industry_evidence_review"], "reason": "quality_gate_not_met"}}))
+        monkeypatch.setenv("ARENA_JUDGE_PROVIDER_ROUTES", json.dumps(ROUTES))
+        monkeypatch.setenv("ARENA_JUDGE_REQUEST_OPTIONS", json.dumps(PREVIOUS_OPTIONS))
         monkeypatch.setattr(investigator, "REASONING_MAX_TOKENS", 16384 if capture else 3000)
         asyncio.run(investigator.investigate_company_evidence(company_locator={"name": "Acme", "website": url},
             targets=("industry",), requested_industry="Software", prior_observations={"submitted_source_urls": [url]},
@@ -232,6 +240,7 @@ def test_new_sol_controller_keeps_legacy_wire_and_repair_bounds(monkeypatch):
                and p["parallel_tool_calls"] is False for _, p in new)
     assert all("reasoning_details" not in m for m in new[1][1]["messages"])
     historical = wire(True, "")
+    assert len(historical) == 2
     assert all(p["model"] == "deepseek/deepseek-v4.1-flash-1017" and p["max_tokens"] == 8192
                and p["provider"] == {"only": ["nebius/fp8"]} for _, p in historical)
     current = wire(True, "z-ai/glm-5.3-flash")

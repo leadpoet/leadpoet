@@ -17,7 +17,7 @@ from tests.lab_arena.prospective_admission_primary_test import DEEPSEEK, receipt
 from tests.lab_arena.test_lab_arena_code_review_runtime import _archive, _source
 from tests.postgres_migration_harness import SCRIPTS
 
-MIGRATION = SCRIPTS / '642-lab-arena-prospective-admission-primary.sql'
+MIGRATION = SCRIPTS / '643-lab-arena-prospective-admission-primary.sql'
 parent_database = ninth.database
 
 
@@ -31,7 +31,7 @@ def restore_predecessor(cursor):
     for i, signature in enumerate(SIGNATURES):
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
         fixed = cursor.fetchone()[0]
-        replacements = re.findall(r'v_old:=\$old642_'+str(i)+r'_(\d+)\$(.*?)\$old642_'+str(i)+r'_\1\$;\n  v_new:=\$new642_'+str(i)+r'_\1\$(.*?)\$new642_'+str(i)+r'_\1\$;', text, re.S)
+        replacements = re.findall(r'v_old:=\$old643_'+str(i)+r'_(\d+)\$(.*?)\$old643_'+str(i)+r'_\1\$;\n  v_new:=\$new643_'+str(i)+r'_\1\$(.*?)\$new643_'+str(i)+r'_\1\$;', text, re.S)
         assert replacements
         for _, old, new in reversed(replacements):
             assert new in fixed
@@ -75,7 +75,7 @@ def test_fail_before_then_upgrade_preserves_rows_and_uses_actual_new_primary(rec
     with recovery_superuser.cursor() as cursor:
         restore_predecessor(cursor)
         functions = function_snapshot(cursor)
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-before')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary643-before')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, DEEPSEEK)
@@ -108,9 +108,9 @@ def test_migration_replay_and_unknown_final_body_preserve_all_functions(recovery
         restore_predecessor(cursor)
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURES[-1],))
         original_schema = cursor.fetchone()[0]
-        cursor.execute(original_schema.replace('SELECT', '-- unknown642\n  SELECT', 1))
+        cursor.execute(original_schema.replace('SELECT', '-- unknown643\n  SELECT', 1))
         before = function_snapshot(cursor)
-        with pytest.raises(Exception, match='primary642 preimage differs'):
+        with pytest.raises(Exception, match='primary643 preimage differs'):
             cursor.execute(MIGRATION.read_text())
         cursor.execute('ROLLBACK')
         assert function_snapshot(cursor) == before
@@ -124,9 +124,9 @@ def test_unknown_parent_recovery_helper_is_rejected_without_function_changes(rec
     with recovery_superuser.cursor() as cursor:
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
         original = cursor.fetchone()[0]
-        cursor.execute(original.replace('SELECT', '-- unknown642parent\n SELECT', 1))
+        cursor.execute(original.replace('SELECT', '-- unknown643parent\n SELECT', 1))
         before = function_snapshot(cursor)
-        with pytest.raises(Exception, match='primary642 parent637 differs'):
+        with pytest.raises(Exception, match='primary643 parent637 differs'):
             cursor.execute(MIGRATION.read_text())
         cursor.execute('ROLLBACK')
         assert function_snapshot(cursor) == before
@@ -165,7 +165,7 @@ def test_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth_context):
 
 @pytest.mark.parametrize('primary', [PRIMARY, DEEPSEEK])
 def test_refusal_episode_keeps_two_real_primary_and_two_alternate_claims(recovery_store, recovery_superuser, primary):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-'+('legacy' if primary == PRIMARY else 'new'))
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary643-'+('legacy' if primary == PRIMARY else 'new'))
     for index, model in enumerate([primary, primary, ALTERNATE, ALTERNATE], 1):
         if index > 1:
             _age_review_error(recovery_superuser, submission)
@@ -188,7 +188,7 @@ def test_refusal_episode_keeps_two_real_primary_and_two_alternate_claims(recover
 
 
 def test_deepseek_truncation_uses_next_existing_slot_and_preserves_unknown_cost(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-truncated')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary643-truncated')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, DEEPSEEK,
@@ -213,7 +213,7 @@ def test_deepseek_truncation_uses_next_existing_slot_and_preserves_unknown_cost(
 @pytest.mark.parametrize('primary,other', [(PRIMARY, DEEPSEEK), (DEEPSEEK, PRIMARY)])
 def test_transient_episode_cannot_change_primary_model(recovery_store, recovery_superuser, primary, other):
     _, submission, miner = accepted_recovery_submission(recovery_store,
-        'primary642-transient-'+('old' if primary == PRIMARY else 'new'))
+        'primary643-transient-'+('old' if primary == PRIMARY else 'new'))
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, primary, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, primary, error='code_review_transport_error', actual=None)
@@ -225,7 +225,7 @@ def test_transient_episode_cannot_change_primary_model(recovery_store, recovery_
 
 
 def test_native_runtime_primary_pass_is_bound_to_real_ledger_and_final(recovery_store, recovery_superuser):
-    _, submission, _ = accepted_recovery_submission(recovery_store, 'primary642-runtime')
+    _, submission, _ = accepted_recovery_submission(recovery_store, 'primary643-runtime')
     instance, _, _, transport = reviewer(lambda parameters: {'body': receipt(parameters)}, store=recovery_store)
     row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(_archive(_source()))}
     assert instance.review(row)['status'] == 'passed'
@@ -238,7 +238,7 @@ def test_native_runtime_primary_pass_is_bound_to_real_ledger_and_final(recovery_
 
 
 def test_actual_model_binding_and_db_first_schema_remain_fail_closed(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-binding')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary643-binding')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     with pytest.raises(ArenaStoreError, match='input_invalid'):

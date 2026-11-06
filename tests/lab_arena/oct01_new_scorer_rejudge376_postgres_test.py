@@ -212,7 +212,7 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     service._chain_scope = lambda: ('finney', 71)
     service._pinned_round_id = lambda: None
     service._round = lambda rid: store.get_round(rid)
-    service._public_round_output_policy = lambda config: {}
+    service._public_round_output_policy = lambda config, replacement_freeze_seconds=None: {}
     assert service.current_round()['round_id'] != archive['round_id']
     assert archive['round_id'] not in {r['round_id'] for r in service.active_rounds()}
     # This sealed fixture has active scoring work and no open admission round.

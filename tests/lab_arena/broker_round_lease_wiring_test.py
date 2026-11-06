@@ -25,6 +25,13 @@ class LeaseStore(FakeLedgerStore):
         assert require_invalid_review_budget is True
         return {"refusal_fallback": {"max_primary_refusal_claims": 2, "max_alternate_claims": 2}}
 
+    def submission_replacement_schema(self, *, require_per_round_cutoff=False):
+        assert require_per_round_cutoff is True
+        return {"schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
+                "version": 258, "replacement_freeze_seconds": 3600,
+                "max_replacement_attempts": 1, "per_round_replacement_freeze_seconds": True,
+                "default_replacement_freeze_seconds": 600}
+
     def _renew(self, kind: str, ttl: int) -> None:
         self.renewals.append((kind, ttl))
         # The store's reserve/settle/uncertain SQL writes now + passed TTL.

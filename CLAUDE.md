@@ -1,3 +1,16 @@
+## Scoped authorization: November 6 exact eight late admission recovery
+
+The user approved recovering the exact eight infrastructure-invalid November 6
+reviews after the eighteen entrants froze and before any execution. Use existing
+append-only audit receipts and one additional Sol reservation per exact source,
+within thirty minutes of the receipt. Preserve original archives, all prior
+charges, the frozen benchmark, rules, eighteen entrants, and every round schedule.
+Retain the existing operator hold and restart controls; do not create executions
+or unpause. Enroll only settled, source-bound passing model-directed reviews;
+exclude rejected, incomplete, expired, or unspent work truthfully. Internal agents
+implement and test only. The root coordinator owns independent review, push,
+merge, canonical release, exact committed SQL, paid calls, and live verification.
+
 ## Scoped authorization: November 3 closed Deepline proof guards
 
 The coordinator authorized exact function-only migration617 during the November 3

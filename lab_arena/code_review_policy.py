@@ -343,6 +343,8 @@ def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
         and document.get("error_reason") == "truncated_at_limit"
     ):
         return attempts
+    if nov06_late_review_available(row):
+        return 4
     invalid_count = invalid_review_reservations(document)
     if invalid_count is not None and invalid_count >= INVALID_REVIEW_MAX_RESERVATIONS:
         return attempts
@@ -378,6 +380,8 @@ def recovery_retryable(document: Mapping[str, Any]) -> bool:
 def review_model_for(row: Mapping[str, Any]) -> str:
     """Follow committed chain counts; SQL rechecks every paid claim."""
     document = row.get("code_review_doc")
+    if nov06_late_review_available(row):
+        return code_review.FALLBACK_REVIEW_MODEL
     if refusal_recovery(document):
         primary = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
         alternate = int(document.get("review_alternate_attempts") or 0)
@@ -391,6 +395,29 @@ def review_model_for(row: Mapping[str, Any]) -> str:
         # the last existing slot's route, never the finite episode allowance.
         return code_review.FALLBACK_REVIEW_MODEL
     return code_review.DEFAULT_REVIEW_MODEL
+
+
+def nov06_late_review_available(
+    row: Mapping[str, Any], *, now: Optional[datetime] = None,
+) -> bool:
+    """Discover one dated receipt-bound claim; SQL proves all authority."""
+    document = row.get("code_review_doc")
+    if not (row.get("round_id") == "arena-2026-11-06"
+            and row.get("status") == "accepted"
+            and row.get("code_review_status") == "error"
+            and row.get("code_review_attempts") == 3
+            and isinstance(document, Mapping)
+            and document.get("error_code") == "review_response_invalid"
+            and document.get("review_invalid_attempts") == 3):
+        return False
+    hint = document.get("nov06_late_review")
+    if not isinstance(hint, Mapping) or hint.get("request_id") != "nov06-late-review635-v1":
+        return False
+    try:
+        expiry = datetime.fromisoformat(str(hint.get("expires_at")).replace("Z", "+00:00"))
+        return expiry.tzinfo is not None and (now or datetime.now(timezone.utc)) < expiry
+    except (TypeError, ValueError):
+        return False
 
 
 def review_output_tokens_for(row: Mapping[str, Any]) -> int:

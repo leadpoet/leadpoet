@@ -67,7 +67,7 @@ $new633$);
 END;
 $idempotent633$;
 DO $history633$
-DECLARE target OID:='public.lab_arena_scoring_policy_history_v1(text)'::regprocedure; d TEXT; m JSONB;
+DECLARE target OID:='public.lab_arena_scoring_policy_history_v1(text)'::regprocedure; d TEXT; m JSONB; expected_post TEXT;
 BEGIN
  SELECT pg_get_functiondef(p.oid),to_jsonb(p)-'prosrc' INTO d,m FROM pg_proc p WHERE p.oid=target;
  IF pg_get_userbyid((m->>'proowner')::OID)<>'lab_arena_owner'
@@ -75,13 +75,16 @@ BEGIN
   OR m->>'prosecdef'<>'true' OR m->>'provolatile'<>'s'
   OR m->'proconfig'<>'["search_path=pg_catalog, public"]'::JSONB THEN
   RAISE EXCEPTION 'Recovery633 history security differs'; END IF;
- IF encode(extensions.digest(d,'sha256'),'hex')='27da80592b12e32477348f106756d4e5bf9ca8dabe9e604291530519a3a93d43' THEN RETURN; END IF;
- IF encode(extensions.digest(d,'sha256'),'hex')<>'1bc738f6e73c29ac756106ff233af894915a492547334f6ecb66815654f6031a'
+ -- The exact635 reader adds only dated admission audit mappings. Preserve both orders.
+ expected_post:=CASE WHEN encode(extensions.digest(d,'sha256'),'hex')='c263bf0dcdc639093f4321351bfc212cd983a6270414f81b5c7cab05df401aae'
+  THEN 'e56c877e3c2ba5440b2fc7b55caa65b2e94935c5117dddd12ed1320c9e3f4a45' ELSE '27da80592b12e32477348f106756d4e5bf9ca8dabe9e604291530519a3a93d43' END;
+ IF encode(extensions.digest(d,'sha256'),'hex') IN('27da80592b12e32477348f106756d4e5bf9ca8dabe9e604291530519a3a93d43','e56c877e3c2ba5440b2fc7b55caa65b2e94935c5117dddd12ed1320c9e3f4a45') THEN RETURN; END IF;
+ IF encode(extensions.digest(d,'sha256'),'hex') NOT IN('1bc738f6e73c29ac756106ff233af894915a492547334f6ecb66815654f6031a','c263bf0dcdc639093f4321351bfc212cd983a6270414f81b5c7cab05df401aae')
   OR length(d)-length(replace(d,$old633$'baseline_donor_evidence630_v1') THEN$old633$,''))<>length($old633$'baseline_donor_evidence630_v1') THEN$old633$) THEN
   RAISE EXCEPTION 'Recovery633 history preimage differs'; END IF;
  EXECUTE replace(d,$old633$'baseline_donor_evidence630_v1') THEN$old633$,$new633$'baseline_donor_evidence630_v1','nov05_infrastructure_recovery633_v1') THEN$new633$);
  IF (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE p.oid=target) IS DISTINCT FROM m
-  OR encode(extensions.digest(pg_get_functiondef(target),'sha256'),'hex')<>'27da80592b12e32477348f106756d4e5bf9ca8dabe9e604291530519a3a93d43' THEN
+  OR encode(extensions.digest(pg_get_functiondef(target),'sha256'),'hex')<>expected_post THEN
   RAISE EXCEPTION 'Recovery633 history readback differs'; END IF;
 END;
 $history633$;

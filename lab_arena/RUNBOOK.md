@@ -828,12 +828,14 @@ to bind the exact frozen model identity. Historical rounds retain their saved
 models, routes, requests and scorer images. See the dated model review for
 measured quality, cost and release evidence.
 
+New industry source research uses `z-ai/glm-5.3-flash` on `near-ai/fp8`, with low
+reasoning and an 8192-token output cap. The native research prompt, tools,
+deadlines, repair limits and source budgets are unchanged.
 The default frozen `ARENA_JUDGE_REASONING_EXCEPTIONS` map retains only `openai/gpt-6.1-sol`,
-with `roles: ["industry_evidence_review", "industry_research_controller"]` and a
-nonempty reason code. These are separate source-research and final-review
-subtasks in the industry workflow. Historical one-role exceptions remain valid;
-Sol cannot serve any other judge role. Its research controller keeps the
-original 3000-token allowance, low effort and native tool/repair limits. Provider routes and request options
+with `roles: ["industry_evidence_review"]` and a nonempty reason code.
+Historical two-role exceptions remain valid and retain Sol's original
+3000-token research allowance and low effort. Sol cannot serve another judge
+role outside its exact frozen exception. Provider routes and request options
 must cover exactly the remaining full-thinking models. Sol Chat requests keep
 the existing Azure regional failover and conservative price/privacy controls;
 the exception grants no Responses or open-model route bypass. Raw exposed text,

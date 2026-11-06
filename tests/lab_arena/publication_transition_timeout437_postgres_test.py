@@ -184,6 +184,10 @@ def _expand(cur, proven, count):
             if index and ranking["submission_id"] == template["submission_id"]:
                 stage1.append(_rewrite(ranking, replacements))
         for table, values in selected.items():
+            if table == "lab_arena_ledger":
+                # Scans need not return append-only events in their original
+                # order. Preserve the latest call head when assigning clone IDs.
+                values = sorted(values, key=lambda value: value["entry_id"])
             for value in values:
                 cloned = _rewrite(value, replacements)
                 if table == "lab_arena_ledger":

@@ -9,6 +9,35 @@ from lab_arena import broker, code_review
 from scripts import benchmark_arena_internal_models as harness
 from scripts.verify_arena_live_capture import SharedBudget
 
+
+@pytest.mark.parametrize("part", [
+    {"type": "reasoning.summary", "text": "A provider summary"},
+    {"type": "unknown", "text": "Unproved text"},
+    {"text": "Untyped text"},
+    {"type": "reasoning.encrypted", "data": "opaque"},
+])
+def test_reasoning_observation_does_not_promote_summary_or_unproved_text(part):
+    response = {"choices": [{"message": {"reasoning_details": [part]}}],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 12}}}
+    assert harness.reasoning_observation(response) == {
+        "full_text_returned": False, "field_characters": {}}
+
+
+def test_reasoning_observation_preserves_typed_provider_text():
+    response = {"choices": [{"message": {"reasoning_details": [
+        {"type": "reasoning.text", "text": "Read the source"},
+        {"type": "reasoning.summary", "text": "Ancillary summary"},
+    ]}}]}
+    assert harness.reasoning_observation(response) == {
+        "full_text_returned": True,
+        "field_characters": {"reasoning_details.text": len("Read the source")}}
+
+
+def test_reasoning_observation_preserves_single_choice_requirement():
+    response = {"choices": [{"message": {"reasoning": "Readable text"}}] * 2}
+    assert harness.reasoning_observation(response) == {
+        "full_text_returned": False, "field_characters": {}}
+
 MODEL = "deepseek/deepseek-v4.1-flash-1017"
 PROVIDER = "nebius/fp8"
 KEY = "sk-or-v1-" + "q" * 40

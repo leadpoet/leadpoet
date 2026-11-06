@@ -383,6 +383,13 @@ def review_model_for(row: Mapping[str, Any]) -> str:
         alternate = int(document.get("review_alternate_attempts") or 0)
         if primary >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
             return code_review.FALLBACK_REVIEW_MODEL
+        # A real refusal episode retains its own existing route allowance.
+        return code_review.DEFAULT_REVIEW_MODEL
+    invalid_count = invalid_review_reservations(document)
+    if invalid_count is not None and 2 <= invalid_count < INVALID_REVIEW_MAX_RESERVATIONS:
+        # SQL proves these reservations under the submission lock. Change only
+        # the last existing slot's route, never the finite episode allowance.
+        return code_review.FALLBACK_REVIEW_MODEL
     return code_review.DEFAULT_REVIEW_MODEL
 
 

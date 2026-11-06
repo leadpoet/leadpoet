@@ -1291,3 +1291,12 @@ Internal agents may implement and test, then commit and push a separate PR after
 independent review. The coordinator owns protected merge, canonical gateway and
 normal-validator release, and live verification. Internal agents must not change
 production, restart services, renew credentials, or alter other tasks' releases.
+
+## Scoped authorization: November 6 invalid admission reviews
+
+The user authorized a narrow permanent fix for incomplete reviewer outputs,
+including tests, merge, canonical deployment and live verification. Preserve
+security criteria, exact source evidence, existing attempt caps and all costs.
+Do not reopen frozen entrants or change deadlines, results, scoring or rewards.
+Any late historical recovery requires a separately reviewed explicit exception.
+Internal agents edit and test only; the coordinator owns production actions.

@@ -331,7 +331,7 @@ def test_canonical_open_scoring_uses_fresh_namespace_and_image_scope(database, m
             assert cursor.rowcount == 10
             cursor.execute("SET session_replication_role=origin")
     assert store.close_scoring(prior.ROUND, 1)['status'] == 'closed'
-    service._outputs_by_run = lambda rid, stage: {
+    service._outputs_by_run = lambda rid, stage, *, executions=None: {
         item['scored_run_id']: [] for item in plan['work_items']
     }
     service._verified_breakdowns = lambda run, **kwargs: []

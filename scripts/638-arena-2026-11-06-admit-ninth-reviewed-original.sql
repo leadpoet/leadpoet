@@ -29,7 +29,7 @@ BEGIN
  WHERE round_id=r.round_id AND request_id='nov06-ninth-review637-v1'
   AND recovery_doc->>'operation'='nov06_late_review635_v1';
  SELECT * INTO STRICT c FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;
- deadline:=LEAST(h.created_at+INTERVAL '30 minutes',(h.old_round_doc#>>'{configuration_doc,schedule,stage_1_close}')::TIMESTAMPTZ);
+ deadline:=h.created_at+INTERVAL '30 minutes';
  control_before:=to_jsonb(c);
  SELECT coalesce(jsonb_object_agg(run_id,to_jsonb(a)),'{}') INTO runs_before FROM public.lab_arena_runs a WHERE round_id=r.round_id;
  IF current_setting('session_replication_role')<>'origin' OR c.operator_paused
@@ -87,7 +87,7 @@ BEGIN
   IF s.code_review_status='passed' THEN
    SELECT sum((value->>'amount_microusd')::BIGINT) INTO review_cost
     FROM jsonb_array_elements(original->'ledger') WHERE value->>'entry_kind'='settlement';
-   IF clock_timestamp()>=(r.configuration_doc#>>'{schedule,stage_1_close}')::TIMESTAMPTZ
+   IF clock_timestamp()>=deadline
     OR s.code_review_attempts<>4 OR terminal.entry_kind IS DISTINCT FROM 'settlement'
     OR terminal.created_at>=deadline
     OR s.code_review_doc->'passed' IS DISTINCT FROM 'true'::JSONB

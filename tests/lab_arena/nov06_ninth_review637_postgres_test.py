@@ -340,25 +340,43 @@ def test_existing_miner_planning_blocks_grant_or_admission(context,fault,at_admi
     assert store.list_ledger(submission_id=SID)==before
 
 
-def test_receipt_window_shortens_to_original_stage1_close(context):
-    store,c,sql,_,_,_,_,_,_=context
+@pytest.mark.parametrize('late_admission',[False,True])
+def test_after_stage1_close_real_claim_settlement_and_bounded_admission(context,late_admission):
+    store,c,sql,target,_,participants,_,_,_=context
     close=datetime.fromisoformat(store.get_round(ROUND)['configuration_doc']['schedule']['stage_1_close'].replace('Z','+00:00'))
-    created=close-timedelta(minutes=10)
-    at_close=sql.replace('created TIMESTAMPTZ:=clock_timestamp()',"created TIMESTAMPTZ:='%s'::TIMESTAMPTZ"%close.isoformat())
-    with pytest.raises(Exception,match='differ'):apply(c,at_close)
-    shortened=sql.replace('created TIMESTAMPTZ:=clock_timestamp()',"created TIMESTAMPTZ:='%s'::TIMESTAMPTZ"%created.isoformat())
-    apply(c,shortened)
-    row=store.get_submission(SID)
-    assert datetime.fromisoformat(row['code_review_doc']['nov06_late_review']['expires_at'])==close
+    moment=close+timedelta(seconds=1)
+    literal="TIMESTAMPTZ '%s'"%moment.isoformat()
+    # Travel only this disposable DB's review clocks and ledger insert clock.
+    # Keep the original frozen schedule and every old receipt/source byte.
+    functions=[]
     with c.cursor() as q:
-        q.execute('SELECT public.lab_arena__nov06_late_review635_v1(r,s) FROM public.lab_arena_rounds r,public.lab_arena_submissions s WHERE r.round_id=%s AND s.submission_id=%s',(ROUND,SID))
-        assert q.fetchone()[0]==close
-    apply(c,shortened)
-    assert store.get_submission(SID)['code_review_attempts']==3
-    assert_preserved(context)
-    # At the capped deadline the unspent slot can be excluded truthfully;
-    # this never opens admission after the frozen stage1 boundary.
-    expiry=M638.read_text().replace('clock_timestamp()',"'%s'::TIMESTAMPTZ"%(close+timedelta(seconds=1)).isoformat())
-    apply(c,expiry)
-    assert store.get_submission(SID)['status']=='rejected'
-    assert_preserved(context)
+        for signature in ('public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)',
+                          'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)'):
+            q.execute('SELECT pg_get_functiondef(%s::regprocedure)',(signature,));definition=q.fetchone()[0];functions.append(definition)
+        q.execute("SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum WHERE d.adrelid='public.lab_arena_ledger'::regclass AND a.attname='created_at'")
+        default=q.fetchone()[0]
+    try:
+        apply(c,sql.replace('created TIMESTAMPTZ:=clock_timestamp()','created TIMESTAMPTZ:='+literal))
+        with c.cursor() as q:
+            for definition in functions:q.execute(definition.replace('pg_catalog.clock_timestamp()',literal))
+            q.execute('ALTER TABLE public.lab_arena_ledger ALTER COLUMN created_at SET DEFAULT '+literal)
+        row=store.get_submission(SID);token=new_lease_token()
+        assert datetime.fromisoformat(row['code_review_doc']['nov06_late_review']['expires_at'])==moment+timedelta(minutes=30)
+        assert begin(store,SID,row['miner_hotkey'],ALTERNATE,token)['status']=='claimed'
+        assert finish_ninth(store,target,'passed',token)['status']=='passed'
+        assert store.get_submission(SID)['code_review_doc']['cost_status']=='settled'
+        assert store.get_submission(SID)['code_review_doc']['cost_microusd']==4321
+        if late_admission:
+            expired="TIMESTAMPTZ '%s'"%(moment+timedelta(minutes=30)).isoformat()
+            with pytest.raises(Exception,match='passing full-source proof differs'):
+                apply(c,M638.read_text().replace('clock_timestamp()',expired))
+            assert store.get_round(ROUND)['participants']==participants
+        else:
+            apply(c,M638.read_text().replace('clock_timestamp()',literal))
+            assert store.get_submission(SID)['status']=='frozen'
+            assert len(store.get_round(ROUND)['participants'])==19
+        assert_preserved(context)
+    finally:
+        with c.cursor() as q:
+            for definition in functions:q.execute(definition)
+            q.execute('ALTER TABLE public.lab_arena_ledger ALTER COLUMN created_at SET DEFAULT '+default)

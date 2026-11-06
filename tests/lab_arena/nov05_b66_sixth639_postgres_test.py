@@ -92,15 +92,14 @@ def extend_final_window(p):
     with p.conn.cursor()as q:
         old=scalar(q,"SELECT to_jsonb(r)-'updated_at'FROM public.lab_arena_rounds r WHERE round_id=%s FOR UPDATE",(ROUND,))
         new=json.loads(json.dumps(old))
-        new['configuration_doc']['schedule'].update(final_scoring_close='2099-11-06T10:30:00Z',publication_deadline='2099-11-06T10:35:00Z')
+        new['configuration_doc']['schedule'].update(final_scoring_close='2099-11-06T11:30:00Z',publication_deadline='2099-11-06T11:35:00Z')
         manifest={'round_id':ROUND,'configuration_sha256':recovery.source.hash_doc(q,old['configuration_doc']),'new_configuration_sha256':recovery.source.hash_doc(q,new['configuration_doc'])}
         q.execute("INSERT INTO public.lab_arena_scoring_supersessions(round_id,generation_floor,request_id,request_hash,actor_ref,transaction_id,backend_pid,old_round_doc,new_round_doc,old_score_projections,recovery_doc) SELECT %s,coalesce(max(generation_floor),0)+1,'nov05-judge-window-before639-v1','sha256:'||encode(extensions.digest(%s::jsonb::text,'sha256'),'hex'),'nov05-user-approved-judge-window-before639',txid_current(),pg_backend_pid(),%s::jsonb,%s::jsonb,'{}',%s::jsonb FROM public.lab_arena_scoring_supersessions WHERE round_id=%s",(ROUND,json.dumps(manifest),json.dumps(old),json.dumps(new),json.dumps({'operation':'nov05_recovery_window641_v1','manifest':manifest}),ROUND))
         q.execute('UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s',(json.dumps(new['configuration_doc']),ROUND))
     p.conn.commit()
 
 
-@pytest.fixture
-def prepared(database):
+def prepare(database, *, final_window=True):
     pg,dsn,definitions=database
     with pg.connect(**dsn)as c,c.cursor()as q:
         for d in definitions.values():q.execute(d)
@@ -154,8 +153,8 @@ def prepared(database):
         p.window_sql=window.render(p);window.apply(p)
         p.retry_window_sql=retry_window.render(p);retry_window.apply(p)
         p.held_window_sql=held_window.render(p);held_window.apply(p)
-        extend_final_window(p)
-        assert p.store.get_round(ROUND)['configuration_doc']['schedule']['final_scoring_close']=='2099-11-06T10:30:00Z'
+        if final_window:extend_final_window(p)
+        assert p.store.get_round(ROUND)['configuration_doc']['schedule']['final_scoring_close']==('2099-11-06T11:30:00Z'if final_window else'2099-11-06T09:30:00Z')
         for _ in range(50):
             lease=recovery.claim(p);assert lease['status']=='leased'and lease['kind']=='execute',lease
             recovery.bill(p,lease);assert recovery.complete(p,lease)['status']=='accepted'
@@ -175,6 +174,16 @@ def prepared(database):
     finally:p.store.close();p.conn.close()
 
 
+@pytest.fixture
+def prepared(database):
+    yield from prepare(database)
+
+
+@pytest.fixture
+def before_final_window(database):
+    yield from prepare(database,final_window=False)
+
+
 def render(p):
     with p.conn.cursor()as q:
         hashes=lambda table,where:scalar(q,'SELECT jsonb_object_agg('+('run_id'if table=='lab_arena_runs'else'cache_key')+",encode(extensions.digest(to_jsonb(a)::text,'sha256'),'hex')) FROM public."+table+' a WHERE '+where)
@@ -182,7 +191,7 @@ def render(p):
         for table in ('lab_arena_company_judgments','lab_arena_signal_judgments'):manifest[table+'_row_hashes']=hashes(table,"source_scored_run_id='"+SOURCE+"'")
         cfg=p.store.get_round(ROUND)['configuration_doc'];digest=recovery.source.hash_doc(q,cfg)
     text=re.sub(r'\$manifest639\$.*?\$manifest639\$',lambda _:'$manifest639$'+json.dumps(manifest,separators=(',',':'))+'$manifest639$',SQL.read_text(),flags=re.S)
-    return text.replace('b45de077ebb68e93809f28309ddf0f8729341033c83d01e6ca145b38d6b1cacc',digest).replace('2026-11-06T10:30:00Z','2099-11-06T10:30:00Z').replace('2026-11-06T10:35:00Z','2099-11-06T10:35:00Z')
+    return text.replace('489f605b2dc4f6f68b31c15c21c3b8bedf3b0ff8f38dfd6ba4e7b2fd72f62048',digest).replace('2026-11-06T11:30:00Z','2099-11-06T11:30:00Z').replace('2026-11-06T11:35:00Z','2099-11-06T11:35:00Z')
 
 
 @pytest.mark.parametrize('outcome',['accepted','judge_error','expired'])
@@ -348,7 +357,7 @@ def test_fresh_sixth_retains_eight_minute_native_backoff(prepared):
     with p.conn.cursor()as q:
         fresh=scalar(q,'SELECT created_at FROM public.lab_arena_runs WHERE run_id=%s',(RUN,))
         assert before<=fresh<=scalar(q,'SELECT clock_timestamp()')
-        assert scalar(q,"SELECT configuration_doc#>>'{schedule,final_scoring_close}'FROM public.lab_arena_rounds WHERE round_id=%s",(ROUND,))=='2099-11-06T10:30:00Z'
+        assert scalar(q,"SELECT configuration_doc#>>'{schedule,final_scoring_close}'FROM public.lab_arena_rounds WHERE round_id=%s",(ROUND,))=='2099-11-06T11:30:00Z'
         definition=scalar(q,'SELECT pg_get_functiondef(%s::regprocedure)',(CLAIM,))
     p.conn.commit()
     try:
@@ -366,3 +375,70 @@ def test_fresh_sixth_retains_eight_minute_native_backoff(prepared):
         p.conn.rollback()
         with p.conn.cursor()as q:q.execute(definition)
         p.conn.commit()
+
+
+def test_scored_continuation_preserves_phase_and_materializes_only_new_judgment(before_final_window):
+    p=before_final_window
+    assert p.service.close_scoring(ROUND,2)['status']=='closed'
+    # Reproduce the real native deadline transition before the DATA extension.
+    p.service._clock=lambda:datetime(2099,11,6,9,36,tzinfo=timezone.utc)
+    assert p.service.score_stage(ROUND,2)['status']=='ok'
+    scored=p.store.get_round(ROUND)
+    assert(scored['status'],scored['status_generation'],scored['stage_generation'])==('scored',13,10)
+    assert scored['configuration_doc']['schedule']['final_scoring_close']=='2099-11-06T09:30:00Z'
+    before_window=snapshot(p);extend_final_window(p);after_window=snapshot(p)
+    for field in('runs','ledger','lab_arena_company_judgments','lab_arena_signal_judgments','metadata','unchanged_functions'):
+        assert after_window[field]==before_window[field]
+    current=p.store.get_round(ROUND)
+    assert(current['status'],current['status_generation'],current['stage_generation'])==('scored',13,10)
+    assert current['stage2_scoring_plan_doc']==scored['stage2_scoring_plan_doc']
+    p.sql=render(p);before=snapshot(p);recovery.apply(p)
+    inserted=snapshot(p)
+    assert{k:v for k,v in inserted['runs'].items()if k!=RUN}==before['runs']
+    assert p.store.get_round(ROUND)['status']=='scored'
+    assert p.service.publish(ROUND)['status']=='retry'
+    with p.conn.cursor()as q:
+        fresh=scalar(q,'SELECT created_at FROM public.lab_arena_runs WHERE run_id=%s',(RUN,))
+        definition=scalar(q,'SELECT pg_get_functiondef(%s::regprocedure)',(CLAIM,))
+        assert scalar(q,'SELECT public.lab_arena__nov05_b66_judge639_v1(r,a)AND public.lab_arena__judge_continuation_v1(r,a)FROM public.lab_arena_rounds r JOIN public.lab_arena_runs a USING(round_id)WHERE a.run_id=%s',(RUN,))is True
+        instant=(fresh+timedelta(seconds=480)).isoformat()
+        q.execute(re.sub(r'(?:pg_catalog\.)?clock_timestamp\(\)',"(TIMESTAMPTZ '"+instant+"')",definition))
+    p.conn.commit()
+    try:
+        lease=claim(p);assert lease['status']=='leased'and lease['run_id']==RUN
+    finally:
+        p.conn.rollback()
+        with p.conn.cursor()as q:q.execute(definition)
+        p.conn.commit()
+    assert sorted(r['company_index']for r in lease['company_judgment_cache']['hits'])==[0,1,2,3]
+    assert[r['company_index']for r in lease['company_judgment_cache']['misses']]==[4]
+    # Full native provider and signed gateway completion after admission in scored.
+    from lab_arena.service import ArenaService,ServiceConfig
+    from tests.lab_arena.test_lab_arena_service_round import FakeChain,keypair,wallet_verify
+    from tests.lab_arena.legacy_partial_postgres_test import _completion
+    def scorer(companies,icp,_reference):
+        assert[c['company_name']for c in companies]==['E'];recovery.bill(p,lease)
+        raw={**_raw(0),'company_judgment_policy':'company_judgment_v1','failure_reason':'required_intent_unverified'}
+        indexes=scoring.verify.bucket_skip(icp,companies,max_scored_companies=0)[0]
+        return scoring.project_company_judgments(companies,[raw],company_quality=False,scored_indexes=indexes)
+    scorer.integrity_policy=True;scorer.company_quality=False;scorer.contacts_required=False
+    breakdowns,new=scoring.score_quality_work_item({'scored_run_id':SOURCE},icp=_input()['icp'],companies=_input()['companies'],scorer=scorer,cache_context=lease['company_judgment_cache'])
+    output={'schema_version':scoring.SCORING_OUTPUT_SCHEMA_VERSION,'scored_run_id':SOURCE,'breakdowns':breakdowns,'company_judgments':new}
+    key=keypair('633-runner');objects=type('Objects',(),{'get':lambda _,k:p.objects[k],'get_bounded':lambda _,k,n:p.objects[k],'put':lambda _,k,v:p.objects.__setitem__(k,v)})()
+    gateway=ArenaService(ServiceConfig(mode='live',store=p.store,object_store=objects,signer=None,chain=FakeChain([key.ss58_address]),verify_signature=wallet_verify,daily_icp_source=lambda **_: {},banned_hotkeys_source=lambda:(),broker_factory=lambda *_:None));gateway.evaluation_icps=p.service.evaluation_icps
+    request=_completion(ROUND,key,lease,'recovery633-fixture',output,terminal='accepted')
+    assert gateway.handle_complete(request)['status']=='accepted'
+    assert gateway.handle_complete(request)['idempotent']is True
+    before_publish=snapshot(p)
+    assert p.store.get_run(SOURCE)['per_icp_score']is None
+    held=p.service.publish(ROUND)
+    assert held['status']=='retry',held
+    assert p.store.get_round(ROUND)['status']=='scored'
+    assert p.store.get_round(ROUND)['stage2_scoring_plan_doc']==scored['stage2_scoring_plan_doc']
+    assert p.store.get_run(SOURCE)['per_icp_score']is not None
+    after_publish=snapshot(p)
+    assert after_publish['ledger']==before_publish['ledger']
+    for rid,row in before_publish['runs'].items():
+        if rid!=SOURCE:assert after_publish['runs'][rid]==row
+    p.store.expire_leases(ROUND)
+    with p.conn.cursor()as q:assert scalar(q,'SELECT max(attempt)FROM public.lab_arena_runs WHERE assignment_id=%s',(ASSIGNMENT,))==6

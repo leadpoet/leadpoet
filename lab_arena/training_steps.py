@@ -921,7 +921,7 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 analysis.append({'source_example_hash': source, 'call_ref_hash': contracts.document_hash(call.get('call_identity')), 'reason': reason})
             else:
                 if full_thinking_candidate is not None:
-                    full_thinking_candidate(example, record)
+                    full_thinking_candidate(example, record, worker_proofs=worker_proofs)
         # Drop the raw source and last raw call before parsing the next episode.
         call = None
         worker_proofs = None

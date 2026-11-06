@@ -1,5 +1,6 @@
 """Real durable admission claims on the exact637 recovery function bodies."""
 import re
+import time
 
 import pytest
 
@@ -68,6 +69,62 @@ def recovery_database():
 def finish(store, submission, miner, token, model, *, error='code_review_provider_refused', actual=1234, **extra):
     return store.finish_submission_review(submission, miner, token, 'error',
         {**failure(model, error), **extra}, actual)
+
+
+@pytest.mark.parametrize('locked_table,key', [
+    ('lab_arena_rounds', 'round_id'),
+    ('lab_arena_submissions', 'submission_id'),
+])
+def test_busy_native_rows_refuse_migration_immediately_without_changes(
+    recovery_connect, recovery_store, recovery_superuser, locked_table, key,
+):
+    with recovery_superuser.cursor() as cursor:
+        restore_predecessor(cursor)
+    round_id, submission, miner = accepted_recovery_submission(
+        recovery_store, 'primary643-nowait-' + key)
+    assert begin(recovery_store, submission, miner, PRIMARY)['status'] == 'claimed'
+
+    def snapshot():
+        with recovery_superuser.cursor() as cursor:
+            functions = function_snapshot(cursor)
+            rows = {}
+            for table in ('lab_arena_rounds', 'lab_arena_submissions',
+                          'lab_arena_ledger', 'lab_arena_restart_claim_control'):
+                cursor.execute(f'SELECT to_jsonb(t) FROM public.{table} t ORDER BY to_jsonb(t)::TEXT')
+                rows[table] = cursor.fetchall()
+            return functions, rows
+
+    before_functions, before_rows = snapshot()
+    blocker = recovery_connect()
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute(f'SELECT 1 FROM public.{locked_table} WHERE {key}=%s FOR UPDATE',
+                           (round_id if key == 'round_id' else submission,))
+            assert cursor.fetchone() == (1,)
+        started = time.monotonic()
+        with recovery_superuser.cursor() as cursor:
+            try:
+                with pytest.raises(Exception) as failure:
+                    cursor.execute(MIGRATION.read_text())
+                elapsed = time.monotonic() - started
+                assert failure.value.pgcode == '55P03'
+                assert elapsed < 1.0, f'busy migration waited {elapsed:.3f}s'
+            finally:
+                cursor.execute('ROLLBACK')
+        assert snapshot() == (before_functions, before_rows)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    with recovery_superuser.cursor() as cursor:
+        cursor.execute(MIGRATION.read_text())
+    after_functions, after_rows = snapshot()
+    assert after_rows == before_rows
+    changed = {name for name in before_functions if after_functions[name] != before_functions[name]}
+    assert changed == {signature.removeprefix('public.') for signature in SIGNATURES}
+    for name in before_functions:
+        assert after_functions[name][1] == before_functions[name][1]
+    assert recovery_store.code_review_schema(require_prospective_primary=True)['prospective_primary']['model'] == DEEPSEEK
 
 
 def test_fail_before_then_upgrade_preserves_rows_and_uses_actual_new_primary(recovery_store, recovery_superuser):

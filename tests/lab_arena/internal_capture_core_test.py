@@ -1,6 +1,7 @@
 """Host evidence uses existing storage without miner proofs or business effects."""
 from __future__ import annotations
 
+import gzip
 import json
 import stat
 
@@ -230,10 +231,38 @@ def test_nonjson_and_unsupported_encoding_are_explicit_and_nonthrowing(tmp_path,
     call.finish(outcome={"business_outcome": "failed"})
     raw, candidate = capture.read_call(objects, call.prefix + "request.json")
     assert candidate is None and raw["events"]["response"]["http_status"] == 503
-    if body != b"\xff\xfe":
-        assert raw["response_text"] == body.decode()
-    else:
-        assert "response_body_unavailable_or_invalid" in raw["completeness"]["gaps"]
+    assert "response_text" not in raw
+    assert "response_body_unavailable_or_invalid" in raw["completeness"]["gaps"]
+
+
+@pytest.mark.parametrize("api", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("status", [200, 503])
+@pytest.mark.parametrize("body", [
+    b'{"encrypted_content":"opaque-fragment', b'{"api_key":"private-field-fragment',
+    json.dumps('{"encrypted_content":"opaque-fragment').encode(),
+    b'{"encrypted_content":"opaque-fragment","encrypted_content":null}',
+    b'{"api_key":"private-field-fragment","api_key":null}',
+])
+def test_completed_malformed_model_body_is_unavailable_without_private_text(tmp_path, api, status, body):
+    objects = LocalObjectStore(tmp_path)
+    payload = (request() if api == "openrouter.chat" else {
+        "model": "test/model", "input": [{"role": "user", "content": "Inspect the company."}],
+        "max_output_tokens": 8192})
+    call = capture.InternalCapture(objects).start(purpose="icp_exclusion", context={}, request=payload, api=api)
+    pointer = call.response(body=body, status=status, elapsed_seconds=0.25)
+    event = json.loads(objects.get_bounded(pointer["ref"], capture.MAX_EVENT_BYTES))
+    assert event["capture"] == training_capture.unavailable("internal_response_capture_failed")
+    assert event["response_observed"] is True and event["http_status"] == status
+    assert event["elapsed_seconds"] == 0.25
+    assert event["wire_body_bytes"] == len(body)
+    assert event["wire_body_sha256"] == capture.contracts.hash_bytes(body)
+    call.finish(outcome={"business_outcome": "failed"})
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json")
+    assert candidate is None and "response_text" not in raw
+    assert "response_body_unavailable_or_invalid" in raw["completeness"]["gaps"]
+    for path in tmp_path.rglob("*.gz"):
+        stored = gzip.decompress(path.read_bytes())
+        assert b"opaque-fragment" not in stored and b"private-field-fragment" not in stored
 
 
 def test_all_capture_storage_failures_are_observational():

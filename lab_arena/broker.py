@@ -2485,10 +2485,15 @@ def _capture_upstream_response(
         if len(response.body) > 3 * 1024 * 1024:
             return {"status": "unavailable", "reason": "response_size_limit"}
         text = response.body.decode("utf-8")
-        try:
-            body, is_json = json.loads(text), True
-        except ValueError:
-            body, is_json = text, False
+        if operation_id in reasoning_capture.OPERATIONS:
+            # Never fall back to text or lose duplicate fields before applying
+            # structured model privacy. Non-model tool text remains supported.
+            body, is_json = training_capture.model_response_object(text), True
+        else:
+            try:
+                body, is_json = json.loads(text), True
+            except ValueError:
+                body, is_json = text, False
         cleaned, body_redactions = training_capture.sanitize_training_value(body)
         raw = response.body
         if body_redactions:

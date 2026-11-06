@@ -172,19 +172,17 @@ class InternalCall:
                 if not isinstance(body, bytes) or len(body) > training_capture.MAX_OBJECT_BYTES:
                     raise ValueError("response_size_or_type")
                 fields.update(wire_body_sha256=contracts.hash_bytes(body), wire_body_bytes=len(body))
-                text = body.decode("utf-8")
-                try:
-                    provider_response = json.loads(text)
-                    document = {"provider_calls": [{"response": provider_response}]}
-                    fields["body_format"] = "json"
-                except ValueError:
-                    document = {"body_text": text}
-                    fields["body_format"] = "text"
-                self.response_pointer = training_capture.RequestCapture(self._objects)(document, secrets=self._secrets)
-                fields["capture"] = self.response_pointer
                 if (type(elapsed_seconds) in (int, float) and math.isfinite(elapsed_seconds)
                         and elapsed_seconds >= 0):
                     fields["elapsed_seconds"] = elapsed_seconds
+                # Every supported internal API is a JSON model endpoint.
+                # Do not turn malformed structured data into untyped text:
+                # that would bypass opaque/credential field redaction.
+                provider_response = training_capture.model_response_object(body.decode("utf-8"))
+                document = {"provider_calls": [{"response": provider_response}]}
+                fields["body_format"] = "json"
+                self.response_pointer = training_capture.RequestCapture(self._objects)(document, secrets=self._secrets)
+                fields["capture"] = self.response_pointer
             except Exception:
                 self.response_pointer = training_capture.unavailable("internal_response_capture_failed")
                 fields["capture"] = self.response_pointer

@@ -9,7 +9,7 @@ SET LOCAL statement_timeout='30s';
 SELECT pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
 LOCK TABLE public.lab_arena_rounds,public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE NOWAIT;
 
-DO $requires637_645$
+DO $requires637_646$
 DECLARE target RECORD;
 BEGIN
   FOR target IN SELECT * FROM (VALUES
@@ -21,13 +21,13 @@ BEGIN
     IF pg_catalog.encode(extensions.digest(pg_catalog.pg_get_functiondef(
          pg_catalog.to_regprocedure(target.signature)),'sha256'),'hex')
          IS DISTINCT FROM target.sha256 THEN
-      RAISE EXCEPTION 'Arena primary645 parent637 differs' USING ERRCODE='55000';
+      RAISE EXCEPTION 'Arena primary646 parent637 differs' USING ERRCODE='55000';
     END IF;
   END LOOP;
 END;
-$requires637_645$;
+$requires637_646$;
 
-DO $primary645_0$
+DO $primary646_0$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)';
   v_preimage CONSTANT TEXT := 'd101aa5610e1c64aa92a975754a45cfdbfb70b1d7fff20832ddb1ea72dc148ff';
@@ -49,34 +49,34 @@ BEGIN
   IF v_definition IS NULL OR v_identity IS DISTINCT FROM pg_catalog.jsonb_build_array(
     'lab_arena_owner','{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}',
     TRUE,'v',ARRAY['search_path=pg_catalog, public']::TEXT[]) THEN
-    RAISE EXCEPTION 'Arena primary645 security shape differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 security shape differs' USING ERRCODE='55000';
   END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')=v_postimage THEN RETURN; END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')<>v_preimage THEN
-    RAISE EXCEPTION 'Arena primary645 preimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 preimage differs' USING ERRCODE='55000';
   END IF;
   v_updated:=v_definition;
-  v_old:=$old645_0_0$  v_required_model TEXT;$old645_0_0$;
-  v_new:=$new645_0_0$  v_required_model TEXT;
-  v_primary_model TEXT;$new645_0_0$;
+  v_old:=$old646_0_0$  v_required_model TEXT;$old646_0_0$;
+  v_new:=$new646_0_0$  v_required_model TEXT;
+  v_primary_model TEXT;$new646_0_0$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.0 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.0 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_1$AND reservation.entry_doc ->> 'review_model'='anthropic/claude-sonnet-5.5'$old645_0_1$;
-  v_new:=$new645_0_1$AND reservation.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')$new645_0_1$;
+  v_old:=$old646_0_1$AND reservation.entry_doc ->> 'review_model'='anthropic/claude-sonnet-5.5'$old646_0_1$;
+  v_new:=$new646_0_1$AND reservation.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')$new646_0_1$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.1 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.1 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' = 'anthropic/claude-sonnet-5.5'),$old645_0_2$;
-  v_new:=$new645_0_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')),$new645_0_2$;
+  v_old:=$old646_0_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' = 'anthropic/claude-sonnet-5.5'),$old646_0_2$;
+  v_new:=$new646_0_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')),$new646_0_2$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.2 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.2 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);$old645_0_3$;
-  v_new:=$new645_0_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);
+  v_old:=$old646_0_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);$old646_0_3$;
+  v_new:=$new646_0_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);
   -- Freeze this episode to its first actual primary reservation. Historical
   -- Sonnet episodes keep Sonnet; model IDs and paid counters remain truthful.
   SELECT ledger.entry_doc ->> 'review_model' INTO v_primary_model
@@ -86,19 +86,19 @@ BEGIN
     AND ledger.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')
     AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start)
   ORDER BY ledger.entry_id LIMIT 1;
-  v_primary_model := COALESCE(v_primary_model,'anthropic/claude-sonnet-5.5');$new645_0_3$;
+  v_primary_model := COALESCE(v_primary_model,'anthropic/claude-sonnet-5.5');$new646_0_3$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.3 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.3 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_4$THEN 'openai/gpt-6.1-sol' ELSE 'anthropic/claude-sonnet-5.5' END;$old645_0_4$;
-  v_new:=$new645_0_4$THEN 'openai/gpt-6.1-sol' ELSE v_primary_model END;$new645_0_4$;
+  v_old:=$old646_0_4$THEN 'openai/gpt-6.1-sol' ELSE 'anthropic/claude-sonnet-5.5' END;$old646_0_4$;
+  v_new:=$new646_0_4$THEN 'openai/gpt-6.1-sol' ELSE v_primary_model END;$new646_0_4$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.4 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.4 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_5$  ELSIF NOT v_refusal_recovery AND v_invalid_start IS NOT NULL$old645_0_5$;
-  v_new:=$new645_0_5$  ELSIF NOT v_refusal_recovery
+  v_old:=$old646_0_5$  ELSIF NOT v_refusal_recovery AND v_invalid_start IS NOT NULL$old646_0_5$;
+  v_new:=$new646_0_5$  ELSIF NOT v_refusal_recovery
       AND v_reservation.entry_doc ->> 'review_model'='deepseek/deepseek-v4.1-flash-1017'
       AND v_head.entry_kind IN ('settlement','uncertain')
       AND v_head.entry_doc ->> 'error_code'='review_response_invalid'
@@ -107,42 +107,42 @@ BEGIN
     IF p_review_model IS DISTINCT FROM 'openai/gpt-6.1-sol' THEN
       RETURN pg_catalog.jsonb_build_object('status','route_required','review_model','openai/gpt-6.1-sol');
     END IF;
-  ELSIF NOT v_refusal_recovery AND v_invalid_start IS NOT NULL$new645_0_5$;
+  ELSIF NOT v_refusal_recovery AND v_invalid_start IS NOT NULL$new646_0_5$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.5 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.5 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_6$  ELSIF p_review_model='openai/gpt-6.1-sol' THEN
+  v_old:=$old646_0_6$  ELSIF p_review_model='openai/gpt-6.1-sol' THEN
     RETURN pg_catalog.jsonb_build_object('status','fallback_not_authorized');
-  END IF;$old645_0_6$;
-  v_new:=$new645_0_6$  ELSIF p_review_model='openai/gpt-6.1-sol' THEN
+  END IF;$old646_0_6$;
+  v_new:=$new646_0_6$  ELSIF p_review_model='openai/gpt-6.1-sol' THEN
     RETURN pg_catalog.jsonb_build_object('status','fallback_not_authorized');
   ELSIF v_primary_count>0 AND p_review_model IS DISTINCT FROM v_primary_model THEN
     RETURN pg_catalog.jsonb_build_object('status','route_required','review_model',v_primary_model);
-  END IF;$new645_0_6$;
+  END IF;$new646_0_6$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.6 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.6 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_0_7$'review_alternate_attempts', v_alternate_count)$old645_0_7$;
-  v_new:=$new645_0_7$'review_alternate_attempts', v_alternate_count, 'review_primary_model', v_primary_model)$new645_0_7$;
+  v_old:=$old646_0_7$'review_alternate_attempts', v_alternate_count)$old646_0_7$;
+  v_new:=$new646_0_7$'review_alternate_attempts', v_alternate_count, 'review_primary_model', v_primary_model)$new646_0_7$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 0.7 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 0.7 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
   IF pg_catalog.encode(extensions.digest(v_updated,'sha256'),'hex')<>v_postimage THEN
-    RAISE EXCEPTION 'Arena primary645 postimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 postimage differs' USING ERRCODE='55000';
   END IF;
   EXECUTE v_updated;
   IF pg_catalog.encode(extensions.digest(pg_catalog.pg_get_functiondef(v_oid),'sha256'),'hex')<>v_postimage
      OR (SELECT pg_catalog.to_jsonb(p)-'prosrc' FROM pg_catalog.pg_proc p WHERE p.oid=v_oid)
        IS DISTINCT FROM v_metadata THEN
-    RAISE EXCEPTION 'Arena primary645 readback differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 readback differs' USING ERRCODE='55000';
   END IF;
 END;
-$primary645_0$;
+$primary646_0$;
 
-DO $primary645_1$
+DO $primary646_1$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)';
   v_preimage CONSTANT TEXT := '167edcc637fc4d3c3ac5b624850788895a736cb88907e97172e43c077b609f6d';
@@ -164,34 +164,34 @@ BEGIN
   IF v_definition IS NULL OR v_identity IS DISTINCT FROM pg_catalog.jsonb_build_array(
     'lab_arena_owner','{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}',
     TRUE,'v',ARRAY['search_path=pg_catalog, public']::TEXT[]) THEN
-    RAISE EXCEPTION 'Arena primary645 security shape differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 security shape differs' USING ERRCODE='55000';
   END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')=v_postimage THEN RETURN; END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')<>v_preimage THEN
-    RAISE EXCEPTION 'Arena primary645 preimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 preimage differs' USING ERRCODE='55000';
   END IF;
   v_updated:=v_definition;
-  v_old:=$old645_1_0$  v_required_model TEXT;$old645_1_0$;
-  v_new:=$new645_1_0$  v_required_model TEXT;
-  v_primary_model TEXT;$new645_1_0$;
+  v_old:=$old646_1_0$  v_required_model TEXT;$old646_1_0$;
+  v_new:=$new646_1_0$  v_required_model TEXT;
+  v_primary_model TEXT;$new646_1_0$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.0 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.0 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_1_1$AND reservation.entry_doc ->> 'review_model'='anthropic/claude-sonnet-5.5'$old645_1_1$;
-  v_new:=$new645_1_1$AND reservation.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')$new645_1_1$;
+  v_old:=$old646_1_1$AND reservation.entry_doc ->> 'review_model'='anthropic/claude-sonnet-5.5'$old646_1_1$;
+  v_new:=$new646_1_1$AND reservation.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')$new646_1_1$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.1 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.1 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_1_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' = 'anthropic/claude-sonnet-5.5'),$old645_1_2$;
-  v_new:=$new645_1_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')),$new645_1_2$;
+  v_old:=$old646_1_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' = 'anthropic/claude-sonnet-5.5'),$old646_1_2$;
+  v_new:=$new646_1_2$SELECT count(*) FILTER (WHERE ledger.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')),$new646_1_2$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.2 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.2 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_1_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);$old645_1_3$;
-  v_new:=$new645_1_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);
+  v_old:=$old646_1_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);$old646_1_3$;
+  v_new:=$new646_1_3$    AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start);
   -- Freeze this episode to its first actual primary reservation. Historical
   -- Sonnet episodes keep Sonnet; model IDs and paid counters remain truthful.
   SELECT ledger.entry_doc ->> 'review_model' INTO v_primary_model
@@ -201,43 +201,43 @@ BEGIN
     AND ledger.entry_doc ->> 'review_model' IN ('anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017')
     AND (v_episode_start IS NULL OR (ledger.entry_doc ->> 'attempt')::INTEGER>=v_episode_start)
   ORDER BY ledger.entry_id LIMIT 1;
-  v_primary_model := COALESCE(v_primary_model,'anthropic/claude-sonnet-5.5');$new645_1_3$;
+  v_primary_model := COALESCE(v_primary_model,'anthropic/claude-sonnet-5.5');$new646_1_3$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.3 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.3 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_1_4$'openai/gpt-6.1-sol','openai/gpt-6.1-sol-20260929')$old645_1_4$;
-  v_new:=$new645_1_4$'openai/gpt-6.1-sol','openai/gpt-6.1-sol-20260929',
-                'deepseek/deepseek-v4.1-flash-1017','deepseek/deepseek-v4.1-flash-20261017')$new645_1_4$;
+  v_old:=$old646_1_4$'openai/gpt-6.1-sol','openai/gpt-6.1-sol-20260929')$old646_1_4$;
+  v_new:=$new646_1_4$'openai/gpt-6.1-sol','openai/gpt-6.1-sol-20260929',
+                'deepseek/deepseek-v4.1-flash-1017','deepseek/deepseek-v4.1-flash-20261017')$new646_1_4$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.4 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.4 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_1_5$('Anthropic','Amazon Bedrock','Google','Google Vertex','Azure')$old645_1_5$;
-  v_new:=$new645_1_5$('Anthropic','Amazon Bedrock','Google','Google Vertex','Azure','Nebius')$new645_1_5$;
+  v_old:=$old646_1_5$('Anthropic','Amazon Bedrock','Google','Google Vertex','Azure')$old646_1_5$;
+  v_new:=$new646_1_5$('Anthropic','Amazon Bedrock','Google','Google Vertex','Azure','Nebius')$new646_1_5$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.5 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.5 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
-  v_old:=$old645_1_6$'review_alternate_attempts', v_alternate_count)$old645_1_6$;
-  v_new:=$new645_1_6$'review_alternate_attempts', v_alternate_count, 'review_primary_model', v_primary_model)$new645_1_6$;
+  v_old:=$old646_1_6$'review_alternate_attempts', v_alternate_count)$old646_1_6$;
+  v_new:=$new646_1_6$'review_alternate_attempts', v_alternate_count, 'review_primary_model', v_primary_model)$new646_1_6$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 1.6 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 1.6 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
   IF pg_catalog.encode(extensions.digest(v_updated,'sha256'),'hex')<>v_postimage THEN
-    RAISE EXCEPTION 'Arena primary645 postimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 postimage differs' USING ERRCODE='55000';
   END IF;
   EXECUTE v_updated;
   IF pg_catalog.encode(extensions.digest(pg_catalog.pg_get_functiondef(v_oid),'sha256'),'hex')<>v_postimage
      OR (SELECT pg_catalog.to_jsonb(p)-'prosrc' FROM pg_catalog.pg_proc p WHERE p.oid=v_oid)
        IS DISTINCT FROM v_metadata THEN
-    RAISE EXCEPTION 'Arena primary645 readback differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 readback differs' USING ERRCODE='55000';
   END IF;
 END;
-$primary645_1$;
+$primary646_1$;
 
-DO $primary645_2$
+DO $primary646_2$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_code_review_schema_v1()';
   v_preimage CONSTANT TEXT := 'e2431ef03209fd2844a71ed80c068c9e289b087ecac7fa5e4a17b90bf436bda9';
@@ -259,33 +259,33 @@ BEGIN
   IF v_definition IS NULL OR v_identity IS DISTINCT FROM pg_catalog.jsonb_build_array(
     'lab_arena_owner','{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}',
     TRUE,'s',ARRAY['search_path=pg_catalog, public']::TEXT[]) THEN
-    RAISE EXCEPTION 'Arena primary645 security shape differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 security shape differs' USING ERRCODE='55000';
   END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')=v_postimage THEN RETURN; END IF;
   IF pg_catalog.encode(extensions.digest(v_definition,'sha256'),'hex')<>v_preimage THEN
-    RAISE EXCEPTION 'Arena primary645 preimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 preimage differs' USING ERRCODE='55000';
   END IF;
   v_updated:=v_definition;
-  v_old:=$old645_2_0$    'atomic_restart_guard', TRUE,$old645_2_0$;
-  v_new:=$new645_2_0$    'atomic_restart_guard', TRUE,
+  v_old:=$old646_2_0$    'atomic_restart_guard', TRUE,$old646_2_0$;
+  v_new:=$new646_2_0$    'atomic_restart_guard', TRUE,
     'prospective_primary', pg_catalog.jsonb_build_object(
       'model', 'deepseek/deepseek-v4.1-flash-1017', 'legacy_primary_model', 'anthropic/claude-sonnet-5.5',
       'episode_binding', 'first_primary_reservation', 'max_output_tokens', 32768,
-      'truncation_alternate', 'openai/gpt-6.1-sol'),$new645_2_0$;
+      'truncation_alternate', 'openai/gpt-6.1-sol'),$new646_2_0$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old)*1 THEN
-    RAISE EXCEPTION 'Arena primary645 anchor 2.0 differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 anchor 2.0 differs' USING ERRCODE='55000';
   END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
   IF pg_catalog.encode(extensions.digest(v_updated,'sha256'),'hex')<>v_postimage THEN
-    RAISE EXCEPTION 'Arena primary645 postimage differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 postimage differs' USING ERRCODE='55000';
   END IF;
   EXECUTE v_updated;
   IF pg_catalog.encode(extensions.digest(pg_catalog.pg_get_functiondef(v_oid),'sha256'),'hex')<>v_postimage
      OR (SELECT pg_catalog.to_jsonb(p)-'prosrc' FROM pg_catalog.pg_proc p WHERE p.oid=v_oid)
        IS DISTINCT FROM v_metadata THEN
-    RAISE EXCEPTION 'Arena primary645 readback differs' USING ERRCODE='55000';
+    RAISE EXCEPTION 'Arena primary646 readback differs' USING ERRCODE='55000';
   END IF;
 END;
-$primary645_2$;
+$primary646_2$;
 
 COMMIT;

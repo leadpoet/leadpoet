@@ -10,6 +10,7 @@ import pytest
 from lab_arena import contracts, scoring
 from qualification.scoring import company_evidence_investigator as investigator
 from tests.lab_arena.industry_controller_capture_test import tool_reply
+from tests.lab_arena.judge_default_activation_test import EXCEPTIONS, PREVIOUS_OPTIONS, ROUTES
 
 SOL = 'openai/gpt-6.1-sol'
 GLM = 'z-ai/glm-5.3-flash'
@@ -63,9 +64,9 @@ def run_controller(monkeypatch, variant, shape, finish, *, repeat=False, complet
     monkeypatch.setenv('ARENA_COMPANY_REVERIFY_MODEL', 'deepseek/deepseek-v4.1-flash-1017')
     enabled = variant != 'sol_legacy'
     monkeypatch.setenv('ARENA_JUDGE_REASONING_CAPTURE_POLICY', 'full_generated_thinking_v1' if enabled else '')
-    monkeypatch.setenv('ARENA_JUDGE_REASONING_EXCEPTIONS', json.dumps(scoring.DEFAULT_JUDGE_REASONING_EXCEPTIONS))
-    monkeypatch.setenv('ARENA_JUDGE_PROVIDER_ROUTES', json.dumps(scoring.DEFAULT_JUDGE_PROVIDER_ROUTES))
-    monkeypatch.setenv('ARENA_JUDGE_REQUEST_OPTIONS', json.dumps(scoring.DEFAULT_JUDGE_REQUEST_OPTIONS) if variant == 'glm' else '')
+    monkeypatch.setenv('ARENA_JUDGE_REASONING_EXCEPTIONS', json.dumps(EXCEPTIONS))
+    monkeypatch.setenv('ARENA_JUDGE_PROVIDER_ROUTES', json.dumps(ROUTES))
+    monkeypatch.setenv('ARENA_JUDGE_REQUEST_OPTIONS', json.dumps(PREVIOUS_OPTIONS) if variant == 'glm' else '')
     monkeypatch.setattr(investigator, 'REASONING_MAX_TOKENS', 16384 if enabled else 3000)
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={'name': 'Acme', 'website': url}, targets=('industry',), requested_industry='Software',

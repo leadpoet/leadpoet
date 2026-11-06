@@ -14,6 +14,7 @@ from tests.lab_arena.judge_policy_integration_test import NOW, service
 DEEPSEEK = "deepseek/deepseek-v4.1-flash-1017"
 GPT_OSS = "openai/gpt-oss-120b"
 SOL = "openai/gpt-6.1-sol"
+MISTRAL = "mistralai/mistral-large-4-0"
 MODELS = {
     "company_fit_reverification": DEEPSEEK,
     "intent_signal_judge": GPT_OSS,
@@ -21,7 +22,7 @@ MODELS = {
     "intent_three_stage_stage3": DEEPSEEK,
     "intent_fetched_evidence": GPT_OSS,
     "role_batch_check": GPT_OSS,
-    "industry_evidence_review": SOL,
+    "industry_evidence_review": MISTRAL,
     "industry_research_controller": SOL,
 }
 LEGACY_MODELS = {
@@ -33,12 +34,13 @@ LEGACY_MODELS = {
     "role_batch_check": "google/gemini-3.5-flash-lite",
     "industry_evidence_review": SOL,
 }
-ROUTES = {DEEPSEEK: "nebius/fp8", GPT_OSS: "near-ai/fp4"}
+ROUTES = {DEEPSEEK: "nebius/fp8", GPT_OSS: "near-ai/fp4", MISTRAL: "mistral/zdr"}
 OPTIONS = {
     DEEPSEEK: {"reasoning": {"effort": "low"}, "max_output_tokens": 8192},
     GPT_OSS: {"reasoning": {"effort": "low"}, "max_output_tokens": 4096},
+    MISTRAL: {"reasoning": {"effort": "high"}, "max_output_tokens": 16384},
 }
-EXCEPTIONS = {SOL: {"roles": ["industry_evidence_review", "industry_research_controller"], "reason": "quality_gate_not_met"}}
+EXCEPTIONS = {SOL: {"roles": ["industry_research_controller"], "reason": "quality_gate_not_met"}}
 
 
 def test_reviewed_default_models_freeze_exact_routes_options_and_exception():
@@ -102,6 +104,7 @@ def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical
     (DEEPSEEK, "nebius/fp8", "openrouter.chat"),
     (DEEPSEEK, "nebius/fp8", "openrouter.responses"),
     (GPT_OSS, "near-ai/fp4", "openrouter.chat"),
+    (MISTRAL, "mistral/zdr", "openrouter.chat"),
 ])
 def test_new_default_round_fails_closed_before_persistence_if_exact_route_is_missing(model, provider, api):
     registry = reasoning_capture.load_registry()

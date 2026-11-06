@@ -28,6 +28,17 @@ REASONING_RESPONSE_CONTRACT = (
     "material missing requirement. Missing proof alone is unavailable, not mismatch. "
     "Describe the company's observed offering in observed_activity, not the decision label."
 )
+MISTRAL_CRITERION_GUIDANCE = (
+    "\nApply the existing criterion at its stated company, product or platform scope. "
+    "Descriptive-product-line guidance applies to variants within a stated product line; "
+    "do not use it to drop a separately stated activity or a required capability. "
+    "Conjunctions joining separate required offerings or capabilities remain binding when "
+    "written as lowercase 'and' without 'must'. Preserve explicitly illustrative examples, "
+    "ordinary descriptive customer-base lists, and qualifying functional equivalents under "
+    "the existing rules. Before concluding match, weigh supplied affirmative contrary source "
+    "facts about those requirements and explain why the complete criterion is still established. "
+    "Missing proof alone remains unavailable, not mismatch."
+)
 CONDITIONAL_SOURCE_KEYS = ('child_source_url', 'parent_source_url', 'parent_quote', 'child_brand',
                            'official_child_homepage', 'parent_body_sha256', 'child_body_sha256',
                            'child_final_url', 'pointer_kind', 'printed_reference')
@@ -274,6 +285,8 @@ def request_payload(packet, *, model, research=False):
         citations['items']['enum'] = list(spans)
     else:
         citations['maxItems'] = 0
+    if model == 'mistralai/mistral-large-4-0':
+        messages[0]['content'] += MISTRAL_CRITERION_GUIDANCE
     # A conclusive initial assessment can become the final decision when its
     # source packet is unchanged. Both assessments need the same reasoning.
     return {"model": model, "max_tokens": 2000,

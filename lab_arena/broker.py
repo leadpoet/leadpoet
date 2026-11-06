@@ -5018,13 +5018,22 @@ class Broker:
                     normalized
                 )
                 pricing = self._price_table["models"][normalized["model"]]
+                industry_review_model = self._judge_model_roles.get("industry_evidence_review")
+                if (exception is not None
+                        and exception["roles"] == ["industry_research_controller"]
+                        and normalized["model"] == OPENROUTER_INDUSTRY_REVIEW_MODEL):
+                    # The newly frozen controller-only exception retains Sol's
+                    # existing Azure route and price ceiling after final review
+                    # moves to an open model. Historical policies keep their
+                    # original role binding, including capture-off policies.
+                    industry_review_model = OPENROUTER_INDUSTRY_REVIEW_MODEL
                 openrouter_host_route = _openrouter_host_route(
                     kind=getattr(context, "kind", "execute"),
                     operation_id=effective_operation_id,
                     model=normalized["model"],
                     pricing=pricing,
                     parameters=normalized,
-                    industry_review_model=self._judge_model_roles.get("industry_evidence_review"),
+                    industry_review_model=industry_review_model,
                 )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
                     # Exact tested provider only. OpenRouter must neither pick

@@ -14,16 +14,15 @@ ROLE = "industry_research_controller"
 ENV = "ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL"
 
 
-def test_default_sol_exception_covers_exactly_both_industry_subtasks():
+def test_default_sol_exception_covers_only_controller_and_keeps_historical_both():
     policy = scoring.build_scorer_policy()
     assert policy["judge_models"][ROLE] == SOL
     exception = contracts.judge_reasoning_exceptions(policy)[SOL]
-    assert exception["roles"] == ["industry_evidence_review", ROLE]
+    assert exception["roles"] == [ROLE]
+    from tests.lab_arena.mistral_industry_final_candidate_test import historical_policy
+    assert contracts.judge_reasoning_exceptions(historical_policy())[SOL]["roles"] == ["industry_evidence_review", ROLE]
     assert contracts.validate_scorer_policy(json.loads(json.dumps(policy))) == policy
-    old = deepcopy(policy)
-    del old["judge_models"][ROLE]
-    exceptions = {SOL: {**exception, "roles": ["industry_evidence_review"]}}
-    old["env_bindings"][contracts.JUDGE_REASONING_EXCEPTIONS_BINDING] = json.dumps(exceptions)
+    old = historical_policy(controller=False)
     assert contracts.validate_scorer_policy(old) == old
     for role in ("role_batch_check", "intent_details_review"):
         bad = deepcopy(policy)
@@ -34,13 +33,8 @@ def test_default_sol_exception_covers_exactly_both_industry_subtasks():
 
 @pytest.mark.parametrize("capture", [False, True])
 def test_historical_absent_role_binds_empty_and_rejects_ambient(capture):
-    policy = scoring.build_scorer_policy()
-    policy["judge_models"].pop(ROLE, None)
-    if capture:
-        entry = {SOL: {"roles": ["industry_evidence_review"], "reason": "quality_gate_not_met"}}
-        policy["env_bindings"][contracts.JUDGE_REASONING_EXCEPTIONS_BINDING] = json.dumps(entry)
-    else:
-        policy["env_bindings"] = {}
+    from tests.lab_arena.mistral_industry_final_candidate_test import historical_policy
+    policy = historical_policy(controller=False, capture=capture)
     before = contracts.canonical_json(policy)
     credentials = {name: "offline-placeholder" for name in scoring.CREDENTIAL_ENV_NAMES}
     env = {}

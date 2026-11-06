@@ -1448,6 +1448,7 @@ def validate_judge_reasoning_exceptions(raw: Any, models: Optional[Mapping[str, 
         exceptions = json.loads(raw)
         model = "openai/gpt-6.1-sol"
         allowed_roles = (["industry_evidence_review"],
+                         ["industry_research_controller"],
                          ["industry_evidence_review", "industry_research_controller"])
         if not isinstance(exceptions, dict) or set(exceptions) != {model}:
             raise ValueError

@@ -30,14 +30,15 @@ DEFAULT_JUDGE_MODELS = {
     "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
     "intent_fetched_evidence": "openai/gpt-oss-120b",
     "role_batch_check": "openai/gpt-oss-120b",
-    "industry_evidence_review": "openai/gpt-6.1-sol",
+    "industry_evidence_review": "mistralai/mistral-large-4-0",
     "industry_research_controller": "openai/gpt-6.1-sol",
 }
 # These reviewed settings are frozen only for the exact prospective model map.
-# Sol retains both industry source research and final review after their open-model gates failed.
+# The industry research controller retains Sol; final review has its own route.
 DEFAULT_JUDGE_PROVIDER_ROUTES = {
     "deepseek/deepseek-v4.1-flash-1017": "nebius/fp8",
     "openai/gpt-oss-120b": "near-ai/fp4",
+    "mistralai/mistral-large-4-0": "mistral/zdr",
 }
 DEFAULT_JUDGE_REQUEST_OPTIONS = {
     "deepseek/deepseek-v4.1-flash-1017": {
@@ -46,10 +47,13 @@ DEFAULT_JUDGE_REQUEST_OPTIONS = {
     "openai/gpt-oss-120b": {
         "reasoning": {"effort": "low"}, "max_output_tokens": 4096,
     },
+    "mistralai/mistral-large-4-0": {
+        "reasoning": {"effort": "high"}, "max_output_tokens": 16384,
+    },
 }
 DEFAULT_JUDGE_REASONING_EXCEPTIONS = {
     "openai/gpt-6.1-sol": {
-        "roles": ["industry_evidence_review", "industry_research_controller"], "reason": "quality_gate_not_met",
+        "roles": ["industry_research_controller"], "reason": "quality_gate_not_met",
     },
 }
 CREDENTIAL_ENV_NAMES = (

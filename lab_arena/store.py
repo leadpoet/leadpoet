@@ -67,6 +67,13 @@ READ_RETRY_TRANSPORT_ERRORS = (
     httpx.RemoteProtocolError,
 )
 
+# A 55P03 lock timeout aborts its statement before any effect is visible, so a
+# read that takes no parameters and writes nothing can be repeated verbatim.
+# Mutating RPCs keep their own narrower replay policy below.
+LOCK_TIMEOUT_REPLAYABLE_READ_RPCS = frozenset({
+    "lab_arena_review_guard_state_v1",
+})
+
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_nov03_review_recovery_authorized_v1": (("p_submission_id", "text"),),
     "lab_arena_preserved_judgment_policy_v1": (
@@ -611,6 +618,17 @@ def create_http1_client(timeout_seconds: float) -> httpx.Client:
     )
 
 
+def _is_lock_timeout(response: httpx.Response) -> bool:
+    """True when PostgREST reported a 55P03 lock timeout for this request."""
+    if response.status_code != 500:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("code") == "55P03"
+
+
 class PostgrestTransport(StoreTransport):
     """PostgREST over HTTP/1.1 with one least-privilege credential."""
 
@@ -742,7 +760,10 @@ class PostgrestTransport(StoreTransport):
                 if code == DEADLOCK_SQLSTATE or (
                     response.status_code == 500
                     and code == "55P03"
-                    and function in LOCK_TIMEOUT_REPLAYABLE_RPCS
+                    and (
+                        function in LOCK_TIMEOUT_REPLAYABLE_RPCS
+                        or function in LOCK_TIMEOUT_REPLAYABLE_READ_RPCS
+                    )
                 ):
                     # A proved lock timeout rolls back these RPCs. Repeat the
                     # exact identity; an existing dispatch marker or claim
@@ -908,9 +929,17 @@ class PostgrestTransport(StoreTransport):
                     headers=self._headers,
                     params=query,
                 )
-                if response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES and not attempt:
+                if (
+                    not attempt
+                    and (
+                        response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES
+                        or _is_lock_timeout(response)
+                    )
+                ):
                     # Share the existing two-attempt SELECT budget; never
                     # replay a mutating RPC for an ambiguous HTTP response.
+                    # A lock timeout rolled the read back, so repeating it
+                    # cannot double any effect.
                     continue
                 break
             except READ_RETRY_TRANSPORT_ERRORS as exc:

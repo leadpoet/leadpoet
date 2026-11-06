@@ -1,3 +1,12 @@
+## Scoped authorization: November 6 unused ninth review closure
+
+The exact637 grant was not spent before miner planning closed the review gate.
+Migration643 may only reject the unchanged ninth source as code_review_incomplete
+and append the existing638 terminal receipt with an explicit unused/no-judgment
+outcome. Preserve all other rows, round fields, work, costs, receipts and operator
+state. Add no review attempt, admission, deadline or runtime authority. Internal
+agents implement, test and commit; the root owns review and production release.
+
 ## Scoped authorization: November 6 ninth exact late review
 
 The user approved one unchanged-artifact alternate review for

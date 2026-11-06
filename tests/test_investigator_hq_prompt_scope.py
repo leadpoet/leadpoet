@@ -58,7 +58,7 @@ def invoke(monkeypatch,targets,post,**kwargs):
 
 
 def test_generic_system_prompt_remains_exact_main_snapshot():
-    assert len(inv._SYSTEM_PROMPT)==SNAPSHOT['main_system_characters']==31640
+    assert len(inv._SYSTEM_PROMPT)==SNAPSHOT['main_system_characters']==31700
     assert hashlib.sha256(inv._SYSTEM_PROMPT.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
     assert inv._SYSTEM_PROMPT.count(SNAPSHOT['old_paragraph'])==1
     assert inv._LITERAL_HEADQUARTERS_INSTRUCTION==SNAPSHOT['new_paragraph']

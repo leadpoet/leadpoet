@@ -580,12 +580,12 @@ CONTRADICTED for a proven different stage, UNPROVEN if current stage is unknown.
 Never put the disproved stage in observed_value.
 
 For a proven stage, observed_value must be a non-null canonical value: Seed,
-Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the value
-the evidence proves, not the requested value by default. Series C+ represents
+Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the proven
+value, not the requested value by default. Series C+ represents
 completed Series C and later priced-equity rounds, including a completed
 extension of that round. Return observed_value="Series C+" for such evidence;
 an extension does not require a new stage label. Debt, grants, planned rounds,
-and unresolved ownership or chronology do not establish that value.
+or pending deals do not establish that value.
 
 A currently listed company stays Public despite PE control until a later
 completed take-private or delisting. For requested PE, cite listing proof as
@@ -608,21 +608,20 @@ A later completed priced-equity round, controlling acquisition, or IPO/listing
 event involving ownership of the investigated company can supersede it and
 must be evaluated chronologically. Identify the buyer and target explicitly:
 the investigated company buying another business does not make the buyer
-Acquired and does not supersede the buyer's funding stage. Only an acquisition
-OF the investigated company can do that. Thus a later
+Acquired and does not supersede the buyer's funding stage. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
-later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
-A later completed equity round of unstated series keeps a proven Series C+
-unless it gave, or may have given, a buyer or PE sponsor control or listed the
-company.
+later debt alone cannot. A competing stage event is material only if the
+source states it completed and changed control, listing or priced-round series.
+Later strategic, minority or unspecified investments, pending or conditional
+deals and unfinished research are not; a proven stage stays. Later private
+financing keeps Series C+ unless stated to give control or a listing.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for
 the exact company. For Public, review current listing and later completed
 take-private and delisting results before retaining an older
-ticker quote. Search results remain discovery only, so fetch a useful result
-when one is relevant. Current company or exchange proof may also come from a
-submitted URL or site navigation. Cite fetched company-bound text. An old
+ticker quote. Current company or exchange proof may also come from a
+submitted URL or site navigation. An old
 listing quote alone, or the absence of a contradicting search result, does not
 establish current Public status. The word "latest" in an old article does not
 prove that its round or listing is still the company's current stage.
@@ -675,13 +674,15 @@ business alone does not prove that the old and new brands are the same
 operating company. A true rebrand can coexist with separate ownership history,
 but the quoted text must explicitly prove the old-to-new company continuity.
 A common domain, redirect, or shared LinkedIn slug alone is insufficient. Never
-inherit Public or another stage from a parent, holding company, or subsidiary.
+inherit a stage from a parent or subsidiary, except that for requested Public a
+current wholly or majority owned subsidiary, brand or division of a currently
+listed parent is Public: return Acquired, VERIFIED, ownership quote primary,
+parent's current listing support 1.
 Headcount must be current company-wide headcount; department,
 office, job, associated-member count, or stale evidence is UNPROVEN. An exact
 entity-bound LinkedIn Company size/employeeCountRange is primary over a
 third-party exact estimate. Other conflicts are UNPROVEN. Use only a canonical
-LinkedIn band or a strict current integer. Do not resolve conflicts by
-preference or guesswork.
+LinkedIn band or a strict current integer.
 
 Use submit_findings when research is complete. If deterministic validation
 rejects it and returns feedback, correct it within the remaining limits and
@@ -4268,6 +4269,7 @@ def _validated_findings(
             evidence_url = _safe_https_url(finding["evidence_url"])
             fetched_text = fetched_pages.get(evidence_url, "")
             semantic_pe_ownership = False
+            listed_parent_public = False
             if target == "stage":
                 # Imported at validation time because lead_scorer owns the
                 # canonical stage vocabulary and imports this investigator.
@@ -4275,6 +4277,7 @@ def _validated_findings(
                     _CANONICAL_COMPANY_STAGES,
                     _acquired_stage_quote_supports_names,
                     _company_stage_matches,
+                    _listed_parent_public_stage_matches,
                     _normalize_company_stage,
                     _private_equity_linked_support_proves_ownership,
                     _stage_evidence_supports_observation,
@@ -4313,6 +4316,40 @@ def _validated_findings(
                             linked_pe_support_invalid = True
                             break
                         linked_pe_support.append({"url": url, "quote": quote})
+                acquisition_names = tuple(
+                    name for name in stage_attribution_names
+                    if len(acquisition_name := re.sub(
+                        r"[^a-z0-9]+", "", _normalized_span(name),
+                    )) >= 4 or acquisition_name in acquisition_short_identity_names
+                )
+                # Requested Public only: a current listed parent can prove
+                # the stage through its own exact, fetched listing quote.
+                listed_parent_support: list[dict[str, str]] = []
+                if (
+                    normalized_stage == "acquired"
+                    and normalized_requested_stage == "public"
+                ):
+                    for item in raw_support:
+                        url = _safe_https_url(item["url"])
+                        quote = item["quote"]
+                        if (
+                            not url or not isinstance(quote, str)
+                            or not quote or len(quote) > 2000
+                            or not _quote_occurs(quote, fetched_pages.get(url, ""))
+                        ):
+                            listed_parent_support = []
+                            break
+                        listed_parent_support.append({"url": url, "quote": quote})
+                    else:
+                        listed_parent_public = _listed_parent_public_stage_matches(
+                            normalized_stage,
+                            normalized_requested_stage,
+                            company_names=acquisition_names,
+                            ownership_quote=finding["evidence_quote"],
+                            listing_quotes=tuple(
+                                item["quote"] for item in listed_parent_support
+                            ),
+                        )
                 linked_pe_ownership = bool(
                     linked_pe_support
                     and _private_equity_linked_support_proves_ownership(
@@ -4527,6 +4564,7 @@ def _validated_findings(
                     _company_stage_matches(
                         normalized_stage, normalized_requested_stage,
                     )
+                    or listed_parent_public
                 ):
                     finding.update(
                         status="UNPROVEN",
@@ -4567,12 +4605,10 @@ def _validated_findings(
                     )
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
-                        tuple(name for name in stage_attribution_names
-                              if len(acquisition_name := re.sub(
-                                  r"[^a-z0-9]+", "", _normalized_span(name),
-                              )) >= 4 or acquisition_name in acquisition_short_identity_names),
+                        acquisition_names,
                         finding["evidence_quote"],
                     )
+                    or listed_parent_public
                 ):
                     finding.update(
                         status="UNPROVEN",
@@ -4641,6 +4677,8 @@ def _validated_findings(
                     finding["supporting_evidence"] = linked_pe_support
                     if semantic_pe_ownership:
                         finding["ownership"] = dict(raw["ownership"])
+                if listed_parent_public and finding["status"] != "UNPROVEN":
+                    finding["supporting_evidence"] = listed_parent_support
                 # Preserve a proven different stage when VERIFIED described
                 # the observed fact instead of its match to the request.
                 if (
@@ -4649,6 +4687,7 @@ def _validated_findings(
                     and not _company_stage_matches(
                         normalized_stage, normalized_requested_stage,
                     )
+                    and not listed_parent_public
                 ):
                     finding["status"] = "CONTRADICTED"
             elif target == "headcount" and not _quote_supports_headcount(
@@ -7007,11 +7046,21 @@ async def investigate_company_evidence(
                         requested_public_stage
                         and stage_finding.get("status")
                         in {"VERIFIED", "CONTRADICTED"}
-                        and _company_stage_matches(
-                            _normalize_company_stage(
-                                stage_finding.get("observed_value")
-                            ),
-                            "public",
+                        and (
+                            _company_stage_matches(
+                                _normalize_company_stage(
+                                    stage_finding.get("observed_value")
+                                ),
+                                "public",
+                            )
+                            # A validated listed-parent route is also a
+                            # matching Public stage; it needs the same search.
+                            or (
+                                stage_finding.get("status") == "VERIFIED"
+                                and _normalize_company_stage(
+                                    stage_finding.get("observed_value")
+                                ) == "acquired"
+                            )
                         )
                     )
                     if matching_public_stage and not current_stage_search_succeeded:

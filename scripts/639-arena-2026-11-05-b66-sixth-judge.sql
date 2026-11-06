@@ -182,7 +182,9 @@ BEGIN
   OR c.guard_expires_at IS NOT NULL OR c.candidate_commit IS DISTINCT FROM ''
   OR c.restart_scope IS DISTINCT FROM '' OR c.restart_phase IS DISTINCT FROM ''
   OR c.captured_leases IS DISTINCT FROM '[]'::JSONB
-  OR r.status IS DISTINCT FROM 'stage2_scoring' OR r.status_generation IS DISTINCT FROM 11 OR r.stage_generation IS DISTINCT FROM 9 OR r.scoring_generation_floor IS DISTINCT FROM 0
+  OR ((r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_scoring'::TEXT,11::BIGINT,9::BIGINT)
+    AND (r.status,r.status_generation,r.stage_generation) IS DISTINCT FROM ('stage2_judged'::TEXT,12::BIGINT,10::BIGINT))
+  OR r.scoring_generation_floor IS DISTINCT FROM 0
   OR encode(extensions.digest(r.configuration_doc::TEXT,'sha256'),'hex') IS DISTINCT FROM '51f53895739647654c13e59e4ebeeaba436203342271b302219c5993b027d946'
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.reward_activated_at IS NOT NULL
   OR r.configuration_doc#>>'{schedule,final_scoring_close}' IS DISTINCT FROM '2026-11-06T07:00:00Z'

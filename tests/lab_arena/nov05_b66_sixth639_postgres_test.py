@@ -164,12 +164,38 @@ def render(p):
 
 
 @pytest.mark.parametrize('outcome',['accepted','judge_error','expired'])
-def test_full_recovery_then_exact_sixth_claim_reuses_four_without_seventh(prepared,outcome):
-    p=prepared;before=snapshot(p);recovery.apply(p);recovery.apply(p)
+@pytest.mark.parametrize('phase',['scoring','judged'])
+def test_full_recovery_then_exact_sixth_claim_reuses_four_without_seventh(prepared,outcome,phase):
+    p=prepared
+    if phase=='judged':
+        # The ordinary driver closes scoring early when every existing score
+        # row is terminal, even while exhausted judgments remain unfinished.
+        assert p.service.close_scoring(ROUND,2)['status']=='closed'
+        row=p.store.get_round(ROUND)
+        assert (row['status'],row['status_generation'],row['stage_generation'])==('stage2_judged',12,10)
+    if phase=='judged'and outcome=='accepted':
+        # Isolate this pending sixth as the only unfinished judgment. Other
+        # exhausted assignments become accepted only in this disposable control.
+        with p.conn.cursor()as q:
+            rows=scalar(q,"SELECT jsonb_agg(to_jsonb(a)) FROM (SELECT DISTINCT ON(assignment_id) * FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' AND assignment_id<>%s ORDER BY assignment_id,attempt DESC)a WHERE status='failed'",(ROUND,ASSIGNMENT))
+            assert len(rows)==16
+            q.execute('SET LOCAL session_replication_role=replica')
+            for r in rows:
+                ref=r['run_id']+'-accepted-control.json'
+                p.objects[ref]=contracts.canonical_json({'schema_version':scoring.SCORING_OUTPUT_SCHEMA_VERSION,'scored_run_id':r['scored_run_id'],'breakdowns':[],'company_judgments':[]}).encode()
+                q.execute("UPDATE public.lab_arena_runs SET status='accepted',terminal_cause='accepted',result_doc=%s::jsonb,output_ref=%s WHERE run_id=%s",(json.dumps({'terminal_status':'accepted','company_judgment_consumed_indexes':[]}),ref,r['run_id']))
+            q.execute('SET LOCAL session_replication_role=origin')
+        p.conn.commit()
+    before=snapshot(p);recovery.apply(p);recovery.apply(p)
     after=snapshot(p)
     assert {k:v for k,v in after['runs'].items()if k!=RUN}==before['runs']
     assert {k:v for k,v in after.items()if k!='runs'}=={k:v for k,v in before.items()if k!='runs'}
     assert all(after['runs'][k]==v for k,v in p.original_accepted.items())
+    if phase=='judged'and outcome=='accepted':
+        waiting=p.service.score_stage(ROUND,2)
+        assert waiting['status']=='retry'and waiting['remaining']==1
+        assert p.service.publish(ROUND)['status']=='stale'
+        assert p.store.get_round(ROUND)['published_at']is None
     with p.conn.cursor()as q:
         assert scalar(q,'SELECT public.lab_arena__score_attempt_count_v1(a) FROM public.lab_arena_runs a WHERE run_id=%s',(RUN,))==6
         q.execute('SET LOCAL session_replication_role=replica');q.execute("UPDATE public.lab_arena_runs SET created_at=now()-interval '30 minutes' WHERE run_id=%s",(RUN,));q.execute('SET LOCAL session_replication_role=origin')
@@ -243,8 +269,14 @@ def test_full_recovery_then_exact_sixth_claim_reuses_four_without_seventh(prepar
             history=scalar(q,'SELECT public.lab_arena_scoring_policy_history_v1(%s)',(ROUND,))
             revision=next(r for r in history['revisions']if(r.get('recovery')or{}).get('operation')=='nov05_b66_post_repair639_v1')
             assert revision['generation_floor']==0 and revision['receipt_generation']>0
-        assert p.service.close_scoring(ROUND,2)['status']=='closed'
-        assert p.service.score_stage(ROUND,2)['status']=='retry'
+        if phase=='scoring':assert p.service.close_scoring(ROUND,2)['status']=='closed'
+        if phase=='judged':
+            # Completing the sole pending sixth releases the real assembly
+            # gate; no deadline move is needed in this isolated control.
+            assert p.service.score_stage(ROUND,2)['status']=='ok'
+            waiting=p.service.publish(ROUND)
+            assert waiting['status']=='retry'and waiting['reason']=='execution_infrastructure_incomplete'
+        else:assert p.service.score_stage(ROUND,2)['status']=='retry'
         # Only the disposable clock/schedule move past the publication gate.
         # The normal scorer still excludes genuinely unfinished assignments.
         now=datetime.now(timezone.utc)
@@ -255,14 +287,14 @@ def test_full_recovery_then_exact_sixth_claim_reuses_four_without_seventh(prepar
             q.execute('UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s',(json.dumps(cfg),ROUND))
             q.execute('SET LOCAL session_replication_role=origin')
         p.conn.commit();p.service._clock=lambda:now
-        assert p.service.score_stage(ROUND,2)['status']=='ok'
+        if phase=='scoring':assert p.service.score_stage(ROUND,2)['status']=='ok'
         assert p.service.publish(ROUND)['status']=='ok'
         final=p.store.get_round(ROUND)
         assert final['status']=='published'and final['scoring_generation_floor']==0
         assert p.store.get_run(RUN)['status']=='accepted'
 
 
-@pytest.mark.parametrize('fault',['source','parent','company','signal','runtime','hold','inflight','plan','expired','stage_generation'])
+@pytest.mark.parametrize('fault',['source','parent','company','signal','runtime','hold','inflight','plan','expired','stage_generation','crossed_scoring_generation','crossed_judged_generation','later_judged_generation','wrong_judged_stage'])
 def test_changed_binding_refuses_exact_sixth_and_rolls_back(prepared,fault):
     p=prepared
     with p.conn.cursor()as q:
@@ -277,6 +309,10 @@ def test_changed_binding_refuses_exact_sixth_and_rolls_back(prepared,fault):
         elif fault=='plan':q.execute('UPDATE public.lab_arena_rounds SET stage2_scoring_plan_doc=NULL WHERE round_id=%s',(ROUND,))
         elif fault=='expired':q.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule,final_scoring_close}',to_jsonb((now()-interval '1 second')::text)) WHERE round_id=%s",(ROUND,))
         elif fault=='stage_generation':q.execute('UPDATE public.lab_arena_rounds SET stage_generation=stage_generation+1 WHERE round_id=%s',(ROUND,))
+        elif fault=='crossed_scoring_generation':q.execute('UPDATE public.lab_arena_rounds SET status_generation=12 WHERE round_id=%s',(ROUND,))
+        elif fault=='crossed_judged_generation':q.execute("UPDATE public.lab_arena_rounds SET status='stage2_judged',status_generation=11 WHERE round_id=%s",(ROUND,))
+        elif fault=='wrong_judged_stage':q.execute("UPDATE public.lab_arena_rounds SET status='stage2_judged',status_generation=12 WHERE round_id=%s",(ROUND,))
+        elif fault=='later_judged_generation':q.execute("UPDATE public.lab_arena_rounds SET status='stage2_judged',status_generation=13 WHERE round_id=%s",(ROUND,))
         q.execute('SET LOCAL session_replication_role=origin')
     p.conn.commit();before=snapshot(p)
     with pytest.raises(p.pg.Error):recovery.apply(p)

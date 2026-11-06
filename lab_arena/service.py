@@ -1976,7 +1976,7 @@ class ArenaService:
                 "round_id": row["round_id"],
                 "status": row["status"],
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
-                **self._public_round_output_policy(row.get("configuration_doc") or {}),
+                **self._public_round_output_policy(row.get("configuration_doc") or {}, row.get("replacement_freeze_seconds")),
             }]
 
         network_name, netuid = self._chain_scope()
@@ -1993,6 +1993,7 @@ class ArenaService:
                 offset=offset,
                 columns=(
                     "round_id,status,created_at,evaluation_date,rewards_enabled,"
+                    + getattr(self._store, "replacement_cutoff_columns", "")
                     + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 ),
             )
@@ -2013,7 +2014,7 @@ class ArenaService:
                 "round_id": row["round_id"],
                 "status": row["status"],
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
-                **self._public_round_output_policy(row.get("configuration_doc") or {}),
+                **self._public_round_output_policy(row.get("configuration_doc") or {}, row.get("replacement_freeze_seconds")),
             }
             for row in reversed(rows)
         ]
@@ -2149,6 +2150,7 @@ class ArenaService:
             limit=1,
             columns=(
                 "round_id,status,published_at,"
+                + getattr(self._store, "replacement_cutoff_columns", "")
                 + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 + ",king_outcome,king_hotkey,effective_reward_epoch,reward_basis_hash"
             ),
@@ -2414,7 +2416,12 @@ class ArenaService:
     @staticmethod
     def _submission_replacement_cutoff(round_row: Mapping[str, Any]) -> datetime:
         schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
-        return _parse_iso(schedule["submission_cutoff"]) - timedelta(hours=1)
+        seconds = round_row.get("replacement_freeze_seconds")
+        if seconds is None:
+            seconds = 3600
+        if type(seconds) is not int or seconds not in (600, 3600):
+            raise ServiceError("submission_replacement_policy_invalid", 503)
+        return _parse_iso(schedule["submission_cutoff"]) - timedelta(seconds=seconds)
 
     def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
@@ -8769,7 +8776,7 @@ class ArenaService:
         return {"outcomes": [dict(row["outcome_doc"]) for row in rows], "lookup_ok": True}
 
     @staticmethod
-    def _public_round_output_policy(configuration: Mapping[str, Any]) -> Dict[str, Any]:
+    def _public_round_output_policy(configuration: Mapping[str, Any], replacement_freeze_seconds: Optional[int] = None) -> Dict[str, Any]:
         """Expose the output contract and replacement deadline, never ICPs."""
 
         cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
@@ -8777,7 +8784,9 @@ class ArenaService:
             "max_replacement_attempts": 1,
             "benchmark_icp_count": contracts.benchmark_icp_count(configuration),
             "promotion_margin": contracts.promotion_margin(configuration),
-            **({"submission_replacement_cutoff": (_parse_iso(cutoff) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")} if cutoff else {}),
+            **({"submission_replacement_cutoff": ArenaService._submission_replacement_cutoff({
+                "configuration_doc": configuration, "replacement_freeze_seconds": replacement_freeze_seconds,
+            }).isoformat().replace("+00:00", "Z")} if cutoff else {}),
             "output_schema_version": contact_policy.output_schema(configuration),
             **({"integrity_policy": integrity.POLICY} if integrity.enabled(configuration) else {}),
             **({"contact_policy": contact_policy.POLICY} if contact_policy.enabled(configuration) else {}),
@@ -8813,7 +8822,7 @@ class ArenaService:
             "round_id": round_id,
             "status": row["status"],
             "schedule": dict(configuration.get("schedule") or {}),
-            **self._public_round_output_policy(configuration),
+            **self._public_round_output_policy(configuration, row.get("replacement_freeze_seconds")),
             "participants": participants,
             "finalists": row.get("finalists") if row["status"] == "published" else None,
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),

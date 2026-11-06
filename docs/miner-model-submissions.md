@@ -141,7 +141,8 @@ Retry an unchanged archive with the same hotkey. The gateway reuses its upload
 reservation. If an unfinished archive changes, the gateway keeps the old row
 and bytes and assigns a new upload target. A late finalize for the replaced
 reservation returns `submission_superseded`. One replacement is allowed before
-the published replacement cutoff, including an accepted source that has not
+the published replacement cutoff (23:50 UTC for new and eligible open daily
+rounds; frozen rounds retain their original cutoff), including an accepted source that has not
 started review or execution. The prior accepted source remains available until
 the replacement is finalized. The duplicate check excludes that same hotkey's
 prior source. The existing MD5 transport checksum prevents a

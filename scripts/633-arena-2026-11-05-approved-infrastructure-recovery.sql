@@ -106,9 +106,9 @@ BEGIN
  PERFORM pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
  SELECT * INTO STRICT r FROM public.lab_arena_rounds WHERE round_id='arena-2026-11-05' FOR UPDATE;
  expected_config:=jsonb_set(jsonb_set(jsonb_set(r.configuration_doc,
-  '{schedule,stage_2_close}','"2026-11-05T20:30:00Z"'::JSONB,FALSE),
-  '{schedule,final_scoring_close}','"2026-11-05T23:58:59Z"'::JSONB,FALSE),
-  '{schedule,publication_deadline}','"2026-11-05T23:59:00Z"'::JSONB,FALSE);
+  '{schedule,stage_2_close}','"2026-11-06T05:30:00Z"'::JSONB,FALSE),
+  '{schedule,final_scoring_close}','"2026-11-06T07:00:00Z"'::JSONB,FALSE),
+  '{schedule,publication_deadline}','"2026-11-06T07:05:00Z"'::JSONB,FALSE);
  SELECT * INTO h FROM public.lab_arena_scoring_supersessions
  WHERE round_id=r.round_id AND request_id='nov05-approved-infrastructure633-v1';
  IF FOUND THEN
@@ -135,7 +135,7 @@ BEGIN
   OR r.configuration_doc->>'sourcing_cost_eligibility_policy'<>'successful_calls_flat_per_icp_v1'
   OR r.published_at IS NOT NULL OR r.publication_doc IS NOT NULL OR r.promotion_doc IS NOT NULL
   OR r.reward_activated_at IS NOT NULL OR r.reward_basis_doc IS NOT NULL OR r.reward_basis_hash IS NOT NULL
-  OR clock_timestamp()>='2026-11-05T20:30:00Z'::TIMESTAMPTZ
+  OR clock_timestamp()>='2026-11-06T05:30:00Z'::TIMESTAMPTZ
   OR jsonb_array_length(manifest->'targets')<>50
   OR (SELECT count(*) FROM jsonb_array_elements(manifest->'targets')t WHERE t->>'mode'='restore_unused')<>36
   OR (SELECT count(*) FROM jsonb_array_elements(manifest->'targets')t WHERE t->>'mode'='ordinary_retry')<>14
@@ -261,7 +261,7 @@ BEGIN
   OR (SELECT jsonb_object_agg(s.submission_id,to_jsonb(s)) FROM public.lab_arena_submissions s WHERE s.round_id=r.round_id) IS DISTINCT FROM before_submissions
   OR (SELECT jsonb_object_agg(a.round_id,encode(extensions.digest(to_jsonb(a)::TEXT,'sha256'),'hex')) FROM public.lab_arena_rounds a WHERE a.round_id<>r.round_id) IS DISTINCT FROM before_rounds
   OR (SELECT to_jsonb(a)-'updated_at' FROM public.lab_arena_rounds a WHERE a.round_id=r.round_id) IS DISTINCT FROM to_jsonb(n)-'updated_at'
-  OR clock_timestamp()>='2026-11-05T20:30:00Z'::TIMESTAMPTZ THEN
+  OR clock_timestamp()>='2026-11-06T05:30:00Z'::TIMESTAMPTZ THEN
   RAISE EXCEPTION 'Recovery633 exact readback differs'; END IF;
 END;
 $data633$;

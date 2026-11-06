@@ -216,7 +216,13 @@ def test_upgrade_reapply_and_failed_upgrade_preserve_function_security():
 def test_database_vocabulary_matches_python_projection():
     from lab_arena import code_review_policy
 
-    migration = MIGRATION.read_text() + (SCRIPTS / "599-lab-arena-refusal-review-fallback.sql").read_text()
+    # Current Python includes the prospective provider added after 594/599.
+    # Keep the database fixture historical; compare vocabulary across upgrades.
+    migration = (
+        MIGRATION.read_text()
+        + (SCRIPTS / "599-lab-arena-refusal-review-fallback.sql").read_text()
+        + (SCRIPTS / "643-lab-arena-prospective-admission-primary.sql").read_text()
+    )
     for value in (code_review_policy.REVIEW_FINISH_REASONS
                   | code_review_policy.REVIEW_CONTEXT_REASONS
                   | code_review_policy.REVIEW_PROVIDER_NAMES):

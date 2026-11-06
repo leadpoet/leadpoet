@@ -115,7 +115,7 @@ def test_malformed_refused_and_incomplete_native_results_stay_raw_without_sft(tm
     raw, candidate = export(tmp_path, provider=provider)
     if damage == "malformed_reasoning":
         assert raw["response"]["output"][0]["content"] == "[REDACTED]"
-        assert raw["sft_exclusions"] == ["privacy_nonexact"]
+        assert raw["sft_exclusions"] == ["target_shape_or_completion_unsupported"]
     else:
         assert raw["response"] == provider
         assert raw["sft_exclusions"] == ["target_shape_or_completion_unsupported"]

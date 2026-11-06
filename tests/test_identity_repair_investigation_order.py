@@ -19,7 +19,7 @@ from tests.test_company_evidence_investigator import (
 def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
               repair="valid", investigation_failure="", source_fault=False,
               industry="UNPROVEN", initial_rebrand=False, company_quality=True,
-              initial_missing_name=False, profile_failure=""):
+              initial_missing_name=False, profile_failure="", initial_missing_geography=False):
     company, icp = _company(), _icp(required_attribute="Supplies software.")
     initial = _complete_verdict(
         observed_company_linkedin="" if missing_identity else company.company_linkedin,
@@ -29,6 +29,9 @@ def _exercise(monkeypatch, *, geography="UNPROVEN", missing_identity=True,
     if initial_rebrand:
         initial.update(observed_company_website="https://other.example",
                        observed_company_linkedin="https://www.linkedin.com/company/other")
+    if initial_missing_geography:
+        initial.update(observed_hq_country="", observed_hq_state="", geography_matches=None,
+                       geography_evidence_url="", geography_evidence_quote="")
     if initial_missing_name:
         initial.pop("observed_company_name")
     repaired = _complete_verdict(

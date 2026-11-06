@@ -30,6 +30,9 @@ The mutually exclusive --shim-only mode appends only the exact-source socket
 return-margin repair. It does not import the current runtime package or grading
 converters and can be selected as a prospective scorer default after verification.
 
+The exclusive --identity-repair-finality-only mode applies only the reviewed
+completed missing-LinkedIn repair predicate to exact frozen2dc in one file.
+
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
 
@@ -274,6 +277,7 @@ def extract_frozen_sources(
     verified_homepage_brand_alias: bool = False,
     empty_domain_negative_finality_only: bool = False,
     identity_repair_before_investigation_only: bool = False,
+    identity_repair_finality_only: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -304,7 +308,8 @@ def extract_frozen_sources(
         if verified_display_brand:
             from scripts.arena_reviewer_verified_display_brand_seam import FILES
             names = FILES
-        if empty_domain_negative_finality_only or identity_repair_before_investigation_only:
+        if (empty_domain_negative_finality_only or identity_repair_before_investigation_only
+                or identity_repair_finality_only):
             names = (FINALITY_FILE,)
         for name in dict.fromkeys(names):
             path = destination / name
@@ -475,6 +480,10 @@ def main() -> int:
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
+        "--identity-repair-finality-only", action="store_true",
+        help="compose only reviewed completed missing-LinkedIn repair finality on exact frozen 2dc; excludes other corrections",
+    )
+    parser.add_argument(
         "--identity-repair-before-investigation-only", action="store_true",
         help="compose only the reviewed missing-identity ordering on exact frozen b699; excludes other corrections",
     )
@@ -575,6 +584,11 @@ def main() -> int:
         help="compose verified brand identity and its matching host-validator contract; deploy that host validator too; use the same option for --verify-image",
     )
     args = parser.parse_args()
+    if args.identity_repair_finality_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"identity_repair_finality_only", "push"}
+    ):
+        raise CompositionError("identity-repair-finality-only mode cannot include other corrections")
     if args.identity_repair_before_investigation_only and any(
         value is True for name, value in vars(args).items()
         if name not in {"identity_repair_before_investigation_only", "push"}
@@ -602,6 +616,10 @@ def main() -> int:
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
+    if args.identity_repair_finality_only:
+        from scripts.arena_reviewer_identity_repair_finality_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("identity repair finality requires the exact frozen 2dc image")
     if args.identity_repair_before_investigation_only:
         from scripts.arena_reviewer_identity_repair_order_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
@@ -621,7 +639,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.identity_repair_before_investigation_only:
+        if args.identity_repair_finality_only:
+            from scripts.arena_reviewer_identity_repair_finality_seam import convert_identity_repair_finality_seam
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", identity_repair_finality_only=True,
+            )
+            if set(original) != {FINALITY_FILE}:
+                raise CompositionError("frozen identity finality source is incomplete")
+            files = {FINALITY_FILE: convert_identity_repair_finality_seam(original[FINALITY_FILE])}
+        elif args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import convert_identity_repair_order_seam
             original = extract_frozen_sources(
                 args.grading_image, root / "original", identity_repair_before_investigation_only=True,
@@ -740,6 +766,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-verified-display-brand" if args.verified_display_brand else "")
             + ("-empty-domain-negative-finality" if args.empty_domain_negative_finality_only else "")
             + ("-identity-repair-order" if args.identity_repair_before_investigation_only else "")
+            + ("-identity-repair-finality" if args.identity_repair_finality_only else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -766,6 +793,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.identity_repair_finality_only:
+            from scripts.arena_reviewer_identity_repair_finality_seam import CORRECTION_ID as IDENTITY_REPAIR_FINALITY_CORRECTION_ID
+            corrections.append(IDENTITY_REPAIR_FINALITY_CORRECTION_ID)
         if args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import CORRECTION_ID as IDENTITY_REPAIR_ORDER_CORRECTION_ID
             corrections.append(IDENTITY_REPAIR_ORDER_CORRECTION_ID)

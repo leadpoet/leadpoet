@@ -73,5 +73,13 @@
         "sha256": "559e5283eb9fe971bee6dc10abd106d08d02e39b2a9a2ee6bdb8c4eefe9b9af9"
       }
     }
+  },
+  "identity_repair_finality_2dc": {
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "identity_repair_finality_2dc_lead_scorer.py.gz",
+        "sha256": "f2417700fb3ff72311e0911498573ed27e735a0371cdca970b1cbcf1b926ae93"
+      }
+    }
   }
 }

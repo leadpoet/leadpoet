@@ -14,18 +14,27 @@ ROLE = "industry_research_controller"
 ENV = "ARENA_INDUSTRY_RESEARCH_CONTROLLER_MODEL"
 
 
-def test_default_sol_exception_covers_exactly_both_industry_subtasks():
+def historical_policy_without_controller():
     policy = scoring.build_scorer_policy()
-    assert policy["judge_models"][ROLE] == SOL
+    del policy["judge_models"][ROLE]
+    for binding in (contracts.JUDGE_PROVIDER_ROUTES_BINDING, contracts.JUDGE_REQUEST_OPTIONS_BINDING):
+        values = json.loads(policy["env_bindings"][binding])
+        del values["z-ai/glm-5.3-flash"]
+        policy["env_bindings"][binding] = json.dumps(values)
+    return policy
+
+
+def test_default_sol_exception_covers_only_final_industry_review():
+    policy = scoring.build_scorer_policy()
+    assert policy["judge_models"][ROLE] == "z-ai/glm-5.3-flash"
     exception = contracts.judge_reasoning_exceptions(policy)[SOL]
-    assert exception["roles"] == ["industry_evidence_review", ROLE]
+    assert exception["roles"] == ["industry_evidence_review"]
     assert contracts.validate_scorer_policy(json.loads(json.dumps(policy))) == policy
-    old = deepcopy(policy)
-    del old["judge_models"][ROLE]
+    old = historical_policy_without_controller()
     exceptions = {SOL: {**exception, "roles": ["industry_evidence_review"]}}
     old["env_bindings"][contracts.JUDGE_REASONING_EXCEPTIONS_BINDING] = json.dumps(exceptions)
     assert contracts.validate_scorer_policy(old) == old
-    for role in ("role_batch_check", "intent_details_review"):
+    for role in ("role_batch_check", "intent_details_review", ROLE):
         bad = deepcopy(policy)
         bad["judge_models"][role] = SOL
         with pytest.raises(contracts.ArenaContractError):
@@ -34,8 +43,7 @@ def test_default_sol_exception_covers_exactly_both_industry_subtasks():
 
 @pytest.mark.parametrize("capture", [False, True])
 def test_historical_absent_role_binds_empty_and_rejects_ambient(capture):
-    policy = scoring.build_scorer_policy()
-    policy["judge_models"].pop(ROLE, None)
+    policy = historical_policy_without_controller()
     if capture:
         entry = {SOL: {"roles": ["industry_evidence_review"], "reason": "quality_gate_not_met"}}
         policy["env_bindings"][contracts.JUDGE_REASONING_EXCEPTIONS_BINDING] = json.dumps(entry)
@@ -226,3 +234,14 @@ def test_new_sol_controller_keeps_legacy_wire_and_repair_bounds(monkeypatch):
     historical = wire(True, "")
     assert all(p["model"] == "deepseek/deepseek-v4.1-flash-1017" and p["max_tokens"] == 8192
                and p["provider"] == {"only": ["nebius/fp8"]} for _, p in historical)
+    current = wire(True, "z-ai/glm-5.3-flash")
+    assert len(current) == 2
+    assert all(p["model"] == "z-ai/glm-5.3-flash" and p["max_tokens"] == 8192
+               and p["provider"] == {"only": ["near-ai/fp8"]}
+               and p["reasoning"] == {"effort": "low", "exclude": False}
+               and p.get("parallel_tool_calls", False) is False for _, p in current)
+    # Keep the existing GLM one-tool adapter and the complete research contract.
+    assert current[0][1]["messages"][0] == {
+        "role": "system", "content": "Return exactly one tool call per assistant turn."}
+    assert current[0][1]["messages"][1:] == new[0][1]["messages"]
+    assert current[0][1]["tools"] == new[0][1]["tools"]

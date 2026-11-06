@@ -1,0 +1,432 @@
+{
+  "schema_version": "retained_native_worker_replay_v1",
+  "probe_id": "glm-nearai-native-research-capture-20261106",
+  "verified_at": "2026-11-06T06:25:05.534384Z",
+  "fresh_provider_execution": false,
+  "production_activation": false,
+  "action_quality": "unreviewed",
+  "training_permission": "unconfirmed",
+  "limits": [
+    "This composite proof replays retained real-provider bytes through native SQL and worker delivery; it is not a new provider execution or production acceptance.",
+    "Both native trajectories concern EPAM and differ in intent evidence; they are not independent industry classes.",
+    "All eight low-effort research replies expose readable thinking; this does not establish that every route request exposes all reasoning.",
+    "Fresh high-effort synthetic controls have positive token counts without readable text. These calls stay missing_thinking and are excluded from generated-thinking targets.",
+    "The rejected native tool batch remains unreviewed, not a correct-action target.",
+    "No full training-ready trajectory or training permission is established by this route proof."
+  ],
+  "replay_script_sha256": "1399ac329226ff4e0af3cf7ca9851dbb8f22b993d36310093d889c6e4c6b8a14",
+  "captures": [
+    {
+      "route_metadata": {
+        "model_id": "z-ai/glm-5.3-flash",
+        "model_version": "z-ai/glm-5.3-flash-20260826",
+        "provider": "near-ai/fp8",
+        "provider_name": "Near AI",
+        "api": "openrouter.chat",
+        "mode": {
+          "effort": "low"
+        },
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "semantic_class": "full_generated_thinking",
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_content",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "answer_headroom_tokens": 1024,
+        "context_tokens": 1048576,
+        "price_ceiling": {
+          "prompt": "0.00000008",
+          "completion": "0.0000005",
+          "request": "0",
+          "internal_reasoning": "0"
+        },
+        "allowed_fallback_routes": [],
+        "status": "approved"
+      },
+      "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "checks": {
+        "original_request_hashes_exact": true,
+        "original_response_hashes_exact": true,
+        "SQL_request_response_readback_exact": true,
+        "worker_delivery_and_ack_exact": true,
+        "strict_unscored_targets_verified": true,
+        "readable_thinking_preserved": true,
+        "full_text_turns": 8,
+        "strict_unscored_targets": 8,
+        "unknown_or_missing_positive_reasoning_turns": 0,
+        "summary_or_opaque_turns": 0,
+        "cap_or_truncation_signals": 0
+      },
+      "cases": [
+        {
+          "scenario": "positive",
+          "proof_kind": "retained_real_provider_bytes_replayed_locally",
+          "fresh_provider_calls": 0,
+          "action_quality": "unreviewed",
+          "training_permission": "unconfirmed",
+          "original_source_commit": "42d73c24a206d33bf52e09e3540ed220cbd8a4bb",
+          "original_summary_sha256": "sha256:621878f40ab0195855c04458b2d40127b164fcbfe56437599fa4703780790511",
+          "proof_summary_sha256": "221c83ce6d6603345120d79322e4ca425172097b75b2545f0b66c7cf419303bb",
+          "artifact_sha256": {
+            "ledger-readback.json": "3e373842b26eff29eab69d45838e0ccd347deb38484f64cc906bee23eb7e78b7",
+            "diagnostic-export.json": "6320a906553a63d815e70fcc84f042b14755a3f9002b6117932b30748b554c19",
+            "readable-trace.json": "57eb323563f92b30fa48014c3e288aa16d3157ba37b6bc1ddb4bd89d397d0e31",
+            "strict-unscored-targets.json": "a8a5976314d1e56ac378edd0c631c5beaf95303bd3646ecb3f288a46be9d5531"
+          },
+          "turns": [
+            {
+              "original_call_index": 2,
+              "original_request_sha256": "sha256:556dfcecd4d18a46cf4b234c94f98879f1da0529a820839c1515e1993bd2b9b9",
+              "original_response_sha256": "sha256:a7df784ebe734ad33510a9f3c03a65aca79eb4483d1966e8bee6636e16aac44f",
+              "replayed_request_sha256": "sha256:556dfcecd4d18a46cf4b234c94f98879f1da0529a820839c1515e1993bd2b9b9",
+              "replayed_response_sha256": "sha256:a7df784ebe734ad33510a9f3c03a65aca79eb4483d1966e8bee6636e16aac44f",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 1890,
+              "reported_reasoning_tokens": 360,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "rejected_batch_not_executed"
+            },
+            {
+              "original_call_index": 3,
+              "original_request_sha256": "sha256:ddfa5a8a602e2135e2524bb9e4efaa54afa5c2a1192ae67e98c61a14b1167b6c",
+              "original_response_sha256": "sha256:6737be035d90d60b646478377439be1d5ea975be66591c15cc19813d5bafcbba",
+              "replayed_request_sha256": "sha256:ddfa5a8a602e2135e2524bb9e4efaa54afa5c2a1192ae67e98c61a14b1167b6c",
+              "replayed_response_sha256": "sha256:6737be035d90d60b646478377439be1d5ea975be66591c15cc19813d5bafcbba",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 783,
+              "reported_reasoning_tokens": 154,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            },
+            {
+              "original_call_index": 4,
+              "original_request_sha256": "sha256:e4e1b281ea123808bc0088db6a49705a4fa0511d7774cf12f6f6126f5e5f5995",
+              "original_response_sha256": "sha256:05e76cf137234a9303b6240c311814fb80ddc186ea053ebb6cff1abede757d85",
+              "replayed_request_sha256": "sha256:e4e1b281ea123808bc0088db6a49705a4fa0511d7774cf12f6f6126f5e5f5995",
+              "replayed_response_sha256": "sha256:05e76cf137234a9303b6240c311814fb80ddc186ea053ebb6cff1abede757d85",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 566,
+              "reported_reasoning_tokens": 115,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            },
+            {
+              "original_call_index": 5,
+              "original_request_sha256": "sha256:c07ef3b2e651ffb2d8ce91f44fb0bbb9e2ab7d22186f1566cd6c048d81700184",
+              "original_response_sha256": "sha256:d91cda5fc511b9e29b1667c28790fc1b02c38a9702d3340596af5153de61f04b",
+              "replayed_request_sha256": "sha256:c07ef3b2e651ffb2d8ce91f44fb0bbb9e2ab7d22186f1566cd6c048d81700184",
+              "replayed_response_sha256": "sha256:d91cda5fc511b9e29b1667c28790fc1b02c38a9702d3340596af5153de61f04b",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 3965,
+              "reported_reasoning_tokens": 738,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            }
+          ]
+        },
+        {
+          "scenario": "negative",
+          "proof_kind": "retained_real_provider_bytes_replayed_locally",
+          "fresh_provider_calls": 0,
+          "action_quality": "unreviewed",
+          "training_permission": "unconfirmed",
+          "original_source_commit": "42d73c24a206d33bf52e09e3540ed220cbd8a4bb",
+          "original_summary_sha256": "sha256:c71911b27824f62be47ad04cd23a6b2218df134be2ddd9fba1485c03b03fa561",
+          "proof_summary_sha256": "2c09e33498f0c981b3825bffacf8d8bcb9bc7e3f6eb53e81fe61cb01561fc957",
+          "artifact_sha256": {
+            "ledger-readback.json": "cbbbba1d86af16cfd3017d8a9c275875edfc05bca01cc415cda4e3a155e5c434",
+            "diagnostic-export.json": "1dd47e27a64a0ea666c6cc5727337441b4edab5e9affaf5dba01403cf3a0989f",
+            "readable-trace.json": "6ab56178b3637c18f9562840f013dab3dbf5500e96bd27535393274e445382ef",
+            "strict-unscored-targets.json": "cec57fe5ce73313efc3d767ea8eed712b8ea65e1e49ce0170bbb0697a44c6a7b"
+          },
+          "turns": [
+            {
+              "original_call_index": 2,
+              "original_request_sha256": "sha256:15fc05590ca425409810dbe65b9630785b0cd4466b4657b231c636515616163f",
+              "original_response_sha256": "sha256:e3677366e65936df38b54357fa4d8f445e612c31b909df918135623e7e98b188",
+              "replayed_request_sha256": "sha256:15fc05590ca425409810dbe65b9630785b0cd4466b4657b231c636515616163f",
+              "replayed_response_sha256": "sha256:e3677366e65936df38b54357fa4d8f445e612c31b909df918135623e7e98b188",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 1125,
+              "reported_reasoning_tokens": 226,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            },
+            {
+              "original_call_index": 4,
+              "original_request_sha256": "sha256:138e6380da42f343adb6acc299b3ccd1e39c4a3023ba52bad6e2507d5e59f8ec",
+              "original_response_sha256": "sha256:cf868b916a861dc1b585da85f0cde0f71cd5eeb370eabff4bd0be5da3ea8742d",
+              "replayed_request_sha256": "sha256:138e6380da42f343adb6acc299b3ccd1e39c4a3023ba52bad6e2507d5e59f8ec",
+              "replayed_response_sha256": "sha256:cf868b916a861dc1b585da85f0cde0f71cd5eeb370eabff4bd0be5da3ea8742d",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 108,
+              "reported_reasoning_tokens": 19,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            },
+            {
+              "original_call_index": 5,
+              "original_request_sha256": "sha256:219360e712f944c9e379ceef07a0e1ac817be9586886a326b7ca7a8d6057c3d7",
+              "original_response_sha256": "sha256:097478d98c4013b498997f3efafe2da963d58ddc6ec5bc8c639eb3e5c3204f2d",
+              "replayed_request_sha256": "sha256:219360e712f944c9e379ceef07a0e1ac817be9586886a326b7ca7a8d6057c3d7",
+              "replayed_response_sha256": "sha256:097478d98c4013b498997f3efafe2da963d58ddc6ec5bc8c639eb3e5c3204f2d",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 1160,
+              "reported_reasoning_tokens": 221,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            },
+            {
+              "original_call_index": 6,
+              "original_request_sha256": "sha256:5dc738badb0ff5d27c24fc5ba8a9f4b915d3e4cf802a4e5266e9ac241cc7aca5",
+              "original_response_sha256": "sha256:deddfca4f36f0878c0eb37de065a9b95830ee8d27c68b3ebd56c1e07f4ec924a",
+              "replayed_request_sha256": "sha256:5dc738badb0ff5d27c24fc5ba8a9f4b915d3e4cf802a4e5266e9ac241cc7aca5",
+              "replayed_response_sha256": "sha256:deddfca4f36f0878c0eb37de065a9b95830ee8d27c68b3ebd56c1e07f4ec924a",
+              "request_exact": true,
+              "response_exact": true,
+              "thinking_characters": 840,
+              "reported_reasoning_tokens": 167,
+              "returned": "full_thinking",
+              "provider_route_verified": true,
+              "worker_socket_written": true,
+              "agent_exact_response_acknowledged": true,
+              "strict_unscored_target": true,
+              "outbound_reasoning_controls": {
+                "effort": "low",
+                "exclude": false
+              },
+              "tool_choice": "required",
+              "finish_reason": "tool_calls",
+              "original_action_disposition": "observed_only_not_reexecuted"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "fresh_synthetic_counterevidence": [
+    {
+      "tool_choice": "named",
+      "reasoning_effort": "high",
+      "calls": 6,
+      "full_thinking_turns": 2,
+      "missing_positive_thinking_turns": 4,
+      "missing_thinking_excluded_from_generated_targets": true,
+      "raw_SQL_and_worker_fidelity_passed": true,
+      "classification": "incomplete_or_unproved",
+      "missing_turns": [
+        {
+          "scenario": "acme",
+          "call_identity": "sha256:cb40fbf4d967a31a79600e28647366177b5dbc6b4d3fcf6667153a044cff89ac",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "acme",
+          "call_identity": "sha256:316964c5109d12b86ae59dbe42393dca33fe9882502487f2d84d7bef6e7a3acd",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "call_identity": "sha256:2fd6ac887f7e226a24bb41ce30eb202d2c7533cfd0b20e4c1d286d1f44b83340",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "call_identity": "sha256:a3384ad49519a54f0e2e97444b19c79634f2312a926e6ed8bbcacc21bf7f916e",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        }
+      ],
+      "artifacts": [
+        {
+          "scenario": "acme",
+          "report_sha256": "8a6a16a91548fde84b323ae8ee5f7b8fb9423f6deb02ca1f738c9332a3e267cb",
+          "ledger_sha256": "5c222f0727f1ae8b91439f8fb66f04bbbabfd993f3b3b6cb4212fc3b51a44566",
+          "export_sha256": "ee4aea36c3505f6eeebbb19e5b743f0fdafed5cebe63237c1649365376dd2f4e"
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "report_sha256": "77c10274a26e59e114a5d4e1b9b6018b0520181b036d1ac46585dca6c588c215",
+          "ledger_sha256": "3a14e5ed530eff457fcde48f61959c849b7e1f0de58fbe8efb3e2248cf5e73a1",
+          "export_sha256": "825c51a29ddbbe04c79626cebb76e68f8d63b51c5f84c6d36da7a2187e426cfa"
+        }
+      ]
+    },
+    {
+      "tool_choice": "auto",
+      "reasoning_effort": "high",
+      "calls": 6,
+      "full_thinking_turns": 3,
+      "missing_positive_thinking_turns": 3,
+      "missing_thinking_excluded_from_generated_targets": true,
+      "raw_SQL_and_worker_fidelity_passed": true,
+      "classification": "incomplete_or_unproved",
+      "missing_turns": [
+        {
+          "scenario": "acme",
+          "call_identity": "sha256:75f5091475eb3fd5f4f0ff5ed86f8b5a49d39e635e4455a6a1fdf090fd4b10ee",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "call_identity": "sha256:5be3eadce1fb83d5c94c6429dcab58e7cc33175a99cd408a9c60f9811fa220ca",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "call_identity": "sha256:65c50b24bd498988dee70835842a6ba0cb90a12aad61eb37b564e32caea2fd91",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        }
+      ],
+      "artifacts": [
+        {
+          "scenario": "acme",
+          "report_sha256": "fe8029e07d148f9061aa07807f71cfe782070ae7ba24304b5501dd10938bf2f0",
+          "ledger_sha256": "1004c037b4e719509336dbea3ad2a9832c2c876908b3f33c8db14d6bd7a41847",
+          "export_sha256": "bb3d574bd10a3b2fc4613b5f1f2c56d4d9c79a5b8a4707a32b0745f044785dee"
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "report_sha256": "8e42ce47c29a0bcf514b125ace29f1d0e686449ea6e32366b00288098d018339",
+          "ledger_sha256": "15bf5c2736027513117c3174477fd91f5edd74a21a9857243b5f4a569f4a84c4",
+          "export_sha256": "6d99087f3234d47621608221a947dd349c4418a88ec33500e6e341c28ba2dbe3"
+        }
+      ]
+    },
+    {
+      "tool_choice": "required",
+      "reasoning_effort": "high",
+      "calls": 6,
+      "full_thinking_turns": 2,
+      "missing_positive_thinking_turns": 4,
+      "missing_thinking_excluded_from_generated_targets": true,
+      "raw_SQL_and_worker_fidelity_passed": true,
+      "classification": "incomplete_or_unproved",
+      "missing_turns": [
+        {
+          "scenario": "acme",
+          "call_identity": "sha256:772efb7af61d2cfd7b790396279859c816e8901752fe5dc4a72971c8f8b4cd62",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "acme",
+          "call_identity": "sha256:d34130697a3ee3b297d2832c9bb62b8938065383040b1f43e62424b995c27cf2",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "call_identity": "sha256:789bfbcaba943a90ee2d7e3eabd0d0728e63b9311a32d4b632a8bd409884bc03",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "call_identity": "sha256:caaf5d5d54a5c51c4f49df8ab72b4991649822b72cfe87186c1d68b355492d83",
+          "reported_reasoning_tokens": 1,
+          "thinking_characters": 0
+        }
+      ],
+      "artifacts": [
+        {
+          "scenario": "acme",
+          "report_sha256": "fe55dd75d7f5c3090dd45f2d5c98cd4c2a6f273cc71224e7299ee0a084ccacf4",
+          "ledger_sha256": "2370f657cb63a42a8007a93a9aa5628f7dfab472408ffa87f9bbf92a570a9be8",
+          "export_sha256": "793d3b092b068381863f63b1a10b2afac9185358d91662b5b2f7acc30f3d7ee0"
+        },
+        {
+          "scenario": "conflicting_evidence",
+          "report_sha256": "5112a090a00e09346f00288600058e3920ab302bec4011fb234107c4c659d295",
+          "ledger_sha256": "c248d6be7032e73b252cdff39365f6bbb23ea501390d53204f078b319672e74a",
+          "export_sha256": "f59315c5045a2e162a53324d2d6fa391e9311bcb4c10c65e286eefc0d55a993a"
+        }
+      ]
+    }
+  ]
+}

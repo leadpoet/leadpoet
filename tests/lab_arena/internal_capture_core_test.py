@@ -52,6 +52,49 @@ def test_roundtrip_retains_exact_request_readable_reasoning_and_distinct_outcome
     assert all(stage in raw["events"] for stage in capture.STAGES)
 
 
+@pytest.mark.parametrize("declaration", ["absent", "different", "hosted_only"])
+def test_undeclared_chat_tool_call_stays_raw_without_sft(tmp_path, declaration):
+    payload = request()
+    if declaration == "different":
+        payload["tools"] = [{"type": "function", "function": {
+            "name": "different_tool", "parameters": {"type": "object"}}}]
+    elif declaration == "hosted_only":
+        payload["tools"] = [{"type": "openrouter:web_search", "parameters": {"engine": "native"}}]
+    provider = response()
+    choice = provider["choices"][0]
+    choice["finish_reason"] = "tool_calls"
+    choice["message"].update(content=None, tool_calls=[{
+        "id": "call-1", "type": "function", "function": {
+            "name": "fetch_source", "arguments": '{"url":"https://example.com/source"}'}}])
+    objects, call = captured(tmp_path, provider=provider, payload=payload)
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json")
+    assert raw["request"] == payload and raw["response"] == provider
+    assert raw["completeness"]["complete"] is True
+    assert candidate is None
+    assert raw["sft_exclusions"] == ["target_shape_or_completion_unsupported"]
+
+
+@pytest.mark.parametrize("hosted_search", [False, True])
+def test_declared_chat_tool_call_keeps_exact_target(tmp_path, hosted_search):
+    payload = request()
+    payload["tools"] = [{"type": "function", "function": {
+        "name": "fetch_source", "parameters": {"type": "object"}}}]
+    if hosted_search:
+        payload["tools"].append({"type": "openrouter:web_search", "parameters": {"engine": "native"}})
+    provider = response()
+    choice = provider["choices"][0]
+    choice["finish_reason"] = "tool_calls"
+    choice["message"].update(content=None, tool_calls=[{
+        "id": "call-1", "type": "function", "function": {
+            "name": "fetch_source", "arguments": ' { "url" : "https://example.com/source" } '}}])
+    objects, call = captured(tmp_path, provider=provider, payload=payload)
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json")
+    assert raw["request"] == candidate["input"] == payload
+    assert raw["response"] == provider
+    assert candidate["target"]["tool_calls"] == choice["message"]["tool_calls"]
+    assert raw["sft_exclusions"] == []
+
+
 def test_start_is_not_dispatch_and_missing_stages_are_visible(tmp_path):
     objects = LocalObjectStore(tmp_path)
     call = capture.InternalCapture(objects).start(purpose="icp_generation", context={}, request=request())

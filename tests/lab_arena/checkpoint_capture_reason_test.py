@@ -8,6 +8,7 @@ import threading
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -36,49 +37,61 @@ def read(c, n):
     return data
 
 
+@contextmanager
+def ack_server(mode):
+    with tempfile.TemporaryDirectory(prefix='cpr-', dir='/tmp') as short:
+        path = short+'/socket'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.settimeout(1.0)
+            server.bind(path)
+            server.listen(1)
+            stored = []
+
+            def serve():
+                try:
+                    c, _ = server.accept()
+                    with c:
+                        c.settimeout(1.0)
+                        size = int.from_bytes(read(c, 4), 'big') & 0x7fffffff
+                        frame = json.loads(read(c, size))
+                        checkpoint.validate_training_frame(frame)
+                        if mode != 'rejected':
+                            stored.append(frame)
+                        if mode == 'delayed':
+                            time.sleep(1.1)
+                        payload = (b'no' if mode == 'malformed' else json.dumps({
+                            'recorded': mode != 'rejected',
+                            'observation_id': 'bad' if mode == 'bad_id' else 0,
+                        }).encode())
+                        c.sendall(len(payload).to_bytes(4, 'big')+payload)
+                except (socket.timeout, EOFError, BrokenPipeError):
+                    pass
+
+            thread = threading.Thread(target=serve)
+            thread.start()
+            try:
+                yield path, stored
+            finally:
+                thread.join(2)
+                assert not thread.is_alive()
+
+
 @pytest.mark.parametrize('mode,reason', [
     ('success', None), ('delayed', 'timeout'), ('rejected', 'host_rejected'),
     ('malformed', 'invalid_response'), ('bad_id', 'invalid_response'),
 ])
 def test_socket_ack_diagnostic(tmp_path, monkeypatch, mode, reason):
-    short = tempfile.TemporaryDirectory(prefix='cpr-', dir='/tmp')
-    path = short.name+'/socket'
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(path)
-    server.listen(1)
-    stored = []
-    def serve():
-        c, _ = server.accept()
-        with c:
-            size = int.from_bytes(read(c, 4), 'big') & 0x7fffffff
-            frame = json.loads(read(c, size))
-            checkpoint.validate_training_frame(frame)
-            if mode != 'rejected':
-                stored.append(frame)
-            if mode == 'delayed':
-                time.sleep(1.1)
-            payload = (b'no' if mode == 'malformed' else json.dumps({
-                'recorded': mode != 'rejected', 'observation_id': 'bad' if mode == 'bad_id' else 0,
-            }).encode())
-            try:
-                c.sendall(len(payload).to_bytes(4, 'big')+payload)
-            except BrokenPipeError:
-                pass
-    thread = threading.Thread(target=serve)
-    thread.start()
-    monkeypatch.setenv(checkpoint.WORKER_SOCKET_ENV, path)
-    raw = b'nonsecret text'
-    body = SimpleNamespace(identity=None, truncated=False, size=len(raw), complete=True,
-        content_type='text/plain', buffer=raw, encoding='utf-8', url='https://example.com',
-        status=200, retrieved_at='2026-10-21T00:00:00+00:00', digest=hashlib.sha256(raw))
-    checkpoint._TRAINING_FAILURE.reason = "host_rejected"
-    value = recorder()
-    value._enqueue(body)
-    value._emit(value.queue.get_nowait())
-    thread.join(2)
-    server.close()
-    short.cleanup()
-    assert not thread.is_alive()
+    with ack_server(mode) as (path, stored):
+        monkeypatch.setenv(checkpoint.WORKER_SOCKET_ENV, path)
+        raw = b'nonsecret text'
+        body = SimpleNamespace(identity=None, truncated=False, size=len(raw), complete=True,
+            content_type='text/plain', buffer=raw, encoding='utf-8', url='https://example.com',
+            redirect_url=None, status=200, retrieved_at='2026-10-21T00:00:00+00:00',
+            digest=hashlib.sha256(raw))
+        checkpoint._TRAINING_FAILURE.reason = "host_rejected"
+        value = recorder()
+        value._enqueue(body)
+        value._emit(value.queue.get_nowait())
     assert checkpoint.TRAINING_SOCKET_TIMEOUT_SECONDS == 1.0
     assert checkpoint._training_failure_reason() == reason
     if reason:
@@ -86,6 +99,16 @@ def test_socket_ack_diagnostic(tmp_path, monkeypatch, mode, reason):
     else:
         assert value.counts == {'web_written': 1}
     assert len(stored) == (mode != 'rejected')
+
+
+@pytest.mark.parametrize('connect', [False, True])
+def test_ack_server_closes_without_complete_capture_frame(connect):
+    with ack_server('success') as (path, stored):
+        if connect:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(path)
+                client.sendall(b'\x00')
+    assert stored == []
 
 
 def test_socket_invalid_frame_and_reset(tmp_path, monkeypatch):

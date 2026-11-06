@@ -1,4 +1,4 @@
-"""Real durable admission claims on the exact635 recovery function bodies."""
+"""Real durable admission claims on the exact637 recovery function bodies."""
 import re
 
 import pytest
@@ -6,6 +6,7 @@ import pytest
 from lab_arena import code_review, code_review_policy
 from lab_arena.store import ArenaStoreError, new_lease_token
 from tests.lab_arena import nov06_late_review635_postgres_test as late
+from tests.lab_arena import nov06_ninth_review637_postgres_test as ninth
 from tests.lab_arena.refusal_review_fallback599_postgres_test import (
     PRIMARY, ALTERNATE, SIGNATURES, accepted_recovery_submission, begin, failure, verdict,
 )
@@ -16,7 +17,13 @@ from tests.lab_arena.prospective_admission_primary_test import DEEPSEEK, receipt
 from tests.lab_arena.test_lab_arena_code_review_runtime import _archive, _source
 from tests.postgres_migration_harness import SCRIPTS
 
-MIGRATION = SCRIPTS / '641-lab-arena-prospective-admission-primary.sql'
+MIGRATION = SCRIPTS / '642-lab-arena-prospective-admission-primary.sql'
+parent_database = ninth.database
+
+
+@pytest.fixture
+def ninth_context(parent_database):
+    yield from ninth.context.__wrapped__(parent_database)
 
 
 def restore_predecessor(cursor):
@@ -24,7 +31,7 @@ def restore_predecessor(cursor):
     for i, signature in enumerate(SIGNATURES):
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
         fixed = cursor.fetchone()[0]
-        replacements = re.findall(r'v_old:=\$old641_'+str(i)+r'_(\d+)\$(.*?)\$old641_'+str(i)+r'_\1\$;\n  v_new:=\$new641_'+str(i)+r'_\1\$(.*?)\$new641_'+str(i)+r'_\1\$;', text, re.S)
+        replacements = re.findall(r'v_old:=\$old642_'+str(i)+r'_(\d+)\$(.*?)\$old642_'+str(i)+r'_\1\$;\n  v_new:=\$new642_'+str(i)+r'_\1\$(.*?)\$new642_'+str(i)+r'_\1\$;', text, re.S)
         assert replacements
         for _, old, new in reversed(replacements):
             assert new in fixed
@@ -49,6 +56,9 @@ def recovery_database():
             # recovery membership, row changes, or additional claims are made.
             cursor.execute(sql.split('DO $recover635$')[0]
                            + 'DO $restore635$' + sql.split('DO $restore635$', 1)[1])
+            ninth = (SCRIPTS / '637-arena-2026-11-06-ninth-review-recovery.sql').read_text()
+            cursor.execute(ninth.split('DO $recover637$')[0]
+                           + 'DO $restore637$' + ninth.split('DO $restore637$', 1)[1])
             cursor.execute(MIGRATION.read_text())
         yield pg, dsn
     finally:
@@ -65,7 +75,7 @@ def test_fail_before_then_upgrade_preserves_rows_and_uses_actual_new_primary(rec
     with recovery_superuser.cursor() as cursor:
         restore_predecessor(cursor)
         functions = function_snapshot(cursor)
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary641-before')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-before')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, DEEPSEEK)
@@ -94,12 +104,13 @@ def test_migration_replay_and_unknown_final_body_preserve_all_functions(recovery
         fixed = function_snapshot(cursor)
         cursor.execute(MIGRATION.read_text())
         assert function_snapshot(cursor) == fixed
+
         restore_predecessor(cursor)
         cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURES[-1],))
         original_schema = cursor.fetchone()[0]
-        cursor.execute(original_schema.replace('SELECT', '-- unknown641\n  SELECT', 1))
+        cursor.execute(original_schema.replace('SELECT', '-- unknown642\n  SELECT', 1))
         before = function_snapshot(cursor)
-        with pytest.raises(Exception, match='primary641 preimage differs'):
+        with pytest.raises(Exception, match='primary642 preimage differs'):
             cursor.execute(MIGRATION.read_text())
         cursor.execute('ROLLBACK')
         assert function_snapshot(cursor) == before
@@ -108,9 +119,53 @@ def test_migration_replay_and_unknown_final_body_preserve_all_functions(recovery
         assert function_snapshot(cursor) == fixed
 
 
+def test_unknown_parent_recovery_helper_is_rejected_without_function_changes(recovery_store, recovery_superuser):
+    signature = 'public.lab_arena__nov06_late_review635_v1(public.lab_arena_rounds,public.lab_arena_submissions)'
+    with recovery_superuser.cursor() as cursor:
+        cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
+        original = cursor.fetchone()[0]
+        cursor.execute(original.replace('SELECT', '-- unknown642parent\n SELECT', 1))
+        before = function_snapshot(cursor)
+        with pytest.raises(Exception, match='primary642 parent637 differs'):
+            cursor.execute(MIGRATION.read_text())
+        cursor.execute('ROLLBACK')
+        assert function_snapshot(cursor) == before
+        cursor.execute(original)
+
+
+def test_ninth_receipt_keeps_exact_sol_attempt_and_prior_history(ninth_context):
+    store, connection, sql, target, *_ = ninth_context
+    ninth.apply(connection, sql)
+    before_row = store.get_submission(ninth.SID)
+    before_ledger = store.list_ledger(submission_id=ninth.SID)
+    with connection.cursor() as cursor:
+        functions = function_snapshot(cursor)
+    ninth.apply(connection, MIGRATION.read_text())
+    assert store.get_submission(ninth.SID) == before_row
+    assert store.list_ledger(submission_id=ninth.SID) == before_ledger
+    with connection.cursor() as cursor:
+        after = function_snapshot(cursor)
+    for signature in ('lab_arena__nov06_late_review635_v1(lab_arena_rounds,lab_arena_submissions)',
+                      'lab_arena_submissions_frozen_v1()'):
+        assert after[signature] == functions[signature]
+    assert begin(store, ninth.SID, before_row['miner_hotkey'], DEEPSEEK) == {
+        'status': 'route_required', 'review_model': ALTERNATE}
+    assert ninth.finish_ninth(store, target)['status'] == 'error'
+    row = store.get_submission(ninth.SID)
+    assert row['code_review_attempts'] == 4
+    assert row['code_review_doc']['model'] == ALTERNATE
+    ledger = store.list_ledger(submission_id=ninth.SID)
+    assert ledger[:len(before_ledger)] == before_ledger
+    assert [entry['entry_doc']['review_model'] for entry in ledger if entry['entry_kind'] == 'reservation'] == [
+        PRIMARY, PRIMARY, PRIMARY, ALTERNATE]
+    _age_review_error(connection, ninth.SID)
+    assert begin(store, ninth.SID, row['miner_hotkey'], ALTERNATE)['status'] == 'exhausted'
+    assert store.list_ledger(submission_id=ninth.SID) == ledger
+
+
 @pytest.mark.parametrize('primary', [PRIMARY, DEEPSEEK])
 def test_refusal_episode_keeps_two_real_primary_and_two_alternate_claims(recovery_store, recovery_superuser, primary):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary641-'+('legacy' if primary == PRIMARY else 'new'))
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-'+('legacy' if primary == PRIMARY else 'new'))
     for index, model in enumerate([primary, primary, ALTERNATE, ALTERNATE], 1):
         if index > 1:
             _age_review_error(recovery_superuser, submission)
@@ -133,7 +188,7 @@ def test_refusal_episode_keeps_two_real_primary_and_two_alternate_claims(recover
 
 
 def test_deepseek_truncation_uses_next_existing_slot_and_preserves_unknown_cost(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary641-truncated')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-truncated')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, DEEPSEEK,
@@ -158,7 +213,7 @@ def test_deepseek_truncation_uses_next_existing_slot_and_preserves_unknown_cost(
 @pytest.mark.parametrize('primary,other', [(PRIMARY, DEEPSEEK), (DEEPSEEK, PRIMARY)])
 def test_transient_episode_cannot_change_primary_model(recovery_store, recovery_superuser, primary, other):
     _, submission, miner = accepted_recovery_submission(recovery_store,
-        'primary641-transient-'+('old' if primary == PRIMARY else 'new'))
+        'primary642-transient-'+('old' if primary == PRIMARY else 'new'))
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, primary, token)['status'] == 'claimed'
     finish(recovery_store, submission, miner, token, primary, error='code_review_transport_error', actual=None)
@@ -170,7 +225,7 @@ def test_transient_episode_cannot_change_primary_model(recovery_store, recovery_
 
 
 def test_native_runtime_primary_pass_is_bound_to_real_ledger_and_final(recovery_store, recovery_superuser):
-    _, submission, _ = accepted_recovery_submission(recovery_store, 'primary641-runtime')
+    _, submission, _ = accepted_recovery_submission(recovery_store, 'primary642-runtime')
     instance, _, _, transport = reviewer(lambda parameters: {'body': receipt(parameters)}, store=recovery_store)
     row = {**recovery_store.get_submission(submission), 'source_size_bytes': len(_archive(_source()))}
     assert instance.review(row)['status'] == 'passed'
@@ -183,7 +238,7 @@ def test_native_runtime_primary_pass_is_bound_to_real_ledger_and_final(recovery_
 
 
 def test_actual_model_binding_and_db_first_schema_remain_fail_closed(recovery_store, recovery_superuser):
-    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary641-binding')
+    _, submission, miner = accepted_recovery_submission(recovery_store, 'primary642-binding')
     token = new_lease_token()
     assert begin(recovery_store, submission, miner, DEEPSEEK, token)['status'] == 'claimed'
     with pytest.raises(ArenaStoreError, match='input_invalid'):

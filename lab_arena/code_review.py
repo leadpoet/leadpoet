@@ -116,6 +116,20 @@ classification and a nonempty source-only limitations list. If control cannot be
 established, use unverified with actual source evidence for that uncertainty;
 never invent an excerpt to complete the response.
 """
+_PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE = """
+
+Final research_control output format: every evidence excerpt must contain at
+least 12 non-whitespace characters and be an exact contiguous substring of its
+named source file. Choose adjacent source lines if needed to meet that minimum;
+do not edit, combine separate spans, or paraphrase the excerpt.
+The unique set of evidence claim tags must be exactly the set for the selected
+classification, with no tags from another classification:
+model_directed: observation_to_action, finish_continue
+workflow: fixed_control
+unverified: uncertainty
+Describe other scaffolding and interpretation in explanation or limitations,
+not as additional evidence claim tags.
+"""
 _RESPONSE_INVALID_REASONS = frozenset(
     {
         "envelope", "model_mismatch", "choice", "not_finished", "truncated", "truncated_at_limit", "message",
@@ -476,7 +490,9 @@ def prepare_request(
         "model": model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT + (
-                _RESEARCH_PROMPT + _RESEARCH_RESPONSE_GUIDANCE if research_control else "")},
+                _RESEARCH_PROMPT + _RESEARCH_RESPONSE_GUIDANCE + (
+                    _PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
+                    if model == PROSPECTIVE_REVIEW_MODEL else "") if research_control else "")},
             {"role": "user", "content": contracts.canonical_json(submission)},
         ],
         "max_tokens": max_output_tokens,

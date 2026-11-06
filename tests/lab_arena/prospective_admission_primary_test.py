@@ -163,6 +163,49 @@ def test_deepseek_research_classification_and_exact_excerpts_keep_native_securit
     assert error.value.response_reason == 'research_evidence_mismatch'
 
 
+def test_deepseek_research_format_suffix_repeats_only_existing_native_contract():
+    from tests.lab_arena.research_control_code_review_test import SOURCE
+    payload = _archive(SOURCE)
+    prepared = code_review.prepare_request(payload, model=DEEPSEEK, research_control=True)
+    native_prefix = code_review._SYSTEM_PROMPT + code_review._RESEARCH_PROMPT + code_review._RESEARCH_RESPONSE_GUIDANCE
+    suffix = code_review._PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
+    assert prepared.parameters['messages'][0]['content'] == native_prefix + suffix
+    assert contracts.document_hash(prepared.parameters) == 'sha256:77c0d34fed0b38ac9912880c03ce18ed8ee7d0cd541820b89c47b601237c396a'
+    assert '12 non-whitespace characters' in suffix
+    assert 'exact contiguous substring' in suffix
+    assert 'adjacent source lines' in suffix
+    for classification, claims in {
+        'model_directed': 'observation_to_action, finish_continue',
+        'workflow': 'fixed_control', 'unverified': 'uncertainty',
+    }.items():
+        assert classification + ': ' + claims in suffix
+    assert 'explanation or limitations' in suffix
+    for model in (code_review.DEFAULT_REVIEW_MODEL, code_review.FALLBACK_REVIEW_MODEL):
+        historical = code_review.prepare_request(payload, model=model, research_control=True)
+        assert historical.parameters['messages'][0]['content'] == native_prefix
+    plain = code_review.prepare_request(payload, model=DEEPSEEK)
+    assert plain.parameters['messages'][0]['content'] == code_review._SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize('damage,reason', [
+    ('short_exact_excerpt', 'research_evidence_mismatch'),
+    ('extra_scaffolding_claim', 'research_classification'),
+])
+def test_format_guidance_never_weakens_excerpt_or_classification_validator(damage, reason):
+    from tests.lab_arena.research_control_code_review_test import SOURCE, _assessment, _response
+    prepared = code_review.prepare_request(_archive(SOURCE), model=DEEPSEEK, research_control=True)
+    assessment = _assessment(prepared)
+    if damage == 'short_exact_excerpt':
+        assessment['evidence'][0]['excerpt'] = 'while True:'
+    else:
+        assessment['evidence'].append({**assessment['evidence'][0], 'claim': 'fixed_control'})
+    response = _response(prepared, assessment)
+    response.update({key: receipt(prepared.parameters)[key] for key in ('provider', 'openrouter_metadata', 'usage')})
+    with pytest.raises(code_review.CodeReviewError) as error:
+        code_review.parse_response(response, prepared)
+    assert error.value.response_reason == reason
+
+
 @pytest.mark.parametrize('summary_only', [False, True])
 def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_path, summary_only):
     from lab_arena import internal_capture, reasoning_capture

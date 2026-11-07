@@ -73,8 +73,8 @@ class CaptureError(ValueError):
     """Request evidence was not complete or did not pass integrity checks."""
 
 
-def model_response_object(text: str) -> dict[str, Any]:
-    """Parse optional model evidence without discarding private field values."""
+def response_json_value(text: str) -> Any:
+    """Parse provider evidence without discarding duplicate private fields."""
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -83,7 +83,12 @@ def model_response_object(text: str) -> dict[str, Any]:
             result[key] = value
         return result
 
-    value = json.loads(text, object_pairs_hook=unique_object)
+    return json.loads(text, object_pairs_hook=unique_object)
+
+
+def model_response_object(text: str) -> dict[str, Any]:
+    """Require an object for structured model privacy checks."""
+    value = response_json_value(text)
     if not isinstance(value, dict):
         raise CaptureError("model_response_object_required")
     return value

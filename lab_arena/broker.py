@@ -2491,8 +2491,8 @@ def _capture_upstream_response(
             body, is_json = training_capture.model_response_object(text), True
         else:
             try:
-                body, is_json = json.loads(text), True
-            except ValueError:
+                body, is_json = training_capture.response_json_value(text), True
+            except json.JSONDecodeError:
                 body, is_json = text, False
         cleaned, body_redactions = training_capture.sanitize_training_value(body)
         raw = response.body

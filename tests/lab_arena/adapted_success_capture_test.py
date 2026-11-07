@@ -55,6 +55,59 @@ def test_identity_adapter_does_not_duplicate_upstream_body(monkeypatch):
     assert "upstream_response_receipt" not in store.calls[result.call["call_identity"]]["terminal"]
 
 
+def test_duplicate_tool_metadata_cannot_bypass_private_capture_redaction():
+    document = b'{"job_id":"fake-job-1","status":"completed","billing":{"credits_charged":0.02},"result":{"data":{"rawHtml":"<html>safe facts</html>","metadata":{"url":"https://example.com/","sourceURL":"https://example.com/","statusCode":200,"api_key":"synthetic-private-test-value","api_key":null}}}}'
+    transport = FakeTransport([(200, document)])
+    broker, store, _ = routed_broker(transport=transport)
+    kwargs = dict(operation_id="scrapingdog.scrape", parameters={"url": "https://example.com/"},
+                  action_sequence=1, timeout_ms=30_000)
+    first = broker.execute(score_context(firecrawl_catalog()), **kwargs)
+    saved = store.calls[first.call["call_identity"]]["terminal"]
+    assert first.status == 200 and first.body == b"<html>safe facts</html>"
+    assert saved["upstream_response_receipt"] == {
+        "status": "unavailable", "reason": "response_capture_failed",
+    }
+    assert "synthetic-private-test-value" not in json.dumps(saved)
+    repeated = broker.execute(score_context(firecrawl_catalog()), **kwargs)
+    assert (repeated.status, repeated.headers, repeated.body) == (first.status, first.headers, first.body)
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize("body", [
+    b'{"api_key":"synthetic-secret","api_key":null}',
+    b'[{"metadata":{"api_key":"synthetic-secret","api_key":null}}]',
+    b'{"metadata":{"api_key":"synthetic-secret","api_\\u006bey":null}}',
+])
+@pytest.mark.parametrize("status", [200, 503])
+def test_duplicate_tool_json_is_not_reinterpreted_as_plain_text(body, status):
+    from lab_arena import broker as br
+    receipt = br._capture_upstream_response(br.ProviderResponse(status, {}, body),
+        operation_id="scrapingdog.scrape", request_hash="hash", call_identity="call")
+    assert receipt == {"status": "unavailable", "reason": "response_capture_failed"}
+
+
+@pytest.mark.parametrize("body", [
+    b'[{"facts":"safe"}]', b'"safe text"', b'123', b'null',
+    b'<html>safe facts</html>', b'{unfinished public text',
+])
+def test_nonobject_json_and_plain_tool_text_remain_capturable(body):
+    from lab_arena import broker as br
+    receipt = br._capture_upstream_response(br.ProviderResponse(200, {}, body),
+        operation_id="scrapingdog.scrape", request_hash="hash", call_identity="call")
+    assert base64.b64decode(receipt["body_b64"]) == body
+    assert receipt["privacy"]["redacted"] is False
+
+
+def test_tool_json_array_still_redacts_nested_credentials():
+    from lab_arena import broker as br
+    body = b'[{"metadata":{"api_key":"synthetic-secret","source":"public"}}]'
+    receipt = br._capture_upstream_response(br.ProviderResponse(200, {}, body),
+        operation_id="scrapingdog.scrape", request_hash="hash", call_identity="call")
+    assert json.loads(base64.b64decode(receipt["body_b64"])) == [
+        {"metadata": {"api_key": "[REDACTED]", "source": "public"}}]
+    assert receipt["privacy"]["redacted"] is True
+
+
 @pytest.mark.parametrize("capture_case", ["credential", "size"])
 def test_optional_success_capture_preserves_eligibility_and_sft_targets(capture_case):
     from copy import deepcopy

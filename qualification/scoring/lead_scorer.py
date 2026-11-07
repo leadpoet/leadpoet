@@ -9029,7 +9029,8 @@ async def _run_targeted_company_evidence_investigation(
             "structured_profile_identity"
         ]["url"]
     if (
-        investigation_observed_linkedin == ""
+        isinstance(investigation_observed_linkedin, str)
+        and not investigation_observed_linkedin.strip()
         and investigation_web_identity.get("decision") == COMPANY_FIT_MATCH
         and investigation_web_identity.get("evidence_source")
         == "company_web_reverification"

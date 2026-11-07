@@ -15,6 +15,9 @@ from tests.lab_arena.internal_capture_responses_test import request, response
     ("Retained source excerpt.", 1, "exposed"),
     ("[REDACTED]", 0, "redacted"),
     (" \n[REDACTED]\t", 0, "redacted"),
+    ("[REDACTED] [REDACTED]", 0, "redacted"),
+    ("[REDACTED][REDACTED]", 0, "redacted"),
+    ("[REDACTED] Retained excerpt.", 1, "exposed"),
     ("", 0, "not_exposed"),
     (" \n\t", 0, "not_exposed"),
 ])
@@ -33,6 +36,8 @@ def test_responses_text_summary_distinguishes_retained_redacted_and_absent(locat
 @pytest.mark.parametrize("value,count", [
     ("Retained source excerpt.", 1), ("[REDACTED]", 0),
     (" \n[REDACTED]\t", 0), ("", 0), (" \n\t", 0),
+    ("[REDACTED] [REDACTED]", 0), ("[REDACTED][REDACTED]", 0),
+    ("[REDACTED] Retained excerpt.", 1),
 ])
 def test_chat_text_summary_uses_the_same_placeholder_boundary(value, count):
     provider = {"choices": [{"message": {"annotations": [{"type": "url_citation",
@@ -68,20 +73,25 @@ def test_mixed_events_keep_real_text_counts_and_original_output_order():
     assert provider == before
 
 
-def test_privacy_removed_text_stays_distinct_from_provider_nonexposure(tmp_path):
+@pytest.mark.parametrize("source_text,redacted", [
+    ("fixture-private-token", "[REDACTED]"),
+    ("fixture-private-token fixture-second-token", "[REDACTED] [REDACTED]"),
+    ("fixture-private-tokenfixture-second-token", "[REDACTED][REDACTED]"),
+])
+def test_privacy_removed_text_stays_distinct_from_provider_nonexposure(tmp_path, source_text, redacted):
     objects = LocalObjectStore(tmp_path)
     provider = response()
-    provider["output"][1]["action"]["sources"][0]["text"] = "fixture-private-token"
+    provider["output"][1]["action"]["sources"][0]["text"] = source_text
     provider["usage"].update(input_tokens=121, output_tokens=33,
                              output_tokens_details={"reasoning_tokens": 0}, cost=0.0002)
     before = deepcopy(provider)
     call = internal_capture.InternalCapture(objects).start(
         purpose="icp_generation", context={}, request=request(), api="openrouter.responses",
-        secrets=("fixture-private-token",))
+        secrets=("fixture-private-token", "fixture-second-token"))
     call.response(body=json.dumps(provider).encode(), status=200)
     call.finish(outcome={"status": "fixture"}, cost_microusd=200)
     raw, candidate = internal_capture.read_call(objects, call.prefix + "request.json")
-    assert raw["response"]["output"][1]["action"]["sources"][0]["text"] == "[REDACTED]"
+    assert raw["response"]["output"][1]["action"]["sources"][0]["text"] == redacted
     assert raw["research_evidence"]["events"][0]["result_text_status"] == "redacted"
     assert raw["research_evidence"]["events"][1]["result_text_status"] == "not_exposed"
     assert raw["research_evidence"]["events_with_result_text"] == 0

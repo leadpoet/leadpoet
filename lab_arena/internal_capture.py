@@ -348,6 +348,10 @@ def _internal_chat_annotations(body, message):
     }, allow_full_thinking=True)
 
 
+def _has_retained_search_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.replace("[REDACTED]", "").strip())
+
+
 def _search_evidence(response: Any) -> dict:
     """Distinguish retained provider events, URL references and result text.
 
@@ -369,11 +373,10 @@ def _search_evidence(response: Any) -> dict:
         results = results if isinstance(results, list) else []
         text_fields = ("text", "content", "snippet")
         text_results = [row for row in sources + results if isinstance(row, Mapping)
-                        and any(isinstance(row.get(key), str) and row[key].strip()
-                                and row[key].strip() != "[REDACTED]" for key in text_fields)]
+                        and any(_has_retained_search_text(row.get(key)) for key in text_fields)]
         text_status = "exposed" if text_results else "not_exposed"
         if not text_results and any(isinstance(row, Mapping) and any(
-                isinstance(row.get(key), str) and row[key].strip() == "[REDACTED]"
+                isinstance(row.get(key), str) and "[REDACTED]" in row[key]
                 for key in text_fields) for row in sources + results):
             text_status = "redacted"
         events.append({"output_index": index, "status": item.get("status"),
@@ -390,7 +393,7 @@ def _search_evidence(response: Any) -> dict:
                 continue
             path = f"/choices/{choice_index}/message/annotations/{index}"
             content = citation.get("content")
-            exposed = isinstance(content, str) and bool(content.strip()) and content.strip() != "[REDACTED]"
+            exposed = _has_retained_search_text(content)
             citations.append({"annotation_path": path, "url_path": path + "/url_citation/url",
                               "content_path": path + "/url_citation/content" if exposed else None,
                               "content_characters": len(content) if exposed else 0})

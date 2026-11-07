@@ -8,6 +8,7 @@ import pytest
 from tests.lab_arena import zero_call_setup_recovery467_postgres_test as deployed
 
 SQL = Path(__file__).parents[2] / 'scripts/468-lab-arena-legacy-review-checkpoint.sql'
+CONTENT_ADDRESS_SQL = Path(__file__).parents[2] / 'scripts/668-lab-arena-content-addressed-score-checkpoint.sql'
 RPCS = (
     'public.lab_arena_complete_attempt(text,text,jsonb,text,text)',
     'public.lab_arena_retry_credit_failures_v1(text,text,text,text)',
@@ -94,6 +95,21 @@ def test_non_superuser_apply_replay_and_failed_old_migration_restore_authority(e
                 else:
                     assert installed == first_rpcs
                     assert helper == first_helper
+
+            content_address_literal = CONTENT_ADDRESS_SQL.read_text()
+            assert content_address_literal.count(grant) == content_address_literal.count(revoke) == 1
+            # Replacing this existing function is allowed to the migration role;
+            # applying the migration must still restore the exact schema ACL.
+            for _ in range(2):
+                cursor.execute(content_address_literal)
+                cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+                assert cursor.fetchone()[0] == original_schema_acl
+                cursor.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE'),has_schema_privilege('lab_arena_service','public','CREATE')")
+                assert cursor.fetchone() == (False, False)
+                cursor.execute('SELECT pg_get_functiondef(oid),pg_get_userbyid(proowner),prosecdef,proacl::text FROM pg_proc WHERE oid=%s::regprocedure', (HELPER,))
+                helper = cursor.fetchone()
+                assert helper[1:] == ('lab_arena_owner', True, '{lab_arena_owner=X/lab_arena_owner}')
+                assert "|| '-' || pg_catalog.substr(p_receipt ->> 'source_output_hash', 8) || '.json'" in helper[0]
             cursor.execute('RESET ROLE')
     finally:
         control.close()

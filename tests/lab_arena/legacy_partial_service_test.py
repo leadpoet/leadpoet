@@ -49,6 +49,20 @@ def test_committed_failed_source_returns_original_terminal_row_only():
     assert service._prior_legacy_terminal_breakdowns({**retry, 'assignment_id': 'another-assignment'}, round_row) == []
 
 
+def test_committed_legacy_score_ref_remains_readable():
+    service, source, round_row, output, _ = _bound_source()
+    legacy_ref = "arena/%s/scores/items/%s.json" % (
+        round_row["round_id"], source["run_id"],
+    )
+    receipt = dict(
+        source["result_doc"]["legacy_partial_checkpoint"],
+        source_output_ref=legacy_ref,
+    )
+    source["output_ref"] = legacy_ref
+    source["result_doc"]["legacy_partial_checkpoint"] = receipt
+    assert service._validated_legacy_partial(source, round_row) == output["terminal_breakdowns"]
+
+
 @pytest.mark.parametrize('change', ['not_committed', 'no_receipt', 'completion', 'artifact', 'accepted', 'input', 'image', 'date', 'claim', 'lease', 'authority', 'unregistered', 'retryable'])
 def test_unbound_checkpoint_never_returns_resume_rows(change):
     service, source, round_row, output, document = _bound_source()

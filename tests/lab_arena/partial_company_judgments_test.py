@@ -4,12 +4,16 @@ from __future__ import annotations
 import copy
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from lab_arena import company_judgments, contracts, runner, scorer_entrypoint, scoring
-from lab_arena.service import ArenaService
+from lab_arena.service import (
+    ArenaService, LocalObjectStore, ServiceError, _score_item_output_ref,
+)
+from lab_arena.store import hash_lease_token
 from qualification.scoring.competition import apply_company_judgment_context
 from qualification.scoring import company_verification, lead_scorer
 from qualification.scoring.company_fit_decision import company_fit_match
@@ -155,6 +159,438 @@ def test_atomic_output_survives_process_failure_after_completed_company(tmp_path
     checkpoint = scoring.scoring_output_from_bytes(output_path.read_bytes())
     assert checkpoint == scoring.build_scoring_failure("execute-1", "judge_error", company_judgments=rows)
     assert not output_path.with_name("output.json.tmp").exists()
+
+
+def test_rejected_score_completion_keeps_object_ref_available_for_correction(
+    tmp_path, monkeypatch
+):
+    """Invalid evidence must not reserve the immutable score object key."""
+    from lab_arena import reviewer_runtime
+
+    scoring_input = _input()
+    refs = _refs(scoring_input)
+    validator = "validator-a"
+    token = "lease-token"
+    lease = {
+        "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+        "hits": [],
+        "misses": [_miss(ref) for ref in refs],
+    }
+    run = {
+        "run_id": "score-run-1",
+        "round_id": "arena-2026-09-11",
+        "runner_hotkey": validator,
+        "kind": "score",
+        "scored_run_id": "execute-1",
+        "submission_id": "submission-1",
+        "miner_hotkey": "miner-a",
+        "lease_token_hash": hash_lease_token(token),
+        "lease_generation": 2,
+        "claim_request_id": "a" * 32,
+        "claim_request_hash": "sha256:" + "b" * 64,
+        "company_judgment_refs": refs,
+        "claim_response": {
+            "company_judgment_cache": lease,
+            "runner_authority_exclusions": [validator, "validator-b"],
+        },
+    }
+    completion_calls = []
+
+    class Store:
+        def get_run(self, run_id):
+            assert run_id == run["run_id"]
+            return run
+
+        def get_submission(self, submission_id):
+            assert submission_id == run["submission_id"]
+            return {"is_king": False}
+
+        def complete_attempt(self, **kwargs):
+            completion_calls.append(kwargs)
+            if len(completion_calls) == 1:
+                raise RuntimeError("injected terminal write failure")
+            run["status"] = "failed"
+            return {"status": "failed", "idempotent": False}
+
+    service = ArenaService.__new__(ArenaService)
+    service._store = Store()
+    service._objects = LocalObjectStore(tmp_path / "objects")
+    configuration = {
+        "integrity_policy": "arena_integrity_v1",
+        "company_judgment_policy": company_judgments.POLICY,
+        "company_quality_policy": "company_quality_v1",
+        "scorer_policy": scoring_input["scorer_policy"],
+    }
+    round_row = {"round_id": run["round_id"], "configuration_doc": configuration}
+    monkeypatch.setattr(
+        service, "_request_round", lambda _envelope, **_kwargs: (_envelope, round_row)
+    )
+    monkeypatch.setattr(service, "_require_validator_authority", lambda _hotkey: None)
+    monkeypatch.setattr(
+        reviewer_runtime, "validate_completion_audit", lambda *_args: None
+    )
+
+    rows = [_new(ref) for ref in refs[:2]]
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 0.0,
+            "max_rss_bytes": 1024,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "provider_call_count": 1,
+        },
+        "started_at": "2026-09-11T00:00:00Z",
+        "finished_at": "2026-09-11T00:00:01Z",
+        "terminal_status": "judge_error",
+    }
+
+    def envelope(company_rows):
+        return {
+            "hotkey": validator,
+            "body": {
+                "run_id": run["run_id"],
+                "lease_token": token,
+                "result": dict(result),
+                "output": scoring.build_scoring_failure(
+                    run["scored_run_id"], "judge_error", company_judgments=company_rows
+                ),
+            },
+        }
+
+    invalid_rows = copy.deepcopy(rows)
+    invalid_rows[0]["authority_slot"] += 1
+    invalid_ref = _score_item_output_ref(
+        run["round_id"], run["run_id"],
+        contracts.document_hash(
+            scoring.build_scoring_failure(
+                run["scored_run_id"], "judge_error", company_judgments=invalid_rows
+            )
+        ),
+    )
+    with pytest.raises(ServiceError) as failure:
+        service.handle_complete(envelope(invalid_rows))
+    assert failure.value.code == "company_judgment_output_invalid"
+    assert service._objects.get_optional_bounded(invalid_ref, 1_000_000) is None
+    assert completion_calls == []
+
+    with pytest.raises(RuntimeError, match="injected terminal write failure"):
+        service.handle_complete(envelope(rows))
+    first_hash = contracts.document_hash(
+        scoring.build_scoring_failure(
+            run["scored_run_id"], "judge_error", company_judgments=rows
+        )
+    )
+    first_ref = _score_item_output_ref(run["round_id"], run["run_id"], first_hash)
+    assert completion_calls[0]["output_ref"] == first_ref
+    assert service._objects.get(first_ref)
+    assert run.get("status") is None
+
+    corrected_rows = copy.deepcopy(rows)
+    corrected_rows[0]["raw_judgment"]["final_score"] = 80.0
+    assert service.handle_complete(envelope(corrected_rows))["status"] == "failed"
+    corrected_ref = completion_calls[1]["output_ref"]
+    assert corrected_ref != first_ref
+    assert service._objects.get(corrected_ref)
+    assert run["status"] == "failed"
+
+
+def test_terminal_score_replay_accepts_valid_output_above_execution_size_limit(
+    tmp_path, monkeypatch,
+):
+    """A persisted judge result may use the full 2 MiB scoring output limit."""
+    from lab_arena import reviewer_runtime
+    from tests.test_arena_score_integrity import _public_company
+
+    round_id = "arena-2026-09-11-large-replay"
+    run_id = "score-run-large"
+    executed_id = "execute-large"
+    runner = "validator-a"
+    companies = [
+        _public_company("Company %d" % index, domain="company%d.example" % index,
+                        signal_date="2026-09-10")
+        for index in range(5)
+    ]
+    icp = _icp().model_dump()
+    policy = scoring.build_scorer_policy(judge_provider_routes={})
+    output = scoring.build_scoring_output(
+        executed_id,
+        [
+            {"final_score": 80.0, "padding": ["x" * 60_000] * 3}
+            for _ in companies
+        ],
+    )
+    output_bytes = contracts.canonical_json(output).encode("utf-8")
+    assert scoring.MAX_SCORING_OUTPUT_BYTES > len(output_bytes) > 512 * 1024
+
+    objects = LocalObjectStore(tmp_path / "objects")
+    execution_ref = "arena/%s/outputs/%s.json" % (round_id, executed_id)
+    execution_bytes = contracts.canonical_json({
+        "schema_version": "leadpoet.lab_arena.output.v1",
+        "companies": companies,
+    }).encode("utf-8")
+    objects.put(execution_ref, execution_bytes)
+    score_ref = _score_item_output_ref(
+        round_id, run_id, contracts.document_hash(output),
+    )
+    objects.put(score_ref, output_bytes)
+    run = {
+        "run_id": run_id, "round_id": round_id, "runner_hotkey": runner,
+        "kind": "score", "status": "accepted", "scored_run_id": executed_id,
+        "submission_id": "submission-a", "miner_hotkey": "miner-a",
+        "icp_position": 0, "lease_token_hash": hash_lease_token("token"),
+        "output_ref": score_ref,
+    }
+    execution = {
+        "run_id": executed_id, "output_ref": execution_ref,
+        "submission_id": "submission-a", "miner_hotkey": "miner-a",
+    }
+
+    class Store:
+        def get_run(self, requested_id):
+            return run if requested_id == run_id else execution
+
+        def complete_attempt(self, **_kwargs):
+            return {"status": "accepted", "idempotent": True}
+
+    service = ArenaService.__new__(ArenaService)
+    service._store = Store()
+    service._objects = objects
+    round_row = {
+        "round_id": round_id,
+        "configuration_doc": {"scorer_policy": policy},
+    }
+    validated = {
+        "hotkey": runner,
+        "body": {
+            "run_id": run_id,
+            "lease_token": "token",
+            "result": {
+                "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+                "resource_summary": {
+                    "wall_seconds": 1.0, "cpu_seconds": 0.0,
+                    "max_rss_bytes": 1024, "stdout_bytes": 0,
+                    "stderr_bytes": 0, "provider_call_count": 0,
+                },
+                "started_at": "2026-09-11T00:00:00Z",
+                "finished_at": "2026-09-11T00:00:01Z",
+                "terminal_status": "accepted",
+            },
+            "output": output,
+        },
+    }
+    monkeypatch.setattr(
+        service, "_request_round", lambda *_args, **_kwargs: (validated, round_row),
+    )
+    monkeypatch.setattr(service, "_require_validator_authority", lambda _hotkey: None)
+    monkeypatch.setattr(reviewer_runtime, "validate_completion_audit", lambda *_args: None)
+    service.evaluation_icps = lambda _round_id: [icp]
+
+    assert service.handle_complete({}) == {"status": "accepted", "idempotent": True}
+    assert objects.get_optional_bounded(score_ref, scoring.MAX_SCORING_OUTPUT_BYTES) == output_bytes
+
+
+def test_oversize_score_completion_is_rejected_before_object_write(
+    tmp_path, monkeypatch,
+):
+    """A valid document over the stored-output limit must not become committed."""
+    from lab_arena import reviewer_runtime
+    from tests.test_arena_score_integrity import _public_company
+    from tests.lab_arena.test_lab_arena_contracts import Keypair, wallet_verifier
+
+    round_id = "arena-2026-09-11-oversize-score"
+    run_id = "score-run-oversize"
+    executed_id = "execute-oversize"
+    keypair = Keypair.create_from_uri("//Alice")
+    runner = keypair.ss58_address
+    companies = [
+        _public_company("Company %d" % index, domain="company%d.example" % index,
+                        signal_date="2026-09-10")
+        for index in range(5)
+    ]
+    icp = _icp().model_dump()
+    policy = scoring.build_scorer_policy(judge_provider_routes={})
+    output = scoring.build_scoring_output(
+        executed_id,
+        [
+            {"final_score": 80.0,
+             "padding": ["x" * 65_000] * 6 + ["x" * 32_000]}
+            for _ in companies
+        ],
+    )
+    output_bytes = contracts.canonical_json(output).encode("utf-8")
+    assert scoring.MAX_SCORING_OUTPUT_BYTES < len(output_bytes)
+    assert len(output_bytes) <= contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+    scoring.validate_scoring_output_document(output)
+
+    objects = LocalObjectStore(tmp_path / "objects")
+    execution_ref = "arena/%s/outputs/%s.json" % (round_id, executed_id)
+    execution_bytes = contracts.canonical_json({
+        "schema_version": "leadpoet.lab_arena.output.v1",
+        "companies": companies,
+    }).encode("utf-8")
+    objects.put(execution_ref, execution_bytes)
+    score_ref = _score_item_output_ref(
+        round_id, run_id, contracts.document_hash(output),
+    )
+    run = {
+        "run_id": run_id, "round_id": round_id, "runner_hotkey": runner,
+        "kind": "score", "scored_run_id": executed_id,
+        "submission_id": "submission-a", "miner_hotkey": "miner-a",
+        "icp_position": 0, "lease_token_hash": hash_lease_token("token"),
+    }
+    execution = {
+        "run_id": executed_id, "output_ref": execution_ref,
+        "submission_id": "submission-a", "miner_hotkey": "miner-a",
+    }
+    completion_calls = []
+
+    class Store:
+        def get_run(self, requested_id):
+            return run if requested_id == run_id else execution
+
+        def complete_attempt(self, **kwargs):
+            completion_calls.append(kwargs)
+            raise AssertionError("oversize output reached completion persistence")
+
+    service = ArenaService.__new__(ArenaService)
+    service._store = Store()
+    service._objects = objects
+    round_row = {"round_id": round_id, "configuration_doc": {"scorer_policy": policy}}
+    timestamp = 1_795_000_000
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0, "cpu_seconds": 0.0,
+            "max_rss_bytes": 1024, "stdout_bytes": 0,
+            "stderr_bytes": 0, "provider_call_count": 0,
+        },
+        "started_at": "2026-09-11T00:00:00Z",
+        "finished_at": "2026-09-11T00:00:01Z",
+        "terminal_status": "accepted",
+    }
+    signed = contracts.build_signed_request(
+        scope=contracts.SCOPE_COMPLETE, round_id=round_id, hotkey=runner,
+        timestamp=timestamp,
+        body={"run_id": run_id, "lease_token": "token", "result": result,
+              "output": output},
+        sign_message=lambda message: keypair.sign(message.encode("utf-8")).hex(),
+    )
+    signed_bytes = contracts.canonical_json(signed).encode("utf-8")
+    assert len(signed_bytes) <= contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+    validated = contracts.validate_signed_request(
+        signed, expected_scope=contracts.SCOPE_COMPLETE, now=timestamp,
+        verify_signature=wallet_verifier, expected_round_id=round_id,
+    )
+    service._config = SimpleNamespace(verify_signature=wallet_verifier)
+    service.now = lambda: datetime.fromtimestamp(timestamp, timezone.utc)
+    assert service.validate_request(
+        signed, scope=contracts.SCOPE_COMPLETE, round_id=None,
+    ) == validated
+    monkeypatch.setattr(
+        service, "_request_round", lambda *_args, **_kwargs: (validated, round_row),
+    )
+    monkeypatch.setattr(service, "_require_validator_authority", lambda _hotkey: None)
+    monkeypatch.setattr(reviewer_runtime, "validate_completion_audit", lambda *_args: None)
+    service.evaluation_icps = lambda _round_id: [icp]
+
+    with pytest.raises(ServiceError) as failure:
+        service.handle_complete({})
+    assert failure.value.code == "output_invalid"
+    assert objects.get_optional_bounded(score_ref, scoring.MAX_SCORING_OUTPUT_BYTES) is None
+    assert completion_calls == []
+
+
+def test_legacy_partial_replay_keeps_the_committed_legacy_output_ref(
+    tmp_path, monkeypatch,
+):
+    from lab_arena import reviewer_runtime
+
+    round_id = "arena-2026-09-11-legacy-replay"
+    run_id = "score-run-legacy"
+    runner = "validator-a"
+    output = scoring.build_scoring_failure(
+        "execute-legacy", "judge_error",
+        terminal_breakdowns=[{"company_index": 0, "final_score": 80.0}],
+    )
+    output_bytes = contracts.canonical_json(output).encode("utf-8")
+    legacy_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
+    policy = scoring.build_scorer_policy(judge_provider_routes={})
+    run = {
+        "run_id": run_id, "round_id": round_id, "runner_hotkey": runner,
+        "kind": "score", "status": "failed", "terminal_cause": "judge_error",
+        "result_doc": {"terminal_status": "judge_error"},
+        "scored_run_id": "execute-legacy", "submission_id": "submission-a",
+        "miner_hotkey": "miner-a", "stage": 1, "icp_position": 0,
+        "lease_token_hash": hash_lease_token("token"), "output_ref": legacy_ref,
+        "claim_request_id": "a" * 32, "claim_request_hash": "sha256:" + "b" * 64,
+        "lease_generation": 1,
+        "claim_response": {"runner_authority_exclusions": [runner, "validator-b"]},
+    }
+    configuration = {
+        "integrity_policy": "arena_integrity_v1",
+        "scorer_policy": policy,
+        "scorer_image_digest": "sha256:" + "c" * 64,
+        "scorer_image_reference": "registry.example/scorer:stable",
+    }
+    round_row = {
+        "round_id": round_id, "configuration_doc": configuration,
+        "evaluation_date": "2026-09-10",
+    }
+    objects = LocalObjectStore(tmp_path / "objects")
+    objects.put(legacy_ref, output_bytes)
+
+    class Store:
+        def get_run(self, _run_id):
+            return run
+
+        def complete_attempt(self, **kwargs):
+            checkpoint = kwargs["result"]["legacy_partial_checkpoint"]
+            assert checkpoint["source_output_ref"] == legacy_ref
+            assert kwargs["output_ref"] == legacy_ref
+            return {"status": "failed", "idempotent": True}
+
+    service = ArenaService.__new__(ArenaService)
+    service._store = Store()
+    service._objects = objects
+    scoring_input = {
+        "scored_run_id": "execute-legacy", "icp": {}, "companies": [],
+        "scorer_policy": policy,
+    }
+    monkeypatch.setattr(
+        service, "_request_round",
+        lambda *_args, **_kwargs: ({
+            "hotkey": runner,
+            "body": {
+                "run_id": run_id, "lease_token": "token",
+                "result": {
+                    "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+                    "resource_summary": {
+                        "wall_seconds": 1.0, "cpu_seconds": 0.0,
+                        "max_rss_bytes": 1024, "stdout_bytes": 0,
+                        "stderr_bytes": 0, "provider_call_count": 0,
+                    },
+                    "started_at": "2026-09-11T00:00:00Z",
+                    "finished_at": "2026-09-11T00:00:01Z",
+                    "terminal_status": "judge_error",
+                },
+                "output": output,
+            },
+        }, round_row),
+    )
+    monkeypatch.setattr(service, "_require_validator_authority", lambda _hotkey: None)
+    monkeypatch.setattr(reviewer_runtime, "validate_completion_audit", lambda *_args: None)
+    monkeypatch.setattr(
+        service, "_legacy_partial_input",
+        lambda *_args: (scoring_input, "sha256:" + "d" * 64),
+    )
+    monkeypatch.setattr(
+        scoring, "validate_terminal_breakdowns_for_work_item",
+        lambda rows, **_kwargs: list(rows),
+    )
+
+    assert service.handle_complete({}) == {"status": "failed", "idempotent": True}
 
 
 @pytest.mark.parametrize("timed_out", [False, True])

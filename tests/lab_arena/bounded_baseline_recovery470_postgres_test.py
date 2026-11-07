@@ -363,6 +363,8 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
     execution=harness.service.store.list_runs(harness.round_id,stage=1,kind='execute')
     failed_source=next(r for r in execution if r['icp_position']==0)
     retained_source=next(r for r in execution if r['icp_position']==3)
+    failed_score=next(r for r in harness.service.store.list_runs(harness.round_id,kind='score')
+                      if r['scored_run_id']==failed_source['run_id'])
     complete=[r for r in execution if r['icp_position'] not in (0,3)]
     before_plan=json.loads(json.dumps(row['stage1_scoring_plan_doc']))
     # Seed the actual resume boundary: ICP0 has two source-provider failures;
@@ -383,7 +385,7 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
         cur.execute('UPDATE public.lab_arena_rounds SET stage1_scoring_plan_doc=%s::jsonb WHERE round_id=%s',(json.dumps(frozen_plan),harness.round_id))
     # This source-failure fixture has no original ICP0 judge. Remove only the
     # task-created fake judge artifact that preceded the seeded boundary.
-    harness.objects._path('arena/%s/scores/items/%s:score:1.json' % (harness.round_id,failed_source['assignment_id'])).unlink()
+    harness.objects._path(failed_score['output_ref']).unlink()
     if not recover_successfully:
         harness.sandbox.judge_failures.add(('PublicBaseline',3))
     harness.clock.advance_to(harness.schedule()['stage_2_start'])

@@ -262,7 +262,7 @@ def test_full_recovery_then_exact_sixth_claim_reuses_four_without_seventh(prepar
         key=keypair('633-runner')
         # Gateway validation creates the authoritative cache evidence from the
         # saved object. A signed completion also verifies unchanged cache hits.
-        objects=type('Objects',(),{'get':lambda _,k:p.objects[k],'get_bounded':lambda _,k,n:p.objects[k],'put':lambda _,k,v:p.objects.__setitem__(k,v)})()
+        objects=type('Objects',(),{'get':lambda _,k:p.objects[k],'get_bounded':lambda _,k,n:p.objects[k],'get_optional_bounded':lambda _,k,n:p.objects.get(k),'put':lambda _,k,v:p.objects.__setitem__(k,v)})()
         gateway=ArenaService(ServiceConfig(mode='live',store=p.store,object_store=objects,signer=None,chain=FakeChain([key.ss58_address]),verify_signature=wallet_verify,daily_icp_source=lambda **_: {},banned_hotkeys_source=lambda:(),broker_factory=lambda *_:None))
         gateway.evaluation_icps=p.service.evaluation_icps
         # The fixture's SQL claim uses hotkey('633-runner'); sign with the
@@ -424,7 +424,7 @@ def test_scored_continuation_preserves_phase_and_materializes_only_new_judgment(
     scorer.integrity_policy=True;scorer.company_quality=False;scorer.contacts_required=False
     breakdowns,new=scoring.score_quality_work_item({'scored_run_id':SOURCE},icp=_input()['icp'],companies=_input()['companies'],scorer=scorer,cache_context=lease['company_judgment_cache'])
     output={'schema_version':scoring.SCORING_OUTPUT_SCHEMA_VERSION,'scored_run_id':SOURCE,'breakdowns':breakdowns,'company_judgments':new}
-    key=keypair('633-runner');objects=type('Objects',(),{'get':lambda _,k:p.objects[k],'get_bounded':lambda _,k,n:p.objects[k],'put':lambda _,k,v:p.objects.__setitem__(k,v)})()
+    key=keypair('633-runner');objects=type('Objects',(),{'get':lambda _,k:p.objects[k],'get_bounded':lambda _,k,n:p.objects[k],'get_optional_bounded':lambda _,k,n:p.objects.get(k),'put':lambda _,k,v:p.objects.__setitem__(k,v)})()
     gateway=ArenaService(ServiceConfig(mode='live',store=p.store,object_store=objects,signer=None,chain=FakeChain([key.ss58_address]),verify_signature=wallet_verify,daily_icp_source=lambda **_: {},banned_hotkeys_source=lambda:(),broker_factory=lambda *_:None));gateway.evaluation_icps=p.service.evaluation_icps
     request=_completion(ROUND,key,lease,'recovery633-fixture',output,terminal='accepted')
     assert gateway.handle_complete(request)['status']=='accepted'

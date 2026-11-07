@@ -15,15 +15,17 @@ from tests.lab_arena.judge_default_activation_test import EXCEPTIONS, PREVIOUS_O
 SOL = 'openai/gpt-6.1-sol'
 GLM = 'z-ai/glm-5.3-flash'
 
-# Complete explicit-length request sequences from parent c4bde26, including
-# the unchanged existing repair instruction. Budget-only repairs must match.
+# Complete explicit-length requests with the reviewed stage/scope prompts.
+# Compared against main 82b0c3601: only system and criteria prompt text changes;
+# the repair instructions, tools, budgets and provider routing are unchanged.
+# Budget-only repairs must still match explicit-length requests byte for byte.
 REQUEST_GOLDENS = {
-    ('glm', 'empty'): 'sha256:ac6f28237560888c2a2992ee0be3ea2d2a2f2a7267483c02a13efd60461d0876',
-    ('glm', 'malformed_submit'): 'sha256:794dedbd135130775b0e13bd9ceec03e900bb52965aefaf1e420cd1845b98b18',
-    ('sol_legacy', 'empty'): 'sha256:e227de00da28ac0b5b2d1a4eb46b7f492c92488f2356e7c6d9cc0419b67f84e7',
-    ('sol_legacy', 'malformed_submit'): 'sha256:6492aff7542d6563a0e429478714d5c13fdab372e493fdc9f369beba76d3c6b9',
-    ('historical_open', 'empty'): 'sha256:1cdec36d703b8571278650112c84371614ec51a0b08e3ec928751942feefd275',
-    ('historical_open', 'malformed_submit'): 'sha256:6fe708a6cf9babdacdf86408250993919e66e6beb2fd7adfceaf147c150cedc8',
+    ('glm', 'empty'): 'sha256:d4251e3da355a5df932b1d4ffb31dc75726d943ce0403df08c38f79b650e3498',
+    ('glm', 'malformed_submit'): 'sha256:b7a625ace7c61cd04376bb04fc2d331576ae102733373b43d501380edfe94885',
+    ('sol_legacy', 'empty'): 'sha256:a495cd48758114bca39a8f935217152114880b2ff9e0f36ff26f9d6f0096422a',
+    ('sol_legacy', 'malformed_submit'): 'sha256:4ea9eaf36a43af68a487b2e7bdce40d9899880c1d5484236f5764886870878a1',
+    ('historical_open', 'empty'): 'sha256:820f02c696f3d7febdd684f68ea8b07bda1ca510be94e248ab539d417552865d',
+    ('historical_open', 'malformed_submit'): 'sha256:4db4d66902ba5cd441142ad9244678cd3927db91938092a17c344b1f9fc65d8f',
 }
 
 

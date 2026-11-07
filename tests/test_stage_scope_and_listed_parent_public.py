@@ -9,6 +9,7 @@ company-bound ownership text and the parent's current listing.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import json
 
@@ -181,6 +182,24 @@ def test_listed_parent_route_requires_the_validated_investigator_finding():
     # A saved verdict claiming the route without the bound finding fails closed.
     *_, decision = _decide(OWNERSHIP, LISTING, "public", validated=False)
     assert decision != "match"
+
+
+@pytest.mark.parametrize("damage", ["ownership", "listing", "missing_support"])
+def test_saved_parent_proof_cannot_change_after_validation(damage):
+    finding, retained, _ = _decide(OWNERSHIP, LISTING, "public")
+    if damage == "ownership":
+        retained["stage_evidence_quote"] = "Acme Realty is independent."
+    elif damage == "listing":
+        retained["dimension_evidence"]["stage"]["supporting_evidence"][0]["quote"] = (
+            "Other Corp (NYSE: OTHR) reported results."
+        )
+    else:
+        retained["dimension_evidence"]["stage"].pop("supporting_evidence")
+    company = _company(name="Acme Realty", website="https://acmerealty.example")
+    assert lead_scorer._decision_from_observed_stage(
+        retained, "public", validated_stage_finding=finding,
+        company=company, evidence_attributed=True,
+    ) != "match"
 
 
 def test_same_subsidiary_does_not_match_a_requested_venture_stage():
@@ -375,3 +394,126 @@ def test_descriptive_scope_lists_and_delivery_words_keep_required_functions():
     assert rules.index("Explicit logical AND and mandatory wording") < rules.index(
         "An ordinary descriptive list of lifecycle stages"
     )
+
+
+@pytest.mark.parametrize("listing", [
+    "Barco Industries (NYSE: BRC) is not listed; the ticker is hypothetical.",
+    "Barco Industries (NYSE: BRC) is not a publicly listed company.",
+    "Barco Industries (NYSE: BRC) is not listed; Other Corp is publicly traded.",
+    "Barco Industries (NYSE: BRC) is planning to list.",
+    "Barco Industries (NYSE: BRC) is a hypothetical listing.",
+    "Barco Industries (NYSE: BRC) completed its IPO in 2000.",
+    "Zqlistedparentissuerzq (NYSE: ZZZ) is unrelated to Barco Industries.",
+])
+def test_parent_listing_must_be_affirmed_current_fact(listing):
+    finding, retained, decision = _decide(
+        "Acme Realty is a subsidiary of Barco Industries.", listing, "public",
+    )
+    assert finding["status"] != "VERIFIED"
+    assert not retained.get("stage_matches")
+    assert decision != "match"
+
+
+@pytest.mark.parametrize("percentage", ["50%", "50.0 percent", "49%", "101%"])
+def test_equal_or_minority_ownership_cannot_establish_majority(percentage):
+    ownership = (
+        "Acme Realty is a subsidiary of Barco Industries. "
+        f"Barco Industries owns {percentage} of Acme Realty."
+    )
+    *_, decision = _decide(ownership, BARCO_LISTING, "public")
+    assert decision != "match"
+
+
+@pytest.mark.parametrize("percentage", ["50.1%", "80 percent", "100%"])
+def test_stated_majority_preserves_valid_parent_route(percentage):
+    *_, decision = _decide(
+        "Acme Realty is a subsidiary of Barco Industries. "
+        f"Barco Industries owns {percentage} of Acme Realty.",
+        BARCO_LISTING, "public",
+    )
+    assert decision == "match"
+
+
+def test_majority_stake_wording_preserves_valid_parent_route():
+    *_, decision = _decide(
+        "Acme Realty is a majority-owned subsidiary of Barco Industries. "
+        "Barco Industries holds an 80 percent stake in Acme Realty.",
+        BARCO_LISTING, "public",
+    )
+    assert decision == "match"
+
+
+@pytest.mark.parametrize("sales", [
+    "Barco Industries (NYSE: BRC) reported profits from products sold to customers.",
+    "Barco Industries (NYSE: BRC) sells software to companies.",
+])
+def test_unrelated_product_sales_do_not_erase_parent_listing(sales):
+    *_, decision = _decide(
+        "Acme Realty is a wholly owned subsidiary of Barco Industries.",
+        sales, "public",
+    )
+    assert decision == "match"
+
+
+@pytest.mark.parametrize("search_ok", [True, False])
+def test_native_listed_parent_route_keeps_current_search_and_private_receipt(monkeypatch, search_ok):
+    raw = _finding(
+        "stage", observed_value="Acquired", evidence_url=OWNERSHIP_URL,
+        evidence_quote=OWNERSHIP, supporting_evidence_url_1=LISTING_URL,
+        supporting_evidence_quote_1=LISTING,
+    )
+    raw.pop("supporting_evidence")
+    searches = []
+    turns = []
+
+    async def search(_session, query, *, key):
+        searches.append(query)
+        if not search_ok:
+            raise RuntimeError("offline discovery failure")
+        return {"results": []}
+
+    async def submit(_session, _url, *, headers, payload):
+        turns.append(payload)
+        if len(turns) <= 2:
+            name, arguments = "fetch_page", {"url": (
+                OWNERSHIP_URL if len(turns) == 1 else LISTING_URL
+            )}
+        else:
+            name, arguments = "submit_findings", {"findings": [raw]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "submit", "type": "function", "function": {
+                "name": name, "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    async def fetch(_session, url):
+        return {"ok": True, "url": url, "final_url": url,
+                "text": OWNERSHIP if url == OWNERSHIP_URL else LISTING}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-placeholder")
+    monkeypatch.setenv("EXA_API_KEY", "offline-placeholder")
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_post_json", submit)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme Realty", "website": "https://acmerealty.example"},
+        targets=("stage",), requested_stage="Public",
+    ))
+    assert len(searches) == 1
+    finding = result["claims"]["stage"]
+    assert finding["status"] == ("VERIFIED" if search_ok else "UNPROVEN")
+    if search_ok:
+        assert finding["supporting_evidence"] == [{"url": LISTING_URL, "quote": LISTING}]
+        assert result["_validated_stage_finding"] == finding
+        raw["private_provider_metadata"] = "must-not-enter-stage-receipt"
+        validated = investigator._validated_findings(
+            {"findings": [raw]}, targets=("stage",),
+            fetched_pages={OWNERSHIP_URL: OWNERSHIP, LISTING_URL: LISTING},
+            fetched_final_urls={OWNERSHIP_URL: OWNERSHIP_URL, LISTING_URL: LISTING_URL},
+            first_party_domains={"acmerealty.example"}, identity_names={"acmerealty"},
+            requested_stage="Public",
+        )["stage"]
+        assert validated["status"] == "VERIFIED"
+        assert "must-not-enter-stage-receipt" not in json.dumps(validated)
+    else:
+        assert result["_completed_submit"] is False

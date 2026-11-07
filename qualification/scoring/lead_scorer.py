@@ -1618,10 +1618,10 @@ _LISTED_PARENT_RELATION_PATTERNS = (
 # Any of this wording anywhere in the cited quotes means the ownership may
 # have ended, been shared, or be partial. The route then fails closed.
 _LISTED_PARENT_NOT_HELD_RE = re.compile(
-    r"\b(?:sold|sells|divest\w*|spun\s+(?:off|out)|spin-?\s?(?:off|out)|"
+    r"\b(?:divest\w*|spun\s+(?:off|out)|spin-?\s?(?:off|out)|"
     r"carve-?\s?out|carved\s+out|independen(?:t|tly|ce)|former(?:ly)?|"
     r"previously|no\s+longer|bought\b[^.;!?\n]{0,40}\bback|buy-?\s?out|"
-    r"joint(?:ly)?|co-?owned|stakes?|minority|non-?controlling|"
+    r"joint(?:ly)?|co-?owned|minority|non-?controlling|"
     r"until\s+(?:\w+\s+){0,2}(?:19|20)\d{2})\b",
     re.I,
 )
@@ -1629,7 +1629,7 @@ _LISTED_PARENT_PERCENT_RE = re.compile(
     r"(?<![\d.])(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)", re.I,
 )
 _LISTED_PARENT_OWNERSHIP_WORD_RE = re.compile(
-    r"\b(?:own\w*|held|holds?|interest|equity|shares?|acquir\w*|controls?)\b",
+    r"\b(?:own\w*|held|holds?|interest|stakes?|equity|shares?|acquir\w*|controls?)\b",
     re.I,
 )
 _LISTED_PARENT_JOINT_SUFFIX_RE = re.compile(
@@ -1664,19 +1664,43 @@ def _listed_parent_entity_tokens(value: str) -> tuple[str, ...]:
     return parts
 
 
-def _listed_parent_quotes_not_held(quotes: Sequence[str]) -> bool:
+def _listed_parent_quotes_not_held(
+    quotes: Sequence[str], company_names: Sequence[Any] = (),
+) -> bool:
     """Return true when cited text says ownership ended, is shared or partial."""
 
     for quote in quotes:
         if _LISTED_PARENT_NOT_HELD_RE.search(quote):
             return True
+        # A parent selling products says nothing about ownership. Bind a sale
+        # to the investigated business, or to an explicit ownership interest.
+        names = {
+            "".join(_listed_parent_entity_tokens(str(name or "")))
+            for name in company_names if name
+        }
+        for sale in re.finditer(r"\b(?:sold|sells)\b", quote, re.I):
+            before = re.split(r"[;!?\n]|\.\s", quote[:sale.start()])[-1]
+            after = re.split(r"[;!?\n]|\.\s", quote[sale.end():])[0]
+            before_compact = _compact_company_name(before)
+            after_compact = _compact_company_name(after)
+            if (
+                re.match(r"\s+(?:(?:its|the|all|remaining)\s+){0,3}"
+                         r"(?:stake|interest|ownership|shares?|equity)\b", after, re.I)
+                or re.match(r"\s+it\b", after, re.I)
+                or any(
+                    after_compact.startswith((name, "its" + name, "the" + name))
+                    or before_compact.endswith((name + "was", name + "is", name + "hasbeen"))
+                    for name in names
+                )
+            ):
+                return True
         for match in _LISTED_PARENT_PERCENT_RE.finditer(quote):
             window = quote[max(0, match.start() - 120):match.end() + 120]
             start = match.start() - max(0, match.start() - 120)
             before = re.split(r"[;!?\n]|\.\s", window[:start])[-1]
             after = re.split(r"[;!?\n]|\.\s", window[start:])[0]
             if (
-                float(match.group(1)) < 50
+                not 50 < float(match.group(1)) <= 100
                 and _LISTED_PARENT_OWNERSHIP_WORD_RE.search(before + after)
             ):
                 return True
@@ -1739,7 +1763,7 @@ def _listed_parent_names_from_relation(
         for name in company_names
         if (tokens := _listed_parent_entity_tokens(str(name or "")))
     }
-    if not names or _listed_parent_quotes_not_held((ownership_quote,)):
+    if not names or _listed_parent_quotes_not_held((ownership_quote,), company_names):
         return ()
     parents: list[str] = []
     for pattern in _LISTED_PARENT_RELATION_PATTERNS:
@@ -1808,7 +1832,7 @@ def _listed_parent_public_proof(
     ))
     # A completed take-private, delisting, or PE acquisition in any cited
     # proof means this is not a currently listed parent.
-    if _listed_parent_quotes_not_held(quotes) or any(
+    if _listed_parent_quotes_not_held(quotes, company_names) or any(
         _has_affirmed_stage_proof(
             quote,
             _PUBLIC_STAGE_SUPERSESSION_PATTERNS,
@@ -1820,7 +1844,16 @@ def _listed_parent_public_proof(
     parents = _listed_parent_names_from_relation(company_names, ownership_quote)
     issuer = (_LISTED_PARENT_ISSUER_TOKEN,)
     for parent in parents:
-        for quote in quotes:
+        # Validate the parent's own statement. An unrelated positive listing
+        # in a later sentence cannot rescue this parent's negated listing.
+        for quote in (
+            clause for source in quotes
+            for clause in re.split(r";\s*|(?<=[.!?])\s+(?=[A-Z])", source)
+        ):
+            # This private marker must come only from the exact issuer binder,
+            # never from untrusted source text naming an unrelated company.
+            if _LISTED_PARENT_ISSUER_TOKEN.casefold() in quote.casefold():
+                continue
             # The existing listing helpers match names as substrings. For
             # this route, the listed issuer must be exactly the parent, so
             # only exact parent-name occurrences become the bound issuer.
@@ -1828,6 +1861,27 @@ def _listed_parent_public_proof(
                 _PUBLIC_COMPANY_ALIAS_RE.sub("", quote), parent,
             )
             if _LISTED_PARENT_ISSUER_TOKEN not in text:
+                continue
+            if not (
+                _stage_quote_supports_observation("public", text)
+                or _current_exchange_profile_names_issuer(text, issuer)
+            ):
+                continue
+            if re.search(
+                r"\b(?:hypothetical|fictional|illustrative|placeholder)\s+"
+                r"(?:(?:stock|equity|exchange|public|market)\s+){0,2}"
+                r"(?:listing|ticker|issuer|company)\b|"
+                r"\b(?:listing|ticker|issuer)\s+(?:is|was)\s+"
+                r"(?:hypothetical|fictional|illustrative|a\s+placeholder)\b",
+                text, re.I,
+            ):
+                continue
+            if (
+                _PUBLIC_HISTORICAL_IPO_EVENT_RE.search(text)
+                and not _stage_evidence_supports_observation(
+                    "public", text, identity_names=issuer,
+                )
+            ):
                 continue
             if (
                 _public_quote_has_bound_market_locator(text, issuer)

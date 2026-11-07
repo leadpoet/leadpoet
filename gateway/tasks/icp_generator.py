@@ -686,6 +686,26 @@ def generated_bank_error(
         return "stage_quota"
     return None
 
+
+def _stored_bank_error(icps, icp_set_hash):
+    """Check stored-bank integrity without reapplying generation-only variety rules."""
+    if not isinstance(icps, list) or not icps or not all(isinstance(item, dict) for item in icps):
+        return "items"
+    if not isinstance(icp_set_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", icp_set_hash):
+        return "hash"
+    if compute_icp_set_hash(icps) != icp_set_hash:
+        return "hash"
+    identities = set()
+    for item in icps:
+        icp_id = str(item.get("icp_id") or "").strip()
+        if not icp_id or icp_id in identities:
+            return "duplicate_id"
+        identities.add(icp_id)
+    # Market uniqueness, company-stage quotas, and generated distribution
+    # rules govern new banks. Their descriptive distribution column also does
+    # not define Arena's frozen benchmark contract.
+    return None
+
 # Products/Services by industry (what the miner's model should help sell)
 # One entry per industry in INDUSTRY_DISTRIBUTION.
 PRODUCTS_BY_INDUSTRY = {
@@ -2178,10 +2198,11 @@ async def store_icp_set(
     industry_distribution: Dict[str, int],
     active_from: datetime,
     active_until: datetime,
-    generation_seed: Optional[str] = None
-) -> bool:
-    """
-    Store a new ICP set in the database.
+    generation_seed: Optional[str] = None,
+    contacts_required: bool = False,
+    _recovery_attempted: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Atomically store and activate a daily ICP bank.
     
     Args:
         set_id: Set identifier
@@ -2193,7 +2214,7 @@ async def store_icp_set(
         generation_seed: Optional seed used for generation
     
     Returns:
-        True if stored successfully
+        The effective persisted bank and activation result, or None on failure.
     """
     try:
         # MUST use write_client (service_role) because this table has
@@ -2203,64 +2224,112 @@ async def store_icp_set(
         write_client = get_write_client()
         
         data = {
-            "set_id": set_id,
-            "icps": icps,
-            "icp_set_hash": icp_set_hash,
-            "industry_distribution": industry_distribution,
-            "active_from": active_from.isoformat(),
-            "active_until": active_until.isoformat(),
-            "generation_seed": generation_seed,
-            "is_active": False  # Not active until explicitly activated
+            "p_set_id": set_id,
+            "p_icps": icps,
+            "p_icp_set_hash": icp_set_hash,
+            "p_industry_distribution": industry_distribution,
+            "p_active_from": active_from.isoformat(),
+            "p_active_until": active_until.isoformat(),
+            "p_generation_seed": generation_seed,
         }
-        
-        # Upsert (in case regenerating same set_id)
-        result = write_client.table("qualification_private_icp_sets") \
-            .upsert(data, on_conflict="set_id") \
-            .execute()
-        
-        logger.info(f"Stored ICP set {set_id} with {len(icps)} ICPs")
-        return True
+
+        result = write_client.rpc(
+            "qualification_private_icp_set_publish_v1", data,
+        ).execute()
+        publication = result.data
+        if isinstance(publication, list) and len(publication) == 1:
+            publication = publication[0]
+        if not isinstance(publication, dict):
+            logger.error("ICP set %d publish response was invalid", set_id)
+            return None
+        status = publication.get("status")
+        published_id = publication.get("set_id")
+        inserted = publication.get("inserted")
+        if status == "conflict":
+            if type(published_id) is int and published_id == set_id and inserted is False:
+                persisted_icps = publication.get("icps")
+                persisted_hash = publication.get("icp_set_hash")
+                persisted_distribution = publication.get("industry_distribution")
+                persisted_seed = publication.get("generation_seed")
+                persisted_from = publication.get("active_from")
+                persisted_until = publication.get("active_until")
+
+                def same_instant(value, expected):
+                    try:
+                        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+                            str(value).replace("Z", "+00:00")
+                        )
+                        if parsed.tzinfo is None or expected.tzinfo is None:
+                            return False
+                        return parsed.astimezone(timezone.utc) == expected.astimezone(timezone.utc)
+                    except (TypeError, ValueError):
+                        return False
+
+                recoverable = (
+                    not _recovery_attempted
+                    and _stored_bank_error(persisted_icps, persisted_hash) is None
+                    and isinstance(persisted_distribution, dict)
+                    and len(persisted_icps) == len(icps)
+                    and persisted_seed == generation_seed
+                    and same_instant(persisted_from, active_from)
+                    and same_instant(persisted_until, active_until)
+                )
+                if recoverable and contacts_required:
+                    from lab_arena import contact_policy
+                    try:
+                        for persisted_icp in persisted_icps:
+                            contact_policy.validate_icp(persisted_icp)
+                    except (TypeError, ValueError):
+                        recoverable = False
+                if not recoverable:
+                    return publication
+                logger.warning(
+                    "Recovering valid inactive ICP set %d from its persisted payload",
+                    set_id,
+                )
+                return await store_icp_set(
+                    set_id=set_id,
+                    icps=persisted_icps,
+                    icp_set_hash=persisted_hash,
+                    industry_distribution=persisted_distribution,
+                    active_from=active_from,
+                    active_until=active_until,
+                    generation_seed=persisted_seed,
+                    contacts_required=contacts_required,
+                    _recovery_attempted=True,
+                )
+            logger.error("ICP set %d conflict response was invalid", set_id)
+            return None
+        if status not in {"activated", "stale"} or type(published_id) is not int \
+                or type(inserted) is not bool:
+            logger.error("ICP set %d publish response was invalid", set_id)
+            return None
+        if (status == "activated" and published_id != set_id) \
+                or (status == "stale" and (published_id <= set_id or inserted)):
+            logger.error("ICP set %d publish response identity was invalid", set_id)
+            return None
+        persisted_icps = publication.get("icps")
+        persisted_hash = publication.get("icp_set_hash")
+        persisted_distribution = publication.get("industry_distribution")
+        if _stored_bank_error(persisted_icps, persisted_hash) is not None:
+            logger.error("ICP set %d publish response bank was invalid", set_id)
+            return None
+        if status == "activated" and inserted and (
+            persisted_icps != icps or persisted_hash != icp_set_hash
+            or persisted_distribution != industry_distribution
+        ):
+            logger.error("ICP set %d inserted response did not match its request", set_id)
+            return None
+
+        logger.info(
+            "Published ICP set %s (inserted=%s)",
+            publication.get("set_id"), publication.get("inserted"),
+        )
+        return publication
         
     except Exception as e:
         logger.error(f"Failed to store ICP set {set_id}: {e}")
-        return False
-
-
-async def activate_icp_set(set_id: int) -> bool:
-    """
-    Activate an ICP set (deactivates all others).
-    
-    Args:
-        set_id: Set identifier to activate
-    
-    Returns:
-        True if activated successfully
-    """
-    try:
-        # MUST use write_client (service_role) because this table has
-        # RLS that only allows service_role access
-        from gateway.db.client import get_write_client
-        
-        write_client = get_write_client()
-        
-        # Deactivate all sets
-        write_client.table("qualification_private_icp_sets") \
-            .update({"is_active": False}) \
-            .neq("set_id", 0) \
-            .execute()
-        
-        # Activate the target set
-        write_client.table("qualification_private_icp_sets") \
-            .update({"is_active": True}) \
-            .eq("set_id", set_id) \
-            .execute()
-        
-        logger.info(f"Activated ICP set {set_id}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to activate ICP set {set_id}: {e}")
-        return False
+        return None
 
 
 async def get_active_icp_set(*, strict: bool = False) -> Optional[Dict[str, Any]]:
@@ -2416,8 +2485,13 @@ async def generate_and_activate_icp_set(
     try:
         active_set = await get_active_icp_set(strict=True)
         if active_set and active_set.get("set_id") == set_id:
-            logger.info("ICP set %d is already active; retaining persisted bank", set_id)
-            return set_id
+            active_error = _stored_bank_error(
+                active_set.get("icps"), active_set.get("icp_set_hash"),
+            )
+            if active_error is None:
+                logger.info("ICP set %d is already active; retaining persisted bank", set_id)
+                return set_id
+            logger.error("active_icp_bank_invalid set_id=%d reason=%s", set_id, active_error)
         frozen_count = await asyncio.to_thread(frozen_benchmark_icp_count, set_id)
         target_count = frozen_count if frozen_count is not None else (
             configured_benchmark_icp_count() if total_icps is None else total_icps
@@ -2524,29 +2598,46 @@ async def generate_and_activate_icp_set(
     
     # Store in database
     committed_outcome = "storage_unavailable"
+    committed_bank_hash = ""
     try:
-        stored = await store_icp_set(
+        publication = await store_icp_set(
             set_id=set_id,
             icps=icps,
             icp_set_hash=icp_hash,
             industry_distribution=distribution,
             active_from=active_from,
             active_until=active_until,
-            generation_seed=generation_seed
+            generation_seed=generation_seed,
+            contacts_required=contacts_required,
         )
-        if not stored:
+        if not publication:
             committed_outcome = "storage_failed"
             return None
-        committed_outcome = "stored_activation_unavailable"
-        activated = await activate_icp_set(set_id)
-        if not activated:
-            committed_outcome = "stored_activation_failed"
+        if publication.get("status") == "stale":
+            committed_bank_hash = str(publication.get("icp_set_hash") or "")
+            committed_outcome = "stale_generation"
             return None
-        committed_outcome = "activated"
+        if publication.get("status") == "conflict":
+            committed_outcome = "stored_bank_conflict"
+            return None
+        if publication.get("status") != "activated":
+            committed_outcome = "storage_failed"
+            return None
+        persisted_icps = publication.get("icps")
+        persisted_hash = publication.get("icp_set_hash")
+        if not isinstance(persisted_icps, list) or not isinstance(persisted_hash, str):
+            committed_outcome = "publication_response_invalid"
+            return None
+        committed_bank_hash = persisted_hash
+        committed_outcome = (
+            "activated" if publication.get("inserted") is True
+            else "activated_existing"
+        )
         return set_id
     finally:
         for capture in capture_calls:
             capture.finish(normalized_icps=icps, icp_set_hash=icp_hash,
+                           committed_bank_hash=committed_bank_hash,
                            exclusion_call_ids=exclusion_call_ids,
                            committed_outcome=committed_outcome)
 
@@ -2582,11 +2673,19 @@ async def icp_rotation_task():
             # Check DB: is today's set already active?
             active_set = await get_active_icp_set()
             if active_set and active_set.get('set_id') == today_set_id:
-                logger.info(f"ICP rotation: Today's set {today_set_id} already active")
-                last_generated_date = current_date
+                active_error = _stored_bank_error(
+                    active_set.get("icps"), active_set.get("icp_set_hash"),
+                )
+                if active_error is None:
+                    logger.info(f"ICP rotation: Today's set {today_set_id} already active")
+                    last_generated_date = current_date
 
-                await asyncio.sleep(60)
-                continue
+                    await asyncio.sleep(60)
+                    continue
+                logger.error(
+                    "icp_rotation_active_bank_invalid set_id=%d reason=%s",
+                    today_set_id, active_error,
+                )
             
             # Today's set is missing or a stale set is active — generate
             stale_id = active_set.get('set_id') if active_set else None
@@ -2632,6 +2731,17 @@ async def ensure_icp_set_exists():
     """
     active_set = await get_active_icp_set()
     
+    if active_set:
+        active_error = _stored_bank_error(
+            active_set.get("icps"), active_set.get("icp_set_hash"),
+        )
+        if active_error is not None:
+            logger.error(
+                "active_icp_bank_invalid set_id=%s reason=%s",
+                active_set.get("set_id"), active_error,
+            )
+            active_set = None
+
     if active_set:
         # Check if the set is still valid (not expired)
         active_until_str = active_set.get('active_until')

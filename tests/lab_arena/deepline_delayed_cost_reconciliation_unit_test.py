@@ -478,3 +478,76 @@ def test_pending_deepline_accounting_does_not_stop_other_round_progress():
 
     assert service.advance_round(ROUND_ID) == {"status": "advanced"}
     assert progressed == [ROUND_ID]
+
+
+class _OneCandidateStore:
+    """One reconcilable bill, offered to every lane until it settles."""
+
+    def __init__(self):
+        self.item = _candidate(uncertain_entry_id=10)
+
+    def list_abandoned_billing_runs(self, _round_id):
+        return []
+
+    def list_deepline_cost_reconciliations(
+        self, round_id, *, run_id, after_entry_id, limit, **_options
+    ):
+        assert round_id == ROUND_ID
+        if run_id or after_entry_id >= 10 or limit < 1:
+            return []
+        return [self.item]
+
+
+class _StatusBroker:
+    def __init__(self, status):
+        self.status = status
+        self.calls = 0
+
+    def reconcile_deepline_cost(self, _candidate):
+        self.calls += 1
+        return {"status": self.status}
+
+
+def _reconcile_stages(status):
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from gateway.observability.otel_bootstrap import configure_arena_otel
+    from lab_arena import telemetry
+
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    try:
+        broker = _StatusBroker(status)
+        service = _bare_service(_OneCandidateStore(), broker)
+        service._reconcile_active_deepline_cost(ROUND_ID)
+    finally:
+        telemetry.install_recorder(None)
+    return broker, [
+        span for span in exporter.get_finished_spans()
+        if span.name == "arena.reconcile_deepline_cost"
+    ]
+
+
+@pytest.mark.parametrize(
+    "status,outcome,count",
+    [
+        ("settled", "ok", 1),
+        ("pending", "idle", 0),
+        ("invalid", "idle", 0),
+        ("credential_mismatch", "idle", 0),
+        ("unavailable", "idle", 0),
+    ],
+)
+def test_per_bill_reconcile_stage_reports_whether_the_bill_settled(status, outcome, count):
+    # Every non-settling path RETURNS a status rather than raising, so the
+    # stage must read it. Without this a reconciler pinned at its batch limit
+    # and clearing nothing reports "ok" on every bill it fails to settle.
+    broker, spans = _reconcile_stages(status)
+
+    assert broker.calls == 1
+    assert len(spans) == 1
+    assert spans[0].attributes["arena.outcome"] == outcome
+    assert spans[0].attributes["arena.count"] == count
+    assert spans[0].attributes["arena.error_type"] == "-"

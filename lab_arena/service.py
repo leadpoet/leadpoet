@@ -7425,8 +7425,19 @@ class ArenaService:
 
             def reconcile(candidate: Mapping[str, Any]) -> Dict[str, Any]:
                 try:
-                    with telemetry.stage("reconcile_deepline_cost"):
-                        return broker.reconcile_deepline_cost(candidate)
+                    with telemetry.stage("reconcile_deepline_cost") as observed:
+                        result = broker.reconcile_deepline_cost(candidate)
+                        # Every non-settling path here RETURNS a status
+                        # (pending/invalid/credential_mismatch/unavailable);
+                        # only an escaping exception reaches the "failed"
+                        # branch. Without this the stage reads "ok" for a bill
+                        # that settled nothing, so a reconciler pinned at its
+                        # batch limit and clearing none of it is invisible per
+                        # bill. Same idle/count idiom the parent stage uses.
+                        settled = result.get("status") == "settled"
+                        observed.count = int(settled)
+                        observed.idle = not settled
+                        return result
                 except Exception as exc:
                     # A failed read/write leaves the original liability intact.
                     # Independent candidates must still make progress.

@@ -4282,6 +4282,7 @@ def _validated_findings(
                     _CANONICAL_COMPANY_STAGES,
                     _acquired_stage_quote_supports_names,
                     _company_stage_matches,
+                    _is_archived_sec_filing_snapshot,
                     _listed_parent_public_stage_matches,
                     _normalize_company_stage,
                     _private_equity_linked_support_proves_ownership,
@@ -4293,6 +4294,20 @@ def _validated_findings(
                     finding["observed_value"]
                 )
                 normalized_requested_stage = _normalize_company_stage(requested_stage)
+
+                def parent_listing_source_url(url: str) -> str:
+                    # An exchange card needs the requested and fetched final
+                    # source to be exchange-hosted. Retain either archive URL
+                    # so old SEC prose cannot acquire current-listing authority.
+                    final_url = str((fetched_final_urls or {}).get(url) or "")
+                    for source in (url, final_url):
+                        if _is_archived_sec_filing_snapshot(source):
+                            return source
+                    if str(urlsplit(url).hostname or "").casefold() in {
+                        "nyse.com", "www.nyse.com", "nasdaq.com", "www.nasdaq.com",
+                    }:
+                        return _safe_https_url(final_url)
+                    return url
                 linked_pe_support: list[dict[str, str]] = []
                 linked_pe_support_invalid = bool(
                     normalized_stage == "private equity"
@@ -4351,8 +4366,13 @@ def _validated_findings(
                             normalized_requested_stage,
                             company_names=acquisition_names,
                             ownership_quote=finding["evidence_quote"],
+                            ownership_url=parent_listing_source_url(evidence_url),
                             listing_quotes=tuple(
                                 item["quote"] for item in listed_parent_support
+                            ),
+                            listing_urls=tuple(
+                                parent_listing_source_url(item["url"])
+                                for item in listed_parent_support
                             ),
                         )
                 linked_pe_ownership = bool(

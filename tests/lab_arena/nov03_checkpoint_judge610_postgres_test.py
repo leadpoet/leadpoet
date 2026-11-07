@@ -144,7 +144,7 @@ def test_terminal_seventh_never_creates_eighth(database,outcome):
                 conn.commit();store.expire_leases(ROUND)
             elif outcome=='accepted':
                 key=keypair('corrected-runner607')
-                objects_api=SimpleNamespace(get=lambda key:objects[key],get_bounded=lambda key,limit:objects[key],put=lambda key,value:objects.__setitem__(key,value))
+                objects_api=SimpleNamespace(get=lambda key:objects[key],get_bounded=lambda key,limit:objects[key],get_optional_bounded=lambda key,limit:objects.get(key),put=lambda key,value:objects.__setitem__(key,value))
                 gateway=ArenaService(ServiceConfig(mode='live',store=store,object_store=objects_api,signer=None,chain=FakeChain([key.ss58_address]),verify_signature=wallet_verify,daily_icp_source=lambda **_: {},banned_hotkeys_source=lambda: (),broker_factory=lambda *_: None))
                 gateway.evaluation_icps=service.evaluation_icps
                 current=store.get_run(RUN);lease=current['claim_response'];cache=lease['company_judgment_cache']

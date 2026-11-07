@@ -92,7 +92,7 @@ def _completion(round_id, key, lease, token, output, terminal='judge_error'):
     return _sign(round_id, key, {'run_id': lease['run_id'], 'lease_token': token, 'result': result, 'output': output})
 
 
-def test_signed_failure_persists_then_retry_scores_only_unresolved_and_final_cache_accepts(store, monkeypatch):
+def test_signed_failure_persists_then_retry_scores_only_unresolved_and_final_cache_accepts(store, database, monkeypatch):
     # The hermetic scorer uses sandbox placeholders, independent of host keys.
     for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
         monkeypatch.setenv(name, value)

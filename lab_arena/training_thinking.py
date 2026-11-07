@@ -933,8 +933,8 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
         return False
 
 
-def _verified_credit_refusal(call: Mapping[str, Any], delivered: list[Any]) -> bool:
-    """Bind a pre-generation OpenRouter payment error to its delivered failure."""
+def _verified_account_refusal(call: Mapping[str, Any], delivered: list[Any]) -> bool:
+    """Bind a pre-generation OpenRouter auth/payment error to its delivered failure."""
     expected = {"error": {"code": "miner_credentials_unavailable"}}
     if (call.get("response_status") != 402
             or not delivered or any(value != expected for value in delivered)):
@@ -946,13 +946,13 @@ def _verified_credit_refusal(call: Mapping[str, Any], delivered: list[Any]) -> b
     for receipt in receipts:
         value = receipt.get("response")
         error = value.get("error") if isinstance(value, Mapping) else None
-        if (type(receipt.get("status")) is not int or receipt["status"] != 402
+        if (type(receipt.get("status")) is not int or receipt["status"] not in (401, 402)
                 or type(receipt.get("entry_id")) is not int or receipt["entry_id"] != response_id
                 or not isinstance(value, Mapping)
                 or not set(value) <= {"error", "user_id", "openrouter_metadata", "usage"}
                 or not isinstance(error, Mapping) or not set(error) <= {"code", "message", "metadata"}
                 or type(error.get("code")) is not int
-                or error["code"] != 402 or not isinstance(error.get("message"), str)
+                or error["code"] != receipt["status"] or not isinstance(error.get("message"), str)
                 or not error["message"].strip()
                 or not _error_body_has_no_generation(value)
                 or receipt.get("provenance") != "private_upstream_response_receipt"
@@ -1131,7 +1131,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                         and bool(failure_bodies)
                         and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
         if status == 402:
-            return _verified_credit_refusal(call, failure_bodies)
+            return _verified_account_refusal(call, failure_bodies)
         return all(_error_body_has_no_generation(value)
                    and (status != 404 or _ignored_provider_failure(
                        value, body, call.get("reasoning_capture") or {}))

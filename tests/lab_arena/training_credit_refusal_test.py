@@ -14,6 +14,8 @@ BROKER_ERROR = {'error': {'code': 'miner_credentials_unavailable'}}
 CREDIT_ERROR = {'error': {'code': 402,
     'message': 'This request requires more credits, or fewer max_tokens.',
     'metadata': {'provider_name': None}}}
+AUTH_ERROR = {'error': {'message': 'User not found.', 'code': 401}}
+AUTH_WIRE = b'{"error":{"message":"User not found.","code":401}}'
 
 
 def upstream(value, entry_id=3):
@@ -57,6 +59,137 @@ def credit_example(*, worker_error=True, client_ack=False, settled=False):
     if not client_ack:
         example = without_client_callbacks(example)
     return seal(example)
+
+
+def authentication_example(*, worker_error=False, client_ack=False, settled=True):
+    example = credit_example(worker_error=worker_error, client_ack=client_ack, settled=settled)
+    call = example['provider_calls'][0]
+    receipt = upstream(AUTH_ERROR, call['terminal_entry_id'])
+    receipt.update(status=401, body_sha256=contracts.hash_bytes(AUTH_WIRE),
+                   wire_body_sha256=contracts.hash_bytes(AUTH_WIRE),
+                   body_bytes=len(AUTH_WIRE), wire_body_bytes=len(AUTH_WIRE))
+    call['upstream_response_receipts'] = [receipt]
+    if settled:
+        call['actual_microusd'] = 0
+    return seal(example)
+
+
+@pytest.mark.parametrize('worker_error', [False, True])
+@pytest.mark.parametrize('client_ack', [False, True])
+@pytest.mark.parametrize('settled', [False, True])
+@pytest.mark.parametrize('funding', ['miner_key', 'host'])
+def test_exact_authentication_refusal_preserves_prior_targets_and_accounting(worker_error, client_ack, settled, funding):
+    example = authentication_example(worker_error=worker_error, client_ack=client_ack, settled=settled)
+    call = example['provider_calls'][0]
+    call['funding_source'] = funding
+    seal(example)
+    before = deepcopy(example)
+    receipt = call['upstream_response_receipts'][0]
+    # Match the retained provider error's wire/canonical distinction. These
+    # generic error bytes contain no request, credential or production identity.
+    assert len(AUTH_WIRE) == 50
+    assert receipt['wire_body_sha256'] == 'sha256:6faf1b143addca514302d08060df34ba407457f06d73add7ca78af04a158c8f9'
+    assert receipt['response_sha256'] == 'sha256:7c7fee0b0e1267370661af51907bc8aa998eb2ae1b7a4e6b5fabe8382633bbee'
+    assert training_steps._host_result(example, call, allow_worker_error=True)['write']['status'] == 402
+    assert training_thinking.verified_failed_attempt(example, call)
+    result = training_eligibility.assess_capture(submission(), {'run': example}, ['run'], enabled=True)
+    assert result['eligible'], result
+    assert result['counts']['verified_failed_model_attempts'] == 1
+    assert call['actual_microusd'] == (0 if settled else None)
+    assert 'usage' not in receipt['response']
+    assert training_thinking.attempt_coverage(call, example['role'],
+        example['configuration']['reasoning_route_registry'])['tokens_reported'] is None
+    with pytest.raises(ValueError):
+        training_steps._candidate(example, call)
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits['train'] + splits['eval']
+    expected = deepcopy(example)
+    expected['provider_calls'].pop(0)
+    seal(expected)
+    prior, _ = training_thinking.build([expected], training_steps.Rules(production_rounds_only=False))
+    keys = ('candidate_id', 'input', 'target', 'generated_thinking')
+    assert [{k: r[k] for k in keys} for r in records] == [
+        {k: r[k] for k in keys} for r in prior['train'] + prior['eval']]
+    assert len(records) == 2
+    assert all(r['source_refs'][0]['call_identity'] != call['call_identity'] for r in records)
+    assert example == before
+
+
+@pytest.mark.parametrize('damage', ['generated_output', 'generated_choices', 'opaque',
+    'positive_reasoning_tokens', 'code_status_mismatch', 'boolean_code', 'status_403',
+    'empty_message', 'upstream_privacy', 'missing_upstream', 'missing_request',
+    'request_hash', 'request_privacy', 'host_hash', 'host_privacy', 'wire_hash',
+    'canonical_hash', 'host_status'])
+def test_authentication_refusal_cannot_mask_generation_or_invalid_evidence(damage):
+    example = authentication_example()
+    call = example['provider_calls'][0]
+    receipt = call['upstream_response_receipts'][0]
+    body = deepcopy(AUTH_ERROR)
+    if damage == 'generated_output': body['output'] = [{'type': 'message', 'content': 'generated'}]
+    elif damage == 'generated_choices': body['choices'] = [{'message': {'content': 'generated'}}]
+    elif damage == 'opaque': body['encrypted_content'] = 'opaque'
+    elif damage == 'positive_reasoning_tokens': body['usage'] = {'output_tokens_details': {'reasoning_tokens': 1}}
+    elif damage == 'code_status_mismatch': body['error']['code'] = 402
+    elif damage == 'boolean_code': body['error']['code'] = True
+    elif damage == 'status_403': receipt['status'] = 403
+    elif damage == 'empty_message': body['error']['message'] = ' '
+    elif damage == 'upstream_privacy': receipt['privacy_redactions'] = ['credential']
+    elif damage == 'missing_upstream': call.pop('upstream_response_receipts')
+    elif damage == 'missing_request': call.pop('request')
+    elif damage == 'request_hash': call['request']['request_hash'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'request_privacy': call['request_capture']['redacted'] = True
+    elif damage == 'host_hash': call['response_provenance']['worker_receipt_ref']['payload_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'host_privacy': call['response_receipts'][0]['privacy_redactions'] = ['credential']
+    elif damage == 'wire_hash': receipt['wire_body_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'canonical_hash': receipt['response_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'host_status': example['worker_observation_artifacts']['run']['payload']['response_receipts'][0]['status'] = 401
+    if damage in {'generated_output', 'generated_choices', 'opaque', 'positive_reasoning_tokens',
+                  'code_status_mismatch', 'boolean_code', 'empty_message'}:
+        changed = upstream(body, receipt['entry_id'])
+        changed['status'] = 401
+        call['upstream_response_receipts'][0] = changed
+    seal(example)
+    before = deepcopy(example)
+    assert not training_thinking.verified_failed_attempt(example, call), damage
+    assert not training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)['eligible']
+    assert example == before
+
+
+def test_authentication_failure_keeps_the_frozen_eight_of_ten_floor_and_one_percent_setting():
+    from tests.lab_arena.training_eligibility_test import ten_selected_examples
+    examples = ten_selected_examples()
+    examples.pop('run-9')
+    examples['run'] = authentication_example(settled=False)
+    for example in examples.values():
+        example['configuration']['training_maximum_missing_reasoning_percent'] = 1
+        seal(example)
+    examples['run-8'] = None
+    examples['run-7'] = None
+    def assess():
+        return training_eligibility.assess_capture(submission(), examples, list(examples), enabled=True,
+            minimum_coverage_percent=80, expected_run_count=10, maximum_missing_reasoning_percent=1)
+    result = assess()
+    assert result['eligible'], result
+    assert result['counts']['required_complete_runs'] == 8
+    assert result['counts']['complete_runs'] == 8
+    assert result['counts']['verified_failed_model_attempts'] == 1
+    assert result['counts']['maximum_missing_reasoning_percent'] == 1
+    assert examples['run']['provider_calls'][0]['actual_microusd'] is None
+    examples['run-6'] = None
+    result = assess()
+    assert not result['eligible']
+    assert result['counts']['complete_runs'] == 7
+
+
+def test_authentication_exception_does_not_change_historical_capture_admission():
+    example = authentication_example()
+    example['configuration'].pop('training_maximum_missing_reasoning_percent')
+    seal(example)
+    result = training_eligibility.assess_capture(submission(), {'run': example}, ['run'], enabled=True)
+    assert not result['eligible']
+    assert result['counts']['rejected_runs'] == [
+        {'run_id': 'run', 'reasons': ['selected_run_evidence_invalid']}]
 
 
 @pytest.mark.parametrize('worker_error', [False, True])

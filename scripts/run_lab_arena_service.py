@@ -196,6 +196,31 @@ def _record_service_lifecycle(event: str, outcome: str, *, physical_role: str) -
         telemetry.flush()
 
 
+def restart_guard_withholds_review(guard: object) -> bool:
+    """Report whether a restart guard currently withholds paid review work.
+
+    The guard carries its own lease. An owner that never reaches its release
+    step leaves the commitment behind, so holding on presence alone stops
+    review work for good; honour the expiry once the state reports it.
+
+    ``guard_active`` arrives with the hand-applied migration that teaches the
+    read about the lease, so it is accepted as optional and the stricter
+    presence test stands in until that migration lands. Either deploy order is
+    therefore safe, and an absent or malformed field never releases work.
+    """
+
+    if (
+        not isinstance(guard, Mapping)
+        or guard.get("schema_version") != "leadpoet.lab_arena.review_guard_state.v1"
+        or type(guard.get("guard_present")) is not bool
+        or ("guard_active" in guard and type(guard.get("guard_active")) is not bool)
+    ):
+        raise ValueError("Arena restart guard state is invalid")
+    if "guard_active" in guard:
+        return guard["guard_active"]
+    return guard["guard_present"]
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     physical_role = (
@@ -250,13 +275,7 @@ def main(argv=None) -> int:
             return False
         with telemetry.stage("review_guard"):
             guard = service._store._transport.rpc("lab_arena_review_guard_state_v1", {})
-            if (
-                not isinstance(guard, Mapping)
-                or guard.get("schema_version") != "leadpoet.lab_arena.review_guard_state.v1"
-                or type(guard.get("guard_present")) is not bool
-            ):
-                raise ValueError("Arena restart guard state is invalid")
-            return not stop.is_set() and not guard["guard_present"]
+            return not stop.is_set() and not restart_guard_withholds_review(guard)
 
     def safe_review_allowed() -> bool:
         try:

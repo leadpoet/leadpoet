@@ -12,6 +12,7 @@ import ast
 import asyncio
 import inspect
 import json
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +41,9 @@ def _module_strings(module) -> str:
 
 
 LEAD_SCORER_PROMPTS = _module_strings(lead_scorer)
+REAL_CONTRADICTED_PARENT = json.loads(
+    (Path(__file__).parent / 'fixtures/listed_parent_public_contradicted_40628.json').read_text()
+)
 
 
 # Rule A -------------------------------------------------------------------
@@ -524,9 +528,10 @@ def test_unrelated_product_sales_do_not_erase_parent_listing(sales):
 
 
 @pytest.mark.parametrize("search_ok", [True, False])
-def test_native_listed_parent_route_keeps_current_search_and_private_receipt(monkeypatch, search_ok):
+@pytest.mark.parametrize("submitted_status", ["VERIFIED", "CONTRADICTED"])
+def test_native_listed_parent_route_keeps_current_search_and_private_receipt(monkeypatch, search_ok, submitted_status):
     raw = _finding(
-        "stage", observed_value="Acquired", evidence_url=OWNERSHIP_URL,
+        "stage", status=submitted_status, observed_value="Acquired", evidence_url=OWNERSHIP_URL,
         evidence_quote=OWNERSHIP, supporting_evidence_url_1=LISTING_URL,
         supporting_evidence_quote_1=LISTING,
     )
@@ -787,3 +792,90 @@ def test_child_private_status_does_not_replace_proved_acquired_observation():
     assert finding['status'] == 'VERIFIED'
     assert retained['observed_company_stage'] == 'acquired'
     assert decision == 'match'
+
+
+def _validate_recorded_parent(finding=None, pages=None):
+    import copy
+    fixture = REAL_CONTRADICTED_PARENT
+    finding = copy.deepcopy(fixture['finding'] if finding is None else finding)
+    source_pages = fixture['native_kwargs']['prefetched_pages']
+    pages = ({url: value['text'] for url, value in source_pages.items()}
+             if pages is None else pages)
+    return investigator._validated_findings(
+        {'findings': [finding]}, targets=('stage',), fetched_pages=pages,
+        fetched_final_urls={url: url for url in pages},
+        first_party_domains={'acme-realty.example'}, identity_names={'acmerealty'},
+        requested_stage='Public',
+    )['stage']
+
+
+def test_real_contradicted_parent_facts_normalize_only_after_strict_proof():
+    finding = _validate_recorded_parent()
+    raw = REAL_CONTRADICTED_PARENT['finding']
+    assert raw['status'] == 'CONTRADICTED'
+    assert finding['status'] == 'VERIFIED'
+    assert finding['observed_value'] == 'Acquired'
+    assert finding['evidence_quote'] == raw['evidence_quote']
+    assert finding['supporting_evidence'] == [{'url': raw['supporting_evidence_url_1'],
+                                             'quote': raw['supporting_evidence_quote_1']}]
+    company = _company(name='Acme Realty', website='https://acme-realty.example')
+    projected = lead_scorer._project_investigator_stage(
+        {'observed_company_name': company.company_name}, finding, icp_stage='public')
+    assert lead_scorer._decision_from_observed_stage(
+        json.loads(json.dumps(projected)), 'public', validated_stage_finding=finding,
+        company=company, evidence_attributed=True,
+    ) == 'match'
+
+
+@pytest.mark.parametrize('damage', ['missing_support', 'wrong_issuer', 'historical', 'private_parent',
+                                  'minority', 'source_absent', 'support_source_absent',
+                                  'inverse_quote', 'unproven'])
+def test_contradicted_parent_label_cannot_promote_unproved_facts(damage):
+    import copy
+    raw = copy.deepcopy(REAL_CONTRADICTED_PARENT['finding'])
+    pages = {url: value['text'] for url, value in
+             REAL_CONTRADICTED_PARENT['native_kwargs']['prefetched_pages'].items()}
+    if damage == 'missing_support':
+        raw['supporting_evidence_url_1'] = raw['supporting_evidence_quote_1'] = ''
+    elif damage in {'wrong_issuer', 'historical', 'private_parent'}:
+        quote = {'wrong_issuer': 'Other Corp is currently publicly traded.',
+                 'historical': 'Barco Industries (NYSE: BRC) was publicly traded in 2020.',
+                 'private_parent': 'Barco Industries is currently a private company.'}[damage]
+        raw['supporting_evidence_quote_1'] = quote
+        pages[raw['supporting_evidence_url_1']] = quote
+    elif damage == 'minority':
+        raw['evidence_quote'] = ('Acme Realty is a subsidiary of Barco Industries. '
+                                 'Barco Industries owns 40% of Acme Realty.')
+        pages[raw['evidence_url']] = raw['evidence_quote']
+    elif damage == 'source_absent':
+        pages[raw['evidence_url']] = 'The submitted ownership quote is absent.'
+    elif damage == 'support_source_absent':
+        pages.pop(raw['supporting_evidence_url_1'])
+    elif damage == 'inverse_quote':
+        raw['evidence_quote'] = 'Barco Industries currently owns 100% of Acme Realty.'
+    else:
+        raw.update(status='UNPROVEN', observed_value=None, evidence_url='', evidence_quote='')
+    finding = _validate_recorded_parent(raw, pages)
+    assert finding['status'] != 'VERIFIED'
+    projected = lead_scorer._project_investigator_stage({}, finding, icp_stage='public')
+    assert lead_scorer._decision_from_observed_stage(
+        json.loads(json.dumps(projected)), 'public', validated_stage_finding=finding,
+        company=_company(name='Acme Realty', website='https://acme-realty.example'),
+    ) != 'match'
+
+
+@pytest.mark.parametrize('observed,requested,quote', [
+    ('Series A', 'Series A', 'Acme Realty has not completed a Series A financing round.'),
+    ('Public', 'Public', 'Acme Realty (NYSE: ACRE) is currently publicly traded.'),
+])
+def test_matching_contradicted_direct_or_venture_label_keeps_existing_veto(observed, requested, quote):
+    finding = investigator._validated_findings(
+        {'findings': [_finding('stage', status='CONTRADICTED', observed_value=observed,
+                              evidence_url=OWNERSHIP_URL, evidence_quote=quote)]},
+        targets=('stage',), fetched_pages={OWNERSHIP_URL: quote},
+        fetched_final_urls={OWNERSHIP_URL: OWNERSHIP_URL},
+        first_party_domains={'acmerealty.example'}, identity_names={'acmerealty'},
+        requested_stage=requested,
+    )['stage']
+    assert finding['status'] == 'UNPROVEN'
+    assert finding['evidence_url'] == finding['evidence_quote'] == ''

@@ -4600,11 +4600,11 @@ def _validated_findings(
                             "Do not infer a value from the requested stage."
                         ),
                     )
-                elif normalized_requested_stage and status == "CONTRADICTED" and (
-                    _company_stage_matches(
-                        normalized_stage, normalized_requested_stage,
-                    )
-                    or listed_parent_public
+                elif (
+                    normalized_requested_stage
+                    and status == "CONTRADICTED"
+                    and not listed_parent_public
+                    and _company_stage_matches(normalized_stage, normalized_requested_stage)
                 ):
                     finding.update(
                         status="UNPROVEN",
@@ -4718,6 +4718,9 @@ def _validated_findings(
                     if semantic_pe_ownership:
                         finding["ownership"] = dict(raw["ownership"])
                 if listed_parent_public and finding["status"] != "UNPROVEN":
+                    # Only this independently proved route overrides the model's
+                    # requested-fit label, after every stage/source check passed.
+                    finding["status"] = "VERIFIED"
                     finding["supporting_evidence"] = listed_parent_support
                 # Preserve a proven different stage when VERIFIED described
                 # the observed fact instead of its match to the request.

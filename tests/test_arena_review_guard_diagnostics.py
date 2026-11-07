@@ -13,7 +13,7 @@ from scripts import run_lab_arena_service as entrypoint
 
 
 def run_two_review_cycles(monkeypatch, *, fail_at=None, error=None, guard_present=False,
-                          malformed=False, nested=False):
+                          malformed=False, nested=False, review_result=None):
     exporter = InMemorySpanExporter()
     monkeypatch.setattr(telemetry, "_recorder", configure_arena_otel(None, span_exporter=exporter))
     monkeypatch.setattr(entrypoint, "_install_arena_telemetry", lambda _: None)
@@ -65,6 +65,7 @@ def run_two_review_cycles(monkeypatch, *, fail_at=None, error=None, guard_presen
         reviews.append(True)
         if nested:
             callbacks.append(should_continue())
+        return review_result
 
     service = SimpleNamespace(
         startup_checks=lambda: {"database_identity": {"current_user": "service_role"}},
@@ -124,3 +125,19 @@ def test_malformed_guard_remains_closed_without_invented_store_diagnostics(monke
     assert not reviews
     assert all(s.attributes["arena.error_type"] == "ValueError" for s in guards)
     assert not any(k.startswith("arena.store_") for s in guards for k in s.attributes)
+
+
+@pytest.mark.parametrize("review_result,outcome,count", [
+    (None, "idle", 0),
+    ({"reviewed": 0}, "idle", 0),
+    ({"reviewed": 3}, "ok", 3),
+])
+def test_review_pass_reports_how_many_submissions_it_reviewed(
+    monkeypatch, review_result, outcome, count,
+):
+    """An admitted pass that reviewed nothing must not read as work done."""
+    spans, _, reviews, _ = run_two_review_cycles(monkeypatch, review_result=review_result)
+    passes = [s for s in spans if s.name == "arena.review_submissions"]
+    assert len(passes) == len(reviews) == 2
+    assert all(s.attributes["arena.outcome"] == outcome for s in passes)
+    assert all(s.attributes["arena.count"] == count for s in passes)

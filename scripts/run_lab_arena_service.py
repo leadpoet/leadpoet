@@ -271,10 +271,19 @@ def main(argv=None) -> int:
                 if not review_allowed():
                     stop.wait(5)
                     continue
-                with telemetry.stage("review_submissions"):
-                    service.review_pending_submissions(
+                with telemetry.stage("review_submissions") as observed:
+                    outcome = service.review_pending_submissions(
                         should_continue=safe_review_allowed,
                     )
+                    # An admitted pass that reviewed nothing is not work done.
+                    # Without this the stage reads ok/count=0 either way, so a
+                    # round with no pending submissions is indistinguishable
+                    # from one the reviewer is actually working through.
+                    reviewed = 0
+                    if isinstance(outcome, Mapping):
+                        reviewed = int(outcome.get("reviewed") or 0)
+                    observed.count = reviewed
+                    observed.idle = reviewed == 0
             except Exception as exc:
                 # Never emit source, model responses, or credential errors.
                 print("code review worker unavailable", type(exc).__name__, file=sys.stderr)

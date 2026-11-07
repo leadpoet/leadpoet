@@ -931,7 +931,7 @@ def test_review_same_parent_denial_cannot_be_overridden(denial):
     "one hundred and one percent", "one hundred sixty percent",
     "fifty point zero percent", "one hundred point one percent",
     "fifty point ten percent", "fifty point point one percent",
-    "fifty point percent", "-80%", "1500%", "1,080%",
+    "fifty point percent", "-80%", "1500%", "1,080%", "1e100%", "onehundred60%",
     "minus sixty percent", "negative eighty percent", "−80%", "1,099%",
     "60% or less", "sixty percent at most", "between 40 and 60 percent",
     "40 to 60 percent", "forty to sixty percent",

@@ -1630,7 +1630,7 @@ _LISTED_PARENT_NOT_HELD_RE = re.compile(
     re.I,
 )
 _LISTED_PARENT_PERCENT_RE = re.compile(
-    r"(?<![\d.,])([+−-]?\d+(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)", re.I,
+    r"(?<![\w.,])([+−-]?\d+(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)", re.I,
 )
 # Normalize only bounded, unambiguous written percentages into the same guard.
 _LISTED_PARENT_NUMBER_WORDS = dict(zip(

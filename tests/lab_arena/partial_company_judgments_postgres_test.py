@@ -10,7 +10,10 @@ import threading
 import pytest
 
 from lab_arena import contracts, scoring
-from lab_arena.service import ArenaService, ServiceConfig, S3ObjectStore, ServiceError
+from lab_arena.service import (
+    ArenaService, ServiceConfig, S3ObjectStore, ServiceError,
+    _score_item_output_ref,
+)
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.company_judgments_postgres_test import _open, _raw, _complete
 from tests.lab_arena.lab_arena_pg_harness import POSTGREST_MIGRATIONS, database_with_lab_arena_migration
@@ -34,7 +37,7 @@ def store(database):
 
 
 def _setup(store, marker):
-    cases = ["judge_error", "judge_timeout", "credential_error", "foreign_runner", "lease", "generation", "slot", "input", "wrong_run", "provider_failure", "expired", "conflict", "concurrent"]
+    cases = ["judge_error", "judge_timeout", "credential_error", "foreign_runner", "lease", "generation", "slot", "input", "wrong_run", "provider_failure", "expired", "conflict", "concurrent", "corrected_retry"]
     round_id = "arena-2026-09-11-p%02d" % (50 + cases.index(marker))
     _, items = _open(store, round_id=round_id, markers_by_submission=[["positive", "negative", "unresolved"]])
     key = keypair("partial-validator-" + marker)
@@ -142,6 +145,33 @@ def test_failed_partial_completion_rejects_unbound_authority(store, database, ch
     assert all(store.get_company_judgment(ref["cache_key"], 0) is None for ref in refs)
 
 
+def test_invalid_score_output_does_not_poison_corrected_retry(store):
+    service, round_id, key, leased, token, _refs = _setup(store, "corrected_retry")
+    initial = _request(round_id, key, leased, token)
+    invalid_body = copy.deepcopy(initial["body"])
+    invalid_body["output"]["company_judgments"][0]["authority_slot"] += 1
+    invalid = _sign(round_id, key, invalid_body)
+
+    with pytest.raises(ServiceError) as failure:
+        service.handle_complete(invalid)
+    assert failure.value.code == "company_judgment_output_invalid"
+    invalid_ref = _score_item_output_ref(
+        round_id, leased["run_id"], contracts.document_hash(invalid_body["output"]),
+    )
+    assert store.get_run(leased["run_id"])["status"] == "leased"
+    assert invalid_ref not in service._objects._client.objects
+
+    corrected_body = copy.deepcopy(invalid_body)
+    corrected_body["output"]["company_judgments"][0]["authority_slot"] -= 1
+    corrected = _sign(round_id, key, corrected_body)
+    assert service.handle_complete(corrected)["status"] == "failed"
+    assert store.get_run(leased["run_id"])["status"] == "failed"
+    corrected_ref = _score_item_output_ref(
+        round_id, leased["run_id"], contracts.document_hash(corrected_body["output"]),
+    )
+    assert corrected_ref in service._objects._client.objects
+
+
 def test_failed_source_and_its_bytes_survive_terminal_conflicting_completion(store):
     service, round_id, key, leased, token, refs = _setup(store, "conflict")
     request = _request(round_id, key, leased, token)
@@ -182,18 +212,18 @@ def test_concurrent_conflicting_completions_keep_one_bound_source(store):
         return run
 
     store.get_run = synchronized_get
-    def complete(request):
-        try:
-            return service.handle_complete(request)
-        except contracts.ArenaContractError:
-            return {"status": "conflicting_bytes"}
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            outcomes = list(executor.map(complete, (first, second)))
+            outcomes = list(executor.map(service.handle_complete, (first, second)))
     finally:
         store.get_run = original_get
-    assert sorted(result["status"] for result in outcomes) == ["conflicting_bytes", "failed"]
+    assert [result["status"] for result in outcomes] == ["failed", "failed"]
+    assert sorted(result["idempotent"] for result in outcomes) == [False, True]
     source = store.get_run(leased["run_id"])
     output = json.loads(service._objects.get(source["output_ref"]))
     evidence = service._company_judgment_evidence(cache_key=refs[0]["cache_key"], company_input_hash=refs[0]["company_input_hash"], authority_slot=0)
     assert evidence["source_output_hash"] == contracts.document_hash(output)
+    assert evidence["source_output_ref"] == source["output_ref"]
+    # A conflicting completion that races the first commit can leave one
+    # write-once orphan. Only the database-bound output remains authoritative.
+    assert len(client.objects) == 2

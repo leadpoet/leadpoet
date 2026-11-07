@@ -264,6 +264,8 @@ def test_signed_runner_completes_missing_tenth_pair_and_publishes(database,tmp_p
     baseline=next(p['submission_id'] for p in row['participants'] if p['is_king'])
     executions=harness.service.store.list_runs(round_id,kind='execute')
     failed=next(r for r in executions if r['submission_id']==baseline and r['icp_position']==0)
+    failed_score=next(r for r in harness.service.store.list_runs(round_id,kind='score')
+                      if r['scored_run_id']==failed['run_id'])
     with pg.connect(**dsn) as conn,conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')
         cur.execute('DELETE FROM public.lab_arena_judgment_cache WHERE source_scored_run_id=%s',(failed['run_id'],))
@@ -274,7 +276,7 @@ def test_signed_runner_completes_missing_tenth_pair_and_publishes(database,tmp_p
         # Fixture represents the frozen remaining-day boundary. No production
         # schedule changes occur; the configuration is fixed before proof starts.
         cur.execute("UPDATE public.lab_arena_rounds SET status='stage2_scoring',configuration_doc=jsonb_set(configuration_doc,'{schedule,stage_2_close}',to_jsonb((clock_timestamp()-interval '1 hour')::text)) WHERE round_id=%s",(round_id,))
-    harness.objects._path('arena/%s/scores/items/%s:score:1.json'%(round_id,failed['assignment_id'])).unlink()
+    harness.objects._path(failed_score['output_ref']).unlink()
     frozen=harness.service.store.get_round(round_id)
     old_runs=harness.service.store.list_runs(round_id)
     preserved=[r for r in old_runs if r['status']=='accepted']

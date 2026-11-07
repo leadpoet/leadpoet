@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 
 _CompanyEvidenceReads = Dict[Tuple[str, str, int], Dict[str, Any]]
 
+
+def _score_item_output_ref(round_id: str, run_id: str, output_hash: str) -> str:
+    """Use the output digest in score object keys so interrupted writes cannot poison retries."""
+    digest = contracts.require_sha256(output_hash, "score output hash").split(":", 1)[1]
+    return "arena/%s/scores/items/%s-%s.json" % (round_id, run_id, digest)
+
 # Final observation uploads already have two 60-second I/O attempts. Allow
 # their exact lease to finish after expiry without extending execution authority.
 _OBSERVATION_FINALIZATION_GRACE = timedelta(seconds=180)
@@ -3884,8 +3890,12 @@ class ArenaService:
         return document, contracts.document_hash(output)
 
     @staticmethod
-    def _legacy_partial_receipt(run, round_row, scoring_input, execution_hash, output, completion_hash):
+    def _legacy_partial_receipt(
+        run, round_row, scoring_input, execution_hash, output, completion_hash,
+        source_output_ref=None,
+    ):
         configuration = round_row.get("configuration_doc") or {}
+        output_hash = contracts.document_hash(output)
         return {
             "schema_version": "leadpoet.lab_arena.legacy_partial.v1",
             **{key: run.get(key) for key in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "scored_run_id")},
@@ -3895,8 +3905,10 @@ class ArenaService:
             "source_claim_request_hash": run.get("claim_request_hash"),
             "source_lease_generation": int(run.get("lease_generation") or 0),
             "runner_authority_exclusions": (run.get("claim_response") or {}).get("runner_authority_exclusions"),
-            "source_output_ref": "arena/%s/scores/items/%s.json" % (round_row["round_id"], run["run_id"]),
-            "source_output_hash": contracts.document_hash(output),
+            "source_output_ref": source_output_ref or _score_item_output_ref(
+                str(round_row["round_id"]), str(run["run_id"]), output_hash,
+            ),
+            "source_output_hash": output_hash,
             "scoring_input_hash": contracts.document_hash(scoring_input),
             "execution_output_hash": execution_hash,
             "scorer_image_digest": configuration.get("scorer_image_digest"),
@@ -3927,8 +3939,20 @@ class ArenaService:
         output = scoring.validate_scoring_output_document(json.loads(
             self._objects.get_bounded(str(source["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES)))
         document, execution_hash = self._legacy_partial_input(source, round_row)
-        expected = self._legacy_partial_receipt(source, round_row, document, execution_hash, output, completion_hash)
-        if (receipt != expected or source["output_ref"] != expected["source_output_ref"]
+        expected = self._legacy_partial_receipt(
+            source, round_row, document, execution_hash, output, completion_hash,
+            source_output_ref=str(source.get("output_ref") or ""),
+        )
+        legacy_output_ref = "arena/%s/scores/items/%s.json" % (
+            round_row["round_id"], source["run_id"],
+        )
+        content_addressed_output_ref = _score_item_output_ref(
+            str(round_row["round_id"]), str(source["run_id"]),
+            contracts.document_hash(output),
+        )
+        if (receipt != expected or source["output_ref"] not in {
+                legacy_output_ref, content_addressed_output_ref,
+            }
             or output.get("scored_run_id") != source.get("scored_run_id")
             or "failure" not in output or not output.get("terminal_breakdowns")
             or (source.get("terminal_cause") != "credential_error" and output["failure"] != source["terminal_cause"])):
@@ -7767,14 +7791,41 @@ class ArenaService:
                         output["terminal_breakdowns"], icp=document["icp"], companies=document["companies"], policy=document["scorer_policy"],
                     )
                     run_result["legacy_partial_checkpoint"] = self._legacy_partial_receipt(
-                        run, round_row, document, execution_hash, output, contracts.request_bytes_hash(validated),
+                        run, round_row, document, execution_hash, output,
+                        contracts.request_bytes_hash(validated),
+                        source_output_ref=_score_item_output_ref(
+                            round_id, run_id, contracts.document_hash(output),
+                        ),
                     )
                 except (scoring.ScoringError, ValueError, OutputInvalid) as exc:
                     raise ServiceError("legacy_checkpoint_output_invalid", 400) from exc
-            output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
             output_bytes = contracts.canonical_json(output).encode("utf-8")
-            self._objects.put(output_ref, output_bytes)
             output_hash = contracts.document_hash(output)
+            output_ref = _score_item_output_ref(round_id, run_id, output_hash)
+            if run.get("status") in ("accepted", "failed"):
+                committed_ref = str(run.get("output_ref") or "")
+                if not committed_ref:
+                    raise ArenaContractError(
+                        "terminal score run has no committed output reference"
+                    )
+                committed_bytes = self._objects.get_optional_bounded(
+                    committed_ref, scoring.MAX_SCORING_OUTPUT_BYTES,
+                )
+                if committed_bytes != output_bytes:
+                    raise ArenaContractError(
+                        "object ref %s already holds different bytes" % committed_ref
+                    )
+                output_ref = committed_ref
+                if partial_legacy_output:
+                    receipt = run_result.get("legacy_partial_checkpoint")
+                    if not isinstance(receipt, dict):
+                        raise ArenaContractError(
+                            "terminal legacy score run has no validated checkpoint"
+                        )
+                    # The database binds a legacy checkpoint to the committed
+                    # output reference. Historical rows may still use the
+                    # original run-only key, which is valid after byte equality.
+                    receipt["source_output_ref"] = committed_ref
             if company_quality_run:
                 context = (run.get("claim_response") or {}).get(
                     "company_judgment_cache"
@@ -7914,6 +7965,10 @@ class ArenaService:
                 except judgment_cache.JudgmentCacheError as exc:
                     raise ServiceError("judgment_cache_invalid", 500) from exc
                 judgment_evidence_hash = contracts.document_hash(judgment_evidence)
+            # Validate all judgment evidence before writing its immutable,
+            # content-addressed object. A rejected completion must not leave
+            # an artifact that appears committed to a later reader.
+            self._objects.put(output_ref, output_bytes)
         elif terminal_status == "accepted":
             try:
                 output = validate_output_document(

@@ -11,7 +11,10 @@ import pytest
 pytestmark = pytest.mark.usefixtures("scorer_process_environment")
 
 from lab_arena import contracts, judgment_cache, scorer_entrypoint, scoring
-from lab_arena.service import ArenaService, ServiceConfig, S3ObjectStore, ServiceError
+from lab_arena.service import (
+    ArenaService, ServiceConfig, S3ObjectStore, ServiceError,
+    _score_item_output_ref,
+)
 from lab_arena.store import ArenaStore, PsycopgTransport
 from qualification.scoring.competition import apply_company_judgment_context
 from qualification.scoring import lead_scorer
@@ -25,6 +28,7 @@ from tests.lab_arena.test_lab_arena_service_round import keypair, wallet_verify,
 from tests.test_arena_score_integrity import _icp, _positive_breakdown, _public_company
 
 SQL = Path(__file__).parents[2] / 'scripts/468-lab-arena-legacy-review-checkpoint.sql'
+CONTENT_ADDRESS_SQL = Path(__file__).parents[2] / 'scripts/668-lab-arena-content-addressed-score-checkpoint.sql'
 
 
 @pytest.fixture(scope='module')
@@ -35,6 +39,8 @@ def database():
         with value[0].connect(**value[1]) as conn, conn.cursor() as cur:
             cur.execute(SQL.read_text())
             cur.execute(SQL.read_text())
+            cur.execute(CONTENT_ADDRESS_SQL.read_text())
+            cur.execute(CONTENT_ADDRESS_SQL.read_text())
         with value[0].connect(**value[1]) as conn:
             deployed._reset_control(conn)
         yield value
@@ -96,7 +102,36 @@ def test_signed_failure_persists_then_retry_scores_only_unresolved_and_final_cac
     assert service.handle_complete(request)['status'] == 'failed'
     failed = store.get_run(lease['run_id'])
     assert failed['per_icp_score'] is None
+    assert failed['output_ref'] == _score_item_output_ref(
+        round_id, lease['run_id'], contracts.document_hash(output),
+    )
     assert store.get_judgment_cache(failed['judgment_cache_key']) is None
+    receipt = failed['result_doc']['legacy_partial_checkpoint']
+    assert receipt['source_output_ref'] == failed['output_ref']
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            'SELECT public.lab_arena__legacy_partial_bound(r,%s::jsonb,%s) '
+            'FROM public.lab_arena_runs r WHERE run_id=%s',
+            (json.dumps(receipt), failed['output_ref'], lease['run_id']),
+        )
+        assert cur.fetchone()[0] is True
+        legacy_ref = 'arena/%s/scores/items/%s.json' % (round_id, lease['run_id'])
+        legacy_receipt = dict(receipt, source_output_ref=legacy_ref)
+        cur.execute(
+            'SELECT public.lab_arena__legacy_partial_bound(r,%s::jsonb,%s) '
+            'FROM public.lab_arena_runs r WHERE run_id=%s',
+            (json.dumps(legacy_receipt), legacy_ref, lease['run_id']),
+        )
+        assert cur.fetchone()[0] is True
+        bad_ref = failed['output_ref'].rsplit('-', 1)[0] + '-' + '0' * 64 + '.json'
+        bad_receipt = dict(receipt, source_output_ref=bad_ref)
+        cur.execute(
+            'SELECT public.lab_arena__legacy_partial_bound(r,%s::jsonb,%s) '
+            'FROM public.lab_arena_runs r WHERE run_id=%s',
+            (json.dumps(bad_receipt), bad_ref, lease['run_id']),
+        )
+        assert cur.fetchone()[0] is False
     assert service.handle_complete(request)['idempotent'] is True
     claim_request = contracts.build_signed_request(scope=contracts.SCOPE_CLAIM, round_id=round_id, hotkey=key.ss58_address, body={'declared_parallelism': 1}, timestamp=int(datetime.now(timezone.utc).timestamp()), sign_message=lambda message: key.sign(message.encode()).hex())
     retry = service.handle_claim(claim_request)

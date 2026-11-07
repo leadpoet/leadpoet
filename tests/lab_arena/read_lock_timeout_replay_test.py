@@ -53,7 +53,12 @@ def test_review_guard_state_rpc_still_fails_when_the_lock_never_clears():
 
 
 @pytest.mark.parametrize("function", [
-    "lab_arena_claim_assignment", "lab_arena_transition_round",
+    # lab_arena_claim_assignment is deliberately excluded here: it was moved
+    # into LOCK_TIMEOUT_REPLAYABLE_RPCS by "Retry a contended Arena work claim
+    # instead of refusing it" (merged to main 2026-11-06) because it is keyed
+    # on an exact caller identity and safe to repeat. This test is about
+    # mutating RPCs that are NOT in either replay set.
+    "lab_arena_transition_round",
 ])
 def test_a_mutating_rpc_still_never_replays_a_lock_timeout(function):
     attempts = []

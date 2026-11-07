@@ -123,12 +123,12 @@ OWNERSHIP_URL = "https://acmerealty.example/about"
 LISTING_URL = "https://investors.parentgroup.example/stock"
 OWNERSHIP = "Acme Realty is a wholly owned subsidiary of Parent Group, Inc."
 LISTING = (
-    "Parent Group, Inc. (Nasdaq: PGRP) is a holding company for residential "
+    "Parent Group, Inc. (Nasdaq: PGRP) is publicly traded and is a holding company for residential "
     "brokerage brands."
 )
 
 
-def _decide(ownership, listing, requested, *, validated=True):
+def _decide(ownership, listing, requested, *, validated=True, listing2=""):
     pages = {
         OWNERSHIP_URL: "About us. " + ownership + " Contact us.",
         LISTING_URL: "Stock information. " + listing,
@@ -140,6 +140,10 @@ def _decide(ownership, listing, requested, *, validated=True):
         supporting_evidence_quote_1=listing,
     )
     raw.pop("supporting_evidence")
+    if listing2:
+        pages[LISTING_URL + "/status"] = listing2
+        raw.update(supporting_evidence_url_2=LISTING_URL + "/status",
+                   supporting_evidence_quote_2=listing2)
     finding = investigator._validated_findings(
         {"findings": [raw]}, targets=("stage",), fetched_pages=pages,
         fetched_final_urls={url: url for url in pages},
@@ -235,16 +239,17 @@ def test_listed_parent_controls_stay_not_public(ownership, listing):
 
 @pytest.mark.parametrize(("ownership", "listings", "expected"), [
     ("Parent Group, Inc. (Nasdaq: PGRP), the parent company of Acme Realty, "
-     "reported results.", (), True),
+     "reported results. Parent Group is publicly traded.", (), True),
     # Review fix 2: a completed acquisition is past, not current, ownership.
     ("Parent Group, Inc. (NYSE: PGRP) completed its acquisition of Acme Realty.",
      (), False),
     ("Acme Realty was acquired by Parent Group, Inc. (NYSE: PGRP).", (), False),
-    ("Acme Realty is wholly owned by Parent Group, Inc. (NYSE: PGRP).", (), True),
+    ("Acme Realty is wholly owned by Parent Group, Inc. (NYSE: PGRP). "
+     "Parent Group is publicly traded.", (), True),
     ("Acme Realty is an operating company of Parent Group, Inc. (NYSE: PGRP).",
-     (), True),
+     ("Parent Group is publicly traded.",), True),
     ("Acme Realty, a subsidiary of Parent Group, Inc. (Nasdaq: PGRP), serves "
-     "home buyers.", (), True),
+     "home buyers.", ("Parent Group is publicly traded.",), True),
     # The ticker belongs to a different parent than the one that owns Acme.
     ("Acme Realty is a subsidiary of Parent Group, Inc.",
      ("Other Holdings, Inc. (Nasdaq: OTHR) reported results.",), False),
@@ -271,7 +276,7 @@ def test_listed_parent_proof_binds_parent_relation_and_listing(
 
 # Review regressions: each reproduces a false Public found end to end ------
 
-BARCO_LISTING = "Barco Industries (NYSE: BRC) reported results."
+BARCO_LISTING = "Barco Industries (NYSE: BRC) is publicly traded."
 
 
 @pytest.mark.parametrize(("ownership", "listing"), [
@@ -320,9 +325,9 @@ def test_review_false_public_repros_are_not_public(ownership, listing):
      BARCO_LISTING),
     # A trailing legal suffix is not part of the name; ticker case is ignored.
     ("Acme Realty is a wholly owned subsidiary of Barco Industries, Inc.",
-     "Barco Industries (NYSE: BRC) reported results."),
+     "Barco Industries (NYSE: BRC) is publicly traded."),
     ("Acme Realty is a wholly owned subsidiary of Barco Industries.",
-     "Shares of Barco Industries Inc. (NYSE: BRC) rose."),
+     "Barco Industries Inc. (NYSE: BRC) is publicly traded."),
     # A majority percentage is not a minority stake.
     ("Acme Realty is 80% owned by Barco Industries. Acme Realty is a "
      "majority-owned subsidiary of Barco Industries.", BARCO_LISTING),
@@ -338,7 +343,7 @@ def test_exact_listed_parent_still_matches_requested_public(ownership, listing):
 
 @pytest.mark.parametrize("listing", [
     "Barco Industries Holdings (NYSE: BRC) reported results.",
-    "Tata Barco Industries (NYSE: BRC) reported results.",
+    "Tata Barco Industries (NYSE: BRC) is publicly traded.",
     "Barcos Industries (NYSE: BRC) reported results.",
 ])
 def test_listing_issuer_must_equal_the_parent_name(listing):
@@ -414,6 +419,31 @@ def test_parent_listing_must_be_affirmed_current_fact(listing):
     assert decision != "match"
 
 
+@pytest.mark.parametrize("separate_quote", [False, True])
+@pytest.mark.parametrize("denial", [
+    "Samsung is not listed.",
+    "Samsung is not publicly traded.",
+    "Samsung (NYSE: SSNLF) is not a listed company.",
+])
+def test_exact_parent_denial_survives_sentence_and_citation_boundaries(separate_quote, denial):
+    listing = "Samsung (NYSE: SSNLF) is an example."
+    *_, decision = _decide(
+        "Acme Realty is a wholly owned subsidiary of Samsung.",
+        listing if separate_quote else denial + " " + listing,
+        "public", listing2=denial if separate_quote else "",
+    )
+    assert decision != "match"
+
+
+def test_another_issuers_nonpublic_status_does_not_erase_the_listed_parent():
+    *_, decision = _decide(
+        "Acme Realty is a wholly owned subsidiary of Samsung.",
+        "Samsung (NYSE: SSNLF) is publicly traded.", "public",
+        listing2="Other Corp is not listed.",
+    )
+    assert decision == "match"
+
+
 @pytest.mark.parametrize("percentage", ["50%", "50.0 percent", "49%", "101%"])
 def test_equal_or_minority_ownership_cannot_establish_majority(percentage):
     ownership = (
@@ -444,8 +474,8 @@ def test_majority_stake_wording_preserves_valid_parent_route():
 
 
 @pytest.mark.parametrize("sales", [
-    "Barco Industries (NYSE: BRC) reported profits from products sold to customers.",
-    "Barco Industries (NYSE: BRC) sells software to companies.",
+    "Barco Industries (NYSE: BRC) is publicly traded and reported profits from products sold to customers.",
+    "Barco Industries (NYSE: BRC) is publicly traded and sells software to companies.",
 ])
 def test_unrelated_product_sales_do_not_erase_parent_listing(sales):
     *_, decision = _decide(
@@ -517,3 +547,143 @@ def test_native_listed_parent_route_keeps_current_search_and_private_receipt(mon
         assert "must-not-enter-stage-receipt" not in json.dumps(validated)
     else:
         assert result["_completed_submit"] is False
+
+
+@pytest.mark.parametrize('quantity', [
+    'one third', 'a third', 'two fifths', '50-50', '50/50',
+    'less than 60%', 'up to 80%', 'at most 80%',
+])
+def test_ambiguous_quantitative_ownership_does_not_prove_majority(quantity):
+    *_, decision = _decide(
+        'Acme Realty is a subsidiary of Barco Industries. '
+        f'Barco Industries owns {quantity} of Acme Realty.',
+        BARCO_LISTING, 'public',
+    )
+    assert decision != 'match'
+
+
+@pytest.mark.parametrize('quantity', ['more than 50%', 'over 50%', 'at least 51%'])
+def test_clear_lower_bounded_majority_preserves_parent_route(quantity):
+    *_, decision = _decide(
+        'Acme Realty is a subsidiary of Barco Industries. '
+        f'Barco Industries owns {quantity} of Acme Realty.',
+        BARCO_LISTING, 'public',
+    )
+    assert decision == 'match'
+
+
+@pytest.mark.parametrize('unrelated_fact', [
+    'Its board includes independent directors.',
+    'Barco Industries serves independent home buyers.',
+    'Barco Industries owns 40% of Unrelated Corp.',
+    'Barco Industries owns a minority stake in Unrelated Corp.',
+    'Its former CEO Jane Doe attended.',
+    'Its shares rose 20% this quarter.',
+])
+def test_unrelated_parent_facts_do_not_change_target_ownership(unrelated_fact):
+    *_, decision = _decide(OWNERSHIP.replace('Parent Group, Inc.', 'Barco Industries'),
+                          BARCO_LISTING + ' ' + unrelated_fact, 'public')
+    assert decision == 'match'
+
+
+@pytest.mark.parametrize('listing', [
+    'Barco Industries (NYSE: BRC) reported results.',
+    'Barco Industries (NYSE: BRC) was publicly traded in 2000.',
+    'Barco Industries (NYSE: BRC) is a private company.',
+    'Barco Industries (NYSE: BRC) is privately held.',
+])
+def test_ticker_alone_cannot_establish_parent_current_listing(listing):
+    *_, decision = _decide('Acme Realty is a wholly owned subsidiary of Barco Industries.',
+                          listing, 'public')
+    assert decision != 'match'
+
+
+@pytest.mark.parametrize('denial', ['Barco Industries is a private company.',
+                                  'Barco Industries is privately held.'])
+def test_private_parent_contradiction_is_kept_across_citations(denial):
+    *_, decision = _decide('Acme Realty is a subsidiary of Barco Industries.',
+                          BARCO_LISTING, 'public', listing2=denial)
+    assert decision != 'match'
+
+
+@pytest.mark.parametrize('other_owner', ['qux Corp', 'its partner Qux Corp'])
+def test_joint_ownership_is_independent_of_casing_and_determiners(other_owner):
+    *_, decision = _decide('Acme Realty is a subsidiary of Barco Industries and '
+                          + other_owner + '.', BARCO_LISTING, 'public')
+    assert decision != 'match'
+
+
+@pytest.mark.parametrize('url, expected', [
+    ('https://www.nyse.com/quote/XNYS:BRC', True),
+    ('https://unrelated.example/quote/XNYS:BRC', False),
+    ('https://www.sec.gov/Archives/edgar/data/123/report.htm', False),
+])
+def test_live_parent_exchange_card_requires_exchange_source(url, expected):
+    assert lead_scorer._listed_parent_public_stage_matches(
+        'acquired', 'public', company_names=('Acme Realty',),
+        ownership_quote='Acme Realty is a subsidiary of Barco Industries.',
+        listing_quotes=('Barco Industries Inc. New York Stock Exchange: BRC Last 10.00',),
+        listing_urls=(url,),
+    ) is expected
+
+
+def test_archived_sec_present_tense_parent_listing_is_not_current_authority():
+    assert not lead_scorer._listed_parent_public_stage_matches(
+        'acquired', 'public', company_names=('Acme Realty',),
+        ownership_quote='Acme Realty is a subsidiary of Barco Industries.',
+        listing_quotes=(BARCO_LISTING,),
+        listing_urls=('https://www.sec.gov/Archives/edgar/data/123/report.htm',),
+    )
+
+
+@pytest.mark.parametrize('event', ['was taken private by Barco Industries in 2024.',
+                                 'was delisted from Nasdaq in 2024.'])
+def test_child_former_listing_does_not_disprove_current_parent_listing(event):
+    *_, decision = _decide('Acme Realty is a subsidiary of Barco Industries. '
+                          'Acme Realty ' + event, BARCO_LISTING, 'public')
+    assert decision == 'match'
+
+
+def test_ownership_source_retains_same_parent_listing_denial_after_sentence():
+    *_, decision = _decide('Acme Realty is a wholly owned subsidiary of Barco Industries. '
+                          'Barco Industries is not listed.', BARCO_LISTING, 'public')
+    assert decision != 'match'
+
+
+def test_fictional_example_does_not_prove_parent_listing():
+    *_, decision = _decide('Acme Realty is a wholly owned subsidiary of Barco Industries.',
+                          'Barco Industries (NYSE: BRC) is publicly traded '
+                          'in this fictional example.', 'public')
+    assert decision != 'match'
+
+
+@pytest.mark.parametrize('final_url, expected', [
+    ('https://www.nyse.com/quote/XNYS:BRC', 'VERIFIED'),
+    ('https://unrelated.example/stock', 'CONTRADICTED'),
+])
+def test_native_parent_exchange_card_requires_final_exchange_authority(final_url, expected):
+    url = 'https://www.nyse.com/quote/XNYS:BRC'
+    quote = 'Barco Industries Inc. New York Stock Exchange: BRC Last 10.00'
+    raw = _finding('stage', observed_value='Acquired', evidence_url=OWNERSHIP_URL,
+                   evidence_quote='Acme Realty is a wholly owned subsidiary of Barco Industries.',
+                   supporting_evidence_url_1=url, supporting_evidence_quote_1=quote)
+    raw.pop('supporting_evidence')
+    finding = investigator._validated_findings(
+        {'findings': [raw]}, targets=('stage',),
+        fetched_pages={OWNERSHIP_URL: raw['evidence_quote'], url: quote},
+        fetched_final_urls={OWNERSHIP_URL: OWNERSHIP_URL, url: final_url},
+        first_party_domains={'acmerealty.example'}, identity_names={'acmerealty'},
+        requested_stage='Public',
+    )['stage']
+    assert finding['status'] == expected
+
+
+@pytest.mark.parametrize('denial', ['Barco Industries is not listed.',
+                                  'Barco Industries is a private company.'])
+def test_live_exchange_card_does_not_override_explicit_same_parent_contradiction(denial):
+    assert not lead_scorer._listed_parent_public_stage_matches(
+        'acquired', 'public', company_names=('Acme Realty',),
+        ownership_quote='Acme Realty is a wholly owned subsidiary of Barco Industries. ' + denial,
+        listing_quotes=('Barco Industries Inc. New York Stock Exchange: BRC Last 10.00',),
+        listing_urls=('https://www.nyse.com/quote/XNYS:BRC',),
+    )

@@ -36,7 +36,10 @@ source example hash. It also binds the complete source split record hashes, so
 editing a record and updating only its review decision cannot reuse an old
 curation manifest. It does not change raw records, their labels, the dataset
 version, split assignment, scoring, or competition eligibility. The training
-permission is `confirmed`: arena runs are Leadpoet data (2026-11-07).
+permission records **confirmed operator authorization** for Leadpoet's
+foundational Sales LLM CPT and SFT (2026-11-07). It does not clear every record's
+provider terms, source rights, or customer/privacy permissions. See the
+[training-use policy](arena_training_data.md#training-use-authorization-and-remaining-restrictions).
 
 Use `--review-sample-size N` to write `review.jsonl`. A reviewer may copy a row
 to a decision JSONL file and set `human_review_status` to `accepted` or
@@ -58,3 +61,11 @@ and curation versions, decision hashes, and reviewed record hashes. Review does
 not bypass the existing source, scorer cohort, privacy, evidence, or strict
 thinking checks. A changed label needs a separate evidence-backed curation
 contract; this version rejects it.
+
+Quality acceptance does not grant data rights. Before using a reviewed dataset
+for CPT or SFT, establish the applicable rights for its inputs, outputs, reasoning
+and derived labels. Exclude unresolved or prohibited material from the training
+corpus. The existing exporters produce candidates, not legal clearance or an
+automatic training job. Earlier `unconfirmed` manifests and review decisions
+remain historical evidence. Regenerate a new dataset and curation from retained
+sources under the current policy; do not edit old manifests to claim approval.

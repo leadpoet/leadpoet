@@ -248,7 +248,7 @@ def main(argv=None) -> int:
     def review_allowed() -> bool:
         if stop.is_set():
             return False
-        with telemetry.stage("review_guard"):
+        with telemetry.stage("review_guard") as observed:
             guard = service._store._transport.rpc("lab_arena_review_guard_state_v1", {})
             if (
                 not isinstance(guard, Mapping)
@@ -256,7 +256,12 @@ def main(argv=None) -> int:
                 or type(guard.get("guard_present")) is not bool
             ):
                 raise ValueError("Arena restart guard state is invalid")
-            return not stop.is_set() and not guard["guard_present"]
+            allowed = not stop.is_set() and not guard["guard_present"]
+            # A held poll is idle, not work done. Without this the guard span
+            # reads "ok" whether review ran or was withheld, so a restart-guard
+            # hold is indistinguishable from an hour with nothing to review.
+            observed.idle = not allowed
+            return allowed
 
     def safe_review_allowed() -> bool:
         try:

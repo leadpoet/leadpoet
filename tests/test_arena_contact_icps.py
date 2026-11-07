@@ -124,17 +124,20 @@ def test_generated_contact_icp_is_service_valid_and_storage_keeps_marker(
     captured = {}
 
     class Query:
-        def upsert(self, value, *, on_conflict):
-            assert on_conflict == "set_id"
-            captured.update(deepcopy(value))
-            return self
-
         def execute(self):
-            return None
+            return SimpleNamespace(data={
+                "status": "activated",
+                "set_id": captured["p_set_id"],
+                "inserted": True,
+                "icps": captured["p_icps"],
+                "icp_set_hash": captured["p_icp_set_hash"],
+                "industry_distribution": captured["p_industry_distribution"],
+            })
 
     class Client:
-        def table(self, name):
-            assert name == "qualification_private_icp_sets"
+        def rpc(self, name, parameters):
+            assert name == "qualification_private_icp_set_publish_v1"
+            captured.update(deepcopy(parameters))
             return Query()
 
     monkeypatch.setitem(
@@ -143,7 +146,7 @@ def test_generated_contact_icp_is_service_valid_and_storage_keeps_marker(
         SimpleNamespace(get_write_client=lambda: Client()),
     )
     active_from = datetime(2026, 9, 11, tzinfo=timezone.utc)
-    assert asyncio.run(
+    publication = asyncio.run(
         icp_generator.store_icp_set(
             set_id=20260911,
             icps=[generated],
@@ -153,7 +156,162 @@ def test_generated_contact_icp_is_service_valid_and_storage_keeps_marker(
             active_until=active_from + timedelta(days=1),
         )
     )
-    assert captured["icps"][0]["contact_policy"] == "contacts_v1"
+    assert publication["status"] == "activated"
+    assert captured["p_icps"][0]["contact_policy"] == "contacts_v1"
+    assert captured["p_active_until"] == (active_from + timedelta(days=1)).isoformat()
+
+
+@pytest.mark.parametrize("malformation", ["set_id", "empty_bank", "hash", "inserted"])
+def test_icp_publish_rejects_malformed_database_acknowledgements(
+    monkeypatch, malformation,
+) -> None:
+    generated = icp_generator.canonicalize_generated_icp(
+        _icp(), industry="Software", sub_industry="SaaS", contacts_required=True,
+    )
+    rows = [generated]
+    digest = icp_generator.compute_icp_set_hash(rows)
+    response = {
+        "status": "activated", "set_id": 20260911, "inserted": True,
+        "icps": rows, "icp_set_hash": digest,
+        "industry_distribution": {"Software": 1},
+    }
+    if malformation == "set_id":
+        response["set_id"] = 20260912
+    elif malformation == "empty_bank":
+        response["icps"] = []
+    elif malformation == "hash":
+        response["icp_set_hash"] = "0" * 64
+    else:
+        response["inserted"] = "yes"
+
+    class Query:
+        def execute(self):
+            return SimpleNamespace(data=response)
+
+    class Client:
+        def rpc(self, _name, _parameters):
+            return Query()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "gateway.db.client",
+        SimpleNamespace(get_write_client=lambda: Client()),
+    )
+    active_from = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    result = asyncio.run(icp_generator.store_icp_set(
+        set_id=20260911,
+        icps=rows,
+        icp_set_hash=digest,
+        industry_distribution={"Software": 1},
+        active_from=active_from,
+        active_until=active_from + timedelta(days=1),
+    ))
+    assert result is None
+
+
+def test_publish_recovers_valid_inactive_bank_without_replacing_its_payload(monkeypatch):
+    generated = icp_generator.canonicalize_generated_icp(
+        _icp(), industry="Software", sub_industry="SaaS", contacts_required=True,
+    )
+    generated["prompt"] = "new generation from retry"
+    persisted = deepcopy(generated)
+    persisted["prompt"] = "bank saved before legacy writer stopped"
+    persisted["company_stage"] = "Public"
+    stored = [persisted]
+    stored_hash = icp_generator.compute_icp_set_hash(stored)
+    active_from = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    active_until = active_from + timedelta(days=1)
+    conflict = {
+        "status": "conflict", "set_id": 20260911, "inserted": False,
+        "icps": stored, "icp_set_hash": stored_hash,
+        "industry_distribution": {"Software": 1},
+        "active_from": active_from.isoformat(),
+        "active_until": active_until.isoformat(),
+        "generation_seed": "20260911",
+    }
+    activated = {**conflict, "status": "activated"}
+    calls = []
+
+    class Query:
+        def __init__(self, response):
+            self.response = response
+
+        def execute(self):
+            return SimpleNamespace(data=self.response)
+
+    class Client:
+        def rpc(self, name, parameters):
+            assert name == "qualification_private_icp_set_publish_v1"
+            calls.append(deepcopy(parameters))
+            return Query(conflict if len(calls) == 1 else activated)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "gateway.db.client",
+        SimpleNamespace(get_write_client=lambda: Client()),
+    )
+    result = asyncio.run(icp_generator.store_icp_set(
+        set_id=20260911,
+        icps=[generated],
+        icp_set_hash=icp_generator.compute_icp_set_hash([generated]),
+        industry_distribution={"Software": 1},
+        active_from=active_from,
+        active_until=active_until,
+        generation_seed="20260911",
+        contacts_required=True,
+    ))
+    assert result["status"] == "activated"
+    assert len(calls) == 2
+    assert calls[1]["p_icps"] == stored
+    assert calls[1]["p_icp_set_hash"] == stored_hash
+    assert calls[1]["p_generation_seed"] == "20260911"
+
+
+def test_contact_round_does_not_recover_inactive_bank_without_contact_contract(monkeypatch):
+    generated = icp_generator.canonicalize_generated_icp(
+        _icp(), industry="Software", sub_industry="SaaS", contacts_required=True,
+    )
+    persisted = deepcopy(generated)
+    persisted.pop("contact_policy")
+    stored = [persisted]
+    active_from = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    conflict = {
+        "status": "conflict", "set_id": 20260911, "inserted": False,
+        "icps": stored,
+        "icp_set_hash": icp_generator.compute_icp_set_hash(stored),
+        "industry_distribution": {"Software": 1},
+        "active_from": active_from.isoformat(),
+        "active_until": (active_from + timedelta(days=1)).isoformat(),
+        "generation_seed": "20260911",
+    }
+    calls = []
+
+    class Query:
+        def execute(self):
+            return SimpleNamespace(data=conflict)
+
+    class Client:
+        def rpc(self, _name, _parameters):
+            calls.append(1)
+            return Query()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "gateway.db.client",
+        SimpleNamespace(get_write_client=lambda: Client()),
+    )
+    result = asyncio.run(icp_generator.store_icp_set(
+        set_id=20260911,
+        icps=[generated],
+        icp_set_hash=icp_generator.compute_icp_set_hash([generated]),
+        industry_distribution={"Software": 1},
+        active_from=active_from,
+        active_until=active_from + timedelta(days=1),
+        generation_seed="20260911",
+        contacts_required=True,
+    ))
+    assert result["status"] == "conflict"
+    assert calls == [1]
 
 
 @pytest.mark.parametrize(

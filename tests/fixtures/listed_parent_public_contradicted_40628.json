@@ -1,0 +1,59 @@
+{
+  "provenance": "Exact first real tool finding from source40628 synthetic listed-parent pilot; no provider reasoning or credentials.",
+  "source_commit": "40628d7b6b77748ad18dcb59a3bb3ef67afea9a6",
+  "response_sha256": "e1778c4c1d36622deda2059fbe9c41891ab99a3755420b97c7f6dc8bf431b2d6",
+  "finding": {
+    "activity_role": "supplier_operator",
+    "evidence_quote": "Acme Realty is a wholly owned subsidiary of Barco Industries.",
+    "evidence_url": "https://acme-realty.example/about",
+    "new_domain": "",
+    "new_name": "",
+    "observed_country": "",
+    "observed_industry": "",
+    "observed_state": "",
+    "observed_subindustry": "",
+    "observed_value": "Acquired",
+    "old_domain": "",
+    "old_name": "",
+    "ownership": null,
+    "reason": "Acme Realty is owned 100% by Barco Industries, which is a publicly traded company, making Acme a subsidiary (Acquired) rather than a public company.",
+    "shared_linkedin_slug": "",
+    "status": "CONTRADICTED",
+    "supporting_evidence_quote_1": "Barco Industries (NYSE: BRC) is currently publicly traded on the New York Stock Exchange. Its common shares remain listed and trade under ticker BRC as of November 8, 2026.",
+    "supporting_evidence_quote_2": "",
+    "supporting_evidence_url_1": "https://barco-industries.example/investors/stock",
+    "supporting_evidence_url_2": "",
+    "target": "stage"
+  },
+  "native_kwargs": {
+    "company_locator": {
+      "name": "Acme Realty",
+      "website": "https://acme-realty.example"
+    },
+    "targets": [
+      "stage"
+    ],
+    "requested_stage": "Public",
+    "positive_semantic_review": false,
+    "verified_homepage_identity": {
+      "normalized_name": "acmerealty",
+      "registrable_dns_domain": "acme-realty.example"
+    },
+    "prior_observations": {
+      "submitted_source_urls": [
+        "https://acme-realty.example/about",
+        "https://barco-industries.example/investors/stock"
+      ]
+    },
+    "prefetched_pages": {
+      "https://acme-realty.example/about": {
+        "final_url": "https://acme-realty.example/about",
+        "text": "Acme Realty is a wholly owned subsidiary of Barco Industries. Barco Industries currently owns 100% of Acme Realty."
+      },
+      "https://barco-industries.example/investors/stock": {
+        "final_url": "https://barco-industries.example/investors/stock",
+        "text": "Barco Industries (NYSE: BRC) is currently publicly traded on the New York Stock Exchange. Its common shares remain listed and trade under ticker BRC as of November 8, 2026."
+      }
+    }
+  }
+}

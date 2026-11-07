@@ -284,8 +284,8 @@ older matching stage. Prioritize fetching those URLs. Preserve that stage only
 when their actual fetched contents resolve the URL-title or chronology conflict.
 When retaining that older matching stage, if any disputed source remains
 unavailable, return stage UNPROVEN instead of citing only an older round from
-another source. A validated different completed stage may still be
-CONTRADICTED through the normal stage finding contract.
+another source. Still report a proved different completed stage and its facts;
+the server can normalize that finding to CONTRADICTED.
 Use grounded dates to order material competing stage events, from fetched body
 text or a server-visible archive card whose exact link targets that already
 fetched article. Search publication dates and fetch order are discovery, never
@@ -347,12 +347,13 @@ URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
 context only. Never include that marker or those URL strings in a quote.
 
 You have at most 8 reasoning turns, 2 searches, and 4 fresh page fetches across all
-requested targets. Prioritize official company investor-relations pages for
-public listing. For Public, prefer a relevant supplied recent issuer
-announcement or filing that names the investigated company with an exchange
-ticker, and fetch it before a stock-quote or chart page. This source order does
-not establish current stage: still require a fetched company-bound quote and
-compare later completed take-private or delisting evidence.
+requested targets. For Public listing checks, issuer means the investigated
+company for direct proof or the exact proven parent for listed-parent proof.
+Required discovery remains company-bound. Prioritize official issuer
+investor-relations pages. Prefer a relevant supplied recent announcement or
+filing naming the issuer with an exchange/ticker; fetch it before stock-quote
+or chart pages. This order proves no stage: require fetched issuer-bound quotes
+and check later completed take-private or delisting events.
 Allocate this shared tool budget across unresolved requested targets. After
 current-stage discovery, when fetched evidence already directly proves the
 requested stage and discovery exposes no concrete material stage conflict, do
@@ -575,85 +576,84 @@ Supporting quote 1 must classify the owner if the primary does not; bind owner
 aliases from fetched context. Slot 2 is extra alias/context proof.
 In reason, explain control and same-owner PE. If either link or current
 applicability is missing or contradicted, return UNPROVEN or a proven different stage.
-For stage, observed_value is the proven current stage. Use VERIFIED for a match,
-CONTRADICTED for a proven different stage, UNPROVEN if current stage is unknown.
-Never put the disproved stage in observed_value.
+For stage, extract the proven current canonical observed_value and exact source
+facts; do not decide requested fit. Use VERIFIED for a proved observation;
+the server computes requested fit and normalizes status. Use UNPROVEN only if
+the observed stage is unknown. Never replace proved Acquired with null merely
+because the child lacks its own listing. Never put a disproved stage in
+observed_value.
 
 For a proven stage, observed_value must be a non-null canonical value: Seed,
-Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the value
-the evidence proves, not the requested value by default. Series C+ represents
+Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the proven
+value, not the requested value by default. Series C+ represents
 completed Series C and later priced-equity rounds, including a completed
-extension of that round. Return observed_value="Series C+" for such evidence;
-an extension does not require a new stage label. Debt, grants, planned rounds,
-and unresolved ownership or chronology do not establish that value.
+extension of that round. Return observed_value="Series C+" for such evidence.
+Debt, grants, planned rounds,
+or pending deals do not establish that value.
 
 A currently listed company stays Public despite PE control until a later
-completed take-private or delisting. For requested PE, cite listing proof as
-primary and return Public, CONTRADICTED.
-Public needs current company-attributed exchange/ticker or listed/traded-share
-proof. A current issuer announcement naming the exact
-company with an exchange/ticker parenthetical is this proof; it does not also
-need a separate sentence saying the shares are listed or traded. Formatting
-whitespace and a quoted company alias do not change that attribution. A 'Public Company' label, planned IPO, old listing,
-product launch, or funding total is insufficient. A current SEC filing's
-Section 12(b) table can establish registered common/ordinary shares, their
-ticker, and exchange. Quote one continuous span that includes the registrant
-name and the complete row. Check the filing date and later ownership/listing
-events; an old table does not establish current status or override newer
-private-company evidence. For venture stages, compare dated rounds, acquisitions
-and IPO/listing events; use the latest completed event.
+completed take-private or delisting. For requested PE, still report Public with
+its listing proof; the server records the mismatch.
+For requested Public, report Public for direct company listing proof. For a
+current wholly or majority owned subsidiary, brand or division of a currently
+listed parent, report Acquired with company-bound ownership primary and the
+same exact parent's affirmative current listing as support 1. The server
+determines Public fit from these facts; the child may be private or unlisted.
+A bare parent ticker is insufficient. No other parent or subsidiary stage inheritance.
+For direct proof, a current exact-issuer announcement with exchange/ticker
+parenthetical needs no listed/traded sentence. Whitespace and quoted aliases
+keep attribution. A 'Public Company' label, planned IPO, old listing, product
+launch or funding total is insufficient. A current SEC Section 12(b) table
+can prove registered common/ordinary shares, ticker and exchange. Quote the
+registrant and full row in one continuous span. Check filing date and later
+ownership/listing events; old tables cannot prove current status or override
+newer private-company evidence. For venture stages, compare dated rounds, acquisitions
+and IPO/listing events; use the latest completed event, Seed included.
 For a Series stage, use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
 A later completed priced-equity round, controlling acquisition, or IPO/listing
 event involving ownership of the investigated company can supersede it and
 must be evaluated chronologically. Identify the buyer and target explicitly:
 the investigated company buying another business does not make the buyer
-Acquired and does not supersede the buyer's funding stage. Only an acquisition
-OF the investigated company can do that. Thus a later
+Acquired and does not supersede the buyer's funding stage. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
-later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
-A later completed equity round of unstated series keeps a proven Series C+
-unless it gave, or may have given, a buyer or PE sponsor control or listed the
-company.
+later debt alone cannot. A competing stage event is material only if the
+source states it completed and changed control, listing or priced-round series.
+A later completed equity investment or round of unstated series, even one
+called strategic, keeps Series C+ unless stated to give control or a listing,
+but leaves an earlier stage UNPROVEN. A pending or conditional deal does not
+erase a proven stage.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for
-the exact company. For Public, review current listing and later completed
+the exact company. For Public, review the issuer's current listing and later completed
 take-private and delisting results before retaining an older
-ticker quote. Search results remain discovery only, so fetch a useful result
-when one is relevant. Current company or exchange proof may also come from a
-submitted URL or site navigation. Cite fetched company-bound text. An old
+ticker quote. Current issuer or exchange proof may also come from a
+submitted URL or site navigation. An old
 listing quote alone, or the absence of a contradicting search result, does not
 establish current Public status. The word "latest" in an old article does not
-prove that its round or listing is still the company's current stage.
+prove that the round or issuer listing is still current.
 Public listing is a continuing state, not a fact that needs same-day
-reaffirmation. After the required current-status search and review of later
-events, a dated issuer, exchange, or current SEC statement that the exact
-company's shares are listed or traded can still establish current Public when
-no later completed delisting or take-private is
-found. A failed optional fetch of a newer page does not erase that valid
-listing evidence by itself. It does require UNPROVEN when its available
-locator exposes a concrete material conflict that cannot be resolved. A later
-filing date, generic SEC filing reference, or unfetched filing locator is not
-by itself a material listing conflict and does not require valid listing
-evidence to postdate it. Only concrete source context indicating a completed
-delisting, take-private, or current private status
-creates that conflict. A historical IPO-completion announcement alone remains
-insufficient.
-On a current first-party company or investor-relations profile, a separate
-current trading-information row that names the exact company and a literal
-exchange plus ticker is current company-attributed exchange/ticker evidence.
-Do not treat that trading row as historical merely because the same profile
-also lists the company's historical IPO date. This does not make an archived
-IPO profile current; a later completed delisting or take-private overrides the
-ticker row.
-When prior observations contain exact structured `Privately Held` company-type
-evidence, first seek current first-party take-private, delisting, or listing
-evidence. An archived SEC filing cover page is a historical snapshot and cannot
-by itself override that current private-company evidence, even when its
-registered-securities table names a ticker and exchange. Only current official
-exchange or company investor-relations wording that the shares are now listed
-or traded can verify Public against that conflict.
+reaffirmation. After required discovery and later-event review, a dated issuer,
+exchange or current SEC statement that the issuer's shares are listed or traded
+remains valid without a later completed delisting or take-private. A failed
+optional fetch of a newer page does not erase valid listing evidence by itself.
+Require UNPROVEN when its available locator exposes a concrete material conflict
+that cannot be resolved. A later filing date, generic SEC filing reference, or
+unfetched filing locator is not by itself a material listing conflict and does
+not require valid listing evidence to postdate it. Only concrete source context
+indicating a completed delisting, take-private, or the issuer's current private
+status creates that conflict. A historical IPO-completion announcement alone
+remains insufficient.
+A current first-party issuer or investor-relations profile's separate current
+trading row naming that issuer and a literal exchange/ticker is current proof,
+even beside its historical IPO date. An archived IPO profile is not current;
+completed delisting or take-private overrides the row.
+For exact structured `Privately Held` evidence about the issuer, first seek its
+current first-party listing, take-private or delisting evidence. An archived
+SEC cover or registered-securities table cannot override that current private
+evidence. Only current official exchange or issuer investor-relations wording
+that its shares are now listed or traded resolves that conflict.
 Once first-party continuity proves that old and new names are the same entity,
 evaluate completed stage events under either verified name. Do not discard an
 earlier completed round solely because it uses the old name; still check for a
@@ -674,14 +674,12 @@ A merger, acquisition, ownership change, parent, subsidiary, or replacement
 business alone does not prove that the old and new brands are the same
 operating company. A true rebrand can coexist with separate ownership history,
 but the quoted text must explicitly prove the old-to-new company continuity.
-A common domain, redirect, or shared LinkedIn slug alone is insufficient. Never
-inherit Public or another stage from a parent, holding company, or subsidiary.
+A common domain, redirect, or shared LinkedIn slug alone is insufficient.
 Headcount must be current company-wide headcount; department,
 office, job, associated-member count, or stale evidence is UNPROVEN. An exact
 entity-bound LinkedIn Company size/employeeCountRange is primary over a
 third-party exact estimate. Other conflicts are UNPROVEN. Use only a canonical
-LinkedIn band or a strict current integer. Do not resolve conflicts by
-preference or guesswork.
+LinkedIn band or a strict current integer.
 
 Use submit_findings when research is complete. If deterministic validation
 rejects it and returns feedback, correct it within the remaining limits and
@@ -704,7 +702,8 @@ paraphrases or joins fetched text, repair it
 from the already fetched page before spending another fetch. UNPROVEN must have empty
 evidence_url and evidence_quote fields. Return one finding for every requested
 target and no other target.
-VERIFIED means the requested claim is proven. CONTRADICTED means a different
+Except for stage's observed-fact contract, VERIFIED means the requested claim
+is proven. CONTRADICTED means a different
 current value is proven. UNPROVEN means the evidence is absent, ambiguous,
 stale, scoped incorrectly, or conflicting."""
 
@@ -770,8 +769,26 @@ def _tools(targets: Sequence[str], *, industry_sources: bool = False) -> list[di
                                     "type": "string",
                                     "enum": requested_targets,
                                 },
-                                "status": {"type": "string", "enum": sorted(STATUSES)},
-                                "observed_value": {"type": ["string", "integer", "null"]},
+                                "status": {"type": "string", "enum": sorted(STATUSES),
+                                    **({"description": (
+                                        "For stage, VERIFIED proves the observed stage and "
+                                        "its exact evidence; native validation computes requested "
+                                        "fit and normalized status. UNPROVEN means the observed "
+                                        "stage is unknown, not merely different from the request."
+                                    )} if "stage" in requested_targets else {}),
+                                },
+                                "observed_value": {"type": ["string", "integer", "null"],
+                                    **({"description": (
+                                        "For stage, report the proved current canonical company "
+                                        "stage even when requested_stage differs. An unlisted company's "
+                                        "current strategic-parent ownership is observed Acquired; "
+                                        "current private-equity control is Private Equity, while a "
+                                        "currently listed company stays Public. For requested Public, "
+                                        "retain its ownership quote and the exact parent's current "
+                                        "listing support. Do not replace a proved stage with null "
+                                        "because the child has no listed shares."
+                                    )} if "stage" in requested_targets else {}),
+                                },
                                 "observed_country": {"type": "string"},
                                 "observed_state": {"type": "string"},
                                 "observed_industry": {
@@ -4272,6 +4289,7 @@ def _validated_findings(
             evidence_url = _safe_https_url(finding["evidence_url"])
             fetched_text = fetched_pages.get(evidence_url, "")
             semantic_pe_ownership = False
+            listed_parent_public = False
             if target == "stage":
                 # Imported at validation time because lead_scorer owns the
                 # canonical stage vocabulary and imports this investigator.
@@ -4279,6 +4297,8 @@ def _validated_findings(
                     _CANONICAL_COMPANY_STAGES,
                     _acquired_stage_quote_supports_names,
                     _company_stage_matches,
+                    _is_archived_sec_filing_snapshot,
+                    _listed_parent_public_stage_matches,
                     _normalize_company_stage,
                     _private_equity_linked_support_proves_ownership,
                     _stage_evidence_supports_observation,
@@ -4289,6 +4309,20 @@ def _validated_findings(
                     finding["observed_value"]
                 )
                 normalized_requested_stage = _normalize_company_stage(requested_stage)
+
+                def parent_listing_source_url(url: str) -> str:
+                    # An exchange card needs the requested and fetched final
+                    # source to be exchange-hosted. Retain either archive URL
+                    # so old SEC prose cannot acquire current-listing authority.
+                    final_url = str((fetched_final_urls or {}).get(url) or "")
+                    for source in (url, final_url):
+                        if _is_archived_sec_filing_snapshot(source):
+                            return source
+                    if str(urlsplit(url).hostname or "").casefold() in {
+                        "nyse.com", "www.nyse.com", "nasdaq.com", "www.nasdaq.com",
+                    }:
+                        return _safe_https_url(final_url)
+                    return url
                 linked_pe_support: list[dict[str, str]] = []
                 linked_pe_support_invalid = bool(
                     normalized_stage == "private equity"
@@ -4317,6 +4351,45 @@ def _validated_findings(
                             linked_pe_support_invalid = True
                             break
                         linked_pe_support.append({"url": url, "quote": quote})
+                acquisition_names = tuple(
+                    name for name in stage_attribution_names
+                    if len(acquisition_name := re.sub(
+                        r"[^a-z0-9]+", "", _normalized_span(name),
+                    )) >= 4 or acquisition_name in acquisition_short_identity_names
+                )
+                # Requested Public only: a current listed parent can prove
+                # the stage through its own exact, fetched listing quote.
+                listed_parent_support: list[dict[str, str]] = []
+                if (
+                    normalized_stage == "acquired"
+                    and normalized_requested_stage == "public"
+                ):
+                    for item in raw_support:
+                        url = _safe_https_url(item["url"])
+                        quote = item["quote"]
+                        if (
+                            not url or not isinstance(quote, str)
+                            or not quote or len(quote) > 2000
+                            or not _quote_occurs(quote, fetched_pages.get(url, ""))
+                        ):
+                            listed_parent_support = []
+                            break
+                        listed_parent_support.append({"url": url, "quote": quote})
+                    else:
+                        listed_parent_public = _listed_parent_public_stage_matches(
+                            normalized_stage,
+                            normalized_requested_stage,
+                            company_names=acquisition_names,
+                            ownership_quote=finding["evidence_quote"],
+                            ownership_url=parent_listing_source_url(evidence_url),
+                            listing_quotes=tuple(
+                                item["quote"] for item in listed_parent_support
+                            ),
+                            listing_urls=tuple(
+                                parent_listing_source_url(item["url"])
+                                for item in listed_parent_support
+                            ),
+                        )
                 linked_pe_ownership = bool(
                     linked_pe_support
                     and _private_equity_linked_support_proves_ownership(
@@ -4527,10 +4600,11 @@ def _validated_findings(
                             "Do not infer a value from the requested stage."
                         ),
                     )
-                elif normalized_requested_stage and status == "CONTRADICTED" and (
-                    _company_stage_matches(
-                        normalized_stage, normalized_requested_stage,
-                    )
+                elif (
+                    normalized_requested_stage
+                    and status == "CONTRADICTED"
+                    and not listed_parent_public
+                    and _company_stage_matches(normalized_stage, normalized_requested_stage)
                 ):
                     finding.update(
                         status="UNPROVEN",
@@ -4571,12 +4645,10 @@ def _validated_findings(
                     )
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
-                        tuple(name for name in stage_attribution_names
-                              if len(acquisition_name := re.sub(
-                                  r"[^a-z0-9]+", "", _normalized_span(name),
-                              )) >= 4 or acquisition_name in acquisition_short_identity_names),
+                        acquisition_names,
                         finding["evidence_quote"],
                     )
+                    or listed_parent_public
                 ):
                     finding.update(
                         status="UNPROVEN",
@@ -4645,6 +4717,11 @@ def _validated_findings(
                     finding["supporting_evidence"] = linked_pe_support
                     if semantic_pe_ownership:
                         finding["ownership"] = dict(raw["ownership"])
+                if listed_parent_public and finding["status"] != "UNPROVEN":
+                    # Only this independently proved route overrides the model's
+                    # requested-fit label, after every stage/source check passed.
+                    finding["status"] = "VERIFIED"
+                    finding["supporting_evidence"] = listed_parent_support
                 # Preserve a proven different stage when VERIFIED described
                 # the observed fact instead of its match to the request.
                 if (
@@ -4653,6 +4730,7 @@ def _validated_findings(
                     and not _company_stage_matches(
                         normalized_stage, normalized_requested_stage,
                     )
+                    and not listed_parent_public
                 ):
                     finding["status"] = "CONTRADICTED"
             elif target == "headcount" and not _quote_supports_headcount(
@@ -7014,11 +7092,21 @@ async def investigate_company_evidence(
                         requested_public_stage
                         and stage_finding.get("status")
                         in {"VERIFIED", "CONTRADICTED"}
-                        and _company_stage_matches(
-                            _normalize_company_stage(
-                                stage_finding.get("observed_value")
-                            ),
-                            "public",
+                        and (
+                            _company_stage_matches(
+                                _normalize_company_stage(
+                                    stage_finding.get("observed_value")
+                                ),
+                                "public",
+                            )
+                            # A validated listed-parent route is also a
+                            # matching Public stage; it needs the same search.
+                            or (
+                                stage_finding.get("status") == "VERIFIED"
+                                and _normalize_company_stage(
+                                    stage_finding.get("observed_value")
+                                ) == "acquired"
+                            )
                         )
                     )
                     if matching_public_stage and not current_stage_search_succeeded:
@@ -7412,18 +7500,20 @@ async def investigate_company_evidence(
                                 "Re-review Public stage once using the already fetched "
                                 "issuer-bound market sources and the completed current-status "
                                 "discovery. A failed optional fetch does not by itself erase "
-                                "valid company-bound exchange or ticker evidence. A current issuer "
-                                "announcement naming the exact company with its exchange/ticker "
+                                "valid issuer-bound exchange or ticker evidence. For direct proof, "
+                                "a current announcement naming the exact company with its exchange/ticker "
                                 "is sufficient without a separate listed/traded-share sentence, "
                                 "unless concrete conflicting evidence remains unresolved. A later "
                                 "filing date, generic SEC filing reference, or unfetched filing "
                                 "locator is not by itself a material listing conflict and does "
                                 "not require valid listing evidence to postdate it. Only concrete "
                                 "source context indicating a completed delisting, take-private, "
-                                "or current private status creates that "
+                                "or the issuer's current private status creates that "
                                 "conflict and must remain UNPROVEN or support the different stage. "
                                 "PE control alone does not end Public listing. "
-                                "Do not infer Public from this correction. "
+                                "Report the proved observed stage and exact evidence, not an "
+                                "inferred Public label. VERIFIED proves the observation; native "
+                                "validation computes requested fit and normalized status. "
                                 "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
                                 "one exact continuous quote from its fetched URL and must pass "
                                 "the unchanged deterministic validator. The server retained "

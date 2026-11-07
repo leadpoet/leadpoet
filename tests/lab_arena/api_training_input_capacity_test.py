@@ -20,6 +20,7 @@ from tests.lab_arena.api_provider_capacity_test import (
 )
 
 
+# Keep the configured default explicit; burst tests exercise other limits.
 CAPTURE_LIMIT = 2
 TOKEN = HEADERS["x-lab-arena-lease"]
 CLAIM_HASH = "sha256:" + "c" * 64
@@ -69,7 +70,7 @@ def test_training_input_queue_preserves_provider_and_control_workers():
                 captures = []
                 try:
                     await wait_until(lambda: service.active == PROVIDER_WORKER_LIMIT)
-                    captures = [post_input(client, "input-" + str(i)) for i in range(8)]
+                    captures = [post_input(client, "input-" + str(i)) for i in range(CAPTURE_LIMIT * 2)]
                     await wait_until(lambda: service.capture_active >= CAPTURE_LIMIT)
                     controls = await asyncio.wait_for(asyncio.gather(
                         client.post("/arena/v1/runs/claim", json={}),
@@ -317,10 +318,10 @@ def test_capture_exception_returns_input_permit(failure):
     asyncio.run(scenario())
 
 
-def real_service(objects):
+def real_service(objects, *, kind="score"):
     def get_run(run_id):
         return {
-            "run_id": run_id, "round_id": "arena-test", "kind": "score", "status": "leased",
+            "run_id": run_id, "round_id": "arena-test", "kind": kind, "status": "leased",
             "lease_token_hash": hash_lease_token(TOKEN), "lease_generation": 1,
             "claim_request_hash": CLAIM_HASH, "lease_expires_at": (NOW + timedelta(hours=1)).isoformat(),
         }

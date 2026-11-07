@@ -141,5 +141,6 @@ def test_subsidiary_cannot_inherit_its_parent_registrants_listing():
 
 def test_listing_table_does_not_bypass_archived_private_company_guard():
     assert lead_scorer._is_archived_sec_filing_snapshot(URL)
-    assert "an old table does not establish current status" in investigator._SYSTEM_PROMPT
-    assert "cannot\nby itself override that current private-company evidence" in investigator._SYSTEM_PROMPT
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert "old tables cannot prove current status or override newer private-company evidence" in prompt
+    assert "An archived SEC cover or registered-securities table cannot override that current private evidence" in prompt

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lab_arena import contracts, internal_capture, reasoning_capture
+from lab_arena import contracts, internal_capture, reasoning_capture, training_dataset
 
 
 def discover_s3(client, *, bucket: str, prefix: str, dates: list[str], max_events: int) -> tuple[list[str], dict]:
@@ -148,7 +148,7 @@ def main(argv=None) -> int:
                         "discovery": discovery, "counts": dict(counts), "purposes": dict(purposes),
                         "gap_counts": dict(gaps), "sft_exclusions": dict(exclusions),
                         "reasoning_status": dict(reasoning), "quality": "unreviewed",
-                        "training_permission": {"status": "unconfirmed"},
+                        "training_permission": dict(training_dataset.TRAINING_PERMISSION),
                         "reasoning_registry_sha256": contracts.document_hash(registry),
                         "limits": ["request_event_does_not_prove_dispatch", "provider_returned_readable_text_only",
                                    "host_outcome_is_not_verified_ground_truth", "no_miner_eligibility_authority",

@@ -36,7 +36,7 @@ source example hash. It also binds the complete source split record hashes, so
 editing a record and updating only its review decision cannot reuse an old
 curation manifest. It does not change raw records, their labels, the dataset
 version, split assignment, scoring, or competition eligibility. The training
-permission remains `unconfirmed`.
+permission is `confirmed`: arena runs are Leadpoet data (2026-11-07).
 
 Use `--review-sample-size N` to write `review.jsonl`. A reviewer may copy a row
 to a decision JSONL file and set `human_review_status` to `accepted` or

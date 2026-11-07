@@ -42,9 +42,13 @@ _CLAIM_CODES = ("company_linkedin_required_or_invalid", "us_headquarters_state_r
                 "state_must_be_text")
 _MAX_SOURCE_CONTEXTS = 12
 _MAX_SOURCE_BYTES = 64 * 1024
+# Leadpoet operates the arena and owns the run data it captures. The operator
+# confirmed training use for all arena runs, miner and internal (2026-11-07).
+# Quality review, label checks and model-provider output terms still apply.
 TRAINING_PERMISSION = {
-    "status": "unconfirmed",
-    "reason": "Submission consent records public rerun only; confirm training use before training.",
+    "status": "confirmed",
+    "reason": "Leadpoet operates the arena and owns its run data; the operator confirmed training use.",
+    "confirmed_on": "2026-11-07",
 }
 DEFAULT_SPLIT_SEED = "arena-agent-steps-v1"
 SPLIT_GROUPING = "shared_source_episode_company_icp_request_v1"

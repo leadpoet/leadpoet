@@ -997,7 +997,7 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 **({'role': 'judge'} if role == 'judge' else {}),
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
-                                       'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',
+                                       'text_local_tools_and_exposed_hosted_search_only',
                                        'hosted_internal_prompts_not_observed',
                                        *(['host_delivery_required', 'client_consumption_not_proved'] if host_observed else
                                          ['host_delivery_required_for_new_policy', 'agent_read_required_for_historical_policy']),

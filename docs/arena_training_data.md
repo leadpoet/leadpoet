@@ -536,10 +536,11 @@ for qualification records, cohort filters, and readiness reports. These tools
 use the exporter's verified preservation authority and selected score attempt.
 The export retains the current round configuration and the original verdicts.
 
-🔹 Training permission is not yet confirmed. Submission consent records only
-public rerun permission; confirm the terms before training on these records.
-The manifest says so explicitly. Label accuracy still needs a manual sample
-check before the first training run.
+🔹 Training permission is confirmed. Leadpoet operates the arena and owns the
+run data it captures, miner and internal, and the operator confirmed training
+use on 2026-11-07. Every manifest records this. Label accuracy still needs a
+manual sample check before the first training run, and each record's
+model-provider output terms still apply.
 
 ## Additive readiness, review, and agent-step tools
 

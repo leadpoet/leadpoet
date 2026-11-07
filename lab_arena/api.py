@@ -33,10 +33,10 @@ PROVIDER_WORKER_LIMIT = 32
 # being whatever the default pool happens to leave over.
 NON_PROVIDER_WORKER_RESERVE = 32
 # Full input snapshots do CPU-heavy privacy, hashing and compression work.
-# Admit eight captures independently of the default pool so bursts can make
-# progress without consuming the control-route reserve. This bounds active
-# work; storage latency and larger bursts can still exceed the client timeout.
-TRAINING_INPUT_WORKER_LIMIT = 8
+# Bound active captures independently of the default pool to preserve control
+# worker permits. Extra capture threads can increase CPU contention; this
+# limit does not guarantee capture latency or bound queued request memory.
+TRAINING_INPUT_WORKER_LIMIT = 2
 # Segment storage and final verification both perform full privacy/hash scans.
 # Bound these together without consuming control-route worker permits.
 TRAINING_OBSERVATION_WORKER_LIMIT = 2

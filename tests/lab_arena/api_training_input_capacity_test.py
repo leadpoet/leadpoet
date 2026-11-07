@@ -20,8 +20,8 @@ from tests.lab_arena.api_provider_capacity_test import (
 )
 
 
-# Keep the expected capacity explicit: a regression to two workers must fail.
-CAPTURE_LIMIT = 8
+# Keep the configured default explicit; burst tests exercise other limits.
+CAPTURE_LIMIT = 2
 TOKEN = HEADERS["x-lab-arena-lease"]
 CLAIM_HASH = "sha256:" + "c" * 64
 NOW = datetime(2026, 11, 2, tzinfo=timezone.utc)

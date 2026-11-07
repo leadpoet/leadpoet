@@ -6923,8 +6923,8 @@ def test_fiuu_parent_listing_stays_an_explicit_unproven_stage_control():
     assert result["stage"]["status"] == "UNPROVEN"
     # Razer, Fiuu's parent, was taken private, so the requested-Public
     # listed-parent exception does not apply and the stage stays unproven.
-    assert "Never inherit a stage from a parent or subsidiary" in prompt
-    assert "currently listed parent is Public" in prompt
+    assert "No other parent or subsidiary stage inheritance" in prompt
+    assert "of a currently listed parent; return Acquired, VERIFIED" in prompt
 
 
 def test_headquarters_source_priority_uses_linkedin_then_current_first_party():

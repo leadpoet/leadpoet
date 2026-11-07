@@ -22,6 +22,147 @@ DEFAULT_RECENT_ROUND_LIMIT = 30
 MAX_RECENT_ROUND_LIMIT = 100
 
 
+_CHECK_REASON_MESSAGES = {
+    "submitted_value_mismatch": "The submitted company value does not meet this filter. Check the requested filter and correct the company value or choose another company.",
+    "verified_value_mismatch": "The verified company value does not meet this filter. Choose a company that meets the requested filter.",
+    "requirement_mismatch": "The saved verdict does not meet this requirement. Check the requested filter and supply a matching company with supporting evidence.",
+    "verification_unavailable": "The saved result does not establish this requirement. Supply clear evidence for this filter; the saved result does not identify a more specific cause.",
+    "not_evaluated": "No saved result is available for this check. Check the earlier company requirements before changing this field.",
+    "verifier_error": "The saved verdict records a verification error. This result does not establish that the company or claim is wrong.",
+    "primary_intent_missing": "The saved signals do not include the required primary intent. Supply evidence for the required primary event; optional bonus intents do not replace it.",
+    "primary_intent_not_verified": "The required primary intent was not verified. Supply source content that directly supports the requested primary event.",
+    "intent_outside_recency": "The primary intent evidence did not meet the required date window. Supply evidence of an event within that window.",
+    "intent_evidence_unresolved": "The primary intent evidence remains unresolved. Supply clearer source content for the requested event; this is not a confirmed factual mismatch.",
+    "intent_identity_unresolved": "The saved verdict could not bind the primary event to this company. Supply a source that clearly names the company and event.",
+    "intent_claim_contradicted": "The saved verdict found the primary intent claim contradicted. Correct the claim or supply evidence of a matching event.",
+    "intent_source_content_missing": "The saved verdict did not find the required event in the fetched source content. Supply a readable source that contains the event or job details.",
+    "paragraph_facts_unsupported": "One or more paragraph facts lack verified support. Remove or correct unsupported facts and use only verified evidence.",
+    "paragraph_signals_missing": "The paragraph does not cover the verified signals. Explain the verified events in the paragraph.",
+    "paragraph_relevance_ungrounded": "The paragraph's relevance claim lacks evidence. Explain relevance using the verified facts.",
+    "paragraph_icp_connection_missing": "The paragraph does not connect the evidence to the requested ICP. Explain that connection using verified facts.",
+    "paragraph_form_invalid": "The text does not meet the natural paragraph requirement. Write a clear client-facing paragraph.",
+}
+_PARAGRAPH_CHECK_REASONS = {
+    "facts_supported": "paragraph_facts_unsupported",
+    "verified_signals_covered": "paragraph_signals_missing",
+    "relevance_grounded": "paragraph_relevance_ungrounded",
+    "connects_icp": "paragraph_icp_connection_missing",
+    "natural_paragraph": "paragraph_form_invalid",
+}
+
+
+def _primary_diagnostic_details(details: Sequence[Any]) -> list[Mapping[str, Any]]:
+    # Rejected native signals retain their asserted index. An unknown historical
+    # index is not enough to attribute a bonus failure to the required primary.
+    return [item for item in details if isinstance(item, Mapping)
+            and type(item.get("matched_icp_signal")) is int
+            and item["matched_icp_signal"] == 0]
+
+
+def _intent_diagnostic_unresolved(detail: Mapping[str, Any]) -> bool:
+    verdict = detail.get("judge_verdict")
+    return isinstance(verdict, Mapping) and bool(
+        verdict.get("pipeline_decision") in {"review", "unavailable"}
+        or verdict.get("decision") == "rejected_verifier_error"
+        or verdict.get("error_class")
+    )
+
+
+def _unbound_diagnostic_details(details: Sequence[Any]) -> list[Mapping[str, Any]]:
+    return [item for item in details if isinstance(item, Mapping)
+            and (type(item.get("matched_icp_signal")) is not int
+                 or item["matched_icp_signal"] < 0)]
+
+
+def _intent_diagnostic_codes(details: Sequence[Any]) -> list[str]:
+    primary = _primary_diagnostic_details(details)
+    unbound_unresolved = any(_intent_diagnostic_unresolved(item)
+                             for item in _unbound_diagnostic_details(details))
+    if not primary:
+        # Only an entirely bonus-bound set proves that no primary was supplied.
+        # Missing historical bindings cannot establish that miner error.
+        bonus_only = bool(details) and all(
+            isinstance(item, Mapping)
+            and type(item.get("matched_icp_signal")) is int
+            and item["matched_icp_signal"] > 0 for item in details
+        )
+        if unbound_unresolved:
+            return ["verification_unavailable"]
+        return ["primary_intent_missing" if bonus_only else "primary_intent_not_verified"]
+    codes = []
+    for item in primary:
+        verdict = item.get("judge_verdict")
+        verdict = verdict if isinstance(verdict, Mapping) else {}
+        if (verdict.get("decision") == "rejected_verifier_error"
+                or verdict.get("error_class")):
+            code = "verifier_error"
+        elif (verdict.get("decision") == "rejected_freshness"
+              or item.get("date_status") == "out_of_window"
+              or item.get("date_verdict") == "out_of_window"):
+            code = "intent_outside_recency"
+        elif verdict.get("rejection_reason") == "stage3_identity_unresolved":
+            code = "intent_identity_unresolved"
+        elif verdict.get("rejection_reason") == "stage3_contradicted":
+            code = "intent_claim_contradicted"
+        elif verdict.get("rejection_reason") in {
+            "job_body_not_in_fetched_content", "evidence_not_found",
+        }:
+            code = "intent_source_content_missing"
+        elif verdict.get("pipeline_decision") in {"review", "unavailable"}:
+            code = "intent_evidence_unresolved"
+        else:
+            code = "primary_intent_not_verified"
+        if code not in codes:
+            codes.append(code)
+    if unbound_unresolved:
+        codes.append("verification_unavailable")
+    return codes
+
+
+def _company_check_reasons(
+    checks: Mapping[str, str], fit: Mapping[str, Any],
+    gates: Mapping[str, Mapping[str, Any]], details: Sequence[Any],
+) -> dict[str, list[dict[str, str]]]:
+    """Explain saved typed verdicts without emitting any source/model payload.
+
+    This public projection does not alter scoring evidence, frozen policies,
+    hashes or cache identities. Missing old evidence gets a generic explanation.
+    """
+    reasons = {}
+    evidence = fit.get("dimension_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    for check, status in checks.items():
+        if status in {"passed", "not_required"}:
+            continue
+        codes = []
+        if check == "intent" and status != "not_evaluated":
+            if gates.get("intent_verification", {}).get("decision") == "unavailable":
+                codes = ["verification_unavailable"]
+            else:
+                codes = _intent_diagnostic_codes(details)
+        elif check == "intent_details":
+            receipt = gates.get("intent_details", {})
+            paragraph_checks = receipt.get("checks")
+            if status == "failed" and isinstance(paragraph_checks, Mapping):
+                codes = [code for name, code in _PARAGRAPH_CHECK_REASONS.items()
+                         if paragraph_checks.get(name) is False]
+            elif (status == "unavailable"
+                  and receipt.get("failure_class") == "intent_details_provider_unavailable"):
+                codes = ["verifier_error"]
+        elif status == "failed":
+            dimension = evidence.get(check)
+            if isinstance(dimension, Mapping):
+                if dimension.get("submitted_decision") == "mismatch":
+                    codes.append("submitted_value_mismatch")
+                if dimension.get("observed_decision") == "mismatch":
+                    codes.append("verified_value_mismatch")
+        if not codes:
+            codes = [{"failed": "requirement_mismatch", "unavailable": "verification_unavailable",
+                      "not_evaluated": "not_evaluated"}[status]]
+        reasons[check] = [{"code": code, "message": _CHECK_REASON_MESSAGES[code]} for code in codes]
+    return reasons
+
+
 def company_diagnostic(
     breakdown: Mapping[str, Any], company: Mapping[str, Any], *, icp_position: int,
     contacts_required: bool = True
@@ -58,10 +199,13 @@ def company_diagnostic(
         checks["intent"] = "unavailable"
     elif details:
         # A supported claim can still be unresolved. Do not call review a mismatch.
-        verdicts = [item.get("judge_verdict") or {} for item in details if isinstance(item, Mapping)]
+        # Bonus failures do not change the required primary intent's outcome.
+        # Old unbound details can still record an unresolved result. Preserve
+        # that uncertainty; only a known bonus binding can be excluded.
+        required_or_unbound = (_primary_diagnostic_details(details)
+                               + _unbound_diagnostic_details(details))
         checks["intent"] = "unavailable" if any(
-            item.get("pipeline_decision") in {"review", "unavailable"}
-            or item.get("error_class") for item in verdicts
+            _intent_diagnostic_unresolved(item) for item in required_or_unbound
         ) else "failed"
     else:
         checks["intent"] = "not_evaluated"
@@ -75,6 +219,7 @@ def company_diagnostic(
         "qualified": breakdown.get("company_qualified") is True,
         "duplicate_company": breakdown.get("duplicate_company") is True,
         "checks": checks,
+        "check_reasons": _company_check_reasons(checks, fit, gates, details),
     }
     if not contacts_required:
         return result

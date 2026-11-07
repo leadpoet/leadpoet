@@ -112,7 +112,9 @@ def test_valid_guard_states_do_not_report_failures_or_add_reads(monkeypatch, gua
     spans, reads, reviews, _ = run_two_review_cycles(monkeypatch, guard_present=guard_present)
     guards = [s for s in spans if s.name == "arena.review_guard"]
     assert len(guards) == len(reads) == 2
-    assert all(s.attributes["arena.outcome"] == "ok" for s in guards)
+    # A held poll reports idle; only an admitted poll reports work done.
+    expected = "idle" if guard_present else "ok"
+    assert all(s.attributes["arena.outcome"] == expected for s in guards)
     assert not any(k.startswith("arena.store_") for s in guards for k in s.attributes)
     assert len(reviews) == (0 if guard_present else 2)
 

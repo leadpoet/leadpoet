@@ -80,6 +80,40 @@ def test_original_native_judgment_and_source_survive_cross_submission_rewrite(fi
     assert result[0]["use"]["acceptance_doc"] == args["uses"][0]["acceptance_doc"]
 
 
+def test_same_run_source_search_reaches_later_company():
+    args, _ = fixture(rewrite=False)
+    judge = args["judge"]
+    judge["runner_hotkey"] = "validator-current"
+    unrelated = deepcopy(args["scoring_input"]["companies"][0])
+    unrelated["intent_signals"][0]["url"] = "https://acme.example/other-launch"
+    args["scoring_input"]["companies"].insert(0, unrelated)
+    args["scored_company_indexes"] = [1]
+    use = args["uses"][0]
+    use.update(company_index=1, source_score_run_id=judge["run_id"])
+    row = args["authority_rows"][0]
+    for key in ("scored_run_id", "runner_hotkey", "claim_request_hash", "lease_generation"):
+        row["source_" + key] = judge[key]
+    row["source_score_run_id"] = judge["run_id"]
+    row["runner_authority_exclusions"] = [judge["runner_hotkey"]]
+
+    result = _signal_authority_evidence(**args)
+
+    assert len(result) == 1
+    assert result[0]["company_index"] == 1
+    assert result[0]["authority"]["source_score_run_id"] == judge["run_id"]
+
+
+def test_source_search_with_no_exact_evidence_match_still_rejects():
+    args, inputs = fixture()
+    source = inputs["judge:source"]
+    source["companies"][0]["intent_signals"][0]["date"] = "2000-01-01"
+
+    with pytest.raises(ExportError) as error:
+        _signal_authority_evidence(**args)
+
+    assert str(error.value.__cause__) == "evidence_original_input_mismatch"
+
+
 @pytest.mark.parametrize("fault", ["missing_proof", "wrong_proof", "source_claim", "current_claim", "source_body", "source_runner", "source_input_missing"])
 def test_changed_or_missing_frozen_provenance_fails_closed(fault):
     args, inputs = fixture()
@@ -97,3 +131,28 @@ def test_exact_variant_can_use_existing_completion_without_paraphrase_receipt():
     args, _ = fixture(rewrite=False)
     args["uses"][0]["acceptance_doc"] = None
     assert len(_signal_authority_evidence(**args)) == 1
+
+
+@pytest.mark.parametrize("earlier_candidate", ["company", "signal"])
+@pytest.mark.parametrize("source_status", ["accepted", "failed"])
+def test_source_search_reaches_exact_signal_after_unrelated_evidence(
+    earlier_candidate, source_status,
+):
+    args, inputs = fixture()
+    source = inputs["judge:source"]
+    args["runs"]["judge:source"]["status"] = source_status
+    unrelated = deepcopy(source["companies"][0])
+    unrelated["intent_signals"][0]["date"] = "2000-01-01"
+    unrelated["intent_signals"][0]["url"] = "https://acme.example/other-launch"
+    if earlier_candidate == "company":
+        source["companies"].insert(0, unrelated)
+    else:
+        source["companies"][0]["intent_signals"].insert(
+            0, unrelated["intent_signals"][0],
+        )
+
+    result = _signal_authority_evidence(**args)
+
+    assert len(result) == 1
+    assert result[0]["authority"] == args["authority_rows"][0]
+    assert result[0]["use"]["acceptance_doc"] == args["uses"][0]["acceptance_doc"]

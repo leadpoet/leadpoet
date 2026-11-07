@@ -325,27 +325,7 @@ def _internal_chat_annotations(body, message):
     tools = body.get("tools", [])
     _internal_search_tools(tools, body.get("max_tool_calls"), allow_chat_fast_mode=True)
     require(bool(tools) and not message.get("tool_calls"), "internal_chat_search_undeclared")
-    annotations = message["annotations"]
-    require(isinstance(annotations, list) and len(annotations) <= 128,
-            "internal_chat_annotations_unsupported")
-    flat = []
-    fields = {"url", "title", "content", "start_index", "end_index"}
-    for annotation in annotations:
-        require(isinstance(annotation, Mapping) and set(annotation) == {"type", "url_citation"}
-                and annotation["type"] == "url_citation", "internal_chat_annotations_unsupported")
-        citation = annotation["url_citation"]
-        require(isinstance(citation, Mapping) and set(citation) <= fields,
-                "internal_chat_annotations_unsupported")
-        # Reuse the existing safe public-HTTPS boundary. No URL is fetched.
-        operations.validate_https_url(citation.get("url"), max_length=8192)
-        flat.append({"type": "url_citation", **citation})
-    # Reuse the native citation field/length/offset validator through a
-    # temporary validation view. The nested original is returned untouched.
-    operations.validate_operation_request("openrouter.responses", {
-        "model": body["model"], "input": [{"type": "message", "role": "assistant",
-            "status": "completed", "content": [{"type": "output_text",
-                "text": message.get("content"), "annotations": flat}]}],
-    }, allow_full_thinking=True)
+    training_steps._chat_citation_annotations(body, message)
 
 
 def _has_retained_search_text(value: Any) -> bool:

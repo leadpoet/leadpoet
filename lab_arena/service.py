@@ -7800,6 +7800,8 @@ class ArenaService:
                 except (scoring.ScoringError, ValueError, OutputInvalid) as exc:
                     raise ServiceError("legacy_checkpoint_output_invalid", 400) from exc
             output_bytes = contracts.canonical_json(output).encode("utf-8")
+            if len(output_bytes) > scoring.MAX_SCORING_OUTPUT_BYTES:
+                raise ServiceError("output_invalid", 400)
             output_hash = contracts.document_hash(output)
             output_ref = _score_item_output_ref(round_id, run_id, output_hash)
             if run.get("status") in ("accepted", "failed"):

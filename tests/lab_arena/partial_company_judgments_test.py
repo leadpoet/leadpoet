@@ -390,6 +390,99 @@ def test_terminal_score_replay_accepts_valid_output_above_execution_size_limit(
     assert objects.get_optional_bounded(score_ref, scoring.MAX_SCORING_OUTPUT_BYTES) == output_bytes
 
 
+def test_oversize_score_completion_is_rejected_before_object_write(
+    tmp_path, monkeypatch,
+):
+    """A valid document over the stored-output limit must not become committed."""
+    from lab_arena import reviewer_runtime
+    from tests.test_arena_score_integrity import _public_company
+
+    round_id = "arena-2026-09-11-oversize-score"
+    run_id = "score-run-oversize"
+    executed_id = "execute-oversize"
+    runner = "validator-a"
+    companies = [
+        _public_company("Company %d" % index, domain="company%d.example" % index,
+                        signal_date="2026-09-10")
+        for index in range(5)
+    ]
+    icp = _icp().model_dump()
+    policy = scoring.build_scorer_policy(judge_provider_routes={})
+    output = scoring.build_scoring_output(
+        executed_id,
+        [
+            {"final_score": 80.0, "padding": ["x" * 65_000] * 7}
+            for _ in companies
+        ],
+    )
+    output_bytes = contracts.canonical_json(output).encode("utf-8")
+    assert len(output_bytes) > scoring.MAX_SCORING_OUTPUT_BYTES
+    scoring.validate_scoring_output_document(output)
+
+    objects = LocalObjectStore(tmp_path / "objects")
+    execution_ref = "arena/%s/outputs/%s.json" % (round_id, executed_id)
+    execution_bytes = contracts.canonical_json({
+        "schema_version": "leadpoet.lab_arena.output.v1",
+        "companies": companies,
+    }).encode("utf-8")
+    objects.put(execution_ref, execution_bytes)
+    score_ref = _score_item_output_ref(
+        round_id, run_id, contracts.document_hash(output),
+    )
+    run = {
+        "run_id": run_id, "round_id": round_id, "runner_hotkey": runner,
+        "kind": "score", "scored_run_id": executed_id,
+        "submission_id": "submission-a", "miner_hotkey": "miner-a",
+        "icp_position": 0, "lease_token_hash": hash_lease_token("token"),
+    }
+    execution = {
+        "run_id": executed_id, "output_ref": execution_ref,
+        "submission_id": "submission-a", "miner_hotkey": "miner-a",
+    }
+    completion_calls = []
+
+    class Store:
+        def get_run(self, requested_id):
+            return run if requested_id == run_id else execution
+
+        def complete_attempt(self, **kwargs):
+            completion_calls.append(kwargs)
+            raise AssertionError("oversize output reached completion persistence")
+
+    service = ArenaService.__new__(ArenaService)
+    service._store = Store()
+    service._objects = objects
+    round_row = {"round_id": round_id, "configuration_doc": {"scorer_policy": policy}}
+    result = {
+        "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
+        "resource_summary": {
+            "wall_seconds": 1.0, "cpu_seconds": 0.0,
+            "max_rss_bytes": 1024, "stdout_bytes": 0,
+            "stderr_bytes": 0, "provider_call_count": 0,
+        },
+        "started_at": "2026-09-11T00:00:00Z",
+        "finished_at": "2026-09-11T00:00:01Z",
+        "terminal_status": "accepted",
+    }
+    validated = {
+        "hotkey": runner,
+        "body": {"run_id": run_id, "lease_token": "token", "result": result,
+                 "output": output},
+    }
+    monkeypatch.setattr(
+        service, "_request_round", lambda *_args, **_kwargs: (validated, round_row),
+    )
+    monkeypatch.setattr(service, "_require_validator_authority", lambda _hotkey: None)
+    monkeypatch.setattr(reviewer_runtime, "validate_completion_audit", lambda *_args: None)
+    service.evaluation_icps = lambda _round_id: [icp]
+
+    with pytest.raises(ServiceError) as failure:
+        service.handle_complete({})
+    assert failure.value.code == "output_invalid"
+    assert objects.get_optional_bounded(score_ref, scoring.MAX_SCORING_OUTPUT_BYTES) is None
+    assert completion_calls == []
+
+
 def test_legacy_partial_replay_keeps_the_committed_legacy_output_ref(
     tmp_path, monkeypatch,
 ):

@@ -101,11 +101,21 @@ def test_reviewer_prompts_match_the_investigator_stage_persistence_rule():
 
 def test_listed_parent_route_is_stated_only_for_requested_public():
     assert (
-        "Never inherit a stage from a parent or subsidiary, except that for "
-        "requested Public a current wholly or majority owned subsidiary, brand "
-        "or division of a currently listed parent is Public: return Acquired, "
-        "VERIFIED, ownership quote primary, parent's current listing support 1."
+        "Listed parent: a current wholly or majority owned subsidiary, brand "
+        "or division of a currently listed parent; return Acquired, VERIFIED. "
+        "Observed Acquired meets requested Public. Quote ownership as primary "
+        "and the same exact parent's affirmative current listing as support 1. "
+        "The child may be private or unlisted."
     ) in INVESTIGATOR_PROMPT
+    assert "A parent ticker alone fails" in INVESTIGATOR_PROMPT
+    assert "No other parent or subsidiary stage inheritance" in INVESTIGATOR_PROMPT
+    public_start = INVESTIGATOR_PROMPT.index("Requested Public can match by:")
+    parent_route = INVESTIGATOR_PROMPT.index("Listed parent:", public_start)
+    direct_details = INVESTIGATOR_PROMPT.index("For direct proof,", public_start)
+    rebrand = INVESTIGATOR_PROMPT.index("A merger, acquisition, ownership change,")
+    assert public_start < parent_route < direct_details < rebrand
+    assert INVESTIGATOR_PROMPT.count("Listed parent:") == 1
+    assert "Never inherit a stage from a parent or subsidiary" not in INVESTIGATOR_PROMPT
     assert "it is not Public merely because the parent is public" not in LEAD_SCORER_PROMPTS
     assert (
         "Only when the requested stage is Public, a company that is currently a "
@@ -503,6 +513,14 @@ def test_native_listed_parent_route_keeps_current_search_and_private_receipt(mon
         return {"results": []}
 
     async def submit(_session, _url, *, headers, payload):
+        emitted_system = " ".join(" ".join(
+            message["content"] for message in payload["messages"]
+            if message["role"] == "system"
+        ).split())
+        assert "Requested Public can match by:" in emitted_system
+        assert "return Public, VERIFIED" in emitted_system
+        assert "return Acquired, VERIFIED. Observed Acquired meets requested Public" in emitted_system
+        assert "The child may be private or unlisted" in emitted_system
         turns.append(payload)
         if len(turns) <= 2:
             name, arguments = "fetch_page", {"url": (

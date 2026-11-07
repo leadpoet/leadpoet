@@ -590,17 +590,22 @@ or pending deals do not establish that value.
 A currently listed company stays Public despite PE control until a later
 completed take-private or delisting. For requested PE, cite listing proof as
 primary and return Public, CONTRADICTED.
-Public needs current company-attributed exchange/ticker or listed/traded-share
-proof. A current issuer announcement naming the exact
-company with an exchange/ticker parenthetical is this proof; it does not also
-need a separate sentence saying the shares are listed or traded. Formatting
-whitespace and a quoted company alias do not change that attribution. A 'Public Company' label, planned IPO, old listing,
-product launch, or funding total is insufficient. A current SEC filing's
-Section 12(b) table can establish registered common/ordinary shares, their
-ticker, and exchange. Quote one continuous span that includes the registrant
-name and the complete row. Check the filing date and later ownership/listing
-events; an old table does not establish current status or override newer
-private-company evidence. For venture stages, compare dated rounds, acquisitions
+Requested Public can match by:
+Direct: current company-bound exchange/ticker or listed/traded shares;
+return Public, VERIFIED.
+Listed parent: a current wholly or majority owned subsidiary, brand or division
+of a currently listed parent; return Acquired, VERIFIED. Observed Acquired meets
+requested Public. Quote ownership as primary and the same exact parent's
+affirmative current listing as support 1. The child may be private or unlisted.
+A parent ticker alone fails. No other parent or subsidiary stage inheritance.
+For direct proof, a current exact-issuer announcement with exchange/ticker
+parenthetical needs no listed/traded sentence. Whitespace and quoted aliases
+keep attribution. A 'Public Company' label, planned IPO, old listing, product
+launch or funding total is insufficient. A current SEC Section 12(b) table
+can prove registered common/ordinary shares, ticker and exchange. Quote the
+registrant and full row in one continuous span. Check filing date and later
+ownership/listing events; old tables cannot prove current status or override
+newer private-company evidence. For venture stages, compare dated rounds, acquisitions
 and IPO/listing events; use the latest completed event, Seed included.
 For a Series stage, use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
@@ -674,11 +679,7 @@ A merger, acquisition, ownership change, parent, subsidiary, or replacement
 business alone does not prove that the old and new brands are the same
 operating company. A true rebrand can coexist with separate ownership history,
 but the quoted text must explicitly prove the old-to-new company continuity.
-A common domain, redirect, or shared LinkedIn slug alone is insufficient. Never
-inherit a stage from a parent or subsidiary, except that for requested Public a
-current wholly or majority owned subsidiary, brand or division of a currently
-listed parent is Public: return Acquired, VERIFIED, ownership quote primary,
-parent's current listing support 1.
+A common domain, redirect, or shared LinkedIn slug alone is insufficient.
 Headcount must be current company-wide headcount; department,
 office, job, associated-member count, or stale evidence is UNPROVEN. An exact
 entity-bound LinkedIn Company size/employeeCountRange is primary over a

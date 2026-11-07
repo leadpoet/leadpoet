@@ -2475,7 +2475,7 @@ def _capture_upstream_response(
     response: ProviderResponse, *, operation_id: str,
     request_hash: str, call_identity: str, call_succeeded: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Keep complete private error bytes without storage I/O or replay authority."""
+    """Keep private provider bytes without storage I/O or replay authority."""
     if response.internal_provenance is not None:
         return None
     try:
@@ -6945,6 +6945,7 @@ class Broker:
                     row["entry_id"] for row in rows if row.get("entry_kind") == "uncertain"))
 
         adapted_response_url = ""
+        adapted_body = upstream_response.body
         call_succeeded = False
         judgment_cache_eligible = False
         judgment_response_replayable = False
@@ -7360,7 +7361,14 @@ class Broker:
                 summary["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
-            if not call_succeeded and not 200 <= sanitized_status < 300:
+            if (
+                (not call_succeeded and not 200 <= sanitized_status < 300)
+                or (call_succeeded and route is not None
+                    and adapted_body != upstream_response.body)
+            ):
+                # Compatibility adapters can discard source dates, authors and
+                # provider metadata. Keep that evidence privately; replay still
+                # uses only the unchanged sanitized terminal response.
                 retain_upstream_response(terminal)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"

@@ -2293,6 +2293,9 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(
     assert store.openrouter_capacity == 9_998_000
     terminal = store.calls[result.call["call_identity"]]["terminal"]
     assert terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == requested_url
+    assert terminal["upstream_response_receipt"] == {
+        "status": "unavailable", "reason": "response_size_limit",
+    }
     persisted_body = base64.b64decode(terminal["body_b64"])
     assert persisted_body == result.body
     assert tail_marker.encode() not in persisted_body

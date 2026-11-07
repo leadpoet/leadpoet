@@ -842,10 +842,14 @@ _PUBLIC_STRONG_CURRENT_PATTERNS = (
 def _current_exchange_profile_names_issuer(
     quote: str,
     identity_names: Sequence[str],
+    *,
+    allow_initials: bool = True,
 ) -> bool:
     """Bind a current exchange quote-card layout to its named issuer."""
 
-    return current_exchange_profile_names_issuer(quote, identity_names)
+    return current_exchange_profile_names_issuer(
+        quote, identity_names, allow_initials=allow_initials,
+    )
 
 
 def _public_claims_share_clause(
@@ -1626,8 +1630,42 @@ _LISTED_PARENT_NOT_HELD_RE = re.compile(
     re.I,
 )
 _LISTED_PARENT_PERCENT_RE = re.compile(
-    r"(?<![\d.])(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)", re.I,
+    r"(?<![\d.,])([+−-]?\d+(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)", re.I,
 )
+# Normalize only bounded, unambiguous written percentages into the same guard.
+_LISTED_PARENT_NUMBER_WORDS = dict(zip(
+    ("zero one two three four five six seven eight nine ten eleven twelve "
+     "thirteen fourteen fifteen sixteen seventeen eighteen nineteen").split(),
+    range(20),
+))
+_LISTED_PARENT_NUMBER_WORDS.update(dict(zip(
+    "twenty thirty forty fifty sixty seventy eighty ninety".split(),
+    range(20, 100, 10),
+)))
+_LISTED_PARENT_WRITTEN_PERCENT_RE = re.compile(
+    r"\b(?P<number>(?:" + "|".join((
+        *_LISTED_PARENT_NUMBER_WORDS, "hundred", "thousand", "and", "point",
+    )) + r")(?:[ -]+(?:" + "|".join((
+        *_LISTED_PARENT_NUMBER_WORDS, "hundred", "thousand", "and", "point",
+    )) + r")){0,7})\s*(?:%|percent\b|per\s+cent\b)", re.I,
+)
+
+
+def _listed_parent_normalize_written_percentage(match: re.Match) -> str:
+    words = match.group("number").casefold().replace("-", " ").split()
+    if words == ["one", "hundred"]:
+        return "100%"
+    values = [_LISTED_PARENT_NUMBER_WORDS.get(word) for word in words]
+    if len(values) == 1 and values[0] is not None:
+        return f"{values[0]}%"
+    if (
+        len(values) == 2 and values[0] is not None and values[1] is not None
+        and values[0] >= 20 and values[0] % 10 == 0 and 1 <= values[1] <= 9
+    ):
+        return f"{sum(values)}%"
+    return match.group(0)
+
+
 _LISTED_PARENT_OWNERSHIP_WORD_RE = re.compile(
     r"\b(?:own\w*|held|holds?|interest|stakes?|acquir\w*|controls?)\b",
     re.I,
@@ -1708,6 +1746,17 @@ def _listed_parent_quotes_not_held(
             )
             if not quantitative_scope:
                 continue
+            quote = _LISTED_PARENT_WRITTEN_PERCENT_RE.sub(
+                _listed_parent_normalize_written_percentage, quote,
+            )
+            percentages = tuple(_LISTED_PARENT_PERCENT_RE.finditer(quote))
+            percentage_ends = {match.end() for match in percentages}
+            # Unsupported written quantities cannot silently bypass the guard.
+            if any(
+                unit.end() not in percentage_ends
+                for unit in re.finditer(r"%|\bpercent\b|\bper\s+cent\b", quote, re.I)
+            ):
+                return True
             # Fractions and shared-ownership ratios do not establish a clear
             # majority through this bounded percentage proof. Do not guess one.
             if re.search(
@@ -1716,19 +1765,24 @@ def _listed_parent_quotes_not_held(
                 quote, re.I,
             ):
                 return True
-            for match in _LISTED_PARENT_PERCENT_RE.finditer(quote):
+            for match in percentages:
                 window = quote[max(0, match.start() - 120):match.end() + 120]
                 start = match.start() - max(0, match.start() - 120)
                 before = re.split(r"[;!?\n]|\.\s", window[:start])[-1]
-                after = re.split(r"[;!?\n]|\.\s", window[start:])[0]
-                percentage = float(match.group(1))
+                after = quote[match.end():]
+                percentage = float(match.group(1).replace("−", "-"))
                 lower_exclusive = re.search(r"(?:\b(?:more\s+than|over)|(?<![<>=])>)\s*$", before, re.I)
                 lower_inclusive = re.search(r"(?:\bat\s+least|>=|≥)\s*$", before, re.I)
                 ambiguous_bound = re.search(
                     r"(?:\b(?:less\s+than|under|up\s+to|at\s+most|about|approximately|around)|<=?|≤)\s*$",
                     before, re.I,
                 )
-                if ambiguous_bound or _has_stage_proof_uncertainty(before) or not (
+                ambiguous_range = re.search(
+                    r"\b(?:minus|negative|to|through)\s*$|"
+                    r"\b(?:between|from)\b[^.;!?\n]{0,80}\b(?:and|to)\s*$|[–—]\s*$",
+                    before, re.I,
+                ) or re.match(r"\s*(?:or\s+(?:less|lower)|at\s+most)\b", after, re.I)
+                if ambiguous_bound or ambiguous_range or _has_stage_proof_uncertainty(before) or not (
                     50 <= percentage < 100 if lower_exclusive else
                     50 < percentage <= 100 if lower_inclusive else
                     50 < percentage <= 100
@@ -1807,14 +1861,32 @@ def _listed_parent_names_from_relation(
                 ownership_quote[max(0, match.start() - 100):match.start()],
                 flags=re.I,
             )[-1]
-            suffix = ownership_quote[match.end():match.end() + 100]
+            suffix = ownership_quote[match.end():match.end() + 200]
+            # A legal suffix must not end the relation's sentence early.
+            legal_suffix = _LISTED_PARENT_ISSUER_SUFFIX_RE.match(suffix)
+            suffix = suffix[legal_suffix.end():] if legal_suffix else suffix
+            relation_suffix = re.split(r"[;!?\n]|\.(?:\s|$)", suffix, maxsplit=1)[0]
+            suffix_predicate = re.match(
+                r"\s*,?\s*(?:(?:but|however|and|though|although)\s+)?"
+                r"(?:(?:(?:this|that|the)\s+(?:relationship|ownership|statement|claim)|it)\s+)?"
+                r"(?P<predicate>(?:is|remains|has|may|might|could|would|will|according\s+to)\b.*)",
+                relation_suffix, re.I,
+            )
             if (
                 _has_stage_proof_uncertainty(prefix)
                 or _STAGE_PROOF_HISTORICAL_RE.search(prefix)
                 or _STAGE_SUPERSESSION_FUTURE_RE.search(prefix)
                 or _LISTED_PARENT_UNSETTLED_RE.search(prefix)
                 or _LISTED_PARENT_NOT_CURRENT_RE.search(match.group(0))
-                or re.match(_LISTED_PARENT_PENDING_SUFFIX, suffix, re.I)
+                or re.match(_LISTED_PARENT_PENDING_SUFFIX, relation_suffix, re.I)
+                or re.match(
+                    r"\s*,?\s*(?:(?:but|however|and|though|although)\s+)?(?:only\s+)?"
+                    r"(?:if|unless|whether|once|upon|conditional(?:ly)?|contingent|subject\s+to)\b",
+                    relation_suffix, re.I,
+                )
+                or (suffix_predicate is not None and _has_stage_proof_uncertainty(
+                    suffix_predicate.group("predicate"),
+                ))
                 # "a subsidiary of A and B" is joint, not single, ownership.
                 or _LISTED_PARENT_JOINT_SUFFIX_RE.match(
                     ownership_quote, match.end("parent"),
@@ -1873,14 +1945,14 @@ def _listed_parent_public_proof(
         issuer_subject = (
             rf"\b{re.escape(_LISTED_PARENT_ISSUER_TOKEN)}"
             rf"(?:\s*{_PUBLIC_EXCHANGE_TICKER_LOCATOR})?"
-            r"(?:\s*['’]s\s+(?:shares?|stock))?"
+            r"(?:\s*['’]s)?(?:\s+(?:(?:common|ordinary)\s+)?(?:shares?|stock))?"
         )
         # Supersession belongs to the parent's listing, not to the acquired
         # child's former shares. Keep the existing event/uncertainty guards.
         parent_supersession = re.compile(
             issuer_subject + r"\s+(?:(?:was|were|is|are|has\s+been|have\s+been)\s+"
             r"(?:taken\s+private|delisted)|(?:went|became)\s+private|"
-            r"(?:ceased|stopped)\s+trading)\b", re.I,
+            r"(?:(?:has|have)\s+)?(?:ceased|stopped)\s+trading)\b", re.I,
         )
         if any(_has_affirmed_stage_proof(
             _listed_parent_issuer_text(_PUBLIC_COMPANY_ALIAS_RE.sub("", source), parent),
@@ -1891,11 +1963,14 @@ def _listed_parent_public_proof(
         # An isolated ticker cannot override an explicit nonpublic predicate.
         # Exact issuer marking keeps another company's denial out of this gate.
         if any(re.search(
-            issuer_subject + r"\s+"
-            r"(?:is|are|remains?)\s+(?:currently\s+)?(?:"
+            issuer_subject + r"\s+(?:"
+            r"(?:is|are|remains?)\s+(?:(?:currently|now)\s+)?(?:"
             r"(?:not|never|no\s+longer)\s+(?:currently\s+)?"
             r"(?:an?\s+)?(?:publicly\s+)?(?:listed|traded|public)\b|"
-            r"(?:an?\s+)?(?:private\s+company|privately\s+held)\b)",
+            r"(?:an?\s+)?(?:private\s+company\b|privately\s+(?:held|owned)\b|"
+            r"private(?=\s*(?:[.;!?]|$))))|"
+            r"(?:has|have)\s+(?:not|never)\s+been\s+(?:publicly\s+)?(?:listed|traded|public)\b|"
+            r"no\s+longer\s+trades?\s+on\b)",
             _listed_parent_issuer_text(_PUBLIC_COMPANY_ALIAS_RE.sub("", source), parent),
             re.I,
         ) for source in quotes):
@@ -1906,7 +1981,9 @@ def _listed_parent_public_proof(
                 _valid_web_evidence_url(url)
                 and str(urlsplit(url).hostname or "").casefold()
                 in {"nyse.com", "www.nyse.com", "nasdaq.com", "www.nasdaq.com"}
-                and _current_exchange_profile_names_issuer(source, (parent,))
+                and _current_exchange_profile_names_issuer(
+                    source, (parent,), allow_initials=False,
+                )
             ):
                 return True
         # Validate the parent's own statement. An unrelated positive listing

@@ -234,6 +234,8 @@ def verified_brand_formal_legal_name(brand: object, legal_name: object) -> bool:
 def current_exchange_profile_names_issuer(
     quote: str,
     identity_names: list[str] | tuple[str, ...] | set[str],
+    *,
+    allow_initials: bool = True,
 ) -> bool:
     """Bind a current exchange quote-card layout to its exact issuer identity."""
 
@@ -305,7 +307,8 @@ def current_exchange_profile_names_issuer(
                 ))
             )
             or (
-                not issuer_structural_terms
+                allow_initials
+                and not issuer_structural_terms
                 and len(normalized_name) >= 3
                 and normalized_name == issuer_initials
             )

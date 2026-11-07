@@ -1,7 +1,7 @@
 # Leadpoet Privacy Policy
 
-**Last Updated:** January 18, 2025  
-**Effective Date:** January 18, 2025
+**Last Updated:** November 7, 2026  
+**Original Effective Date:** January 18, 2025
 
 ---
 

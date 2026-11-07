@@ -213,6 +213,16 @@ def test_listed_customers_and_products_describe_the_offering_but_functions_stay_
      "'manufactures pumps AND valves' requires both products"),
     ('Must manufacture pumps and valves.',
      "'must manufacture pumps and valves' requires both products"),
+    ('Develops therapies for preclinical, clinical and commercial stages in oncology, immunology and rare diseases.',
+     "proof of an offering within that scope establishes fit without proof of each listed item"),
+    ('Develops genetic medicines for genetic and rare diseases.',
+     "An offering wholly outside that scope does not fit"),
+    ('Provides cloud-based, mobile-first scheduling software.',
+     "Read delivery or form words such as cloud, online, digital, web-based, mobile-first and app-based by the same ordinary meaning"),
+    ('Online platform that unifies customer and community signals.',
+     "it does not supply a missing function or capability"),
+    ('Online platform that unifies customer and community signals.',
+     "Each listed function or capability of a required product or service remains required"),
 ])
 def test_customer_and_product_requirement_prompt_contract(criterion, rule, research):
     # Check the production request contract, not a model's semantic accuracy.

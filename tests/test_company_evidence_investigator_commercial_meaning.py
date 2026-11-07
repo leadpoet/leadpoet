@@ -84,10 +84,11 @@ def test_absolute_commercial_bans_are_replaced(absolute_rule):
 
 def test_later_untyped_round_keeps_only_a_proven_series_c_plus():
     assert (
-        "A later completed equity round of unstated series keeps a proven "
-        "Series C+ unless it gave, or may have given, a buyer or PE sponsor "
-        "control or listed the company."
+        "A later completed equity investment or round of unstated series, even "
+        "one called strategic, keeps Series C+ unless stated to give control or "
+        "a listing, but leaves an earlier stage UNPROVEN."
     ) in PROMPT
+    assert "may have given" not in PROMPT
     # Debt, chronology and the current-stage search keep their rules.
     assert "Debt, grants, planned rounds" in PROMPT
     assert "later debt alone cannot" in PROMPT

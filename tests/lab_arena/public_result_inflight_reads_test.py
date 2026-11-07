@@ -12,7 +12,7 @@ from lab_arena import contracts, service as service_module
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, _PublicResultInFlightReads, ServiceError
 from tests.lab_arena.scoring_validator_attribution_test import (
-    ROUND_ID, SUBMISSION_ID, _execution, _service,
+    MINER, ROUND_ID, SUBMISSION_ID, _execution, _service,
 )
 
 
@@ -349,3 +349,73 @@ def test_unpublished_and_undisclosed_results_do_not_fetch_objects():
             result = service.public_results(ROUND_ID, SUBMISSION_ID)
             assert result["outputs"] == {}
             assert result["public_icp_status"] == "pending"
+
+
+def test_unpublished_round_results_also_share_the_in_flight_output_get(monkeypatch):
+    """A round that has not published yet shares reads too.
+
+    On 2026-11-04 the Arena's object store slowed twice. Published rounds kept
+    answering in about two seconds; the two rounds still awaiting publication
+    took six to twenty minutes, and the gateway cut 135 of those 202 reads off
+    at its 150 s proxy deadline. Those rounds were the only ones reading the
+    object store without this sharer, so every concurrent viewer paid for its
+    own GET of the same write-once output.
+    """
+    joined = _observed_future(monkeypatch)
+    document = json.dumps({
+        "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "companies": [],
+    }).encode()
+
+    class Objects:
+        def __init__(self):
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+
+        def get_bounded(self, ref, max_bytes):
+            assert (ref, max_bytes) == ("public-output", service_module.MAX_OUTPUT_BYTES)
+            self.calls += 1
+            self.entered.set()
+            assert self.release.wait(3)
+            return document
+
+    execution = _execution("execute-public", 0)
+    execution["output_ref"] = "public-output"
+    service = _service([execution], public_positions={0}, status="scored")
+    objects = Objects()
+    service._objects = objects
+    service._public_result_reads = _PublicResultInFlightReads(objects)
+    participant = {"submission_id": SUBMISSION_ID, "miner_hotkey": MINER,
+                   "is_baseline": False}
+    service._round = lambda _round_id: {
+        "round_id": ROUND_ID,
+        "status": "scored",
+        "configuration_doc": {},
+        "participants": [participant],
+        "publication_doc": {},
+    }
+    # The scored branch reads completed scores instead of a publication
+    # document; only the object read is under test here.
+    service.completed_submission_scores = lambda _row: {
+        SUBMISSION_ID: {"submission_id": SUBMISSION_ID,
+                        "execution_runs": [execution]},
+    }
+    path = f"/arena/v1/rounds/{ROUND_ID}/results/{SUBMISSION_ID}"
+
+    async def calls():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(service)),
+            base_url="http://private",
+        ) as client:
+            first = asyncio.create_task(client.get(path))
+            assert await asyncio.to_thread(objects.entered.wait, 3)
+            second = asyncio.create_task(client.get(path))
+            assert await asyncio.to_thread(joined.wait, 3)
+            objects.release.set()
+            return await asyncio.gather(first, second)
+
+    first, second = asyncio.run(calls())
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    assert objects.calls == 1

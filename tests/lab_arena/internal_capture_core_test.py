@@ -48,7 +48,7 @@ def test_roundtrip_retains_exact_request_readable_reasoning_and_distinct_outcome
     assert candidate["generated_thinking"] == []  # Unreviewed route text is never full thinking.
     assert candidate["available_reasoning"][0]["text"] == "Check the original source."
     assert candidate["quality"] == {"status": "unreviewed", "correct_action": "not_established"}
-    assert candidate["training_permission"]["status"] == "unconfirmed"
+    assert candidate["training_permission"]["status"] == "confirmed"
     assert "run_id" not in raw and "miner_hotkey" not in raw
     assert all(stage in raw["events"] for stage in capture.STAGES)
 

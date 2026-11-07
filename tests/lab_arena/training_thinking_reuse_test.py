@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from lab_arena import contracts, training_eligibility, training_steps, training_thinking
+from lab_arena import contracts, training_dataset, training_eligibility, training_steps, training_thinking
 from tests.lab_arena.training_eligibility_test import captured_example, refresh_response_links, submission
 from tests.lab_arena.training_hidden_retry_test import recovered_example
 from tests.lab_arena.training_steps_test import seal
@@ -16,8 +16,9 @@ RULES = training_steps.Rules(production_rounds_only=False)
 
 @contextmanager
 def historical_provenance_projection():
-    """Keep old whole-result goldens after the reviewed metadata addition."""
+    """Keep old goldens with their exact provenance and permission metadata."""
     candidate = training_steps._candidate
+    build = training_steps._build
 
     def without_added_provenance(*args, **kwargs):
         row = candidate(*args, **kwargs)
@@ -27,7 +28,21 @@ def historical_provenance_projection():
             assert provenance['label_authority']['ground_truth'] == 'not_established'
         return row
 
-    with patch.object(training_steps, '_candidate', side_effect=without_added_provenance):
+    def with_historical_permission_limit(*args, **kwargs):
+        splits, manifest = build(*args, **kwargs)
+        assert 'no_training_permission_confirmed' not in manifest['eligibility_limits']
+        manifest['eligibility_limits'].insert(3, 'no_training_permission_confirmed')
+        manifest.pop('dataset_version')
+        manifest['dataset_version'] = contracts.document_hash(manifest)
+        return splits, manifest
+
+    historical_permission = {
+        'status': 'unconfirmed',
+        'reason': 'Submission consent records public rerun only; confirm training use before training.',
+    }
+    with patch.object(training_steps, '_candidate', side_effect=without_added_provenance), \
+            patch.object(training_steps, '_build', side_effect=with_historical_permission_limit), \
+            patch.object(training_dataset, 'TRAINING_PERMISSION', historical_permission):
         yield
 
 
@@ -114,8 +129,10 @@ def test_reuse_preserves_complete_result_and_counts_once_per_source(case):
                        wraps=training_thinking.selected_research_evidence) as selected:
         result = training_thinking.build([example], RULES)
     splits, manifest = result
-    # Preserve every historical payload and derived digest. Only the new
-    # source-ref metadata is removed before the ordinary build hashes it.
+    assert manifest['training_permission'] == training_dataset.TRAINING_PERMISSION
+    assert manifest['training_permission']['scope'] == 'operator_authorization_only'
+    # Preserve every old golden, record and split. Restore only the historical
+    # provenance/permission metadata before calculating its derived hashes.
     with historical_provenance_projection():
         historical = training_thinking.build([example], RULES)
     assert contracts.document_hash(historical) == expected_hash
@@ -126,6 +143,7 @@ def test_reuse_preserves_complete_result_and_counts_once_per_source(case):
                 ref.pop('training_provenance')
     assert projected == historical[0]
     previous_manifest = deepcopy(manifest)
+    previous_manifest['training_permission'] = deepcopy(historical[1]['training_permission'])
     previous_manifest['source_dataset_version'] = historical[1]['source_dataset_version']
     previous_manifest.pop('dataset_version')
     previous_manifest['dataset_version'] = contracts.document_hash(previous_manifest)

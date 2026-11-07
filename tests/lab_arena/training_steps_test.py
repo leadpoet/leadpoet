@@ -94,7 +94,7 @@ def test_observed_not_correct_and_no_future_labels():
     assert row['source_refs'][0]['teacher_reasoning_metadata'][0]['text'] == 'Readable summary'
     assert 'FUTURE JUDGE' not in json.dumps(row)
     assert row['quality']['status'] == 'unreviewed'
-    assert manifest['training_permission']['status'] == 'unconfirmed'
+    assert manifest['training_permission']['status'] == 'confirmed'
 
 
 def test_private_binary_bytes_never_enter_agent_dataset_splits_or_manifest():

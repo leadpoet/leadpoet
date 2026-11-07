@@ -42,9 +42,18 @@ _CLAIM_CODES = ("company_linkedin_required_or_invalid", "us_headquarters_state_r
                 "state_must_be_text")
 _MAX_SOURCE_CONTEXTS = 12
 _MAX_SOURCE_BYTES = 64 * 1024
+# This is Leadpoet's purpose authorization, not clearance of every captured
+# record. Provider/source rights, customer privacy and quality checks still
+# apply to miner, baseline and internal records. Keep this scope in exports.
 TRAINING_PERMISSION = {
-    "status": "unconfirmed",
-    "reason": "Submission consent records public rerun only; confirm training use before training.",
+    "status": "confirmed",
+    "scope": "operator_authorization_only",
+    "purpose": "leadpoet_foundational_sales_llm_cpt_and_sft",
+    "reason": "Leadpoet authorizes eligible Arena reasoning and trajectories for its Sales LLM; record rights remain separate.",
+    "confirmed_on": "2026-11-07",
+    "record_rights": "not_cleared_by_operator_authorization",
+    "restrictions": "provider_terms_source_rights_and_customer_privacy_permissions_still_apply",
+    "redistribution": "not_authorized_by_this_record",
 }
 DEFAULT_SPLIT_SEED = "arena-agent-steps-v1"
 SPLIT_GROUPING = "shared_source_episode_company_icp_request_v1"

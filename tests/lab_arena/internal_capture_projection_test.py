@@ -65,7 +65,7 @@ def test_only_opaque_response_is_a_marked_projection_with_raw_privacy_unchanged(
     if api.endswith('chat'):target={k:target[k] for k in ('role','content')}
     assert candidate['target']==target
     assert 'synthetic-opaque-state' not in json.dumps(raw)
-    assert candidate['quality']['status']=='unreviewed' and candidate['training_permission']['status']=='unconfirmed'
+    assert candidate['quality']['status']=='unreviewed' and candidate['training_permission']['status']=='confirmed'
 
 
 def test_projection_does_not_promote_approved_raw_reasoning_to_candidate_full_thinking(tmp_path):

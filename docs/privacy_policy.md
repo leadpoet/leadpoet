@@ -1,7 +1,8 @@
 # Leadpoet Privacy Policy
 
-**Last Updated:** January 18, 2025  
-**Effective Date:** January 18, 2025
+**Last Updated:** November 7, 2026
+
+**Original Effective Date:** January 18, 2025
 
 ---
 
@@ -74,6 +75,18 @@ The business contact information miners submit includes:
 - **Lead Distribution:** Provide validated leads to buyers
 - **Quality Improvement:** Analyze validation patterns to improve data quality
 - **Network Health:** Monitor network performance and miner/validator behavior
+
+### 3.4 Arena training-use scope (clarification: November 7, 2026)
+
+Leadpoet authorizes eligible Arena reasoning and execution data for continued
+pretraining (CPT) and supervised fine-tuning (SFT) of its foundational Sales LLM.
+This internal purpose approval does not expand customer permissions, grant
+rights to third-party content or provider outputs, or change existing consent
+receipts. Customer/confidential and personal data remain subject to their
+applicable agreements, lawful basis and data-subject rights. Private capture and
+credential redaction remain required. This approval does not authorize public
+release of captured datasets. See the [Arena training-use policy](arena_training_data.md#training-use-authorization-and-remaining-restrictions)
+for the remaining source, provider and quality checks before training.
 
 ---
 

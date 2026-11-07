@@ -65,7 +65,9 @@ def main(argv=None):
         print('Arena agent dataset failed: invalid_input_or_output', file=sys.stderr)
         return 1
     print(json.dumps({'dataset_version': manifest['dataset_version'], 'counts': manifest['counts'],
-                      'training_permission': manifest['training_permission']['status']}, sort_keys=True))
+                      'training_permission': manifest['training_permission']['status'],
+                      'training_permission_scope': manifest['training_permission']['scope'],
+                      'training_record_rights': manifest['training_permission']['record_rights']}, sort_keys=True))
     return 0 if splits['train'] or splits['eval'] else 2
 
 

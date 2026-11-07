@@ -133,7 +133,7 @@ def test_cli_later_corrupt_episode_leaves_source_and_no_partial_output(tmp_path,
 
 def test_full_thinking_multi_episode_global_split_and_manifest_golden():
     import copy
-    from lab_arena import training_thinking
+    from lab_arena import training_dataset, training_thinking
     from tests.lab_arena.training_thinking_test import full_example
     from tests.lab_arena.training_steps_test import seal
     from tests.lab_arena.training_thinking_reuse_test import historical_provenance_projection
@@ -143,6 +143,8 @@ def test_full_thinking_multi_episode_global_split_and_manifest_golden():
     second["round_id"] = "arena-20261028-000002"
     seal(second)
     splits, manifest = training_thinking.build(iter([first, second, first]))
+    assert manifest['training_permission'] == training_dataset.TRAINING_PERMISSION
+    assert manifest['training_permission']['scope'] == 'operator_authorization_only'
     # Bind the shared source graph, cross-source dedup, and coverage.
     with historical_provenance_projection():
         historical_splits, historical_manifest = training_thinking.build(iter([first, second, first]))
@@ -154,6 +156,7 @@ def test_full_thinking_multi_episode_global_split_and_manifest_golden():
                 ref.pop("training_provenance")
     assert projected == historical_splits
     previous_manifest = copy.deepcopy(manifest)
+    previous_manifest['training_permission'] = copy.deepcopy(historical_manifest['training_permission'])
     previous_manifest["source_dataset_version"] = historical_manifest["source_dataset_version"]
     previous_manifest.pop("dataset_version")
     from lab_arena import contracts

@@ -97,24 +97,52 @@ def test_reviewer_prompts_match_the_investigator_stage_persistence_rule():
     assert "unfinished research" not in LEAD_SCORER_PROMPTS
 
 
+def test_stage_observation_contract_is_consistent_at_system_and_tool_fields():
+    assert "Use VERIFIED for a proved observation" in INVESTIGATOR_PROMPT
+    assert "do not decide requested fit" in INVESTIGATOR_PROMPT
+    assert "before comparing requested_stage" not in INVESTIGATOR_PROMPT
+    assert "the server computes requested fit and normalizes status" in INVESTIGATOR_PROMPT
+    assert "Except for stage's observed-fact contract" in INVESTIGATOR_PROMPT
+    assert "Use VERIFIED for a match" not in INVESTIGATOR_PROMPT
+    tool = next(value for value in investigator._tools(("stage",))
+                if value["name"] == "submit_findings")
+    properties = tool["parameters"]["properties"]["findings"]["items"]["properties"]
+    assert "even when requested_stage differs" in properties["observed_value"]["description"]
+    assert "VERIFIED proves the observed stage" in properties["status"]["description"]
+    assert properties["status"]["enum"] == sorted(investigator.STATUSES)
+    assert properties["observed_value"]["type"] == ["string", "integer", "null"]
+    assert "current private-equity control is Private Equity" in properties["observed_value"]["description"]
+    assert "currently listed company stays Public" in properties["observed_value"]["description"]
+
+
+def test_listing_issuer_scope_does_not_change_required_discovery_company():
+    assert (
+        "For Public listing checks, issuer means the investigated company for direct "
+        "proof or the exact proven parent for listed-parent proof."
+    ) in INVESTIGATOR_PROMPT
+    assert "Required discovery remains company-bound" in INVESTIGATOR_PROMPT
+    assert "the exact company's shares are listed or traded" not in INVESTIGATOR_PROMPT
+    assert "structured `Privately Held` evidence about the issuer" in INVESTIGATOR_PROMPT
+
+
 # Rule B prompt contract ----------------------------------------------------
 
 def test_listed_parent_route_is_stated_only_for_requested_public():
     assert (
-        "Listed parent: a current wholly or majority owned subsidiary, brand "
-        "or division of a currently listed parent; return Acquired, VERIFIED. "
-        "Observed Acquired meets requested Public. Quote ownership as primary "
-        "and the same exact parent's affirmative current listing as support 1. "
-        "The child may be private or unlisted."
+        "For requested Public, report Public for direct company listing proof. For a "
+        "current wholly or majority owned subsidiary, brand or division of a currently "
+        "listed parent, report Acquired with company-bound ownership primary and the "
+        "same exact parent's affirmative current listing as support 1."
     ) in INVESTIGATOR_PROMPT
-    assert "A parent ticker alone fails" in INVESTIGATOR_PROMPT
+    assert "the child may be private or unlisted" in INVESTIGATOR_PROMPT
+    assert "A bare parent ticker is insufficient" in INVESTIGATOR_PROMPT
     assert "No other parent or subsidiary stage inheritance" in INVESTIGATOR_PROMPT
-    public_start = INVESTIGATOR_PROMPT.index("Requested Public can match by:")
-    parent_route = INVESTIGATOR_PROMPT.index("Listed parent:", public_start)
+    public_start = INVESTIGATOR_PROMPT.index("For requested Public, report Public")
+    parent_route = INVESTIGATOR_PROMPT.index("listed parent, report Acquired", public_start)
     direct_details = INVESTIGATOR_PROMPT.index("For direct proof,", public_start)
     rebrand = INVESTIGATOR_PROMPT.index("A merger, acquisition, ownership change,")
     assert public_start < parent_route < direct_details < rebrand
-    assert INVESTIGATOR_PROMPT.count("Listed parent:") == 1
+    assert INVESTIGATOR_PROMPT.count("listed parent, report Acquired") == 1
     assert "Never inherit a stage from a parent or subsidiary" not in INVESTIGATOR_PROMPT
     assert "it is not Public merely because the parent is public" not in LEAD_SCORER_PROMPTS
     assert (
@@ -517,10 +545,10 @@ def test_native_listed_parent_route_keeps_current_search_and_private_receipt(mon
             message["content"] for message in payload["messages"]
             if message["role"] == "system"
         ).split())
-        assert "Requested Public can match by:" in emitted_system
-        assert "return Public, VERIFIED" in emitted_system
-        assert "return Acquired, VERIFIED. Observed Acquired meets requested Public" in emitted_system
-        assert "The child may be private or unlisted" in emitted_system
+        assert "For requested Public, report Public" in emitted_system
+        assert "Use VERIFIED for a proved observation" in emitted_system
+        assert "listed parent, report Acquired with company-bound ownership primary" in emitted_system
+        assert "the child may be private or unlisted" in emitted_system
         turns.append(payload)
         if len(turns) <= 2:
             name, arguments = "fetch_page", {"url": (
@@ -706,3 +734,56 @@ def test_live_exchange_card_does_not_override_explicit_same_parent_contradiction
         listing_quotes=('Barco Industries Inc. New York Stock Exchange: BRC Last 10.00',),
         listing_urls=('https://www.nyse.com/quote/XNYS:BRC',),
     )
+
+
+@pytest.mark.parametrize('observed,requested,quote', [
+    ('Series A', 'Series B', 'Acme Realty completed a $20 million Series A financing round.'),
+    ('Acquired', 'Series C+', 'Acme Realty is a wholly owned subsidiary of Barco Industries.'),
+    ('Public', 'Private Equity', 'Acme Realty (NYSE: ACRE) is currently publicly traded.'),
+])
+def test_proved_stage_fact_normalizes_to_a_different_requested_stage(observed, requested, quote):
+    raw = _finding('stage', status='VERIFIED', observed_value=observed,
+                   evidence_url=OWNERSHIP_URL, evidence_quote=quote)
+    finding = investigator._validated_findings(
+        {'findings': [raw]}, targets=('stage',), fetched_pages={OWNERSHIP_URL: quote},
+        fetched_final_urls={OWNERSHIP_URL: OWNERSHIP_URL},
+        first_party_domains={'acmerealty.example'}, identity_names={'acmerealty'},
+        requested_stage=requested,
+    )['stage']
+    assert finding['status'] == 'CONTRADICTED'
+    assert finding['observed_value'] == observed
+    requested_value = lead_scorer._normalize_company_stage(requested)
+    company = _company(name='Acme Realty', website='https://acmerealty.example')
+    projected = lead_scorer._project_investigator_stage(
+        {'observed_company_name': company.company_name}, finding, icp_stage=requested_value)
+    assert lead_scorer._decision_from_observed_stage(
+        json.loads(json.dumps(projected)), requested_value,
+        validated_stage_finding=finding, company=company, evidence_attributed=True,
+    ) == 'mismatch'
+
+
+@pytest.mark.parametrize('status', ['UNPROVEN', 'CONTRADICTED'])
+def test_empty_stage_claim_cannot_be_promoted_by_fact_normalization(status):
+    raw = _finding('stage', status=status, observed_value='Acquired',
+                   evidence_url='', evidence_quote='')
+    finding = investigator._validated_findings(
+        {'findings': [raw]}, targets=('stage',), fetched_pages={},
+        first_party_domains={'acmerealty.example'}, identity_names={'acmerealty'},
+        requested_stage='Public',
+    )['stage']
+    assert finding['status'] == 'UNPROVEN'
+    projected = lead_scorer._project_investigator_stage({}, finding, icp_stage='public')
+    assert lead_scorer._decision_from_observed_stage(
+        json.loads(json.dumps(projected)), 'public', validated_stage_finding=finding,
+        company=_company(name='Acme Realty', website='https://acmerealty.example'),
+    ) == 'unavailable'
+
+
+def test_child_private_status_does_not_replace_proved_acquired_observation():
+    finding, retained, decision = _decide(
+        OWNERSHIP + ' Acme Realty is privately held and has no listed shares.',
+        LISTING, 'public',
+    )
+    assert finding['status'] == 'VERIFIED'
+    assert retained['observed_company_stage'] == 'acquired'
+    assert decision == 'match'

@@ -196,7 +196,7 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
     assert "review every one before preserving the older matching stage" in prompt
     assert "if any disputed source remains" in prompt
     assert "return stage UNPROVEN" in prompt
-    assert "validated different completed stage may still be" in prompt
+    assert "Still report a proved different completed stage and its facts" in prompt
     assert (
         "inspect known relevant first-party product, pricing, subscription, "
         "or platform links"
@@ -301,13 +301,13 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
     assert (
-        "prefer a relevant supplied recent issuer announcement or filing that "
-        "names the investigated company with an exchange ticker"
+        "Prefer a relevant supplied recent announcement or filing naming the issuer "
+        "with an exchange/ticker"
     ) in prompt
-    assert "fetch it before a stock-quote or chart page" in prompt
-    assert "This source order does not establish current stage" in prompt
-    assert "still require a fetched company-bound quote" in prompt
-    assert "later completed take-private or delisting evidence" in prompt
+    assert "fetch it before stock-quote or chart pages" in prompt
+    assert "This order proves no stage" in prompt
+    assert "require fetched issuer-bound quotes" in prompt
+    assert "later completed take-private or delisting events" in prompt
     assert "Series C+, or Public stage" in prompt
     assert "server-required current-stage search" in prompt
     assert "absence of a contradicting search result" in prompt
@@ -323,7 +323,7 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     assert "does not require valid listing evidence to postdate it" in prompt
     assert (
         "Only concrete source context indicating a completed delisting, "
-        "take-private, or current private status "
+        "take-private, or the issuer's current private status "
         "creates that conflict"
     ) in prompt
     assert (
@@ -6924,7 +6924,7 @@ def test_fiuu_parent_listing_stays_an_explicit_unproven_stage_control():
     # Razer, Fiuu's parent, was taken private, so the requested-Public
     # listed-parent exception does not apply and the stage stays unproven.
     assert "No other parent or subsidiary stage inheritance" in prompt
-    assert "of a currently listed parent; return Acquired, VERIFIED" in prompt
+    assert "listed parent, report Acquired with company-bound ownership primary" in prompt
 
 
 def test_headquarters_source_priority_uses_linkedin_then_current_first_party():
@@ -12196,7 +12196,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         "admission_deadline_seconds": 110.0,
         "remaining_search_calls": 1,
     }
-    assert "official company investor-relations pages" in (
+    assert "official issuer\ninvestor-relations pages" in (
         requests[0]["messages"][0]["content"]
     )
     assert "never combine a quote from one page" in (

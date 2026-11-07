@@ -16,16 +16,17 @@ SOL = 'openai/gpt-6.1-sol'
 GLM = 'z-ai/glm-5.3-flash'
 
 # Complete explicit-length requests with the reviewed stage/scope prompts.
-# Compared against reviewed b18d4bbc3: only the system prompt text changes;
-# repair instructions, tools, budgets and provider routing are unchanged.
+# This industry-only fixture changes only system text from reviewed4157;
+# stage-field descriptions are covered by the stage contract tests. Repair
+# instructions, tools, budgets and provider routing here are unchanged.
 # Budget-only repairs must still match explicit-length requests byte for byte.
 REQUEST_GOLDENS = {
-    ('glm', 'empty'): 'sha256:b8e7bfcab201347d2c3d32d7c56173595af6efcfb1f5b2575348161e366c7f97',
-    ('glm', 'malformed_submit'): 'sha256:2f233459b3c9abf38176d62e48129843b6fdef8537d080a653b189a878691b8d',
-    ('sol_legacy', 'empty'): 'sha256:0fbcc237197fad4aa7eb56dd1a11fe973a65ea45914f4ff2d3b8aeacba60c7c3',
-    ('sol_legacy', 'malformed_submit'): 'sha256:fe32a62c1b3d151d0f3a42b77b7a16427b2eb48d11773c74458bf5768e8ae8e0',
-    ('historical_open', 'empty'): 'sha256:88ccceebd67b0e0e91993b9fd058a2cc124dfc69129aa265238e567ebfd5be5d',
-    ('historical_open', 'malformed_submit'): 'sha256:3627c33c425e61b58eca77f605a7ac40f988556e9924aaad6dad8d6dcbca4239',
+    ('glm', 'empty'): 'sha256:8d623905f754e74302f3c1e1096383cda44c20dba6241b49c9a7d83777bc41de',
+    ('glm', 'malformed_submit'): 'sha256:9400af628550ec1a034e28bb2452354909dc93edd8d68a618bd8c82a91019a07',
+    ('sol_legacy', 'empty'): 'sha256:ff260880c060639a6c21aac4054c391edddfd21e0b855ef63d95667f940a7654',
+    ('sol_legacy', 'malformed_submit'): 'sha256:5b9a1c3c9f489ca3a52c9819a4204912beec4f7a172f08399f9514d6ebdc6156',
+    ('historical_open', 'empty'): 'sha256:73cedeef1e8c60935cbdff32b17559ee4c59d91183e977eb6162ea8062f4e27b',
+    ('historical_open', 'malformed_submit'): 'sha256:074bcc5e0c65b698b20d3a38e10df8a35018cf6ec97aefa5aacf3e2606cd0d06',
 }
 
 

@@ -10648,7 +10648,8 @@ async def _llm_reverify_company(
         checks.append(
             f'stage_matches: is this company\'s funding/ownership stage consistent with '
             f'"{getattr(icp, "company_stage", "")}" (verify from funding announcements, '
-            f'investor pages)? Return observed_company_stage as exactly one of Seed, '
+            f'investor pages)? First report the proved observed_company_stage, '
+            f'even when it differs from the request, as exactly one of Seed, '
             f'Series A, Series B, Series C+, Private Equity, Public, or Acquired. '
             f'Acquired means a completed strategic acquisition with a current parent; '
             f'it is not Private Equity unless a private-equity sponsor currently '
@@ -10660,7 +10661,11 @@ async def _llm_reverify_company(
             f'the requested stage is Public, a company that is currently a wholly or '
             f'majority owned subsidiary, operating brand, or division of a currently '
             f'listed parent also satisfies Public: return Acquired with the ownership '
-            f'quote; a separate review must prove the parent\'s current listing. For '
+            f'quote even if the child is private or unlisted; a separate review must '
+            f'prove the parent\'s current listing. Leave stage_matches null until that '
+            f'parent proof is established; do not erase the proved Acquired observation. '
+            f'For listing and private-status checks, issuer means the company for direct '
+            f'proof or the exact controlling parent for this parent route. For '
             f'every other requested stage, Acquired still disproves the stage. Answer false '
             f'ONLY if you are confident it is a different stage. Do not stop when you '
             f'find a venture round that matches the requested stage. Before returning '
@@ -10680,7 +10685,8 @@ async def _llm_reverify_company(
             f'Series A, or Series B quote does not establish the current stage when '
             f'later-round or completed-ownership evidence exists. The stage evidence '
             f'quote must itself name the relevant '
-            f'completed round, current controlling private-equity ownership, or current '
+            f'completed round, current parent/acquisition ownership, current '
+            f'controlling private-equity ownership, or current '
             f'public listing. A funding amount or total raised, a press release or '
             f'public product launch, a "Privately Held" label, planned IPO, absence of '
             f'funding data, or negated statement such as "not publicly traded" proves '
@@ -11364,8 +11370,10 @@ async def _llm_reverify_company(
         )
     stage_proof_repair = (
         "\nSTAGE EVIDENCE REPAIR: find proof of the company's actual current "
-        "stage. For Public, quote a current stock-listing/trading statement "
-        "or company-attributed exchange and ticker; a Public Company profile "
+        "stage, even if it differs from the request. Keep proved observations and "
+        "exact source facts; do not erase them to force a requested-stage judgment. "
+        "For direct Public proof, quote a current stock-listing/trading statement "
+        "or issuer-attributed exchange and ticker; a Public Company profile "
         "label is insufficient. For a venture stage, quote the named completed "
         "round, not only a funding amount. For Private Equity, quote current "
         "majority ownership or control, not merely an investor name. Do not "
@@ -11376,7 +11384,11 @@ async def _llm_reverify_company(
         "stage onto its subsidiary, except that a requested Public stage is met "
         "by a current wholly or majority owned subsidiary, brand, or division "
         "of a currently listed parent; return Acquired with the ownership quote "
-        "for that case. A later completed equity investment or round of "
+        "even if the child is private or unlisted. For Public listing and private-status "
+        "checks, issuer means the company for direct proof or the exact controlling "
+        "parent for that route. A separate review must prove the parent's current "
+        "listing; leave stage_matches null until then, retaining observed Acquired "
+        "and ownership evidence. A later completed equity investment or round of "
         "unstated series, even one called strategic, keeps Series C+ but leaves "
         "an earlier stage unresolved. A pending or conditional deal does not "
         "erase a proven stage. Prefer a first-party completed-round "

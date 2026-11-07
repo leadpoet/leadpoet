@@ -349,7 +349,11 @@ def _internal_chat_annotations(body, message):
 
 
 def _search_evidence(response: Any) -> dict:
-    """Distinguish retained provider events, URL references and actual result text."""
+    """Distinguish retained provider events, URL references and result text.
+
+    Text counters describe retained content. A privacy placeholder does not
+    establish that the provider never exposed the original text.
+    """
     output = response.get("output") if isinstance(response, Mapping) else None
     events = []
     for index, item in enumerate(output if isinstance(output, list) else []):
@@ -363,12 +367,18 @@ def _search_evidence(response: Any) -> dict:
         # a citation or the model's reasoning into retrieved source content.
         results = action.get("results")
         results = results if isinstance(results, list) else []
+        text_fields = ("text", "content", "snippet")
         text_results = [row for row in sources + results if isinstance(row, Mapping)
                         and any(isinstance(row.get(key), str) and row[key].strip()
-                                for key in ("text", "content", "snippet"))]
+                                and row[key].strip() != "[REDACTED]" for key in text_fields)]
+        text_status = "exposed" if text_results else "not_exposed"
+        if not text_results and any(isinstance(row, Mapping) and any(
+                isinstance(row.get(key), str) and row[key].strip() == "[REDACTED]"
+                for key in text_fields) for row in sources + results):
+            text_status = "redacted"
         events.append({"output_index": index, "status": item.get("status"),
                        "source_references": len(sources), "results_with_text": len(text_results),
-                       "result_text_status": "exposed" if text_results else "not_exposed"})
+                       "result_text_status": text_status})
     citations = []
     choices = response.get("choices") if isinstance(response, Mapping) else None
     for choice_index, choice in enumerate(choices if isinstance(choices, list) else []):
@@ -380,7 +390,7 @@ def _search_evidence(response: Any) -> dict:
                 continue
             path = f"/choices/{choice_index}/message/annotations/{index}"
             content = citation.get("content")
-            exposed = isinstance(content, str) and bool(content.strip()) and content != "[REDACTED]"
+            exposed = isinstance(content, str) and bool(content.strip()) and content.strip() != "[REDACTED]"
             citations.append({"annotation_path": path, "url_path": path + "/url_citation/url",
                               "content_path": path + "/url_citation/content" if exposed else None,
                               "content_characters": len(content) if exposed else 0})

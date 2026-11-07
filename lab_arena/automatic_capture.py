@@ -372,7 +372,8 @@ class Recorder:
             "content_type": body.content_type, "body": text, "retrieved_at": body.retrieved_at,
             "capture": {"source": _SOURCE, "complete": body.complete, "encoding": body.encoding,
                         "received_body_sha256": "sha256:" + body.digest.hexdigest(),
-                        "received_body_bytes": body.size}})
+                        "received_body_bytes": body.size,
+                        **({"redirect_url": body.redirect_url} if body.redirect_url is not None else {})}})
 
     def _prepare_binary(self, body):
         """Store bounded consumed bytes, with privacy review still required."""
@@ -387,7 +388,8 @@ class Recorder:
                 "retrieved_at": body.retrieved_at,
                 "capture": {"source": _SOURCE, "complete": body.complete,
                             "received_body_sha256": "sha256:" + body.digest.hexdigest(),
-                            "received_body_bytes": body.size}})
+                            "received_body_bytes": body.size,
+                            **({"redirect_url": body.redirect_url} if body.redirect_url is not None else {})}})
         return None
 
     def _emit(self, body):

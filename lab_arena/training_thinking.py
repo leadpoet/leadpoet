@@ -933,8 +933,8 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
         return False
 
 
-def _verified_credit_refusal(call: Mapping[str, Any], delivered: list[Any]) -> bool:
-    """Bind a pre-generation OpenRouter payment error to its delivered failure."""
+def _verified_account_refusal(call: Mapping[str, Any], delivered: list[Any]) -> bool:
+    """Bind a pre-generation OpenRouter auth/payment error to its delivered failure."""
     expected = {"error": {"code": "miner_credentials_unavailable"}}
     if (call.get("response_status") != 402
             or not delivered or any(value != expected for value in delivered)):
@@ -946,13 +946,13 @@ def _verified_credit_refusal(call: Mapping[str, Any], delivered: list[Any]) -> b
     for receipt in receipts:
         value = receipt.get("response")
         error = value.get("error") if isinstance(value, Mapping) else None
-        if (type(receipt.get("status")) is not int or receipt["status"] != 402
+        if (type(receipt.get("status")) is not int or receipt["status"] not in (401, 402)
                 or type(receipt.get("entry_id")) is not int or receipt["entry_id"] != response_id
                 or not isinstance(value, Mapping)
                 or not set(value) <= {"error", "user_id", "openrouter_metadata", "usage"}
                 or not isinstance(error, Mapping) or not set(error) <= {"code", "message", "metadata"}
                 or type(error.get("code")) is not int
-                or error["code"] != 402 or not isinstance(error.get("message"), str)
+                or error["code"] != receipt["status"] or not isinstance(error.get("message"), str)
                 or not error["message"].strip()
                 or not _error_body_has_no_generation(value)
                 or receipt.get("provenance") != "private_upstream_response_receipt"
@@ -1131,7 +1131,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                         and bool(failure_bodies)
                         and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
         if status == 402:
-            return _verified_credit_refusal(call, failure_bodies)
+            return _verified_account_refusal(call, failure_bodies)
         return all(_error_body_has_no_generation(value)
                    and (status != 404 or _ignored_provider_failure(
                        value, body, call.get("reasoning_capture") or {}))
@@ -1395,6 +1395,10 @@ def coverage(examples, *, role=None) -> dict:
         if source in seen:
             continue
         seen.add(source)
+        # This validated episode owns its immutable worker proofs only until
+        # the next source is requested; standalone helpers remain stateless.
+        worker_proofs = training_worker_proof.WorkerProofs()
+        example = worker_proofs.prepare(example)
         bad = False
         has_text = False
         partial_judge = False
@@ -1413,8 +1417,8 @@ def coverage(examples, *, role=None) -> dict:
                 continue
             call_configuration = _capture_configuration(example, 'judge') if call_role == 'judge' else baseline_reasoning.for_example(example)
             call_registry = call_configuration.get('reasoning_route_registry')
-            row = _call_coverage(example, call, call_registry)
-            full, _ = full_text_segments(call, call_role, call_registry)
+            row = _call_coverage(example, call, call_registry, worker_proofs=worker_proofs)
+            full, _ = full_text_segments(call, call_role, call_registry, worker_proofs=worker_proofs)
             exception = _judge_exception(example, call)
             frozen_route_error = _judge_frozen_route_error(example, call)
             if exception is not None or frozen_route_error:
@@ -1435,16 +1439,17 @@ def coverage(examples, *, role=None) -> dict:
                 # cannot veto independently proven full-thinking turn targets.
                 continue
             full_round = call_configuration.get("reasoning_capture_policy") == POLICY
-            failed = new_policy and verified_failed_attempt(example, call)
+            failed = new_policy and verified_failed_attempt(example, call, worker_proofs=worker_proofs)
             omitted_truncation = False
             target_usable = not new_policy
             if new_policy and execution_model and not failed:
                 try:
-                    training_steps._candidate(example, call, role='judge' if role == 'judge' else 'source')
+                    training_steps._candidate(example, call, worker_proofs=worker_proofs,
+                                              role='judge' if role == 'judge' else 'source')
                     target_usable = True
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-                    private_truncation = verified_private_explicit_truncation(example, call)
-                    omitted_truncation = private_truncation or verified_cap_truncated_target(example, call) or (
+                    private_truncation = verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs)
+                    omitted_truncation = private_truncation or verified_cap_truncated_target(example, call, worker_proofs=worker_proofs) or (
                         isinstance(exc, ValueError) and str(exc) == "response_not_complete"
                         and row["returned"] == "truncated" and row["route_reviewed"]
                         and row["provider_route_verified"])
@@ -1476,7 +1481,11 @@ def coverage(examples, *, role=None) -> dict:
             trajectories["partial_judge_thinking"] += 1
         trajectories["selected_judge_full_thinking" if role == 'judge' else "selected_research_full_thinking"] += bool(
             not bad and has_text and (role != 'judge' or not partial_judge)
-            and selected_research_evidence(example, role='judge' if role == 'judge' else 'source') is not None)
+            and selected_research_evidence(example, worker_proofs=worker_proofs,
+                                           role='judge' if role == 'judge' else 'source') is not None)
+        call = None
+        worker_proofs = None
+        del example
     return {"attempts": attempts, "returned_classes": dict(sorted(counts.items())),
             "distinct_verified_exports": len(seen),
             "saved_calls": sum(row["storage"] == "saved" for row in attempts),
@@ -1789,10 +1798,10 @@ def readable_trace_markdown(report: Mapping[str, Any], *, raw_export_name: str |
     return "\n".join(lines) + "\n"
 
 
-def _prior_observations(example: Mapping[str, Any], call: Mapping[str, Any]) -> list[dict]:
+def _prior_observations(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> list[dict]:
     artifact = training_steps._worker_artifact(example, call, allow_journal_prefix=True)
     payload = artifact.get("payload") or {}
-    if contracts.document_hash(payload) != artifact.get("payload_sha256"):
+    if training_worker_proof.payload_hash(payload, worker_proofs) != artifact.get("payload_sha256"):
         raise ValueError("worker_payload_hash_mismatch")
     sequence = call.get("action_sequence")
     if type(sequence) is not int:
@@ -2075,9 +2084,9 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
     return None if result is None else result | diagnostic_gaps
 
 
-def _individual_research_evidence(example, *, role='source'):
+def _individual_research_evidence(example, *, role='source', worker_proofs=None):
     """Builder-only absence exception; never establish full-ICP eligibility."""
-    selected = selected_research_evidence(example, role=role)
+    selected = selected_research_evidence(example, role=role, worker_proofs=worker_proofs)
     if selected is not None:
         return selected
     try:
@@ -2201,7 +2210,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
     coverage_sources = set()
     coverage_by_source = {}
 
-    def project_candidate(example, candidate):
+    def project_candidate(example, candidate, *, worker_proofs=None):
         # The shared builder calls this while this one source is in memory.
         # Global candidate deduplication and cluster assignment still run there.
         ref = candidate["source_refs"][0]
@@ -2223,7 +2232,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
                 return
         source = ref["example_hash"]
         if source not in scoped:
-            scoped[source] = _individual_research_evidence(example, role=role)
+            scoped[source] = _individual_research_evidence(example, role=role, worker_proofs=worker_proofs)
         ancillary_gaps = scoped[source]
         if ancillary_gaps is None:
             reasons["trajectory_evidence_incomplete"] += 1
@@ -2237,17 +2246,17 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
                               response_sha256=ref["delivered_response_sha256"])
         registry = _capture_configuration(example, role).get("reasoning_route_registry")
         source = ref["example_hash"]
-        segments, status = full_text_segments(delivered_call, _role(example, call), registry)
+        segments, status = full_text_segments(delivered_call, _role(example, call), registry, worker_proofs=worker_proofs)
         if not segments:
             reasons[status["returned"]] += 1
             return
         try:
-            prior = _prior_observations(example, call)
+            prior = _prior_observations(example, call, worker_proofs=worker_proofs)
         except ValueError as exc:
             reasons[str(exc)] += 1
             return
         if source not in diagnostic_gaps_by_source:
-            diagnostic_gaps_by_source[source] = provider_visible_view(example)[1]
+            diagnostic_gaps_by_source[source] = provider_visible_view(example, worker_proofs=worker_proofs)[1]
         diagnostic_gaps = diagnostic_gaps_by_source[source]
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if identity not in (example.get("input_snapshots") or {}))

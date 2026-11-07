@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from lab_arena import contracts, reasoning_capture, training_capture, training_steps, training_thinking
+from lab_arena import contracts, operations, reasoning_capture, training_capture, training_export, training_steps, training_thinking
 from lab_arena.runtime_version import SOURCE_METADATA
 
 SCHEMA_VERSION = "leadpoet.lab_arena.internal_capture_event.v1"
@@ -172,19 +172,17 @@ class InternalCall:
                 if not isinstance(body, bytes) or len(body) > training_capture.MAX_OBJECT_BYTES:
                     raise ValueError("response_size_or_type")
                 fields.update(wire_body_sha256=contracts.hash_bytes(body), wire_body_bytes=len(body))
-                text = body.decode("utf-8")
-                try:
-                    provider_response = json.loads(text)
-                    document = {"provider_calls": [{"response": provider_response}]}
-                    fields["body_format"] = "json"
-                except ValueError:
-                    document = {"body_text": text}
-                    fields["body_format"] = "text"
-                self.response_pointer = training_capture.RequestCapture(self._objects)(document, secrets=self._secrets)
-                fields["capture"] = self.response_pointer
                 if (type(elapsed_seconds) in (int, float) and math.isfinite(elapsed_seconds)
                         and elapsed_seconds >= 0):
                     fields["elapsed_seconds"] = elapsed_seconds
+                # Every supported internal API is a JSON model endpoint.
+                # Do not turn malformed structured data into untyped text:
+                # that would bypass opaque/credential field redaction.
+                provider_response = training_capture.model_response_object(body.decode("utf-8"))
+                document = {"provider_calls": [{"response": provider_response}]}
+                fields["body_format"] = "json"
+                self.response_pointer = training_capture.RequestCapture(self._objects)(document, secrets=self._secrets)
+                fields["capture"] = self.response_pointer
             except Exception:
                 self.response_pointer = training_capture.unavailable("internal_response_capture_failed")
                 fields["capture"] = self.response_pointer
@@ -290,19 +288,29 @@ def _internal_responses_input(value, *, tools=(), max_tool_calls=None,
                 require(all(isinstance(part, Mapping) and set(part) == {"type", "text"}
                             and part["type"] == "input_text" and isinstance(part["text"], str)
                             for part in content), "internal_initial_content_unsupported")
+    _internal_search_tools(tools, max_tool_calls)
+
+
+def _internal_search_tools(tools, max_tool_calls, *, allow_chat_fast_mode=False):
+    """Check retained internal controls; this grants no dispatch or budget authority."""
+    require = training_steps._require
     require(isinstance(tools, (list, tuple)) and len(tools) <= 1, "internal_tools_unsupported")
     if tools:
         tool = tools[0]
         require(isinstance(tool, Mapping) and set(tool) <= {"type", "parameters"}
                 and tool.get("type") == "openrouter:web_search", "internal_tools_unsupported")
         parameters = tool.get("parameters", {})
-        require(isinstance(parameters, Mapping)
-                and set(parameters) <= {"engine", "max_uses", "max_results", "max_total_results", "max_characters"},
+        fields = {"engine", "max_uses", "max_results", "max_total_results", "max_characters"}
+        if allow_chat_fast_mode:
+            fields.add("mode")
+        require(isinstance(parameters, Mapping) and set(parameters) <= fields,
                 "internal_search_controls_unsupported")
+        if "mode" in parameters:
+            require(parameters["mode"] == "fast", "internal_search_mode_unsupported")
         if "engine" in parameters:
             require(parameters["engine"] in {"exa", "native"}, "internal_search_engine_invalid")
         for name, number in parameters.items():
-            if name != "engine":
+            if name not in {"engine", "mode"}:
                 require(type(number) is int and 1 <= number <= 1_000_000,
                         "internal_search_limit_invalid")
         require(type(max_tool_calls) is int and 1 <= max_tool_calls <= 1000,
@@ -311,8 +319,25 @@ def _internal_responses_input(value, *, tools=(), max_tool_calls=None,
         require(max_tool_calls is None, "internal_tool_limit_without_tools")
 
 
+def _internal_chat_annotations(body, message):
+    """Validate exact nested Chat citations without rewriting the saved target."""
+    require = training_steps._require
+    tools = body.get("tools", [])
+    _internal_search_tools(tools, body.get("max_tool_calls"), allow_chat_fast_mode=True)
+    require(bool(tools) and not message.get("tool_calls"), "internal_chat_search_undeclared")
+    training_steps._chat_citation_annotations(body, message)
+
+
+def _has_retained_search_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.replace("[REDACTED]", "").strip())
+
+
 def _search_evidence(response: Any) -> dict:
-    """Distinguish retained provider events, URL references and actual result text."""
+    """Distinguish retained provider events, URL references and result text.
+
+    Text counters describe retained content. A privacy placeholder does not
+    establish that the provider never exposed the original text.
+    """
     output = response.get("output") if isinstance(response, Mapping) else None
     events = []
     for index, item in enumerate(output if isinstance(output, list) else []):
@@ -326,19 +351,64 @@ def _search_evidence(response: Any) -> dict:
         # a citation or the model's reasoning into retrieved source content.
         results = action.get("results")
         results = results if isinstance(results, list) else []
+        text_fields = ("text", "content", "snippet")
         text_results = [row for row in sources + results if isinstance(row, Mapping)
-                        and any(isinstance(row.get(key), str) and row[key].strip()
-                                for key in ("text", "content", "snippet"))]
+                        and any(_has_retained_search_text(row.get(key)) for key in text_fields)]
+        text_status = "exposed" if text_results else "not_exposed"
+        if not text_results and any(isinstance(row, Mapping) and any(
+                isinstance(row.get(key), str) and "[REDACTED]" in row[key]
+                for key in text_fields) for row in sources + results):
+            text_status = "redacted"
         events.append({"output_index": index, "status": item.get("status"),
                        "source_references": len(sources), "results_with_text": len(text_results),
-                       "result_text_status": "exposed" if text_results else "not_exposed"})
+                       "result_text_status": text_status})
+    citations = []
+    choices = response.get("choices") if isinstance(response, Mapping) else None
+    for choice_index, choice in enumerate(choices if isinstance(choices, list) else []):
+        message = choice.get("message") if isinstance(choice, Mapping) else None
+        annotations = message.get("annotations") if isinstance(message, Mapping) else None
+        for index, annotation in enumerate(annotations if isinstance(annotations, list) else []):
+            citation = annotation.get("url_citation") if isinstance(annotation, Mapping) and annotation.get("type") == "url_citation" else None
+            if not isinstance(citation, Mapping) or not isinstance(citation.get("url"), str) or not citation["url"].strip():
+                continue
+            path = f"/choices/{choice_index}/message/annotations/{index}"
+            content = citation.get("content")
+            exposed = _has_retained_search_text(content)
+            citations.append({"annotation_path": path, "url_path": path + "/url_citation/url",
+                              "content_path": path + "/url_citation/content" if exposed else None,
+                              "content_characters": len(content) if exposed else 0})
+    usage = response.get("usage") if isinstance(response, Mapping) else None
+    details = usage.get("server_tool_use_details") if isinstance(usage, Mapping) else None
+    requests = details.get("web_search_requests") if isinstance(details, Mapping) else None
+    requests = requests if type(requests) is int and requests >= 0 else None
     return {"scope": "provider_exposed_search_events_only", "search_events": len(events),
             "events_with_source_references": sum(row["source_references"] > 0 for row in events),
             "source_references": sum(row["source_references"] for row in events),
             "events_with_result_text": sum(row["results_with_text"] > 0 for row in events),
             "all_search_events_have_result_text": bool(events) and all(row["results_with_text"] for row in events),
             "underlying_page_contents_verified": False, "all_internal_provider_turns_verified": False,
-            "events": events}
+            "events": events,
+            "chat_url_citations": {"scope": "provider_exposed_chat_annotations_only",
+                "references": len(citations),
+                "annotations_with_content": sum(row["content_path"] is not None for row in citations),
+                "content_characters": sum(row["content_characters"] for row in citations), "items": citations},
+            "provider_reported_web_search_requests": {"scope": "provider_reported_aggregate_only",
+                "count": requests, "path": "/usage/server_tool_use_details/web_search_requests" if requests is not None else None}}
+
+
+def _opaque_response_projection_allowed(events, documents) -> bool:
+    """Keep opaque omission separate from every other nonexact privacy edit."""
+    if set(events) != set(STAGES) or set(documents) != set(STAGES):
+        return False
+    for stage, event in events.items():
+        if any(event.get(field) != {"redacted": False, "redactions": []}
+               for field in ("context_privacy", "event_privacy")):
+            return False
+        pointer = event.get("capture") or {}
+        if (pointer.get("redacted") is not (stage == "response")
+                or pointer.get("redactions") != (["hidden_reasoning"] if stage == "response" else [])):
+            return False
+    return True
 
 
 def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, dict | None]:
@@ -398,10 +468,11 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
            "research_evidence": _search_evidence(response),
            "completeness": {"complete": all(dimensions.values()) and not gaps,
                             "dimensions": dimensions, "gaps": sorted(set(gaps))}}
+    opaque_projection = redactions == ["hidden_reasoning"] and _opaque_response_projection_allowed(events, documents)
     candidate, exclusions = None, []
     if not dimensions["request"] or not dimensions["response"] or "event_context_mismatch" in gaps:
         exclusions.append("request_response_unavailable")
-    elif redactions:
+    elif redactions and not opaque_projection:
         exclusions.append("privacy_nonexact")
     elif events.get("response", {}).get("http_status") != 200:
         exclusions.append("provider_http_error")
@@ -409,21 +480,35 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
         try:
             if isinstance(response, Mapping) and any(response.get(key) for key in ("error", "errors", "refusal")):
                 raise ValueError("internal_provider_error_or_refusal")
-            target, _ = training_steps._target(request, response, first["api"], allow_reasoning_history=True,
+            target_response = training_export.without_hidden_reasoning(response)[0] if opaque_projection else response
+            target, _ = training_steps._target(request, target_response, first["api"], allow_reasoning_history=True,
                                                allow_tool_error_history=True,
-                                               responses_input_validator=_internal_responses_input)
+                                               responses_input_validator=_internal_responses_input,
+                                               chat_annotations_validator=_internal_chat_annotations)
             if first["api"] == "openrouter.responses":
                 training_steps._validate_target_tools(request, target, first["api"])
+            elif target.get("tool_calls"):
+                # Hosted search executes at the provider; it cannot declare
+                # a model-authored function call. Preserve mixed requests and
+                # validate only their callable function definitions here.
+                function_tools = [tool for tool in request.get("tools", [])
+                                  if tool.get("type") == "function"]
+                training_steps._validate_target_tools(
+                    {"tools": function_tools}, target, first["api"])
             candidate = {"schema_version": SFT_SCHEMA_VERSION, "actor_type": "arena_internal",
                          "purpose": first.get("purpose"), "call_id": raw["call_id"],
                          "format": first["api"], "input": request, "target": target,
                          "available_reasoning": reasoning["available_segments"],
-                         "generated_thinking": reasoning["full_generated_thinking"],
+                         # A projected response grants no new full-thinking target.
+                         "generated_thinking": [] if opaque_projection else reasoning["full_generated_thinking"],
                          "quality": {"status": "unreviewed", "correct_action": "not_established"},
                          "training_permission": {"status": "unconfirmed"},
                          "source": {"event_refs": raw["event_refs"], "context": raw["context"],
                                     "request_sha256": (events["request"].get("capture") or {}).get("sha256"),
                                     "response_sha256": (events["response"].get("capture") or {}).get("sha256"),
+                                    **({"response_projection": {"opaque_reasoning_omitted": True,
+                                                                 "exact_provider_replay": False}}
+                                       if opaque_projection else {}),
                                     "outcome": raw["outcome"], "cost_status": raw["cost_status"],
                                     "research_evidence": raw["research_evidence"],
                                     "capture_completeness": raw["completeness"]}}

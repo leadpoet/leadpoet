@@ -21,6 +21,14 @@ from lab_arena import contracts, source_bundle
 
 DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5.5"
 FALLBACK_REVIEW_MODEL = "openai/gpt-6.1-sol"
+# The standalone default and saved Sonnet requests remain historical. Production
+# wiring opts new, unclaimed episodes into this separately bound primary.
+PROSPECTIVE_REVIEW_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+PROSPECTIVE_CONTEXT_WINDOW_TOKENS = 1_048_576
+PROSPECTIVE_MAX_OUTPUT_TOKENS = 32_768
+# Exact Nebius FP8 endpoint prices, verified 2026-11-06. Reserve at least these
+# ceilings even when the model catalog advertises a cheaper provider.
+PROSPECTIVE_PRICE_CEILING = {"prompt": "0.0000003", "completion": "0.0000012"}
 FALLBACK_CONTEXT_WINDOW_TOKENS = 1_050_000
 FALLBACK_MAX_PROMPT_TOKENS = 922_000
 # Exact public catalog id -> canonical_slug, verified 2026-10-19 (Claude)
@@ -31,6 +39,7 @@ FALLBACK_MAX_PROMPT_TOKENS = 922_000
 _REVIEW_MODEL_CANONICAL_SLUGS = {
     DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5.5-20260928",
     FALLBACK_REVIEW_MODEL: "openai/gpt-6.1-sol-20260929",
+    PROSPECTIVE_REVIEW_MODEL: "deepseek/deepseek-v4.1-flash-20261017",
     # Preserve validation for prepared reviews that selected the old model.
     "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
@@ -106,6 +115,20 @@ over comments describing them. Include the required claims for the selected
 classification and a nonempty source-only limitations list. If control cannot be
 established, use unverified with actual source evidence for that uncertainty;
 never invent an excerpt to complete the response.
+"""
+_PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE = """
+
+Final research_control output format: every evidence excerpt must contain at
+least 12 non-whitespace characters and be an exact contiguous substring of its
+named source file. Choose adjacent source lines if needed to meet that minimum;
+do not edit, combine separate spans, or paraphrase the excerpt.
+The unique set of evidence claim tags must be exactly the set for the selected
+classification, with no tags from another classification:
+model_directed: observation_to_action, finish_continue
+workflow: fixed_control
+unverified: uncertainty
+Describe other scaffolding and interpretation in explanation or limitations,
+not as additional evidence claim tags.
 """
 _RESPONSE_INVALID_REASONS = frozenset(
     {
@@ -439,6 +462,10 @@ def prepare_request(
         raise CodeReviewError("review_output_limit_invalid")
     if not isinstance(context_window_tokens, int) or isinstance(context_window_tokens, bool) or context_window_tokens < 1:
         raise CodeReviewError("review_context_limit_invalid")
+    if model == PROSPECTIVE_REVIEW_MODEL and max_output_tokens > PROSPECTIVE_MAX_OUTPUT_TOKENS:
+        raise CodeReviewError("review_output_limit_invalid")
+    if model == PROSPECTIVE_REVIEW_MODEL and context_window_tokens > PROSPECTIVE_CONTEXT_WINDOW_TOKENS:
+        raise CodeReviewError("review_context_limit_invalid")
 
     files = _read_all_text_files(source_archive)
     if not isinstance(similarity_contexts, tuple) or len(similarity_contexts) > 257 or any(
@@ -478,7 +505,9 @@ def prepare_request(
         "model": model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT + (
-                _RESEARCH_PROMPT + _RESEARCH_RESPONSE_GUIDANCE if research_control else "")},
+                _RESEARCH_PROMPT + _RESEARCH_RESPONSE_GUIDANCE + (
+                    _PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
+                    if model == PROSPECTIVE_REVIEW_MODEL else "") if research_control else "")},
             {"role": "user", "content": contracts.canonical_json(submission)},
         ],
         "max_tokens": max_output_tokens,
@@ -489,7 +518,8 @@ def prepare_request(
         "provider": {
             # Admission chooses one approved full-source route per durable
             # claim. Provider-internal fallback must not hide extra attempts.
-            "only": ["azure" if model == FALLBACK_REVIEW_MODEL else "google-vertex"],
+            "only": ["azure" if model == FALLBACK_REVIEW_MODEL else
+                     "nebius/fp8" if model == PROSPECTIVE_REVIEW_MODEL else "google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
@@ -501,9 +531,15 @@ def prepare_request(
                 paths=paths, comparison_ids=tuple(context["comparison_id"] for context in similarity_contexts),
                 research_bindings=submission.get("research_control"),
             ),
-        }} if model in {DEFAULT_REVIEW_MODEL, FALLBACK_REVIEW_MODEL}
+        }} if model in {DEFAULT_REVIEW_MODEL, FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL}
             else {"type": "json_object"}),
     }
+    if model == PROSPECTIVE_REVIEW_MODEL:
+        parameters["reasoning"] = {"effort": "low", "exclude": False}
+        parameters["provider"].update({
+            "max_price": {"prompt": 0.3, "completion": 1.2, "request": 0.0},
+            "enforce_distillable_text": True,
+        })
     # UTF-8 bytes are a conservative token ceiling even for non-ASCII source,
     # not an exact tokenizer count. Exceeding this ceiling cannot prove that
     # the actual request is too large; require router integrity and actual
@@ -516,7 +552,7 @@ def prepare_request(
     if max_output_tokens >= context_window_tokens:
         raise CodeReviewError("review_source_exceeds_context")
     requires_context_integrity = (
-        model == FALLBACK_REVIEW_MODEL
+        model in {FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL}
         or input_bound + max_output_tokens > context_window_tokens
     )
 
@@ -580,6 +616,10 @@ def context_integrity_failure(
     if selected[0]["model"] not in allowed_endpoint_models:
         return "selected_model"
     if requested_model == FALLBACK_REVIEW_MODEL and selected[0]["provider"] != "Azure":
+        return "selected_provider"
+    if requested_model == PROSPECTIVE_REVIEW_MODEL and selected[0]["provider"] != "Nebius":
+        return "selected_provider"
+    if requested_model == PROSPECTIVE_REVIEW_MODEL and response.get("provider") not in (None, "Nebius"):
         return "selected_provider"
     usage = response.get("usage")
     if not isinstance(usage, Mapping):

@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 
 _CompanyEvidenceReads = Dict[Tuple[str, str, int], Dict[str, Any]]
 
+
+def _score_item_output_ref(round_id: str, run_id: str, output_hash: str) -> str:
+    """Use the output digest in score object keys so interrupted writes cannot poison retries."""
+    digest = contracts.require_sha256(output_hash, "score output hash").split(":", 1)[1]
+    return "arena/%s/scores/items/%s-%s.json" % (round_id, run_id, digest)
+
 # Final observation uploads already have two 60-second I/O attempts. Allow
 # their exact lease to finish after expiry without extending execution authority.
 _OBSERVATION_FINALIZATION_GRACE = timedelta(seconds=180)
@@ -343,6 +349,31 @@ def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
         phase[:32],
         type(exc).__name__[:64],
     )
+
+
+def _warn_observation_segment_failure(
+    run_id: str, number: int, stage: str, exc: Optional[BaseException] = None,
+) -> None:
+    """Log only authenticated identity, fixed stages and bounded error classes."""
+    try:
+        reason = exc.args[0] if isinstance(exc, training_observations.ObservationError) and len(exc.args) == 1 else None
+        if type(reason) is not str or reason not in {
+            "journal_store_unavailable", "segment_size_limit", "journal_invalid", "journal_unavailable",
+        }:
+            reason = "none"
+        # read_segment hides storage/parse prose but retains this immediate
+        # context. Its type distinguishes a timeout from a corrupt gzip body.
+        cause = exc.__context__ if reason == "journal_unavailable" else None
+        logger.warning(
+            "arena training observation segment unavailable run_id=%s segment=%s stage=%s "
+            "error_class=%s cause_class=%s observation_reason=%s",
+            run_id, number, stage, type(exc).__name__[:64],
+            type(cause).__name__[:64] if cause is not None else "none", reason,
+        )
+    except Exception:
+        # Diagnostics must not replace the existing storage API response.
+        pass
+
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
@@ -3292,9 +3323,14 @@ class ArenaService:
             raise ServiceError("scoring_plan_invalid", 500)
         return validated
 
-    def _outputs_by_run(self, round_id: str, stage: int) -> Dict[str, List[Dict[str, Any]]]:
+    def _outputs_by_run(
+        self, round_id: str, stage: int, *,
+        executions: Optional[Sequence[Mapping[str, Any]]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         outputs: Dict[str, List[Dict[str, Any]]] = {}
-        for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
+        if executions is None:
+            executions = self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute")
+        for run in executions:
             document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
             outputs[str(run["run_id"])] = list(document["companies"])
         return outputs
@@ -3879,8 +3915,12 @@ class ArenaService:
         return document, contracts.document_hash(output)
 
     @staticmethod
-    def _legacy_partial_receipt(run, round_row, scoring_input, execution_hash, output, completion_hash):
+    def _legacy_partial_receipt(
+        run, round_row, scoring_input, execution_hash, output, completion_hash,
+        source_output_ref=None,
+    ):
         configuration = round_row.get("configuration_doc") or {}
+        output_hash = contracts.document_hash(output)
         return {
             "schema_version": "leadpoet.lab_arena.legacy_partial.v1",
             **{key: run.get(key) for key in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "scored_run_id")},
@@ -3890,8 +3930,10 @@ class ArenaService:
             "source_claim_request_hash": run.get("claim_request_hash"),
             "source_lease_generation": int(run.get("lease_generation") or 0),
             "runner_authority_exclusions": (run.get("claim_response") or {}).get("runner_authority_exclusions"),
-            "source_output_ref": "arena/%s/scores/items/%s.json" % (round_row["round_id"], run["run_id"]),
-            "source_output_hash": contracts.document_hash(output),
+            "source_output_ref": source_output_ref or _score_item_output_ref(
+                str(round_row["round_id"]), str(run["run_id"]), output_hash,
+            ),
+            "source_output_hash": output_hash,
             "scoring_input_hash": contracts.document_hash(scoring_input),
             "execution_output_hash": execution_hash,
             "scorer_image_digest": configuration.get("scorer_image_digest"),
@@ -3922,8 +3964,20 @@ class ArenaService:
         output = scoring.validate_scoring_output_document(json.loads(
             self._objects.get_bounded(str(source["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES)))
         document, execution_hash = self._legacy_partial_input(source, round_row)
-        expected = self._legacy_partial_receipt(source, round_row, document, execution_hash, output, completion_hash)
-        if (receipt != expected or source["output_ref"] != expected["source_output_ref"]
+        expected = self._legacy_partial_receipt(
+            source, round_row, document, execution_hash, output, completion_hash,
+            source_output_ref=str(source.get("output_ref") or ""),
+        )
+        legacy_output_ref = "arena/%s/scores/items/%s.json" % (
+            round_row["round_id"], source["run_id"],
+        )
+        content_addressed_output_ref = _score_item_output_ref(
+            str(round_row["round_id"]), str(source["run_id"]),
+            contracts.document_hash(output),
+        )
+        if (receipt != expected or source["output_ref"] not in {
+                legacy_output_ref, content_addressed_output_ref,
+            }
             or output.get("scored_run_id") != source.get("scored_run_id")
             or "failure" not in output or not output.get("terminal_breakdowns")
             or (source.get("terminal_cause") != "credential_error" and output["failure"] != source["terminal_cause"])):
@@ -4188,7 +4242,6 @@ class ArenaService:
         policy = contracts.validate_scorer_policy(round_row["configuration_doc"]["scorer_policy"])
         plan = self._load_scoring_plan(round_row, stage)
         icps = self.evaluation_icps(round_id)
-        outputs = self._outputs_by_run(round_id, stage)
         chosen = self._scoring_outputs(round_id, stage, round_row=round_row)
         baseline_ids = {
             str(participant["submission_id"])
@@ -4254,6 +4307,14 @@ class ArenaService:
             and incomplete_items.get(item["scored_run_id"]) == "stage_closed"
             for item in plan["work_items"]
         )
+        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
+        needed = {item["scored_run_id"] for item in plan["work_items"]
+                  if item["scored_run_id"] not in failed_items
+                  and item["scored_run_id"] not in incomplete_items}
+        outputs = self._outputs_by_run(round_id, stage, executions=[
+            run for run in runs if run.get("status") == "accepted" and run["run_id"] in needed
+        ])
+        evidence_reads = _PublicResultEvidenceReads()
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
         for item in plan["work_items"]:
@@ -4265,7 +4326,8 @@ class ArenaService:
             companies = outputs[scored_run_id]
             try:
                 breakdowns_by_item[scored_run_id] = self._verified_breakdowns(
-                    run, icp=icp, companies=companies, policy=policy
+                    run, icp=icp, companies=companies, policy=policy,
+                    evidence_reads=evidence_reads, round_context=round_row,
                 )
             except scoring.ScoringError:
                 return self._store.cancel_round(
@@ -4305,7 +4367,6 @@ class ArenaService:
             breakdowns_by_item=breakdowns_by_item,
             configuration=round_row.get("configuration_doc"),
         )
-        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
         recorded = self._record_current_run_scores(round_row, stage, scoring.run_scores_for_store(stage_scores, runs))
         if recorded.get("status") != "ok":
             # The per-run scores are part of the published result; a write the
@@ -4983,6 +5044,7 @@ class ArenaService:
         configuration = row["configuration_doc"]
         policy = contracts.validate_scorer_policy(configuration["scorer_policy"])
         icps = self.evaluation_icps(round_id)
+        evidence_reads = _PublicResultEvidenceReads()
         for stage in (1, 2):
             sources = self._store.list_runs(round_id, stage=stage, kind="execute")
             score_runs = self._store.list_runs(round_id, stage=stage, kind="score")
@@ -4994,7 +5056,7 @@ class ArenaService:
                 and judges.get(str(source["run_id"]), {}).get("status") == "accepted"]
             if not ready:
                 continue
-            outputs = self._outputs_by_run(round_id, stage)
+            outputs = self._outputs_by_run(round_id, stage, executions=ready)
             rows = []
             for source in ready:
                 judge = judges[str(source["run_id"])]
@@ -5003,7 +5065,8 @@ class ArenaService:
                 position = int(source["icp_position"])
                 companies = outputs[str(source["run_id"])]
                 breakdowns = self._verified_breakdowns(
-                    judge, icp=icps[position], companies=companies, policy=policy)
+                    judge, icp=icps[position], companies=companies, policy=policy,
+                    evidence_reads=evidence_reads, round_context=row)
                 rows.append(verify.scored_row(str(source["submission_id"]),
                     position, str(source["run_id"]), icps[position], companies,
                     breakdowns, policy))
@@ -5043,7 +5106,7 @@ class ArenaService:
             selected = self._selected_execution_runs(reads.runs, submission_id)
             for run in selected.values():
                 if run.get("status") == "accepted":
-                    if reads.output(str(run["output_ref"]))["companies"] and run.get("per_icp_score") is not None:
+                    if reads.output(str(run["output_ref"]))["companies"]:
                         continue
                 elif run.get("status") != "failed" or run.get("terminal_cause") not in (
                     "provider_error", "stage_closed"):
@@ -5250,6 +5313,10 @@ class ArenaService:
         )
         try:
             infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
+        except ArenaStoreUnavailable:
+            # A failed read cannot prove that saved evaluation is incomplete.
+            # Keep the ordinary store-unavailable path, even after the deadline.
+            raise
         except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
                 TypeError, ValueError, UnicodeDecodeError):
             return self._hold_incomplete_evaluation(
@@ -7029,13 +7096,15 @@ class ArenaService:
             raise ServiceError("training_observation_segment_invalid", 400) from None
         objects = self._config.training_object_store
         if objects is None:
+            _warn_observation_segment_failure(run_id, segment["number"], "store_missing")
             raise ServiceError("training_observation_segment_unavailable", 503)
         if segment["number"]:
             try:
                 previous = training_observations.read_segment(
                     objects, run_id, segment["kind"], segment["lease_generation"],
                     segment["claim_request_hash"], segment["number"] - 1)
-            except Exception:
+            except Exception as exc:
+                _warn_observation_segment_failure(run_id, segment["number"], "previous_read", exc)
                 raise ServiceError("training_observation_segment_unavailable", 503) from None
             if (previous is None or previous["segment_sha256"] != segment["previous_sha256"]
                     or segment["cumulative_bytes"] != previous["cumulative_bytes"]
@@ -7057,7 +7126,8 @@ class ArenaService:
             objects.put(ref, compressed)
         except ArenaContractError:
             raise ServiceError("training_observation_segment_conflict", 409) from None
-        except Exception:
+        except Exception as exc:
+            _warn_observation_segment_failure(run_id, segment["number"], "put", exc)
             raise ServiceError("training_observation_segment_unavailable", 503) from None
         return {"status": "stored", "number": segment["number"],
                 "segment_sha256": segment["segment_sha256"]}
@@ -7749,14 +7819,43 @@ class ArenaService:
                         output["terminal_breakdowns"], icp=document["icp"], companies=document["companies"], policy=document["scorer_policy"],
                     )
                     run_result["legacy_partial_checkpoint"] = self._legacy_partial_receipt(
-                        run, round_row, document, execution_hash, output, contracts.request_bytes_hash(validated),
+                        run, round_row, document, execution_hash, output,
+                        contracts.request_bytes_hash(validated),
+                        source_output_ref=_score_item_output_ref(
+                            round_id, run_id, contracts.document_hash(output),
+                        ),
                     )
                 except (scoring.ScoringError, ValueError, OutputInvalid) as exc:
                     raise ServiceError("legacy_checkpoint_output_invalid", 400) from exc
-            output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
             output_bytes = contracts.canonical_json(output).encode("utf-8")
-            self._objects.put(output_ref, output_bytes)
+            if len(output_bytes) > scoring.MAX_SCORING_OUTPUT_BYTES:
+                raise ServiceError("output_invalid", 400)
             output_hash = contracts.document_hash(output)
+            output_ref = _score_item_output_ref(round_id, run_id, output_hash)
+            if run.get("status") in ("accepted", "failed"):
+                committed_ref = str(run.get("output_ref") or "")
+                if not committed_ref:
+                    raise ArenaContractError(
+                        "terminal score run has no committed output reference"
+                    )
+                committed_bytes = self._objects.get_optional_bounded(
+                    committed_ref, scoring.MAX_SCORING_OUTPUT_BYTES,
+                )
+                if committed_bytes != output_bytes:
+                    raise ArenaContractError(
+                        "object ref %s already holds different bytes" % committed_ref
+                    )
+                output_ref = committed_ref
+                if partial_legacy_output:
+                    receipt = run_result.get("legacy_partial_checkpoint")
+                    if not isinstance(receipt, dict):
+                        raise ArenaContractError(
+                            "terminal legacy score run has no validated checkpoint"
+                        )
+                    # The database binds a legacy checkpoint to the committed
+                    # output reference. Historical rows may still use the
+                    # original run-only key, which is valid after byte equality.
+                    receipt["source_output_ref"] = committed_ref
             if company_quality_run:
                 context = (run.get("claim_response") or {}).get(
                     "company_judgment_cache"
@@ -7896,6 +7995,10 @@ class ArenaService:
                 except judgment_cache.JudgmentCacheError as exc:
                     raise ServiceError("judgment_cache_invalid", 500) from exc
                 judgment_evidence_hash = contracts.document_hash(judgment_evidence)
+            # Validate all judgment evidence before writing its immutable,
+            # content-addressed object. A rejected completion must not leave
+            # an artifact that appears committed to a later reader.
+            self._objects.put(output_ref, output_bytes)
         elif terminal_status == "accepted":
             try:
                 output = validate_output_document(

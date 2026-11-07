@@ -55,7 +55,13 @@ def validate_use(*, use, row, judge, scoring_input, company_index, signal_index,
     for ci, effective in enumerate(company_judgments.effective_company_inputs(source_input)):
         indexes = [-1] if signal_index == -1 else range(len(effective["company"].get("intent_signals") or []))
         for si in indexes:
-            if scope(source, source_input, ci, si) == original:
+            try:
+                candidate = scope(source, source_input, ci, si)
+            except signal_judgments.SignalJudgmentError:
+                # Original evidence can belong to a later company or signal.
+                # An incompatible candidate is not proof that the source is absent.
+                continue
+            if candidate == original:
                 found = True
                 break
         if found:

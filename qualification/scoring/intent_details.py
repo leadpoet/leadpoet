@@ -718,6 +718,26 @@ def _statement_units(paragraph: str) -> list[dict[str, Any]]:
         r"(?<=[.!?][\"'\u2019\u201d])\s+|(?<=[.!?])\s+",
         paragraph,
     )
+    joined: list[str] = []
+    for part in parts:
+        # An abbreviation's full stop is not a reliable sentence boundary.
+        # Keep its continuation in the same review unit, including uppercase
+        # names such as "U.S. Air Force". Ambiguous actual sentence endings
+        # can share a unit: the contract already permits multiple sentences
+        # per unit and still requires every factual clause to be supported.
+        previous = joined[-1].rstrip("\"'\u2019\u201d") if joined else ""
+        if re.search(
+            r"(?<!\w)(?:(?:[a-z]\.\s*){2,}|"
+            r"(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|inc|ltd|co|corp|no)\.)$",
+            previous, re.IGNORECASE,
+        ) or (
+            re.search(r"(?<!\w)[A-Z]\.$", previous)
+            and re.match(r"[A-Z]\.(?:\s|$)", part)
+        ):
+            joined[-1] += " " + part
+        else:
+            joined.append(part)
+    parts = joined
     if len(parts) > _MAX_STATEMENT_UNITS:
         buckets: list[list[str]] = [[] for _ in range(_MAX_STATEMENT_UNITS)]
         for index, part in enumerate(parts):

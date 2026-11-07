@@ -867,7 +867,7 @@
       "symbol": "_decision_from_observed_employee_size"
     },
     {
-      "ast_sha256": "sha256:ae456213206886c81bd2a505c882af900ea9d23a0d696431cd5f457ff0880404",
+      "ast_sha256": "sha256:978659b32ed5413ef58f987c51b529c553ed79eadba970b6960b8cd77c0aee8c",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_has_explicitly_unproven_fit_dimensions"
     },
@@ -877,7 +877,7 @@
       "symbol": "_is_bound_homepage_name_conflict"
     },
     {
-      "ast_sha256": "sha256:aba088b4f2207ef41c6a75fa7089923ac8e9d497da9bb09bbb8dd1b9704ba799",
+      "ast_sha256": "sha256:44e02d8a7ef35092a4fa942e5b357c45cf7fd845c07928ff6e77aa31a2b96395",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -887,12 +887,12 @@
       "symbol": "_reverify_decision"
     },
     {
-      "ast_sha256": "sha256:89d5d4775b5a8293a48702e7c45731cc5bd03ebb7c5d6f404fcf56639713495b",
+      "ast_sha256": "sha256:702f589ef8915bd871b2ddea23b9299d6b18d68a75355c4b974fe903c750623f",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_run_targeted_company_evidence_investigation"
     },
     {
-      "ast_sha256": "sha256:bb0095005d0fd3f32f4cec89a5b0b552c2b5e94558b17482f3c1e02bb92d3abb",
+      "ast_sha256": "sha256:d6cc7e516b6e3487a7903ef944e5b54bbcf9441c9c6403c22c2c3a271eacfde0",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_settle_completed_company_investigation"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:82670eb069535c00cae11013b1063a73db26a5fa9d410905b22249f9d34613eb",
-  "protected_source_commit": "d1ff106051a923261a423aff7f1233c36ba3397c",
+  "manifest_hash": "sha256:d42a1837a623ca421fda781ee83faa190c928b2a8f603b0024f4213d29cd7ced",
+  "protected_source_commit": "66300ad3b44cccc5572fec1f653b2e7da2a01803",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

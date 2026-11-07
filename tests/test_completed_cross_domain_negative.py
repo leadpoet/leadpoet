@@ -165,6 +165,7 @@ def _verdict():
 @pytest.mark.parametrize("preserve_marker", [True, False])
 def test_negative_completion_through_fit_and_arena(
     monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
+    expected_retryable=None,
 ):
     company = _company()
     icp = ICPPrompt(
@@ -219,6 +220,9 @@ def test_negative_completion_through_fit_and_arena(
     row = {"final_score": 0.0, "failure_reason": "Company fit unavailable",
            "verifier_gate_receipts": [fit.receipt("company_fit")]}
     retryable = bool(investigation_fault or (homepage_fault and not preserve_marker))
+    if expected_retryable is not None:
+        assert type(expected_retryable) is bool
+        retryable = expected_retryable
     assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row) is retryable
     assert "_completed_investigation_settled" not in fit.details
     assert row["final_score"] == 0.0

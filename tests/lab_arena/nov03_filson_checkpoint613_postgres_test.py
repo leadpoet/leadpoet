@@ -161,7 +161,7 @@ def test_exact_sixth_claim_keeps_three_companies_and_two_misses_without_seventh(
             assert scalar(cur, 'SELECT public.lab_arena__nov03_filson_judge613_v1(r,a) FROM public.lab_arena_rounds r JOIN public.lab_arena_runs a ON a.round_id=r.round_id WHERE a.run_id=%s', (RUN,)) is True
         if outcome == 'accepted':
             key = keypair('filson613')
-            objects_api = type('Objects', (), {'get': lambda _self,k: objects[k], 'get_bounded': lambda _self,k,_limit: objects[k], 'put': lambda _self,k,v: objects.__setitem__(k,v)})()
+            objects_api = type('Objects', (), {'get': lambda _self,k: objects[k], 'get_bounded': lambda _self,k,_limit: objects[k], 'get_optional_bounded': lambda _self,k,_limit: objects.get(k), 'put': lambda _self,k,v: objects.__setitem__(k,v)})()
             gateway = ArenaService(ServiceConfig(mode='live', store=store, object_store=objects_api, signer=None, chain=FakeChain([key.ss58_address]), verify_signature=wallet_verify, daily_icp_source=lambda **_: {}, banned_hotkeys_source=lambda: (), broker_factory=lambda *_: None))
             gateway.evaluation_icps = service.evaluation_icps
             current = store.get_run(RUN); lease = current['claim_response']; cache = lease['company_judgment_cache']

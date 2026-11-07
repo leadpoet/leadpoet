@@ -18,7 +18,7 @@ from tests.lab_arena.test_lab_arena_broker import (
 )
 
 RESERVATIONS = ("lab_arena_reserve_call", "lab_arena_reserve_judgment_call")
-PRE_DISPATCH = RESERVATIONS + ("lab_arena_mark_dispatched",)
+PRE_DISPATCH = RESERVATIONS + ("lab_arena_mark_dispatched", "lab_arena_claim_assignment")
 LOCK_TIMEOUT = {"code": "55P03", "message": "canceling statement due to lock timeout"}
 
 
@@ -251,3 +251,68 @@ def test_broker_never_replays_ambiguous_or_committed_dispatch_marker(failure):
     assert len(ledger.calls) == 1
     assert next(iter(ledger.calls.values()))["kind"] == (
         "reservation" if failure == "transport_before" else "dispatch")
+
+
+CLAIM_PARAMS = {
+    "p_round_id": "arena-2026-11-06",
+    "p_runner_hotkey": "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+    "p_declared_parallelism": 4,
+    "p_slot_ceiling": 8,
+    "p_excluded_miner_hotkeys": [],
+    "p_request_id": "claim-0001",
+    "p_request_hash": "sha256:" + "c" * 64,
+    "p_lease_token_hash": "sha256:" + "d" * 64,
+    "p_lease_ttl_seconds": 900,
+}
+LEASED = {"status": "leased", "run_id": "run-1", "submission_id": "sub-1", "icp_position": 0}
+
+
+@pytest.mark.parametrize("failures", [1, DEADLOCK_RETRIES])
+def test_claim_lock_timeout_retries_the_same_signed_identity(failures):
+    """A contended claim must not cost a runner its work: 55P03 proves rollback,
+    and the claim RPC returns its stored response for a repeated identity."""
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if len(requests) <= failures:
+            return httpx.Response(500, json=LOCK_TIMEOUT)
+        return httpx.Response(200, json=LEASED)
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        transport = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+        assert transport.rpc("lab_arena_claim_assignment", CLAIM_PARAMS) == LEASED
+        assert transport.deadlock_retries == failures
+    assert len(requests) == failures + 1
+    # Every attempt replays the byte-identical request, so the function's
+    # (p_request_id, p_request_hash) guard can only return the saved lease.
+    assert {request.content for request in requests} == {requests[0].content}
+    assert json.loads(requests[0].content) == CLAIM_PARAMS
+
+
+def test_claim_lock_timeout_still_surfaces_unavailable_when_contention_persists():
+    requests = []
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda request: requests.append(request) or httpx.Response(500, json=LOCK_TIMEOUT)
+    )) as client:
+        transport = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+        with pytest.raises(ArenaStoreUnavailable, match="55P03") as failed:
+            transport.rpc("lab_arena_claim_assignment", CLAIM_PARAMS)
+        assert failed.value.transaction_rolled_back is True
+    assert len(requests) == DEADLOCK_RETRIES + 1
+
+
+def test_claim_read_timeout_is_still_never_replayed():
+    """An 8s ReadTimeout is ambiguous, not a proved rollback — unchanged."""
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        raise httpx.ReadTimeout("response may have committed")
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        transport = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+        with pytest.raises(ArenaStoreUnavailable):
+            transport.rpc("lab_arena_claim_assignment", CLAIM_PARAMS)
+        assert transport.deadlock_retries == 0
+    assert len(requests) == 1

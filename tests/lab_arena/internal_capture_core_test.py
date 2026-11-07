@@ -1,6 +1,7 @@
 """Host evidence uses existing storage without miner proofs or business effects."""
 from __future__ import annotations
 
+import gzip
 import json
 import stat
 
@@ -50,6 +51,49 @@ def test_roundtrip_retains_exact_request_readable_reasoning_and_distinct_outcome
     assert candidate["training_permission"]["status"] == "unconfirmed"
     assert "run_id" not in raw and "miner_hotkey" not in raw
     assert all(stage in raw["events"] for stage in capture.STAGES)
+
+
+@pytest.mark.parametrize("declaration", ["absent", "different", "hosted_only"])
+def test_undeclared_chat_tool_call_stays_raw_without_sft(tmp_path, declaration):
+    payload = request()
+    if declaration == "different":
+        payload["tools"] = [{"type": "function", "function": {
+            "name": "different_tool", "parameters": {"type": "object"}}}]
+    elif declaration == "hosted_only":
+        payload["tools"] = [{"type": "openrouter:web_search", "parameters": {"engine": "native"}}]
+    provider = response()
+    choice = provider["choices"][0]
+    choice["finish_reason"] = "tool_calls"
+    choice["message"].update(content=None, tool_calls=[{
+        "id": "call-1", "type": "function", "function": {
+            "name": "fetch_source", "arguments": '{"url":"https://example.com/source"}'}}])
+    objects, call = captured(tmp_path, provider=provider, payload=payload)
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json")
+    assert raw["request"] == payload and raw["response"] == provider
+    assert raw["completeness"]["complete"] is True
+    assert candidate is None
+    assert raw["sft_exclusions"] == ["target_shape_or_completion_unsupported"]
+
+
+@pytest.mark.parametrize("hosted_search", [False, True])
+def test_declared_chat_tool_call_keeps_exact_target(tmp_path, hosted_search):
+    payload = request()
+    payload["tools"] = [{"type": "function", "function": {
+        "name": "fetch_source", "parameters": {"type": "object"}}}]
+    if hosted_search:
+        payload["tools"].append({"type": "openrouter:web_search", "parameters": {"engine": "native"}})
+    provider = response()
+    choice = provider["choices"][0]
+    choice["finish_reason"] = "tool_calls"
+    choice["message"].update(content=None, tool_calls=[{
+        "id": "call-1", "type": "function", "function": {
+            "name": "fetch_source", "arguments": ' { "url" : "https://example.com/source" } '}}])
+    objects, call = captured(tmp_path, provider=provider, payload=payload)
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json")
+    assert raw["request"] == candidate["input"] == payload
+    assert raw["response"] == provider
+    assert candidate["target"]["tool_calls"] == choice["message"]["tool_calls"]
+    assert raw["sft_exclusions"] == []
 
 
 def test_start_is_not_dispatch_and_missing_stages_are_visible(tmp_path):
@@ -109,7 +153,11 @@ def test_summary_and_opaque_state_remain_separate_from_full_text(tmp_path):
     assert raw["reasoning"]["contains_opaque"] is True
     assert raw["reasoning"]["full_generated_thinking"] == []
     assert "opaque-state" not in json.dumps(raw)
-    assert candidate is None
+    assert candidate is not None
+    assert candidate["generated_thinking"] == []
+    assert candidate["source"]["response_projection"] == {
+        "opaque_reasoning_omitted": True, "exact_provider_replay": False}
+    assert candidate["source"]["capture_completeness"]["dimensions"]["privacy"] is False
 
 
 def reviewed_registry():
@@ -183,10 +231,38 @@ def test_nonjson_and_unsupported_encoding_are_explicit_and_nonthrowing(tmp_path,
     call.finish(outcome={"business_outcome": "failed"})
     raw, candidate = capture.read_call(objects, call.prefix + "request.json")
     assert candidate is None and raw["events"]["response"]["http_status"] == 503
-    if body != b"\xff\xfe":
-        assert raw["response_text"] == body.decode()
-    else:
-        assert "response_body_unavailable_or_invalid" in raw["completeness"]["gaps"]
+    assert "response_text" not in raw
+    assert "response_body_unavailable_or_invalid" in raw["completeness"]["gaps"]
+
+
+@pytest.mark.parametrize("api", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("status", [200, 503])
+@pytest.mark.parametrize("body", [
+    b'{"encrypted_content":"opaque-fragment', b'{"api_key":"private-field-fragment',
+    json.dumps('{"encrypted_content":"opaque-fragment').encode(),
+    b'{"encrypted_content":"opaque-fragment","encrypted_content":null}',
+    b'{"api_key":"private-field-fragment","api_key":null}',
+])
+def test_completed_malformed_model_body_is_unavailable_without_private_text(tmp_path, api, status, body):
+    objects = LocalObjectStore(tmp_path)
+    payload = (request() if api == "openrouter.chat" else {
+        "model": "test/model", "input": [{"role": "user", "content": "Inspect the company."}],
+        "max_output_tokens": 8192})
+    call = capture.InternalCapture(objects).start(purpose="icp_exclusion", context={}, request=payload, api=api)
+    pointer = call.response(body=body, status=status, elapsed_seconds=0.25)
+    event = json.loads(objects.get_bounded(pointer["ref"], capture.MAX_EVENT_BYTES))
+    assert event["capture"] == training_capture.unavailable("internal_response_capture_failed")
+    assert event["response_observed"] is True and event["http_status"] == status
+    assert event["elapsed_seconds"] == 0.25
+    assert event["wire_body_bytes"] == len(body)
+    assert event["wire_body_sha256"] == capture.contracts.hash_bytes(body)
+    call.finish(outcome={"business_outcome": "failed"})
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json")
+    assert candidate is None and "response_text" not in raw
+    assert "response_body_unavailable_or_invalid" in raw["completeness"]["gaps"]
+    for path in tmp_path.rglob("*.gz"):
+        stored = gzip.decompress(path.read_bytes())
+        assert b"opaque-fragment" not in stored and b"private-field-fragment" not in stored
 
 
 def test_all_capture_storage_failures_are_observational():

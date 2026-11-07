@@ -76,8 +76,9 @@ def validate(captured, *, pages=None, finals=None, finding=None):
         identity_names={'baringa'},identity_anchor=anchor)['required_attribute']
 
 
-def test_exact_native_r5_blank_observation_preserves_the_accepted_identity(monkeypatch):
-    captured=capture_call(monkeypatch)
+@pytest.mark.parametrize('raw', ['', ' ', '\n\t'])
+def test_blank_observation_preserves_the_accepted_identity(monkeypatch, raw):
+    captured=capture_call(monkeypatch, raw=raw)
     assert captured['company_locator']['linkedin']==''  # Optional submission remains unchanged.
     assert captured['prior_observations']['observed_company_linkedin']==LINKEDIN
     assert not inv._quote_names_company(QUOTE,{'baringa'})
@@ -86,7 +87,7 @@ def test_exact_native_r5_blank_observation_preserves_the_accepted_identity(monke
 
 @pytest.mark.parametrize('raw',['https://www.linkedin.com/company/another','not-a-url',
     'https://www.linkedin.com/in/baringa','https://www.linkedin.com/company/baringa/jobs?invalid=1',
-    ' ',None])
+    None])
 def test_nonblank_conflicting_malformed_or_missing_raw_values_are_never_overridden(monkeypatch,raw):
     captured=capture_call(monkeypatch,raw=raw)
     assert captured['prior_observations']['observed_company_linkedin']==raw

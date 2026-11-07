@@ -1722,13 +1722,13 @@ def _listed_parent_quotes_not_held(
                 before = re.split(r"[;!?\n]|\.\s", window[:start])[-1]
                 after = re.split(r"[;!?\n]|\.\s", window[start:])[0]
                 percentage = float(match.group(1))
-                lower_exclusive = re.search(r"\b(?:more\s+than|over)\s*$", before, re.I)
-                lower_inclusive = re.search(r"\bat\s+least\s*$", before, re.I)
+                lower_exclusive = re.search(r"(?:\b(?:more\s+than|over)|(?<![<>=])>)\s*$", before, re.I)
+                lower_inclusive = re.search(r"(?:\bat\s+least|>=|≥)\s*$", before, re.I)
                 ambiguous_bound = re.search(
-                    r"\b(?:less\s+than|under|up\s+to|at\s+most|about|approximately|around)\s*$",
+                    r"(?:\b(?:less\s+than|under|up\s+to|at\s+most|about|approximately|around)|<=?|≤)\s*$",
                     before, re.I,
                 )
-                if ambiguous_bound or not (
+                if ambiguous_bound or _has_stage_proof_uncertainty(before) or not (
                     50 <= percentage < 100 if lower_exclusive else
                     50 < percentage <= 100 if lower_inclusive else
                     50 < percentage <= 100

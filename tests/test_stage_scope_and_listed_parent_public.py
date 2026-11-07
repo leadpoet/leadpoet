@@ -552,6 +552,7 @@ def test_native_listed_parent_route_keeps_current_search_and_private_receipt(mon
 @pytest.mark.parametrize('quantity', [
     'one third', 'a third', 'two fifths', '50-50', '50/50',
     'less than 60%', 'up to 80%', 'at most 80%',
+    'not more than 80%', 'no more than 80%', '<=80%', '≤80%',
 ])
 def test_ambiguous_quantitative_ownership_does_not_prove_majority(quantity):
     *_, decision = _decide(
@@ -562,7 +563,7 @@ def test_ambiguous_quantitative_ownership_does_not_prove_majority(quantity):
     assert decision != 'match'
 
 
-@pytest.mark.parametrize('quantity', ['more than 50%', 'over 50%', 'at least 51%'])
+@pytest.mark.parametrize('quantity', ['more than 50%', 'over 50%', 'at least 51%', '>50%', '>=51%'])
 def test_clear_lower_bounded_majority_preserves_parent_route(quantity):
     *_, decision = _decide(
         'Acme Realty is a subsidiary of Barco Industries. '

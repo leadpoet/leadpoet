@@ -94,6 +94,21 @@ throttled provider looked the same.
 | `arena.attempts` | `2` (champion credential attempts, 1–4) |
 | `arena.cost_microusd` | `1375` (settled ledger cost, 0–1e9) |
 | `duration_ms` | `842.0` |
+| `arena.credential_fingerprint` | `0123456789ab` (12 hex, optional: only on a miner-credential refusal) |
+| `arena.provider_refusal_type` | `rate_limit_exceeded` (`ARENA_PROVIDER_REFUSAL_TYPES`, optional: only on a miner-credential refusal) |
+
+The last two are present only when a provider refuses a miner's own
+credential, and they exist to separate two faults that otherwise look
+identical: a key that has genuinely stopped working, and a provider refusing a
+key it answered a minute earlier. `arena.credential_fingerprint` is the first
+twelve hex characters of the SHA-256 of the credential we actually presented —
+never the credential, and not enough of the digest to confirm a guess — so a
+changed value across two calls means we sent two different keys.
+`arena.provider_refusal_type` is OpenRouter's own typed error name, so a rate
+limit answered with a 401 reads as `rate_limit_exceeded` rather than
+`authentication`. Like the store-error fields, they are optional members of the
+provider envelope: absent on every other span, and out-of-vocabulary values
+drop the span whole.
 
 Every Deepline call leaves as the single operation `deepline.execute`, so
 `arena.operation` alone cannot say which upstream tool answered or failed.

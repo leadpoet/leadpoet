@@ -6986,6 +6986,31 @@ class Broker:
                     original_http_status=observed_provider_http_status,
                 )
             )
+            if miner_credential_failure:
+                # A provider refusing a miner's key is indistinguishable from
+                # a dead key without these two. The fingerprint prefix says
+                # whether we presented the same credential the provider
+                # answered a moment earlier, and the typed error says whether
+                # the provider called it an authentication problem at all or a
+                # limit dressed as one. Neither is a credential, an identity,
+                # or provider text: the first is a truncated digest, the
+                # second is a member of OpenRouter's own fixed vocabulary.
+                if (
+                    isinstance(provider_credential_fingerprint, str)
+                    and _CREDENTIAL_FINGERPRINT_RE.fullmatch(
+                        provider_credential_fingerprint
+                    )
+                ):
+                    summary["credential_fingerprint_short"] = (
+                        provider_credential_fingerprint.removeprefix("sha256:")[:12]
+                    )
+                if (
+                    effective_operation.provider == "openrouter"
+                    and isinstance(raw_document, Mapping)
+                ):
+                    summary["provider_refusal_type"] = _openrouter_safe_error_type(
+                        raw_document
+                    )
             # A known miner-account refusal may finish later score jobs via
             # the existing no-dispatch refusal path even while billing is
             # unknown. Keep its call binding separate from cost evidence.

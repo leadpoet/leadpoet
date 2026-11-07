@@ -297,6 +297,12 @@ def _provider_telemetry_fields(
         provider_status = observed_status
     error_class = call.get("error_class")
     cost = call.get("actual_microusd")
+    # A provider authorisation refusal needs two more bounded fields to be
+    # readable after the fact: which credential we presented (a truncated
+    # digest, never the credential) and what the provider itself called the
+    # refusal (a member of its own fixed vocabulary, never its text).
+    fingerprint = call.get("credential_fingerprint_short")
+    refusal_type = call.get("provider_refusal_type")
     return {
         "provider": provider,
         "operation": operation,
@@ -310,6 +316,16 @@ def _provider_telemetry_fields(
         "provider_status": max(0, min(int(provider_status), 999)) if isinstance(provider_status, int) and not isinstance(provider_status, bool) else 0,
         "attempts": max(1, min(int(attempts), 4)),
         "cost_microusd": max(0, min(int(cost), 1_000_000_000)) if isinstance(cost, int) and not isinstance(cost, bool) else 0,
+        **({"credential_fingerprint": fingerprint} if (
+            isinstance(fingerprint, str)
+            and re.fullmatch(r"^[0-9a-f]{12}$", fingerprint)
+        ) else {}),
+        **({"provider_refusal_type": refusal_type} if (
+            isinstance(refusal_type, str)
+            and refusal_type in (
+                set(broker_module._OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES) | {"unmapped"}
+            )
+        ) else {}),
     }
 
 

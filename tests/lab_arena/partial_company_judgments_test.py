@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -396,11 +397,13 @@ def test_oversize_score_completion_is_rejected_before_object_write(
     """A valid document over the stored-output limit must not become committed."""
     from lab_arena import reviewer_runtime
     from tests.test_arena_score_integrity import _public_company
+    from tests.lab_arena.test_lab_arena_contracts import Keypair, wallet_verifier
 
     round_id = "arena-2026-09-11-oversize-score"
     run_id = "score-run-oversize"
     executed_id = "execute-oversize"
-    runner = "validator-a"
+    keypair = Keypair.create_from_uri("//Alice")
+    runner = keypair.ss58_address
     companies = [
         _public_company("Company %d" % index, domain="company%d.example" % index,
                         signal_date="2026-09-10")
@@ -411,12 +414,14 @@ def test_oversize_score_completion_is_rejected_before_object_write(
     output = scoring.build_scoring_output(
         executed_id,
         [
-            {"final_score": 80.0, "padding": ["x" * 65_000] * 7}
+            {"final_score": 80.0,
+             "padding": ["x" * 65_000] * 6 + ["x" * 32_000]}
             for _ in companies
         ],
     )
     output_bytes = contracts.canonical_json(output).encode("utf-8")
-    assert len(output_bytes) > scoring.MAX_SCORING_OUTPUT_BYTES
+    assert scoring.MAX_SCORING_OUTPUT_BYTES < len(output_bytes)
+    assert len(output_bytes) <= contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
     scoring.validate_scoring_output_document(output)
 
     objects = LocalObjectStore(tmp_path / "objects")
@@ -453,6 +458,7 @@ def test_oversize_score_completion_is_rejected_before_object_write(
     service._store = Store()
     service._objects = objects
     round_row = {"round_id": round_id, "configuration_doc": {"scorer_policy": policy}}
+    timestamp = 1_795_000_000
     result = {
         "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
         "resource_summary": {
@@ -464,11 +470,24 @@ def test_oversize_score_completion_is_rejected_before_object_write(
         "finished_at": "2026-09-11T00:00:01Z",
         "terminal_status": "accepted",
     }
-    validated = {
-        "hotkey": runner,
-        "body": {"run_id": run_id, "lease_token": "token", "result": result,
-                 "output": output},
-    }
+    signed = contracts.build_signed_request(
+        scope=contracts.SCOPE_COMPLETE, round_id=round_id, hotkey=runner,
+        timestamp=timestamp,
+        body={"run_id": run_id, "lease_token": "token", "result": result,
+              "output": output},
+        sign_message=lambda message: keypair.sign(message.encode("utf-8")).hex(),
+    )
+    signed_bytes = contracts.canonical_json(signed).encode("utf-8")
+    assert len(signed_bytes) <= contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+    validated = contracts.validate_signed_request(
+        signed, expected_scope=contracts.SCOPE_COMPLETE, now=timestamp,
+        verify_signature=wallet_verifier, expected_round_id=round_id,
+    )
+    service._config = SimpleNamespace(verify_signature=wallet_verifier)
+    service.now = lambda: datetime.fromtimestamp(timestamp, timezone.utc)
+    assert service.validate_request(
+        signed, scope=contracts.SCOPE_COMPLETE, round_id=None,
+    ) == validated
     monkeypatch.setattr(
         service, "_request_round", lambda *_args, **_kwargs: (validated, round_row),
     )

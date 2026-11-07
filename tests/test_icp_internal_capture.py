@@ -94,17 +94,19 @@ def _transport(monkeypatch, *, generation_status=200, generation_body=None, excl
     return requests
 
 
-@pytest.mark.parametrize("stored,activated,expected", [
-    (True, True, "activated"),
-    (False, True, "storage_failed"),
-    (True, False, "stored_activation_failed"),
+@pytest.mark.parametrize("mode,expected", [
+    ("activated", "activated"),
+    ("failed", "storage_failed"),
+    ("stale", "stale_generation"),
+    ("existing", "activated_existing"),
 ])
 def test_real_bank_path_records_exact_calls_normalization_and_commit_outcome(
-    monkeypatch, tmp_path, stored, activated, expected,
+    monkeypatch, tmp_path, mode, expected,
 ):
     spy = _capture(monkeypatch, tmp_path)
     requests = _transport(monkeypatch)
     persisted = {}
+    generated = {}
 
     async def active(*, strict=False):
         return None
@@ -112,20 +114,36 @@ def test_real_bank_path_records_exact_calls_normalization_and_commit_outcome(
     async def store(**kwargs):
         assert not spy.calls[0]["finishes"]
         persisted.update(kwargs)
-        return stored
-
-    async def activate(set_id):
-        assert stored
-        return activated
+        generated["icps"] = kwargs["icps"]
+        generated["icp_set_hash"] = kwargs["icp_set_hash"]
+        if mode == "failed":
+            return None
+        if mode == "stale":
+            return {
+                "status": "stale", "set_id": kwargs["set_id"] + 1,
+                "inserted": False, "icps": kwargs["icps"],
+                "icp_set_hash": kwargs["icp_set_hash"],
+            }
+        effective_icps = kwargs["icps"]
+        inserted = mode == "activated"
+        if mode == "existing":
+            effective_icps = [dict(row) for row in kwargs["icps"]]
+            effective_icps[0]["prompt"] += " Existing persisted version."
+            persisted["icps"] = effective_icps
+            persisted["icp_set_hash"] = generator.compute_icp_set_hash(effective_icps)
+        return {
+            "status": "activated", "set_id": kwargs["set_id"],
+            "inserted": inserted, "icps": effective_icps,
+            "icp_set_hash": generator.compute_icp_set_hash(effective_icps),
+        }
 
     monkeypatch.setattr(generator, "get_active_icp_set", active)
     monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda set_id: None)
     monkeypatch.setattr(generator, "store_icp_set", store)
-    monkeypatch.setattr(generator, "activate_icp_set", activate)
     result = asyncio.run(generator.generate_and_activate_icp_set(
         datetime(2026, 11, 5, tzinfo=timezone.utc), total_icps=10,
     ))
-    assert result == (20261105 if stored and activated else None)
+    assert result == (20261105 if mode in {"activated", "existing"} else None)
     assert len(spy.calls) == len(requests) == 11
     generation = spy.calls[0]
     finish = generation["finishes"]
@@ -133,9 +151,12 @@ def test_real_bank_path_records_exact_calls_normalization_and_commit_outcome(
     assert finish[0]["cost_microusd"] == 13
     outcome = finish[0]["outcome"]
     assert outcome["committed_outcome"] == expected
-    assert outcome["normalized_icps"] == persisted["icps"]
-    assert outcome["icp_set_hash"] == persisted["icp_set_hash"]
-    assert generator.compute_icp_set_hash(persisted["icps"]) == persisted["icp_set_hash"]
+    assert outcome["normalized_icps"] == generated["icps"]
+    assert outcome["icp_set_hash"] == generated["icp_set_hash"]
+    assert generator.compute_icp_set_hash(generated["icps"]) == generated["icp_set_hash"]
+    if mode == "existing":
+        assert persisted["icps"] != generated["icps"]
+        assert outcome["committed_bank_hash"] == persisted["icp_set_hash"]
     assert outcome["exclusion_call_ids"] == [call["call_id"] for call in spy.calls[1:]]
     for position, call in enumerate(spy.calls):
         assert call["request"]["request"] == requests[position]
@@ -159,7 +180,9 @@ def test_real_bank_path_records_exact_calls_normalization_and_commit_outcome(
     from lab_arena.internal_capture import read_call
     raw, candidate = read_call(spy.core.objects, generation["prefix"] + "request.json")
     assert raw["outcome"]["committed_outcome"] == expected
-    assert raw["outcome"]["icp_set_hash"] == persisted["icp_set_hash"]
+    assert raw["outcome"]["icp_set_hash"] == generated["icp_set_hash"]
+    if mode == "existing":
+        assert raw["outcome"]["committed_bank_hash"] == persisted["icp_set_hash"]
     assert raw["request"] == requests[0]
     assert raw["response"]["choices"][0]["message"]["content"]
     assert "privacy_redactions" in raw["completeness"]["gaps"]

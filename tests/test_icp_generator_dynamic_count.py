@@ -47,6 +47,18 @@ def _provider_rows(slots):
     return rows
 
 
+def _publication(kwargs, *, inserted=True, status="activated", icps=None):
+    persisted_icps = kwargs["icps"] if icps is None else icps
+    return {
+        "status": status,
+        "set_id": kwargs["set_id"],
+        "inserted": inserted,
+        "icps": persisted_icps,
+        "icp_set_hash": generator.compute_icp_set_hash(persisted_icps),
+        "industry_distribution": kwargs["industry_distribution"],
+    }
+
+
 def _stub_provider(monkeypatch, mutate=None):
     captured = {}
 
@@ -190,7 +202,7 @@ def test_activation_runs_provider_to_validated_store_without_changing_other_fiel
         assert strict
         return None
 
-    async def store(*, icps, icp_set_hash, industry_distribution, **_kwargs):
+    async def store(*, set_id, icps, icp_set_hash, industry_distribution, **_kwargs):
         assert len(icps) == 10
         assert sum(bool(row["company_stage"]) for row in icps) == 3
         assert generator.generated_bank_error(icps, 10, industry_distribution) is None
@@ -205,23 +217,18 @@ def test_activation_runs_provider_to_validated_store_without_changing_other_fiel
             assert row["contact_geography"] == {"countries": [], "regions": [], "cities": []}
             model = ICPPrompt.model_validate(_normalized_icp(row))
             assert ICPPrompt.model_validate_json(model.model_dump_json()) == model
-        calls.append("stored")
-        return True
-
-    async def activate(_set_id):
-        calls.append("activated")
-        return True
+        calls.append("published")
+        return _publication(locals())
 
     monkeypatch.setattr(generator, "OPENROUTER_API_KEY", "test-only")
     monkeypatch.setattr(generator, "get_active_icp_set", no_active)
     monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda _set_id: None)
     monkeypatch.setattr(generator, "attach_generated_exclusions", lambda _icps: None)
     monkeypatch.setattr(generator, "store_icp_set", store)
-    monkeypatch.setattr(generator, "activate_icp_set", activate)
     assert asyncio.run(generator.generate_and_activate_icp_set(
         datetime(2026, 10, 25, tzinfo=timezone.utc), contacts_required=True, total_icps=10,
     )) == 20261025
-    assert calls == ["stored", "activated"]
+    assert calls == ["published"]
 
 
 def test_template_stage_quota_preserves_existing_draws_and_fields(monkeypatch):
@@ -281,12 +288,44 @@ def test_existing_active_bank_keeps_all_original_stage_filters(monkeypatch):
         pytest.fail("existing active bank reached a generation or mutation path")
 
     monkeypatch.setattr(generator, "get_active_icp_set", already_active)
-    for name in ("frozen_benchmark_icp_count", "generated_bank_error", "generate_icps_with_openrouter", "store_icp_set", "activate_icp_set"):
+    for name in ("frozen_benchmark_icp_count", "generate_icps_with_openrouter", "store_icp_set"):
         monkeypatch.setattr(generator, name, forbidden)
     assert asyncio.run(generator.generate_and_activate_icp_set(
         datetime(2026, 10, 24, tzinfo=timezone.utc), total_icps=10,
     )) == 20261024
     assert active == original
+
+
+def test_existing_active_bank_keeps_duplicate_market_rows(monkeypatch):
+    rows = _provider_rows(generator.industry_slots(30, seed=42))
+    repeated_industry = next(
+        industry for industry in (row["industry"] for row in rows)
+        if sum(other["industry"] == industry for other in rows) > 1
+    )
+    first = next(i for i, row in enumerate(rows) if row["industry"] == repeated_industry)
+    second = next(i for i, row in enumerate(rows) if i > first and row["industry"] == repeated_industry)
+    for field in ("sub_industry", "company_stage", "geography", "intent_category"):
+        rows[second][field] = rows[first][field]
+    active = {
+        "set_id": 20261024,
+        "icps": rows,
+        "icp_set_hash": generator.compute_icp_set_hash(rows),
+    }
+
+    async def already_active(*, strict=False):
+        assert strict
+        return active
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("existing active bank reached a generation or mutation path")
+
+    monkeypatch.setattr(generator, "get_active_icp_set", already_active)
+    for name in ("frozen_benchmark_icp_count", "generate_icps_with_openrouter", "store_icp_set"):
+        monkeypatch.setattr(generator, name, forbidden)
+    assert generator._stored_bank_error(rows, active["icp_set_hash"]) is None
+    assert asyncio.run(generator.generate_and_activate_icp_set(
+        datetime(2026, 10, 24, tzinfo=timezone.utc), total_icps=10,
+    )) == 20261024
 
 
 @pytest.mark.parametrize("failure", [429, 502, "timeout", "malformed", "empty"])
@@ -409,13 +448,14 @@ def test_activation_passes_count_to_generation_and_stores_exact_bank(monkeypatch
         calls["requested"] = total_icps
         return rows, dict(Counter(row["industry"] for row in rows)), "before-contract"
 
-    async def store(*, icps, icp_set_hash, **_kwargs):
+    async def store(*, set_id, icps, icp_set_hash, industry_distribution, **_kwargs):
         calls["stored"] = len(icps)
         assert icp_set_hash == generator.compute_icp_set_hash(icps)
-        return True
-
-    async def activate(_set_id):
-        return True
+        return {
+            "status": "activated", "set_id": set_id, "inserted": True,
+            "icps": icps, "icp_set_hash": icp_set_hash,
+            "industry_distribution": industry_distribution,
+        }
 
     monkeypatch.setattr(generator, "OPENROUTER_API_KEY", "test-only")
     async def no_active(*, strict=False):
@@ -424,7 +464,6 @@ def test_activation_passes_count_to_generation_and_stores_exact_bank(monkeypatch
     monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda _set_id: None)
     monkeypatch.setattr(generator, "generate_icps_with_openrouter", fake_generate)
     monkeypatch.setattr(generator, "store_icp_set", store)
-    monkeypatch.setattr(generator, "activate_icp_set", activate)
     monkeypatch.setattr(generator, "attach_generated_exclusions", lambda _icps: None)
     assert asyncio.run(generator.generate_and_activate_icp_set(
         datetime(2026, 9, 20, tzinfo=timezone.utc), total_icps=10,
@@ -524,25 +563,25 @@ def test_activation_prefers_frozen_count_and_existing_bank(monkeypatch):
         return None
 
     async def already_active(*, strict=False):
-        return {"set_id": 20260920}
+        return {
+            "set_id": 20260920,
+            "icps": rows,
+            "icp_set_hash": generator.compute_icp_set_hash(rows),
+        }
 
     async def fake_generate(_set_id, *, total_icps, **_kwargs):
         calls.append(("generate", total_icps))
         return rows, dict(Counter(row["industry"] for row in rows)), "before-contract"
 
-    async def store(*, icps, **_kwargs):
+    async def store(*, set_id, icps, **_kwargs):
         calls.append(("store", len(icps)))
-        return True
-
-    async def activate(_set_id):
-        return True
+        return _publication(_kwargs | {"set_id": set_id, "icps": icps})
 
     monkeypatch.setattr(generator, "OPENROUTER_API_KEY", "test-only")
     monkeypatch.setattr(generator, "get_active_icp_set", no_active)
     monkeypatch.setattr(generator, "frozen_benchmark_icp_count", lambda _set_id: 20)
     monkeypatch.setattr(generator, "generate_icps_with_openrouter", fake_generate)
     monkeypatch.setattr(generator, "store_icp_set", store)
-    monkeypatch.setattr(generator, "activate_icp_set", activate)
     monkeypatch.setattr(generator, "attach_generated_exclusions", lambda _icps: None)
     date = datetime(2026, 9, 20, tzinfo=timezone.utc)
     assert asyncio.run(generator.generate_and_activate_icp_set(date, total_icps=10)) == 20260920

@@ -8181,8 +8181,20 @@ class ArenaService:
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}
                 try:
-                    with telemetry.stage("advance_publish"):
-                        return self.publish(round_id)
+                    with telemetry.stage("advance_publish") as observed:
+                        outcome = self.publish(round_id)
+                        # `publish` returns WITHOUT raising on every hold path
+                        # (`publication_busy`, `stale`, `judge_incomplete`,
+                        # `baseline_incomplete`, `scoring_evidence_invalid`, …),
+                        # so an unqualified `ok` here reads as "the round is
+                        # out" when nothing was published. Only the publication
+                        # return carries `king_outcome`; mark every other tick
+                        # idle, the same way `activate_rewards` and
+                        # `promote_baselines` already distinguish a routine tick
+                        # from a round-advancing one.
+                        observed.idle = "king_outcome" not in outcome
+                        observed.count = int(not observed.idle)
+                        return outcome
                 except ServiceError as exc:
                     if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["publication"])

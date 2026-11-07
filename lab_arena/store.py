@@ -436,6 +436,23 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
+# A 55P03 lock timeout aborts the statement before it takes the lock, so the
+# RPC's implicit transaction rolls back having written nothing. These functions
+# are additionally keyed on an exact caller identity and return their saved
+# result rather than allocating again, so repeating the identical request body
+# is safe even if a write had somehow landed:
+#   reserve/dispatch — keyed on p_call_identity, an existing dispatch marker
+#     returns idempotent into the broker's uncertain branch;
+#   claim assignment — keyed on (p_request_id, p_request_hash); the function
+#     returns the stored claim_response for a repeated identity and never
+#     issues a second lease.
+# Settlement and ambiguous transport failures stay outside this bound.
+LOCK_TIMEOUT_REPLAYABLE_RPCS = frozenset({
+    "lab_arena_reserve_call",
+    "lab_arena_reserve_judgment_call",
+    "lab_arena_mark_dispatched",
+    "lab_arena_claim_assignment",
+})
 # Stage creation, lease recovery, stage/round closure, and score batches can
 # take longer than an ordinary RPC. Let their bounded database work return a
 # result before giving up on the response.
@@ -725,14 +742,11 @@ class PostgrestTransport(StoreTransport):
                 if code == DEADLOCK_SQLSTATE or (
                     response.status_code == 500
                     and code == "55P03"
-                    and function in {
-                        "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
-                        "lab_arena_mark_dispatched",
-                    }
+                    and function in LOCK_TIMEOUT_REPLAYABLE_RPCS
                 ):
-                    # A proved lock timeout rolls back these pre-dispatch RPCs.
-                    # Repeat the exact identity; an existing dispatch marker
-                    # returns idempotent into the broker's uncertain branch.
+                    # A proved lock timeout rolls back these RPCs. Repeat the
+                    # exact identity; an existing dispatch marker or claim
+                    # response returns idempotent to the caller.
                     # Settlement and ambiguous failures stay outside this bound.
                     self.deadlock_retries += 1
                     deadlock_attempts += 1

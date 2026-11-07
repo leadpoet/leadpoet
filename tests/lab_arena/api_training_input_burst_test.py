@@ -1,4 +1,4 @@
-"""Eight-way input capture and real HTTP timeouts under capture overload."""
+"""Bounded input bursts preserve evidence and drop timed-out queued work."""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,7 @@ import httpx
 import pytest
 import uvicorn
 
-from lab_arena import runner, training_input
+from lab_arena import api as arena_api, runner, training_input
 from lab_arena.api import create_app
 from lab_arena.service import LocalObjectStore
 from tests.lab_arena.api_training_input_capacity_test import (
@@ -21,7 +21,10 @@ from tests.lab_arena.api_provider_capacity_test import wait_until
 
 
 @pytest.mark.parametrize("kind", ["execute", "score"])
-def test_eight_input_captures_reach_storage_together_and_preserve_evidence(tmp_path, kind):
+@pytest.mark.parametrize("worker_limit", [2, 8])
+def test_input_burst_bounds_storage_work_and_preserves_evidence(tmp_path, monkeypatch, kind, worker_limit):
+    monkeypatch.setattr(arena_api, "TRAINING_INPUT_WORKER_LIMIT", worker_limit)
+
     async def scenario():
         objects = LocalObjectStore(tmp_path / "private-objects")
         original_put = objects.put
@@ -32,7 +35,7 @@ def test_eight_input_captures_reach_storage_together_and_preserve_evidence(tmp_p
         def put(ref, data):
             with lock:
                 entered.append(ref)
-            assert release.wait(5), "eight input workers did not reach storage together"
+            assert release.wait(5), "test did not release bounded storage work"
             original_put(ref, data)
 
         objects.put = put
@@ -43,9 +46,9 @@ def test_eight_input_captures_reach_storage_together_and_preserve_evidence(tmp_p
                     "schema": {"maximum": 2 ** 64 - 1}, "lease_echo": TOKEN}
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-                captures = [post_input(client, "burst-" + str(i), document) for i in range(CAPTURE_LIMIT)]
+                captures = [post_input(client, "burst-" + str(i), document) for i in range(8)]
                 try:
-                    await wait_until(lambda: len(entered) == CAPTURE_LIMIT)
+                    await wait_until(lambda: len(entered) == worker_limit)
                     assert not any(task.done() for task in captures)
                     assert anyio.to_thread.current_default_thread_limiter().borrowed_tokens == 0
                 finally:

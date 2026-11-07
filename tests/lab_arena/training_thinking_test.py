@@ -666,7 +666,7 @@ def test_private_cli_writes_text_and_versioned_manifest(tmp_path):
     assert "Inspect the retained page, then answer." in text
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["dataset_version"].startswith("sha256:")
-    assert manifest["training_permission"]["status"] == "unconfirmed"
+    assert manifest["training_permission"]["status"] == "confirmed"
 
 
 @pytest.mark.parametrize('delivery', ['selected_terminal', 'terminal_receipt'])

@@ -35,7 +35,7 @@ def test_historical_host_pair_exports_without_changing_policy_or_claiming_consum
     assert candidate['input'] == example['provider_calls'][0]['request']['outbound']['body']
     assert candidate['source_refs'][0]['capture_scope'] == 'provider_visible_request_result'
     assert candidate['source_refs'][0]['client_consumption'] == 'not_proved'
-    assert manifest['training_permission']['status'] == 'unconfirmed'
+    assert manifest['training_permission']['status'] == 'confirmed'
     assert example == before
     with pytest.raises(ValueError, match='agent_read_unverified'):
         training_steps._candidate(example, example['provider_calls'][0])

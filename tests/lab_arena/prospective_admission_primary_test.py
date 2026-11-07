@@ -232,7 +232,7 @@ def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_pat
     assert raw['reasoning']['full_generated_thinking'] == ([] if summary_only else [{
         'field': 'reasoning_details.text', 'text': 'Compare the reachable source with the policy.',
         'source_paths': [['choices', 0, 'message', 'reasoning_details', 0, 'text']]}])
-    assert candidate['training_permission']['status'] == 'unconfirmed'
+    assert candidate['training_permission']['status'] == 'confirmed'
     entry = next(r for r in registry['approved_routes'] if r['model_id'] == DEEPSEEK and
                  r['provider'] == 'nebius/fp8' and r['api'] == 'openrouter.chat')
     assert entry['mode'] == {'effort': 'high'}

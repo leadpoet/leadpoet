@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from lab_arena import contracts, operations, reasoning_capture, training_capture, training_export, training_steps, training_thinking
+from lab_arena import contracts, operations, reasoning_capture, training_capture, training_dataset, training_export, training_steps, training_thinking
 from lab_arena.runtime_version import SOURCE_METADATA
 
 SCHEMA_VERSION = "leadpoet.lab_arena.internal_capture_event.v1"
@@ -502,7 +502,7 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
                          # A projected response grants no new full-thinking target.
                          "generated_thinking": [] if opaque_projection else reasoning["full_generated_thinking"],
                          "quality": {"status": "unreviewed", "correct_action": "not_established"},
-                         "training_permission": {"status": "unconfirmed"},
+                         "training_permission": dict(training_dataset.TRAINING_PERMISSION),
                          "source": {"event_refs": raw["event_refs"], "context": raw["context"],
                                     "request_sha256": (events["request"].get("capture") or {}).get("sha256"),
                                     "response_sha256": (events["response"].get("capture") or {}).get("sha256"),

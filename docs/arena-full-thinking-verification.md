@@ -1,5 +1,11 @@
 # Reasoning capture verification
 
+**Training-use update, November 7, 2026:** The dated audit below retains its
+original permission status. Operator authorization for eligible Arena data in
+Leadpoet Sales LLM CPT/SFT is now confirmed, subject to separate record rights
+and quality checks. See the [current training-use policy](arena_training_data.md#training-use-authorization-and-remaining-restrictions).
+Historical manifests and audit evidence are not rewritten.
+
 ## Final capture audit, October 26
 
 PR #790 fixes three reproduced defects on source `70f2a4b0a`:

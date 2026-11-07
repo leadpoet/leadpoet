@@ -49,7 +49,7 @@ def test_internal_chat_preserves_fifty_nested_annotations_and_zero_offsets(tmp_p
     assert candidate["target"] == expected
     assert len(candidate["target"]["annotations"]) == 50
     assert candidate["quality"] == {"status": "unreviewed", "correct_action": "not_established"}
-    assert candidate["training_permission"]["status"] == "unconfirmed"
+    assert candidate["training_permission"]["status"] == "confirmed"
 
 
 def test_chat_summary_keeps_citations_and_aggregate_separate_from_search_events(tmp_path):

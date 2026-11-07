@@ -1,5 +1,12 @@
 # Arena open-weight model review — 2026-11-05
 
+**Training-use update, November 7, 2026:** References below to unconfirmed
+permission describe the original experiment. Operator authorization for eligible
+Arena data in Leadpoet Sales LLM CPT/SFT is now confirmed; model/provider terms,
+source/customer rights and quality checks remain separate. See the [current
+training-use policy](arena_training_data.md#training-use-authorization-and-remaining-restrictions).
+This update does not change retained experiments or historical manifests.
+
 This review builds on the committed implementation in PR1041 and the deployed
 internal capture work in PR1044. It tests exact provider routes, not model names
 alone. A catalog reasoning flag or token count is not proof of readable thinking.

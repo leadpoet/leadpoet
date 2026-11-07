@@ -513,7 +513,7 @@ def test_manifest_is_deterministic_and_records_permission_status():
     second = dataset.build(list(reversed(examples)))
     assert first == second
     manifest = first[1]
-    assert manifest["training_permission"]["status"] == "unconfirmed"
+    assert manifest["training_permission"] == dataset.TRAINING_PERMISSION
     assert manifest["rules"] == {"eval_percent": 20, "seed": "arena-agent-steps-v1",
                                  "production_rounds_only": True, "scorer_image_digest": None,
                                  "scorer_policy_hash": None, "eval_mode": "company_and_icp",
@@ -568,7 +568,7 @@ def test_cli_writes_a_new_private_dataset(tmp_path, capsys):
     output = tmp_path / "dataset"
     assert cli.main(["--examples", str(source), "--output", str(output)]) == 0
     summary = json.loads(capsys.readouterr().out)
-    assert summary["training_permission"] == "unconfirmed"
+    assert summary["training_permission"] == "confirmed"
     assert sum(summary["records"].values()) == 4
     for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json"):
         assert stat.S_IMODE((output / name).stat().st_mode) == 0o600

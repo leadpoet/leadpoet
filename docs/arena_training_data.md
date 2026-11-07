@@ -536,10 +536,59 @@ for qualification records, cohort filters, and readiness reports. These tools
 use the exporter's verified preservation authority and selected score attempt.
 The export retains the current round configuration and the original verdicts.
 
-🔹 Training permission is not yet confirmed. Submission consent records only
-public rerun permission; confirm the terms before training on these records.
-The manifest says so explicitly. Label accuracy still needs a manual sample
-check before the first training run.
+### Training-use authorization and remaining restrictions
+
+Leadpoet confirmed operator authorization on **2026-11-07** to use eligible Arena
+reasoning and execution trajectories for **continued pretraining (CPT)** and
+**supervised fine-tuning (SFT)** of its foundational Sales LLM. This covers the
+intended use of miner, baseline and internal verifier/judge records. This purpose
+is no longer TBD. The shared `TRAINING_PERMISSION` metadata records `confirmed`
+with scope `operator_authorization_only`; it does not assert ownership of every
+captured input or output, or clearance of every record.
+
+The following restrictions remain:
+
+- **Provider and source rights:** review the actual model, serving provider,
+  route, applicable terms at collection/use, and any separate agreement for each
+  selected input, output, reasoning trace and derived label. Readable reasoning,
+  an open-weight license, paid access, and the capture whitelist do not by
+  themselves establish training rights. Exclude unresolved or prohibited
+  material from the training corpus until its use is established as permitted.
+- **Miner rights:** `consent.public_rerun` still grants public rerun only. Neither
+  this metadata nor the source-code license is a new or retroactive miner grant
+  over all run content. Establish the applicable rights to submitted material;
+  do not change historical consent receipts.
+- **Customer and privacy boundaries:** Leadpoet-generated Arena ICPs do not
+  establish permission for unrelated customer requests, CRM data, personal data,
+  licensed sources or confidential material that may occur in a trajectory.
+  Such data needs its applicable permission and lawful basis. Preserve private
+  storage, access controls, credential redaction, suppression and deletion
+  obligations. A record without redaction markers is not proof of these rights.
+- **Quality and distribution:** label/action review and held-out checks remain
+  required. Capture, curation acceptance and this authorization do not make a
+  dataset training-ready. The readiness report still returns `training_ready:
+  false`. This metadata grants no public dataset redistribution right and starts
+  no paid training job.
+
+The November 7 public-terms review found concrete reasons to retain these
+boundaries. [OpenRouter §§5–6](https://openrouter.ai/terms/) defer to upstream
+model terms. [NEAR AI §4.2](https://near.ai/terms-of-service) restricts competing
+model development and certain output-based training without a separate agreement.
+[Nebius Token Factory §4](https://docs.nebius.com/legal/token-factory) restricts
+using outputs to develop competing services. These are review flags for the
+actual account/route agreement, not a finding that all Sales LLM training is
+prohibited. Historical proprietary outputs also need their applicable terms
+checked. This review does not establish route-specific or customer-contract
+clearance.
+
+Qualification, agent-step, full-thinking, internal-call, readiness and curation
+exports share the same scoped permission record. The qualification, agent-step
+and full-thinking CLI summaries also report its scope and unresolved record-rights
+status. Their candidates and preserved raw records
+remain separate from a rights-cleared training corpus; these tools do not perform
+automated legal clearance. Earlier manifests are immutable evidence: rebuild
+datasets from retained sources and redo exact-version curation, rather than
+editing old `unconfirmed` manifests or claims of consent.
 
 ## Additive readiness, review, and agent-step tools
 

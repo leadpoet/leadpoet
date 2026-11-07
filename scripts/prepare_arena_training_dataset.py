@@ -171,6 +171,8 @@ def main(argv=None):
         "examples_used": source_counts["examples_used"],
         "examples_excluded": source_counts["examples_excluded"],
         "training_permission": manifest["training_permission"]["status"],
+        "training_permission_scope": manifest["training_permission"]["scope"],
+        "training_record_rights": manifest["training_permission"]["record_rights"],
         "output": str(args.output),
     }, sort_keys=True))
     return 0 if splits["train"] or splits["eval"] else 2

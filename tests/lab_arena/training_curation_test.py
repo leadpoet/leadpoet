@@ -86,7 +86,7 @@ def test_raw_identity_and_reviewed_selection_fail_closed():
     assert reviewed[split][0]["group_keys"] == record["group_keys"]
     assert reviewed_manifest["source_dataset_version"] == manifest["dataset_version"]
     assert reviewed_manifest["source_curation_version"] == curation["curation_version"]
-    assert reviewed_manifest["training_permission"]["status"] == "unconfirmed"
+    assert reviewed_manifest["training_permission"]["status"] == "confirmed"
     empty, _ = training_curation.apply_review(splits, manifest, [], curation)
     assert not empty["train"] and not empty["eval"] and len(empty["analysis"]) == 1
     changed_record = copy.deepcopy(splits)
@@ -124,7 +124,7 @@ def test_raw_identity_and_reviewed_selection_fail_closed():
         (dict(manifest, dataset_version="sha256:" + "1" * 64), curation),
         (manifest, dict(curation, curation_version="sha256:" + "1" * 64)),
         (manifest, dict(curation, flagged_records=[])),
-        (manifest, dict(curation, training_permission={"status": "confirmed"})),
+        (manifest, dict(curation, training_permission={"status": "unconfirmed"})),
         (dict(manifest, rules={"seed": "changed"}), curation),
     ):
         with pytest.raises(ValueError):
@@ -137,7 +137,7 @@ def test_raw_identity_and_reviewed_selection_fail_closed():
         training_curation.review_sample(splits, 1, unknown, unknown_curation)
     with pytest.raises(ValueError, match="curation_manifest_mismatch"):
         training_curation.apply_review(splits, unknown, [], unknown_curation)
-    fake_permission = {"status": "confirmed"}
+    fake_permission = {"status": "confirmed", "reason": "spoofed"}
     spoofed_source = dict(manifest, training_permission=fake_permission)
     spoofed_curation = dict(curation, training_permission=fake_permission)
     spoofed_curation["curation_version"] = contracts.document_hash({
@@ -182,7 +182,7 @@ def test_all_cli_review_modes_keep_raw_and_write_separate_reviewed(tmp_path, mai
     raw = tmp_path / "raw"
     assert main(["--examples", str(path), "--output", str(raw), "--review-sample-size", "10"]) == 0
     curation = json.loads((raw / "curation.json").read_text())
-    assert curation["training_permission"]["status"] == "unconfirmed"
+    assert curation["training_permission"]["status"] == "confirmed"
     review = [json.loads(line) for line in (raw / "review.jsonl").read_text().splitlines()]
     assert review
     assert review[0]["source_dataset_version"] == json.loads((raw / "manifest.json").read_text())["dataset_version"]

@@ -103,10 +103,13 @@ def test_shared_model_with_another_schema_keeps_identical_bytes():
 
 
 def test_wire_order_changes_judgment_cache_identity_without_changing_request_identity():
+    from tests.lab_arena.judge_default_activation_test import PREVIOUS_MODELS, PREVIOUS_OPTIONS, ROUTES, EXCEPTIONS
     parameters = request()
     before, after = wires(parameters)
     assert before != after and json.loads(before) == json.loads(after)
-    policy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2")
+    policy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2",
+        judge_models=PREVIOUS_MODELS, judge_provider_routes=ROUTES,
+        judge_request_options=PREVIOUS_OPTIONS, judge_reasoning_exceptions=EXCEPTIONS)
     policy["judge_models"]["industry_evidence_review"] = MODEL
     context = replace(CONTEXT, kind="score", judgment_cache_scope={
         "round_id": CONTEXT.round_id, "evaluation_date": "2026-10-24",

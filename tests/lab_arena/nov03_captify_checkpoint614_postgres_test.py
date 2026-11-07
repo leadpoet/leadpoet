@@ -77,7 +77,7 @@ def setup(database):
     store = ArenaStore(PsycopgTransport(lambda: pg.connect(**dsn)))
     service = ArenaService.__new__(ArenaService); service._store = store
     objects['captify-output.json'] = contracts.canonical_json({'schema_version': contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, 'companies': _input()['companies']}).encode()
-    service._objects = type('Objects', (), {'get': lambda _self,key: objects[key], 'get_bounded': lambda _self,key,_limit: objects[key]})()
+    service._objects = type('Objects', (), {'get': lambda _self,key: objects[key], 'get_bounded': lambda _self,key,_limit: objects[key], 'get_optional_bounded': lambda _self,key,_limit: objects.get(key)})()
     service._round = lambda rid: store.get_round(rid)
     service.evaluation_icps = lambda _rid: icps
     refs = service._scoring_work_items(store.get_round(ROUND), 2, plan)[0]['company_judgment_refs']
@@ -160,7 +160,7 @@ def test_exact_sixth_claim_keeps_two_companies_and_three_misses_without_seventh(
             assert scalar(cur, 'SELECT public.lab_arena__nov03_captify_judge614_v1(r,a) FROM public.lab_arena_rounds r JOIN public.lab_arena_runs a ON a.round_id=r.round_id WHERE a.run_id=%s', (RUN,)) is True
         if outcome == 'accepted':
             key = keypair('captify614')
-            objects_api = type('Objects', (), {'get': lambda _self,k: objects[k], 'get_bounded': lambda _self,k,_limit: objects[k], 'put': lambda _self,k,v: objects.__setitem__(k,v)})()
+            objects_api = type('Objects', (), {'get': lambda _self,k: objects[k], 'get_bounded': lambda _self,k,_limit: objects[k], 'get_optional_bounded': lambda _self,k,_limit: objects.get(k), 'put': lambda _self,k,v: objects.__setitem__(k,v)})()
             gateway = ArenaService(ServiceConfig(mode='live', store=store, object_store=objects_api, signer=None, chain=FakeChain([key.ss58_address]), verify_signature=wallet_verify, daily_icp_source=lambda **_: {}, banned_hotkeys_source=lambda: (), broker_factory=lambda *_: None))
             gateway.evaluation_icps = service.evaluation_icps
             current = store.get_run(RUN); lease = current['claim_response']; cache = lease['company_judgment_cache']

@@ -415,7 +415,11 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     terminal = ledger.calls[result.call["call_identity"]]["terminal"]
     assert set(terminal) == {
         "status", "headers", "body_b64", "call_succeeded", "provider_cost",
+        "upstream_response_receipt",
     }
+    retained = terminal["upstream_response_receipt"]
+    assert json.loads(base64.b64decode(retained["body_b64"])) == envelope
+    assert "upstream_response_receipt" not in json.dumps(result.to_document())
     assert br.broker_observations(terminal) == {}  # Historical score policy is unchanged.
     assert terminal["call_succeeded"] is True
     assert terminal["provider_cost"] == {
@@ -437,6 +441,10 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
         timeout_ms=60_000,
     )
     assert replay.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
+    assert (replay.status, replay.headers, replay.body) == (
+        result.status, result.headers, result.body,
+    )
+    assert "upstream_response_receipt" not in json.dumps(replay.to_document())
     assert replay.call["idempotent"] is True
     assert ledger.calls[result.call["call_identity"]]["terminal"] == terminal
     assert [call["method"] for call in transport.sent] == ["POST"]

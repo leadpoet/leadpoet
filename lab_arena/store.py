@@ -75,6 +75,11 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     ),
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
+    "lab_arena_evidence_judgment_v2": (
+        ("p_operation", "text"), ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_company_index", "integer"), ("p_signal_index", "integer"),
+        ("p_scope", "jsonb"), ("p_candidate_reference", "jsonb"), ("p_equivalence_receipt", "jsonb"),
+    ),
     "lab_arena_claim_signal_judgment_v1": (
         ("p_run_id", "text"), ("p_lease_token_hash", "text"),
         ("p_company_index", "integer"), ("p_signal_index", "integer"),
@@ -413,6 +418,9 @@ _RUNTIME_JSON_COLUMNS = {
     "source_dirty:content->>validator_source_dirty": "content ->> 'validator_source_dirty' AS source_dirty",
     "start_lease_generation:content->>lease_generation": "content ->> 'lease_generation' AS start_lease_generation",
     "status:content->>status": "content ->> 'status' AS status",
+    "finished_at:content->>finished_at": "content ->> 'finished_at' AS finished_at",
+    "started_at:content->>started_at": "content ->> 'started_at' AS started_at",
+    "resource_summary:content->resource_summary": "content -> 'resource_summary' AS resource_summary",
     "error_class:content->>error_class": "content ->> 'error_class' AS error_class",
     "failure_stage:content->>failure_stage": "content ->> 'failure_stage' AS failure_stage",
     **{
@@ -428,6 +436,23 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
+# A 55P03 lock timeout aborts the statement before it takes the lock, so the
+# RPC's implicit transaction rolls back having written nothing. These functions
+# are additionally keyed on an exact caller identity and return their saved
+# result rather than allocating again, so repeating the identical request body
+# is safe even if a write had somehow landed:
+#   reserve/dispatch — keyed on p_call_identity, an existing dispatch marker
+#     returns idempotent into the broker's uncertain branch;
+#   claim assignment — keyed on (p_request_id, p_request_hash); the function
+#     returns the stored claim_response for a repeated identity and never
+#     issues a second lease.
+# Settlement and ambiguous transport failures stay outside this bound.
+LOCK_TIMEOUT_REPLAYABLE_RPCS = frozenset({
+    "lab_arena_reserve_call",
+    "lab_arena_reserve_judgment_call",
+    "lab_arena_mark_dispatched",
+    "lab_arena_claim_assignment",
+})
 # Stage creation, lease recovery, stage/round closure, and score batches can
 # take longer than an ordinary RPC. Let their bounded database work return a
 # result before giving up on the response.
@@ -717,14 +742,11 @@ class PostgrestTransport(StoreTransport):
                 if code == DEADLOCK_SQLSTATE or (
                     response.status_code == 500
                     and code == "55P03"
-                    and function in {
-                        "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
-                        "lab_arena_mark_dispatched",
-                    }
+                    and function in LOCK_TIMEOUT_REPLAYABLE_RPCS
                 ):
-                    # A proved lock timeout rolls back these pre-dispatch RPCs.
-                    # Repeat the exact identity; an existing dispatch marker
-                    # returns idempotent into the broker's uncertain branch.
+                    # A proved lock timeout rolls back these RPCs. Repeat the
+                    # exact identity; an existing dispatch marker or claim
+                    # response returns idempotent to the caller.
                     # Settlement and ambiguous failures stay outside this bound.
                     self.deadlock_retries += 1
                     deadlock_attempts += 1
@@ -782,7 +804,7 @@ class PostgrestTransport(StoreTransport):
         for key, value in (filters or {}).items():
             if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid filter column")
-            if (key == "event_kind" and value in ("runtime.started", "runtime.error")
+            if (key == "event_kind" and value in ("runtime.started", "runtime.error", "runtime.finished")
                     and table == "lab_arena_trajectory_events"):
                 query.append((key, "eq." + value))
             elif key == "operation_id" and value is not None:
@@ -907,7 +929,10 @@ class PostgrestTransport(StoreTransport):
         try:
             self._raise_for_status(response, "select %s" % table, operation="select", resource=table)
         except ArenaStoreError as exc:
-            if response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES:
+            if (response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES
+                    or (response.status_code == 500 and exc.store_error.get("code") == "57014")):
+                # A cancelled SELECT returned no evidence. Keep it unavailable
+                # without extending the existing retry budget or RPC policy.
                 raise ArenaStoreUnavailable(
                     "select %s temporarily unavailable" % table,
                     **exc.store_error,
@@ -1199,6 +1224,12 @@ class ArenaStore:
     def __init__(self, transport: StoreTransport, *, lease_ttl_seconds: int = LEASE_TTL_SECONDS) -> None:
         self._transport = transport
         self._lease_ttl_seconds = int(lease_ttl_seconds)
+        self._per_round_replacement_cutoff = False
+
+    @property
+    def replacement_cutoff_columns(self) -> str:
+        """Select the additive round field only after schema capability proof."""
+        return "replacement_freeze_seconds," if self._per_round_replacement_cutoff else ""
 
     # -- identity ---------------------------------------------------------
 
@@ -1401,6 +1432,7 @@ class ArenaStore:
     def code_review_schema(
         self, *, require_refusal_fallback: bool = False,
         require_invalid_review_budget: bool = False,
+        require_prospective_primary: bool = False,
     ) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
@@ -1436,6 +1468,14 @@ class ArenaStore:
             "legacy_structured_refusal_recovery": True,
         }:
             raise ArenaStoreError("code review fallback schema mismatch")
+        if require_prospective_primary and result.get("prospective_primary") != {
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "legacy_primary_model": "anthropic/claude-sonnet-5.5",
+            "episode_binding": "first_primary_reservation",
+            "max_output_tokens": 32768,
+            "truncation_alternate": "openai/gpt-6.1-sol",
+        }:
+            raise ArenaStoreError("code review primary schema mismatch")
         if require_invalid_review_budget and result.get("invalid_review_budget") != {
             "max_reservations": 3,
             "starts_at": "first_invalid_or_unverified_result",
@@ -1801,6 +1841,12 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
 
+    def get_round_capture_state(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """Read only the cancellation authority needed for late input capture."""
+        rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id},
+            limit=1, columns="round_id,status")
+        return rows[0] if rows else None
+
     def get_round_baseline_hotkey(self, round_id: str) -> Any:
         """Read one configured key, not the multi-megabyte round configuration."""
 
@@ -1946,7 +1992,7 @@ class ArenaStore:
 
     # -- submissions ------------------------------------------------------
 
-    def submission_replacement_schema(self) -> Dict[str, Any]:
+    def submission_replacement_schema(self, *, require_per_round_cutoff: bool = False) -> Dict[str, Any]:
         result = _require_mapping(
             self._transport.rpc("lab_arena_submission_replacement_schema_v1", {}),
             "submission_replacement_schema",
@@ -1958,6 +2004,13 @@ class ArenaStore:
                 or type(result.get("max_replacement_attempts")) is not int
                 or result["max_replacement_attempts"] != 1):
             raise ArenaStoreError("submission replacement schema mismatch")
+        self._per_round_replacement_cutoff = (
+            result.get("per_round_replacement_freeze_seconds") is True
+            and type(result.get("default_replacement_freeze_seconds")) is int
+            and result["default_replacement_freeze_seconds"] == 600
+        )
+        if require_per_round_cutoff and not self._per_round_replacement_cutoff:
+            raise ArenaStoreError("per-round submission replacement schema unavailable")
         return result
 
     def submission_similarity_schema(self) -> Dict[str, Any]:
@@ -2740,19 +2793,19 @@ class ArenaStore:
     def get_signal_judgment_batch(self, identities):
         return self._get_authority_batch("lab_arena_signal_judgments", identities)
 
-    def get_signal_judgment_uses_batch(self, run_ids):
-        """Read complete selected-run uses, bounded by the five by 100 schema."""
+    def get_signal_judgment_uses_batch(self, run_ids, *, evidence=False):
+        """Read complete selected-run uses, bounded by five companies and 101 evidence slots."""
         ids = sorted(set(run_ids))
         found = {run_id: [] for run_id in ids}
         for first in range(0, len(ids), 25):
             batch = ids[first:first + 25]
             previous = None
-            for offset in range(0, len(batch) * 500 + 1, 500):
+            for offset in range(0, len(batch) * 505 + 1, 500):
                 rows = self._transport.select(
                     "lab_arena_signal_judgment_uses", run_ids=batch,
                     order="signal_use_identity", limit=500, offset=offset,
                     columns=("run_id,company_index,signal_index,cache_key,authority_slot,"
-                             "signal_input_hash,source_score_run_id,judgment_hash"),
+                             "signal_input_hash,source_score_run_id,judgment_hash" + (",acceptance_doc" if evidence else "")),
                 )
                 if len(rows) > 500:
                     raise ArenaStoreError("signal use bulk page exceeds limit")
@@ -2763,7 +2816,7 @@ class ArenaStore:
                                               ("run_id", "company_index", "signal_index"))
                     if (type(run_id) is not str or run_id not in batch
                             or type(company) is not int or not 0 <= company < 5
-                            or type(signal) is not int or not 0 <= signal < 100):
+                            or type(signal) is not int or not -1 <= signal < 100):
                         raise ArenaStoreError("signal use bulk identity is invalid")
                     identity = (run_id, company, signal)
                     if previous is not None and identity <= previous:
@@ -2790,6 +2843,17 @@ class ArenaStore:
                 "source_scored_run_id,source_runner_hotkey,created_at"
             ),
         )
+
+    def evidence_judgment(self, *, operation: str, run_id: str, lease_token_hash: str,
+                          company_index: int, signal_index: int, scope: Mapping[str, Any],
+                          candidate_reference: Optional[Mapping[str, Any]] = None,
+                          equivalence_receipt: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc("lab_arena_evidence_judgment_v2", {
+            "p_operation": operation, "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+            "p_company_index": company_index, "p_signal_index": signal_index,
+            "p_scope": dict(scope), "p_candidate_reference": dict(candidate_reference) if candidate_reference is not None else None,
+            "p_equivalence_receipt": dict(equivalence_receipt) if equivalence_receipt is not None else None,
+        }), "evidence judgment")
 
     def claim_signal_judgment(
         self, *, run_id: str, lease_token_hash: str, company_index: int,
@@ -2832,12 +2896,12 @@ class ArenaStore:
             raise ArenaStoreError("signal judgment authority is not unique")
         return rows[0] if rows else None
 
-    def get_signal_judgment_uses(self, run_id: str) -> List[Dict[str, Any]]:
+    def get_signal_judgment_uses(self, run_id: str, *, evidence=False) -> List[Dict[str, Any]]:
         return self._transport.select(
             "lab_arena_signal_judgment_uses", filters={"run_id": run_id},
-            order="company_index", limit=500,
+            order="company_index", limit=505,
             columns=("run_id,company_index,signal_index,cache_key,authority_slot,"
-                     "signal_input_hash,source_score_run_id,judgment_hash"),
+                     "signal_input_hash,source_score_run_id,judgment_hash" + (",acceptance_doc" if evidence else "")),
         )
 
     def signal_authority_exclusions(self, run_id: str) -> List[str]:
@@ -2931,6 +2995,13 @@ class ArenaStore:
                     raise ArenaStoreError("referenced run bulk read is invalid")
                 found[run_id] = row
         return found
+
+    def get_input_finish_event(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Use the existing run/created index and project one server finish anchor."""
+        rows = self._transport.select("lab_arena_trajectory_events",
+            filters={"run_id": run_id, "event_kind": "runtime.finished"}, order="created_at", limit=1,
+            columns="run_id,round_id,runner_hotkey,run_kind,event_kind,created_at,status:content->>status,started_at:content->>started_at,finished_at:content->>finished_at,resource_summary:content->resource_summary")
+        return rows[0] if rows else None
 
     def list_trajectory_events(self, run_id: str) -> List[Dict[str, Any]]:
         """Read one private run in bounded pages, including long trajectories."""

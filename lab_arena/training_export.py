@@ -265,6 +265,16 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
     if set(scoring_input) - runtime_fields != set(fields):
         raise ExportError("signal_scoring_input_changed")
     frozen_input = {field: scoring_input[field] for field in fields}
+    def evidence_scope(use, row, company_index, signal_index):
+        from lab_arena.training_evidence_cache import validate_use
+        try:
+            return validate_use(
+                use=use, row=row, judge=judge, scoring_input=frozen_input,
+                company_index=company_index, signal_index=signal_index, runs=runs,
+                round_row=round_row, source_input_reader=source_input_reader,
+                fields=fields, runtime_fields=runtime_fields)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ExportError("evidence_cache_use_invalid") from exc
     by_use = {}
     for use in uses:
         position = (use.get("run_id"), use.get("company_index"), use.get("signal_index"))
@@ -343,21 +353,25 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                 source_effective = company_judgments.effective_company_inputs(fit_input)[fit_position[1]]
                 if current_effective != source_effective:
                     raise ExportError("fit_checkpoint_company_input_mismatch")
-            execution_hash = contracts.document_hash({
-                "schema_version": contact_policy.output_schema(config),
-                "companies": fit_input["companies"],
-            })
-            scope = signal_judgments.build_fit_scope(
-                scoring_input=fit_input, company_index=fit_position[1],
-                checkpoint_context=signal_judgments.fit_checkpoint_context(
-                    fit_judge, execution, config, fit_input, execution_hash,
-                ),
-                round_id=judge["round_id"], network_name=round_row["arena_network_name"],
-                netuid=int(round_row.get("arena_netuid") or 0),
-                scorer_image_digest=config["scorer_image_digest"],
-                scorer_image_reference=config["scorer_image_reference"],
-            )
-            judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
+            evidence_v2 = (row.get("scope_doc") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2"
+            if evidence_v2:
+                scope, judgment = evidence_scope(fit_use, row, company_index, -1)
+            else:
+                execution_hash = contracts.document_hash({
+                    "schema_version": contact_policy.output_schema(config),
+                    "companies": fit_input["companies"],
+                })
+                scope = signal_judgments.build_fit_scope(
+                    scoring_input=fit_input, company_index=fit_position[1],
+                    checkpoint_context=signal_judgments.fit_checkpoint_context(
+                        fit_judge, execution, config, fit_input, execution_hash,
+                    ),
+                    round_id=judge["round_id"], network_name=round_row["arena_network_name"],
+                    netuid=int(round_row.get("arena_netuid") or 0),
+                    scorer_image_digest=config["scorer_image_digest"],
+                    scorer_image_reference=config["scorer_image_reference"],
+                )
+                judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
             from arena_reviewer_runtime.checkpoint_io import normalize_evidence_quotes
             fit_receipts = [receipt for receipt in breakdown.get("verifier_gate_receipts") or []
                             if isinstance(receipt, Mapping) and receipt.get("gate") == "company_fit"]
@@ -372,9 +386,10 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                 )) or source is None or source.get("kind") != "score"
                 or source.get("status") not in {"accepted", "failed", "leased"}
                 or source.get("round_id") != judge["round_id"]
-                or source.get("assignment_id") != fit_judge.get("assignment_id")
-                or source.get("scoring_generation_floor", 0) != fit_judge.get("scoring_generation_floor", 0)
-                or source.get("scored_run_id") != fit_judge.get("scored_run_id")
+                or (not evidence_v2 and (
+                    source.get("assignment_id") != fit_judge.get("assignment_id")
+                    or source.get("scoring_generation_floor", 0) != fit_judge.get("scoring_generation_floor", 0)
+                    or source.get("scored_run_id") != fit_judge.get("scored_run_id")))
                 or source.get("scored_run_id") != row.get("source_scored_run_id")
                 or source.get("runner_hotkey") != row.get("source_runner_hotkey")
                 or source.get("claim_request_hash") != row.get("source_claim_request_hash")
@@ -420,18 +435,22 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             if row is None or not isinstance(row.get("scope_doc"), Mapping):
                 raise ExportError("signal_authority_missing")
             scope_doc = row["scope_doc"]
-            scope = signal_judgments.build_scope(
-                scoring_input=frozen_input, company_index=company_index,
-                signal_index=signal_index,
-                verified_company_identity=scope_doc.get("verified_company_identity"),
-                verified_funding_stage_context=scope_doc.get("verified_funding_stage_context"),
-                verified_source_pages=scope_doc.get("verified_source_pages"),
-                round_id=judge["round_id"],
-                network_name=round_row["arena_network_name"],
-                netuid=int(round_row.get("arena_netuid") or 0),
-                scorer_image_digest=config["scorer_image_digest"],
-                scorer_image_reference=config["scorer_image_reference"],
-            )
+            evidence_v2 = scope_doc.get("evidence_judgment_policy") == "evidence_judgment_v2"
+            if evidence_v2:
+                scope, judgment = evidence_scope(use, row, company_index, signal_index)
+            else:
+                scope = signal_judgments.build_scope(
+                    scoring_input=frozen_input, company_index=company_index,
+                    signal_index=signal_index,
+                    verified_company_identity=scope_doc.get("verified_company_identity"),
+                    verified_funding_stage_context=scope_doc.get("verified_funding_stage_context"),
+                    verified_source_pages=scope_doc.get("verified_source_pages"),
+                    round_id=judge["round_id"],
+                    network_name=round_row["arena_network_name"],
+                    netuid=int(round_row.get("arena_netuid") or 0),
+                    scorer_image_digest=config["scorer_image_digest"],
+                    scorer_image_reference=config["scorer_image_reference"],
+                )
             if (scope_doc != scope
                     or signal_judgments.validate_reference(reference, scope) != reference
                     or identity != (reference["cache_key"], reference["authority_slot"])
@@ -444,7 +463,7 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
             source_id = row.get("source_score_run_id")
             source = runs.get(source_id)
-            if (raw != judgment
+            if (raw != (judgment["raw_judgment"] if evidence_v2 else judgment)
                     or row.get("judgment_hash") != contracts.document_hash(judgment)
                     or use.get("judgment_hash") != row["judgment_hash"]
                     or use.get("source_score_run_id") != source_id
@@ -1810,6 +1829,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                "round_status": round_row.get("status"), "rewards_enabled": round_row.get("rewards_enabled"),
                "arena_network_name": round_row.get("arena_network_name"),
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
+               # Host round timestamps are not publication dates of source pages.
+               # Preserve absence; do not substitute evaluation or export time.
+               "round_dates": {key: copy.deepcopy(round_row.get(key))
+                               for key in ("created_at", "published_at")},
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
     from lab_arena import baseline_reasoning
@@ -2231,6 +2254,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                         "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
                         "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
         for row in related})
+    clean["label_authority"] = {
+        "origin": "automated_native_scorer" if "judgment" in clean else "unavailable",
+        "ground_truth": "not_established",
+        "external_adjudication": "not_established_by_export",
+    }
     clean["example_hash"] = contracts.document_hash(clean)
     # Both privacy walks own their context containers. Worker artifacts and
     # journal prefixes come from freshly decoded JSON, with no caller-owned

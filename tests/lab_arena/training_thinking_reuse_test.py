@@ -1,5 +1,6 @@
 """Per-build reuse keeps strict full-thinking outputs and failure counts exact."""
 from copy import deepcopy
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,23 @@ from tests.lab_arena.training_steps_test import seal
 
 
 RULES = training_steps.Rules(production_rounds_only=False)
+
+
+@contextmanager
+def historical_provenance_projection():
+    """Keep old whole-result goldens after the reviewed metadata addition."""
+    candidate = training_steps._candidate
+
+    def without_added_provenance(*args, **kwargs):
+        row = candidate(*args, **kwargs)
+        for ref in row['source_refs']:
+            provenance = ref.pop('training_provenance')
+            assert provenance['schema_version'] == 'leadpoet.lab_arena.training_provenance.v1'
+            assert provenance['label_authority']['ground_truth'] == 'not_established'
+        return row
+
+    with patch.object(training_steps, '_candidate', side_effect=without_added_provenance):
+        yield
 
 
 def example_for(case):
@@ -96,7 +114,22 @@ def test_reuse_preserves_complete_result_and_counts_once_per_source(case):
                        wraps=training_thinking.selected_research_evidence) as selected:
         result = training_thinking.build([example], RULES)
     splits, manifest = result
-    assert contracts.document_hash(result) == expected_hash
+    # Preserve every historical payload and derived digest. Only the new
+    # source-ref metadata is removed before the ordinary build hashes it.
+    with historical_provenance_projection():
+        historical = training_thinking.build([example], RULES)
+    assert contracts.document_hash(historical) == expected_hash
+    projected = deepcopy(splits)
+    for split in ('train', 'eval'):
+        for row in projected[split]:
+            for ref in row['source_refs']:
+                ref.pop('training_provenance')
+    assert projected == historical[0]
+    previous_manifest = deepcopy(manifest)
+    previous_manifest['source_dataset_version'] = historical[1]['source_dataset_version']
+    previous_manifest.pop('dataset_version')
+    previous_manifest['dataset_version'] = contracts.document_hash(previous_manifest)
+    assert previous_manifest == historical[1]
     assert len(splits['train']) + len(splits['eval']) == expected_rows
     assert manifest['counts']['exclusion_reasons'] == expected_reasons
     assert selected.call_count == expected_validations
@@ -234,7 +267,8 @@ def test_delivery_failure_drops_candidates_after_source_evidence_reuse():
         for record in splits[split]:
             for ref in record['source_refs']:
                 ref['delivered_response_sha256'] = contracts.hash_bytes(b'unretained')
-    def deliver_candidates(examples, rules, *, full_thinking_candidate):
+    def deliver_candidates(examples, rules, *, full_thinking_candidate, role='source'):
+        assert role == 'source'
         for source in examples:
             for split in ('train', 'eval'):
                 for record in splits[split]:

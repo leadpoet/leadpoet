@@ -247,7 +247,7 @@ def create_app(service: ArenaService) -> FastAPI:
         if exc.code == "submission_replacement_closed":
             content["detail"] = (
                 "Queued submissions can be replaced only before "
-                "submission_replacement_cutoff (one hour before the round boundary) "
+                "the published submission_replacement_cutoff "
                 "and before evaluation starts. The accepted submission is unchanged."
             )
         if exc.code == "submission_replacement_ineligible":

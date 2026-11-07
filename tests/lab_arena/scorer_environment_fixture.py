@@ -13,12 +13,9 @@ def isolated_scorer_environment(monkeypatch):
     # pytest process, which inherits unrelated CI credentials and survives
     # across different frozen policies. Keep the real policy checks enabled.
     environment = dict(os.environ)
-    for name in (
-        *scoring.CREDENTIAL_ENV_NAMES,
-        *scoring.build_scorer_policy()["env_bindings"],
-        "ARENA_INTENT_EVIDENCE_MODEL",
-        "ARENA_INTENT_DETAILS_REVIEW_MODEL",
-        "ARENA_ROLE_BATCH_MODEL",
-    ):
+    bound = {}
+    scoring.apply_policy_to_environment(scoring.build_scorer_policy(),
+        environ=bound, credentials={name: "test-only-placeholder" for name in scoring.CREDENTIAL_ENV_NAMES})
+    for name in bound:
         environment.pop(name, None)
     monkeypatch.setattr(os, "environ", environment)

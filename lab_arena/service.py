@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 
 _CompanyEvidenceReads = Dict[Tuple[str, str, int], Dict[str, Any]]
 
+
+def _score_item_output_ref(round_id: str, run_id: str, output_hash: str) -> str:
+    """Use the output digest in score object keys so interrupted writes cannot poison retries."""
+    digest = contracts.require_sha256(output_hash, "score output hash").split(":", 1)[1]
+    return "arena/%s/scores/items/%s-%s.json" % (round_id, run_id, digest)
+
 # Final observation uploads already have two 60-second I/O attempts. Allow
 # their exact lease to finish after expiry without extending execution authority.
 _OBSERVATION_FINALIZATION_GRACE = timedelta(seconds=180)
@@ -107,8 +113,10 @@ class _PublicResultEvidenceReads(dict):
     def submission(self, store: ArenaStore, submission_id: str) -> Optional[Dict[str, Any]]:
         return self._read(self.submissions, submission_id, lambda: store.get_submission(submission_id))
 
-    def uses(self, store: ArenaStore, run_id: str) -> List[Dict[str, Any]]:
-        return self._read(self.signal_uses, run_id, lambda: store.get_signal_judgment_uses(run_id))
+    def uses(self, store: ArenaStore, run_id: str, *, evidence=False) -> List[Dict[str, Any]]:
+        return self._read(self.signal_uses, run_id,
+                          lambda: store.get_signal_judgment_uses(run_id, evidence=True) if evidence
+                          else store.get_signal_judgment_uses(run_id))
 
     def signal(self, store: ArenaStore, cache_key: str, authority_slot: int) -> Optional[Dict[str, Any]]:
         if type(cache_key) is not str or type(authority_slot) is not int:
@@ -341,6 +349,31 @@ def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
         phase[:32],
         type(exc).__name__[:64],
     )
+
+
+def _warn_observation_segment_failure(
+    run_id: str, number: int, stage: str, exc: Optional[BaseException] = None,
+) -> None:
+    """Log only authenticated identity, fixed stages and bounded error classes."""
+    try:
+        reason = exc.args[0] if isinstance(exc, training_observations.ObservationError) and len(exc.args) == 1 else None
+        if type(reason) is not str or reason not in {
+            "journal_store_unavailable", "segment_size_limit", "journal_invalid", "journal_unavailable",
+        }:
+            reason = "none"
+        # read_segment hides storage/parse prose but retains this immediate
+        # context. Its type distinguishes a timeout from a corrupt gzip body.
+        cause = exc.__context__ if reason == "journal_unavailable" else None
+        logger.warning(
+            "arena training observation segment unavailable run_id=%s segment=%s stage=%s "
+            "error_class=%s cause_class=%s observation_reason=%s",
+            run_id, number, stage, type(exc).__name__[:64],
+            type(cause).__name__[:64] if cause is not None else "none", reason,
+        )
+    except Exception:
+        # Diagnostics must not replace the existing storage API response.
+        pass
+
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
@@ -748,6 +781,7 @@ class RoundDefaults:
     company_quality_from: Optional[str] = None
     company_judgment_from: Optional[str] = None
     signal_judgment_from: Optional[str] = None
+    evidence_judgment_cache: bool = False
     intent_details_from: Optional[str] = None
     # Opt-in for future intake windows only; existing rounds keep their policy.
     reasoning_capture_from: Optional[str] = None
@@ -1735,6 +1769,11 @@ class ArenaService:
             >= datetime.fromisoformat(defaults.signal_judgment_from.replace("Z", "+00:00"))):
             document["scorer_policy"] = dict(document["scorer_policy"],
                 signal_judgment_policy="signal_judgment_v1")
+            if defaults.evidence_judgment_cache:
+                document["scorer_policy"] = dict(document["scorer_policy"],
+                    evidence_judgment_policy="evidence_judgment_v2", env_bindings={
+                        **document["scorer_policy"]["env_bindings"],
+                        "ARENA_EVIDENCE_JUDGMENT_POLICY": "evidence_judgment_v2"})
         if defaults.normalize_intent_scale and integrity.enabled(document):
             document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
                 **document["scorer_policy"]["env_bindings"],
@@ -1801,6 +1840,17 @@ class ArenaService:
                 raise ServiceError(
                     "reasoning_capture_activation_not_ready:%s" % unready_reason, 503,
                 )
+        if (document["scorer_policy"].get("env_bindings", {}).get(
+                contracts.JUDGE_REASONING_CAPTURE_BINDING) == reasoning_capture.POLICY):
+            try:
+                registry = document.get("reasoning_route_registry")
+                if registry is None:
+                    source = getattr(self._config, "reasoning_registry_source", None)
+                    registry = source() if source is not None else reasoning_capture.load_registry()
+                document["judge_reasoning_route_registry"] = reasoning_capture.validate_judge_registry(
+                    registry, document["scorer_policy"])
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                raise ServiceError("judge_reasoning_capture_activation_not_ready", 503) from exc
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
@@ -1957,7 +2007,7 @@ class ArenaService:
                 "round_id": row["round_id"],
                 "status": row["status"],
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
-                **self._public_round_output_policy(row.get("configuration_doc") or {}),
+                **self._public_round_output_policy(row.get("configuration_doc") or {}, row.get("replacement_freeze_seconds")),
             }]
 
         network_name, netuid = self._chain_scope()
@@ -1974,6 +2024,7 @@ class ArenaService:
                 offset=offset,
                 columns=(
                     "round_id,status,created_at,evaluation_date,rewards_enabled,"
+                    + getattr(self._store, "replacement_cutoff_columns", "")
                     + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 ),
             )
@@ -1994,7 +2045,7 @@ class ArenaService:
                 "round_id": row["round_id"],
                 "status": row["status"],
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
-                **self._public_round_output_policy(row.get("configuration_doc") or {}),
+                **self._public_round_output_policy(row.get("configuration_doc") or {}, row.get("replacement_freeze_seconds")),
             }
             for row in reversed(rows)
         ]
@@ -2130,6 +2181,7 @@ class ArenaService:
             limit=1,
             columns=(
                 "round_id,status,published_at,"
+                + getattr(self._store, "replacement_cutoff_columns", "")
                 + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 + ",king_outcome,king_hotkey,effective_reward_epoch,reward_basis_hash"
             ),
@@ -2395,7 +2447,12 @@ class ArenaService:
     @staticmethod
     def _submission_replacement_cutoff(round_row: Mapping[str, Any]) -> datetime:
         schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
-        return _parse_iso(schedule["submission_cutoff"]) - timedelta(hours=1)
+        seconds = round_row.get("replacement_freeze_seconds")
+        if seconds is None:
+            seconds = 3600
+        if type(seconds) is not int or seconds not in (600, 3600):
+            raise ServiceError("submission_replacement_policy_invalid", 503)
+        return _parse_iso(schedule["submission_cutoff"]) - timedelta(seconds=seconds)
 
     def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
@@ -3266,9 +3323,14 @@ class ArenaService:
             raise ServiceError("scoring_plan_invalid", 500)
         return validated
 
-    def _outputs_by_run(self, round_id: str, stage: int) -> Dict[str, List[Dict[str, Any]]]:
+    def _outputs_by_run(
+        self, round_id: str, stage: int, *,
+        executions: Optional[Sequence[Mapping[str, Any]]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         outputs: Dict[str, List[Dict[str, Any]]] = {}
-        for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
+        if executions is None:
+            executions = self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute")
+        for run in executions:
             document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
             outputs[str(run["run_id"])] = list(document["companies"])
         return outputs
@@ -3853,8 +3915,12 @@ class ArenaService:
         return document, contracts.document_hash(output)
 
     @staticmethod
-    def _legacy_partial_receipt(run, round_row, scoring_input, execution_hash, output, completion_hash):
+    def _legacy_partial_receipt(
+        run, round_row, scoring_input, execution_hash, output, completion_hash,
+        source_output_ref=None,
+    ):
         configuration = round_row.get("configuration_doc") or {}
+        output_hash = contracts.document_hash(output)
         return {
             "schema_version": "leadpoet.lab_arena.legacy_partial.v1",
             **{key: run.get(key) for key in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "scored_run_id")},
@@ -3864,8 +3930,10 @@ class ArenaService:
             "source_claim_request_hash": run.get("claim_request_hash"),
             "source_lease_generation": int(run.get("lease_generation") or 0),
             "runner_authority_exclusions": (run.get("claim_response") or {}).get("runner_authority_exclusions"),
-            "source_output_ref": "arena/%s/scores/items/%s.json" % (round_row["round_id"], run["run_id"]),
-            "source_output_hash": contracts.document_hash(output),
+            "source_output_ref": source_output_ref or _score_item_output_ref(
+                str(round_row["round_id"]), str(run["run_id"]), output_hash,
+            ),
+            "source_output_hash": output_hash,
             "scoring_input_hash": contracts.document_hash(scoring_input),
             "execution_output_hash": execution_hash,
             "scorer_image_digest": configuration.get("scorer_image_digest"),
@@ -3896,8 +3964,20 @@ class ArenaService:
         output = scoring.validate_scoring_output_document(json.loads(
             self._objects.get_bounded(str(source["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES)))
         document, execution_hash = self._legacy_partial_input(source, round_row)
-        expected = self._legacy_partial_receipt(source, round_row, document, execution_hash, output, completion_hash)
-        if (receipt != expected or source["output_ref"] != expected["source_output_ref"]
+        expected = self._legacy_partial_receipt(
+            source, round_row, document, execution_hash, output, completion_hash,
+            source_output_ref=str(source.get("output_ref") or ""),
+        )
+        legacy_output_ref = "arena/%s/scores/items/%s.json" % (
+            round_row["round_id"], source["run_id"],
+        )
+        content_addressed_output_ref = _score_item_output_ref(
+            str(round_row["round_id"]), str(source["run_id"]),
+            contracts.document_hash(output),
+        )
+        if (receipt != expected or source["output_ref"] not in {
+                legacy_output_ref, content_addressed_output_ref,
+            }
             or output.get("scored_run_id") != source.get("scored_run_id")
             or "failure" not in output or not output.get("terminal_breakdowns")
             or (source.get("terminal_cause") != "credential_error" and output["failure"] != source["terminal_cause"])):
@@ -4162,7 +4242,6 @@ class ArenaService:
         policy = contracts.validate_scorer_policy(round_row["configuration_doc"]["scorer_policy"])
         plan = self._load_scoring_plan(round_row, stage)
         icps = self.evaluation_icps(round_id)
-        outputs = self._outputs_by_run(round_id, stage)
         chosen = self._scoring_outputs(round_id, stage, round_row=round_row)
         baseline_ids = {
             str(participant["submission_id"])
@@ -4228,6 +4307,14 @@ class ArenaService:
             and incomplete_items.get(item["scored_run_id"]) == "stage_closed"
             for item in plan["work_items"]
         )
+        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
+        needed = {item["scored_run_id"] for item in plan["work_items"]
+                  if item["scored_run_id"] not in failed_items
+                  and item["scored_run_id"] not in incomplete_items}
+        outputs = self._outputs_by_run(round_id, stage, executions=[
+            run for run in runs if run.get("status") == "accepted" and run["run_id"] in needed
+        ])
+        evidence_reads = _PublicResultEvidenceReads()
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
         for item in plan["work_items"]:
@@ -4239,7 +4326,8 @@ class ArenaService:
             companies = outputs[scored_run_id]
             try:
                 breakdowns_by_item[scored_run_id] = self._verified_breakdowns(
-                    run, icp=icp, companies=companies, policy=policy
+                    run, icp=icp, companies=companies, policy=policy,
+                    evidence_reads=evidence_reads, round_context=round_row,
                 )
             except scoring.ScoringError:
                 return self._store.cancel_round(
@@ -4279,7 +4367,6 @@ class ArenaService:
             breakdowns_by_item=breakdowns_by_item,
             configuration=round_row.get("configuration_doc"),
         )
-        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
         recorded = self._record_current_run_scores(round_row, stage, scoring.run_scores_for_store(stage_scores, runs))
         if recorded.get("status") != "ok":
             # The per-run scores are part of the published result; a write the
@@ -4957,6 +5044,7 @@ class ArenaService:
         configuration = row["configuration_doc"]
         policy = contracts.validate_scorer_policy(configuration["scorer_policy"])
         icps = self.evaluation_icps(round_id)
+        evidence_reads = _PublicResultEvidenceReads()
         for stage in (1, 2):
             sources = self._store.list_runs(round_id, stage=stage, kind="execute")
             score_runs = self._store.list_runs(round_id, stage=stage, kind="score")
@@ -4968,7 +5056,7 @@ class ArenaService:
                 and judges.get(str(source["run_id"]), {}).get("status") == "accepted"]
             if not ready:
                 continue
-            outputs = self._outputs_by_run(round_id, stage)
+            outputs = self._outputs_by_run(round_id, stage, executions=ready)
             rows = []
             for source in ready:
                 judge = judges[str(source["run_id"])]
@@ -4977,7 +5065,8 @@ class ArenaService:
                 position = int(source["icp_position"])
                 companies = outputs[str(source["run_id"])]
                 breakdowns = self._verified_breakdowns(
-                    judge, icp=icps[position], companies=companies, policy=policy)
+                    judge, icp=icps[position], companies=companies, policy=policy,
+                    evidence_reads=evidence_reads, round_context=row)
                 rows.append(verify.scored_row(str(source["submission_id"]),
                     position, str(source["run_id"]), icps[position], companies,
                     breakdowns, policy))
@@ -5017,7 +5106,7 @@ class ArenaService:
             selected = self._selected_execution_runs(reads.runs, submission_id)
             for run in selected.values():
                 if run.get("status") == "accepted":
-                    if reads.output(str(run["output_ref"]))["companies"] and run.get("per_icp_score") is not None:
+                    if reads.output(str(run["output_ref"]))["companies"]:
                         continue
                 elif run.get("status") != "failed" or run.get("terminal_cause") not in (
                     "provider_error", "stage_closed"):
@@ -5224,6 +5313,10 @@ class ArenaService:
         )
         try:
             infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
+        except ArenaStoreUnavailable:
+            # A failed read cannot prove that saved evaluation is incomplete.
+            # Keep the ordinary store-unavailable path, even after the deadline.
+            raise
         except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
                 TypeError, ValueError, UnicodeDecodeError):
             return self._hold_incomplete_evaluation(
@@ -6062,6 +6155,15 @@ class ArenaService:
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
+        from lab_arena import evidence_judgments
+        if evidence_judgments.enabled(configuration.get("scorer_policy") or {}):
+            advertised = body.get("evidence_judgment_policies")
+            if (not isinstance(advertised, list) or not 1 <= len(advertised) <= 8
+                    or any(not isinstance(policy, str) for policy in advertised)
+                    or evidence_judgments.POLICY not in advertised):
+                # Allocation chooses execution or scoring atomically. Fence an
+                # incompatible worker before it can acquire either lease kind.
+                raise ServiceError("validator_evidence_judgment_upgrade_required", 409)
         required_output_schema = contact_policy.output_schema(configuration)
         if (
             required_output_schema
@@ -6192,6 +6294,10 @@ class ArenaService:
             # The worker's request validator receives the frozen round policy
             # through the gateway lease, never through a miner operation frame.
             lease["reasoning_capture_policy"] = reasoning_capture.POLICY
+        if (response.get("kind") == "score"
+                and (configuration.get("scorer_policy") or {}).get("env_bindings", {}).get(
+                    "ARENA_JUDGE_REASONING_CAPTURE_POLICY") == reasoning_capture.POLICY):
+            lease["judge_reasoning_capture_policy"] = reasoning_capture.POLICY
         if configuration.get("deepline_catalog") is not None:
             lease["deepline_catalog"] = configuration["deepline_catalog"]
         checkpoint_policy = configuration.get("checkpoint_deadline_policy")
@@ -6357,6 +6463,10 @@ class ArenaService:
             deepline_catalog=configuration.get("deepline_catalog"),
             reasoning_capture_policy=capture_configuration.get("reasoning_capture_policy"),
             reasoning_route_registry=capture_configuration.get("reasoning_route_registry"),
+            judge_reasoning_capture_policy=(configuration.get("scorer_policy") or {}).get(
+                "env_bindings", {}).get("ARENA_JUDGE_REASONING_CAPTURE_POLICY"),
+            judge_reasoning_route_registry=configuration.get(
+                "judge_reasoning_route_registry", configuration.get("reasoning_route_registry")),
         )
 
     def handle_signal_judgment(
@@ -6385,19 +6495,23 @@ class ArenaService:
             raise ServiceError("signal_judgment_policy_unavailable", 409)
         if not isinstance(request, Mapping):
             raise ServiceError("signal_judgment_request_invalid", 400)
+        from lab_arena import evidence_judgments
+        evidence_v2 = evidence_judgments.enabled(policy)
         operation = request.get("operation")
         company_index = request.get("company_index")
         signal_index = request.get("signal_index")
-        if operation not in ("claim", "complete") or type(company_index) is not int or type(signal_index) is not int:
+        if operation not in (("candidates", "claim", "complete") if evidence_v2 else ("claim", "complete")) or type(company_index) is not int or type(signal_index) is not int:
             raise ServiceError("signal_judgment_request_invalid", 400)
-        fit_checkpoint = request.get("checkpoint_kind") == company_judgments.FIT_CHECKPOINT_KIND
+        fit_checkpoint = request.get("checkpoint_kind") in (
+            company_judgments.FIT_CHECKPOINT_KIND,
+            evidence_judgments.FIT_KIND if evidence_v2 else company_judgments.FIT_CHECKPOINT_KIND)
         if (fit_checkpoint != (signal_index == company_judgments.FIT_CHECKPOINT_INDEX)
             or ("checkpoint_kind" in request and not fit_checkpoint)):
             raise ServiceError("signal_judgment_request_invalid", 400)
-        if fit_checkpoint:
-            from lab_arena.signal_cache_control import validate_request
+        if fit_checkpoint or evidence_v2:
+            from lab_arena.signal_cache_control import validate_request, validate_evidence_request
             try:
-                validate_request(request)
+                (validate_evidence_request if evidence_v2 else validate_request)(request)
             except ValueError as exc:
                 raise ServiceError("signal_judgment_request_invalid", 400) from exc
         executed = self._store.get_run(str(run.get("scored_run_id") or ""))
@@ -6433,6 +6547,10 @@ class ArenaService:
                     and provider_observations.enabled(policy) else None
                 ),
             )
+            if evidence_v2:
+                return self._handle_evidence_judgment(
+                    run=run, executed=executed, round_row=round_row, configuration=configuration,
+                    scoring_input=scoring_input, lease_token=lease_token, request=request)
             scope_builder = signal_judgments.build_fit_scope if fit_checkpoint else signal_judgments.build_scope
             scope = scope_builder(
                 scoring_input=scoring_input, company_index=company_index,
@@ -6525,6 +6643,125 @@ class ArenaService:
         if result.get("status") not in ("stored", "existing", "released", "pending"):
             raise ServiceError("signal_judgment_completion_invalid", 500)
         return {"status": result["status"], "reference": reference}
+
+    def _handle_evidence_judgment(self, *, run, executed, round_row, configuration,
+                                   scoring_input, lease_token, request):
+        from lab_arena import evidence_judgments as evidence
+        operation = request["operation"]
+        company_index, signal_index = request["company_index"], request["signal_index"]
+        try:
+            selected = reviewer_runtime.selected_image(run, configuration)
+            scope = evidence.build_scope(
+                scoring_input=scoring_input, company_index=company_index, signal_index=signal_index,
+                round_id=str(run["round_id"]), network_name=str(round_row.get("arena_network_name") or ""),
+                netuid=int(round_row.get("arena_netuid") or 0),
+                scorer_image_digest=str(configuration.get("scorer_image_digest") or ""),
+                scorer_image_reference=str(configuration.get("scorer_image_reference") or ""),
+                runtime_image_digest=selected["image_digest"], runtime_image_reference=selected["image_reference"],
+                evidence_input=request.get("evidence_input"), evidence_hash=request.get("evidence_hash"),
+                verified_company_identity=request.get("verified_company_identity"),
+                verified_funding_stage_context=request.get("verified_funding_stage_context"),
+                verified_source_pages=request.get("verified_source_pages"))
+            if "claim" in request and request["claim"] != scope.get("claim"):
+                raise evidence.Error("current claim differs from frozen scoring input")
+            lease_hash = hash_lease_token(lease_token)
+            if operation == "complete":
+                reference = signal_judgments.validate_reference(request.get("reference"), scope)
+                judgment = evidence.validate_judgment(request["judgment"], scope) if request.get("judgment") is not None else None
+                result = self._store.complete_signal_judgment(
+                    run_id=run["run_id"], lease_token_hash=lease_hash,
+                    company_index=company_index, signal_index=signal_index, scope=scope, reference=reference,
+                    judgment=judgment, judgment_hash=contracts.document_hash(judgment) if judgment is not None else "")
+                if result.get("status") not in {"stored", "existing", "released", "pending"}:
+                    raise evidence.Error("evidence completion is invalid")
+                return {"status": result["status"], "reference": reference}
+            candidate_reference = request.get("candidate_reference")
+            if candidate_reference is not None:
+                source, source_scope = self._validated_evidence_source(candidate_reference, run, configuration, lease_hash)
+                if (source_scope.get("family_doc") != scope.get("family_doc")
+                    or source_scope.get("family_hash") != scope.get("family_hash")
+                    or source_scope.get("evidence_hash") != scope.get("evidence_hash")
+                    or source_scope.get("evidence_input") != scope.get("evidence_input")):
+                    raise evidence.Error("candidate differs from current evidence")
+                evidence.validate_equivalence(request.get("equivalence_receipt"), source_scope.get("claim"),
+                                              scope.get("claim"), scoring_input["scorer_policy"])
+            result = self._store.evidence_judgment(
+                operation=operation, run_id=run["run_id"], lease_token_hash=lease_hash,
+                company_index=company_index, signal_index=signal_index, scope=scope,
+                candidate_reference=candidate_reference, equivalence_receipt=request.get("equivalence_receipt"))
+            if operation == "candidates":
+                candidates = result.get("candidates")
+                if result.get("status") != "candidates" or not isinstance(candidates, list) or len(candidates) > 8:
+                    raise evidence.Error("candidate result is invalid")
+                for candidate in candidates:
+                    source, source_scope = self._validated_evidence_source(candidate.get("reference"), run, configuration, lease_hash)
+                    if (candidate != {"reference": signal_judgments.reference(source_scope, source["authority_slot"]),
+                                      "scope": source_scope, "judgment": source["judgment_doc"]}
+                        or source_scope.get("family_doc") != scope.get("family_doc")
+                        or source_scope.get("family_hash") != scope.get("family_hash")
+                        or (signal_index >= 0 and source_scope.get("evidence_hash") != scope.get("evidence_hash"))):
+                        raise evidence.Error("candidate source changed")
+                from lab_arena.signal_cache_control import MAX_BYTES
+                bounded = []
+                for candidate in candidates:
+                    response = {"status": "candidates", "candidates": [*bounded, candidate]}
+                    if len(contracts.canonical_json(response).encode("utf-8")) <= MAX_BYTES:
+                        bounded.append(candidate)
+                return {"status": "candidates", "candidates": bounded}
+            if result.get("status") in {"busy", "pending"}:
+                return {"status": result["status"]}
+            if result.get("status") == "miss":
+                reference = signal_judgments.validate_reference(result.get("reference"), scope)
+                return {"status": "miss", "reference": reference, "current_scope": scope}
+            if result.get("status") == "hit":
+                source, source_scope = self._validated_evidence_source(result.get("reference"), run, configuration, lease_hash)
+                if candidate_reference is None and source_scope != scope:
+                    raise evidence.Error("exact evidence source changed")
+                if result.get("judgment") != source["judgment_doc"]:
+                    raise evidence.Error("evidence judgment changed")
+                return {"status": "hit", "reference": result["reference"],
+                        "judgment": source["judgment_doc"], "current_scope": scope}
+            raise evidence.Error("evidence claim is invalid")
+        except (evidence.Error, company_judgments.CompanyJudgmentError, KeyError, TypeError, ValueError) as exc:
+            raise ServiceError("signal_judgment_evidence_invalid", 400) from exc
+
+    def _validated_evidence_source(self, reference, run, configuration, lease_hash):
+        from lab_arena import evidence_judgments as evidence
+        if not isinstance(reference, Mapping):
+            raise evidence.Error("candidate reference is invalid")
+        source = self._store.get_signal_judgment(reference.get("cache_key"), reference.get("authority_slot"))
+        if source is None:
+            raise evidence.Error("candidate authority is missing")
+        scope = source.get("scope_doc")
+        if not isinstance(scope, Mapping) or not evidence.enabled(scope):
+            raise evidence.Error("candidate policy is invalid")
+        signal_judgments.validate_reference(reference, scope)
+        judgment = evidence.validate_judgment(source.get("judgment_doc"), scope)
+        if (source.get("signal_input_hash") != reference["signal_input_hash"]
+            or source.get("judgment_hash") != contracts.document_hash(judgment)
+            or scope.get("cache_key") != contracts.document_hash({key: value for key, value in scope.items() if key != "cache_key"})
+            or scope.get("evidence_hash") != contracts.document_hash(scope.get("evidence_input"))):
+            raise evidence.Error("candidate evidence integrity differs")
+        origin = self._store.get_run(str(source.get("source_score_run_id") or ""))
+        execution = self._store.get_run(str(source.get("source_scored_run_id") or ""))
+        exclusions = source.get("runner_authority_exclusions")
+        same_lease = (origin is not None and origin.get("run_id") == run["run_id"]
+                      and origin.get("status") == "leased" and origin.get("lease_token_hash") == lease_hash)
+        if (origin is None or execution is None or execution.get("kind") != "execute"
+            or execution.get("status") != "accepted"
+            or any(execution.get(key) != origin.get(key) for key in
+                   ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))
+            or origin.get("kind") != "score" or origin.get("status") not in {"leased", "accepted", "failed"}
+            or origin.get("round_id") != run.get("round_id")
+            or origin.get("scored_run_id") != source.get("source_scored_run_id")
+            or origin.get("runner_hotkey") != source.get("source_runner_hotkey")
+            or origin.get("claim_request_hash") != source.get("source_claim_request_hash")
+            or origin.get("lease_generation") != source.get("source_lease_generation")
+            or not isinstance(exclusions, list) or source.get("source_runner_hotkey") not in exclusions
+            or (run.get("miner_hotkey") in exclusions and not same_lease)
+            or reviewer_runtime.selected_image(origin, configuration) != reviewer_runtime.selected_image(run, configuration)):
+            raise evidence.Error("candidate source authority differs")
+        return source, scope
 
     def handle_quota_snapshot(
         self,
@@ -6670,11 +6907,92 @@ class ArenaService:
             raise ServiceError("lease_inactive", 409)
         return run
 
+    def _training_input_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Grant only immutable input storage, never renewed execution authority."""
+        try:
+            return self._training_capture_run(run_id, lease_token)
+        except ServiceError as exc:
+            if exc.code not in {"lease_inactive", "lease_expired"}:
+                raise
+            original_error = exc
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
+        if not hmac.compare_digest(str(run.get("lease_token_hash") or ""), hash_lease_token(lease_token)):
+            raise ServiceError("lease_invalid", 401)
+        try:
+            training_input.object_ref(run_id, run.get("lease_generation"))
+            training_input._validate_claim_hash(run.get("claim_request_hash"))
+            claim = run.get("claim_response") or {}
+            if (claim.get("status") != "leased" or not isinstance(run.get("claim_request_id"), str)
+                    or contracts.HEX32_RE.fullmatch(run["claim_request_id"]) is None
+                    or claim.get("request_id") != run["claim_request_id"]
+                    or claim.get("run_id") != run_id or type(claim.get("lease_generation")) is not int
+                    or claim["lease_generation"] != run["lease_generation"]
+                    or claim.get("kind") != run.get("kind") or run.get("terminal_doc")):
+                raise ValueError("input lease binding differs")
+            def instant(value):
+                parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("input timestamp lacks a zone")
+                return parsed.astimezone(timezone.utc)
+            now = self.now()
+            expiry = instant(run.get("lease_expires_at"))
+            anchors = [expiry]
+            if run.get("status") in {"accepted", "failed"}:
+                result = run.get("result_doc")
+                contracts.validate_run_result(result)
+                cause = run.get("terminal_cause")
+                allowed = ({"accepted"} | set(contracts.MODEL_CAUSED_TERMINAL_CAUSES) | {"provider_error"}
+                           if run.get("kind") == "execute" else set(contracts.SCORE_TERMINAL_CAUSES))
+                if (cause not in allowed or result.get("terminal_status") != cause
+                        or (run["status"] == "accepted") != (cause == "accepted")):
+                    raise ValueError("input terminal binding differs")
+                started, finished = instant(result["started_at"]), instant(result["finished_at"])
+                if not started <= finished <= now:
+                    raise ValueError("input finish anchor is invalid")
+                anchors.append(finished)
+                if run["status"] == "accepted":
+                    terminal = instant(run.get("participation_accepted_at"))
+                else:
+                    event = self._store.get_input_finish_event(run_id)
+                    # runtime.finished can be appended only under the live
+                    # token. Its database created_at precedes completion and
+                    # cannot be refreshed by late provider or billing events.
+                    if (not isinstance(event, Mapping) or not isinstance(run.get("runner_hotkey"), str)
+                            or not run["runner_hotkey"]
+                            or any(event.get(key) != run.get(key) for key in ("run_id", "round_id", "runner_hotkey"))
+                            or event.get("run_kind") != run.get("kind")
+                            or event.get("event_kind") != "runtime.finished"
+                            or event.get("status") != cause or event.get("started_at") != result["started_at"]
+                            or event.get("finished_at") != result["finished_at"]
+                            or contracts.canonical_json(event.get("resource_summary")) != contracts.canonical_json(result["resource_summary"])):
+                        raise ValueError("input server finish binding differs")
+                    terminal = instant(event.get("created_at"))
+                if not started <= terminal <= now:
+                    raise ValueError("input server terminal anchor is invalid")
+                anchors.append(terminal)
+            elif run.get("status") != "leased" or run.get("terminal_cause") is not None or expiry > now:
+                raise ValueError("input lease is not eligible")
+            if now >= min(anchors) + _OBSERVATION_FINALIZATION_GRACE:
+                raise ServiceError("lease_expired", 409)
+            round_state = self._store.get_round_capture_state(str(run["round_id"]))
+            if (round_state is None or round_state.get("round_id") != run["round_id"]
+                    or round_state.get("status") == "cancelled"):
+                raise ValueError("input round is not active")
+        except ServiceError:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError, ArenaContractError):
+            raise original_error from None
+        return run
+
     def handle_training_input(
         self, run_id: str, lease_token: str, document: Any,
     ) -> Dict[str, Any]:
-        """Store the final runner input only for this live, owned run lease."""
-        run = self._training_capture_run(run_id, lease_token)
+        """Store only the original owned input, with a bounded capture-only grace."""
+        run = self._training_input_capture_run(run_id, lease_token)
+        identity = {key: run.get(key) for key in ("round_id", "kind", "lease_generation", "claim_request_hash")}
         try:
             snapshot, compressed = training_input.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,
@@ -6684,6 +7002,9 @@ class ArenaService:
             )
         except (ValueError, TypeError, RecursionError):
             raise ServiceError("training_input_invalid", 400) from None
+        current = self._training_input_capture_run(run_id, lease_token)
+        if any(current.get(key) != value for key, value in identity.items()):
+            raise ServiceError("lease_invalid", 401)
         objects = self._config.training_object_store
         if objects is None:
             raise ServiceError("training_input_unavailable", 503)
@@ -6775,13 +7096,15 @@ class ArenaService:
             raise ServiceError("training_observation_segment_invalid", 400) from None
         objects = self._config.training_object_store
         if objects is None:
+            _warn_observation_segment_failure(run_id, segment["number"], "store_missing")
             raise ServiceError("training_observation_segment_unavailable", 503)
         if segment["number"]:
             try:
                 previous = training_observations.read_segment(
                     objects, run_id, segment["kind"], segment["lease_generation"],
                     segment["claim_request_hash"], segment["number"] - 1)
-            except Exception:
+            except Exception as exc:
+                _warn_observation_segment_failure(run_id, segment["number"], "previous_read", exc)
                 raise ServiceError("training_observation_segment_unavailable", 503) from None
             if (previous is None or previous["segment_sha256"] != segment["previous_sha256"]
                     or segment["cumulative_bytes"] != previous["cumulative_bytes"]
@@ -6803,7 +7126,8 @@ class ArenaService:
             objects.put(ref, compressed)
         except ArenaContractError:
             raise ServiceError("training_observation_segment_conflict", 409) from None
-        except Exception:
+        except Exception as exc:
+            _warn_observation_segment_failure(run_id, segment["number"], "put", exc)
             raise ServiceError("training_observation_segment_unavailable", 503) from None
         return {"status": "stored", "number": segment["number"],
                 "segment_sha256": segment["segment_sha256"]}
@@ -7190,15 +7514,14 @@ class ArenaService:
         limits = (contracts.RESPONSES_PROVIDER_FRAME_LIMITS
                   if frame["operation_id"] == "openrouter.responses" else contracts.PROVIDER_FRAME_LIMITS)
         # Decode only a bounded candidate before resolving its existing lease.
-        # The frozen execute policy, never a caller hint, admits larger history.
+        # The frozen run-role policy, never a caller hint, admits larger history.
         candidate_limits = limits
         if frame["operation_id"] in ("openrouter.chat", "openrouter.responses"):
             candidate_limits = (contracts.FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS
                 if frame["operation_id"] == "openrouter.responses" else contracts.FULL_THINKING_PROVIDER_FRAME_LIMITS)
         contracts.check_strict_document(frame, candidate_limits)
         run, context = self._run_context(run_id, lease_token)
-        if not (getattr(context, "kind", "execute") == "execute"
-                and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY):
+        if broker_module._reasoning_contract(context)[0] != reasoning_capture.POLICY:
             contracts.check_strict_document(frame, limits)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])
@@ -7496,14 +7819,43 @@ class ArenaService:
                         output["terminal_breakdowns"], icp=document["icp"], companies=document["companies"], policy=document["scorer_policy"],
                     )
                     run_result["legacy_partial_checkpoint"] = self._legacy_partial_receipt(
-                        run, round_row, document, execution_hash, output, contracts.request_bytes_hash(validated),
+                        run, round_row, document, execution_hash, output,
+                        contracts.request_bytes_hash(validated),
+                        source_output_ref=_score_item_output_ref(
+                            round_id, run_id, contracts.document_hash(output),
+                        ),
                     )
                 except (scoring.ScoringError, ValueError, OutputInvalid) as exc:
                     raise ServiceError("legacy_checkpoint_output_invalid", 400) from exc
-            output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
             output_bytes = contracts.canonical_json(output).encode("utf-8")
-            self._objects.put(output_ref, output_bytes)
+            if len(output_bytes) > scoring.MAX_SCORING_OUTPUT_BYTES:
+                raise ServiceError("output_invalid", 400)
             output_hash = contracts.document_hash(output)
+            output_ref = _score_item_output_ref(round_id, run_id, output_hash)
+            if run.get("status") in ("accepted", "failed"):
+                committed_ref = str(run.get("output_ref") or "")
+                if not committed_ref:
+                    raise ArenaContractError(
+                        "terminal score run has no committed output reference"
+                    )
+                committed_bytes = self._objects.get_optional_bounded(
+                    committed_ref, scoring.MAX_SCORING_OUTPUT_BYTES,
+                )
+                if committed_bytes != output_bytes:
+                    raise ArenaContractError(
+                        "object ref %s already holds different bytes" % committed_ref
+                    )
+                output_ref = committed_ref
+                if partial_legacy_output:
+                    receipt = run_result.get("legacy_partial_checkpoint")
+                    if not isinstance(receipt, dict):
+                        raise ArenaContractError(
+                            "terminal legacy score run has no validated checkpoint"
+                        )
+                    # The database binds a legacy checkpoint to the committed
+                    # output reference. Historical rows may still use the
+                    # original run-only key, which is valid after byte equality.
+                    receipt["source_output_ref"] = committed_ref
             if company_quality_run:
                 context = (run.get("claim_response") or {}).get(
                     "company_judgment_cache"
@@ -7643,6 +7995,10 @@ class ArenaService:
                 except judgment_cache.JudgmentCacheError as exc:
                     raise ServiceError("judgment_cache_invalid", 500) from exc
                 judgment_evidence_hash = contracts.document_hash(judgment_evidence)
+            # Validate all judgment evidence before writing its immutable,
+            # content-addressed object. A rejected completion must not leave
+            # an artifact that appears committed to a later reader.
+            self._objects.put(output_ref, output_bytes)
         elif terminal_status == "accepted":
             try:
                 output = validate_output_document(
@@ -8523,7 +8879,7 @@ class ArenaService:
         return {"outcomes": [dict(row["outcome_doc"]) for row in rows], "lookup_ok": True}
 
     @staticmethod
-    def _public_round_output_policy(configuration: Mapping[str, Any]) -> Dict[str, Any]:
+    def _public_round_output_policy(configuration: Mapping[str, Any], replacement_freeze_seconds: Optional[int] = None) -> Dict[str, Any]:
         """Expose the output contract and replacement deadline, never ICPs."""
 
         cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
@@ -8531,7 +8887,9 @@ class ArenaService:
             "max_replacement_attempts": 1,
             "benchmark_icp_count": contracts.benchmark_icp_count(configuration),
             "promotion_margin": contracts.promotion_margin(configuration),
-            **({"submission_replacement_cutoff": (_parse_iso(cutoff) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")} if cutoff else {}),
+            **({"submission_replacement_cutoff": ArenaService._submission_replacement_cutoff({
+                "configuration_doc": configuration, "replacement_freeze_seconds": replacement_freeze_seconds,
+            }).isoformat().replace("+00:00", "Z")} if cutoff else {}),
             "output_schema_version": contact_policy.output_schema(configuration),
             **({"integrity_policy": integrity.POLICY} if integrity.enabled(configuration) else {}),
             **({"contact_policy": contact_policy.POLICY} if contact_policy.enabled(configuration) else {}),
@@ -8567,7 +8925,7 @@ class ArenaService:
             "round_id": round_id,
             "status": row["status"],
             "schedule": dict(configuration.get("schedule") or {}),
-            **self._public_round_output_policy(configuration),
+            **self._public_round_output_policy(configuration, row.get("replacement_freeze_seconds")),
             "participants": participants,
             "finalists": row.get("finalists") if row["status"] == "published" else None,
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
@@ -8709,11 +9067,13 @@ class ArenaService:
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
         evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        evidence_v2: bool = False,
     ) -> None:
         """Credit immutable original signal sources used by this company."""
 
         reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
-        uses = (reads.uses(self._store, company_source_run_id) if reads is not None
+        uses = (reads.uses(self._store, company_source_run_id, evidence=evidence_v2) if reads is not None
+                else self._store.get_signal_judgment_uses(company_source_run_id, evidence=True) if evidence_v2
                 else self._store.get_signal_judgment_uses(company_source_run_id))
         seen: set[tuple[int, int]] = set()
         for use in uses:
@@ -8798,6 +9158,9 @@ class ArenaService:
             == signal_judgments.POLICY
         )
 
+        evidence_v2 = signal_policy and (((self._round_from_context(round_id, round_context).get("configuration_doc") or {})
+                                         .get("scorer_policy") or {}).get("evidence_judgment_policy") == "evidence_judgment_v2")
+
         if score_run.get("company_judgment_refs") is not None:
             try:
                 lease = company_judgments.validate_lease_context(
@@ -8878,7 +9241,7 @@ class ArenaService:
                             company_indexes={int(item["company_index"])},
                             current_score_run_id=score_run_id, round_id=round_id,
                             runs_by_id=runs_by_id,
-                            evidence_reads=evidence_reads,
+                            evidence_reads=evidence_reads, evidence_v2=evidence_v2,
                         )
                     continue
                 hotkey = self._validated_attribution_source(
@@ -8913,7 +9276,7 @@ class ArenaService:
                         company_indexes=source_indexes,
                         current_score_run_id=score_run_id, round_id=round_id,
                         runs_by_id=runs_by_id,
-                        evidence_reads=evidence_reads,
+                        evidence_reads=evidence_reads, evidence_v2=evidence_v2,
                     )
             return attributed
 
@@ -8985,6 +9348,8 @@ class ArenaService:
         signal_companies: Dict[str, set[int]] = {}
         signal_policy = (((round_context.get("configuration_doc") or {}).get("scorer_policy") or {})
                          .get("signal_judgment_policy") == signal_judgments.POLICY)
+        evidence_v2 = (((round_context.get("configuration_doc") or {}).get("scorer_policy") or {})
+                       .get("evidence_judgment_policy") == "evidence_judgment_v2")
         for execution_id, judge in judgments.items():
             if (execution_id not in public_run_ids or judge.get("status") != "accepted"
                     or execution_id not in executions
@@ -9026,12 +9391,14 @@ class ArenaService:
             reads.seed(reads.companies, {pair: rows.get(pair) for pair in pairs})
         uses_reader = getattr(self._store, "get_signal_judgment_uses_batch", None)
         if signal_companies and uses_reader is not None:
-            reads.seed(reads.signal_uses, uses_reader(sorted(signal_companies)))
+            rows = (uses_reader(sorted(signal_companies), evidence=True) if evidence_v2
+                    else uses_reader(sorted(signal_companies)))
+            reads.seed(reads.signal_uses, rows)
         signal_reader = getattr(self._store, "get_signal_judgment_batch", None)
         if signal_companies and signal_reader is not None:
             signal_pairs = set()
             for run_id, indexes in signal_companies.items():
-                for use in reads.uses(self._store, run_id):
+                for use in reads.uses(self._store, run_id, evidence=evidence_v2):
                     key, slot = use.get("cache_key"), use.get("authority_slot")
                     if (use.get("company_index") in indexes and type(key) is str
                             and key and type(slot) is int and 0 <= slot <= 2147483647):

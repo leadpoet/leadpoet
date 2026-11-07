@@ -1,3 +1,105 @@
+## Scoped authorization: November 6 unused ninth review closure
+
+The exact637 grant was not spent before miner planning closed the review gate.
+Migration643 may only reject the unchanged ninth source as code_review_incomplete
+and append the existing638 terminal receipt with an explicit unused/no-judgment
+outcome. Preserve all other rows, round fields, work, costs, receipts and operator
+state. Add no review attempt, admission, deadline or runtime authority. Internal
+agents implement, test and commit; the root owns review and production release.
+
+## Scoped authorization: prospective 23:50 replacement cutoff
+
+The user approved moving the daily replacement cutoff to 23:50 UTC for new
+and eligible open rounds only. Bind native admission, review start and public
+API policy to the same immutable round metadata. Preserve legacy frozen rounds,
+signed configuration, midnight intake/disclosure, evaluation windows, the same
+hotkey and one replacement attempt including failed attempts, source and costs.
+Apply migration642 only after the exact November6 recovery is terminal; retain
+its snapshots and receipts unchanged. Internal agents implement, test and commit.
+The root coordinator owns review, push, merge and canonical deployment.
+
+## Scoped authorization: November 6 ninth exact late review
+
+The user approved one unchanged-artifact alternate review for
+sub-43a929eb0e2e487f68014f48e7d80e6b. Add only one receipt-bound Sol attempt4
+within thirty minutes, and enroll only a genuine settled full-source pass.
+Preserve all twenty-nine other rows, prior635/636 receipts and windows, original
+eighteen participants, charges, frozen rules, round schedules, current operator
+state, and existing baseline jobs. The round has advanced to baseline-only stage1
+with no operator hold. The exact ninth review may proceed without pausing it.
+The user explicitly approved this exact late recovery after 04:30, before miner
+planning. Begin, finish and passing admission must fit thirty minutes from the
+new receipt. No round schedule changes. Preserve legitimate baseline progress
+between atomic audited steps.
+Do not create execution jobs, reopen the completed eight, or allow
+a fifth attempt. Internal agents implement, test and commit only; the root owns
+independent review, push, merge, canonical release, production and paid calls.
+
+## Scoped authorization: November 6 exact eight late admission recovery
+
+The user approved recovering the exact eight infrastructure-invalid November 6
+reviews after the eighteen entrants froze and before any execution. Use existing
+append-only audit receipts and one additional Sol reservation per exact source,
+within thirty minutes of the receipt. Preserve original archives, all prior
+charges, the frozen benchmark, rules, eighteen entrants, and every round schedule.
+Retain the existing operator hold and restart controls; do not create executions
+or unpause. Enroll only settled, source-bound passing model-directed reviews;
+exclude rejected, incomplete, expired, or unspent work truthfully. Internal agents
+implement and test only. The root coordinator owns independent review, push,
+merge, canonical release, exact committed SQL, paid calls, and live verification.
+
+## Scoped authorization: November 3 closed Deepline proof guards
+
+The coordinator authorized exact function-only migration617 during the November 3
+Arena watch. Use only the reviewed late scalar LATERAL and CASE gates after the
+unchanged ordered candidate fence. Preserve all four full-proof helpers, billing,
+frozen rules, source data and concurrent work. Add no index, retry, timeout,
+provider or credential change. Internal agents implement and test only. The root
+coordinator owns independent review, push, merge, exact committed SQL application
+and deployed-output verification. Internal agents must not change production.
+
+## Scoped authorization: November 5 ordered OpenRouter cost reads
+
+The user authorized the smallest fix for repeated active OpenRouter cost-read
+failures. Migration632 may order thin candidates before the unchanged full
+billing proofs, reusing the existing indexes and implied non-null call binding.
+Preserve exact outputs, errors, cursor/run/round scope, ACLs, all costs and data.
+Add no index, provider call, timeout, retry or dependency. Internal agents may
+implement, test and push an isolated PR after independent review. The root
+coordinator owns merge, exact committed SQL application and live verification.
+Internal agents must not change production or renew credentials.
+
+## Standing instruction: finish deployment in the owning task
+
+Each task must test, merge, deploy and verify its authorized changes unless the
+user says otherwise. Do not defer deployment to another chat or require its
+release handoff. Preserve concurrent work and canonical release checks. If a
+release lock is held, wait, recheck live state and finish the remaining work.
+Do not bypass a lock or repeat a deployment already verified live. This replaces
+older instructions that reserve deployment for another user-visible task;
+internal subagents still act within their assigned scope. Keep cross-chat
+messaging restrictions unchanged.
+
+## Scoped authorization: Arena evidence-bound judge caching
+
+The user authorized the smallest permanent improvement to existing Arena judge
+caches and checkpoints, including implementation, rigorous tests, safe merge,
+canonical deployment and production verification. Separate company-fit evidence
+from intent wording. Reuse signal judgments only when source evidence and buyer
+requirements are unchanged and claim equivalence is proved. Preserve verified
+passes, genuine negative verdicts, retryable incomplete/provider failures, all
+accuracy and FP/FN rules, costs, private provenance and historical/frozen rounds.
+Use existing authority tables and transports; add no service or dependency.
+Internal agents may implement, test and commit assigned isolated worktrees.
+The coordinator owns independent review, protected merge, exact migrations,
+scorer-image selection and canonical production operations. Keep all conflict
+reports and handoffs in the current chat; do not send cross-chat messages.
+Use prospective frozen policy activation; do not repin committed rounds or
+rewrite historical judgments. Use bounded organizer-funded validation only,
+with an initial task ceiling of $10 including failed and pending calls; do not
+use miner keys or replay historical paid calls. Preserve active release locks,
+guards and all unrelated concurrent work.
+
 ## Scoped authorization: November 4 accepted donor evidence correction
 
 The user explicitly approved reusing all ten accepted results of
@@ -155,8 +257,8 @@ and training eligibility bugs, with tests, merge, canonical deployment and live
 verification. Stream existing canonical hashes and avoid redundant whole-example
 JSON copies. Preserve exact hashes and data, strict privacy, identity checks,
 8/10 coverage, 1% missing reasoning, scoring, billing and published outcomes.
-Use read-only retained data for validation; do not replay providers or overlap
-another task's release. The coordinator owns production actions.
+Use read-only retained data for validation; do not replay providers. Preserve
+concurrent work and active canonical release locks. The coordinator owns production actions.
 
 ## Scoped authorization: November 1 judge evidence audit
 
@@ -415,7 +517,7 @@ Internal agents own isolated implementation and review only; the coordinator
 owns production actions through existing AWS administrative and release controls.
 Permanent capture or accounting fixes remain investigation and recommendation
 only until the user approves them. This authority ends after the exact champion
-correction is verified. Preserve all concurrent work and deployment ownership.
+correction is verified. Preserve all concurrent work and active deployment locks.
 
 ## Scoped authorization: October 29 post-migration production audit
 
@@ -449,8 +551,8 @@ existing AWS infrastructure. The coordinator may upgrade required validators and
 auditors through canonical controls, retire proved obsolete processes, make
 minimal tested fixes, merge and deploy, and verify fresh startup, gateway
 communication, a complete epoch, scoring and actual weight submission on AWS.
-Preserve accepted work, accounting, rewards, history and concurrent deployment
-ownership. Add no database migration, service or compatibility architecture.
+Preserve accepted work, accounting, rewards, history and active deployment
+locks. Add no database migration, service or compatibility architecture.
 After independent review and AWS-only production proof, preserve necessary
 historical data in AWS, decommission only Supabase project
 `qplwoislplkcegvdmbim`, and verify its ongoing project billing has stopped.
@@ -509,7 +611,7 @@ hashes, training eligibility, scoring, billing, miner behavior and frozen rules.
 Add no receipts, dependencies, provider calls or recovery machinery. Internal
 agents may implement and test in this worktree only. The coordinator owns
 independent review, safe merge, canonical deployment and fresh production
-readback. Preserve active runs and other tasks' migration and restart ownership.
+readback. Preserve active runs, concurrent migrations and active restart locks.
 This authority ends after the scoped fix is deployed and verified.
 
 ## Scoped authorization: October 29 frozen catalog request performance
@@ -598,7 +700,7 @@ costs and delayed settlement, exact worker responses, lost/unknown response
 recovery, submitted miner behavior, scoring, capture and historical records.
 Internal agents may test and commit only; the coordinating task owns push,
 merge, deployment and production verification. Preserve all active leases,
-restart owners and shared guards, including concurrent AWS migration work.
+restart locks and shared guards, including concurrent AWS migration work.
 This authority ends after the scoped fix and live verification are complete.
 
 ## Scoped production authorization: October 28 training readiness fixes
@@ -615,7 +717,7 @@ Training-quality selection must remain separate from raw capture and competition
 eligibility. Do not add new services, dependencies, provider reruns, database
 migrations, or Research Lab machinery. Internal agents own only their assigned
 implementation and tests; the coordinating task owns commits, release and live
-verification. Respect existing deployment locks and other restart owners. This
+verification. Respect active deployment and restart locks. This
 authority ends when the four changes and production verification are complete.
 
 ## Scoped authorization: October 28 aggregate exporter text reuse
@@ -776,7 +878,7 @@ coordinating task owns independent review, push, merge, future scorer image
 selection, canonical rollout and live verification. Internal implementation
 agents may commit only. Preserve frozen judgments, accepted results, costs,
 privacy, rewards and all concurrent work. Do not rewrite historical records or
-interrupt another owner's deployment. This authority ends after the scoped
+interrupt an active deployment. This authority ends after the scoped
 fix and future-flow verification are complete.
 
 ## Scoped authorization: October 28 stage-quota query performance
@@ -937,7 +1039,7 @@ explicit model settings and valid tool history, and safely merging and deploying
 these fixes. Apply exact committed migration 582 to expand only the open October
 28 registry. Preserve October 27, baseline identity, scoring, privacy, costs,
 80% coverage, and 1% missing-token rules. Use canonical release controllers and
-respect concurrent restart owners. Proven failed deliveries may consume the
+respect active restart locks. Proven failed deliveries may consume the
 incomplete-ICP allowance, but must not become training targets. This authority
 ends after live verification.
 
@@ -960,7 +1062,7 @@ Preserve source/identity and security checks, research and accounting limits,
 frozen scoring policies, miner/baseline fairness, published results and rewards.
 Do not write test judgments into production or apply unrelated migrations.
 The coordinator may apply exact migration603 to hold November 3 scoring until
-the improved verifier is deployed and verified. Preserve restart ownership,
+the improved verifier is deployed and verified. Preserve active restart locks,
 captured leases, costs, results and schedules. Internal agents test and commit
 only. Keep both instruction files identical.
 
@@ -1147,7 +1249,7 @@ verified RDS session bridge, and live query-plan and monitoring verification.
 Preserve selector definitions, billing records, accepted work, scoring, deadlines,
 privacy and rewards. Add no retry layer, dependency or service. Internal agents
 may test and review; the coordinator owns merge and production application and
-must preserve the other active task's runtime release ownership.
+must preserve concurrent work and active runtime release locks.
 
 ## Scoped authorization: November 3 prospective verifier accuracy
 
@@ -1157,13 +1259,13 @@ providers, including failed calls and unresolved reservations; the $0.50
 retrieval subcap is part of that total, not a new allowance. Preserve every
 previous charge and use the shared guarded task ledger. Preserve historical
 inputs, judgments, scores, rewards, frozen model policies and rejection rules.
-Keep PR981 numeric identity checks and the production release owner's work.
+Keep PR981 numeric identity checks and concurrent production work.
 Do not include the unproven PR929 wider-context experiment. Internal agents may
 implement, test and commit in this isolated checkout only; they must not push,
 merge, deploy, change production or renew credentials. The coordinator owns
 independent review and any later release after full native positive improvement,
-negative controls and the existing production owner's release handoff. Add no
-new judging system, dependency or unrelated architecture.
+negative controls and canonical release checks. Add no new judging system,
+dependency or unrelated architecture.
 
 ## Scoped authorization: November 4 Arena paid-work reliability
 
@@ -1174,7 +1276,7 @@ recovery. Reuse existing persistence and accounting; preserve scoring, judging,
 frozen rounds, costs and historical results. Internal agents implement/test only.
 The coordinator owns independent review, safe merge, exact committed migrations,
 canonical paired deployment, and fresh worker/OnePatch/Sentry verification.
-Preserve concurrent work and release ownership; do not replay paid historical work.
+Preserve concurrent work and active release locks; do not replay paid historical work.
 
 ## Scoped authorization: November 4 review and checkpoint reliability
 
@@ -1222,3 +1324,29 @@ rewards. Interpret criteria faithfully; do not trade unsupported approvals for
 fewer rejections. The coordinator owns independent review and canonical release;
 internal agents inspect and test only unless assigned an isolated edit scope.
 Preserve concurrent work. This supersedes the earlier draft-only merge limit.
+
+
+## Scoped authorization: November 5 durable runtime input capture
+
+The user authorized the narrow capture reliability fix: retain the original
+runtime input privately and immutably before upload, reuse the existing atomic,
+fsync and flock pattern, and replay distinct saved inputs in one bounded
+background operation through the existing gateway input endpoint. Permit only
+reviewed capture-only terminal grace with the same token, generation and claim,
+anchored to reliable immutable server evidence and the existing 180-second bound.
+Keep failed or expired evidence private for audit. Do not reconstruct missing
+historical inputs, replay paid work, or add a service or scoring dependency.
+Preserve privacy, frozen rules, scoring, billing, qualifications and completed work.
+Internal agents may implement and test, then commit and push a separate PR after
+independent review. The coordinator owns protected merge, canonical gateway and
+normal-validator release, and live verification. Internal agents must not change
+production, restart services, renew credentials, or alter other tasks' releases.
+
+## Scoped authorization: November 6 invalid admission reviews
+
+The user authorized a narrow permanent fix for incomplete reviewer outputs,
+including tests, merge, canonical deployment and live verification. Preserve
+security criteria, exact source evidence, existing attempt caps and all costs.
+Do not reopen frozen entrants or change deadlines, results, scoring or rewards.
+Any late historical recovery requires a separately reviewed explicit exception.
+Internal agents edit and test only; the coordinator owns production actions.

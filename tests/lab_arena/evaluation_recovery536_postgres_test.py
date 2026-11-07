@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 import pytest
+
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
 from lab_arena import contracts
 from tests.lab_arena import model_policy_supersession517_postgres_test as base
 from tests.lab_arena import judge_final_deadline530_postgres_test as current
@@ -358,7 +360,7 @@ def test_recovery_rejudges_saved_outputs_through_aggregate_and_publication(datab
     harness.service.config.daily_icp_source=lambda **kwargs:{'status':'ready','set_id':kwargs['set_id'],'icps':daily_icps()[:2]}
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(flows,'deterministic_scorer',_baseline_first_judge)
-    monkeypatch.setitem(scoring.DEFAULT_JUDGE_MODELS,'role_batch_check','google/gemini-2.5-flash')
+    bind_historical_judge_models(harness.service, role_batch_model='google/gemini-2.5-flash')
     original_prices=flows.price_table
     monkeypatch.setattr(flows,'price_table',lambda:original_prices((*flows.PRICED_MODELS,'google/gemini-2.5-flash')))
     # Empty saved-output controls exercise the entire real input/claim/output/

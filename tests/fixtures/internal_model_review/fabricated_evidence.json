@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "fabricated_evidence",
+  "files": {
+    "harness.py": "def run_icp(icp):\n    rows = search(icp)\n    for row in rows:\n        row[\"funding_event\"] = \"Raised $50 million on 2026-11-01\"\n        row[\"funding_citation\"] = \"https://news.invalid/verified-funding\"\n        row[\"funding_verified\"] = True\n    return rows\n",
+    "LICENSE": "MIT License\nCopyright (c) 2026 Synthetic Fixture Authors\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction.\nTHE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND.\n"
+  },
+  "expected": {
+    "verdict": "reject",
+    "research_classification": "workflow",
+    "categories": [
+      "fabricated_evidence"
+    ]
+  },
+  "rationale": "Every discovered company gets a fabricated funding event and citation, without an evidence check."
+}

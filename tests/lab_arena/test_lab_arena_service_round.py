@@ -30,6 +30,7 @@ from bittensor_wallet import Keypair
 from lab_arena import chain as chain_module
 from lab_arena import broker as br, code_review, contracts, driver as arena_driver, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
@@ -289,6 +290,7 @@ PRICED_MODELS = (
     "openai/gpt-4o-mini",
     code_review.DEFAULT_REVIEW_MODEL,
     *sorted(set(scoring.DEFAULT_JUDGE_MODELS.values())),
+    *sorted(set(LEGACY_MODELS.values())),
 )
 
 
@@ -679,7 +681,7 @@ class Harness:
                 credential_for=payer.credential_for,
                 funding_source_for=payer.funding_source_for,
                 price_table=price_table(),
-                judge_models=tuple(scoring.DEFAULT_JUDGE_MODELS.values()),
+                judge_models=round_row["configuration_doc"]["scorer_policy"]["judge_models"],
                 transport=FakeProviderTransport(),
                 clock=harness.clock,
             )
@@ -2109,78 +2111,78 @@ def test_admission_budget_failure_completes_over_http_and_retries(
         return original_run_icp(spec, **kwargs)
 
     monkeypatch.setattr(harness.sandbox, "run_icp", one_interrupted_score)
-    client = TestClient(create_app(harness.service))
-    original_post = client.post
-    observed = {}
-    runner_key = keypair("svc-runner-alpha")
+    with TestClient(create_app(harness.service)) as client:
+        original_post = client.post
+        observed = {}
+        runner_key = keypair("svc-runner-alpha")
 
-    def checked_post(url, *args, **kwargs):
-        if str(url).endswith("/complete"):
-            envelope = json.loads(kwargs["content"])
-            body = envelope["body"]
-            result = body["result"]
-            diagnostic = result.get("failure_diagnostic") or {}
-            if diagnostic.get("reason") == "admission_budget_interrupted":
-                run_id = body["run_id"]
-                assert harness.service.store.get_run(run_id)["status"] == "leased"
-                bad_result = {
-                    **result,
-                    "failure_diagnostic": {**diagnostic, "reason": "unknown_new_reason"},
-                }
-                bad = contracts.build_signed_request(
-                    scope=contracts.SCOPE_COMPLETE,
-                    round_id=harness.round_id,
-                    hotkey=runner_key.ss58_address,
-                    body={**body, "result": bad_result},
-                    timestamp=int(harness.clock().timestamp()),
-                    sign_message=lambda message: runner_key.sign(message.encode()).hex(),
-                )
-                rejected = original_post(
-                    url, content=contracts.canonical_json(bad).encode("utf-8"),
-                    headers={"content-type": "application/json"},
-                )
-                assert rejected.status_code == 400
-                assert rejected.json()["code"].startswith("run_result_invalid:")
-                assert harness.service.store.get_run(run_id)["status"] == "leased"
-                observed["failed_run_id"] = run_id
-            response = original_post(url, *args, **kwargs)
-            if diagnostic.get("reason") == "admission_budget_interrupted":
-                assert response.status_code == 200
-            return response
-        return original_post(url, *args, **kwargs)
+        def checked_post(url, *args, **kwargs):
+            if str(url).endswith("/complete"):
+                envelope = json.loads(kwargs["content"])
+                body = envelope["body"]
+                result = body["result"]
+                diagnostic = result.get("failure_diagnostic") or {}
+                if diagnostic.get("reason") == "admission_budget_interrupted":
+                    run_id = body["run_id"]
+                    assert harness.service.store.get_run(run_id)["status"] == "leased"
+                    bad_result = {
+                        **result,
+                        "failure_diagnostic": {**diagnostic, "reason": "unknown_new_reason"},
+                    }
+                    bad = contracts.build_signed_request(
+                        scope=contracts.SCOPE_COMPLETE,
+                        round_id=harness.round_id,
+                        hotkey=runner_key.ss58_address,
+                        body={**body, "result": bad_result},
+                        timestamp=int(harness.clock().timestamp()),
+                        sign_message=lambda message: runner_key.sign(message.encode()).hex(),
+                    )
+                    rejected = original_post(
+                        url, content=contracts.canonical_json(bad).encode("utf-8"),
+                        headers={"content-type": "application/json"},
+                    )
+                    assert rejected.status_code == 400
+                    assert rejected.json()["code"].startswith("run_result_invalid:")
+                    assert harness.service.store.get_run(run_id)["status"] == "leased"
+                    observed["failed_run_id"] = run_id
+                response = original_post(url, *args, **kwargs)
+                if diagnostic.get("reason") == "admission_budget_interrupted":
+                    assert response.status_code == 200
+                return response
+            return original_post(url, *args, **kwargs)
 
-    client.post = checked_post
-    harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
-    build_runner = harness.runner
-    monkeypatch.setattr(
-        harness, "runner", lambda index, parallel=4: build_runner(index, parallel=1)
-    )
-    harness.run_stage_with_runners(1)
-
-    assert injected and observed.get("failed_run_id")
-    failed = harness.service.store.get_run(observed["failed_run_id"])
-    assert failed["status"] == "failed" and failed["terminal_cause"] == "judge_error"
-    assert failed["result_doc"]["failure_diagnostic"] == {
-        "stage": "scorer",
-        "error_class": "judge_error",
-        "reason": "admission_budget_interrupted",
-    }
-    retries = [
-        run for run in harness.service.store.list_runs(
-            harness.round_id, stage=1, kind="score"
+        client.post = checked_post
+        harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
+        build_runner = harness.runner
+        monkeypatch.setattr(
+            harness, "runner", lambda index, parallel=4: build_runner(index, parallel=1)
         )
-        if run["assignment_id"] == failed["assignment_id"]
-        and run["attempt"] == 2
-    ]
-    assert len(retries) == 1
-    assert retries[0]["status"] == "pending"
-    assert retries[0]["output_ref"] is None
-    _make_pending_judge_retries_ready(harness)
-    harness.run_stage_with_runners(1)
-    retries[0] = harness.service.store.get_run(retries[0]["run_id"])
-    assert retries[0]["status"] == "accepted"
-    assert retries[0]["scored_run_id"] == failed["scored_run_id"]
-    assert retries[0]["output_ref"]
+        harness.run_stage_with_runners(1)
+
+        assert injected and observed.get("failed_run_id")
+        failed = harness.service.store.get_run(observed["failed_run_id"])
+        assert failed["status"] == "failed" and failed["terminal_cause"] == "judge_error"
+        assert failed["result_doc"]["failure_diagnostic"] == {
+            "stage": "scorer",
+            "error_class": "judge_error",
+            "reason": "admission_budget_interrupted",
+        }
+        retries = [
+            run for run in harness.service.store.list_runs(
+                harness.round_id, stage=1, kind="score"
+            )
+            if run["assignment_id"] == failed["assignment_id"]
+            and run["attempt"] == 2
+        ]
+        assert len(retries) == 1
+        assert retries[0]["status"] == "pending"
+        assert retries[0]["output_ref"] is None
+        _make_pending_judge_retries_ready(harness)
+        harness.run_stage_with_runners(1)
+        retries[0] = harness.service.store.get_run(retries[0]["run_id"])
+        assert retries[0]["status"] == "accepted"
+        assert retries[0]["scored_run_id"] == failed["scored_run_id"]
+        assert retries[0]["output_ref"]
 
 
 def test_exhausted_company_evidence_continues_remaining_companies_and_round(
@@ -3035,132 +3037,132 @@ def test_validators_complete_a_round_over_the_http_api(isolated_lifecycle_connec
 
     connect = isolated_lifecycle_connect
     harness = Harness(connect, tmp_path, challengers=["Http-A", "Http-B"], runners=["alpha", "beta"])
-    client = TestClient(create_app(harness.service))
-    calls = {"post": 0, "get": 0}
-    original_post, original_get = client.post, client.get
+    with TestClient(create_app(harness.service)) as client:
+        calls = {"post": 0, "get": 0}
+        original_post, original_get = client.post, client.get
 
-    def counted_post(*args, **kwargs):
-        calls["post"] += 1
-        return original_post(*args, **kwargs)
+        def counted_post(*args, **kwargs):
+            calls["post"] += 1
+            return original_post(*args, **kwargs)
 
-    def counted_get(*args, **kwargs):
-        calls["get"] += 1
-        return original_get(*args, **kwargs)
+        def counted_get(*args, **kwargs):
+            calls["get"] += 1
+            return original_get(*args, **kwargs)
 
-    client.post, client.get = counted_post, counted_get
-    harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
-    harness.clock.now = datetime.now(timezone.utc)
-    configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(minutes=30),
-        round_id="arena-2026-10-13-http",
-    )
-    harness.round_id = configuration["round_id"]
+        client.post, client.get = counted_post, counted_get
+        harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
+        harness.clock.now = datetime.now(timezone.utc)
+        configuration = harness.service.create_round(
+            datetime.now(timezone.utc) + timedelta(minutes=30),
+            round_id="arena-2026-10-13-http",
+        )
+        harness.round_id = configuration["round_id"]
 
-    miner = keypair("svc-miner-Http-A")
-    harness.chain.registered.append(miner.ss58_address)
-    payload = flavor_source_archive("Http-A")
-    facts = source_bundle.validate_source_archive(payload, require_license=True)
-    envelope = contracts.build_signed_request(
-        scope=contracts.SCOPE_SUBMISSION_PRESIGN,
-        round_id=harness.round_id,
-        hotkey=miner.ss58_address,
-        body={
-            "source_size_bytes": facts["source_size_bytes"],
-            "consent": {"public_rerun": True},
-        },
-        timestamp=int(harness.clock().timestamp()),
-        sign_message=lambda message: miner.sign(message.encode()).hex(),
-    )
-    presigned = original_post(
-        "http://localhost/arena/v1/submissions/presign",
-        content=json.dumps(envelope),
-        headers={"content-type": "application/json"},
-    )
-    assert presigned.status_code == 200
-    target = presigned.json()
-    submission_id = target["submission_id"]
-    harness.flavors[submission_id] = "Http-A"
-    status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
-    assert status.status_code == 200 and status.json()["status"] == "uploading"
-    harness.objects.put(target["source_ref"], payload)
-    finalize = contracts.build_signed_request(
-        scope=contracts.SCOPE_SUBMISSION_FINALIZE,
-        round_id=harness.round_id,
-        hotkey=miner.ss58_address,
-        body={
-            "submission_id": submission_id,
-            "source_ref": target["source_ref"],
-            "source_size_bytes": facts["source_size_bytes"],
-            "credentials": {
-                "openrouter_api_key": CANARY_OPENROUTER_KEY,
-                "openrouter_management_key": CANARY_OPENROUTER_MANAGEMENT_KEY,
-                "deepline_api_key": CANARY_DEEPLINE_KEY,
+        miner = keypair("svc-miner-Http-A")
+        harness.chain.registered.append(miner.ss58_address)
+        payload = flavor_source_archive("Http-A")
+        facts = source_bundle.validate_source_archive(payload, require_license=True)
+        envelope = contracts.build_signed_request(
+            scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+            round_id=harness.round_id,
+            hotkey=miner.ss58_address,
+            body={
+                "source_size_bytes": facts["source_size_bytes"],
+                "consent": {"public_rerun": True},
             },
-        },
-        timestamp=int(harness.clock().timestamp()),
-        sign_message=lambda message: miner.sign(message.encode()).hex(),
-    )
-    finalized = original_post(
-        "http://localhost/arena/v1/submissions/%s/finalize" % submission_id,
-        content=json.dumps(finalize),
-        headers={"content-type": "application/json"},
-    )
-    assert finalized.status_code == 200
-    status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
-    assert status.status_code == 200 and status.json()["status"] == "accepted"
+            timestamp=int(harness.clock().timestamp()),
+            sign_message=lambda message: miner.sign(message.encode()).hex(),
+        )
+        presigned = original_post(
+            "http://localhost/arena/v1/submissions/presign",
+            content=json.dumps(envelope),
+            headers={"content-type": "application/json"},
+        )
+        assert presigned.status_code == 200
+        target = presigned.json()
+        submission_id = target["submission_id"]
+        harness.flavors[submission_id] = "Http-A"
+        status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
+        assert status.status_code == 200 and status.json()["status"] == "uploading"
+        harness.objects.put(target["source_ref"], payload)
+        finalize = contracts.build_signed_request(
+            scope=contracts.SCOPE_SUBMISSION_FINALIZE,
+            round_id=harness.round_id,
+            hotkey=miner.ss58_address,
+            body={
+                "submission_id": submission_id,
+                "source_ref": target["source_ref"],
+                "source_size_bytes": facts["source_size_bytes"],
+                "credentials": {
+                    "openrouter_api_key": CANARY_OPENROUTER_KEY,
+                    "openrouter_management_key": CANARY_OPENROUTER_MANAGEMENT_KEY,
+                    "deepline_api_key": CANARY_DEEPLINE_KEY,
+                },
+            },
+            timestamp=int(harness.clock().timestamp()),
+            sign_message=lambda message: miner.sign(message.encode()).hex(),
+        )
+        finalized = original_post(
+            "http://localhost/arena/v1/submissions/%s/finalize" % submission_id,
+            content=json.dumps(finalize),
+            headers={"content-type": "application/json"},
+        )
+        assert finalized.status_code == 200
+        status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
+        assert status.status_code == 200 and status.json()["status"] == "accepted"
 
-    assert harness.service.advance_round(harness.round_id)["status"] == "waiting"
-    harness.submit("Http-B", harness.round_id)
-    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
-    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
-    participants = harness.service.store.get_round(harness.round_id)["participants"]
-    for participant in participants:
-        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
-    harness.sandbox.empty_outputs.add(("PublicBaseline", 7))
+        assert harness.service.advance_round(harness.round_id)["status"] == "waiting"
+        harness.submit("Http-B", harness.round_id)
+        harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+        assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+        participants = harness.service.store.get_round(harness.round_id)["participants"]
+        for participant in participants:
+            harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+        harness.sandbox.empty_outputs.add(("PublicBaseline", 7))
 
-    _run_stage_one_to_scoring(harness, len(participants), runners=2)
-    harness.advance_until("published", runners=2)
-    assert calls["post"] > 0
+        _run_stage_one_to_scoring(harness, len(participants), runners=2)
+        harness.advance_until("published", runners=2)
+        assert calls["post"] > 0
 
-    public = original_get("http://localhost/arena/v1/rounds/%s" % harness.round_id)
-    assert public.status_code == 200
-    row = harness.service.store.get_round(harness.round_id)
-    decision = row["publication_doc"]["king_decision"]
-    winner = decision["winner_submission_id"] or row["publication_doc"][
-        "final_ranking"
-    ][0]["submission_id"]
-    results = original_get(
-        "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, winner)
-    )
-    assert results.status_code == 200
-    public_scores = results.json()["scores"]["stage_1"] + results.json()["scores"]["stage_2"]
-    assert len(public_scores) == 20
-    benchmark = original_get("http://localhost/arena/v1/rounds/%s/benchmark" % harness.round_id)
-    assert benchmark.status_code == 200
-    public_positions = {icp["icp_position"] for icp in benchmark.json()["icps"]}
-    assert len(public_positions) == 20
-    assert {score["icp_position"] for score in public_scores} == public_positions
-    assert benchmark.json()["disclosure_policy"] == "all_20_next_day"
-    assert benchmark.json()["private_icp_count"] == 0
-    baseline_id = next(p["submission_id"] for p in row["participants"] if p["is_king"])
-    baseline_public = original_get(
-        "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, baseline_id)
-    ).json()
-    assert len(baseline_public["outputs"]) == 20
-    baseline_runs = [run for run in harness.service.store.list_runs(
-        harness.round_id, kind="execute", status="accepted"
-    ) if run["submission_id"] == baseline_id]
-    empty_run = next(run for run in baseline_runs if run["icp_position"] == 7)
-    assert empty_run["terminal_cause"] == "accepted"
-    assert float(empty_run["per_icp_score"]) == 0.0
-    empty_output = json.loads(harness.service._objects.get_bounded(
-        empty_run["output_ref"], 4 * 1024 * 1024
-    ))
-    assert empty_output["companies"] == []
-    current = original_get("http://localhost/arena/v1/current")
-    assert current.status_code == 200
-    assert row["king_outcome"] == "no_king"
-    assert current.json()["king"] is None
+        public = original_get("http://localhost/arena/v1/rounds/%s" % harness.round_id)
+        assert public.status_code == 200
+        row = harness.service.store.get_round(harness.round_id)
+        decision = row["publication_doc"]["king_decision"]
+        winner = decision["winner_submission_id"] or row["publication_doc"][
+            "final_ranking"
+        ][0]["submission_id"]
+        results = original_get(
+            "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, winner)
+        )
+        assert results.status_code == 200
+        public_scores = results.json()["scores"]["stage_1"] + results.json()["scores"]["stage_2"]
+        assert len(public_scores) == 20
+        benchmark = original_get("http://localhost/arena/v1/rounds/%s/benchmark" % harness.round_id)
+        assert benchmark.status_code == 200
+        public_positions = {icp["icp_position"] for icp in benchmark.json()["icps"]}
+        assert len(public_positions) == 20
+        assert {score["icp_position"] for score in public_scores} == public_positions
+        assert benchmark.json()["disclosure_policy"] == "all_20_next_day"
+        assert benchmark.json()["private_icp_count"] == 0
+        baseline_id = next(p["submission_id"] for p in row["participants"] if p["is_king"])
+        baseline_public = original_get(
+            "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, baseline_id)
+        ).json()
+        assert len(baseline_public["outputs"]) == 20
+        baseline_runs = [run for run in harness.service.store.list_runs(
+            harness.round_id, kind="execute", status="accepted"
+        ) if run["submission_id"] == baseline_id]
+        empty_run = next(run for run in baseline_runs if run["icp_position"] == 7)
+        assert empty_run["terminal_cause"] == "accepted"
+        assert float(empty_run["per_icp_score"]) == 0.0
+        empty_output = json.loads(harness.service._objects.get_bounded(
+            empty_run["output_ref"], 4 * 1024 * 1024
+        ))
+        assert empty_output["companies"] == []
+        current = original_get("http://localhost/arena/v1/current")
+        assert current.status_code == 200
+        assert row["king_outcome"] == "no_king"
+        assert current.json()["king"] is None
 
 
 def test_rounds_overlap_and_every_request_names_its_round(isolated_lifecycle_connect, tmp_path):
@@ -3343,7 +3345,7 @@ class FlakyObjectStore:
         return getattr(self._inner, name)
 
 
-def test_result_writes_retry_after_transient_object_store_failures(isolated_lifecycle_connect, tmp_path, request):
+def test_result_writes_retry_after_transient_object_store_failures(isolated_lifecycle_connect, tmp_path):
     """A transient result-store failure does not lose or duplicate a run."""
 
     connect = isolated_lifecycle_connect
@@ -3353,38 +3355,39 @@ def test_result_writes_retry_after_transient_object_store_failures(isolated_life
     harness.service = harness.build_service()
     from fastapi.testclient import TestClient
     from lab_arena.api import create_app
-    client = TestClient(create_app(harness.service), raise_server_exceptions=False)
-    request.addfinalizer(client.close)
-    harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
-    configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(minutes=30),
-        round_id="arena-2026-10-15-flaky",
-    )
-    harness.round_id = configuration["round_id"]
-    harness.submit("Flaky-A", harness.round_id)
+    # Keep one app loop for concurrent requests, as in the real ASGI server.
+    # Per-request TestClient portals cannot share the app's async limiters.
+    with TestClient(create_app(harness.service), raise_server_exceptions=False) as client:
+        harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
+        configuration = harness.service.create_round(
+            datetime.now(timezone.utc) + timedelta(minutes=30),
+            round_id="arena-2026-10-15-flaky",
+        )
+        harness.round_id = configuration["round_id"]
+        harness.submit("Flaky-A", harness.round_id)
 
-    # This test targets runner result delivery. The benchmark write has a
-    # separate driver retry boundary and is allowed through here.
-    flaky.allow("arena/%s/benchmark.json" % harness.round_id)
-    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
-    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
-    participants = harness.service.store.get_round(harness.round_id)["participants"]
-    for participant in participants:
-        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+        # This test targets runner result delivery. The benchmark write has a
+        # separate driver retry boundary and is allowed through here.
+        flaky.allow("arena/%s/benchmark.json" % harness.round_id)
+        harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+        assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+        participants = harness.service.store.get_round(harness.round_id)["participants"]
+        for participant in participants:
+            harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
-    _run_stage_one_to_scoring(harness, len(participants), runners=1)
-    harness.advance_until("published", runners=1)
-    assert flaky.failures > 0
-    row = harness.service.store.get_round(harness.round_id)
-    decision = row["publication_doc"]["king_decision"]
-    winner = decision["winner_submission_id"] or row["publication_doc"][
-        "final_ranking"
-    ][0]["submission_id"]
-    results = harness.service.public_results(harness.round_id, winner)
-    assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 20
-    attempts = harness.service.store.list_runs(harness.round_id)
-    assert all(int(run["attempt"]) == 1 for run in attempts)
-    assert_canary_absent(harness, connect)
+        _run_stage_one_to_scoring(harness, len(participants), runners=1)
+        harness.advance_until("published", runners=1)
+        assert flaky.failures > 0
+        row = harness.service.store.get_round(harness.round_id)
+        decision = row["publication_doc"]["king_decision"]
+        winner = decision["winner_submission_id"] or row["publication_doc"][
+            "final_ranking"
+        ][0]["submission_id"]
+        results = harness.service.public_results(harness.round_id, winner)
+        assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 20
+        attempts = harness.service.store.list_runs(harness.round_id)
+        assert all(int(run["attempt"]) == 1 for run in attempts)
+        assert_canary_absent(harness, connect)
 
 
 

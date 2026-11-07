@@ -85,7 +85,7 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
         _round=lambda _rid: round_row,
         _load_scoring_plan=lambda _row, _stage: plan,
         evaluation_icps=lambda _rid: [{}],
-        _outputs_by_run=lambda _rid, _stage: {"execution-1": []},
+        _outputs_by_run=lambda _rid, _stage, *, executions=None: {"execution-1": []},
         _scoring_outputs=lambda _rid, _stage, **kwargs: {"execution-1": {
             "status": "failed" if judge_incomplete else "accepted",
             "terminal_cause": judge_cause if judge_incomplete else "accepted",

@@ -2332,6 +2332,52 @@ def _explicit_responses_open_maps(document: Dict[str, Any]) -> bool:
     return changed
 
 
+def serialize_json_body(document: Any, *, industry_schema_order: bool = False) -> bytes:
+    body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    if industry_schema_order:
+        # Structured outputs follow property order. Canonical storage sorts
+        # maps, but preserves the industry's facts-before-verdict sequence
+        # in `required`. Restore only that top-level sequence on the wire.
+        ordered = json.loads(body)
+        response_format = ordered.get("response_format", {})
+        declaration = response_format.get("json_schema", {})
+        schema = declaration.get("schema", {})
+        schema = schema if isinstance(schema, dict) else {}
+        properties, required = schema.get("properties"), schema.get("required")
+        if (response_format.get("type") == "json_schema"
+                and declaration.get("name") == "industry_proposal"
+                and declaration.get("strict") is True
+                and isinstance(properties, dict) and isinstance(required, list)
+                and all(isinstance(key, str) for key in required)
+                and len(required) == len(properties) and set(required) == set(properties)):
+            schema["properties"] = {key: properties[key] for key in required}
+            body = json.dumps(ordered, separators=(",", ":"), ensure_ascii=False,
+                              allow_nan=False).encode("utf-8")
+    return body
+
+
+def outbound_body_hash_matches(operation_id: str, body: Any, digest: Any) -> bool:
+    """Verify a saved body against the exact supported outbound serializations.
+
+    Capture canonicalizes object keys but retains the original wire hash.
+    Historical industry requests can use either canonical bytes or the
+    existing required-property order; arbitrary JSON key orders grant nothing.
+    Route, model, privacy and request authority remain caller checks.
+    """
+    if not isinstance(digest, str) or contracts.SHA256_RE.fullmatch(digest) is None:
+        return False
+    if body is None:
+        return digest == contracts.hash_bytes(b"")
+    try:
+        if contracts.document_hash(body) == digest:
+            return True
+        return (operation_id == "openrouter.chat" and isinstance(body, Mapping)
+                and contracts.hash_bytes(serialize_json_body(
+                    body, industry_schema_order=True)) == digest)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def build_outbound_request(
     operation_id: str,
     parameters: Any,
@@ -2357,7 +2403,7 @@ def build_outbound_request(
                                             allow_full_thinking=allow_full_thinking)
     if type(industry_schema_order) is not bool or industry_schema_order and (
         operation_id != "openrouter.chat"
-        or normalized.get("model") != "openai/gpt-6.1-sol"
+        or (normalized.get("model") != "openai/gpt-6.1-sol" and not allow_full_thinking)
         or openrouter_provider_policy is None
     ):
         raise OperationRequestError("invalid_request")
@@ -2487,26 +2533,7 @@ def build_outbound_request(
                 schema = catalog.tool_entry(deepline_catalog, normalized["tool"])["input_schema"]
                 if not Draft202012Validator(schema).is_valid(document["payload"]):
                     raise OperationRequestError("invalid_request")
-        body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-        if industry_schema_order:
-            # Structured outputs follow property order. Canonical storage sorts
-            # maps, but preserves the industry's facts-before-verdict sequence
-            # in `required`. Restore only that top-level sequence on the wire.
-            ordered = json.loads(body)
-            response_format = ordered.get("response_format", {})
-            declaration = response_format.get("json_schema", {})
-            schema = declaration.get("schema", {})
-            schema = schema if isinstance(schema, dict) else {}
-            properties, required = schema.get("properties"), schema.get("required")
-            if (response_format.get("type") == "json_schema"
-                    and declaration.get("name") == "industry_proposal"
-                    and declaration.get("strict") is True
-                    and isinstance(properties, dict) and isinstance(required, list)
-                    and all(isinstance(key, str) for key in required)
-                    and len(required) == len(properties) and set(required) == set(properties)):
-                schema["properties"] = {key: properties[key] for key in required}
-                body = json.dumps(ordered, separators=(",", ":"), ensure_ascii=False,
-                                  allow_nan=False).encode("utf-8")
+        body = serialize_json_body(document, industry_schema_order=industry_schema_order)
         if schema_expanded:
             try:
                 contracts.check_strict_document(document, _request_structure_limits(operation_id, allow_full_thinking))
@@ -2767,6 +2794,7 @@ __all__ = [
     "match_request",
     "operation_document",
     "operation_table_document",
+    "outbound_body_hash_matches",
     "provider_status_is_infrastructure",
     "outbound_target",
     "sanitize_response",

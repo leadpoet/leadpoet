@@ -98,7 +98,7 @@ def _service(row, runs, *, billing=False, deepline_billing=False,
     service._lock = RLock()
     service._invalidate_hot_round = lambda: None
     service._require_round_mode = lambda value: value
-    service._public_round_output_policy = lambda config: {}
+    service._public_round_output_policy = lambda config, replacement_freeze_seconds=None: {}
     def reconcile_deepline(round_id):
         events.append("deepline_billing")
         checked = int(state["deepline_billing"])

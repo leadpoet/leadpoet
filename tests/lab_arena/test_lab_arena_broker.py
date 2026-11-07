@@ -2293,6 +2293,9 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(
     assert store.openrouter_capacity == 9_998_000
     terminal = store.calls[result.call["call_identity"]]["terminal"]
     assert terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == requested_url
+    assert terminal["upstream_response_receipt"] == {
+        "status": "unavailable", "reason": "response_size_limit",
+    }
     persisted_body = base64.b64decode(terminal["body_b64"])
     assert persisted_body == result.body
     assert tail_marker.encode() not in persisted_body
@@ -6649,9 +6652,11 @@ def test_a_reply_the_sanitizer_refuses_after_dispatch_settles_as_uncertain_not_d
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert result.call["outcome"] == "uncertain" and result.call["error_code"] == "provider_unavailable"
     assert store.log[-1] == "uncertain" and "settle" not in store.log[-1:]  # the reservation is consumed, the head is terminal
-    assert _accounting_without_verified_upstream_receipt(
-        store.calls[result.call["call_identity"]], result, b"<html>Cloudflare error</html>"
-    ) == {
+    saved = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert saved["upstream_response_receipt"] == {"status": "unavailable", "reason": "response_capture_failed"}
+    assert "upstream_response_receipt" not in json.dumps(result.to_document())
+    assert br.broker_observations(saved) == {}  # Historical policy stays unchanged.
+    assert {key: value for key, value in saved.items() if key != "upstream_response_receipt"} == {
         "reason": "missing_provider_cost",
         "call_succeeded": False,
         "failure_stage": "response_adaptation",

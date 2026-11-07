@@ -267,8 +267,44 @@ def _empty_target_message(item):
         and not part.get('annotations') and not part.get('logprobs') for part in item['content'])
 
 
+def _chat_citation_annotations(body, message):
+    """Validate nested public citations without changing the saved target.
+
+    This proves only the provider-exposed annotation shape. A citation does
+    not establish a fetched page, a search event, or full generated thinking.
+    Callers retain their separate actor and declared-search requirements.
+    """
+    _require(not message.get('tool_calls'), 'chat_annotations_unsupported')
+    annotations = message['annotations']
+    _require(isinstance(annotations, list) and len(annotations) <= 128,
+             'internal_chat_annotations_unsupported')
+    flat = []
+    fields = {'url', 'title', 'content', 'start_index', 'end_index'}
+    for annotation in annotations:
+        _require(isinstance(annotation, Mapping) and set(annotation) == {'type', 'url_citation'}
+                 and annotation['type'] == 'url_citation', 'internal_chat_annotations_unsupported')
+        citation = annotation['url_citation']
+        _require(isinstance(citation, Mapping) and set(citation) <= fields,
+                 'internal_chat_annotations_unsupported')
+        try:
+            operations.validate_https_url(citation.get('url'), max_length=8192)
+        except operations.OperationRequestError as exc:
+            raise ValueError('chat_annotations_unsupported') from exc
+        flat.append({'type': 'url_citation', **citation})
+    # Reuse the native field, length and offset validator on a temporary view.
+    # The original nested annotations and all request/response hashes stay exact.
+    try:
+        operations.validate_operation_request('openrouter.responses', {
+            'model': body['model'], 'input': [{'type': 'message', 'role': 'assistant',
+                'status': 'completed', 'content': [{'type': 'output_text',
+                    'text': message.get('content'), 'annotations': flat}]}],
+        }, allow_full_thinking=True)
+    except operations.OperationRequestError as exc:
+        raise ValueError('chat_annotations_unsupported') from exc
+
+
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
-            allow_empty_messages=False):
+            allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -292,7 +328,13 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         if details is not None:
             _require(isinstance(details, list) and all(training_capture.readable_reasoning_item(item) for item in details), 'reasoning_shape_unsupported')
             reasoning.extend(copy.deepcopy(details))
-        _require(set(msg) <= {'role', 'content', 'tool_calls', 'refusal'}
+        fields = {'role', 'content', 'tool_calls', 'refusal'}
+        if 'annotations' in msg and chat_annotations_validator is not None:
+            # Trusted internal and judge exports may validate retained citations.
+            # The shared miner path supplies no callback and stays unchanged.
+            chat_annotations_validator(body, msg)
+            fields.add('annotations')
+        _require(set(msg) <= fields
                  and not msg.get('refusal') and (isinstance(msg.get('content'), str) or msg.get('content') is None), 'assistant_shape_unsupported')
         msg.pop('refusal', None)
         if msg.get('tool_calls'):
@@ -302,10 +344,11 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
             _require(choice['finish_reason'] == 'stop' and isinstance(msg.get('content'), str)
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
-    _responses_input(body.get('input'), tools=body.get('tools', []),
-                     max_tool_calls=body.get('max_tool_calls'),
-                     allow_reasoning_history=allow_reasoning_history,
-                     allow_tool_error_history=allow_tool_error_history)
+    validate_input = _responses_input if responses_input_validator is None else responses_input_validator
+    validate_input(body.get('input'), tools=body.get('tools', []),
+                   max_tool_calls=body.get('max_tool_calls'),
+                   allow_reasoning_history=allow_reasoning_history,
+                   allow_tool_error_history=allow_tool_error_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')
@@ -439,13 +482,15 @@ def _worker_artifact(example, call, *, allow_journal_prefix=False):
     field = ref.get('artifact_field')
     if field is None:
         return (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    kind = ('execute' if run_id == example.get('run_id') else
+            'score' if run_id == example.get('score_run_id') else None)
     _require(field == 'partial_worker_observation_artifacts' and allow_journal_prefix
              and training_coverage.uses_host_result_evidence(example.get('configuration') or {})
-             and run_id == example.get('run_id'), 'worker_journal_prefix_unavailable')
+             and kind is not None, 'worker_journal_prefix_unavailable')
     artifact = (example.get(field) or {}).get(run_id) or {}
     hashes, refs = artifact.get('segment_sha256'), artifact.get('segment_refs')
     _require(artifact.get('schema_version') == training_observations.JOURNAL_SCHEMA_VERSION
-             and artifact.get('run_id') == run_id and artifact.get('kind') == 'execute'
+             and artifact.get('run_id') == run_id and artifact.get('kind') == kind
              and artifact.get('complete') is False
              and (artifact.get('payload') or {}).get('complete') is False
              and isinstance(hashes, list) and isinstance(refs, list)
@@ -610,6 +655,13 @@ def _validate_target_tools(body, target, op):
                      for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
 
 
+def _outbound_body_exact(call):
+    """Use the shared wire verifier without changing the saved identity."""
+    outbound = (call.get('request') or {}).get('outbound') or {}
+    return operations.outbound_body_hash_matches(
+        call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256'))
+
+
 def _outbound_request_exact(call):
     """Check the retained provider route and the existing outbound body hash."""
     request = call.get('request') or {}
@@ -620,14 +672,21 @@ def _outbound_request_exact(call):
             and outbound.get('host') == (operation.outbound_host or operation.host)
             and outbound.get('path') == (operation.outbound_path or operations._render_path(
                 operation, request.get('hashed_parameters') or {}))
-            and outbound.get('body_sha256') == (
-                contracts.hash_bytes(b'') if outbound.get('body') is None
-                else contracts.document_hash(outbound['body'])))
+            and operations.outbound_body_hash_matches(
+                call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256')))
 
 
-def _model_request(example, call, *, worker_proofs=None):
+def _model_request(example, call, *, worker_proofs=None, role='source'):
     """Shared exact model request checks, independent of delivery or target."""
-    _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
+    if role == 'judge':
+        selected = [row for row in example.get('attempts') or []
+                    if row.get('run_id') == example.get('score_run_id')]
+        _require(call.get('run_id') == example.get('score_run_id')
+                 and len(selected) == 1 and selected[0].get('kind') == 'score'
+                 and selected[0].get('status') == 'accepted', 'not_selected_judge_call')
+    else:
+        _require(role == 'source', 'invalid_target_role')
+        _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
     op = call.get('operation_id')
     _require(call.get('provider') == 'openrouter' and op in {'openrouter.chat', 'openrouter.responses'}, 'operation_unsupported')
     request = call.get('request') or {}
@@ -644,11 +703,16 @@ def _model_request(example, call, *, worker_proofs=None):
         _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
     outbound = request.get('outbound') or {}
     body = outbound.get('body')
-    _require(isinstance(body, dict) and contracts.document_hash(body) == outbound.get('body_sha256'), 'outbound_body_hash_mismatch')
+    _require(isinstance(body, dict) and operations.outbound_body_hash_matches(
+        op, body, outbound.get('body_sha256')), 'outbound_body_hash_mismatch')
     _require(outbound.get('method') == 'POST' and outbound.get('host') == 'openrouter.ai'
              and outbound.get('path') == ('/api/v1/responses' if op.endswith('responses') else '/api/v1/chat/completions'), 'outbound_identity_mismatch')
     _require(isinstance(body.get('model'), str) and body['model']
              and body['model'] == (request.get('effective_parameters') or {}).get('model'), 'model_identity_mismatch')
+    if role == 'judge':
+        configuration = training_dataset.label_scorer_configuration(example)
+        _require(body['model'] in (configuration.get('scorer_policy') or {}).get('judge_models', {}).values(),
+                 'judge_model_not_allowed')
     _require(not body.get('stream') and not body.get('previous_response_id')
              and not body.get('conversation') and not body.get('prompt')
              and not body.get('plugins') and not body.get('transforms')
@@ -661,10 +725,69 @@ def _model_request(example, call, *, worker_proofs=None):
     return op, body, tools
 
 
-def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False):
+def _training_provenance(example):
+    """Recorded training context, separate from prompts, targets and gold labels.
+
+    Source-page publication dates and observation timestamps stay in their
+    original evidence payloads. Never infer them from host round dates.
+    """
+    round_dates = example.get('round_dates') or {}
+    runtime = example.get('runtime') or {}
+    judgment = example.get('judgment') or {}
+    judge_runtime = judgment.get('runtime') or {}
+    outcomes = []
+    for row in example.get('companies') or []:
+        if not isinstance(row, Mapping) or type(row.get('company_index')) is not int:
+            continue
+        label, reason = training_dataset.classify(row)
+        provenance = (training_dataset._provenance(example, row['company_index'])
+                      if row.get('label_status') == 'scored' and isinstance(row.get('judgment'), Mapping)
+                      else {'judgment_source': 'unavailable', 'source_score_run_id': None})
+        outcomes.append({'company_index': row['company_index'], 'label_status': row.get('label_status'),
+                         'class': label, 'sub_reason': reason, 'label_provenance': provenance})
+    source = example.get('source') or {}
+    try:
+        configuration = training_dataset.label_scorer_configuration(example)
+        policy_status = 'recorded'
+    except ValueError:
+        # Unverified ancillary label policy must not invalidate an otherwise
+        # proven observed model step, or become a replacement policy claim.
+        configuration = {}
+        policy_status = 'unverified'
+    history = example.get('scoring_policy_history')
+    return {
+        'schema_version': 'leadpoet.lab_arena.training_provenance.v1',
+        'dates': {'evaluation_date': example.get('evaluation_date'),
+                  'round_created_at': round_dates.get('created_at'),
+                  'round_published_at': round_dates.get('published_at'),
+                  'execution_started_at': runtime.get('started_at'),
+                  'execution_finished_at': runtime.get('finished_at'),
+                  'judge_started_at': judge_runtime.get('started_at'),
+                  'judge_finished_at': judge_runtime.get('finished_at')},
+        'source': {key: copy.deepcopy(source[key]) for key in (
+            'ref', 'sha256', 'normalized_sha256', 'hash_origin', 'source_correction') if key in source},
+        'label_authority': {
+            'origin': 'automated_native_scorer' if judgment else 'unavailable',
+            'ground_truth': 'not_established', 'external_adjudication': 'not_established_by_export',
+            'input_output_label_verified': (example.get('completeness') or {}).get(
+                'dimensions', {}).get('input_output_label') is True},
+        'score_run_id': example.get('score_run_id'),
+        'judgment_sha256': contracts.document_hash(judgment) if judgment else None,
+        'scorer_policy_sha256': (contracts.document_hash(configuration.get('scorer_policy') or {})
+                                 if policy_status == 'recorded' else None),
+        'scorer_image_digest': configuration.get('scorer_image_digest') if policy_status == 'recorded' else None,
+        'label_policy_status': policy_status,
+        'scoring_generation_floor': example.get('scoring_generation_floor'),
+        'scoring_policy_history_sha256': contracts.document_hash(history) if isinstance(history, Mapping) else None,
+        'company_outcomes': outcomes,
+    }
+
+
+def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False,
+               role='source'):
     # Individual exporters may retain a proven prefix pair. The full-ICP
     # eligibility caller keeps the default final-snapshot requirement.
-    op, body, tools = _model_request(example, call, worker_proofs=worker_proofs)
+    op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -737,7 +860,8 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
     target, reasoning = _target(body, responses[0], op,
                                 allow_reasoning_history=full_history,
                                 allow_tool_error_history=training_coverage.uses_host_result_evidence(
-                                    example.get('configuration') or {}))
+                                    example.get('configuration') or {}),
+                                chat_annotations_validator=_chat_citation_annotations if role == 'judge' else None)
     _validate_target_tools(body, target, op)
     target_provenance = {}
     if op == 'openrouter.responses':
@@ -748,11 +872,28 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
         if hosted:
             target_provenance.update(target_semantics='provider_executed_trajectory',
                                      hosted_tool_execution='provider')
+    judge_context = {}
+    if role == 'judge':
+        configuration = training_dataset.label_scorer_configuration(example)
+        judge_context = {'role': 'judge', 'judge_context': {
+            'scored_run_id': example.get('run_id'), 'icp_position': example.get('icp_position'),
+            'icp_sha256': contracts.document_hash(example.get('icp') or {}),
+            'scored_output_sha256': contracts.document_hash(example.get('output') or {}),
+            'judgment_sha256': contracts.document_hash(example.get('judgment') or {}),
+            'scorer_policy_sha256': contracts.document_hash(configuration.get('scorer_policy') or {}),
+            'scorer_image_digest': configuration.get('scorer_image_digest'),
+            'evidence_scope': 'exact_provider_visible_input',
+            'judge_input_sha256': ((example.get('input_snapshots') or {}).get(call['run_id']) or {}).get('input_sha256'),
+            'worker_observation_payload_sha256': (call.get('response_provenance') or {}).get(
+                'worker_receipt_ref', {}).get('payload_sha256'),
+            'provider_call_sequence': call.get('action_sequence')}}
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
+            **({'role': 'judge'} if role == 'judge' else {}),
             'target': target,
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
+                             **judge_context,
                              **({'capture_scope': 'provider_visible_request_result', 'client_consumption': 'not_proved'}
                                 if provider_visible else {}),
                              **target_provenance,
@@ -764,12 +905,14 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
                                                 and example.get('round_status') == 'published'),
                              'outcome': {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'), 'score_run_id': example.get('score_run_id')},
+                             'training_provenance': _training_provenance(example),
                              'source_quality': copy.deepcopy(example.get('completeness') or {})}]}
 
 
-def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate=None):
+def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate=None, role='source'):
     """Export individual exact pairs; a journal prefix never proves a full ICP."""
     rules = rules or Rules()
+    _require(role in {'source', 'judge'}, 'invalid_target_role')
     candidates, analysis, sources = {}, [], set()
     source_groups = training_dataset._SourceSplitGroups()
     record_groups = {}
@@ -793,14 +936,20 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
             analysis.append({'source_example_hash': str(source) if isinstance(source, str) and contracts.SHA256_RE.fullmatch(source) else None, 'reason': reason})
             del example
             continue
+        # Own immutable worker snapshots once per episode, as publication
+        # assessment does. Calls retain every original validation and byte.
+        worker_proofs = training_worker_proof.WorkerProofs()
+        example = worker_proofs.prepare(example)
         for call in example.get('provider_calls') or []:
             if not isinstance(call, dict):
                 counts['malformed_call'] += 1
                 analysis.append({'source_example_hash': source, 'call_ref_hash': None, 'reason': 'malformed_call'})
                 continue
             try:
-                record = (_candidate(example, call, host_observed=True, allow_journal_prefix=True) if host_observed
-                          else _candidate(example, call, allow_journal_prefix=True))
+                record = (_candidate(example, call, host_observed=True, worker_proofs=worker_proofs,
+                                     allow_journal_prefix=True, role=role) if host_observed
+                          else _candidate(example, call, worker_proofs=worker_proofs,
+                                          allow_journal_prefix=True, role=role))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])
@@ -815,9 +964,10 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 analysis.append({'source_example_hash': source, 'call_ref_hash': contracts.document_hash(call.get('call_identity')), 'reason': reason})
             else:
                 if full_thinking_candidate is not None:
-                    full_thinking_candidate(example, record)
+                    full_thinking_candidate(example, record, worker_proofs=worker_proofs)
         # Drop the raw source and last raw call before parsing the next episode.
         call = None
+        worker_proofs = None
         del example
     splits = {'train': [], 'eval': [], 'analysis': []}
     future_groups = source_groups.future_groups(rules.eval_after)
@@ -844,6 +994,7 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
     manifest_rules = asdict(rules)
     manifest_rules['split_grouping'] = training_dataset.SPLIT_GROUPING
     manifest = {'schema_version': SCHEMA_VERSION, 'rules': manifest_rules,
+                **({'role': 'judge'} if role == 'judge' else {}),
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
                                        'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',

@@ -36,6 +36,7 @@ pytest.importorskip("qualification.scoring.lead_scorer")
 pytest.importorskip("aiohttp")
 
 from tests.lab_arena.icp_fixtures import raw_icp  # noqa: E402
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS  # noqa: E402
 
 EVALUATION_DATE = "2026-09-02"
 COMPANY = "Acme Robotics"
@@ -402,7 +403,9 @@ def run_real_judge(work_dir: Path, input_document: Mapping[str, Any], *, timeout
 
 def scoring_input() -> Dict[str, Any]:
     icp = arena_icp()
-    return scoring.build_scoring_input(scored_run_id="real-judge", icp=icp, companies=companies_for(icp), policy=scoring.build_scorer_policy(), evaluation_date=EVALUATION_DATE)
+    # This September protocol provider supplies historical Chat replies.
+    policy = scoring.build_scorer_policy(judge_models=LEGACY_MODELS, judge_provider_routes={})
+    return scoring.build_scoring_input(scored_run_id="real-judge", icp=icp, companies=companies_for(icp), policy=policy, evaluation_date=EVALUATION_DATE)
 
 
 def describe(result: Mapping[str, Any]) -> str:

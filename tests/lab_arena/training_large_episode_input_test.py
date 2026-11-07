@@ -136,6 +136,7 @@ def test_full_thinking_multi_episode_global_split_and_manifest_golden():
     from lab_arena import training_thinking
     from tests.lab_arena.training_thinking_test import full_example
     from tests.lab_arena.training_steps_test import seal
+    from tests.lab_arena.training_thinking_reuse_test import historical_provenance_projection
 
     first = full_example()
     second = copy.deepcopy(first)
@@ -143,6 +144,20 @@ def test_full_thinking_multi_episode_global_split_and_manifest_golden():
     seal(second)
     splits, manifest = training_thinking.build(iter([first, second, first]))
     # Bind the shared source graph, cross-source dedup, and coverage.
-    assert manifest["dataset_version"] == "sha256:4b8067822b5508c8c787facf305445b7d22d7af138859acba3598bd7a72693f5"
+    with historical_provenance_projection():
+        historical_splits, historical_manifest = training_thinking.build(iter([first, second, first]))
+    assert historical_manifest["dataset_version"] == "sha256:4b8067822b5508c8c787facf305445b7d22d7af138859acba3598bd7a72693f5"
+    projected = copy.deepcopy(splits)
+    for split in ("train", "eval"):
+        for row in projected[split]:
+            for ref in row["source_refs"]:
+                ref.pop("training_provenance")
+    assert projected == historical_splits
+    previous_manifest = copy.deepcopy(manifest)
+    previous_manifest["source_dataset_version"] = historical_manifest["source_dataset_version"]
+    previous_manifest.pop("dataset_version")
+    from lab_arena import contracts
+    previous_manifest["dataset_version"] = contracts.document_hash(previous_manifest)
+    assert previous_manifest == historical_manifest
     assert manifest["coverage"]["distinct_verified_exports"] == 2
     assert not (splits["train"] and splits["eval"])

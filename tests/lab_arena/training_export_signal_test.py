@@ -12,7 +12,7 @@ from lab_arena import broker, company_judgments, contracts, scoring, signal_judg
 from lab_arena.training_export import ExportError, _signal_authority_evidence, assemble_example
 from scripts.export_arena_training import export_run
 from tests.lab_arena.training_export_test import (
-    OUTPUT_REF, add_call, per_icp_cost_fixture, per_icp_cost_reader, save_input,
+    LEGACY_MODELS, OUTPUT_REF, add_call, per_icp_cost_fixture, per_icp_cost_reader, save_input,
 )
 
 
@@ -21,6 +21,8 @@ def _signal_fixture():
     execute, judge = values["runs"]
     config = values["round_row"]["configuration_doc"]
     policy = scoring.build_scorer_policy(
+        judge_models=LEGACY_MODELS,
+        judge_provider_routes={},
         scoring_adapter_version="qualification_integrity_v2",
         company_judgment_cache=True,
     )

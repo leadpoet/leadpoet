@@ -197,6 +197,7 @@ def current_service_database():
                 "591-lab-arena-legacy-baseline-reward-comparison.sql",
             ):
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            cursor.execute((SCRIPTS / "668-lab-arena-content-addressed-score-checkpoint.sql").read_text(encoding="utf-8"))
             # Only the disposable authority fixture's unrelated seed is removed.
             cursor.execute("TRUNCATE public.lab_arena_rounds CASCADE")
         yield psycopg2, dsn

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
+
 from tests.lab_arena import restore_recorded_results538_postgres_test as prior
 from tests.lab_arena import test_lab_arena_service_round as flows
 from tests.lab_arena.baseline_scored_first_postgres_test import (
@@ -52,8 +54,7 @@ def test_saved_publication_commit_and_preserved_holds(database, tmp_path, monkey
         'status': 'ready', 'set_id': kwargs['set_id'], 'icps': daily_icps()[:2]}
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(flows, 'deterministic_scorer', _baseline_first_judge)
-    monkeypatch.setitem(scoring.DEFAULT_JUDGE_MODELS, 'role_batch_check',
-                        'google/gemini-2.5-flash')
+    bind_historical_judge_models(harness.service, role_batch_model='google/gemini-2.5-flash')
     original_prices = flows.price_table
     monkeypatch.setattr(flows, 'price_table', lambda: original_prices(
         (*flows.PRICED_MODELS, 'google/gemini-2.5-flash')))

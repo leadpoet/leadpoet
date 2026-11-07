@@ -9,12 +9,36 @@ current-service tests must use ArenaStore and current_service_database instead.
 import json
 from copy import deepcopy
 from datetime import date, timedelta
+from functools import partial
+from types import MethodType
+from unittest.mock import patch
 
-from lab_arena import contracts
+from lab_arena import contracts, scoring
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 from lab_arena.store import (ArenaStore, ArenaStoreError, PsycopgTransport,
                              PUBLIC_RESULTS_CONFIGURATION_FIELDS,
                              CODE_REVIEW_SCHEMA_VERSION, _require_mapping)
+
+
+def bind_historical_judge_models(service, *, role_batch_model):
+    """Keep a dated fixture's models explicit without changing current defaults."""
+    models = {**LEGACY_MODELS, "role_batch_check": role_batch_model}
+    policy = deepcopy(service._scorer_policy)
+    policy["judge_models"] = models
+    for name in (contracts.JUDGE_REASONING_CAPTURE_BINDING,
+                 contracts.JUDGE_PROVIDER_ROUTES_BINDING,
+                 contracts.JUDGE_REQUEST_OPTIONS_BINDING,
+                 contracts.JUDGE_REASONING_EXCEPTIONS_BINDING):
+        policy["env_bindings"].pop(name, None)
+    service._scorer_policy = contracts.validate_scorer_policy(policy)
+    builder = partial(scoring.build_scorer_policy,
+                      judge_models=models, judge_provider_routes={})
+    native = type(service).create_round
+    def create_round(self, *args, **kwargs):
+        with patch.object(scoring, "build_scorer_policy", builder):
+            return native(self, *args, **kwargs)
+    service.create_round = MethodType(create_round, service)
 
 
 class HistoricalArenaStore(ArenaStore):

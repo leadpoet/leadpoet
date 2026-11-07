@@ -55,6 +55,9 @@ MAX_TRAINING_FRAME_BYTES = 8 * 1024 * 1024
 MAX_TRAINING_WEB_BODY_BYTES = 6 * 1024 * 1024
 MAX_TRAINING_BINARY_BODY_BYTES = 5 * 1024 * 1024
 MAX_TRAINING_STATE_BYTES = 65_536
+MAX_JUDGE_TOOL_EVENT_BYTES = MAX_TRAINING_FRAME_BYTES - 131_072
+JUDGE_CAPTURE_POLICY_ENV = "ARENA_JUDGE_REASONING_CAPTURE_POLICY"
+JUDGE_CAPTURE_POLICY = "full_generated_thinking_v1"
 TRAINING_SOCKET_TIMEOUT_SECONDS = 1.0
 _TRAINING_FAILURE = threading.local()
 
@@ -68,10 +71,24 @@ class QuotaUnavailable(RuntimeError):
     """The passive quota snapshot could not be read safely."""
 
 
+def _validate_redirect_url(value: Any) -> None:
+    """Accept only a bounded routing target without private URL components."""
+    if value is None:
+        return
+    if (not isinstance(value, str) or len(value) > 2000
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)):
+        raise ValueError("redirect target is invalid")
+    parts = urlsplit(value)
+    if (parts.scheme not in {"http", "https"} or not parts.hostname
+            or parts.username is not None or parts.password is not None
+            or parts.query or parts.fragment):
+        raise ValueError("redirect target contains private components")
+
+
 def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[str, Any]:
     """Validate reported runtime context; it is not an origin attestation."""
-    if (not isinstance(value, dict) or set(value) != {
-            "source", "complete", "encoding", "received_body_sha256", "received_body_bytes"}
+    fields = {"source", "complete", "encoding", "received_body_sha256", "received_body_bytes"}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | {"redirect_url"})
             or value["source"] != "runtime_http_v1"
             or type(value["complete"]) is not bool
             or not isinstance(value["encoding"], str) or not 1 <= len(value["encoding"]) <= 64
@@ -83,6 +100,7 @@ def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[s
             or type(value["received_body_bytes"]) is not int
             or not 0 <= value["received_body_bytes"] <= MAX_TRAINING_WEB_BODY_BYTES):
         raise ValueError("web capture metadata is invalid")
+    _validate_redirect_url(value.get("redirect_url"))
     codec = codecs.lookup(value["encoding"])
     if not getattr(codec, "_is_text_encoding", False):
         raise ValueError("web capture encoding is invalid")
@@ -96,8 +114,8 @@ def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[s
 
 def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> dict[str, Any]:
     """Validate consumed binary bytes without treating them as trainable text."""
-    if (not isinstance(value, dict) or set(value) != {
-            "source", "complete", "received_body_sha256", "received_body_bytes"}
+    fields = {"source", "complete", "received_body_sha256", "received_body_bytes"}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | {"redirect_url"})
             or value["source"] != "runtime_http_v1"
             or type(value["complete"]) is not bool
             or not isinstance(value["received_body_sha256"], str)
@@ -105,6 +123,7 @@ def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> d
             or type(value["received_body_bytes"]) is not int
             or not 0 <= value["received_body_bytes"] <= MAX_TRAINING_BINARY_BODY_BYTES):
         raise ValueError("binary capture metadata is invalid")
+    _validate_redirect_url(value.get("redirect_url"))
     if body is not None and (len(body) != value["received_body_bytes"]
             or "sha256:" + hashlib.sha256(body).hexdigest() != value["received_body_sha256"]):
         raise ValueError("binary capture bytes do not match")
@@ -125,7 +144,8 @@ def validate_http_response_metadata(data: Any) -> dict[str, Any]:
             raise ValueError("timestamp missing timezone")
         for key in ("url", "redirect_url"):
             value = data[key]
-            if key == "redirect_url" and value is None:
+            if key == "redirect_url":
+                _validate_redirect_url(value)
                 continue
             if (not isinstance(value, str) or len(value) > 2000
                     or any(ord(character) < 32 or ord(character) == 127 for character in value)):
@@ -133,12 +153,40 @@ def validate_http_response_metadata(data: Any) -> dict[str, Any]:
             parts = urlsplit(value)
             if parts.scheme not in {"http", "https"} or not parts.hostname:
                 raise ValueError("url invalid")
-            if key == "redirect_url" and (parts.username is not None or parts.password is not None
-                                          or parts.query or parts.fragment):
-                raise ValueError("redirect target contains private components")
     except (ValueError, TypeError):
         raise ValueError("http response metadata is invalid") from None
     return dict(data)
+
+
+def validate_judge_tool_event(value: Any) -> dict[str, Any]:
+    """Validate host tool state, never a training or correctness label.
+
+    Request/response digests identify locally observed documents. They do not
+    establish raw HTTP wire bytes, delivery, or provider/route authority.
+    """
+    fields = {"investigation_id", "sequence", "tool_call_id", "tool_name", "arguments",
+              "result", "disposition", "host_validation", "request_sha256", "response_sha256"}
+    if (not isinstance(value, dict) or set(value) != fields
+            or not isinstance(value["investigation_id"], str) or not 1 <= len(value["investigation_id"]) <= 128
+            or type(value["sequence"]) is not int or not 0 <= value["sequence"] < 4096
+            or value["tool_call_id"] is not None and (not isinstance(value["tool_call_id"], str)
+                or not 1 <= len(value["tool_call_id"]) <= 256)
+            or not isinstance(value["tool_name"], str) or not 1 <= len(value["tool_name"]) <= 256
+            or not isinstance(value["disposition"], str)
+            or value["disposition"] not in {"executed", "repair", "accepted_terminal", "rejected_not_executed"}
+            or not isinstance(value["host_validation"], dict)
+            or any(value[key] is not None and (not isinstance(value[key], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", value[key]))
+                for key in ("request_sha256", "response_sha256"))):
+        raise ValueError("judge tool event is invalid")
+    try:
+        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False,
+                              sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise ValueError("judge tool event is invalid") from None
+    if size > MAX_JUDGE_TOOL_EVENT_BYTES:
+        raise ValueError("judge tool event exceeds size limit")
+    return dict(value)
 
 
 def validate_training_frame(value: Any) -> dict[str, Any]:
@@ -148,7 +196,7 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
             "schema_version", "control", "kind", "depends_on", "data", "retry_token"})
             or value.get("schema_version") != TRAINING_SCHEMA_VERSION
             or value.get("control") != TRAINING_CONTROL
-            or value.get("kind") not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "capture_failure"}
+            or value.get("kind") not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "judge_local_tool", "capture_failure"}
             or not isinstance(value.get("depends_on"), list)
             or len(value["depends_on"]) > 32
             or any(not isinstance(item, str) or len(item) > 96 for item in value["depends_on"])
@@ -191,12 +239,14 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
                 or type(data["status"]) is not int or not 100 <= data["status"] <= 599
                 or type(data["body_bytes"]) is not int or data["body_bytes"] < 0):
             raise ValueError("training frame is invalid")
+    elif kind == "judge_local_tool":
+        validate_judge_tool_event(data)
     elif kind == "state_snapshot" and (set(data) != {"name", "value"} or not isinstance(data["name"], str)
           or not 1 <= len(data["name"]) <= 80
           or len(json.dumps(data["value"], ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES):
         raise ValueError("training frame is invalid")
     elif kind == "capture_failure" and (set(data) != {"category", "reason"}
-          or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot"}
+          or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "judge_local_tool"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ValueError("training frame is invalid")
     if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_FRAME_BYTES:
@@ -675,3 +725,15 @@ def write(companies: list[dict[str, Any]], *, output_path: Path = OUTPUT_PATH) -
             os.unlink(name)
         except FileNotFoundError:
             pass
+
+
+def record_judge_tool_event(event: Mapping[str, Any], *, depends_on: list[str] | None = None) -> int | None:
+    """Report a local judge tool outcome without creating a model turn or label."""
+    if os.environ.get(JUDGE_CAPTURE_POLICY_ENV) != JUDGE_CAPTURE_POLICY:
+        return None
+    try:
+        data = dict(event)
+    except Exception:
+        _record_training("capture_failure", {"category": "judge_local_tool", "reason": "invalid_value"}, None)
+        return None
+    return _record_training("judge_local_tool", data, depends_on, retry_ambiguous=True)

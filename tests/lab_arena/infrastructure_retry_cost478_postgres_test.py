@@ -251,7 +251,8 @@ def test_round_cost_policy_configuration_round_trips_and_rejects_bad_scope():
     cfg = base_round_configuration()
     assert 'infrastructure_retry_cost_policy' not in contracts.validate_round_configuration(cfg)
     cfg.update(integrity_policy=integrity.POLICY,
-               scorer_policy=scoring.build_scorer_policy(scoring_adapter_version=integrity.SCORING_ADAPTER),
+               scorer_policy=scoring.build_scorer_policy(scoring_adapter_version=integrity.SCORING_ADAPTER,
+                                                        judge_provider_routes={}),
                sourcing_cost_eligibility_policy=contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
                cost_per_company_microusd=800000, execution_icp_cap_microusd=4000000,
                infrastructure_retry_cost_policy=POLICY)

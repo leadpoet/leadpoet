@@ -2162,6 +2162,72 @@ class RunContext:
     # agent reasoning. Absent on every round created without the policy.
     reasoning_capture_policy: Optional[str] = None
     reasoning_route_registry: Optional[Mapping[str, Any]] = None
+    # Separate frozen opt-in: an older scorer must keep its exact requests,
+    # even when the sourcing round already requires full thinking.
+    judge_reasoning_capture_policy: Optional[str] = None
+    judge_reasoning_route_registry: Optional[Mapping[str, Any]] = None
+
+
+def _judge_reasoning_exception(context: RunContext, model: Any, operation_id: Any) -> Optional[Dict[str, Any]]:
+    """Only gateway-owned frozen scorer state may exempt this exact model."""
+    if (getattr(context, "kind", "execute") != "score"
+            or context.judge_reasoning_capture_policy != reasoning_capture.POLICY
+            or operation_id != "openrouter.chat"):
+        return None
+    try:
+        policy = contracts.validate_scorer_policy((context.judgment_cache_scope or {})["scorer_policy"])
+        entry = contracts.judge_reasoning_exceptions(policy).get(model)
+        return ({**entry, "scorer_policy_sha256": contracts.document_hash(policy)} if entry else None)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None  # Missing or invalid authority never weakens full capture.
+
+
+def _reasoning_contract(context: RunContext, model: Any = None,
+                        operation_id: Any = None) -> Tuple[Optional[str], Optional[Mapping[str, Any]]]:
+    if getattr(context, "kind", "execute") == "score":
+        if model is not None and _judge_reasoning_exception(context, model, operation_id) is not None:
+            return None, None
+        return (getattr(context, "judge_reasoning_capture_policy", None),
+                getattr(context, "judge_reasoning_route_registry", None))
+    return (getattr(context, "reasoning_capture_policy", None),
+            getattr(context, "reasoning_route_registry", None))
+
+
+def _frozen_judge_parameters(context: RunContext, operation_id: str,
+                             parameters: Mapping[str, Any]) -> Dict[str, Any]:
+    """Bind score requests to server-owned frozen routes and optional limits."""
+    if (getattr(context, "kind", "execute") != "score"
+            or context.judge_reasoning_capture_policy != reasoning_capture.POLICY):
+        return dict(parameters)
+    try:
+        policy = contracts.validate_scorer_policy(
+            (context.judgment_cache_scope or {})["scorer_policy"])
+        bindings = policy["env_bindings"]
+        if bindings.get(contracts.JUDGE_REASONING_CAPTURE_BINDING) != reasoning_capture.POLICY:
+            raise ValueError("missing frozen judge capture policy")
+        model = parameters["model"]
+        provider = json.loads(bindings[contracts.JUDGE_PROVIDER_ROUTES_BINDING])[model]
+        options_raw = bindings.get(contracts.JUDGE_REQUEST_OPTIONS_BINDING)
+        option = json.loads(options_raw)[model] if options_raw is not None else None
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise BrokerError("broker_unavailable") from exc
+    requested = parameters.get("provider")
+    if requested is not None and requested.get("only") != [provider]:
+        raise BrokerError("invalid_request")
+    result = dict(parameters, provider={"only": [provider]})
+    if option is not None:
+        output_field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
+        maximum = contracts.judge_request_max_output_tokens(option, model=model,
+            industry_model=policy["judge_models"].get("industry_evidence_review"),
+            operation_id=operation_id, parameters=result)
+        if result[output_field] > maximum:
+            raise BrokerError("invalid_request")
+        reasoning = dict(result.get("reasoning") or {})
+        if ("reasoning_effort" not in result and not any(
+                key in reasoning for key in ("effort", "max_tokens", "budget_tokens", "enabled"))):
+            reasoning.update(option["reasoning"])
+            result["reasoning"] = reasoning
+    return result
 
 
 @dataclass(frozen=True)
@@ -2409,7 +2475,7 @@ def _capture_upstream_response(
     response: ProviderResponse, *, operation_id: str,
     request_hash: str, call_identity: str, call_succeeded: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Keep complete private error bytes without storage I/O or replay authority."""
+    """Keep private provider bytes without storage I/O or replay authority."""
     if response.internal_provenance is not None:
         return None
     try:
@@ -2419,10 +2485,15 @@ def _capture_upstream_response(
         if len(response.body) > 3 * 1024 * 1024:
             return {"status": "unavailable", "reason": "response_size_limit"}
         text = response.body.decode("utf-8")
-        try:
-            body, is_json = json.loads(text), True
-        except ValueError:
-            body, is_json = text, False
+        if operation_id in reasoning_capture.OPERATIONS:
+            # Never fall back to text or lose duplicate fields before applying
+            # structured model privacy. Non-model tool text remains supported.
+            body, is_json = training_capture.model_response_object(text), True
+        else:
+            try:
+                body, is_json = training_capture.response_json_value(text), True
+            except json.JSONDecodeError:
+                body, is_json = text, False
         cleaned, body_redactions = training_capture.sanitize_training_value(body)
         raw = response.body
         if body_redactions:
@@ -4684,6 +4755,12 @@ class Broker:
         source_content_fallback: bool = False,
         source_content_response_url: Optional[str] = None,
     ) -> BrokerResult:
+        capture_policy, capture_registry = _reasoning_contract(
+            context,
+            parameters.get("model") if isinstance(parameters, Mapping) else None,
+            operation_id,
+        )
+        full_thinking = capture_policy == reasoning_capture.POLICY
         operation = (operations.OPERATIONS.get(operation_id)
                      or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
         if operation is None:
@@ -4696,8 +4773,7 @@ class Broker:
         try:
             normalized = operations.validate_operation_request(
                 operation_id, parameters, deepline_catalog=context.deepline_catalog,
-                allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
-                                     and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
+                allow_full_thinking=full_thinking,
             )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
@@ -4826,6 +4902,9 @@ class Broker:
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
+            capture_policy, capture_registry = _reasoning_contract(
+                context, effective_parameters.get("model"), effective_operation_id)
+            full_thinking = capture_policy == reasoning_capture.POLICY
             source_html_profile = (
                 route is not None and route.adapter == "generic_http_raw_html"
                 and route.compatibility_version == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
@@ -4834,8 +4913,7 @@ class Broker:
             try:
                 effective_normalized = operations.validate_operation_request(
                     effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
-                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
-                                         and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
+                    allow_full_thinking=full_thinking,
                 )
             except operations.OperationError:
                 # Distinguish an absent frozen score route from malformed input.
@@ -4915,19 +4993,31 @@ class Broker:
                 # holds this amount; historical policies keep their rules.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(
                     effective_normalized, kind=getattr(context, "kind", "execute"),
-                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
-                        and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY))
-                if getattr(context, "kind", "execute") == "execute":
+                    allow_full_thinking=full_thinking)
+                if getattr(context, "kind", "execute") == "execute" or full_thinking:
                     # Before hashing: identity, capture and the sent body all
                     # bind the reasoning parameters actually requested.
+                    effective_normalized = _frozen_judge_parameters(
+                        context, effective_operation_id, effective_normalized)
                     effective_normalized, reasoning_annotation = agent_reasoning_parameters(
                         effective_operation_id, effective_normalized,
-                        policy=getattr(context, "reasoning_capture_policy", None),
-                        registry=getattr(context, "reasoning_route_registry", None),
+                        policy=capture_policy,
+                        registry=capture_registry,
                         deepline_catalog=context.deepline_catalog,
                     )
                     max_output_tokens = int(effective_normalized.get(
                         "max_output_tokens", effective_normalized.get("max_tokens")))
+                exception = _judge_reasoning_exception(
+                    context, effective_normalized.get("model"), effective_operation_id)
+                if exception is not None:
+                    reasoning_annotation = {
+                        "policy": "provider_exposed_only", "semantic_class": "provider_exposed_only",
+                        "requested": False, "reviewed_route": False,
+                        "full_thinking_available": False,
+                        "model_id": effective_normalized["model"],
+                        "exception_roles": exception["roles"], "exception_reason": exception["reason"],
+                        "scorer_policy_sha256": exception["scorer_policy_sha256"],
+                    }
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
                 # passes that are absent from the caller body. Keep this
@@ -4971,6 +5061,11 @@ class Broker:
                             component: format(value.normalize(), "f")
                             for component, value in route_prices.items()
                         },
+                        industry_schema_order=(
+                            getattr(context, "kind", "execute") == "score"
+                            and effective_operation_id == "openrouter.chat"
+                            and normalized["model"] == self._judge_model_roles.get("industry_evidence_review")
+                        ),
                     )
                 amount = _max_openrouter_cost_for_pricing(
                     (
@@ -6228,7 +6323,7 @@ class Broker:
         transport_elapsed_ms: Optional[int] = None
 
         def retain_transport_timing(document: Dict[str, Any]) -> None:
-            if (getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY
+            if ((full_thinking or getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY)
                     and transport_elapsed_ms is not None):
                 _retain_broker_observations(document, {
                     "transport_elapsed_ms": transport_elapsed_ms,
@@ -6850,6 +6945,7 @@ class Broker:
                     row["entry_id"] for row in rows if row.get("entry_kind") == "uncertain"))
 
         adapted_response_url = ""
+        adapted_body = upstream_response.body
         call_succeeded = False
         judgment_cache_eligible = False
         judgment_response_replayable = False
@@ -7265,7 +7361,14 @@ class Broker:
                 summary["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
-            if not call_succeeded and not 200 <= sanitized_status < 300:
+            if (
+                (not call_succeeded and not 200 <= sanitized_status < 300)
+                or (call_succeeded and route is not None
+                    and adapted_body != upstream_response.body)
+            ):
+                # Compatibility adapters can discard source dates, authors and
+                # provider metadata. Keep that evidence privately; replay still
+                # uses only the unchanged sanitized terminal response.
                 retain_upstream_response(terminal)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"

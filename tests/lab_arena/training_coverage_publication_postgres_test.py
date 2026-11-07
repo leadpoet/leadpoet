@@ -13,6 +13,7 @@ import pytest
 
 from lab_arena import code_review, contracts, training_reader
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.historical_service_harness import bind_historical_judge_models
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
@@ -45,6 +46,7 @@ def _rename_run(value, run_id):
 ])
 def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     database, tmp_path, monkeypatch, missing, expected_eligible, gap,
+    *, adoption_before_utc_midnight=False,
 ):
     psycopg2, dsn = database
     # Each parameter owns a fresh database, so it must own its object store too.
@@ -379,6 +381,9 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
             + old_head + ".tar.gz"
         )
+        # This fixture freezes miner capture; its registry predates judge capture.
+        bind_historical_judge_models(
+            harness.service, role_batch_model="google/gemini-3.5-flash-lite")
         harness.service.config.defaults = replace(
             harness.service.config.defaults,
             reasoning_capture_from="2026-01-01T00:00:00Z",
@@ -390,14 +395,27 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
         harness.service._config.reasoning_registry_source = approved_registry
         harness.service._config.baseline_source_fetcher = promoted_source
         harness.clock.now = datetime.now(timezone.utc)
+        previous_cutoff = datetime.fromisoformat(
+            saved["configuration_doc"]["schedule"]["submission_cutoff"].replace("Z", "+00:00"))
+        if adoption_before_utc_midnight:
+            # Reproduce a first cutoff just after UTC midnight, followed by
+            # resetting the fixture clock to the preceding wall-clock date.
+            harness.clock.now = previous_cutoff.replace(
+                hour=0, minute=15, second=0, microsecond=0) - timedelta(minutes=30)
+        # The winner is eligible only on a later evaluation date. Wall time
+        # plus one day can still share the first round's date near midnight.
+        next_cutoff = max(harness.clock.now, previous_cutoff) + timedelta(days=1)
         next_config = harness.service.create_round(
-            harness.clock.now + timedelta(days=1),
+            next_cutoff,
             round_id="arena-2099-10-23-cov%d%s" % (
                 missing, gap[0]),
         )
+        assert next_config["reasoning_capture_policy"] == "full_generated_thinking_v1"
+        assert contracts.JUDGE_REASONING_CAPTURE_BINDING not in next_config["scorer_policy"]["env_bindings"]
         harness.round_id = next_config["round_id"]
         harness.clock.advance_to(harness.schedule()["submission_cutoff"])
-        assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+        advance = harness.service.advance_round(harness.round_id)
+        assert advance["status"] == "ok", advance
         next_row = harness.service.store.get_round(harness.round_id)
         baseline = next(participant for participant in next_row["participants"]
                         if participant["is_king"])
@@ -408,3 +426,10 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
         original = harness.service.store.get_round(promoted["round_id"])
         assert original["publication_doc"] == original_publication
         assert original["configuration_doc"] == original_configuration
+
+
+def test_promoted_winner_adoption_crosses_utc_midnight(database, tmp_path, monkeypatch):
+    test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
+        database, tmp_path, monkeypatch, 3, False, "missing",
+        adoption_before_utc_midnight=True,
+    )

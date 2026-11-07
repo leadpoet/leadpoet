@@ -725,6 +725,8 @@ async def openrouter_chat(
     system_prompt: Optional[str] = None,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: int = 200,
+    output_token_floor: Optional[int] = None,
+    timeout_seconds: Optional[float] = None,
 ) -> str:
     """Call OpenRouter LLM API with automatic retry on transient failures.
 
@@ -749,7 +751,17 @@ async def openrouter_chat(
         the output channel is locked.
 
       * ``max_tokens`` — bounds the response size. Default 200.
+      * ``output_token_floor`` and ``timeout_seconds`` let optional claim
+        comparison retain its original short bound under judge capture. The
+        frozen per-model allowance still caps its output; neither grants reuse.
     """
+    from qualification.scoring.openrouter_options import (
+        prepare_judge_request, judge_reasoning_enabled, JUDGE_REASONING_TIMEOUT_SECONDS,
+    )
+    default_timeout = JUDGE_REASONING_TIMEOUT_SECONDS if judge_reasoning_enabled() else LLM_TIMEOUT
+    if timeout_seconds is not None and (type(timeout_seconds) not in (int, float)
+            or not 0 < timeout_seconds <= default_timeout):
+        raise ValueError("judge_timeout_invalid")
     key = api_key or OPENROUTER_API_KEY
     if not key:
         raise ValueError("No OpenRouter API key configured (neither api_key param nor QUALIFICATION_OPENROUTER_API_KEY env var)")
@@ -778,14 +790,15 @@ async def openrouter_chat(
                 # Sonnet 5.5 rejects sampling controls. Its adaptive high
                 # default can consume the small JSON reply's output budget.
                 if payload["model"] == "anthropic/claude-sonnet-5.5":
-                    payload["reasoning"] = {"effort": "low"}
+                    if not judge_reasoning_enabled():
+                        payload["reasoning"] = {"effort": "low"}
                 else:
                     payload["temperature"] = 0.3
                 if response_format is not None:
                     payload["response_format"] = response_format
-
+                path, payload = prepare_judge_request(payload, output_token_floor=output_token_floor)
                 response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    "https://openrouter.ai/api/v1" + path,
                     headers={
                         "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json",
@@ -793,10 +806,13 @@ async def openrouter_chat(
                         "X-Title": "Leadpoet Qualification"
                     },
                     json=payload,
-                    timeout=LLM_TIMEOUT
+                    timeout=(timeout_seconds if timeout_seconds is not None else
+                             JUDGE_REASONING_TIMEOUT_SECONDS if judge_reasoning_enabled() else LLM_TIMEOUT)
                 )
                 response.raise_for_status()
                 data = response.json()
+                if judge_reasoning_enabled() and data["choices"][0].get("finish_reason") != "stop":
+                    raise ValueError("judge_response_incomplete")
                 return data["choices"][0]["message"]["content"]
         except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
             last_error = e

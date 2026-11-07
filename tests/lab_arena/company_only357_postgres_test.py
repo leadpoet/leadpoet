@@ -6,6 +6,7 @@ import pytest
 from lab_arena import contracts, scoring
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
+from tests.lab_arena.judge_default_activation_test import LEGACY_MODELS
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/357-arena-2026-09-24-company-only.sql"
 
@@ -20,7 +21,9 @@ def seed(cursor, day="24", status="open"):
                intent_details_policy="intent_details_v1", cost_per_company_microusd=800000,
                stage_1_icp_count=5, stage_2_icp_count=5, promotion_margin=0.5)
     cfg["schedule"] = {k:v.replace("2026-09-01",f"2026-09-{int(day)-1:02d}").replace("2026-09-02",f"2026-09-{day}") for k,v in cfg["schedule"].items()}
-    cfg["scorer_policy"] = scoring.build_scorer_policy(scoring_adapter_version="qualification_contacts_v3", intent_details=True)
+    cfg["scorer_policy"] = scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_contacts_v3", intent_details=True,
+        judge_models=LEGACY_MODELS, judge_provider_routes={})
     cfg = contracts.validate_round_configuration(cfg)
     cursor.execute("SET session_replication_role=replica")
     cursor.execute("INSERT INTO public.lab_arena_rounds (round_id,status,configuration_doc,rewards_enabled) VALUES (%s,%s,%s::jsonb,false)", (cfg["round_id"],status,json.dumps(cfg)))

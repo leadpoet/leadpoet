@@ -28,6 +28,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import httpx
+from qualification.scoring.openrouter_options import prepare_judge_request, judge_reasoning_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -341,11 +342,12 @@ async def _judge_chunk(
             "zdr": True,
         },
     }
+    path, body = prepare_judge_request(body)
     last_err = "retries_exhausted"
     for attempt in range(NUM_RETRIES):
         try:
             r = await http.post(
-                f"{OPENROUTER_BASE_URL}/chat/completions",
+                f"{OPENROUTER_BASE_URL}{path}",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -378,6 +380,9 @@ async def _judge_chunk(
                 )
                 return None
             resp_doc = r.json()
+            if judge_reasoning_enabled() and (resp_doc.get("choices") or [{}])[0].get("finish_reason") != "stop":
+                last_err = "incomplete_response"
+                continue
             content = (resp_doc.get("choices") or [{}])[0].get("message", {}).get("content", "")
             parsed = _parse_response(content)
             if parsed is not None and len(parsed) == len(chunk):
@@ -473,23 +478,26 @@ CONTRADICTED for an evidenced different function/level, UNPROVEN for ambiguity.
 ROLE RUBRIC:\n""" + _build_prompt(target_roles, [{
         "id": 1, "role": actual_role, "duties": bounded_duties,
     }]).split("OUTPUT — JSON array", 1)[0] + "\nEVIDENCE:\n" + json.dumps(evidence)
-    try:
-        response = await http.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
+    path, body = prepare_judge_request({
                 "model": MODEL, "temperature": 0, "max_tokens": 900,
                 "messages": [
                     {"role": "system", "content": _SYS_MESSAGE},
                     {"role": "user", "content": prompt},
                 ],
                 "provider": {"data_collection": "deny", "zdr": True},
-            },
+            })
+    try:
+        response = await http.post(
+            f"{OPENROUTER_BASE_URL}{path}",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=body,
             timeout=TIMEOUT_SECONDS,
         )
         if response.status_code != 200:
             return None
         document = response.json()
+        if judge_reasoning_enabled() and document["choices"][0].get("finish_reason") != "stop":
+            return None
         content = document["choices"][0]["message"]["content"]
         # Providers can wrap the requested object in a Markdown JSON fence.
         # Accept only the complete wrapper; evidence validation still follows.

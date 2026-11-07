@@ -409,9 +409,22 @@ def sha256_json(value: Any) -> str:
     digest = hashlib.sha256()
     encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
                                ensure_ascii=False, allow_nan=False)
+    # Schema-heavy inputs contain many tiny encoder fragments. Batch those
+    # updates without reconstructing a large history or changing its bytes.
+    buffer = bytearray()
+    buffer_limit = 64 * 1024
     try:
         for chunk in encoder.iterencode(value):
-            digest.update(chunk.encode("utf-8"))
+            data = chunk.encode("utf-8")
+            if buffer and len(buffer) + len(data) > buffer_limit:
+                digest.update(buffer)
+                buffer.clear()
+            if len(data) >= buffer_limit:
+                digest.update(data)
+            else:
+                buffer.extend(data)
+        if buffer:
+            digest.update(buffer)
     except UnicodeEncodeError:
         raise
     except (TypeError, ValueError) as exc:
@@ -977,6 +990,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("training_maximum_missing_reasoning_percent", "int", required=False,
       minimum=0, maximum=100),
     F("reasoning_route_registry", "object", required=False),
+    F("judge_reasoning_route_registry", "object", required=False),
     F("baseline_reasoning_configuration", "object", required=False),
     F("reasoning_baseline_source_sha256", "sha256", required=False),
     F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
@@ -1133,6 +1147,18 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     elif ("reasoning_route_registry" in config
           or "reasoning_baseline_source_sha256" in config):
         raise ArenaContractError("reasoning policy and route metadata must be frozen together")
+    judge_policy = (config.get("scorer_policy") or {}).get("env_bindings", {}).get(
+        JUDGE_REASONING_CAPTURE_BINDING)
+    if judge_policy == "full_generated_thinking_v1":
+        from lab_arena import reasoning_capture
+        try:
+            reasoning_capture.validate_judge_registry(
+                config.get("judge_reasoning_route_registry", config.get("reasoning_route_registry")),
+                config["scorer_policy"])
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ArenaContractError("judge thinking requires its frozen route registry") from exc
+    elif "judge_reasoning_route_registry" in config:
+        raise ArenaContractError("judge reasoning policy and registry must be frozen together")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None
@@ -1406,6 +1432,161 @@ FIT_FP_CLASSIFICATION_BINDING = "ARENA_FIT_FP_CLASSIFICATION"
 FIT_RECEIPT_AUTHORITY = "company_fit_receipt_v1"
 PROVIDER_OBSERVATION_HANDOFF_BINDING = "ARENA_PROVIDER_OBSERVATION_HANDOFF"
 AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
+JUDGE_REASONING_CAPTURE_BINDING = "ARENA_JUDGE_REASONING_CAPTURE_POLICY"
+JUDGE_PROVIDER_ROUTES_BINDING = "ARENA_JUDGE_PROVIDER_ROUTES"
+JUDGE_REQUEST_OPTIONS_BINDING = "ARENA_JUDGE_REQUEST_OPTIONS"
+JUDGE_REASONING_EXCEPTIONS_BINDING = "ARENA_JUDGE_REASONING_EXCEPTIONS"
+
+
+def validate_judge_request_option(option: Any, *, model: str,
+                                  industry_model: Optional[str]) -> None:
+    """Validate existing model options and the optional frozen industry ceiling."""
+    fields = {"reasoning", "max_output_tokens"}
+    if not isinstance(option, dict) or set(option) not in (fields, fields | {"industry_max_output_tokens"}):
+        raise ValueError("invalid judge request option")
+    maximum, mode = option["max_output_tokens"], option["reasoning"]
+    if type(maximum) is not int or not 1 <= maximum <= 32768 or not isinstance(mode, dict):
+        raise ValueError("invalid judge request option")
+    if not ((set(mode) == {"effort"} and mode["effort"] in {"minimal", "low", "medium", "high", "xhigh", "max"})
+            or (set(mode) == {"enabled"} and mode["enabled"] is True)
+            or (set(mode) == {"max_tokens"} and type(mode["max_tokens"]) is int and 1 <= mode["max_tokens"] < maximum)):
+        raise ValueError("invalid judge request option")
+    if "industry_max_output_tokens" in option:
+        industry_maximum = option["industry_max_output_tokens"]
+        if (not industry_model or model != industry_model or type(industry_maximum) is not int
+                or not maximum < industry_maximum <= 32768):
+            raise ValueError("invalid industry judge output ceiling")
+
+
+def judge_request_max_output_tokens(option: Mapping[str, Any], *, model: str,
+                                    industry_model: Optional[str], operation_id: str,
+                                    parameters: Optional[Mapping[str, Any]] = None,
+                                    role: Optional[str] = None) -> int:
+    """Select one frozen ceiling for preparation, broker admission and registry checks.
+
+    Only registry validation supplies a trusted policy role. Dispatch identifies
+    the native tool-free industry packet, never a caller role or schema name alone.
+    Existing options without the extra field retain their exact model ceiling.
+    """
+    validate_judge_request_option(option, model=model, industry_model=industry_model)
+    maximum = option["max_output_tokens"]
+    if "industry_max_output_tokens" not in option or operation_id != "openrouter.chat":
+        return maximum
+    if role is not None:
+        return option["industry_max_output_tokens"] if role == "industry_evidence_review" else maximum
+    try:
+        if not isinstance(parameters, Mapping) or parameters.get("model") != industry_model or parameters.get("tools"):
+            return maximum
+        fmt = parameters["response_format"]
+        declaration, schema = fmt["json_schema"], fmt["json_schema"]["schema"]
+        if declaration.get("name") != "industry_proposal":
+            return maximum
+        messages = parameters["messages"]
+        if (not isinstance(messages, list) or len(messages) < 3
+                or messages[0].get("role") != "system"
+                or any(message.get("role") != "user" for message in messages[1:])):
+            return maximum
+        metadata = json.loads(messages[1]["content"])
+        if (set(metadata["criterion"]) != {"industry", "subindustry", "product_service"}
+                or set(metadata["company_locator"]) != {"name", "website", "linkedin"}
+                or any(not isinstance(value, str) for section in ("criterion", "company_locator")
+                       for value in metadata[section].values())
+                or not isinstance(metadata["evaluation_date"], str)):
+            return maximum
+        pages = []
+        for message in messages[2:]:
+            sources = json.loads(message["content"])["untrusted_source_pages"]
+            if not isinstance(sources, list) or not sources:
+                return maximum
+            pages.extend(sources)
+        if any(not isinstance(page["source_id"], str) or not page["source_id"]
+               or not isinstance(page["source_url"], str) or not page["source_url"].startswith("https://")
+               or not isinstance(page["spans"], list) or not page["spans"] for page in pages):
+            return maximum
+        from copy import deepcopy
+        from qualification.scoring.industry_classification import SCHEMA, prepare
+        source_shapes, offsets, prefixes = {}, {}, set()
+        for page in pages:
+            source_id = page["source_id"]
+            if source_id in source_shapes and source_shapes[source_id]["source_url"] != page["source_url"]:
+                return maximum
+            source_shapes[source_id] = {"source_id": source_id, "source_url": page["source_url"],
+                                        "body": page["spans"][0]["text"]}
+            for span in page["spans"]:
+                match = re.fullmatch(r"([0-9a-f]{16}):([A-Za-z0-9_.-]{1,120}):(0|[1-9][0-9]*):(0|[1-9][0-9]*)", span["span_id"])
+                if (not match or match[2] != source_id or int(match[3]) != offsets.get(source_id, 0)
+                        or int(match[4]) - int(match[3]) != len(span["text"].encode("utf-8"))):
+                    return maximum
+                offsets[source_id] = int(match[4])
+                prefixes.add(match[1])
+        if len(prefixes) != 1:
+            return maximum
+        # Reuse native date, locator, source-ID and absolute-URL checks with
+        # one retained span per source. Do not rebuild the packet digest or
+        # source authority: the native resolver remains the grounding gate.
+        prepare(metadata["criterion"], metadata["company_locator"], list(source_shapes.values()),
+                evaluation_date=metadata["evaluation_date"])
+        spans = [span for page in pages for span in page["spans"]]
+        ids = [span["span_id"] for span in spans]
+        if (not ids or len(ids) != len(set(ids))
+                or any(not isinstance(span["span_id"], str) or not span["span_id"]
+                       or not isinstance(span["text"], str) or not span["text"] for span in spans)):
+            return maximum
+        # This module is pure schema/packet code: no scorer runtime, provider
+        # client or environment is imported. Reuse its native schema rather
+        # than maintaining a second industry response validator here.
+        expected = deepcopy(SCHEMA)
+        if "research_query" in schema["properties"]:
+            expected["properties"]["research_query"] = {"type": "string", "maxLength": 300}
+            expected["required"].append("research_query")
+        # The reviewed facts-before-verdict request may tighten this string.
+        if (schema["properties"]["reason"].get("minLength") == 1
+                and "minLength" not in expected["properties"]["reason"]):
+            expected["properties"]["reason"]["minLength"] = 1
+        expected["properties"]["evidence_span_ids"]["items"]["enum"] = ids
+        if fmt != {"type": "json_schema", "json_schema": {
+                "name": "industry_proposal", "strict": True, "schema": expected}}:
+            return maximum
+        return option["industry_max_output_tokens"]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        # A malformed packet cannot grant the larger frozen allowance. It
+        # retains the model ceiling, which the broker checks before spending.
+        return maximum
+
+
+def validate_judge_reasoning_exceptions(raw: Any, models: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Only the quality-gated proprietary industry workflow may lack full text.
+
+    This grants no route approval. Sol retains its existing host routing; every
+    other frozen model still requires its exact reviewed reasoning route.
+    """
+    try:
+        exceptions = json.loads(raw)
+        model = "openai/gpt-6.1-sol"
+        allowed_roles = (["industry_evidence_review"],
+                         ["industry_evidence_review", "industry_research_controller"])
+        if not isinstance(exceptions, dict) or set(exceptions) != {model}:
+            raise ValueError
+        entry = exceptions[model]
+        if (not isinstance(entry, dict) or set(entry) != {"roles", "reason"}
+                or entry["roles"] not in allowed_roles or not isinstance(entry["reason"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{1,79}", entry["reason"]) is None):
+            raise ValueError
+        if models is not None and sorted(role for role, value in models.items() if value == model) != entry["roles"]:
+            raise ValueError
+        return exceptions
+    except (TypeError, ValueError, KeyError, AttributeError):
+        raise ArenaContractError("invalid frozen judge reasoning exceptions") from None
+
+
+def judge_reasoning_exceptions(policy: Mapping[str, Any]) -> Dict[str, Any]:
+    bindings = policy.get("env_bindings") or {}
+    raw = bindings.get(JUDGE_REASONING_EXCEPTIONS_BINDING)
+    if raw is None:
+        return {}
+    if bindings.get(JUDGE_REASONING_CAPTURE_BINDING) != "full_generated_thinking_v1":
+        raise ArenaContractError("judge reasoning exceptions require frozen thinking policy")
+    return validate_judge_reasoning_exceptions(raw, policy.get("judge_models") or {})
 
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
@@ -1413,6 +1594,7 @@ SCORER_POLICY_FIELDS = (
     F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
     F("company_judgment_policy", "str", required=False, choices=("company_judgment_v1",)),
     F("signal_judgment_policy", "str", required=False, choices=("signal_judgment_v1",)),
+    F("evidence_judgment_policy", "str", required=False, choices=("evidence_judgment_v2",)),
     F("intent_details_policy", "str", required=False, choices=("intent_details_v1",)),
     F("fp_penalty_points", "float", minimum=0, maximum=10),
     F("fp_unverified_primary_penalty_points", "float", minimum=0, maximum=10),
@@ -1431,6 +1613,8 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     policy = validate_document(document, SCORER_POLICY_FIELDS)
     if policy.get("signal_judgment_policy") and policy.get("company_judgment_policy") != "company_judgment_v1":
         raise ArenaContractError("signal judgments require company judgment reuse")
+    if policy.get("evidence_judgment_policy") and policy.get("signal_judgment_policy") != "signal_judgment_v1":
+        raise ArenaContractError("evidence judgments require signal judgment reuse")
     if policy.get("company_judgment_policy") and (policy.get("company_quality_policy") or policy["scoring_adapter_version"] != "qualification_integrity_v2"):
         raise ArenaContractError("legacy company judgments require company-only integrity scoring")
     if policy.get("company_quality_policy") and policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
@@ -1446,6 +1630,43 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     for key, value in policy["env_bindings"].items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ArenaContractError("env_bindings must map strings to strings")
+    evidence_policy = policy.get("evidence_judgment_policy", "")
+    if policy["env_bindings"].get("ARENA_EVIDENCE_JUDGMENT_POLICY", evidence_policy) != evidence_policy:
+        raise ArenaContractError("evidence reuse binding differs from frozen policy")
+    capture = policy["env_bindings"].get(JUDGE_REASONING_CAPTURE_BINDING)
+    routes_raw = policy["env_bindings"].get(JUDGE_PROVIDER_ROUTES_BINDING)
+    exceptions = judge_reasoning_exceptions(policy)
+    full_models = None
+    if capture is not None or routes_raw is not None:
+        if capture != "full_generated_thinking_v1" or not routes_raw:
+            raise ArenaContractError("judge thinking requires a frozen policy and provider routes")
+        required_roles = {
+            "company_fit_reverification", "intent_signal_judge", "intent_details_review",
+            "intent_three_stage_stage3", "intent_fetched_evidence", "role_batch_check",
+            "industry_evidence_review",
+        }
+        if (not required_roles <= set(policy["judge_models"])
+                or any(not isinstance(v, str) or not v.strip() for v in policy["judge_models"].values())):
+            raise ArenaContractError("judge thinking requires every frozen model role")
+        full_models = set(policy["judge_models"].values()) - set(exceptions)
+        try:
+            routes = json.loads(routes_raw)
+        except (TypeError, ValueError):
+            raise ArenaContractError("invalid judge provider routes") from None
+        if (not isinstance(routes, dict) or set(routes) != full_models
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 128 for v in routes.values())):
+            raise ArenaContractError("judge provider routes must cover the frozen model roles")
+    options_raw = policy["env_bindings"].get(JUDGE_REQUEST_OPTIONS_BINDING)
+    if options_raw is not None:
+        try:
+            options = json.loads(options_raw)
+            if capture != "full_generated_thinking_v1" or not isinstance(options, dict) or set(options) != full_models:
+                raise ValueError
+            for model, option in options.items():
+                validate_judge_request_option(option, model=model,
+                    industry_model=policy["judge_models"].get("industry_evidence_review"))
+        except (TypeError, ValueError, KeyError):
+            raise ArenaContractError("invalid frozen judge request options") from None
     if SCORE_NORMALIZATION_BINDING in policy["env_bindings"]:
         if policy["env_bindings"][SCORE_NORMALIZATION_BINDING] != AVAILABLE_INTENT_CAP_NORMALIZATION:
             raise ArenaContractError("unsupported score normalization")

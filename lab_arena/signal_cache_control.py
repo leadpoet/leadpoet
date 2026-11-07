@@ -27,7 +27,10 @@ def fit_checkpoint_capability() -> dict:
 def validate_request(value: Any) -> dict:
     if not isinstance(value, Mapping):
         raise ValueError("invalid signal cache request")
-    from lab_arena import company_judgments
+    from lab_arena import company_judgments, evidence_judgments
+    if (value.get("checkpoint_kind") == evidence_judgments.FIT_KIND
+        or value.get("judgment_kind") == evidence_judgments.SIGNAL_KIND):
+        return validate_evidence_request(value)
     if value.get("checkpoint_kind") == company_judgments.FIT_CHECKPOINT_KIND:
         expected = {"operation", "company_index", "signal_index", "checkpoint_kind"}
         if value.get("operation") == "complete":
@@ -57,6 +60,45 @@ def validate_request(value: Any) -> dict:
     encoded = contracts.canonical_json(value).encode("utf-8")
     if len(encoded) > MAX_BYTES:
         raise ValueError("signal cache request too large")
+    return json.loads(encoded)
+
+
+def validate_evidence_request(value: Any) -> dict:
+    from lab_arena import contracts, evidence_judgments as evidence
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid evidence request")
+    fit = value.get("checkpoint_kind") == evidence.FIT_KIND
+    expected = {"operation", "company_index", "signal_index", "checkpoint_kind" if fit else "judgment_kind"}
+    operation = value.get("operation")
+    if "evidence_judgment_policy" in value:
+        expected.add("evidence_judgment_policy")
+        if value["evidence_judgment_policy"] != evidence.POLICY:
+            raise ValueError("invalid evidence policy")
+    if "claim" in value:
+        expected.add("claim")
+        if fit or not isinstance(value["claim"], Mapping):
+            raise ValueError("invalid current claim")
+    if not fit:
+        expected |= {"verified_company_identity", "verified_funding_stage_context"}
+        if "verified_source_pages" in value:
+            expected.add("verified_source_pages")
+    if operation != "candidates" or not fit or "evidence_input" in value:
+        expected |= {"evidence_input", "evidence_hash"}
+    if operation == "complete":
+        expected |= {"reference", "judgment"}
+    if "candidate_reference" in value:
+        expected.add("candidate_reference")
+        if "equivalence_receipt" in value:
+            expected.add("equivalence_receipt")
+    if (set(value) != expected or operation not in {"candidates", "claim", "complete"}
+        or type(value.get("company_index")) is not int or not 0 <= value["company_index"] < 5
+        or type(value.get("signal_index")) is not int
+        or (value["signal_index"] != -1 if fit else not 0 <= value["signal_index"] < 100)
+        or ("candidate_reference" in value and operation != "claim")):
+        raise ValueError("invalid evidence cache request")
+    encoded = contracts.canonical_json(value).encode("utf-8")
+    if len(encoded) > MAX_BYTES:
+        raise ValueError("evidence cache request too large")
     return json.loads(encoded)
 
 
@@ -95,7 +137,7 @@ async def exchange(request: Mapping[str, Any]) -> dict:
                 return result
             raise SignalJudgmentCacheError("verified fit checkpoint capability is invalid")
         if result.get("status") not in {"busy", "pending"}:
-            if result.get("status") not in {"hit", "miss", "stored", "existing", "released"}:
+            if result.get("status") not in {"hit", "miss", "stored", "existing", "released", "candidates"}:
                 raise SignalJudgmentCacheError("signal cache request unavailable")
             return result
         if time.monotonic() >= deadline:

@@ -170,21 +170,23 @@ LISTING = (
 )
 
 
-def _decide(ownership, listing, requested, *, validated=True, listing2=""):
+def _decide(
+    ownership, listing, requested, *, validated=True, listing2="", listing_url=LISTING_URL,
+):
     pages = {
         OWNERSHIP_URL: "About us. " + ownership + " Contact us.",
-        LISTING_URL: "Stock information. " + listing,
+        listing_url: "Stock information. " + listing,
     }
     raw = _finding(
         "stage", status="VERIFIED", observed_value="Acquired",
         evidence_url=OWNERSHIP_URL, evidence_quote=ownership,
-        supporting_evidence_url_1=LISTING_URL,
+        supporting_evidence_url_1=listing_url,
         supporting_evidence_quote_1=listing,
     )
     raw.pop("supporting_evidence")
     if listing2:
-        pages[LISTING_URL + "/status"] = listing2
-        raw.update(supporting_evidence_url_2=LISTING_URL + "/status",
+        pages[listing_url + "/status"] = listing2
+        raw.update(supporting_evidence_url_2=listing_url + "/status",
                    supporting_evidence_quote_2=listing2)
     finding = investigator._validated_findings(
         {"findings": [raw]}, targets=("stage",), fetched_pages=pages,
@@ -879,3 +881,129 @@ def test_matching_contradicted_direct_or_venture_label_keeps_existing_veto(obser
     )['stage']
     assert finding['status'] == 'UNPROVEN'
     assert finding['evidence_url'] == finding['evidence_quote'] == ''
+
+
+# November 7 independent-review regressions. All assertions use native source
+# validation followed by JSON saved projection and the final fit decision.
+@pytest.mark.parametrize("suffix", [
+    ", if the transaction completes.",
+    ", if the agreement closes.",
+    ", conditional on regulatory approval.",
+    ", but this relationship is unconfirmed.",
+    ", but that relationship has not been confirmed.",
+    ", but this relationship may be inaccurate.",
+    ", may be inaccurate.",
+    ", has not been confirmed.",
+    ", according to unconfirmed reports.",
+    ", though this relationship is unconfirmed.",
+    ", although this relationship has not been confirmed.",
+    ", but it may be inaccurate.",
+    ", only if the agreement closes.",
+    ", contingent on regulatory approval.",
+])
+def test_review_ownership_suffix_is_not_current_proof(suffix):
+    *_, decision = _decide(
+        "Acme Realty is wholly owned by Barco Industries" + suffix,
+        BARCO_LISTING, "public",
+    )
+    assert decision != "match"
+
+
+@pytest.mark.parametrize("denial", [
+    "Barco Industries is now privately held.",
+    "Barco Industries has ceased trading.",
+    "Barco Industries has never been publicly traded.",
+    "Barco Industries has never been publicly listed.",
+    "Barco Industries no longer trades on Nasdaq.",
+    "Barco Industries's common shares are no longer listed.",
+])
+def test_review_same_parent_denial_cannot_be_overridden(denial):
+    *_, decision = _decide(
+        "Acme Realty is wholly owned by Barco Industries.",
+        BARCO_LISTING, "public", listing2=denial,
+    )
+    assert decision != "match"
+
+
+@pytest.mark.parametrize("quantity", [
+    "one percent", "fifty percent", "forty-nine percent",
+    "at least fifty percent", "less than sixty percent",
+    "one hundred and one percent", "one hundred sixty percent",
+    "fifty point zero percent", "one hundred point one percent",
+    "fifty point ten percent", "fifty point point one percent",
+    "fifty point percent", "-80%", "1500%", "1,080%", "1e100%", "onehundred60%",
+    "minus sixty percent", "negative eighty percent", "−80%", "1,099%",
+    "60% or less", "sixty percent at most", "between 40 and 60 percent",
+    "40 to 60 percent", "forty to sixty percent",
+])
+def test_review_written_or_invalid_quantity_cannot_hide_minority(quantity):
+    *_, decision = _decide(
+        "Acme Realty is a subsidiary of Barco Industries. "
+        f"Barco Industries owns {quantity} of Acme Realty.",
+        BARCO_LISTING, "public",
+    )
+    assert decision != "match"
+
+
+@pytest.mark.parametrize("quantity", [
+    "fifty-one percent", "sixty percent", "one hundred percent",
+    "more than fifty percent", "at least fifty-one percent", "80%",
+    "fifty point one percent", "ninety-nine point nine percent",
+])
+def test_review_clear_written_majority_still_matches(quantity):
+    *_, decision = _decide(
+        "Acme Realty is a subsidiary of Barco Industries. "
+        f"Barco Industries owns {quantity} of Acme Realty.",
+        BARCO_LISTING, "public",
+    )
+    assert decision == "match"
+
+
+@pytest.mark.parametrize("unrelated", [
+    ", while Unrelated Corp is not publicly listed.",
+    ", but its earnings report has not been confirmed.",
+    ". Unrelated Corp may be acquired.",
+    " as of May 2026.",
+    ". Barco Industries owns fifty percent of Unrelated Corp.",
+])
+def test_review_unrelated_uncertainty_and_quantities_preserve_parent(unrelated):
+    *_, decision = _decide(
+        "Acme Realty is wholly owned by Barco Industries" + unrelated,
+        BARCO_LISTING, "public",
+        listing2="Unrelated Corp is now privately held. Acme Realty is privately held.",
+    )
+    assert decision == "match"
+
+
+@pytest.mark.parametrize("issuer, expected", [
+    ("Midwest Advanced Research Systems Inc.", False),
+    ("Zqlistedparentissuerzq", False),
+    ("Mars Inc.", True),
+])
+def test_review_exchange_card_must_name_exact_parent(issuer, expected):
+    *_, decision = _decide(
+        "Acme Realty is wholly owned by Mars.",
+        issuer + " New York Stock Exchange: MARS Last 10.00", "public",
+        listing_url="https://www.nyse.com/quote/XNYS:MARS",
+    )
+    assert (decision == "match") is expected
+
+
+@pytest.mark.parametrize("description", [
+    "a private label manufacturer", "a private cloud provider",
+    "a private markets investment manager",
+])
+def test_review_private_product_description_is_not_listing_denial(description):
+    *_, decision = _decide(
+        "Acme Realty is wholly owned by Barco Industries.",
+        BARCO_LISTING, "public", listing2=f"Barco Industries is {description}.",
+    )
+    assert decision == "match"
+
+
+def test_review_direct_exchange_initials_policy_is_unchanged():
+    quote = "Midwest Advanced Research Systems Inc. New York Stock Exchange: MARS Last 10.00"
+    assert lead_scorer._current_exchange_profile_names_issuer(quote, ("Mars",))
+    assert not lead_scorer._current_exchange_profile_names_issuer(
+        quote, ("Mars",), allow_initials=False,
+    )

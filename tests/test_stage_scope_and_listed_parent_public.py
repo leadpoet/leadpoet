@@ -929,7 +929,9 @@ def test_review_same_parent_denial_cannot_be_overridden(denial):
     "one percent", "fifty percent", "forty-nine percent",
     "at least fifty percent", "less than sixty percent",
     "one hundred and one percent", "one hundred sixty percent",
-    "fifty point one percent", "-80%", "1500%", "1,080%",
+    "fifty point zero percent", "one hundred point one percent",
+    "fifty point ten percent", "fifty point point one percent",
+    "fifty point percent", "-80%", "1500%", "1,080%",
     "minus sixty percent", "negative eighty percent", "−80%", "1,099%",
     "60% or less", "sixty percent at most", "between 40 and 60 percent",
     "40 to 60 percent", "forty to sixty percent",
@@ -946,6 +948,7 @@ def test_review_written_or_invalid_quantity_cannot_hide_minority(quantity):
 @pytest.mark.parametrize("quantity", [
     "fifty-one percent", "sixty percent", "one hundred percent",
     "more than fifty percent", "at least fifty-one percent", "80%",
+    "fifty point one percent", "ninety-nine point nine percent",
 ])
 def test_review_clear_written_majority_still_matches(quantity):
     *_, decision = _decide(

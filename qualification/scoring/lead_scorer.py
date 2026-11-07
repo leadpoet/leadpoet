@@ -1652,17 +1652,24 @@ _LISTED_PARENT_WRITTEN_PERCENT_RE = re.compile(
 
 
 def _listed_parent_normalize_written_percentage(match: re.Match) -> str:
-    words = match.group("number").casefold().replace("-", " ").split()
+    number, point, fractional_words = match.group("number").casefold().partition("point")
+    fraction = ""
+    if point:
+        digits = [_LISTED_PARENT_NUMBER_WORDS.get(word) for word in fractional_words.split()]
+        if not digits or any(digit is None or not 0 <= digit <= 9 for digit in digits):
+            return match.group(0)
+        fraction = "." + "".join(str(digit) for digit in digits)
+    words = number.replace("-", " ").split()
     if words == ["one", "hundred"]:
-        return "100%"
+        return f"100{fraction}%"
     values = [_LISTED_PARENT_NUMBER_WORDS.get(word) for word in words]
     if len(values) == 1 and values[0] is not None:
-        return f"{values[0]}%"
+        return f"{values[0]}{fraction}%"
     if (
         len(values) == 2 and values[0] is not None and values[1] is not None
         and values[0] >= 20 and values[0] % 10 == 0 and 1 <= values[1] <= 9
     ):
-        return f"{sum(values)}%"
+        return f"{sum(values)}{fraction}%"
     return match.group(0)
 
 

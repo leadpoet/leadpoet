@@ -267,6 +267,42 @@ def _empty_target_message(item):
         and not part.get('annotations') and not part.get('logprobs') for part in item['content'])
 
 
+def _chat_citation_annotations(body, message):
+    """Validate nested public citations without changing the saved target.
+
+    This proves only the provider-exposed annotation shape. A citation does
+    not establish a fetched page, a search event, or full generated thinking.
+    Callers retain their separate actor and declared-search requirements.
+    """
+    _require(not message.get('tool_calls'), 'chat_annotations_unsupported')
+    annotations = message['annotations']
+    _require(isinstance(annotations, list) and len(annotations) <= 128,
+             'internal_chat_annotations_unsupported')
+    flat = []
+    fields = {'url', 'title', 'content', 'start_index', 'end_index'}
+    for annotation in annotations:
+        _require(isinstance(annotation, Mapping) and set(annotation) == {'type', 'url_citation'}
+                 and annotation['type'] == 'url_citation', 'internal_chat_annotations_unsupported')
+        citation = annotation['url_citation']
+        _require(isinstance(citation, Mapping) and set(citation) <= fields,
+                 'internal_chat_annotations_unsupported')
+        try:
+            operations.validate_https_url(citation.get('url'), max_length=8192)
+        except operations.OperationRequestError as exc:
+            raise ValueError('chat_annotations_unsupported') from exc
+        flat.append({'type': 'url_citation', **citation})
+    # Reuse the native field, length and offset validator on a temporary view.
+    # The original nested annotations and all request/response hashes stay exact.
+    try:
+        operations.validate_operation_request('openrouter.responses', {
+            'model': body['model'], 'input': [{'type': 'message', 'role': 'assistant',
+                'status': 'completed', 'content': [{'type': 'output_text',
+                    'text': message.get('content'), 'annotations': flat}]}],
+        }, allow_full_thinking=True)
+    except operations.OperationRequestError as exc:
+        raise ValueError('chat_annotations_unsupported') from exc
+
+
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
             allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None):
     _require(isinstance(response, dict), 'response_shape_unsupported')
@@ -294,7 +330,7 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
             reasoning.extend(copy.deepcopy(details))
         fields = {'role', 'content', 'tool_calls', 'refusal'}
         if 'annotations' in msg and chat_annotations_validator is not None:
-            # Trusted internal export may validate retained provider citations.
+            # Trusted internal and judge exports may validate retained citations.
             # The shared miner path supplies no callback and stays unchanged.
             chat_annotations_validator(body, msg)
             fields.add('annotations')
@@ -824,7 +860,8 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
     target, reasoning = _target(body, responses[0], op,
                                 allow_reasoning_history=full_history,
                                 allow_tool_error_history=training_coverage.uses_host_result_evidence(
-                                    example.get('configuration') or {}))
+                                    example.get('configuration') or {}),
+                                chat_annotations_validator=_chat_citation_annotations if role == 'judge' else None)
     _validate_target_tools(body, target, op)
     target_provenance = {}
     if op == 'openrouter.responses':

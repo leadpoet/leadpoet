@@ -350,6 +350,31 @@ def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
         type(exc).__name__[:64],
     )
 
+
+def _warn_observation_segment_failure(
+    run_id: str, number: int, stage: str, exc: Optional[BaseException] = None,
+) -> None:
+    """Log only authenticated identity, fixed stages and bounded error classes."""
+    try:
+        reason = exc.args[0] if isinstance(exc, training_observations.ObservationError) and len(exc.args) == 1 else None
+        if type(reason) is not str or reason not in {
+            "journal_store_unavailable", "segment_size_limit", "journal_invalid", "journal_unavailable",
+        }:
+            reason = "none"
+        # read_segment hides storage/parse prose but retains this immediate
+        # context. Its type distinguishes a timeout from a corrupt gzip body.
+        cause = exc.__context__ if reason == "journal_unavailable" else None
+        logger.warning(
+            "arena training observation segment unavailable run_id=%s segment=%s stage=%s "
+            "error_class=%s cause_class=%s observation_reason=%s",
+            run_id, number, stage, type(exc).__name__[:64],
+            type(cause).__name__[:64] if cause is not None else "none", reason,
+        )
+    except Exception:
+        # Diagnostics must not replace the existing storage API response.
+        pass
+
+
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
@@ -7071,13 +7096,15 @@ class ArenaService:
             raise ServiceError("training_observation_segment_invalid", 400) from None
         objects = self._config.training_object_store
         if objects is None:
+            _warn_observation_segment_failure(run_id, segment["number"], "store_missing")
             raise ServiceError("training_observation_segment_unavailable", 503)
         if segment["number"]:
             try:
                 previous = training_observations.read_segment(
                     objects, run_id, segment["kind"], segment["lease_generation"],
                     segment["claim_request_hash"], segment["number"] - 1)
-            except Exception:
+            except Exception as exc:
+                _warn_observation_segment_failure(run_id, segment["number"], "previous_read", exc)
                 raise ServiceError("training_observation_segment_unavailable", 503) from None
             if (previous is None or previous["segment_sha256"] != segment["previous_sha256"]
                     or segment["cumulative_bytes"] != previous["cumulative_bytes"]
@@ -7099,7 +7126,8 @@ class ArenaService:
             objects.put(ref, compressed)
         except ArenaContractError:
             raise ServiceError("training_observation_segment_conflict", 409) from None
-        except Exception:
+        except Exception as exc:
+            _warn_observation_segment_failure(run_id, segment["number"], "put", exc)
             raise ServiceError("training_observation_segment_unavailable", 503) from None
         return {"status": "stored", "number": segment["number"],
                 "segment_sha256": segment["segment_sha256"]}

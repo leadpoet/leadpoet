@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from lab_arena import contracts, training_input
-from lab_arena.api import create_app
+from lab_arena.api import TRAINING_INPUT_WORKER_LIMIT, create_app
 from lab_arena.service import ServiceError
 from lab_arena.store import hash_lease_token
 from tests.lab_arena.training_input_test import CLAIM_HASH, NOW, TOKEN, service_for
@@ -173,8 +173,9 @@ def test_queued_capture_rechecks_grace_when_an_input_worker_becomes_available(tm
     async def scenario():
         app = create_app(service)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-            active = [asyncio.create_task(client.post(ROUTE, headers=HEADERS, json={'active': i})) for i in range(2)]
-            await wait_until(lambda: len(entered) == 2)
+            active = [asyncio.create_task(client.post(ROUTE, headers=HEADERS, json={'active': i}))
+                      for i in range(TRAINING_INPUT_WORKER_LIMIT)]
+            await wait_until(lambda: len(entered) == TRAINING_INPUT_WORKER_LIMIT)
             queued = asyncio.create_task(client.post(ROUTE, headers=HEADERS, json={'queued': True}))
             try:
                 await asyncio.sleep(.02)
@@ -182,7 +183,7 @@ def test_queued_capture_rechecks_grace_when_an_input_worker_becomes_available(tm
             finally:
                 release.set()
             replies = await asyncio.gather(*active, queued)
-            assert [r.status_code for r in replies] == [409, 409, 409]
+            assert [r.status_code for r in replies] == [409] * (TRAINING_INPUT_WORKER_LIMIT + 1)
     asyncio.run(scenario())
     assert all('queued' not in row for row in entered)
     assert not list((tmp_path / 'objects').rglob('*.gz'))

@@ -24,6 +24,7 @@ from tests.lab_arena.trajectory_runner_test import LoggingApi
          "requirements.txt may contain only package names and version constraints"),
         ("unknown_pip", "model_error", "source_error", 1, "No matching distribution"),
         ("network", "provider_error", "network_error", 2, "NewConnectionError"),
+        ("connection_reset", "provider_error", "network_error", 2, "ConnectionResetError"),
         ("host", "provider_error", "installer_error", 1, "No module named pip"),
         ("timeout", "provider_error", "timeout", 2, "ReadTimeoutError"),
         ("payload_limit", "model_error", "source_error", 1,
@@ -86,6 +87,10 @@ def test_dependency_failure_private_trajectory_round_trip(
     message = {
         "unknown_pip": "No matching distribution",
         "network": "NewConnectionError('connection failed')",
+        "connection_reset": 'ERROR: Could not install packages due to an OSError: '
+                            '("Connection broken: ConnectionResetError(104, '
+                            "'Connection reset by peer')\", ConnectionResetError(104, "
+                            "'Connection reset by peer'))",
         "host": "/usr/bin/python3: No module named pip",
         "timeout": "ReadTimeoutError",
     }.get(failure, "")

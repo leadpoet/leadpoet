@@ -145,6 +145,7 @@ DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 _DEPENDENCY_INSTALL_STDERR_TAIL_BYTES = 8 * 1024
 _DEPENDENCY_INSTALL_NETWORK_MARKERS = (
     b"ConnectTimeoutError(",
+    b"ConnectionResetError(",
     b"NetworkConnectionError(",
     b"NetworkConnectionError:",
     b"NewConnectionError(",

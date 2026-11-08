@@ -1620,8 +1620,17 @@ def test_binary_requirement_install_classifies_persistent_transient_failure(
     assert capsys.readouterr().err == ""
 
 
+PIP_NETWORK_FAILURES = (
+    b"NewConnectionError('connection failed')\n",
+    b'ERROR: Could not install packages due to an OSError: ("Connection broken: '
+    b"ConnectionResetError(104, 'Connection reset by peer')\", "
+    b"ConnectionResetError(104, 'Connection reset by peer'))\n",
+)
+
+
+@pytest.mark.parametrize("network_stderr", PIP_NETWORK_FAILURES)
 def test_binary_requirement_install_retries_known_pip_network_failure(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, network_stderr
 ):
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
@@ -1636,7 +1645,7 @@ def test_binary_requirement_install_retries_known_pip_network_failure(
         pip_calls += 1
         install_target = Path(command[command.index("--target") + 1])
         if pip_calls == 1:
-            kwargs["stderr"].write(b"NewConnectionError('connection failed')\n")
+            kwargs["stderr"].write(network_stderr)
             (install_target / "partial.py").write_text("partial\n", encoding="utf-8")
             return type("Result", (), {"returncode": 1})()
         assert not (install_target / "partial.py").exists()
@@ -1652,8 +1661,9 @@ def test_binary_requirement_install_retries_known_pip_network_failure(
     assert not (target / "partial.py").exists()
 
 
+@pytest.mark.parametrize("network_stderr", PIP_NETWORK_FAILURES)
 def test_binary_requirement_install_exhausts_known_pip_network_failure_safely(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, network_stderr
 ):
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
@@ -1667,7 +1677,7 @@ def test_binary_requirement_install_exhausts_known_pip_network_failure_safely(
             return type("Result", (), {"returncode": 0})()
         pip_calls += 1
         kwargs["stderr"].write(
-            b"secret=do-not-log NewConnectionError('connection failed')\n"
+            b"secret=do-not-log " + network_stderr
         )
         return type("Result", (), {"returncode": 1})()
 
@@ -1682,8 +1692,12 @@ def test_binary_requirement_install_exhausts_known_pip_network_failure_safely(
     assert capsys.readouterr().err == ""
 
 
+@pytest.mark.parametrize("source_stderr", (
+    b"No matching distribution found\n",
+    b"No matching distribution found for ConnectionResetError\n",
+))
 def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, source_stderr
 ):
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("missing-package==1.0.0\n", encoding="utf-8")
@@ -1695,7 +1709,7 @@ def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
         nonlocal pip_calls
         if "pip" in command:
             pip_calls += 1
-            _kwargs["stderr"].write(b"No matching distribution found\n")
+            _kwargs["stderr"].write(source_stderr)
             return type("Result", (), {"returncode": 1})()
         return type("Result", (), {"returncode": 0})()
 
@@ -1706,7 +1720,7 @@ def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
 
     assert pip_calls == 1
     assert not any(target.iterdir())
-    assert raised.value.diagnostic_detail == "No matching distribution found"
+    assert raised.value.diagnostic_detail == source_stderr.decode().strip()
 
 
 def test_binary_requirement_install_classifies_missing_host_pip_as_infrastructure(

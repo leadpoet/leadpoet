@@ -1947,9 +1947,16 @@ async def verify_company_exists(
             verified_homepage_transport_domain=domain,
             observed_homepage_organization_identity=bound_organization,
         )
+    unavailable_receipts = [
+        receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"
+    ]
+    # Retain an exact observed name as lookup context before SEO copy. This
+    # grants no identity; preserve the independent Organization conflict below.
     unavailable = next(
-        (receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"),
-        None,
+        (receipt for receipt in unavailable_receipts
+         if len(observed_linkedins) == 1
+         and receipt["observed_name"] == submitted_name_key),
+        unavailable_receipts[0] if unavailable_receipts else None,
     )
     if unavailable is not None:
         return _identity_result(

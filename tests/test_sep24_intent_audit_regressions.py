@@ -530,6 +530,58 @@ def test_announced_facility_alternatives_receive_expansion_rule(target) -> None:
         assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK in prompt
 
 
+@pytest.mark.parametrize("qualifier", [
+    ", excluding warehouses and distribution centers.",
+    "; offices and headquarters do not qualify.",
+    "; not just an office expansion.",
+])
+def test_unrelated_exclusions_preserve_announced_plant_alternative(qualifier) -> None:
+    target = _OPENING_OR_EXPANSION_TARGET.rstrip(".") + qualifier
+    row = _row(
+        company="Example Manufacturing",
+        claim="Example announced a new manufacturing plant.",
+        target=target,
+        source_url="https://example.com/news/new-plant",
+        evidence_type="FACILITY_OPENING",
+    )
+
+    for prompt in _prompts(row, "Example will add a 300,000 square foot manufacturing plant."):
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK in prompt
+        assert target in prompt
+
+
+@pytest.mark.parametrize("target", [
+    _OPENING_OR_EXPANSION_TARGET,
+    "Opened a new manufacturing facility or announced a major expansion of an "
+    "existing plant in the last 12 months.",
+])
+def test_committed_announcement_keeps_pending_approvals_and_exact_scope_visible(target) -> None:
+    # A committed project can still be called proposed during routine zoning.
+    # This verifies instructions and evidence delivery, not a model verdict.
+    row = _row(
+        company="Example Manufacturing",
+        claim="Example announced a major plant expansion.",
+        target=target,
+        source_url="https://example.com/news/proposed-plant",
+        evidence_type="FACILITY_OPENING",
+    )
+    source_text = (
+        "Example committed to adding a one million square foot manufacturing "
+        "plant. The proposed facility has a selected site; zoning approval is pending."
+    )
+    stage1, stage3 = _prompts(row, source_text)
+
+    for prompt in (stage1, stage3):
+        assert target in prompt
+        assert "Pending site selection, incentives, or approvals alone" in prompt
+        assert "do not negate an announced project" in prompt
+        assert "only considering whether to undertake a project" in prompt
+        assert "requires expansion of an existing plant" in prompt
+        assert "must add the footprint or capacity the target requests" in prompt
+        assert "a small figure is not major" in prompt
+    assert source_text in stage3
+
+
 @pytest.mark.parametrize("target", [
     "Opened a new manufacturing facility in the last 12 months, per a press "
     "release or an economic-development announcement.",

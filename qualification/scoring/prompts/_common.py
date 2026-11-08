@@ -404,20 +404,25 @@ FACILITY_OPENING_BLOCK = """      * Apply this block only to a chosen facility-o
 _FACILITY_ANNOUNCED_ALTERNATIVE_RE = re.compile(
     r"\bor announced\b|\bannounced\b[^.;()]*\bexpansion\b"
 )
+# A prohibition on announcement-only projects, not an unrelated exclusion
+# such as "excluding warehouses" in an otherwise valid plant alternative.
 _FACILITY_ANNOUNCED_EXCLUSION_RE = re.compile(
-    r"\bnot merely\b|\bnot just\b|\b(?:do|does|will) not count\b"
-    r"|\bdo not qualify\b|\bexcluding\b"
+    r"\b(?:announced|planned) (?:projects|facilities|plants|sites)\b"
+    r"[^.;()]*\b(?:do|does|will) not (?:count|qualify)\b"
 )
 
 
 FACILITY_EXPANSION_ALTERNATIVE_BLOCK = """      * When the actual target ICP text also accepts an announced new facility
         or an announced plant, facility, or capacity expansion, evaluate that
-        alternative on its own. An announced new site of the facility type the
-        target names satisfies it even before construction finishes; an
-        expansion need not enlarge an existing building. The company itself
-        must have committed to the project; proposed, under-consideration, or
-        contingent projects (pending site selection, incentives, or approvals)
-        do not qualify. The source may be the company, news coverage, or an
+        alternative on its own and preserve its explicit exclusions. An
+        announced new site can satisfy an expansion alternative before
+        construction finishes, but it must add the footprint or capacity the target requests.
+        If the target requires expansion of an existing plant, a separate new
+        site alone does not satisfy it. The company itself must have announced
+        a project decision or commitment, rather than only considering whether to undertake a project.
+        Pending site selection, incentives, or approvals alone
+        do not negate an announced project; neither does calling it proposed.
+        The source may be the company, news coverage, or an
         economic-development agency. For a plant or manufacturing target the
         new site must produce goods, not serve as an office, warehouse, or
         headquarters. Keep every stated qualifier: "major" requires a material

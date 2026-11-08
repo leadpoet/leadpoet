@@ -1,11 +1,12 @@
 """Ampersand company slugs share one escaped form for observed and submitted URLs."""
 import asyncio
+import json
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlencode
 
 import pytest
 
-from gateway.qualification.models import candidate_linkedin_prompt_slug
+from gateway.qualification.models import CompanyOutput, candidate_linkedin_prompt_slug
 from qualification.scoring import company_verification as homepage
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import linkedin_company_size as size
@@ -38,6 +39,59 @@ def test_submitted_ampersand_slug_matches_exclusion_key(url):
     from qualification.scoring.lead_scorer import _exclusion_linkedin_key
 
     assert _exclusion_linkedin_key(url) == _exclusion_linkedin_key(ESCAPED) == SLUG
+
+
+def _public_ampersand_company(url):
+    return {
+        'company_name': 'Acme & Sons', 'company_website': 'https://acme.com/',
+        'company_linkedin': url, 'industry': 'Software', 'employee_count': '51-200',
+        'country': 'United States', 'fit_summary': 'Software company.',
+        'fit_evidence_urls': [],
+        'intent_signals': [{'matched_icp_signal': 0, 'description': 'Raised funding',
+                            'date': '2026-07-01', 'why_now': 'Recent funding',
+                            'url': 'https://news.example/funding',
+                            'snippet': 'Acme raised funding.'}],
+    }
+
+
+@pytest.mark.parametrize('namespace', ['%63ompany', 'comp%61ny', '%43OMPANY'])
+def test_encoded_ampersand_namespace_rejects_native_model_and_json(namespace):
+    from qualification.scoring.competition import _normalized_company
+
+    url = f'https://www.linkedin.com/{namespace}/acme%26sons'
+    normalized = _normalized_company(_public_ampersand_company(url), integrity_policy=True)
+    with pytest.raises(ValueError):
+        candidate_linkedin_prompt_slug(url, 'company_linkedin')
+    with pytest.raises(ValueError):
+        CompanyOutput(**normalized)
+    with pytest.raises(ValueError):
+        CompanyOutput.model_validate_json(json.dumps(normalized))
+
+
+@pytest.mark.parametrize('namespace', ['%63ompany', 'comp%61ny', '%43OMPANY'])
+def test_encoded_ampersand_namespace_cannot_consume_a_legacy_scorer_judgment(namespace):
+    from qualification.scoring.competition import apply_legacy_company_judgment_context
+
+    company = _public_ampersand_company(
+        f'https://www.linkedin.com/{namespace}/acme%26sons'
+    )
+    result = apply_legacy_company_judgment_context(
+        [company], [None],
+        resolve_raw=lambda _index: pytest.fail('unsafe identity reached scorer judgment'),
+    )[0]
+    assert result['final_score'] == 0.0
+    assert result['company_qualified'] is False
+    assert result['failure_reason'] == 'company model contract incompatible'
+
+
+@pytest.mark.parametrize('url,expected', [
+    ('https://www.linkedin.com/COMPANY/Acme%26Sons', SLUG),
+    ('https://www.linkedin.com/company/acme%26%73ons', SLUG),
+    ('https://www.linkedin.com/%63ompany/acme', 'acme'),
+    ('https://www.linkedin.com/%69n/person', 'person'),
+])
+def test_ampersand_fix_preserves_literal_namespace_and_prior_ordinary_routes(url, expected):
+    assert candidate_linkedin_prompt_slug(url, 'company_linkedin') == expected
 
 
 @pytest.mark.parametrize('url', [

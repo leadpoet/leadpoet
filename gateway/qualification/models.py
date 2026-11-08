@@ -313,14 +313,16 @@ def candidate_linkedin_prompt_slug(
     host = str(parsed.hostname or "").casefold()
     if host != "linkedin.com" and not host.endswith(".linkedin.com"):
         raise ValueError(f"{field_name} must use linkedin.com")
-    parts = [unquote(part).casefold() for part in parsed.path.split("/") if part]
+    raw_parts = [part for part in parsed.path.split("/") if part]
+    parts = [unquote(part).casefold() for part in raw_parts]
     if len(parts) != 2 or parts[0] not in {"company", "in"}:
         raise ValueError(f"{field_name} must contain one strict LinkedIn slug")
     slug = parts[1]
     if _PROMPT_LINKEDIN_COMPANY_SLUG_RE.fullmatch(slug) is not None:
         return slug
     if (
-        parts[0] == "company"
+        # Observed identity and exclusion consumers require a literal namespace.
+        raw_parts[0].casefold() == "company"
         and "&" in slug
         and _PROMPT_LINKEDIN_COMPANY_AMPERSAND_SLUG_RE.fullmatch(slug) is not None
     ):

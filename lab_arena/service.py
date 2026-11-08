@@ -8715,7 +8715,10 @@ class ArenaService:
             return {"state": None, "lookup_ok": True}
         network, netuid = self._chain_scope()
         requested_epoch = int(epoch)
-        basis = self.public_reward_basis(requested_epoch)
+        # Reward selection reads only mode and baseline_hotkey from each
+        # configuration. Keep signed history/scope metadata, not every round's
+        # large frozen provider catalog, on this frequent validator read.
+        basis = self.public_reward_basis(requested_epoch, public_only=True)
         if basis is None:
             return {"state": None, "lookup_ok": True}
         existing = self._store.get_weight_state(network, netuid, requested_epoch)

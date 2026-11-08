@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, service
+from lab_arena import contracts, internal_capture, service
 
 
 @pytest.fixture(autouse=True)
@@ -62,3 +62,19 @@ def test_broken_stderr_does_not_escape_capture_diagnostics(monkeypatch):
     outcome = service.ArenaService._submission_training_eligibility(
         instance, {"round_id": "private-round"}, "private-submission", [])
     assert outcome == {"eligible": False, "reasons": ["training_evidence_check_failed"]}
+
+
+def test_internal_capture_outage_survives_disabled_logger(monkeypatch, capsys):
+    logger = logging.getLogger(internal_capture.__name__)
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logging.CRITICAL)
+    call = internal_capture.InternalCapture(None).start(
+        purpose="admission_review", context={},
+        request={"model": "synthetic/model", "messages": []})
+    assert call.response(body=b"{}", status=200)["status"] == "unavailable"
+    assert call.finish(outcome={})["status"] == "unavailable"
+    assert capsys.readouterr().err.splitlines() == [
+        "arena_internal_capture_write_failed stage=" + stage
+        + " purpose=admission_review call_id=" + call.call_id
+        for stage in internal_capture.STAGES
+    ]

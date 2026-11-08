@@ -11,6 +11,7 @@ byte-identical output through the refactor.
 Snapshot equality test: ``tests/test_prompt_refactor.py``.
 """
 import json
+import re
 from datetime import date
 from typing import Any, Dict, Iterable, List
 
@@ -397,6 +398,17 @@ FACILITY_OPENING_BLOCK = """      * Apply this block only to a chosen facility-o
         expected completion date does not prove an opening. Apply this boundary
         even when the planned facility is material or construction is underway."""
 
+FACILITY_EXPANSION_ALTERNATIVE_BLOCK = """      * When the actual target ICP text also accepts an announced new facility
+        or an announced plant, facility, or capacity expansion, evaluate that
+        alternative on its own. The company's own announcement of a new plant,
+        site, or facility that adds to its production or operating capacity
+        satisfies it, even before construction finishes; an expansion need not
+        enlarge an existing building. Keep every stated qualifier: "major"
+        needs source-stated scale such as investment, floor area, jobs, or
+        capacity, and the announcement date must fall inside the target
+        window. Rumors, site searches, or another party's plans remain
+        insufficient."""
+
 
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     Apply this block only to a chosen new-market alternative in the actual
@@ -636,6 +648,10 @@ def build_verification_prompt(
         ))
     ):
         parts.append(FACILITY_OPENING_BLOCK)
+        # The verb, not "announcement": targets often name an
+        # economic-development announcement as an accepted source type.
+        if re.search(r"expan|\bannounc(?:ed|es|ing)\b", criterion):
+            parts.append(FACILITY_EXPANSION_ALTERNATIVE_BLOCK)
     if row.get("_evidence_type") == "MARKET_EXPANSION":
         parts.append(MARKET_EXPANSION_BLOCK)
     if row.get("_evidence_type") in {"FUNDING", "FINANCING"}:

@@ -12,6 +12,7 @@ import os
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 import secrets
+import sys
 import threading
 import tempfile
 import time
@@ -336,6 +337,15 @@ _TRAJECTORY_WARNING_LOCK = threading.Lock()
 _TRAJECTORY_WARNING_LAST: Dict[str, float] = {}
 
 
+def _emit_capture_warning(message: str, *args: Any) -> None:
+    """Keep bounded capture diagnostics visible after chain-library logging setup."""
+    try:
+        print(message % args, file=sys.stderr, flush=True)
+    except Exception:
+        # A diagnostic stream failure must not change storage or eligibility.
+        pass
+
+
 def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
     """Emit a bounded warning without provider content or exception text."""
 
@@ -344,7 +354,7 @@ def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
         if now - _TRAJECTORY_WARNING_LAST.get(phase, float("-inf")) < 30.0:
             return
         _TRAJECTORY_WARNING_LAST[phase] = now
-    logger.warning(
+    _emit_capture_warning(
         "arena trajectory persistence failed phase=%s error_class=%s",
         phase[:32],
         type(exc).__name__[:64],
@@ -364,7 +374,7 @@ def _warn_observation_segment_failure(
         # read_segment hides storage/parse prose but retains this immediate
         # context. Its type distinguishes a timeout from a corrupt gzip body.
         cause = exc.__context__ if reason == "journal_unavailable" else None
-        logger.warning(
+        _emit_capture_warning(
             "arena training observation segment unavailable run_id=%s segment=%s stage=%s "
             "error_class=%s cause_class=%s observation_reason=%s",
             run_id, number, stage, type(exc).__name__[:64],
@@ -5264,7 +5274,7 @@ class ArenaService:
             # Keep diagnostics useful without exposing stored data, object refs,
             # provider exception text or tracebacks. Identity hashes are bounded.
             round_id = round_row.get("round_id")
-            logger.warning(
+            _emit_capture_warning(
                 "arena_training_evidence_check_failed round_id_hash=%s submission_id_hash=%s error_class=%s",
                 contracts.hash_bytes(round_id.encode("utf-8", "replace")) if isinstance(round_id, str) else "unavailable",
                 contracts.hash_bytes(submission_id.encode("utf-8", "replace")) if isinstance(submission_id, str) else "unavailable",

@@ -1,6 +1,5 @@
 """Segment failures name the storage phase without exposing captured content."""
 import copy
-import logging
 
 from fastapi.testclient import TestClient
 import pytest
@@ -30,14 +29,11 @@ def prepared(tmp_path, *, second=False):
     return service, objects, client, copy.deepcopy(journal.pending[0])
 
 
-def diagnostic(caplog):
-    records = [r for r in caplog.records if r.name == "lab_arena.service"]
-    assert len(records) == 1
-    record = records[0]
-    assert record.levelno == logging.WARNING and record.exc_info is None
-    message = record.getMessage()
+def diagnostic(capsys):
+    messages = capsys.readouterr().err.splitlines()
+    assert len(messages) == 1
+    message = messages[0]
     assert "run_id=r1" in message and PRIVATE not in message and TOKEN not in message
-    assert PRIVATE not in repr(record.args) and TOKEN not in repr(record.args)
     return message
 
 
@@ -47,7 +43,7 @@ def diagnostic(caplog):
     ("put", "OSError", "none"),
 ])
 def test_native_storage_failure_keeps_503_and_logs_only_safe_identity(
-        tmp_path, monkeypatch, caplog, stage, exception_class, cause_class):
+        tmp_path, monkeypatch, capsys, stage, exception_class, cause_class):
     service, objects, client, document = prepared(tmp_path, second=stage == "previous_read")
     calls = []
 
@@ -59,11 +55,11 @@ def test_native_storage_failure_keeps_503_and_logs_only_safe_identity(
         service._config.training_object_store = None
     else:
         monkeypatch.setattr(objects, "get_optional_bounded" if stage == "previous_read" else "put", fail)
-    caplog.clear()
+    capsys.readouterr()
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 503 and response.json() == UNAVAILABLE
     assert len(calls) == (0 if stage == "store_missing" else 1)  # No new retry.
-    message = diagnostic(caplog)
+    message = diagnostic(capsys)
     assert "segment=" + str(document["number"]) in message
     assert "stage=" + stage in message
     assert "error_class=" + exception_class in message
@@ -75,33 +71,33 @@ def test_native_storage_failure_keeps_503_and_logs_only_safe_identity(
     "journal_store_unavailable", "segment_size_limit", "journal_invalid",
     "journal_unavailable", PRIVATE,
 ])
-def test_only_fixed_observation_reasons_are_logged(tmp_path, monkeypatch, caplog, reason):
+def test_only_fixed_observation_reasons_are_logged(tmp_path, monkeypatch, capsys, reason):
     _service, _objects, client, document = prepared(tmp_path, second=True)
 
     def refuse(*args, **kwargs):
         raise obs.ObservationError(reason)
 
     monkeypatch.setattr(obs, "read_segment", refuse)
-    caplog.clear()
+    capsys.readouterr()
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 503 and response.json() == UNAVAILABLE
-    message = diagnostic(caplog)
+    message = diagnostic(capsys)
     assert "observation_reason=" + ("none" if reason == PRIVATE else reason) in message
 
 
-def test_logger_failure_does_not_change_the_existing_503(tmp_path, monkeypatch):
+def test_diagnostic_stream_failure_does_not_change_the_existing_503(tmp_path, monkeypatch):
     service, _objects, client, document = prepared(tmp_path)
     service._config.training_object_store = None
 
     def fail(*args, **kwargs):
         raise RuntimeError(PRIVATE)
 
-    monkeypatch.setattr(arena_service.logger, "warning", fail)
+    monkeypatch.setattr(arena_service.sys.stderr, "write", fail)
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 503 and response.json() == UNAVAILABLE
 
 
-def test_read_logs_only_the_immediate_known_wrapper_context(tmp_path, monkeypatch, caplog):
+def test_read_logs_only_the_immediate_known_wrapper_context(tmp_path, monkeypatch, capsys):
     _service, objects, client, document = prepared(tmp_path, second=True)
 
     def fail(*args, **kwargs):
@@ -111,15 +107,15 @@ def test_read_logs_only_the_immediate_known_wrapper_context(tmp_path, monkeypatc
             raise OSError(PRIVATE + TOKEN) from deep
 
     monkeypatch.setattr(objects, "get_optional_bounded", fail)
-    caplog.clear()
+    capsys.readouterr()
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 503 and response.json() == UNAVAILABLE
-    message = diagnostic(caplog)
+    message = diagnostic(capsys)
     assert "cause_class=OSError" in message and "LookupError" not in message
 
 
 @pytest.mark.parametrize("stage", ["previous_read", "put"])
-def test_exception_class_is_bounded(tmp_path, monkeypatch, caplog, stage):
+def test_exception_class_is_bounded(tmp_path, monkeypatch, capsys, stage):
     _service, objects, client, document = prepared(tmp_path, second=stage == "previous_read")
     error = type("X" * 100, (OSError,), {})
 
@@ -127,24 +123,24 @@ def test_exception_class_is_bounded(tmp_path, monkeypatch, caplog, stage):
         raise error(PRIVATE)
 
     monkeypatch.setattr(objects, "get_optional_bounded" if stage == "previous_read" else "put", fail)
-    caplog.clear()
+    capsys.readouterr()
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 503 and response.json() == UNAVAILABLE
-    message = diagnostic(caplog)
+    message = diagnostic(capsys)
     field = "cause_class=" if stage == "previous_read" else "error_class="
     assert field + "X" * 64 + " " in message
 
 
-def test_success_and_identical_replay_remain_silent(tmp_path, caplog):
+def test_success_and_identical_replay_remain_silent(tmp_path, capsys):
     _service, _objects, client, document = prepared(tmp_path)
     first = client.post(ROUTE, headers=HEADERS, json=document)
     second = client.post(ROUTE, headers=HEADERS, json=document)
     assert first.status_code == second.status_code == 200 and first.json() == second.json()
     assert len(list((tmp_path / "objects").rglob("segment-*.gz"))) == 1
-    assert not [r for r in caplog.records if r.name == "lab_arena.service"]
+    assert "arena training observation segment unavailable" not in capsys.readouterr().err
 
 
-def test_immutable_put_conflict_keeps_409_without_an_unavailable_warning(tmp_path, monkeypatch, caplog):
+def test_immutable_put_conflict_keeps_409_without_an_unavailable_warning(tmp_path, monkeypatch, capsys):
     _service, objects, client, document = prepared(tmp_path)
 
     def conflict(*args, **kwargs):
@@ -154,25 +150,25 @@ def test_immutable_put_conflict_keeps_409_without_an_unavailable_warning(tmp_pat
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 409
     assert response.json() == {"status": "rejected", "code": "training_observation_segment_conflict"}
-    assert not [r for r in caplog.records if r.name == "lab_arena.service"]
+    assert "arena training observation segment unavailable" not in capsys.readouterr().err
 
 
-def test_missing_previous_segment_keeps_409_without_an_unavailable_warning(tmp_path, monkeypatch, caplog):
+def test_missing_previous_segment_keeps_409_without_an_unavailable_warning(tmp_path, monkeypatch, capsys):
     _service, objects, client, document = prepared(tmp_path, second=True)
     monkeypatch.setattr(objects, "get_optional_bounded", lambda *_args: None)
-    caplog.clear()
+    capsys.readouterr()
     response = client.post(ROUTE, headers=HEADERS, json=document)
     assert response.status_code == 409
     assert response.json() == {"status": "rejected", "code": "training_observation_segment_conflict"}
-    assert not [r for r in caplog.records if r.name == "lab_arena.service"]
+    assert "arena training observation segment unavailable" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("invalid", ["lease", "document"])
-def test_authentication_and_validation_fail_before_diagnostics(tmp_path, caplog, invalid):
+def test_authentication_and_validation_fail_before_diagnostics(tmp_path, capsys, invalid):
     _service, _objects, client, document = prepared(tmp_path)
     headers = {"x-lab-arena-lease": "b" * 64} if invalid == "lease" else HEADERS
     if invalid == "document":
         document["number"] = PRIVATE
     response = client.post(ROUTE, headers=headers, json=document)
     assert response.status_code == (401 if invalid == "lease" else 400)
-    assert not [r for r in caplog.records if r.name == "lab_arena.service"]
+    assert "arena training observation segment unavailable" not in capsys.readouterr().err

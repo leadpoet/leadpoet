@@ -819,7 +819,10 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
             ):
                 history[-1] = (f"attempt_{attempt}", "posting_invalid")
                 continue
-            exact_fields = [title]
+            # Keep observed API field names. An unlabeled timestamp loses its
+            # publication meaning, and dropping listing/application metadata
+            # can make a listed posting appear unverified to the final judge.
+            exact_fields = [title, "isListed: true"]
             for field_name in (
                 "publishedAt",
                 "location",
@@ -830,7 +833,26 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
             ):
                 value = posting.get(field_name)
                 if isinstance(value, str) and value.strip() and "\x00" not in value:
-                    exact_fields.append(value)
+                    exact_fields.append(f"{field_name}: {value}")
+            apply_url = posting.get("applyUrl")
+            try:
+                application = urlsplit(apply_url) if isinstance(apply_url, str) else None
+                bound_application = bool(
+                    application and apply_url.isascii()
+                    and not any(char.isspace() for char in apply_url)
+                    and application.scheme == "https"
+                    and application.hostname == "jobs.ashbyhq.com"
+                    and application.port in (None, 443)
+                    and application.username is None and application.password is None
+                    and not application.query and not application.fragment
+                    and application.path.endswith("/application")
+                    and _ashby_posting_identity(apply_url[:-len("/application")])
+                    == source_identity
+                )
+            except ValueError:
+                bound_application = False
+            if bound_application:
+                exact_fields.append(f"applyUrl: {apply_url}")
             exact_fields.append(description)
             content = "\n".join(exact_fields)[:MAX_SCRAPED_CHARS]
             if len(content) < 20:

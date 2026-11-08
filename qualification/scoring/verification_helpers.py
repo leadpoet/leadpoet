@@ -565,7 +565,9 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
     heading_context: list[str] = []
     archive_articles: list[str] = []
     visible_document, primary_heading, heading_prefix = _visible_html_document(
-        content, heading_context_sink=heading_context,
+        # Use the same narrow entrance-animation handling as company evidence.
+        # Explicit hidden attributes, ancestors and CSS exclusions still win.
+        content, include_scroll_reveal=True, heading_context_sink=heading_context,
         archive_articles_sink=archive_articles,
     )
     archive_articles = [

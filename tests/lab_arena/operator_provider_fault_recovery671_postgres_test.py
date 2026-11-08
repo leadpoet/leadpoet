@@ -209,3 +209,25 @@ def test_provider_replay_must_use_same_durable_proof(provider_case):
     p=provider_case;grant(p);before=base.snapshot(p)
     with pytest.raises(p.pg.Error):grant(p,entry=p.proof+1)
     p.c.rollback();assert base.snapshot(p)==before
+
+@pytest.mark.parametrize('mutation',['source','volatility','language','strict','leakproof','parallel','acl'])
+def test_migration_replay_rejects_tampered_function_source_or_security(provider_case,mutation):
+    p=provider_case;sig=HELPERS[0]
+    with p.c.cursor()as q:
+        original=base.old.scalar(q,'SELECT pg_get_functiondef(%s::regprocedure)',(sig,))
+        if mutation=='source':q.execute(original.replace(' SELECT coalesce',' SELECT /* tamper */ coalesce',1))
+        elif mutation=='volatility':q.execute('ALTER FUNCTION '+sig+' VOLATILE')
+        elif mutation=='language':
+            q.execute('SET check_function_bodies=off');q.execute(original.replace('LANGUAGE sql','LANGUAGE plpgsql',1));q.execute('SET check_function_bodies=on')
+        elif mutation=='strict':q.execute('ALTER FUNCTION '+sig+' STRICT')
+        elif mutation=='leakproof':q.execute('ALTER FUNCTION '+sig+' LEAKPROOF')
+        elif mutation=='parallel':q.execute('ALTER FUNCTION '+sig+' PARALLEL SAFE')
+        elif mutation=='acl':q.execute('GRANT EXECUTE ON FUNCTION '+sig+' TO lab_arena_service')
+    p.c.commit();before=base.snapshot(p)
+    with pytest.raises(p.pg.Error):
+        with p.c.cursor()as q:q.execute(SQL.read_text())
+    p.c.rollback();assert base.snapshot(p)==before
+    with p.c.cursor()as q:
+        q.execute(original)
+        q.execute('REVOKE ALL ON FUNCTION '+sig+' FROM lab_arena_service')
+    p.c.commit()

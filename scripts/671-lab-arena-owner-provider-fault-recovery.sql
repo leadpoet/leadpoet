@@ -28,13 +28,18 @@ BEGIN
     OR metadata->>'proowner' IS DISTINCT FROM ('lab_arena_owner'::regrole::OID)::TEXT
     OR metadata->'prosecdef' IS DISTINCT FROM 'true'::JSONB
     OR metadata->'proconfig' IS DISTINCT FROM '["search_path=pg_catalog, public"]'::JSONB
-    OR metadata->'proacl' IS DISTINCT FROM '["lab_arena_owner=X/lab_arena_owner"]'::JSONB THEN
+    OR metadata->'proacl' IS DISTINCT FROM '["lab_arena_owner=X/lab_arena_owner"]'::JSONB
+    OR metadata->>'provolatile' IS DISTINCT FROM (CASE WHEN target.signature LIKE '%_child_v1(%' OR target.signature LIKE '%_host_v1(%' THEN 's' ELSE 'v' END)
+    OR metadata->>'prolang' IS DISTINCT FROM (SELECT oid::TEXT FROM pg_language WHERE lanname=CASE WHEN target.signature LIKE '%__operator_scorer_bug_%' THEN 'sql' ELSE 'plpgsql' END)
+    OR metadata->'proisstrict' IS DISTINCT FROM 'false'::JSONB
+    OR metadata->'proleakproof' IS DISTINCT FROM 'false'::JSONB
+    OR metadata->>'proparallel' IS DISTINCT FROM 'u' THEN
     RAISE EXCEPTION 'provider recovery671 installed postimage differs'; END IF;
   END LOOP;
   RETURN;
  END IF;
  SELECT prosrc INTO d FROM pg_proc WHERE oid='public.lab_arena_grant_scorer_bug_recovery_v1(text,text,text,text,text,text,boolean)'::regprocedure;
- IF NOT EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid='public.lab_arena_grant_scorer_bug_recovery_v1(text,text,text,text,text,text,boolean)'::regprocedure AND pg_get_userbyid(p.proowner)='lab_arena_owner' AND p.prosecdef AND p.proacl::TEXT='{lab_arena_owner=X/lab_arena_owner}' AND p.proconfig=ARRAY['search_path=pg_catalog, public']::TEXT[])
+ IF NOT EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid='public.lab_arena_grant_scorer_bug_recovery_v1(text,text,text,text,text,text,boolean)'::regprocedure AND pg_get_userbyid(p.proowner)='lab_arena_owner' AND p.prosecdef AND p.proacl::TEXT='{lab_arena_owner=X/lab_arena_owner}' AND p.proconfig=ARRAY['search_path=pg_catalog, public']::TEXT[] AND p.provolatile='v' AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql') AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u')
   OR encode(extensions.digest(d,'sha256'),'hex')<>'967e7add12fe07a4222d677903a622fb6d0e67a282775faa655749b4253028c6' THEN
   RAISE EXCEPTION 'provider recovery671 scorer grant preimage differs'; END IF;
  FOR patch IN SELECT * FROM (VALUES
@@ -91,7 +96,12 @@ BEGIN
    OR metadata->>'proowner' IS DISTINCT FROM ('lab_arena_owner'::regrole::OID)::TEXT
    OR metadata->'prosecdef' IS DISTINCT FROM 'true'::JSONB
    OR metadata->'proconfig' IS DISTINCT FROM '["search_path=pg_catalog, public"]'::JSONB
-   OR metadata->'proacl' IS DISTINCT FROM '["lab_arena_owner=X/lab_arena_owner"]'::JSONB THEN
+   OR metadata->'proacl' IS DISTINCT FROM '["lab_arena_owner=X/lab_arena_owner"]'::JSONB
+   OR metadata->>'provolatile' IS DISTINCT FROM (CASE WHEN target.signature LIKE '%_claim_v1(%' THEN 'v' ELSE 's' END)
+   OR metadata->>'prolang' IS DISTINCT FROM (SELECT oid::TEXT FROM pg_language WHERE lanname='sql')
+   OR metadata->'proisstrict' IS DISTINCT FROM 'false'::JSONB
+   OR metadata->'proleakproof' IS DISTINCT FROM 'false'::JSONB
+   OR metadata->>'proparallel' IS DISTINCT FROM 'u' THEN
    RAISE EXCEPTION 'provider recovery671 child helper preimage differs'; END IF;
   IF (length(d)-length(replace(d,$old671$h.recovery_doc->>'recovery_kind'='operator_scorer_bug_recovery_v1'$old671$,'')))/length($old671$h.recovery_doc->>'recovery_kind'='operator_scorer_bug_recovery_v1'$old671$)<>1 THEN
    RAISE EXCEPTION 'provider recovery671 child helper anchor differs'; END IF;

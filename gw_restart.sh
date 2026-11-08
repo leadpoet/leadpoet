@@ -1862,6 +1862,12 @@ rollback_arena_candidate_before_destructive() {
 
 on_gateway_restart_exit() {
   local status="$?"
+  if [ "$status" -eq 0 ] && [ "$GATEWAY_DEPLOY_COMPLETED" != 1 ] \
+      && { [ "${GATEWAY_DEPLOY_STAGE:-}" = lab_arena_claim_drain ] \
+        || [ -n "$LAB_ARENA_RESTART_GUARD_GENERATION" ]; }; then
+    # A clean shell exit cannot complete an unfinished guarded restart.
+    status=1
+  fi
   if [ "$status" -ne 0 ]; then
     if [ "$ARENA_RECOVERING" = 1 ] \
         && [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" != 1 ]; then
@@ -1900,6 +1906,7 @@ on_gateway_restart_exit() {
       && [ -f "$GATEWAY_GIT_HELPER" ]; then
     finalize_deployment_record failed "$GATEWAY_DEPLOY_STAGE" >/dev/null 2>&1 || true
   fi
+  exit "$status"
 }
 trap on_gateway_restart_exit EXIT
 

@@ -9694,9 +9694,24 @@ async def _run_targeted_company_evidence_investigation(
         )
     )
     matched_industry_bindings = {}
+    retry_source_identity = investigation_verified_identity
+    if (
+        not verified_identity
+        and not retry_source_identity
+        and investigation_web_identity.get("decision") == COMPANY_FIT_MATCH
+        and investigation_web_identity.get("evidence_source")
+        == "company_web_reverification"
+    ):
+        # The producer binds checked pages to the final web identity. Reuse
+        # that same complete anchor without granting homepage identity or fit.
+        retry_source_identity = _matched_company_retry_identity({
+            "normalized_name": investigation_web_identity.get("observed_name"),
+            "registrable_dns_domain": investigation_web_identity.get("observed_domain"),
+            "linkedin_company_slug": investigation_web_identity.get("observed_linkedin_slug"),
+        })
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
-        investigation_verified_identity,
+        retry_source_identity,
         industry_bindings_out=matched_industry_bindings,
     )
     retained_attribute_retry_pages = (

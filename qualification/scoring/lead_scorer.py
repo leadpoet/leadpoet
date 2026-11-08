@@ -5469,7 +5469,9 @@ def _unresolved_homepage_web_identity_conflict(
 
     if (homepage.decision != COMPANY_FIT_UNAVAILABLE
         or web_receipt.get("decision") != COMPANY_FIT_MATCH
-        or web_receipt.get("reason_code") != "verifier_accepted"):
+        or web_receipt.get("reason_code") not in {
+            "verifier_accepted", "structured_homepage_numeric_identity_verified",
+        }):
         return False
     details = homepage.details if isinstance(homepage.details, Mapping) else {}
     organization = details.get("observed_homepage_organization_identity")
@@ -5527,7 +5529,8 @@ def _unresolved_homepage_web_identity_conflict(
         and slug == observed.get("observed_linkedin_slug")
         and domain == web_receipt.get("submitted_domain")
         == web_receipt.get("observed_domain")
-        and name != web_receipt.get("observed_name")
+        and (name != web_receipt.get("observed_name")
+             or web_receipt.get("reason_code") == "structured_homepage_numeric_identity_verified")
         and slug != web_receipt.get("observed_linkedin_slug")
     )
 

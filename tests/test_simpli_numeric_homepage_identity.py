@@ -99,11 +99,29 @@ def test_bound_organization_conflict_remains_until_exact_numeric_proof(monkeypat
     assert not scorer._unresolved_homepage_web_identity_conflict(result, {
         **correct_web, 'structured_profile_identity': numeric_proof(),
     })
+    assert not scorer._unresolved_homepage_web_identity_conflict(result, {
+        **correct_web, 'reason_code': 'structured_homepage_numeric_identity_verified',
+        'structured_profile_identity': numeric_proof(),
+    })
     for key, value in [('company_id', '999'), ('requested_url', 'https://www.linkedin.com/company/999'),
                        ('url', UK), ('website', 'https://simpli-fi.co.uk/'), ('name', 'OtherCo')]:
         assert scorer._unresolved_homepage_web_identity_conflict(result, {
             **correct_web, 'structured_profile_identity': {**numeric_proof(), key: value},
         })
+        assert scorer._unresolved_homepage_web_identity_conflict(result, {
+            **correct_web, 'reason_code': 'structured_homepage_numeric_identity_verified',
+            'structured_profile_identity': {**numeric_proof(), key: value},
+        })
+
+
+def test_new_numeric_receipt_must_match_homepage_id_even_when_organization_name_matches(monkeypatch):
+    result = captured_homepage(monkeypatch)
+    result.details['observed_homepage_organization_identity']['normalized_name'] = 'simplifi'
+    corrected = {**web_receipt(), 'decision': 'match', 'observed_linkedin_slug': 'simpli.fi',
+        'reason_code': 'structured_homepage_numeric_identity_verified',
+        'structured_profile_identity': {**numeric_proof(), 'company_id': '999',
+            'requested_url': 'https://www.linkedin.com/company/999'}}
+    assert scorer._unresolved_homepage_web_identity_conflict(result, corrected)
 
 
 def _run_native_fit(monkeypatch, profile=CONTROLLED_PROFILE, *, web_updates=None, company_updates=None, quality=False):

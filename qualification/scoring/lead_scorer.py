@@ -15034,6 +15034,7 @@ async def _score_single_intent_signal(
     # (flip with INTENT_VERIFIER_REVIEW_AS_ACCEPT=on for more recall).
     # Fail-closed: any unhandled exception rejects the signal.
     from qualification.scoring.intent_verification_three_stage import (
+        _exact_native_ats_api_status,
         verify_three_stage,
     )
     target_signal_raw = icp_signals_for_gate[miner_asserted_idx]
@@ -15272,6 +15273,30 @@ async def _score_single_intent_signal(
             buyer_cap_days=buyer_max_age_days,
             evaluated_on=evaluation_date(),
         )
+        posting_dates = three_stage_result.get("source_publication_dates")
+        if (str(target_evidence_type or "").upper() == "HIRING"
+            and len(evidence_signals or [signal]) == 1
+            and three_stage_result.get("job_publisher_relationship") == "verified"
+            and three_stage_result.get("verified_job_source_urls") == [signal.url]
+            and type(scrape_summary.get("result_count")) is int
+            and scrape_summary.get("result_count") == 1
+            and _exact_native_ats_api_status(signal.url, scrape_summary.get("statuses"))
+            and isinstance(posting_dates, list) and len(posting_dates) == 1
+            and isinstance(posting_dates[0], str)):
+            try:
+                posting_date = date.fromisoformat(posting_dates[0])
+            except ValueError:
+                posting_date = None
+            if posting_date and posting_date.isoformat() == posting_dates[0]:
+                # This native API date is the posting's publication, not an
+                # edit/observation date selected or omitted by the model. It
+                # can reject an old job, never clear an existing rejection.
+                posting_verdict = source_grounded_date_verdict(
+                    event_date=None, publication_dates=[posting_date.isoformat()],
+                    buyer_cap_days=buyer_max_age_days, evaluated_on=evaluation_date(),
+                )
+                if posting_verdict.verdict == "out_of_window":
+                    integrity_date_verdict = posting_verdict
         date_status = integrity_date_verdict.verdict
         content_found_date = integrity_date_verdict.authoritative_date
         if integrity_date_verdict.verdict == "out_of_window":

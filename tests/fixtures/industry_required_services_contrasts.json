@@ -1,0 +1,56 @@
+[
+  {
+    "case_id": "physical_descriptive_product_line",
+    "criterion": "Manufactures pumps, valves and fittings.",
+    "source_body": "Example Systems manufactures its own line of industrial pumps and sells them to industrial customers. Its supplied product evidence describes pumps, without valves or fittings.",
+    "expected_match": true
+  },
+  {
+    "case_id": "explicit_mandatory_physical_products",
+    "criterion": "Must manufacture pumps AND valves.",
+    "source_body": "Example Systems manufactures its own industrial pumps. It does not manufacture valves.",
+    "expected_match": false
+  },
+  {
+    "case_id": "missing_independent_service",
+    "criterion": "Provides managed IT infrastructure, cloud migration and mainframe modernization services to enterprise customers.",
+    "source_body": "Example Systems provides enterprise customers with managed IT infrastructure operations and cloud migration services. The supplied service evidence contains no mainframe modernization offering.",
+    "expected_match": false
+  },
+  {
+    "case_id": "all_services_separate_offerings",
+    "criterion": "Provides managed IT infrastructure, cloud migration and mainframe modernization services to enterprise customers.",
+    "source_body": "Example Systems supplies enterprise customers with three independent offerings: managed IT infrastructure operations, migration of customer environments to public clouds, and modernization of legacy mainframe environments through hardware and system-software upgrades. Each is delivered by Example Systems. These offerings do not share one platform.",
+    "expected_match": true
+  },
+  {
+    "case_id": "explicit_service_alternative",
+    "criterion": "Provides managed IT infrastructure OR cloud migration services to enterprise customers.",
+    "source_body": "Example Systems provides enterprise customers with outsourced managed IT infrastructure operations. The supplied service evidence contains no cloud migration offering.",
+    "expected_match": true
+  },
+  {
+    "case_id": "illustrative_service_examples",
+    "criterion": "Provides IT services such as cloud migration and mainframe modernization to enterprise customers.",
+    "source_body": "Example Systems provides enterprise customers with outsourced managed storage and IT infrastructure operations. These are its supplied IT services; cloud migration and mainframe modernization are not evidenced.",
+    "expected_match": true
+  },
+  {
+    "case_id": "platform_without_model_development",
+    "criterion": "Builds large language models and enterprise AI platforms that businesses use to deploy secure search, assistant and automation applications.",
+    "source_body": "Example Systems builds and sells an enterprise AI platform for business users. It supplies secure search, an AI assistant and workflow automation. Its platform integrates third-party language models through APIs. The supplied evidence does not describe Example Systems training, fine-tuning or otherwise developing its own language models.",
+    "expected_match": false
+  },
+  {
+    "case_id": "capacity_without_mainframe_modernization",
+    "criterion": "Provides mainframe modernization services to enterprise customers.",
+    "source_body": "Example Systems provides enterprise customers with mainframe processor capacity, hardware lifecycle maintenance and round-the-clock operations. Separately, it modernizes customers' web applications. The supplied evidence describes no changes or upgrades to customers' legacy mainframe environments.",
+    "expected_match": false
+  },
+  {
+    "case_id": "proved_mainframe_hardware_modernization",
+    "criterion": "Provides mainframe modernization services to enterprise customers.",
+    "source_body": "Example Systems modernizes enterprise customers' legacy mainframe environments. It replaces older mainframe hardware with a current generation, upgrades the system software and migrates existing workloads to that environment. This modernization service does not rewrite the customer's application code.",
+    "expected_match": true
+  }
+]

@@ -587,7 +587,7 @@
       "symbol": "ArenaService.public_reward_basis"
     },
     {
-      "ast_sha256": "sha256:12b9d2722432d94ad5a10bd94764665882e99a43036dcb8447d4f7f5b8b31a71",
+      "ast_sha256": "sha256:04e01f366be082d71402c44bf5ada2791793d5415ce8714d03c4bf0cc38cfc93",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService.public_weight_state"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9ba4bd87e328ed09d20a071c40fbf267ec497ac89ad864bc56c6e68b82c0a89d",
+  "manifest_hash": "sha256:4a24cc16a806aba6559eedbe862bb7ad007c78b46ade50aee9cd1eadb43cf386",
   "protected_source_commit": "66300ad3b44cccc5572fec1f653b2e7da2a01803",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

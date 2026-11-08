@@ -4157,6 +4157,29 @@ def _semantic_ownership_proof(
     return bool(owner_words) and f" {owner_words} " in f" {quote_words} "
 
 
+def _retained_requested_source_url(
+    value: Any,
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]],
+) -> str:
+    """Resolve an exact observed final citation to its unique retained request.
+
+    Keep the original request key so every downstream authority check still
+    checks both the requested and final destinations. Similar-looking URLs,
+    unobserved redirects and ambiguous final bindings acquire no evidence.
+    """
+
+    url = _safe_https_url(value)
+    if not url or url in fetched_pages:
+        return url
+    requested = [
+        key for key in fetched_pages
+        if _safe_https_url(key)
+        and _safe_https_url((fetched_final_urls or {}).get(key)) == url
+    ]
+    return requested[0] if len(requested) == 1 else url
+
+
 def _required_attribute_support_rejection(
     url: Any,
     quote: Any,
@@ -4169,7 +4192,7 @@ def _required_attribute_support_rejection(
 ) -> Optional[str]:
     """Keep support gates separate so a citation retry repairs the failed check."""
 
-    url = _safe_https_url(url)
+    url = _retained_requested_source_url(url, fetched_pages, fetched_final_urls)
     if not url or not isinstance(quote, str) or not quote:
         return REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON
     if len(quote) > 2000:
@@ -4268,8 +4291,14 @@ def _validated_findings(
                 str(raw.get("reason") or ""),
             )[:300],
         }
+        finding["evidence_url"] = _retained_requested_source_url(
+            finding["evidence_url"], fetched_pages, fetched_final_urls,
+        )
         raw_support = [
-            {"url": raw.get(f"supporting_evidence_url_{index}"),
+            {"url": _retained_requested_source_url(
+                raw.get(f"supporting_evidence_url_{index}"),
+                fetched_pages, fetched_final_urls,
+             ),
              "quote": raw.get(f"supporting_evidence_quote_{index}")}
             for index in (1, 2)
             if raw.get(f"supporting_evidence_url_{index}")

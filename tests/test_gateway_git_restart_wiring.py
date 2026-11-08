@@ -64,6 +64,85 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     assert "-u GATEWAY_ACTIVE_RELEASE_COMPONENT" in script
 
 
+@pytest.mark.parametrize(
+    "stage,generation,completed,destructive,recovering,owned,rollback_status,"
+    "shell_status,expected_status,expected_actions",
+    [
+        ("lab_arena_claim_drain", "", 0, 0, 0, True, 0, 0, 1,
+         ["rollback", "abort:0", "timing:lab_arena_claim_drain:failed", "report", "summary:1", "cancel", "finalize:failed:lab_arena_claim_drain"]),
+        ("lab_arena_destructive_authorization", "17", 0, 0, 0, True, 0, 0, 1,
+         ["rollback", "abort:17", "timing:lab_arena_destructive_authorization:failed", "report", "summary:1", "cancel", "finalize:failed:lab_arena_destructive_authorization"]),
+        ("lab_arena_claim_drain", "17", 0, 0, 0, False, 0, 0, 1,
+         ["rollback", "denied:17", "timing:lab_arena_claim_drain:failed", "report", "summary:1", "cancel", "finalize:failed:lab_arena_claim_drain"]),
+        ("lab_arena_claim_drain", "17", 0, 0, 0, True, 1, 0, 1,
+         ["rollback", "timing:lab_arena_claim_drain:failed", "report", "summary:1", "cancel", "finalize:failed:lab_arena_claim_drain"]),
+        ("lab_arena_claim_drain", "17", 0, 0, 1, True, 0, 0, 1,
+         ["rollback", "restore", "timing:lab_arena_claim_drain:failed", "report", "summary:1", "cancel", "finalize:failed:lab_arena_claim_drain"]),
+        ("gateway_health_check", "17", 0, 1, 0, True, 0, 0, 1,
+         ["rollback", "timing:gateway_health_check:failed", "report", "summary:1", "cancel", "finalize:failed:gateway_health_check"]),
+        ("lab_arena_claim_drain", "17", 0, 0, 0, True, 0, 42, 42,
+         ["rollback", "abort:17", "timing:lab_arena_claim_drain:failed", "report", "summary:42", "cancel", "finalize:failed:lab_arena_claim_drain"]),
+        ("completed", "17", 1, 1, 0, True, 0, 0, 0, ["summary:0", "cancel"]),
+        ("completed", "", 1, 1, 0, True, 0, 0, 0, ["summary:0", "cancel"]),
+        ("dependency_preflight", "", 0, 0, 0, True, 0, 0, 0, ["summary:0", "cancel"]),
+    ],
+    ids=["undiscovered-drain", "owned-before-destructive", "foreign-owner",
+         "rollback-failed", "recovery-restore", "after-destructive", "nonzero",
+         "paired-completed", "completed", "preflight-no-guard"],
+)
+def test_gateway_exit_preserves_guard_cleanup_contract(
+    tmp_path: Path, stage: str, generation: str, completed: int, destructive: int,
+    recovering: int, owned: bool, rollback_status: int, shell_status: int,
+    expected_status: int, expected_actions: list[str],
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helpers = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in ("abort_lab_arena_restart_guard_before_destructive", "on_gateway_restart_exit")
+    )
+    capture = tmp_path / "actions"
+    plan = tmp_path / "plan"
+    git_helper = tmp_path / "git-helper"
+    plan.touch()
+    git_helper.touch()
+    harness = f"""set -euo pipefail
+CAPTURE={shlex.quote(str(capture))}
+GATEWAY_DEPLOY_STAGE={shlex.quote(stage)}
+LAB_ARENA_RESTART_GUARD_GENERATION={shlex.quote(generation)}
+GATEWAY_DEPLOY_COMPLETED={completed}
+GATEWAY_DESTRUCTIVE_PHASE_STARTED={destructive}
+ARENA_RECOVERING={recovering}
+PREPARED_GATEWAY_SHA={'a' * 40}
+LEADPOET_REPO_ROOT=/exact-source
+GATEWAY_PREFLIGHT_TREE=
+GATEWAY_RELEASE_FOLLOW_ROOT=
+LAB_ARENA_RESTART_DRAIN_REPORT=
+GATEWAY_PREPARED_V2_RELEASE_MANIFEST=
+GATEWAY_DEPLOY_PLAN_FILE={shlex.quote(str(plan))}
+GATEWAY_GIT_HELPER={shlex.quote(str(git_helper))}
+record() {{ printf '%s\\n' "$*" >> "$CAPTURE"; }}
+rollback_arena_candidate_before_destructive() {{ record rollback; return {rollback_status}; }}
+restore_arena_recovery_guard_before_destructive() {{ record restore; }}
+run_lab_arena_restart_guard() {{
+  test "$1" = /exact-source && test "$2" = abort && test "$3" = --generation
+  if [ {int(owned)} = 1 ]; then record "abort:$4"; else record "denied:$4"; return 1; fi
+}}
+record_gateway_restart_timing() {{ record "timing:$1:$2"; }}
+report_gateway_recovery_target() {{ record report; }}
+emit_gateway_restart_sentry_summary() {{ record "summary:$1"; }}
+cancel_gateway_offline_artifact_prepare() {{ record cancel; }}
+finalize_deployment_record() {{ record "finalize:$1:$2"; }}
+{helpers}
+trap on_gateway_restart_exit EXIT
+exit {shell_status}
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == expected_status, result.stderr
+    assert capture.read_text(encoding="utf-8").splitlines() == expected_actions
+
+
 def test_gateway_arena_drain_timeout_fails_before_recording_guard(
     tmp_path: Path,
 ) -> None:

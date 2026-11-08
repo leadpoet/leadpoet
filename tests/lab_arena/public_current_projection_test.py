@@ -1,4 +1,4 @@
-"""Current polling uses compact reads; driver and signed weight reads do not."""
+"""Current and weight polling use compact reads; driver reads remain full."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -215,7 +215,7 @@ def test_current_legacy_empty_shadow_and_scoped_paging():
     assert empty.public_current()["published_round"] is None
 
 
-def test_default_driver_reward_and_weight_reads_keep_full_configuration():
+def test_driver_and_default_reward_reads_stay_full_while_weight_reads_are_compact():
     row, _ = _reward()
     service, transport = _service([_active(), row])
     service.active_rounds()
@@ -227,7 +227,7 @@ def test_default_driver_reward_and_weight_reads_keep_full_configuration():
     assert service.public_reward_basis(101) == row["reward_basis_doc"]
     assert transport.calls[-1]["columns"].endswith(",configuration_doc")
     assert service.public_weight_state(99) == {"state": None, "lookup_ok": True}
-    assert transport.calls[-1]["columns"].endswith(",configuration_doc")
+    assert transport.calls[-1]["columns"].endswith("," + PUBLIC_CONFIGURATION_COLUMN)
     captured = []
 
     def full_store_only(**kwargs):

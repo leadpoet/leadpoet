@@ -4424,6 +4424,11 @@ async def _call_openrouter(
             choices = resp.get("choices")
             first_choice = choices[0] if isinstance(choices, list) and choices else {}
             if judge_reasoning_enabled() and first_choice.get("finish_reason") != "stop":
+                # A truncated generation can recover with the unchanged request;
+                # share the existing attempt cap without accepting partial JSON.
+                if first_choice.get("finish_reason") == "length" and attempt + 1 < attempts:
+                    await asyncio.sleep(1)
+                    continue
                 return {"_error": "incomplete_response", "provider_usage": provider_usage}
             message = first_choice.get("message") if isinstance(first_choice, Mapping) else {}
             content = message.get("content", "") if isinstance(message, Mapping) else ""

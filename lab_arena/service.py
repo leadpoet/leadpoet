@@ -4120,6 +4120,7 @@ class ArenaService:
             raw,
             contacts_required=contact_policy.scorer_enabled(policy),
             company_quality=quality_policy.scorer_enabled(policy),
+            company_input_contract=scoring.company_input_contract.from_scorer_policy(policy),
             scored_indexes=scoring.verify.bucket_skip(icp, companies, max_scored_companies=int(policy["max_scored_companies"]))[0],
             consumed_indexes=consumed_indexes,
         )
@@ -7906,6 +7907,7 @@ class ArenaService:
                             raw_rows,
                             contacts_required=contact_policy.enabled(round_row["configuration_doc"]),
                             company_quality=quality_policy.enabled(round_row["configuration_doc"]),
+                            company_input_contract=scoring.company_input_contract.from_scorer_policy(policy),
                             scored_indexes=scoring.verify.bucket_skip(
                                 self.evaluation_icps(round_id)[int(run["icp_position"])], companies,
                                 max_scored_companies=int(policy["max_scored_companies"]),

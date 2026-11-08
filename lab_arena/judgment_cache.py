@@ -58,6 +58,7 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
     copied = _json_copy(document)
     del copied["scored_run_id"]
     from qualification.scoring.competition import effective_competition_input
+    from qualification import company_input_contract
 
     from lab_arena import provider_observations
     try:
@@ -73,11 +74,13 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
             copied["companies"], copied["icp"], contacts_required=True,
             contact_source_evidence=evidence,
             provider_observations=observations,
+            company_input_contract=company_input_contract.from_scorer_policy(copied["scorer_policy"]),
         ))
     else:
         copied.update(effective_competition_input(
             copied["companies"], copied["icp"],
             provider_observations=observations,
+            company_input_contract=company_input_contract.from_scorer_policy(copied["scorer_policy"]),
         ))
     return copied
 

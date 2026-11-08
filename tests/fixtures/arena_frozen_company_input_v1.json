@@ -1,0 +1,527 @@
+{
+  "raw_amp": {
+    "document": {
+      "schema_version": "leadpoet.lab_arena.scoring_input.v1",
+      "scored_run_id": "execute-frozen",
+      "icp": {
+        "icp_id": "arena:test:0",
+        "prompt": "Find software companies with a product launch",
+        "industry": "Software",
+        "sub_industry": "SaaS",
+        "employee_count": [
+          "51-200"
+        ],
+        "company_stage": "Any",
+        "country": "United States",
+        "intent_signals": [
+          "Announced a product launch"
+        ],
+        "intent_max_age_days": 90,
+        "max_companies": 5
+      },
+      "companies": [
+        {
+          "company_name": "Acme",
+          "company_website": "https://acme.example",
+          "company_linkedin": "https://www.linkedin.com/company/acme&sons",
+          "industry": "Software",
+          "employee_count": "51-200",
+          "company_stage": "",
+          "country": "United States",
+          "state": "",
+          "fit_summary": "A software company matching the requested market.",
+          "fit_evidence_urls": [
+            "https://acme.example/about"
+          ],
+          "intent_signals": [
+            {
+              "matched_icp_signal": 0,
+              "description": "The company announced a product launch.",
+              "date": null,
+              "why_now": "The launch creates a timely buying trigger.",
+              "url": "https://acme.example/news/launch",
+              "snippet": "The company launched the product."
+            }
+          ]
+        }
+      ],
+      "scorer_policy": {
+        "schema_version": "leadpoet.lab_arena.scorer_policy.v1",
+        "scoring_adapter_version": "qualification_integrity_v2",
+        "company_judgment_policy": "company_judgment_v1",
+        "fp_penalty_points": 10.0,
+        "fp_unverified_primary_penalty_points": 10.0,
+        "fp_penalty_icp_floor": 0.0,
+        "company_cap_rule": "icp_max_companies",
+        "max_scored_companies": 0,
+        "judge_models": {
+          "company_fit_reverification": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_signal_judge": "openai/gpt-oss-120b",
+          "intent_details_review": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_fetched_evidence": "openai/gpt-oss-120b",
+          "role_batch_check": "openai/gpt-oss-120b",
+          "industry_evidence_review": "deepseek/deepseek-v4.1-flash-1017",
+          "industry_research_controller": "z-ai/glm-5.3-flash"
+        },
+        "provider_profile": "lab_arena",
+        "pre_slice_rule": "first_n_model_order",
+        "employee_bucket_rule": "lab_relaxed_buckets",
+        "env_bindings": {
+          "ARENA_JUDGE_REQUEST_OPTIONS": "{\"deepseek/deepseek-v4.1-flash-1017\":{\"industry_max_output_tokens\":16384,\"max_output_tokens\":8192,\"reasoning\":{\"effort\":\"low\"}},\"openai/gpt-oss-120b\":{\"max_output_tokens\":4096,\"reasoning\":{\"effort\":\"low\"}},\"z-ai/glm-5.3-flash\":{\"max_output_tokens\":8192,\"reasoning\":{\"effort\":\"low\"}}}",
+          "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "full_generated_thinking_v1",
+          "ARENA_JUDGE_PROVIDER_ROUTES": "{\"deepseek/deepseek-v4.1-flash-1017\":\"nebius/fp8\",\"openai/gpt-oss-120b\":\"near-ai/fp4\",\"z-ai/glm-5.3-flash\":\"near-ai/fp8\"}"
+        }
+      },
+      "evaluation_date": "2026-11-08"
+    },
+    "refs": [
+      {
+        "schema_version": "leadpoet.lab_arena.company_judgment_ref.v1",
+        "company_index": 0,
+        "cache_key": "sha256:3a4c456773ca2ef14637a985169f4cb8e7684cdb1b3189f3638dcab018f616c5",
+        "company_input_hash": "sha256:0ff4fe51ca07dcb901b5f641b33b84cf5c3bcef6d86e43e4e5806a6e16dbfbac",
+        "scope_doc": {
+          "schema_version": "leadpoet.lab_arena.company_judgment_scope.v1",
+          "integrity_policy": "arena_integrity_v1",
+          "company_judgment_policy": "company_judgment_v1",
+          "round_id": "arena-2026-11-08",
+          "network_name": "finney",
+          "netuid": 71,
+          "scorer_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scorer_image_reference": "registry/scorer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evaluation_date": "2026-11-08",
+          "company_input_hash": "sha256:0ff4fe51ca07dcb901b5f641b33b84cf5c3bcef6d86e43e4e5806a6e16dbfbac",
+          "cache_key": "sha256:3a4c456773ca2ef14637a985169f4cb8e7684cdb1b3189f3638dcab018f616c5"
+        }
+      }
+    ],
+    "lease": {
+      "schema_version": "leadpoet.lab_arena.company_judgment_lease.v1",
+      "hits": [],
+      "misses": [
+        {
+          "company_index": 0,
+          "cache_key": "sha256:3a4c456773ca2ef14637a985169f4cb8e7684cdb1b3189f3638dcab018f616c5",
+          "company_input_hash": "sha256:0ff4fe51ca07dcb901b5f641b33b84cf5c3bcef6d86e43e4e5806a6e16dbfbac",
+          "authority_slot": 0
+        }
+      ]
+    },
+    "output": {
+      "schema_version": "leadpoet.lab_arena.scoring_output.v1",
+      "scored_run_id": "execute-frozen",
+      "breakdowns": [
+        {
+          "icp_fit": 0.0,
+          "decision_maker": 0.0,
+          "intent_signal_raw": 0.0,
+          "time_decay_multiplier": 1.0,
+          "intent_signal_final": 0.0,
+          "cost_penalty": 0.0,
+          "time_penalty": 0.0,
+          "final_score": 0.0,
+          "failure_reason": "company model contract incompatible",
+          "intent_signals_detail": null,
+          "verifier_gate_receipts": [
+            {
+              "gate": "company_fit",
+              "decision": "unavailable",
+              "reason": "company_model_contract_incompatible",
+              "failure_class": "model_contract_incompatible"
+            }
+          ],
+          "company_index": 0,
+          "company_identity_key": "domain:acme.example|name:acme",
+          "company_identity_alias_keys": [
+            "domain:acme.example|name:acme"
+          ],
+          "company_qualified": false,
+          "duplicate_company": false
+        }
+      ],
+      "company_judgments": []
+    },
+    "whole_input_hash": "sha256:2d39ba44b2de0b2f031ac32d8403d2e12eab52bcebd4763cf1acb50e751f871a"
+  },
+  "encoded_amp": {
+    "document": {
+      "schema_version": "leadpoet.lab_arena.scoring_input.v1",
+      "scored_run_id": "execute-frozen",
+      "icp": {
+        "icp_id": "arena:test:0",
+        "prompt": "Find software companies with a product launch",
+        "industry": "Software",
+        "sub_industry": "SaaS",
+        "employee_count": [
+          "51-200"
+        ],
+        "company_stage": "Any",
+        "country": "United States",
+        "intent_signals": [
+          "Announced a product launch"
+        ],
+        "intent_max_age_days": 90,
+        "max_companies": 5
+      },
+      "companies": [
+        {
+          "company_name": "Acme",
+          "company_website": "https://acme.example",
+          "company_linkedin": "https://www.linkedin.com/company/acme%26sons",
+          "industry": "Software",
+          "employee_count": "51-200",
+          "company_stage": "",
+          "country": "United States",
+          "state": "",
+          "fit_summary": "A software company matching the requested market.",
+          "fit_evidence_urls": [
+            "https://acme.example/about"
+          ],
+          "intent_signals": [
+            {
+              "matched_icp_signal": 0,
+              "description": "The company announced a product launch.",
+              "date": null,
+              "why_now": "The launch creates a timely buying trigger.",
+              "url": "https://acme.example/news/launch",
+              "snippet": "The company launched the product."
+            }
+          ]
+        }
+      ],
+      "scorer_policy": {
+        "schema_version": "leadpoet.lab_arena.scorer_policy.v1",
+        "scoring_adapter_version": "qualification_integrity_v2",
+        "company_judgment_policy": "company_judgment_v1",
+        "fp_penalty_points": 10.0,
+        "fp_unverified_primary_penalty_points": 10.0,
+        "fp_penalty_icp_floor": 0.0,
+        "company_cap_rule": "icp_max_companies",
+        "max_scored_companies": 0,
+        "judge_models": {
+          "company_fit_reverification": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_signal_judge": "openai/gpt-oss-120b",
+          "intent_details_review": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_fetched_evidence": "openai/gpt-oss-120b",
+          "role_batch_check": "openai/gpt-oss-120b",
+          "industry_evidence_review": "deepseek/deepseek-v4.1-flash-1017",
+          "industry_research_controller": "z-ai/glm-5.3-flash"
+        },
+        "provider_profile": "lab_arena",
+        "pre_slice_rule": "first_n_model_order",
+        "employee_bucket_rule": "lab_relaxed_buckets",
+        "env_bindings": {
+          "ARENA_JUDGE_REQUEST_OPTIONS": "{\"deepseek/deepseek-v4.1-flash-1017\":{\"industry_max_output_tokens\":16384,\"max_output_tokens\":8192,\"reasoning\":{\"effort\":\"low\"}},\"openai/gpt-oss-120b\":{\"max_output_tokens\":4096,\"reasoning\":{\"effort\":\"low\"}},\"z-ai/glm-5.3-flash\":{\"max_output_tokens\":8192,\"reasoning\":{\"effort\":\"low\"}}}",
+          "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "full_generated_thinking_v1",
+          "ARENA_JUDGE_PROVIDER_ROUTES": "{\"deepseek/deepseek-v4.1-flash-1017\":\"nebius/fp8\",\"openai/gpt-oss-120b\":\"near-ai/fp4\",\"z-ai/glm-5.3-flash\":\"near-ai/fp8\"}"
+        }
+      },
+      "evaluation_date": "2026-11-08"
+    },
+    "refs": [
+      {
+        "schema_version": "leadpoet.lab_arena.company_judgment_ref.v1",
+        "company_index": 0,
+        "cache_key": "sha256:6b04754bf4e77a58fb0d355f5800295b2143f35400654a157c1c45e1599552bf",
+        "company_input_hash": "sha256:3fd23b7402ddfafe302412d419008b7adf2dd97d9375a0bf25ebe4273e0e6d36",
+        "scope_doc": {
+          "schema_version": "leadpoet.lab_arena.company_judgment_scope.v1",
+          "integrity_policy": "arena_integrity_v1",
+          "company_judgment_policy": "company_judgment_v1",
+          "round_id": "arena-2026-11-08",
+          "network_name": "finney",
+          "netuid": 71,
+          "scorer_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scorer_image_reference": "registry/scorer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evaluation_date": "2026-11-08",
+          "company_input_hash": "sha256:3fd23b7402ddfafe302412d419008b7adf2dd97d9375a0bf25ebe4273e0e6d36",
+          "cache_key": "sha256:6b04754bf4e77a58fb0d355f5800295b2143f35400654a157c1c45e1599552bf"
+        }
+      }
+    ],
+    "lease": {
+      "schema_version": "leadpoet.lab_arena.company_judgment_lease.v1",
+      "hits": [],
+      "misses": [
+        {
+          "company_index": 0,
+          "cache_key": "sha256:6b04754bf4e77a58fb0d355f5800295b2143f35400654a157c1c45e1599552bf",
+          "company_input_hash": "sha256:3fd23b7402ddfafe302412d419008b7adf2dd97d9375a0bf25ebe4273e0e6d36",
+          "authority_slot": 0
+        }
+      ]
+    },
+    "output": {
+      "schema_version": "leadpoet.lab_arena.scoring_output.v1",
+      "scored_run_id": "execute-frozen",
+      "breakdowns": [
+        {
+          "icp_fit": 0.0,
+          "decision_maker": 0.0,
+          "intent_signal_raw": 0.0,
+          "time_decay_multiplier": 1.0,
+          "intent_signal_final": 0.0,
+          "cost_penalty": 0.0,
+          "time_penalty": 0.0,
+          "final_score": 0.0,
+          "failure_reason": "company model contract incompatible",
+          "intent_signals_detail": null,
+          "verifier_gate_receipts": [
+            {
+              "gate": "company_fit",
+              "decision": "unavailable",
+              "reason": "company_model_contract_incompatible",
+              "failure_class": "model_contract_incompatible"
+            }
+          ],
+          "company_index": 0,
+          "company_identity_key": "domain:acme.example|name:acme",
+          "company_identity_alias_keys": [
+            "domain:acme.example|name:acme"
+          ],
+          "company_qualified": false,
+          "duplicate_company": false
+        }
+      ],
+      "company_judgments": []
+    },
+    "whole_input_hash": "sha256:8420a63568c031bb0039ce4beef7c4d90f6310ec3b1b8524a7e0c7c9a52ee925"
+  },
+  "ordinary": {
+    "document": {
+      "schema_version": "leadpoet.lab_arena.scoring_input.v1",
+      "scored_run_id": "execute-frozen",
+      "icp": {
+        "icp_id": "arena:test:0",
+        "prompt": "Find software companies with a product launch",
+        "industry": "Software",
+        "sub_industry": "SaaS",
+        "employee_count": [
+          "51-200"
+        ],
+        "company_stage": "Any",
+        "country": "United States",
+        "intent_signals": [
+          "Announced a product launch"
+        ],
+        "intent_max_age_days": 90,
+        "max_companies": 5
+      },
+      "companies": [
+        {
+          "company_name": "Acme",
+          "company_website": "https://acme.example",
+          "company_linkedin": "https://www.linkedin.com/company/acme",
+          "industry": "Software",
+          "employee_count": "51-200",
+          "company_stage": "",
+          "country": "United States",
+          "state": "",
+          "fit_summary": "A software company matching the requested market.",
+          "fit_evidence_urls": [
+            "https://acme.example/about"
+          ],
+          "intent_signals": [
+            {
+              "matched_icp_signal": 0,
+              "description": "The company announced a product launch.",
+              "date": null,
+              "why_now": "The launch creates a timely buying trigger.",
+              "url": "https://acme.example/news/launch",
+              "snippet": "The company launched the product."
+            }
+          ]
+        }
+      ],
+      "scorer_policy": {
+        "schema_version": "leadpoet.lab_arena.scorer_policy.v1",
+        "scoring_adapter_version": "qualification_integrity_v2",
+        "company_judgment_policy": "company_judgment_v1",
+        "fp_penalty_points": 10.0,
+        "fp_unverified_primary_penalty_points": 10.0,
+        "fp_penalty_icp_floor": 0.0,
+        "company_cap_rule": "icp_max_companies",
+        "max_scored_companies": 0,
+        "judge_models": {
+          "company_fit_reverification": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_signal_judge": "openai/gpt-oss-120b",
+          "intent_details_review": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_three_stage_stage3": "deepseek/deepseek-v4.1-flash-1017",
+          "intent_fetched_evidence": "openai/gpt-oss-120b",
+          "role_batch_check": "openai/gpt-oss-120b",
+          "industry_evidence_review": "deepseek/deepseek-v4.1-flash-1017",
+          "industry_research_controller": "z-ai/glm-5.3-flash"
+        },
+        "provider_profile": "lab_arena",
+        "pre_slice_rule": "first_n_model_order",
+        "employee_bucket_rule": "lab_relaxed_buckets",
+        "env_bindings": {
+          "ARENA_JUDGE_REQUEST_OPTIONS": "{\"deepseek/deepseek-v4.1-flash-1017\":{\"industry_max_output_tokens\":16384,\"max_output_tokens\":8192,\"reasoning\":{\"effort\":\"low\"}},\"openai/gpt-oss-120b\":{\"max_output_tokens\":4096,\"reasoning\":{\"effort\":\"low\"}},\"z-ai/glm-5.3-flash\":{\"max_output_tokens\":8192,\"reasoning\":{\"effort\":\"low\"}}}",
+          "ARENA_JUDGE_REASONING_CAPTURE_POLICY": "full_generated_thinking_v1",
+          "ARENA_JUDGE_PROVIDER_ROUTES": "{\"deepseek/deepseek-v4.1-flash-1017\":\"nebius/fp8\",\"openai/gpt-oss-120b\":\"near-ai/fp4\",\"z-ai/glm-5.3-flash\":\"near-ai/fp8\"}"
+        }
+      },
+      "evaluation_date": "2026-11-08"
+    },
+    "refs": [
+      {
+        "schema_version": "leadpoet.lab_arena.company_judgment_ref.v1",
+        "company_index": 0,
+        "cache_key": "sha256:9f5c4e047dfc928d0d8ae6037dcd6ac0d7682ac801e46922a8321c08ceade6b5",
+        "company_input_hash": "sha256:a8e4649c4e34b5b39da2faa538388265e9b0081f078526500b4102253c02cb08",
+        "scope_doc": {
+          "schema_version": "leadpoet.lab_arena.company_judgment_scope.v1",
+          "integrity_policy": "arena_integrity_v1",
+          "company_judgment_policy": "company_judgment_v1",
+          "round_id": "arena-2026-11-08",
+          "network_name": "finney",
+          "netuid": 71,
+          "scorer_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scorer_image_reference": "registry/scorer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evaluation_date": "2026-11-08",
+          "company_input_hash": "sha256:a8e4649c4e34b5b39da2faa538388265e9b0081f078526500b4102253c02cb08",
+          "cache_key": "sha256:9f5c4e047dfc928d0d8ae6037dcd6ac0d7682ac801e46922a8321c08ceade6b5"
+        }
+      }
+    ],
+    "lease": {
+      "schema_version": "leadpoet.lab_arena.company_judgment_lease.v1",
+      "hits": [],
+      "misses": [
+        {
+          "company_index": 0,
+          "cache_key": "sha256:9f5c4e047dfc928d0d8ae6037dcd6ac0d7682ac801e46922a8321c08ceade6b5",
+          "company_input_hash": "sha256:a8e4649c4e34b5b39da2faa538388265e9b0081f078526500b4102253c02cb08",
+          "authority_slot": 0
+        }
+      ]
+    },
+    "output": {
+      "schema_version": "leadpoet.lab_arena.scoring_output.v1",
+      "scored_run_id": "execute-frozen",
+      "breakdowns": [
+        {
+          "icp_fit": 0.0,
+          "decision_maker": 0.0,
+          "intent_signal_raw": 60.0,
+          "time_decay_multiplier": 1.0,
+          "intent_signal_final": 60.0,
+          "cost_penalty": 0.0,
+          "time_penalty": 0.0,
+          "final_score": 60.0,
+          "failure_reason": null,
+          "verifier_gate_receipts": [
+            {
+              "gate": "company_fit",
+              "decision": "match",
+              "dimension_evidence": {
+                "identity": {
+                  "web_identity_receipt": {
+                    "decision": "match",
+                    "evidence_source": "company_web_reverification",
+                    "observed_name": "Acme",
+                    "observed_domain": "acme.example/",
+                    "observed_linkedin_slug": "acme"
+                  }
+                }
+              }
+            }
+          ],
+          "intent_signals_detail": [
+            {
+              "raw": 60.0,
+              "after_decay": 60.0,
+              "matched_icp_signal": 0,
+              "judge_verdict": {
+                "decision": "verified",
+                "pipeline_decision": "approve",
+                "verification_trace": {
+                  "intent_verdict": {
+                    "signal_evaluations": [
+                      {
+                        "signal_status": "supported"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "company_identity_key": "linkedin:acme",
+          "company_identity_alias_keys": [
+            "domain:acme.example|name:acme",
+            "linkedin:acme"
+          ],
+          "company_index": 0,
+          "company_qualified": true,
+          "duplicate_company": false
+        }
+      ],
+      "company_judgments": [
+        {
+          "authority_slot": 0,
+          "cache_key": "sha256:9f5c4e047dfc928d0d8ae6037dcd6ac0d7682ac801e46922a8321c08ceade6b5",
+          "company_index": 0,
+          "company_input_hash": "sha256:a8e4649c4e34b5b39da2faa538388265e9b0081f078526500b4102253c02cb08",
+          "raw_judgment": {
+            "company_identity_alias_keys": [
+              "domain:acme.example|name:acme",
+              "linkedin:acme"
+            ],
+            "company_identity_key": "linkedin:acme",
+            "company_judgment_policy": "company_judgment_v1",
+            "cost_penalty": 0.0,
+            "decision_maker": 0.0,
+            "failure_reason": null,
+            "final_score": 60.0,
+            "icp_fit": 0.0,
+            "intent_signal_final": 60.0,
+            "intent_signal_raw": 60.0,
+            "intent_signals_detail": [
+              {
+                "after_decay": 60.0,
+                "judge_verdict": {
+                  "decision": "verified",
+                  "pipeline_decision": "approve",
+                  "verification_trace": {
+                    "intent_verdict": {
+                      "signal_evaluations": [
+                        {
+                          "signal_status": "supported"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "matched_icp_signal": 0,
+                "raw": 60.0
+              }
+            ],
+            "time_decay_multiplier": 1.0,
+            "time_penalty": 0.0,
+            "verifier_gate_receipts": [
+              {
+                "decision": "match",
+                "dimension_evidence": {
+                  "identity": {
+                    "web_identity_receipt": {
+                      "decision": "match",
+                      "evidence_source": "company_web_reverification",
+                      "observed_domain": "acme.example/",
+                      "observed_linkedin_slug": "acme",
+                      "observed_name": "Acme"
+                    }
+                  }
+                },
+                "gate": "company_fit"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "whole_input_hash": "sha256:768965c9afaa3444254618aa71fe0143b7673ed89bbe60c6725230d2af598a1c"
+  }
+}

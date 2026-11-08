@@ -2,7 +2,7 @@
 
 import re
 import unicodedata
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from urllib.parse import quote, unquote, urlparse, urlunparse
@@ -299,6 +299,7 @@ def candidate_linkedin_prompt_slug(
     field_name: str,
     *,
     allow_empty: bool = False,
+    allow_company_ampersand: bool = True,
 ) -> str:
     """Return a strict LinkedIn person/company slug, never a raw URL."""
 
@@ -322,7 +323,8 @@ def candidate_linkedin_prompt_slug(
         return slug
     if (
         # Observed identity and exclusion consumers require a literal namespace.
-        raw_parts[0].casefold() == "company"
+        allow_company_ampersand
+        and raw_parts[0].casefold() == "company"
         and "&" in slug
         and _PROMPT_LINKEDIN_COMPANY_AMPERSAND_SLUG_RE.fullmatch(slug) is not None
     ):
@@ -590,10 +592,17 @@ class CompanyOutput(BaseModel):
 
     @field_validator('company_linkedin')
     @classmethod
-    def _reject_unsafe_company_linkedin(cls, v: str) -> str:
+    def _reject_unsafe_company_linkedin(cls, v: str, info: ValidationInfo) -> str:
         raw = v.strip()
+        from qualification import company_input_contract
+        context = info.context or {}
+        contract = context.get(company_input_contract.CONTEXT_KEY)
+        if company_input_contract.CONTEXT_KEY in context:
+            company_input_contract.validate(contract)
         if raw:
-            candidate_linkedin_prompt_slug(raw, "company_linkedin")
+            candidate_linkedin_prompt_slug(
+                raw, "company_linkedin", allow_company_ampersand=contract != "",
+            )
         return raw
 
     @field_validator('description')

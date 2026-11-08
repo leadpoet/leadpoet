@@ -377,6 +377,7 @@ def effective_competition_input(
     contact_source_evidence: Mapping[str, Any] | None = None,
     provider_observations: Sequence[Mapping[str, Any]] | None = None,
     company_quality: bool = False,
+    company_input_contract: str = "",
 ) -> dict[str, Any]:
     """Project the same normalized first-N inputs consumed by the adapter.
 
@@ -386,6 +387,8 @@ def effective_competition_input(
     """
     buckets = employee_count_buckets_for_icp(icp)
     from gateway.qualification.models import CompanyOutput
+    from qualification.company_input_contract import validation_context
+    context = validation_context(company_input_contract)
 
     rows = []
     for company_index, company in enumerate(list(companies)[:_company_goal(icp)]):
@@ -415,7 +418,9 @@ def effective_competition_input(
                 rows.append(effective)
                 continue
         try:
-            effective = CompanyOutput(**normalized).model_dump(mode="json")
+            effective = CompanyOutput.model_validate(
+                normalized, context=context,
+            ).model_dump(mode="json")
         except ValidationError:
             # Preserve validation inputs for incompatible rows; none reach
             # the networked judge, and identity still affects their receipts.
@@ -915,10 +920,13 @@ def apply_legacy_company_judgment_context(
     *, scored_indexes: Sequence[int] | None = None,
     resolve_raw: Callable[[int], Mapping[str, Any]] | None = None,
     consumed_indexes: set[int] | None = None,
+    company_input_contract: str = "",
 ) -> list[dict[str, Any]]:
     """Replay the historical gates; omitted intrinsic rows must be proved skips."""
     if len(companies) != len(raw_breakdowns):
         raise CompetitionScorerInputError("company judgments must cover every company")
+    from qualification.company_input_contract import validation_context
+    context = validation_context(company_input_contract)
     allowed = set(range(len(companies)) if scored_indexes is None else scored_indexes)
     seen: dict[str, str] = {}
     result = []
@@ -932,7 +940,9 @@ def apply_legacy_company_judgment_context(
             continue
         from gateway.qualification.models import CompanyOutput
         try:
-            CompanyOutput(**normalized)
+            CompanyOutput.model_validate(
+                normalized, context=context,
+            )
         except ValidationError:
             incompatible = _model_contract_incompatible_breakdown()
             submitted_identity = canonical_company_identity(normalized)
@@ -991,6 +1001,7 @@ def apply_company_judgment_context(
     scored_indexes: Sequence[int] | None = None,
     resolve_raw: Callable[[int], Mapping[str, Any]] | None = None,
     consumed_indexes: set[int] | None = None,
+    company_input_contract: str = "",
 ) -> list[dict[str, Any]]:
     """Bind immutable single-company decisions to this list's verified identities.
 
@@ -1001,6 +1012,7 @@ def apply_company_judgment_context(
         return apply_legacy_company_judgment_context(
             companies, raw_breakdowns, scored_indexes=scored_indexes, resolve_raw=resolve_raw,
             consumed_indexes=consumed_indexes,
+            company_input_contract=company_input_contract,
         )
     from qualification.company_quality import normalize_company_claim
     from qualification.scoring.company_fit_decision import company_quality_receipt_matches_claim
@@ -1106,6 +1118,8 @@ class CompetitionCompanyScorer:
             sort_keys=True,
             separators=(",", ":"),
         ))
+        from qualification.company_input_contract import from_scorer_policy
+        self.company_input_contract = from_scorer_policy(self.scorer_policy)
 
     def _retry_source_scope_key(self, company: Any, icp: Any) -> str:
         """Bind private retry evidence to every frozen scoring input."""
@@ -1174,7 +1188,10 @@ class CompetitionCompanyScorer:
                 original_company_indexes=[indexes[index]],
             )
             raw.append(raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment())
-        return apply_company_judgment_context(sliced, raw, contacts_required=self.contacts_required)
+        return apply_company_judgment_context(
+            sliced, raw, contacts_required=self.contacts_required,
+            company_input_contract=self.company_input_contract,
+        )
 
     async def _score_with_breakdowns(
         self,
@@ -1270,7 +1287,11 @@ class CompetitionCompanyScorer:
                     retain_row(duplicate)
                     continue
             try:
-                company_model = company_type(**normalized_company)
+                from qualification.company_input_contract import validation_context
+                company_model = company_type.model_validate(
+                    normalized_company,
+                    context=validation_context(self.company_input_contract),
+                )
             except ValidationError:
                 incompatible = _model_contract_incompatible_breakdown()
                 if self.integrity_policy:

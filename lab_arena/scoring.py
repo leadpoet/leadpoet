@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from lab_arena import contracts, verify
+from qualification import company_input_contract
 from lab_arena.contracts import ArenaContractError
 
 SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
@@ -144,6 +145,7 @@ def build_scorer_policy(
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
         "env_bindings": {
+            company_input_contract.BINDING: company_input_contract.POLICY,
             **({contracts.JUDGE_REASONING_EXCEPTIONS_BINDING: json.dumps(
                 dict(exceptions), sort_keys=True, separators=(",", ":"))}
                if exceptions is not None else {}),
@@ -234,6 +236,10 @@ def apply_policy_to_environment(
         existing = environ.get(name)
         if existing is not None and existing != secret:
             raise ScorerPolicyConflict("environment %s conflicts with the Arena scoring credential" % name)
+    # The host uses the explicit policy. Clear an ambient future contract only
+    # after all checks pass when a newer image serves a saved older policy.
+    if company_input_contract.BINDING not in bindings:
+        environ.pop(company_input_contract.BINDING, None)
     for name, value in bindings.items():
         environ[name] = value
     for name in CREDENTIAL_ENV_NAMES:
@@ -390,6 +396,7 @@ def lab_scorer(
     score.contacts_required = contact_policy.scorer_enabled(validated)
     score.company_quality = quality_policy.scorer_enabled(validated)
     score.evidence_investigator = True
+    score.company_input_contract = scorer.company_input_contract
     setattr(score, _SCOPED_RETRY_EVIDENCE_RUNNER, score_with_retry_evidence)
     return score
 
@@ -841,7 +848,8 @@ def _score_legacy_company_work_item(
         return raw_by_key[key]
     scored, _ = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
     full = apply_company_judgment_context(sliced, [None] * len(sliced), company_quality=False,
-                                        scored_indexes=scored, resolve_raw=resolve)
+                                        scored_indexes=scored, resolve_raw=resolve,
+                                        company_input_contract=getattr(scorer, "company_input_contract", ""))
     validate_breakdowns_for_item(full, icp=icp, companies=sliced,
         max_scored_companies=max_scored_companies, integrity_policy=True)
     return full, company_judgments.validate_new_company_judgments(
@@ -911,6 +919,7 @@ def score_quality_work_item(
     full = apply_company_judgment_context(
         sliced, [raw_by_key[ref["cache_key"]] for ref in refs],
         contacts_required=bool(getattr(scorer, "contacts_required", False)),
+        company_input_contract=getattr(scorer, "company_input_contract", ""),
     )
     scored, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
     full = [row for row in full if row["company_index"] in scored]

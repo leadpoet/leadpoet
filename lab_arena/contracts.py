@@ -1630,6 +1630,10 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     for key, value in policy["env_bindings"].items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ArenaContractError("env_bindings must map strings to strings")
+    from qualification import company_input_contract
+    if company_input_contract.BINDING in policy["env_bindings"]:
+        if policy["env_bindings"][company_input_contract.BINDING] != company_input_contract.POLICY:
+            raise ArenaContractError("unsupported Arena company input contract")
     evidence_policy = policy.get("evidence_judgment_policy", "")
     if policy["env_bindings"].get("ARENA_EVIDENCE_JUDGMENT_POLICY", evidence_policy) != evidence_policy:
         raise ArenaContractError("evidence reuse binding differs from frozen policy")

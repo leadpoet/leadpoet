@@ -530,14 +530,24 @@ def test_announced_facility_alternatives_receive_expansion_rule(target) -> None:
         assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK in prompt
 
 
-def test_announcement_as_source_type_does_not_add_expansion_rule() -> None:
+@pytest.mark.parametrize("target", [
+    "Opened a new manufacturing facility in the last 12 months, per a press "
+    "release or an economic-development announcement.",
+    "Opened a new manufacturing facility in the last 365 days, as announced "
+    "in a company press release.",
+    "Opened (not merely announced) a new manufacturing facility in the last 12 months.",
+    "Opened a new manufacturing facility in the last 12 months; announced or "
+    "planned facilities do not count.",
+    "Opened a new plant in the last 12 months as part of a geographic expansion.",
+    "Opened a new facility to expand production capacity in the last 12 months.",
+    "Opened a new plant or announced a major plant expansion in the last year; "
+    "announced projects that are not yet built do not count.",
+])
+def test_opening_only_wording_does_not_add_expansion_rule(target) -> None:
     row = _row(
         company="Example Manufacturing",
         claim="Example opened a new plant.",
-        target=(
-            "Opened a new manufacturing facility in the last 12 months, per a "
-            "press release or an economic-development announcement."
-        ),
+        target=target,
         source_url="https://example.com/news/opened-plant",
         evidence_type="FACILITY_OPENING",
     )

@@ -398,16 +398,33 @@ FACILITY_OPENING_BLOCK = """      * Apply this block only to a chosen facility-o
         expected completion date does not prove an opening. Apply this boundary
         even when the planned facility is material or construction is underway."""
 
+# An explicit announced alternative, such as "or announced a new facility" or
+# "announced a major plant expansion". Not "as announced in a press release"
+# (a source type) or an unrelated "expansion" purpose.
+_FACILITY_ANNOUNCED_ALTERNATIVE_RE = re.compile(
+    r"\bor announced\b|\bannounced\b[^.;()]*\bexpansion\b"
+)
+_FACILITY_ANNOUNCED_EXCLUSION_RE = re.compile(
+    r"\bnot merely\b|\bnot just\b|\b(?:do|does|will) not count\b"
+    r"|\bdo not qualify\b|\bexcluding\b"
+)
+
+
 FACILITY_EXPANSION_ALTERNATIVE_BLOCK = """      * When the actual target ICP text also accepts an announced new facility
         or an announced plant, facility, or capacity expansion, evaluate that
-        alternative on its own. The company's own announcement of a new plant,
-        site, or facility that adds to its production or operating capacity
-        satisfies it, even before construction finishes; an expansion need not
-        enlarge an existing building. Keep every stated qualifier: "major"
-        needs source-stated scale such as investment, floor area, jobs, or
-        capacity, and the announcement date must fall inside the target
-        window. Rumors, site searches, or another party's plans remain
-        insufficient."""
+        alternative on its own. An announced new site of the facility type the
+        target names satisfies it even before construction finishes; an
+        expansion need not enlarge an existing building. The company itself
+        must have committed to the project; proposed, under-consideration, or
+        contingent projects (pending site selection, incentives, or approvals)
+        do not qualify. The source may be the company, news coverage, or an
+        economic-development agency. For a plant or manufacturing target the
+        new site must produce goods, not serve as an office, warehouse, or
+        headquarters. Keep every stated qualifier: "major" requires a material
+        scale stated by the source, such as a large investment, floor area,
+        workforce, or capacity increase; a small figure is not major. The
+        announcement date must fall inside the target window. Rumors and site
+        searches remain insufficient."""
 
 
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
@@ -648,9 +665,9 @@ def build_verification_prompt(
         ))
     ):
         parts.append(FACILITY_OPENING_BLOCK)
-        # The verb, not "announcement": targets often name an
-        # economic-development announcement as an accepted source type.
-        if re.search(r"expan|\bannounc(?:ed|es|ing)\b", criterion):
+        if _FACILITY_ANNOUNCED_ALTERNATIVE_RE.search(
+            criterion
+        ) and not _FACILITY_ANNOUNCED_EXCLUSION_RE.search(criterion):
             parts.append(FACILITY_EXPANSION_ALTERNATIVE_BLOCK)
     if row.get("_evidence_type") == "MARKET_EXPANSION":
         parts.append(MARKET_EXPANSION_BLOCK)

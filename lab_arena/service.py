@@ -8047,6 +8047,7 @@ class ArenaService:
                 kind, terminal_status, run_identity=_telemetry_run_identity(run),
                 failure_stage=str(diagnostic.get("stage") or "-"),
                 failure_error_class=str(diagnostic.get("error_class") or "-"),
+                failure_reason=str(diagnostic.get("reason") or "-"),
             )
         return result
 

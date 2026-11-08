@@ -925,6 +925,70 @@ class _HomepageNavigationParser(HTMLParser):
             self._label_parts.append(data)
 
 
+class _InlineFooterCopyrightParser(_HomepageNavigationParser):
+    """Read one visible footer paragraph across bounded inline text nodes."""
+
+    _INLINE = frozenset({"span", "b", "strong", "em", "i", "small"})
+    _HIDDEN_ELEMENTS = _HomepageNavigationParser._HIDDEN_ELEMENTS | {"svg", "math"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.names: list[str] = []
+        self._parts: list[str] | None = None
+        self._size = 0
+
+    @staticmethod
+    def _element_is_hidden(attributes: Mapping[str, str]) -> bool:
+        return ("inert" in attributes
+                or _HomepageNavigationParser._element_is_hidden(attributes))
+
+    def _finish_paragraph(self) -> None:
+        if self._parts is not None:
+            self.names.extend(
+                match.group("name").strip()[:200]
+                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(" ".join(self._parts))
+            )
+        self._parts = None
+        self._size = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.casefold()
+        super().handle_starttag(tag, attrs)
+        if self._parts is not None and (tag not in self._INLINE or self._hidden_depth):
+            self._finish_paragraph()
+        if (tag == "p" and not self._hidden_depth
+                and any(parent == "footer" for parent, _hidden in self._stack)):
+            self._parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() not in self._INLINE:
+            self._finish_paragraph()
+        super().handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if self._parts is not None and not self._hidden_depth:
+            self._size += len(data)
+            if self._size > 500:
+                self._parts = None
+            else:
+                self._parts.append(data)
+
+
+def _inline_footer_copyright_names(
+    page_text: str, existing_names: list[str],
+) -> list[str]:
+    parser = _InlineFooterCopyrightParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return []
+    # Multiple legal owners do not establish one exact company identity.
+    names = list(dict.fromkeys(parser.names))
+    return names if len({re.sub(r"[^a-z0-9]+", "", name.casefold())
+                         for name in [*names, *existing_names]}) == 1 else []
+
+
 def _commercial_terms_navigation_locator(url: str, label: str) -> bool:
     """Recognize a legal-source locator, never infer its commercial contents."""
 
@@ -1138,7 +1202,10 @@ def _homepage_company_names(
         parser.feed(str(page_text or "")[:_MAX_BYTES])
     except Exception:
         return []
-    candidates = [*parser.metadata_names, *parser.copyright_legal_names]
+    candidates = [
+        *parser.metadata_names, *parser.copyright_legal_names,
+        *_inline_footer_copyright_names(page_text, parser.copyright_legal_names),
+    ]
     # Preserve brand discovery while requiring a unique explicit legal relation.
     organization_names: dict[str, str] = {}
     if observed_domain and observed_linkedin:

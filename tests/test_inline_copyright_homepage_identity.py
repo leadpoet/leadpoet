@@ -102,3 +102,13 @@ def test_wrong_homepage_profile_does_not_gain_exact_company_binding(monkeypatch)
 
 def test_wrong_final_domain_does_not_gain_exact_company_binding(monkeypatch):
     assert homepage(monkeypatch, final='https://other.example/').decision != 'match'
+
+
+@pytest.mark.parametrize('body', [
+    '<style>.invisible {display:none}</style>'+html(COPYRIGHT.replace('<p>', '<p class="invisible">')),
+    '<style>#legal {visibility:hidden}</style>'+html('<div id="legal">'+COPYRIGHT+'</div>'),
+    '<style>.invisible {display:none}</style><div class="invisible">'+html()+'</div>',
+    html('<p><span>©</span><span>2026 Renaissance Learning, Inc.</span><span hidden>hidden</span><span> Other Holdings, Inc. All rights reserved.</span></p>'),
+])
+def test_stylesheet_hidden_and_interrupted_copyright_cannot_supply_a_name(body):
+    assert 'Renaissance Learning, Inc.' not in verification._homepage_company_names(body)

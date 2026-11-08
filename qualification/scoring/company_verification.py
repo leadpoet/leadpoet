@@ -57,6 +57,12 @@ from qualification.scoring.company_fit_decision import (
 )
 
 
+from qualification.scoring.verification_helpers import (
+    _VisibleHTMLTextParser,
+    _css_hidden_selectors,
+)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -925,28 +931,32 @@ class _HomepageNavigationParser(HTMLParser):
             self._label_parts.append(data)
 
 
-class _InlineFooterCopyrightParser(_HomepageNavigationParser):
+class _InlineFooterCopyrightParser(_VisibleHTMLTextParser):
     """Read one visible footer paragraph across bounded inline text nodes."""
 
     _INLINE = frozenset({"span", "b", "strong", "em", "i", "small"})
-    _HIDDEN_ELEMENTS = _HomepageNavigationParser._HIDDEN_ELEMENTS | {"svg", "math"}
+    # Footer text is the intended identity source; shared visibility rules
+    # still exclude its hidden ancestors, descendants and stylesheet selectors.
+    _HIDDEN_ELEMENTS = (_VisibleHTMLTextParser._HIDDEN_ELEMENTS - {"footer"}) | {"svg", "math"}
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, page_text: str) -> None:
+        hidden_classes, hidden_ids = _css_hidden_selectors(page_text)
+        super().__init__(hidden_classes=hidden_classes, hidden_ids=hidden_ids)
         self.names: list[str] = []
         self._parts: list[str] | None = None
         self._size = 0
 
-    @staticmethod
-    def _element_is_hidden(attributes: Mapping[str, str]) -> bool:
-        return ("inert" in attributes
-                or _HomepageNavigationParser._element_is_hidden(attributes))
+    def _is_hidden(self, tag: str, attrs) -> bool:
+        return "inert" in self._attribute_map(attrs) or super()._is_hidden(tag, attrs)
 
     def _finish_paragraph(self) -> None:
         if self._parts is not None:
+            text = " ".join(self._parts)
             self.names.extend(
                 match.group("name").strip()[:200]
-                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(" ".join(self._parts))
+                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(text)
+                # Do not treat an interrupted name as a complete copyright.
+                if re.match(r"[.\s]*all rights reserved\b", text[match.end():], re.I)
             )
         self._parts = None
         self._size = 0
@@ -957,7 +967,7 @@ class _InlineFooterCopyrightParser(_HomepageNavigationParser):
         if self._parts is not None and (tag not in self._INLINE or self._hidden_depth):
             self._finish_paragraph()
         if (tag == "p" and not self._hidden_depth
-                and any(parent == "footer" for parent, _hidden in self._stack)):
+                and any(parent == "footer" for parent, _hidden, _start in self._stack)):
             self._parts = []
 
     def handle_endtag(self, tag: str) -> None:
@@ -977,7 +987,8 @@ class _InlineFooterCopyrightParser(_HomepageNavigationParser):
 def _inline_footer_copyright_names(
     page_text: str, existing_names: list[str],
 ) -> list[str]:
-    parser = _InlineFooterCopyrightParser()
+    page_text = str(page_text or "")[:_MAX_BYTES]
+    parser = _InlineFooterCopyrightParser(page_text)
     try:
         parser.feed(str(page_text or "")[:_MAX_BYTES])
         parser.close()

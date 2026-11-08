@@ -66,7 +66,9 @@ def test_reviewed_default_models_freeze_exact_routes_options_without_exception()
 def test_explicit_empty_routes_preserve_capture_off_without_automatic_options_or_exception():
     policy = scoring.build_scorer_policy(judge_provider_routes={})
     assert policy["judge_models"] == MODELS
-    assert policy["env_bindings"] == {}
+    assert policy["env_bindings"] == {
+        "ARENA_COMPANY_INPUT_CONTRACT": "linkedin_company_ampersand_v1",
+    }
     environment = {}
     scoring.apply_policy_to_environment(policy, environ=environment,
         credentials={name: "test-not-secret" for name in scoring.CREDENTIAL_ENV_NAMES})
@@ -79,6 +81,8 @@ def test_explicit_empty_routes_preserve_capture_off_without_automatic_options_or
 
 def test_custom_historical_models_keep_original_policy_bytes_and_explicit_route_semantics():
     legacy = scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
+    # Reconstruct the saved policy from before prospective input contracts.
+    assert legacy["env_bindings"].pop("ARENA_COMPANY_INPUT_CONTRACT") == "linkedin_company_ampersand_v1"
     # Captured from the original builder on a8fcd5b1e before this default change.
     assert contracts.document_hash(legacy) == "sha256:4805efdc8bfca0ae0c33634c1731a54d3be08f85a482776ebf3a8d129f61e260"
     routes = {model: "historical/provider" for model in set(LEGACY_MODELS.values())}
@@ -98,6 +102,7 @@ def test_saved_sol_research_policy_is_not_upgraded():
             "reason": "quality_gate_not_met",
         }},
     )
+    assert previous["env_bindings"].pop("ARENA_COMPANY_INPUT_CONTRACT") == "linkedin_company_ampersand_v1"
     assert contracts.document_hash(previous) == "sha256:0148cfb34001c5162e20f81a0ecfc72170a1eee2560dc3592ecd16f109692595"
     environment = {}
     scoring.apply_policy_to_environment(previous, environ=environment,
@@ -110,6 +115,7 @@ def test_saved_sol_final_review_policy_keeps_original_bytes_and_explicit_excepti
     previous = scoring.build_scorer_policy(judge_models=PREVIOUS_MODELS,
         judge_provider_routes=ROUTES, judge_request_options=PREVIOUS_OPTIONS,
         judge_reasoning_exceptions=EXCEPTIONS)
+    assert previous["env_bindings"].pop("ARENA_COMPANY_INPUT_CONTRACT") == "linkedin_company_ampersand_v1"
     assert contracts.document_hash(previous) == "sha256:a9682fa60b314b07c9cd9ee3f1ab5383c130750593e8ea038fc3ad87c4504977"
     assert previous["judge_models"]["industry_evidence_review"] == SOL
     assert json.loads(previous["env_bindings"][contracts.JUDGE_REQUEST_OPTIONS_BINDING]) == PREVIOUS_OPTIONS

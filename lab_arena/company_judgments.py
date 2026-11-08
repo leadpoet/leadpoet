@@ -200,6 +200,7 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
         raise CompanyJudgmentError("scoring companies or ICP are invalid")
 
     from lab_arena import provider_observations
+    from qualification import company_input_contract
     from qualification.scoring.competition import effective_competition_input
 
     try:
@@ -213,6 +214,7 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
             contact_source_evidence=document.get("contact_source_evidence"),
             provider_observations=observations,
             company_quality=quality_policy.scorer_enabled(policy),
+            company_input_contract=company_input_contract.from_scorer_policy(policy),
         )
     except (TypeError, ValueError) as exc:
         raise CompanyJudgmentError(

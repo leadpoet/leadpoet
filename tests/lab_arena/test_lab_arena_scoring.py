@@ -620,7 +620,8 @@ def test_company_adapter_does_not_swallow_other_failures(monkeypatch):
             asyncio.run(adapter.score_with_breakdowns([valid], make_icp(16), False))
 
     class BrokenCompanyOutput:
-        def __init__(self, **kwargs):
+        @classmethod
+        def model_validate(cls, *args, **kwargs):
             raise RuntimeError("constructor failure outside validation")
 
     with monkeypatch.context() as scoped:
@@ -683,7 +684,9 @@ def test_scorer_linkedin_slug_still_rejects_unsafe_shapes(linkedin):
 def test_legacy_policy_is_plain_and_binds_environment_fail_closed():
     policy = scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
     assert policy == scoring.build_scorer_policy(judge_models=LEGACY_MODELS)
-    assert policy["env_bindings"] == {} and policy["max_scored_companies"] == 0
+    assert policy["env_bindings"] == {
+        "ARENA_COMPANY_INPUT_CONTRACT": "linkedin_company_ampersand_v1",
+    } and policy["max_scored_companies"] == 0
     assert policy["fp_penalty_points"] == policy["fp_unverified_primary_penalty_points"] == 10.0
     environ = {}
     credentials = {name: "secret-" + name for name in scoring.CREDENTIAL_ENV_NAMES}
@@ -693,6 +696,7 @@ def test_legacy_policy_is_plain_and_binds_environment_fail_closed():
     assert applied == policy["scoring_adapter_version"]
     assert environ == {
         **credentials,
+        "ARENA_COMPANY_INPUT_CONTRACT": "linkedin_company_ampersand_v1",
         "ARENA_EVIDENCE_JUDGMENT_POLICY": "",
         "ARENA_INTENT_EVIDENCE_MODEL": "openai/gpt-6-luna",
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": "anthropic/claude-sonnet-5.5",

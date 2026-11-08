@@ -102,7 +102,7 @@ REVIEW_CONTEXT_REASONS = frozenset({
     "endpoints_total", "endpoint_shape", "selected_count", "selected_model", "selected_provider",
     "usage_missing", "prompt_tokens", "context_budget",
 })
-REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure", "Nebius"})
+REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure", "Nebius", "Moonshot AI"})
 _GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
 
 
@@ -362,7 +362,7 @@ def refusal_recovery(document: Any) -> bool:
     return isinstance(document, Mapping) and (
         document.get("refusal_recovery") is True
         or document.get("error_code") == "code_review_provider_refused"
-        or document.get("model") == code_review.FALLBACK_REVIEW_MODEL
+        or document.get("model") in code_review.ALTERNATE_REVIEW_MODELS
     )
 
 
@@ -377,10 +377,18 @@ def recovery_retryable(document: Mapping[str, Any]) -> bool:
     return allowed and int(document.get("review_alternate_attempts") or 0) < 2
 
 
+def review_alternate_for(document: Any) -> str:
+    """Only the exact persisted policy marker selects the prospective alternate."""
+    if isinstance(document, Mapping) and document.get("review_alternate_model") == code_review.PROSPECTIVE_ALTERNATE_MODEL:
+        return code_review.PROSPECTIVE_ALTERNATE_MODEL
+    return code_review.FALLBACK_REVIEW_MODEL
+
+
 def review_model_for(row: Mapping[str, Any], *,
                      prospective_primary_model: str = code_review.DEFAULT_REVIEW_MODEL) -> str:
     """Follow committed chain counts; SQL rechecks every paid claim."""
     document = row.get("code_review_doc")
+    alternate_model = review_alternate_for(document)
     primary_models = {code_review.DEFAULT_REVIEW_MODEL, code_review.PROSPECTIVE_REVIEW_MODEL}
     primary = code_review.DEFAULT_REVIEW_MODEL
     if not document and row.get("code_review_attempts") == 0:
@@ -393,22 +401,22 @@ def review_model_for(row: Mapping[str, Any], *,
                 and document.get("error_code") == "review_response_invalid"
                 and document.get("error_reason") == "truncated"):
             # No oversized DeepSeek retry and no extra claim allowance. SQL
-            # proves this exact prior terminal result before authorizing Sol.
-            return code_review.FALLBACK_REVIEW_MODEL
+            # proves this exact prior terminal result before authorizing its bound alternate.
+            return alternate_model
     if nov06_late_review_available(row):
         return code_review.FALLBACK_REVIEW_MODEL
     if refusal_recovery(document):
         primary_count = int(document.get("review_primary_attempts") or row.get("code_review_attempts") or 0)
         alternate = int(document.get("review_alternate_attempts") or 0)
-        if primary_count >= 2 or alternate > 0 or document.get("model") == code_review.FALLBACK_REVIEW_MODEL:
-            return code_review.FALLBACK_REVIEW_MODEL
+        if primary_count >= 2 or alternate > 0 or document.get("model") in code_review.ALTERNATE_REVIEW_MODELS:
+            return alternate_model
         # A real refusal episode retains its own existing route allowance.
         return primary
     invalid_count = invalid_review_reservations(document)
     if invalid_count is not None and 2 <= invalid_count < INVALID_REVIEW_MAX_RESERVATIONS:
         # SQL proves these reservations under the submission lock. Change only
         # the last existing slot's route, never the finite episode allowance.
-        return code_review.FALLBACK_REVIEW_MODEL
+        return alternate_model
     return primary
 
 

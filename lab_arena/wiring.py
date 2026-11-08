@@ -669,7 +669,7 @@ def build_service_from_environment(mode: str):
     # The current paid reviewer must not start against a database that lacks
     # atomic route selection and both bounded recovery reservation policies.
     store.code_review_schema(require_refusal_fallback=True, require_invalid_review_budget=True,
-                             require_prospective_primary=True)
+                             require_prospective_primary=True, require_prospective_alternate=True)
     store.submission_replacement_schema(require_per_round_cutoff=True)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
@@ -686,6 +686,7 @@ def build_service_from_environment(mode: str):
             similarity_references_for=lambda row: service.submission_similarity_references(row),
             capture=internal_capture,
             prospective_primary_model=code_review.PROSPECTIVE_REVIEW_MODEL,
+            prospective_alternate_model=code_review.PROSPECTIVE_ALTERNATE_MODEL,
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,

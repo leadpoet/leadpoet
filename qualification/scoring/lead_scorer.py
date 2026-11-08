@@ -9317,7 +9317,12 @@ async def _request_company_reverify_json(
 ) -> tuple[Optional[dict[str, Any]], str]:
     """Execute one bounded independent web-verifier request."""
 
-    from qualification.scoring.openrouter_options import prepare_judge_request, project_judge_response
+    from qualification.scoring.openrouter_options import (
+        JUDGE_REASONING_TIMEOUT_SECONDS,
+        judge_reasoning_enabled,
+        prepare_judge_request,
+        project_judge_response,
+    )
     request_body = {
         "model": _SCORER_REVERIFY_MODEL,
         "messages": [
@@ -9328,7 +9333,11 @@ async def _request_company_reverify_json(
     }
     path, request_body = prepare_judge_request(request_body, hosted_search=True)
     try:
-        timeout = aiohttp.ClientTimeout(total=_SCORER_REVERIFY_TIMEOUT_S)
+        timeout = aiohttp.ClientTimeout(total=(
+            JUDGE_REASONING_TIMEOUT_SECONDS
+            if judge_reasoning_enabled(_SCORER_REVERIFY_MODEL)
+            else _SCORER_REVERIFY_TIMEOUT_S
+        ))
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                 "https://openrouter.ai/api/v1" + path,

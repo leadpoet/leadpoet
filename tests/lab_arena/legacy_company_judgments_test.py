@@ -347,7 +347,7 @@ def test_store_uses_atomic_commit_v4_only_when_cache_activation_is_requested():
 
 def test_internal_model_incompatible_row_retains_old_zero_without_cache(judge):
     document = _input(("A",))
-    document["companies"][0]["company_linkedin"] = "https://www.linkedin.com/company/cushman-&-wakefield"
+    document["companies"][0]["company_linkedin"] = "https://www.linkedin.com/company/acme%2Fposts"
     output = _score(document)
     assert "failure" not in output and output["company_judgments"] == []
     assert output["breakdowns"][0]["failure_reason"] == "company model contract incompatible"

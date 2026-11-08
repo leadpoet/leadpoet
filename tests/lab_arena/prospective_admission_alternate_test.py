@@ -153,3 +153,19 @@ def test_postgrest_transport_selects_explicit_opt_in_without_changing_legacy_rpc
     assert 'p_review_alternate_model' not in requests[0][1]
     assert requests[1][0].endswith('/rpc/lab_arena_begin_submission_review_v2')
     assert requests[1][1] == {**requests[0][1], 'p_review_alternate_model': KIMI}
+
+
+def test_primary_selection_alone_keeps_standalone_legacy_rpc_and_document():
+    instance, row, store, _ = reviewer(lambda parameters: {'body':receipt(parameters)})
+    assert instance.review(row)['status'] == 'passed'
+    assert len(store.begin_calls[0]) == 7
+    assert 'review_alternate_model' not in store.finish_calls[0][4]
+
+
+def test_explicit_alternate_optin_uses_v2_and_retains_authoritative_marker():
+    instance, row, store, _ = reviewer(lambda parameters: {'body':receipt(parameters)},
+        store=BoundStore(), prospective_alternate_model=KIMI)
+    assert instance.review(row)['status'] == 'passed'
+    assert len(store.begin_calls[0]) == 8
+    assert store.begin_calls[0][-1] == KIMI
+    assert store.finish_calls[0][4]['review_alternate_model'] == KIMI

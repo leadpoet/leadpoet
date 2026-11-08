@@ -26,9 +26,12 @@ class SubmissionCodeReviewer:
         similarity_references_for: Callable[[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None,
         capture: Any = None,
         prospective_primary_model: str = code_review.DEFAULT_REVIEW_MODEL,
+        prospective_alternate_model: str = code_review.FALLBACK_REVIEW_MODEL,
     ) -> None:
         if prospective_primary_model not in {code_review.DEFAULT_REVIEW_MODEL, code_review.PROSPECTIVE_REVIEW_MODEL}:
             raise ValueError("unsupported admission primary model")
+        if prospective_alternate_model not in code_review.ALTERNATE_REVIEW_MODELS:
+            raise ValueError("unsupported admission alternate model")
         self._store = store
         self._objects = objects
         self._credential_for = credential_for
@@ -37,6 +40,7 @@ class SubmissionCodeReviewer:
         self._similarity_references_for = similarity_references_for
         self._capture = capture
         self._prospective_primary_model = prospective_primary_model
+        self._prospective_alternate_model = prospective_alternate_model
 
     @staticmethod
     def _capture_outcome(call, document, result, actual):
@@ -300,8 +304,8 @@ class SubmissionCodeReviewer:
             review_model,
             len(prepared.reviewed_files) if prepared else 0,
             prepared.reviewed_file_bytes if prepared else 0,
-            *((code_review.PROSPECTIVE_ALTERNATE_MODEL,)
-              if self._prospective_primary_model == code_review.PROSPECTIVE_REVIEW_MODEL else ()),
+            *((self._prospective_alternate_model,)
+              if self._prospective_alternate_model == code_review.PROSPECTIVE_ALTERNATE_MODEL else ()),
         )
         if claim.get("status") != "claimed":
             return claim
@@ -567,10 +571,11 @@ class SubmissionCodeReviewer:
                 and code_review_policy.recovery_retryable(document))
         document.update({
             "model": review_model,
-            "review_alternate_model": bound_alternate,
             "file_count": len(prepared.reviewed_files),
             "source_bytes": prepared.reviewed_file_bytes,
         })
+        if "review_alternate_model" in claim:
+            document["review_alternate_model"] = bound_alternate
         if diagnostic_response is not None:
             # Decide the review and cost first. Optional diagnostics cannot
             # replace either outcome if their own projection fails.

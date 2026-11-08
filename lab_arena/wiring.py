@@ -686,6 +686,7 @@ def build_service_from_environment(mode: str):
             similarity_references_for=lambda row: service.submission_similarity_references(row),
             capture=internal_capture,
             prospective_primary_model=code_review.PROSPECTIVE_REVIEW_MODEL,
+            prospective_alternate_model=code_review.PROSPECTIVE_ALTERNATE_MODEL,
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,

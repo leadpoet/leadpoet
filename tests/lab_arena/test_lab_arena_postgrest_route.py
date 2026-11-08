@@ -183,6 +183,20 @@ def stack(tmp_path_factory):
                 ):
                     source = (Path(__file__).resolve().parents[2] / "scripts" / migration).read_text()
                     cursor.execute(source[source.index(start):source.index(end)])
+                # The HTTP fixture intentionally preserves historical ordinary
+                # write RPCs. Install the exact committed new entrypoint for
+                # service-role/signature/domain-refusal probes before cache
+                # discovery; positive first-reservation/finish authority uses
+                # the complete669 database in prospective_admission669 tests.
+                alternate = (Path(__file__).resolve().parents[2] /
+                    "scripts/669-lab-arena-prospective-admission-alternate.sql").read_text()
+                definition = alternate.split("EXECUTE $v2_669$", 1)[1].split("$v2_669$;", 1)[0]
+                cursor.execute(definition)
+                cursor.execute("""
+                    ALTER FUNCTION public.lab_arena_begin_submission_review_v2(text,text,text,bigint,text,integer,bigint,text) OWNER TO lab_arena_owner;
+                    REVOKE ALL ON FUNCTION public.lab_arena_begin_submission_review_v2(text,text,text,bigint,text,integer,bigint,text) FROM PUBLIC,anon,authenticated,service_role;
+                    GRANT EXECUTE ON FUNCTION public.lab_arena_begin_submission_review_v2(text,text,text,bigint,text,integer,bigint,text) TO lab_arena_service;
+                """)
                 if not had_create:
                     cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
                 cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")

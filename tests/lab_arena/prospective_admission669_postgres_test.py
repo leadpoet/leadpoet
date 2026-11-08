@@ -256,3 +256,19 @@ def test_requested_model_must_be_an_exact_admission_id(recovery_store, model):
         with pytest.raises(ArenaStoreError):
             caller(recovery_store, sid, miner, model)
     assert recovery_store.list_ledger(submission_id=sid) == []
+
+
+def test_runtime_explicit_optin_freezes_first_primary_reservation(recovery_store):
+    from tests.lab_arena.prospective_admission_primary_test import receipt, reviewer
+    from tests.lab_arena.test_lab_arena_code_review_runtime import _archive, _source
+    _, sid, _ = new(recovery_store, 'explicit-runtime-optin')
+    instance, _, _, transport = reviewer(lambda parameters: {'body': receipt(parameters)},
+        store=recovery_store, prospective_alternate_model=KIMI)
+    row = {**recovery_store.get_submission(sid), 'source_size_bytes': len(_archive(_source()))}
+    assert instance.review(row)['status'] == 'passed'
+    assert len(transport.sent) == 1
+    saved = recovery_store.get_submission(sid)['code_review_doc']
+    assert saved['model'] == DS and saved['review_alternate_model'] == KIMI
+    reservations = [entry for entry in recovery_store.list_ledger(submission_id=sid)
+                    if entry['entry_kind'] == 'reservation']
+    assert len(reservations) == 1 and reservations[0]['entry_doc']['review_alternate_model'] == KIMI

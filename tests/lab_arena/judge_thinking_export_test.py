@@ -91,6 +91,24 @@ def test_unproved_judge_targets_are_excluded(damage):
     assert got == []
 
 
+@pytest.mark.parametrize('has_full_thinking', [False, True])
+def test_judge_summary_text_does_not_replace_or_hide_full_thinking(has_full_thinking):
+    from tests.lab_arena.judge_chat_annotations_test import bind_response
+    example = judge_example()
+    message = example['provider_calls'][-1]['response']['choices'][0]['message']
+    if not has_full_thinking:
+        message.pop('reasoning_content')
+    message['reasoning_details'] = [{'type': 'summary_text', 'text': 'An ancillary judge summary.'}]
+    bind_response(example)
+    before = deepcopy(example)
+    got, _ = records(example, role='judge')
+    assert len(got) == int(has_full_thinking)
+    if got:
+        assert [part['text'] for part in got[0]['generated_thinking']] == [
+            'Inspect the retained page, then answer.']
+    assert example == before
+
+
 def test_judge_capture_uses_current_scorer_even_when_baseline_capture_is_legacy():
     example = judge_example()
     example['role'] = 'baseline'

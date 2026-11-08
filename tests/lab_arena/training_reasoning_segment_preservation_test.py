@@ -60,6 +60,41 @@ def test_equal_summary_cannot_hide_reviewed_full_text(operation):
         [('summary', text), ('full_generated_thinking', text)])
 
 
+@pytest.mark.parametrize('summary_matches_full', [False, True])
+def test_chat_summary_text_keeps_reviewed_full_thinking_and_exact_summary_path(summary_matches_full):
+    value = _example('openrouter.chat')
+    response = value['provider_calls'][0]['response']
+    message = response['choices'][0]['message']
+    full_text = message['reasoning_content']
+    summary_text = full_text if summary_matches_full else 'An ancillary summary.'
+    message['reasoning_details'] = [{'type': 'summary_text', 'text': summary_text}]
+    saved_response = deepcopy(response)
+    records, verdict, trace = _project(value)
+    assert verdict['eligible'] is True, verdict
+    assert verdict['counts']['full_thinking_calls'] == len(records) == 1
+    assert [segment['text'] for segment in records[0]['generated_thinking']] == [full_text]
+    assert response == saved_response
+    events = [event for event in trace['calls'][0]['events']
+              if event.get('delivery') == 'selected_terminal' and event.get('reasoning_field')]
+    assert [(event['kind'], event['value']) for event in events] == [
+        ('full_generated_thinking', full_text), ('summary', summary_text)]
+    assert events[1]['source_path'] == [
+        'provider_calls', 0, 'response', 'choices', 0, 'message', 'reasoning_details', 0, 'text']
+
+
+def test_chat_summary_text_alone_cannot_supply_full_thinking():
+    value = _example('openrouter.chat')
+    message = value['provider_calls'][0]['response']['choices'][0]['message']
+    message.pop('reasoning_content')
+    message['reasoning_details'] = [{'type': 'summary_text', 'text': 'A summary alone.'}]
+    records, verdict, trace = _project(value)
+    assert records == [] and verdict['eligible'] is False
+    assert verdict['counts']['full_thinking_calls'] == 0
+    events = [event for event in trace['calls'][0]['events']
+              if event.get('delivery') == 'selected_terminal' and event.get('reasoning_field')]
+    assert [(event['kind'], event['value']) for event in events] == [('summary', 'A summary alone.')]
+
+
 @pytest.mark.parametrize('operation', ['openrouter.chat', 'openrouter.responses'])
 @pytest.mark.parametrize('separate_items', [False, True])
 def test_repeated_segments_keep_occurrences_order_and_raw_paths(operation, separate_items):

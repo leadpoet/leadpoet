@@ -220,7 +220,9 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                     continue
                 for field in ("text", "thinking", "content"):
                     value = item.get(field)
-                    field_id = "reasoning_details.text" if kind == "reasoning.text" and field == "text" else "reasoning_details.unproved"
+                    field_id = ("reasoning_details.summary" if kind == "summary_text" and field == "text" else
+                                "reasoning_details.text" if kind == "reasoning.text" and field == "text" else
+                                "reasoning_details.unproved")
                     if isinstance(value, str) and value.strip():
                         segments.append({"source_path": ["choices", ci, "message", "reasoning_details", ri, field],
                                          "field": field_id, "text": value})

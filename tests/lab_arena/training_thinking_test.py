@@ -768,7 +768,7 @@ def test_readable_chat_preserves_unindexed_metadata_without_repeating_reasoning(
     assert reasoning[0]['alias_source_paths'] == [
         base + ['message', 'reasoning_content'], base + ['message', 'reasoning_details', 0, 'text']]
     preserved = [event['kind'] for event in events if event['kind'] != 'response_metadata']
-    assert preserved == ['unverified_reasoning_text', 'unverified_reasoning_text',
+    assert preserved == ['unverified_reasoning_text', 'summary',
                          'usage', 'assistant_output', 'tool_call']
     for event in events:
         source = example

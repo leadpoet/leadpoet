@@ -2471,9 +2471,19 @@ def _terminal_response_document(
     return document
 
 
+def _upstream_person_scrub(body: Any, operation_id: str, parameters: Optional[Mapping[str, Any]]) -> Any:
+    operation = operations.OPERATIONS.get(operation_id)
+    if operation is not None and operation.response_scrub == "deepline_person_entities":
+        tool = operation.deepline_tool or str((parameters or {}).get("tool") or "")
+        if tool not in operations.DEEPLINE_PERSON_ENTITY_TOOLS:
+            return operations.scrub_person_entities(body)
+    return body
+
+
 def _capture_upstream_response(
     response: ProviderResponse, *, operation_id: str,
     request_hash: str, call_identity: str, call_succeeded: bool = False,
+    parameters: Optional[Mapping[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Keep private provider bytes without storage I/O or replay authority."""
     if response.internal_provenance is not None:
@@ -2494,7 +2504,11 @@ def _capture_upstream_response(
                 body, is_json = training_capture.response_json_value(text), True
             except json.JSONDecodeError:
                 body, is_json = text, False
+        scrubbed = _upstream_person_scrub(body, operation_id, parameters)
+        person_redactions = ["deepline_person_entities"] if scrubbed != body else []
+        body = scrubbed
         cleaned, body_redactions = training_capture.sanitize_training_value(body)
+        body_redactions = sorted(set(body_redactions) | set(person_redactions))
         raw = response.body
         if body_redactions:
             raw = (contracts.canonical_json(cleaned).encode("utf-8")
@@ -2520,6 +2534,20 @@ def _capture_upstream_response(
         # Unsupported encoding or privacy failure stays explicit. Never
         # retain opaque binary evidence that bypasses credential redaction.
         return {"status": "unavailable", "reason": "response_capture_failed"}
+
+
+def _upstream_body_matches_response(upstream: bytes, body: bytes, *,
+                                    operation_id: str, parameters: Mapping[str, Any]) -> bool:
+    """Avoid another retained body when only formatting or private fields differ."""
+    try:
+        if upstream == body:
+            return True
+        left = training_capture.response_json_value(upstream.decode("utf-8"))
+        left = _upstream_person_scrub(left, operation_id, parameters)
+        right = training_capture.response_json_value(body.decode("utf-8"))
+        return contracts.canonical_json(left) == contracts.canonical_json(right)
+    except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+        return False
 
 
 def _retain_upstream_response_receipt(
@@ -6891,15 +6919,19 @@ class Broker:
         upstream_response = response  # Freeze the wire status before provider adaptation.
         upstream_capture = None
 
-        def retain_upstream_response(document):
+        def retain_upstream_response(document, *, delivered_body=None):
             nonlocal upstream_capture
             if deepline_lost_response or scrapingdog_observed_success_status is not None:
                 return  # No original body survived the transport failure.
+            if delivered_body is not None and _upstream_body_matches_response(
+                    upstream_response.body, delivered_body, operation_id=operation_id, parameters=normalized):
+                return
             if upstream_capture is None:
                 upstream_capture = _capture_upstream_response(
                     upstream_response, operation_id=operation_id,
                     request_hash=request_hash, call_identity=call_identity,
                     call_succeeded=call_succeeded,
+                    parameters=normalized,
                 )
             if upstream_capture is not None:
                 _retain_upstream_response_receipt(document, upstream_capture)
@@ -7363,13 +7395,13 @@ class Broker:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
             if (
                 (not call_succeeded and not 200 <= sanitized_status < 300)
-                or (call_succeeded and route is not None
-                    and adapted_body != upstream_response.body)
+                or (call_succeeded and sanitized_body != upstream_response.body)
             ):
-                # Compatibility adapters can discard source dates, authors and
-                # provider metadata. Keep that evidence privately; replay still
+                # Adapters and the final sanitizer can remove source evidence.
+                # Keep its private projection within the same caps; replay still
                 # uses only the unchanged sanitized terminal response.
-                retain_upstream_response(terminal)
+                retain_upstream_response(terminal,
+                    delivered_body=sanitized_body if call_succeeded else None)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
             settlement = dict(

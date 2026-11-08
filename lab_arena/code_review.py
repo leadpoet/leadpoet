@@ -24,6 +24,12 @@ FALLBACK_REVIEW_MODEL = "openai/gpt-6.1-sol"
 # The standalone default and saved Sonnet requests remain historical. Production
 # wiring opts new, unclaimed episodes into this separately bound primary.
 PROSPECTIVE_REVIEW_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+# Admission-specific route and 65536-token capability, independently screened
+# on 2026-11-08. This does not expand the generic reasoning registry.
+PROSPECTIVE_ALTERNATE_MODEL = "moonshotai/kimi-k3.1-pro"
+PROSPECTIVE_ALTERNATE_CONTEXT_WINDOW_TOKENS = 1_048_576
+PROSPECTIVE_ALTERNATE_PRICE_CEILING = {"prompt": "0.000002", "completion": "0.00001"}
+ALTERNATE_REVIEW_MODELS = frozenset({FALLBACK_REVIEW_MODEL, PROSPECTIVE_ALTERNATE_MODEL})
 PROSPECTIVE_CONTEXT_WINDOW_TOKENS = 1_048_576
 PROSPECTIVE_MAX_OUTPUT_TOKENS = 32_768
 # Exact Nebius FP8 endpoint prices, verified 2026-11-06. Reserve at least these
@@ -40,6 +46,7 @@ _REVIEW_MODEL_CANONICAL_SLUGS = {
     DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5.5-20260928",
     FALLBACK_REVIEW_MODEL: "openai/gpt-6.1-sol-20260929",
     PROSPECTIVE_REVIEW_MODEL: "deepseek/deepseek-v4.1-flash-20261017",
+    PROSPECTIVE_ALTERNATE_MODEL: "moonshotai/kimi-k3.1-pro-20261023",
     # Preserve validation for prepared reviews that selected the old model.
     "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
@@ -467,6 +474,13 @@ def prepare_request(
     if model == PROSPECTIVE_REVIEW_MODEL and context_window_tokens > PROSPECTIVE_CONTEXT_WINDOW_TOKENS:
         raise CodeReviewError("review_context_limit_invalid")
 
+    if model == PROSPECTIVE_ALTERNATE_MODEL and (
+        max_output_tokens > RETRY_MAX_OUTPUT_TOKENS
+        or context_window_tokens > PROSPECTIVE_ALTERNATE_CONTEXT_WINDOW_TOKENS
+    ):
+        raise CodeReviewError("review_output_limit_invalid" if max_output_tokens > RETRY_MAX_OUTPUT_TOKENS
+                              else "review_context_limit_invalid")
+
     files = _read_all_text_files(source_archive)
     if not isinstance(similarity_contexts, tuple) or len(similarity_contexts) > 257 or any(
         not isinstance(context, Mapping)
@@ -519,7 +533,8 @@ def prepare_request(
             # Admission chooses one approved full-source route per durable
             # claim. Provider-internal fallback must not hide extra attempts.
             "only": ["azure" if model == FALLBACK_REVIEW_MODEL else
-                     "nebius/fp8" if model == PROSPECTIVE_REVIEW_MODEL else "google-vertex"],
+                     "nebius/fp8" if model == PROSPECTIVE_REVIEW_MODEL else
+                     "moonshotai/mxfp4" if model == PROSPECTIVE_ALTERNATE_MODEL else "google-vertex"],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
@@ -531,13 +546,19 @@ def prepare_request(
                 paths=paths, comparison_ids=tuple(context["comparison_id"] for context in similarity_contexts),
                 research_bindings=submission.get("research_control"),
             ),
-        }} if model in {DEFAULT_REVIEW_MODEL, FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL}
+        }} if model in {DEFAULT_REVIEW_MODEL, FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL, PROSPECTIVE_ALTERNATE_MODEL}
             else {"type": "json_object"}),
     }
     if model == PROSPECTIVE_REVIEW_MODEL:
         parameters["reasoning"] = {"effort": "low", "exclude": False}
         parameters["provider"].update({
             "max_price": {"prompt": 0.3, "completion": 1.2, "request": 0.0},
+            "enforce_distillable_text": True,
+        })
+    if model == PROSPECTIVE_ALTERNATE_MODEL:
+        parameters["reasoning"] = {"effort": "high", "exclude": False}
+        parameters["provider"].update({
+            "max_price": {"prompt": 2.0, "completion": 10.0, "request": 0.0},
             "enforce_distillable_text": True,
         })
     # UTF-8 bytes are a conservative token ceiling even for non-ASCII source,
@@ -552,7 +573,7 @@ def prepare_request(
     if max_output_tokens >= context_window_tokens:
         raise CodeReviewError("review_source_exceeds_context")
     requires_context_integrity = (
-        model in {FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL}
+        model in {FALLBACK_REVIEW_MODEL, PROSPECTIVE_REVIEW_MODEL, PROSPECTIVE_ALTERNATE_MODEL}
         or input_bound + max_output_tokens > context_window_tokens
     )
 
@@ -621,6 +642,11 @@ def context_integrity_failure(
         return "selected_provider"
     if requested_model == PROSPECTIVE_REVIEW_MODEL and response.get("provider") not in (None, "Nebius"):
         return "selected_provider"
+    if requested_model == PROSPECTIVE_ALTERNATE_MODEL and (
+        selected[0]["provider"] != "Moonshot AI"
+        or response.get("provider") not in (None, "Moonshot AI")
+    ):
+        return "selected_provider"
     usage = response.get("usage")
     if not isinstance(usage, Mapping):
         return "usage_missing"
@@ -629,7 +655,7 @@ def context_integrity_failure(
         return "prompt_tokens"
     if prompt_tokens + prepared.parameters["max_tokens"] > prepared.context_window_tokens:
         return "context_budget"
-    if requested_model == FALLBACK_REVIEW_MODEL and prompt_tokens > FALLBACK_MAX_PROMPT_TOKENS:
+    if requested_model in ALTERNATE_REVIEW_MODELS and prompt_tokens > FALLBACK_MAX_PROMPT_TOKENS:
         return "context_budget"
     return None
 

@@ -24,7 +24,7 @@ BEGIN
     RAISE EXCEPTION 'Arena alternate669 security shape differs' USING ERRCODE='55000';
   END IF;
   IF encode(extensions.digest(v_definition,'sha256'),'hex')='2ade4eb49ebeddead5cf0356f6f94e273a0a4d3d5de47de294c1576ca3c8cbb8' THEN
-    IF encode(extensions.digest(pg_get_functiondef(to_regprocedure(v_v2_signature)),'sha256'),'hex') IS DISTINCT FROM 'e7c425663c97dc4a0bf615081c60c7d6e3ac2f18fc0d90456737d027b37ea8df'
+    IF encode(extensions.digest(pg_get_functiondef(to_regprocedure(v_v2_signature)),'sha256'),'hex') IS DISTINCT FROM '00b9b8c403a5f446eef02e1839eec7d6f96c681bf55c5712b6bb6a2c05f8cbc5'
        OR (SELECT jsonb_build_array(pg_get_userbyid(proowner),proacl::TEXT,prosecdef,provolatile,proconfig)
            FROM pg_proc WHERE oid=to_regprocedure(v_v2_signature)) IS DISTINCT FROM v_identity THEN
       RAISE EXCEPTION 'Arena alternate669 v2 readback differs' USING ERRCODE='55000';
@@ -79,7 +79,8 @@ DECLARE
   v_reservation public.lab_arena_ledger;
   v_review_cost BIGINT;
 BEGIN
-  IF COALESCE(p_review_alternate_model,'') NOT IN ('openai/gpt-6.1-sol','moonshotai/kimi-k3.1-pro')
+  IF COALESCE(p_review_model,'') NOT IN ('anthropic/claude-sonnet-5','anthropic/claude-sonnet-5.5','deepseek/deepseek-v4.1-flash-1017','openai/gpt-6.1-sol','moonshotai/kimi-k3.1-pro')
+     OR COALESCE(p_review_alternate_model,'') NOT IN ('openai/gpt-6.1-sol','moonshotai/kimi-k3.1-pro')
      OR COALESCE(p_submission_id, '') !~ '^[A-Za-z0-9._:-]{1,64}$'
      OR COALESCE(p_miner_hotkey, '') !~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'
      OR COALESCE(p_claim_token_hash, '') !~ '^sha256:[0-9a-f]{64}$'
@@ -629,7 +630,7 @@ $wrapper669$;
   IF (SELECT nspacl::TEXT FROM pg_namespace WHERE nspname='public') IS DISTINCT FROM v_schema_acl
      OR (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE oid=to_regprocedure(v_signature)) IS DISTINCT FROM v_metadata
      OR encode(extensions.digest(pg_get_functiondef(to_regprocedure(v_signature)),'sha256'),'hex') IS DISTINCT FROM '2ade4eb49ebeddead5cf0356f6f94e273a0a4d3d5de47de294c1576ca3c8cbb8'
-     OR encode(extensions.digest(pg_get_functiondef(to_regprocedure(v_v2_signature)),'sha256'),'hex') IS DISTINCT FROM 'e7c425663c97dc4a0bf615081c60c7d6e3ac2f18fc0d90456737d027b37ea8df'
+     OR encode(extensions.digest(pg_get_functiondef(to_regprocedure(v_v2_signature)),'sha256'),'hex') IS DISTINCT FROM '00b9b8c403a5f446eef02e1839eec7d6f96c681bf55c5712b6bb6a2c05f8cbc5'
      OR (SELECT jsonb_build_array(pg_get_userbyid(proowner),proacl::TEXT,prosecdef,provolatile,proconfig)
          FROM pg_proc WHERE oid=to_regprocedure(v_v2_signature)) IS DISTINCT FROM v_identity THEN
     RAISE EXCEPTION 'Arena alternate669 readback differs' USING ERRCODE='55000';

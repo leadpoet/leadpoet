@@ -247,3 +247,12 @@ def test_native_runtime_and_postgres_commit_same_kimi_route_and_cost(recovery_st
     assert settlement['entry_doc']['provider_diagnostic']['selected_provider'] == 'Moonshot AI'
     assert settlement['entry_doc']['provider_diagnostic']['max_output_tokens'] == 65536
     assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize('model', ['moonshotai/kimi-k3.1-pro-20261023', 'moonshotai/kimi-k3.1-pro:highspeed', 'openai/gpt-unapproved'])
+def test_requested_model_must_be_an_exact_admission_id(recovery_store, model):
+    _, sid, miner = new(recovery_store, 'requested-' + hashlib.sha256(model.encode()).hexdigest()[:6])
+    for caller in (begin, legacy_begin):
+        with pytest.raises(ArenaStoreError):
+            caller(recovery_store, sid, miner, model)
+    assert recovery_store.list_ledger(submission_id=sid) == []

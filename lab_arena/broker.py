@@ -88,6 +88,7 @@ OPENROUTER_INTRINSIC_SEARCH_REQUEST_MODELS = frozenset({
     "perplexity/sonar", "perplexity/sonar-pro",
 })
 MAX_PRICE_TABLE_BYTES = 8 * 1024 * 1024
+_UPSTREAM_RESPONSE_CAPTURE_MAX_BYTES = 3 * 1024 * 1024
 MICROUSD = Decimal(1_000_000)
 # Conservative input-token bound: no production tokenizer emits more tokens
 # than characters, and every message carries a small fixed overhead.
@@ -579,6 +580,7 @@ class ProviderTransportError(RuntimeError):
         openrouter_generation_id: Optional[str] = None,
         deepline_job_id: Optional[str] = None,
         observed_status: Optional[int] = None,
+        observed_body: Optional[bytes] = None,
     ) -> None:
         super().__init__(message)
         self.openrouter_generation_id = (
@@ -600,6 +602,13 @@ class ProviderTransportError(RuntimeError):
             and not isinstance(observed_status, bool)
             and 100 <= observed_status <= 599
             else None
+        )
+        # Private, untrusted evidence only; RuntimeError's args/repr contain
+        # only the error class. One byte beyond the capture cap is sufficient
+        # to reject oversized evidence, never retain a clipped body.
+        self.observed_body = (
+            observed_body[:_UPSTREAM_RESPONSE_CAPTURE_MAX_BYTES + 1]
+            if isinstance(observed_body, bytes) and observed_body else None
         )
 
 
@@ -1418,9 +1427,9 @@ class HttpxProviderTransport:
                     _, openrouter_generation_id = _openrouter_generation_identity(
                         None, response_headers
                     )
-                    async for chunk in response.aiter_bytes(
-                        chunk_size=64 * 1024
-                    ):
+                    # HTTPX's fixed-size coalescing hides a short final chunk
+                    # if the next read fails. Keep each observed decoded chunk.
+                    async for chunk in response.aiter_bytes():
                         if len(content) + len(chunk) > response_limit:
                             oversized = True
                             break
@@ -1435,6 +1444,7 @@ class HttpxProviderTransport:
                 openrouter_generation_id=openrouter_generation_id,
                 deepline_job_id=deepline_job_id,
                 observed_status=status,
+                observed_body=bytes(content[:_UPSTREAM_RESPONSE_CAPTURE_MAX_BYTES + 1]),
             ) from exc
         except httpx.HTTPError as exc:
             raise ProviderTransportError(
@@ -1442,6 +1452,7 @@ class HttpxProviderTransport:
                 openrouter_generation_id=openrouter_generation_id,
                 deepline_job_id=deepline_job_id,
                 observed_status=status,
+                observed_body=bytes(content[:_UPSTREAM_RESPONSE_CAPTURE_MAX_BYTES + 1]),
             ) from exc
         finally:
             _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
@@ -2492,7 +2503,7 @@ def _capture_upstream_response(
         # The credential-echo guard has already checked this response before
         # clearing the active key. Filter other credential-shaped fields and
         # opaque reasoning before base64 encoding, including malformed text.
-        if len(response.body) > 3 * 1024 * 1024:
+        if len(response.body) > _UPSTREAM_RESPONSE_CAPTURE_MAX_BYTES:
             return {"status": "unavailable", "reason": "response_size_limit"}
         text = response.body.decode("utf-8")
         if operation_id in reasoning_capture.OPERATIONS:
@@ -2551,12 +2562,13 @@ def _upstream_body_matches_response(upstream: bytes, body: bytes, *,
 
 
 def _retain_upstream_response_receipt(
-    document: Dict[str, Any], receipt: Mapping[str, Any],
+    document: Dict[str, Any], receipt: Mapping[str, Any], *, unavailable_on_overflow: bool = True,
 ) -> None:
     """Fit optional evidence after all accounting fields, or keep the original."""
     try:
         # Default whitespace and ASCII escaping conservatively bound JSONB text.
-        for candidate_receipt in (receipt, {"status": "unavailable", "reason": "response_size_limit"}):
+        fallback = {"status": "unavailable", "reason": "response_size_limit"}
+        for candidate_receipt in ((receipt, fallback) if unavailable_on_overflow else (receipt,)):
             observations = broker_observations(document)
             if observations:
                 candidate_receipt = dict(candidate_receipt, broker_observations=observations)
@@ -6349,6 +6361,7 @@ class Broker:
         openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
         transport_elapsed_ms: Optional[int] = None
+        transport_failure_capture = None
 
         def retain_transport_timing(document: Dict[str, Any]) -> None:
             if ((full_thinking or getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY)
@@ -6826,6 +6839,28 @@ class Broker:
                 if exc.observed_status is not None:
                     uncertain_doc["observed_provider_status"] = exc.observed_status
                 retain_transport_timing(uncertain_doc)
+                if exc.observed_body is not None and exc.observed_status is not None:
+                    observed_response = ProviderResponse(exc.observed_status, {}, exc.observed_body)
+                    # The active key must be checked before it is cleared.
+                    # These bytes cannot supply billing, replay or delivery proof.
+                    try:
+                        # This seam retains only complete duplicate-free JSON,
+                        # including for tools whose normal errors allow text.
+                        observed_document = training_capture.response_json_value(exc.observed_body.decode("utf-8"))
+                        contracts.document_hash(observed_document)  # Reject non-finite JSON scalars.
+                        if not _response_contains_credential(observed_response, secret):
+                            captured = _capture_upstream_response(
+                                observed_response, operation_id=operation_id,
+                                request_hash=request_hash, call_identity=call_identity,
+                                call_succeeded=False, parameters=normalized,
+                            )
+                            if captured is not None and captured.get("capture_kind") == "upstream_response":
+                                transport_failure_capture = captured
+                    except Exception:
+                        pass  # Unusable evidence preserves the original failure.
+                    if transport_failure_capture is not None:
+                        _retain_upstream_response_receipt(uncertain_doc, transport_failure_capture,
+                                                          unavailable_on_overflow=False)
                 if (
                     deepline_readback_cost is None
                     and scrapingdog_observed_success_status is None
@@ -6917,10 +6952,16 @@ class Broker:
         failure_stage = "response_adaptation"
         observed_provider_http_status = response.status
         upstream_response = response  # Freeze the wire status before provider adaptation.
-        upstream_capture = None
+        upstream_capture = transport_failure_capture
 
         def retain_upstream_response(document, *, delivered_body=None):
             nonlocal upstream_capture
+            if transport_failure_capture is not None:
+                # Extra diagnostics must not add a capture gap if their full
+                # envelope cannot fit. Keep the original failure and timing.
+                _retain_upstream_response_receipt(document, transport_failure_capture,
+                                                  unavailable_on_overflow=False)
+                return
             if deepline_lost_response or scrapingdog_observed_success_status is not None:
                 return  # No original body survived the transport failure.
             if delivered_body is not None and _upstream_body_matches_response(

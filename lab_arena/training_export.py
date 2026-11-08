@@ -829,7 +829,23 @@ def recovered_response_for_write(call, write):
 
 
 def _calls(rows, run_ids, objects, run_order):
-    from lab_arena.broker import BrokerError, _decode_terminal, broker_observations
+    from lab_arena.broker import BrokerError, _decode_terminal, broker_observations, _TRANSPORT_ERROR_CLASSES
+
+    def transport_accounting(document):
+        if not isinstance(document, Mapping):
+            return {}
+        captured = document.get("upstream_response_receipt")
+        if (not isinstance(captured, Mapping) or captured.get("capture_kind") != "upstream_response"
+                or document.get("call_succeeded") is not False
+                or not (document.get("reason") == "transport_failure"
+                        or document.get("reason") == "missing_provider_cost" and document.get("transport_failure") is True)
+                or not isinstance(document.get("transport_error_class"), str)
+                or document["transport_error_class"] not in _TRANSPORT_ERROR_CLASSES | {"ProviderTransportError"}
+                or type(document.get("observed_provider_status")) is not int
+                or not 100 <= document["observed_provider_status"] <= 599):
+            return {}
+        return {key: document[key] for key in ("reason", "transport_failure", "call_succeeded",
+                "transport_error_class", "observed_provider_status") if key in document}
 
     def observations(document):
         try:
@@ -1010,6 +1026,9 @@ def _calls(rows, run_ids, objects, run_order):
                 redactions = sorted(set(privacy["redactions"]) | set(removed))
                 upstream_receipts.append({
                     "entry_id": row["entry_id"], "status": captured["status"],
+                    **({key: captured[key] for key in ("call_identity", "operation_id", "request_hash", "call_succeeded")
+                        if key in captured}
+                       if transport_accounting(saved_call) or transport_accounting(row.get("entry_doc") or {}) else {}),
                     "response": response, "privacy_redactions": redactions,
                     "body_sha256": captured["body_sha256"], "body_bytes": len(raw),
                     "wire_body_sha256": captured["wire_body_sha256"],
@@ -1039,6 +1058,8 @@ def _calls(rows, run_ids, objects, run_order):
                         ("entry_id", "entry_kind", "created_at", "funding_source", "amount_microusd") if key in row}
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
+            if row.get("entry_kind") == "uncertain":
+                metadata["accounting"].update(transport_accounting(row.get("entry_doc") or {}))
             if (row.get("entry_kind") == "recovery"
                     and (row.get("entry_doc") or {}).get("reason") in _UNDISPATCHED_RECOVERY_REASONS):
                 metadata["accounting"]["reason"] = row["entry_doc"]["reason"]
@@ -1047,6 +1068,8 @@ def _calls(rows, run_ids, objects, run_order):
             recorded_call = (row.get("entry_doc") or {}).get("call")
             if isinstance(recorded_call, Mapping):
                 call_accounting = {key: copy.deepcopy(value) for key, value in recorded_call.items() if key in accounting_fields}
+                if row.get("entry_kind") == "uncertain":
+                    call_accounting.update(transport_accounting(recorded_call))
                 call_accounting.update({key: copy.deepcopy(value) for key, value in
                     observations(recorded_call).items() if key in accounting_fields})
                 if call_accounting:

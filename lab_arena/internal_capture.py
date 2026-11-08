@@ -163,13 +163,16 @@ class InternalCall:
             return result
 
     def response(self, *, body: bytes, status: int,
-                 elapsed_seconds: float | None = None) -> dict[str, Any]:
+                 elapsed_seconds: float | None = None,
+                 transport_completed: bool = True) -> dict[str, Any]:
         with self._lock:
             if "response" in self._stages or "outcome" in self._stages:
                 return self._stages.get("response", {"status": "unavailable", "reason": "call_finished"})
             fields: dict[str, Any] = {"http_status": status if type(status) is int and 100 <= status <= 599 else None,
                                       "request_event": self._stages.get("request"),
                                       "response_observed": True}
+            if transport_completed is False:
+                fields["transport_completed"] = False
             try:
                 if not isinstance(body, bytes) or len(body) > training_capture.MAX_OBJECT_BYTES:
                     raise ValueError("response_size_or_type")
@@ -447,6 +450,8 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
                          for reason in field.get("redactions") or []})
     if redactions:
         gaps.append("privacy_redactions")
+    if events.get("response", {}).get("transport_completed") is False:
+        gaps.append("transport_incomplete")
     outcome_event = events.get("outcome") or {}
     if outcome_event.get("cost_status") != "known":
         gaps.append("cost_unknown")
@@ -478,6 +483,8 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
     candidate, exclusions = None, []
     if not dimensions["request"] or not dimensions["response"] or "event_context_mismatch" in gaps:
         exclusions.append("request_response_unavailable")
+    elif "transport_incomplete" in gaps:
+        exclusions.append("transport_incomplete")
     elif redactions and not opaque_projection:
         exclusions.append("privacy_nonexact")
     elif events.get("response", {}).get("http_status") != 200:

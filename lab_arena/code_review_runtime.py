@@ -10,7 +10,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_coverage
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_capture, training_coverage
 
 
 _ROUND_NOT_PROVIDED = object()
@@ -532,7 +532,26 @@ class SubmissionCodeReviewer:
                     retryable=(False if exc.response_reason == "truncated_at_limit" else
                                True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None),
                 )
-            except broker.ProviderTransportError:
+            except broker.ProviderTransportError as exc:
+                # A timed-out stream can contain a complete JSON body. Keep it
+                # only as private, incomplete transport evidence; it never
+                # establishes a provider result, verdict, usage, or charge.
+                if (capture_call is not None and exc.observed_status is not None
+                        and exc.observed_body is not None):
+                    try:
+                        observed_body = exc.observed_body
+                        if len(observed_body) <= broker._UPSTREAM_RESPONSE_CAPTURE_MAX_BYTES:
+                            observed = training_capture.model_response_object(observed_body.decode("utf-8"))
+                            contracts.canonical_json(observed)  # Reject non-finite JSON values.
+                            response = broker.ProviderResponse(exc.observed_status, {}, observed_body)
+                            if not broker._response_contains_credential(response, secret):
+                                capture_call.response(
+                                    body=observed_body, status=exc.observed_status,
+                                    elapsed_seconds=time.monotonic() - request_started,
+                                    transport_completed=False,
+                                )
+                    except Exception:
+                        pass
                 # The request may have reached the provider, so its cost is unknown.
                 document = code_review_policy.diagnostic(
                     "code_review_transport_error", retryable=True

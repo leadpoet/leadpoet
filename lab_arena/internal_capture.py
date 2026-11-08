@@ -242,10 +242,11 @@ def _read_event(objects: Any, ref: str) -> dict[str, Any] | None:
     return event
 
 
-def _reasoning(request: Mapping[str, Any], response: Any, api: str, redactions: list[str], registry: Any) -> dict:
+def _reasoning(request: Mapping[str, Any], response: Any, api: str,
+               response_redactions: list[str], registry: Any) -> dict:
     call = {"provider": "openrouter", "operation_id": api, "response": response,
             "request": {"outbound": {"body": request}, "admitted_parameters": request,
-                        "hashed_parameters": request}, "response_privacy_redactions": redactions}
+                        "hashed_parameters": request}, "response_privacy_redactions": response_redactions}
     try:
         checked, annotation = reasoning_capture.apply(api, request, policy=reasoning_capture.POLICY, registry=registry)
         # The exporter cannot add controls that the saved request did not send.
@@ -257,7 +258,7 @@ def _reasoning(request: Mapping[str, Any], response: Any, api: str, redactions: 
     segments, summary, opaque = training_thinking._segments(response, api)
     full, status = training_thinking.full_text_segments(call, "arena_internal", registry)
     return {"available_segments": segments, "contains_summary": summary,
-            "contains_opaque": opaque or "hidden_reasoning" in redactions,
+            "contains_opaque": opaque or "hidden_reasoning" in response_redactions,
             "full_generated_thinking": full, "status": status,
             "registry_sha256": contracts.document_hash(registry) if isinstance(registry, Mapping) else None}
 
@@ -452,7 +453,10 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
     reasoning = {"available_segments": [], "full_generated_thinking": [], "status": {"returned": "unavailable"}}
     if isinstance(request, Mapping):
         try:
-            reasoning = _reasoning(request, response, first.get("api"), redactions, registry)
+            # Source/context/outcome redactions make SFT nonexact, but do not
+            # change which reasoning text the provider response retained.
+            response_redactions = (events.get("response", {}).get("capture") or {}).get("redactions") or []
+            reasoning = _reasoning(request, response, first.get("api"), response_redactions, registry)
         except Exception:
             gaps.append("reasoning_parse_unavailable")
     raw = {"schema_version": EXAMPLE_SCHEMA_VERSION, "actor_type": "arena_internal",

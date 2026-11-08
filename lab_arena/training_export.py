@@ -997,7 +997,7 @@ def _calls(rows, run_ids, objects, run_order):
                 if (not isinstance(privacy, Mapping)
                         or type(privacy.get("redacted")) is not bool
                         or not isinstance(privacy.get("redactions"), list)
-                        or any(reason not in {"credential", "hidden_reasoning"}
+                        or any(reason not in {"credential", "hidden_reasoning", "deepline_person_entities"}
                                for reason in privacy["redactions"])
                         or privacy["redacted"] != bool(privacy["redactions"])):
                     raise ExportError("upstream_response_privacy_invalid")

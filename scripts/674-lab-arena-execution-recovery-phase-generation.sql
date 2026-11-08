@@ -11,7 +11,7 @@ CREATE TEMP TABLE arena674_schema_acl ON COMMIT DROP AS
 GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 DO $generation674$
 DECLARE target OID:='public.lab_arena_grant_execution_infrastructure_recovery_v1(text,text,text,text,text,boolean)'::regprocedure;
- d TEXT; updated TEXT; metadata JSONB; identity JSONB; wanted RECORD; actual RECORD;
+ d TEXT; updated TEXT; metadata JSONB; defaults TEXT; identity JSONB; wanted RECORD; actual RECORD;
  protected_before JSONB; protected_after JSONB;
 BEGIN
  FOR wanted IN SELECT * FROM (VALUES
@@ -27,10 +27,14 @@ BEGIN
    OR actual.lanname<>wanted.language OR actual.source_hash<>wanted.source_hash THEN
    RAISE EXCEPTION 'Execution recovery674 helper security or source differs: %',wanted.signature; END IF;
  END LOOP;
- SELECT pg_get_functiondef(p.oid),to_jsonb(p)-'prosrc',jsonb_build_array(
+ -- PostgreSQL 15 stores parser source positions inside proargdefaults. Compare
+ -- its deparsed expression so CREATE OR REPLACE preserves the actual default.
+ SELECT pg_get_functiondef(p.oid),to_jsonb(p)-ARRAY['prosrc','proargdefaults'],
+  pg_get_expr(p.proargdefaults,0),jsonb_build_array(
   pg_get_userbyid(p.proowner),p.proacl::TEXT,p.prosecdef,p.provolatile,p.proconfig,l.lanname)
- INTO d,metadata,identity FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=target;
- IF d IS NULL OR identity IS DISTINCT FROM '["lab_arena_owner","{lab_arena_owner=X/lab_arena_owner}",true,"v",["search_path=pg_catalog, public"],"plpgsql"]'::JSONB THEN
+ INTO d,metadata,defaults,identity FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=target;
+ IF d IS NULL OR defaults IS DISTINCT FROM 'true'
+  OR identity IS DISTINCT FROM '["lab_arena_owner","{lab_arena_owner=X/lab_arena_owner}",true,"v",["search_path=pg_catalog, public"],"plpgsql"]'::JSONB THEN
   RAISE EXCEPTION 'Execution recovery674 grant security differs'; END IF;
  IF (SELECT encode(extensions.digest(prosrc,'sha256'),'hex') FROM pg_proc WHERE oid=target)='ccc1ea4ecb54f6ae8cc0ac0ea545be793d75eee24e36630f907c212b9cba7b4b' THEN RETURN; END IF;
  IF (SELECT encode(extensions.digest(prosrc,'sha256'),'hex') FROM pg_proc WHERE oid=target)<>'532d14d6356b218a6366a656e5a4a46563d9cb179c4af147d6aaa924ff1d32f2'
@@ -45,7 +49,8 @@ BEGIN
   $old_child674$ child:=parent; child.run_id:=parent.assignment_id||':'||(parent.attempt+1)::TEXT; child.attempt:=parent.attempt+1;$old_child674$,$new_child674$ child:=parent; child.run_id:=parent.assignment_id||':'||(parent.attempt+1)::TEXT; child.attempt:=parent.attempt+1;
  child.stage_generation:=r.stage_generation;$new_child674$);
  EXECUTE updated;
- IF (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE oid=target) IS DISTINCT FROM metadata
+ IF (SELECT to_jsonb(p)-ARRAY['prosrc','proargdefaults'] FROM pg_proc p WHERE oid=target) IS DISTINCT FROM metadata
+  OR (SELECT pg_get_expr(p.proargdefaults,0) FROM pg_proc p WHERE oid=target) IS DISTINCT FROM defaults
   OR (SELECT encode(extensions.digest(prosrc,'sha256'),'hex') FROM pg_proc WHERE oid=target)<>'ccc1ea4ecb54f6ae8cc0ac0ea545be793d75eee24e36630f907c212b9cba7b4b' THEN
   RAISE EXCEPTION 'Execution recovery674 grant postimage or metadata differs'; END IF;
  SELECT jsonb_object_agg(p.oid::TEXT,to_jsonb(p)) INTO protected_after FROM pg_proc p

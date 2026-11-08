@@ -114,3 +114,20 @@ def test_old_phase_successors_use_native_lifecycle_and_remain_finite(old_phase_c
 
 def test_all_nine_old_phase_successors_complete_then_open_native_judgments(old_phase_case):
     original.test_real_completion_opens_only_new_judgments_and_preserves_old_bindings(old_phase_case)
+
+
+def test_dry_run_default_is_preserved_and_tampering_refused(case):
+    p = case
+    with p.c.cursor() as q:
+        assert original.scalar(q, 'SELECT pg_get_expr(proargdefaults,0) FROM pg_proc WHERE oid=%s::regprocedure', (SIGNATURE,)) == 'true'
+        q.execute(CORRECTION.read_text())
+        definition = original.scalar(q, 'SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURE,))
+        assert definition.count('DEFAULT true') == 1
+        q.execute('BEGIN')
+        q.execute('SAVEPOINT default_integrity674')
+        q.execute(definition.replace('DEFAULT true', 'DEFAULT false'))
+        with pytest.raises(p.pg.Error, match='grant security differs'):
+            q.execute(CORRECTION.read_text())
+        q.execute('ROLLBACK TO SAVEPOINT default_integrity674')
+        assert original.scalar(q, 'SELECT pg_get_expr(proargdefaults,0) FROM pg_proc WHERE oid=%s::regprocedure', (SIGNATURE,)) == 'true'
+    p.c.commit()

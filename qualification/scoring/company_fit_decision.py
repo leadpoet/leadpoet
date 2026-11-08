@@ -52,6 +52,9 @@ _INITIALISM_LEGAL_NAME_RE = re.compile(
     r"(?P<initialism>[A-Z][A-Z0-9]{1,9})\s*"
     r"\(\s*(?P<legal_name>[A-Za-z0-9][A-Za-z0-9 .,'&-]{1,199})\s*\)"
 )
+_PARENTHETICAL_CORPORATE_SUFFIXES: Final = _LEGAL_SUFFIXES - {
+    "company", "co", "holdings", "group",
+}
 _INDEPENDENT_IDENTITY_SOURCES: Final = frozenset({
     "company_homepage",
     "company_web_reverification",
@@ -249,11 +252,13 @@ def _verified_parenthetical_name_alignment(
         match = _INITIALISM_LEGAL_NAME_RE.fullmatch(
             str(submitted_name or "").strip()
         )
+        legal_name = _parenthetical_legal_name(match.group("legal_name")) if match else ()
         if (
             match is None
             or not submitted_linkedin_slug
             or submitted_linkedin_slug != observed_linkedin_slug
-            or _company_name(match.group("legal_name")) != _company_name(observed_name)
+            or not legal_name
+            or legal_name != _parenthetical_legal_name(observed_name)
         ):
             return False
         words = re.findall(r"[a-z0-9]+", match.group("legal_name").casefold())
@@ -270,6 +275,21 @@ def _verified_parenthetical_name_alignment(
     if observed_linkedin_slug != initialism:
         return False
     return _company_name(match.group("legal_name")) == _company_name(observed_name)
+
+
+def _parenthetical_legal_name(value: Any) -> tuple[str, ...]:
+    """Keep entity-bearing Company, Group and Holdings in this exact bridge."""
+
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .,'&-]{1,199}", value) is None
+    ):
+        return ()
+    words = re.findall(r"[a-z0-9]+", value.casefold())
+    while words and words[-1] in _PARENTHETICAL_CORPORATE_SUFFIXES:
+        words.pop()
+    return tuple(words)
 
 
 def evaluate_company_identity(
@@ -383,6 +403,12 @@ def evaluate_company_identity(
                     return receipt
         elif source != "company_homepage" or not parenthetical_names_align:
             return receipt
+        if parenthetical_names_align and _INITIALISM_LEGAL_NAME_RE.fullmatch(
+            str(submitted_name or "").strip()
+        ):
+            # The ordinary canonical name drops entity-bearing suffixes. Keep
+            # the actual independently observed legal name for saved replay.
+            receipt["verified_parenthetical_legal_name"] = str(observed_name).strip()
     receipt.update(decision="match", reason_code="verifier_accepted")
     return receipt
 
@@ -438,11 +464,18 @@ def company_quality_receipt_matches_claim(
     ):
         return False
 
+    parenthetical_legal_name = receipt.get("verified_parenthetical_legal_name")
+    if parenthetical_legal_name is not None and (
+        not isinstance(parenthetical_legal_name, str)
+        or not 0 < len(parenthetical_legal_name) <= 200
+        or _company_name(parenthetical_legal_name) != observed_name
+    ):
+        return False
     evaluated = evaluate_company_identity(
         submitted_name=company.get("company_name"),
         submitted_website=company.get("company_website"),
         submitted_linkedin=company.get("company_linkedin"),
-        observed_name=observed_name,
+        observed_name=parenthetical_legal_name or observed_name,
         observed_website=f"https://{observed_domain}",
         observed_linkedin=(
             "https://www.linkedin.com/company/"

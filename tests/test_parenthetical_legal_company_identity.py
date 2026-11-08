@@ -1,6 +1,7 @@
 """November 7 MEC: a supplied initialism does not replace observed legal identity."""
 
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +39,7 @@ def test_exact_nov7_parenthetical_name_keeps_independently_observed_legal_identi
     assert receipt["decision"] == "match"
     assert receipt["observed_name"] == "mayvilleengineering"
     assert receipt["observed_linkedin_slug"] == "mayville-engineering-company"
+    assert receipt["verified_parenthetical_legal_name"] == VERDICT["observed_company_name"]
     # Persisted quality verification replays the canonical observed name, not
     # the raw spaced legal name. It must reproduce the same strict decision.
     assert company_quality_receipt_matches_claim(receipt, COMPANY)
@@ -45,6 +47,8 @@ def test_exact_nov7_parenthetical_name_keeps_independently_observed_legal_identi
 
 @pytest.mark.parametrize("field,value", [
     ("observed_company_name", "Mayville Engineering Sales, Inc."),
+    ("observed_company_name", "Mayville Engineering Holdings, Inc."),
+    ("observed_company_name", "Mayville Engineering Group, Inc."),
     ("observed_company_name", "Mayville Engineering Company Asia, Inc."),
     ("observed_company_name", "Mayville Engineering Company Holdings North America"),
     ("observed_company_name", "MEC"),
@@ -94,3 +98,45 @@ def test_saved_receipt_cannot_be_reused_for_a_changed_parenthetical_claim():
     assert not company_quality_receipt_matches_claim(
         receipt, {**COMPANY, "company_name": "BAD (Mayville Engineering Company, Inc.)"},
     )
+
+
+@pytest.mark.parametrize("name", [
+    "Mayville Engineering Holdings, Inc.", "Mayville Engineering Group, Inc.",
+    "Mayville Engineering", "", None, 123,
+])
+def test_saved_legal_name_proof_cannot_be_replaced_by_collapsed_company_identity(name):
+    receipt = _receipt()
+    receipt["verified_parenthetical_legal_name"] = name
+    assert not company_quality_receipt_matches_claim(receipt, COMPANY)
+
+
+def test_saved_legal_name_proof_cannot_be_omitted():
+    receipt = _receipt()
+    del receipt["verified_parenthetical_legal_name"]
+    assert not company_quality_receipt_matches_claim(receipt, COMPANY)
+
+
+def test_new_legal_proof_survives_json_cache_and_real_host_validation():
+    from lab_arena import company_judgments, scoring
+    from qualification.scoring.competition import apply_company_judgment_context
+    from tests.test_arena_company_quality_policy import _positive_breakdown, company
+    from tests.test_arena_score_integrity import _icp
+
+    claim = company(COMPANY["company_name"], "mecinc.com", **COMPANY)
+    raw = _positive_breakdown(
+        COMPANY["company_name"], "mecinc.com", "mayville-engineering-company",
+    )
+    identity = raw["verifier_gate_receipts"][0]["dimension_evidence"]["identity"]
+    identity["web_identity_receipt"] = _receipt()
+    wire = json.loads(json.dumps(raw, allow_nan=False))
+    assert company_judgments.raw_judgment_is_cacheable(wire)
+    rows = apply_company_judgment_context([claim], [wire], company_quality=True)
+    assert rows[0]["company_qualified"] is True
+    assert scoring.validate_breakdowns_for_item(
+        rows, icp=_icp(), companies=[claim], integrity_policy=True, company_quality=True,
+    ) == rows
+    assert wire == raw
+    del wire["verifier_gate_receipts"][0]["dimension_evidence"]["identity"]["web_identity_receipt"]["verified_parenthetical_legal_name"]
+    rejected = apply_company_judgment_context([claim], [wire], company_quality=True)
+    assert rejected[0]["company_qualified"] is False
+    assert rejected[0]["final_score"] == 0.0

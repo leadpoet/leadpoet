@@ -135,6 +135,10 @@ def test_no_hint_inputs_keep_historical_keys_and_malformed_hints_still_fail():
             "role_batch_check": "google/gemini-2.5-flash",
         },
     )
+    # Reconstruct the saved policy, before the prospective input-contract marker.
+    assert old["scorer_policy"]["env_bindings"].pop(
+        "ARENA_COMPANY_INPUT_CONTRACT"
+    ) == "linkedin_company_ampersand_v1"
     expected = _scope(old)
     blank = copy.deepcopy(old)
     blank["companies"][0]["required_attribute"] = None

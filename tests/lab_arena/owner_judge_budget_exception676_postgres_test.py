@@ -223,3 +223,28 @@ def test_legacy_provider_grant_and_nonrecursion_stay_exact(plain_finite):
   result=prior.provider.grant(p,request='legacy-provider-after-extension')
   assert result['runtime_image_digest']==base.RUNTIME
   prior.claim_child(p,result['child_identity']['run_id'])
+
+
+@pytest.mark.parametrize('drift',['source','acl','owner','security','search_path'])
+def test_unexpected_installed_wrapper_refuses_atomically(finite,drift):
+ p=finite
+ wrapper='public.lab_arena_grant_judge_budget_exception_v1(text,text,text,text,text,text,jsonb,jsonb,boolean)'
+ signatures=[prior.COMMON]+prior.provider.HELPERS+[wrapper]
+ with p.c.cursor()as q:
+  if drift=='source':
+   definition=old.scalar(q,'SELECT pg_get_functiondef(%s::regprocedure)',(wrapper,))
+   source=old.scalar(q,'SELECT prosrc FROM pg_proc WHERE oid=%s::regprocedure',(wrapper,))
+   q.execute(definition.replace(source,"BEGIN RETURN '{}'::JSONB; END;",1))
+  elif drift=='acl':q.execute('GRANT EXECUTE ON FUNCTION '+wrapper+' TO anon')
+  elif drift=='owner':q.execute('ALTER FUNCTION '+wrapper+' OWNER TO anon')
+  elif drift=='security':q.execute('ALTER FUNCTION '+wrapper+' SECURITY INVOKER')
+  elif drift=='search_path':q.execute('ALTER FUNCTION '+wrapper+' SET search_path=public')
+ p.c.commit()
+ with p.c.cursor()as q:
+  before=old.scalar(q,'SELECT jsonb_agg(to_jsonb(p)ORDER BY oid)FROM pg_proc p WHERE oid=ANY(%s::regprocedure[])',(signatures,))
+ p.c.commit();rows=base.snapshot(p)
+ with p.c.cursor()as q:
+  with pytest.raises(p.pg.Error,match='installed wrapper differs'):q.execute(SQL.read_text())
+ p.c.rollback()
+ with p.c.cursor()as q:assert old.scalar(q,'SELECT jsonb_agg(to_jsonb(p)ORDER BY oid)FROM pg_proc p WHERE oid=ANY(%s::regprocedure[])',(signatures,))==before
+ p.c.commit();assert base.snapshot(p)==rows

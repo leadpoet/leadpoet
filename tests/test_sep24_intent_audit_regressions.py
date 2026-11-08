@@ -5,6 +5,8 @@ evidence. They do not prove a live model's semantic verdict; provider-backed
 validation remains separate.
 """
 
+import pytest
+
 from qualification.scoring import intent_verification_three_stage as intent
 from qualification.scoring import verification_helpers
 from qualification.scoring.prompts import _common
@@ -465,6 +467,159 @@ def test_faith_negative_control_rule_reaches_both_prompts() -> None:
         assert "requires positive evidence that the facility\n        opened or began operations" in prompt
         assert "holding a groundbreaking" in prompt
         assert "expected completion date does not prove an opening" in prompt
+
+
+_OPENING_OR_EXPANSION_TARGET = (
+    "Opened a new manufacturing facility or announced a major plant expansion "
+    "in the last 12 months, per a press release, local news coverage, or an "
+    "economic-development announcement."
+)
+
+
+def test_announced_new_plant_reaches_expansion_alternative_in_both_prompts() -> None:
+    # Nov 7 Rockwell/Vermeer: the same announced greenfield plant was judged
+    # both "contradicted" and "fits the expansion alternative".
+    row = _row(
+        company="Rockwell Automation",
+        claim="Rockwell Automation announced a new greenfield manufacturing site.",
+        target=_OPENING_OR_EXPANSION_TARGET,
+        source_url="https://example.com/news/new-greenfield-site",
+        evidence_type="FACILITY_OPENING",
+    )
+    source_text = (
+        "Rockwell Automation today announced plans to build a new one million "
+        "square foot manufacturing site. Construction and site planning are in progress."
+    )
+
+    for prompt in _prompts(row, source_text):
+        assert _common.FACILITY_OPENING_BLOCK in prompt
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK in prompt
+        assert prompt.index(_common.FACILITY_OPENING_BLOCK) < prompt.index(
+            _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK
+        )
+
+
+def test_opening_only_target_keeps_exact_prompt_without_expansion_rule() -> None:
+    row = _row(
+        company="Faith Technologies",
+        claim="Faith Technologies plans three new manufacturing buildings.",
+        target="Opened a new manufacturing facility in the last 365 days.",
+        source_url="https://example.com/news/groundbreaking",
+        evidence_type="FACILITY_OPENING",
+    )
+
+    for prompt in _prompts(row, "Construction is expected to finish in 2027."):
+        assert _common.FACILITY_OPENING_BLOCK in prompt
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK not in prompt
+
+
+@pytest.mark.parametrize("target", [
+    "Opened or announced a new manufacturing or production facility in the last 12 months.",
+    "Opened a new manufacturing facility or announced a major facility expansion in the last year.",
+])
+def test_announced_facility_alternatives_receive_expansion_rule(target) -> None:
+    row = _row(
+        company="Example Manufacturing",
+        claim="Example announced a new production facility.",
+        target=target,
+        source_url="https://example.com/news/new-facility",
+        evidence_type="FACILITY_OPENING",
+    )
+
+    for prompt in _prompts(row, "Example announced a new production facility."):
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK in prompt
+
+
+@pytest.mark.parametrize("qualifier", [
+    ", excluding warehouses and distribution centers.",
+    "; offices and headquarters do not qualify.",
+    "; not just an office expansion.",
+])
+def test_unrelated_exclusions_preserve_announced_plant_alternative(qualifier) -> None:
+    target = _OPENING_OR_EXPANSION_TARGET.rstrip(".") + qualifier
+    row = _row(
+        company="Example Manufacturing",
+        claim="Example announced a new manufacturing plant.",
+        target=target,
+        source_url="https://example.com/news/new-plant",
+        evidence_type="FACILITY_OPENING",
+    )
+
+    for prompt in _prompts(row, "Example will add a 300,000 square foot manufacturing plant."):
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK in prompt
+        assert target in prompt
+
+
+@pytest.mark.parametrize("target", [
+    _OPENING_OR_EXPANSION_TARGET,
+    "Opened a new manufacturing facility or announced a major expansion of an "
+    "existing plant in the last 12 months.",
+])
+def test_committed_announcement_keeps_pending_approvals_and_exact_scope_visible(target) -> None:
+    # A committed project can still be called proposed during routine zoning.
+    # This verifies instructions and evidence delivery, not a model verdict.
+    row = _row(
+        company="Example Manufacturing",
+        claim="Example announced a major plant expansion.",
+        target=target,
+        source_url="https://example.com/news/proposed-plant",
+        evidence_type="FACILITY_OPENING",
+    )
+    source_text = (
+        "Example committed to adding a one million square foot manufacturing "
+        "plant. The proposed facility has a selected site; zoning approval is pending."
+    )
+    stage1, stage3 = _prompts(row, source_text)
+
+    for prompt in (stage1, stage3):
+        assert target in prompt
+        assert "Pending site selection, incentives, or approvals alone" in prompt
+        assert "do not negate an announced project" in prompt
+        assert "only considering whether to undertake a project" in prompt
+        assert "requires expansion of an existing plant" in prompt
+        assert "must add the footprint or capacity the target requests" in prompt
+        assert "a small figure is not major" in prompt
+    assert source_text in stage3
+
+
+@pytest.mark.parametrize("target", [
+    "Opened a new manufacturing facility in the last 12 months, per a press "
+    "release or an economic-development announcement.",
+    "Opened a new manufacturing facility in the last 365 days, as announced "
+    "in a company press release.",
+    "Opened (not merely announced) a new manufacturing facility in the last 12 months.",
+    "Opened a new manufacturing facility in the last 12 months; announced or "
+    "planned facilities do not count.",
+    "Opened a new plant in the last 12 months as part of a geographic expansion.",
+    "Opened a new facility to expand production capacity in the last 12 months.",
+    "Opened a new plant or announced a major plant expansion in the last year; "
+    "announced projects that are not yet built do not count.",
+])
+def test_opening_only_wording_does_not_add_expansion_rule(target) -> None:
+    row = _row(
+        company="Example Manufacturing",
+        claim="Example opened a new plant.",
+        target=target,
+        source_url="https://example.com/news/opened-plant",
+        evidence_type="FACILITY_OPENING",
+    )
+
+    for prompt in _prompts(row, "Example opened a new plant."):
+        assert _common.FACILITY_OPENING_BLOCK in prompt
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK not in prompt
+
+
+def test_expansion_rule_never_reaches_non_facility_targets() -> None:
+    row = _row(
+        company="Example",
+        claim="Example expanded into Canada.",
+        target="Announced an expansion into a new geographic market in the last year.",
+        source_url="https://example.com/news/canada",
+        evidence_type="MARKET_EXPANSION",
+    )
+
+    for prompt in _prompts(row, "Example expanded into Canada."):
+        assert _common.FACILITY_EXPANSION_ALTERNATIVE_BLOCK not in prompt
 
 
 def test_unrelated_product_launch_does_not_receive_event_type_rules() -> None:

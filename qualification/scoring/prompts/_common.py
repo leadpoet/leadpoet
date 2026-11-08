@@ -11,6 +11,7 @@ byte-identical output through the refactor.
 Snapshot equality test: ``tests/test_prompt_refactor.py``.
 """
 import json
+import re
 from datetime import date
 from typing import Any, Dict, Iterable, List
 
@@ -397,6 +398,39 @@ FACILITY_OPENING_BLOCK = """      * Apply this block only to a chosen facility-o
         expected completion date does not prove an opening. Apply this boundary
         even when the planned facility is material or construction is underway."""
 
+# An explicit announced alternative, such as "or announced a new facility" or
+# "announced a major plant expansion". Not "as announced in a press release"
+# (a source type) or an unrelated "expansion" purpose.
+_FACILITY_ANNOUNCED_ALTERNATIVE_RE = re.compile(
+    r"\bor announced\b|\bannounced\b[^.;()]*\bexpansion\b"
+)
+# A prohibition on announcement-only projects, not an unrelated exclusion
+# such as "excluding warehouses" in an otherwise valid plant alternative.
+_FACILITY_ANNOUNCED_EXCLUSION_RE = re.compile(
+    r"\b(?:announced|planned) (?:projects|facilities|plants|sites)\b"
+    r"[^.;()]*\b(?:do|does|will) not (?:count|qualify)\b"
+)
+
+
+FACILITY_EXPANSION_ALTERNATIVE_BLOCK = """      * When the actual target ICP text also accepts an announced new facility
+        or an announced plant, facility, or capacity expansion, evaluate that
+        alternative on its own and preserve its explicit exclusions. An
+        announced new site can satisfy an expansion alternative before
+        construction finishes, but it must add the footprint or capacity the target requests.
+        If the target requires expansion of an existing plant, a separate new
+        site alone does not satisfy it. The company itself must have announced
+        a project decision or commitment, rather than only considering whether to undertake a project.
+        Pending site selection, incentives, or approvals alone
+        do not negate an announced project; neither does calling it proposed.
+        The source may be the company, news coverage, or an
+        economic-development agency. For a plant or manufacturing target the
+        new site must produce goods, not serve as an office, warehouse, or
+        headquarters. Keep every stated qualifier: "major" requires a material
+        scale stated by the source, such as a large investment, floor area,
+        workforce, or capacity increase; a small figure is not major. The
+        announcement date must fall inside the target window. Rumors and site
+        searches remain insufficient."""
+
 
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     Apply this block only to a chosen new-market alternative in the actual
@@ -636,6 +670,10 @@ def build_verification_prompt(
         ))
     ):
         parts.append(FACILITY_OPENING_BLOCK)
+        if _FACILITY_ANNOUNCED_ALTERNATIVE_RE.search(
+            criterion
+        ) and not _FACILITY_ANNOUNCED_EXCLUSION_RE.search(criterion):
+            parts.append(FACILITY_EXPANSION_ALTERNATIVE_BLOCK)
     if row.get("_evidence_type") == "MARKET_EXPANSION":
         parts.append(MARKET_EXPANSION_BLOCK)
     if row.get("_evidence_type") in {"FUNDING", "FINANCING"}:

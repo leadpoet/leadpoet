@@ -1117,6 +1117,9 @@ def session(
             'sandbox_mode = "danger-full-access"',
             "web_search = " + json.dumps(web_search),
             'check_for_update_on_startup = false',
+            # Disable the native CLI's optional analytics in this isolated home.
+            '[analytics]',
+            'enabled = false',
             '[agents]',
             'enabled = false',
             '[features]',

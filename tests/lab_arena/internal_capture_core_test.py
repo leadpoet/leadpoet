@@ -217,6 +217,52 @@ def test_chat_summary_text_remains_a_summary_through_internal_storage_and_export
     assert candidate["target"] == {"role": "assistant", "content": "Supported answer."}
 
 
+@pytest.mark.parametrize("redacted_stage", ["request", "context", "outcome", "response"])
+def test_reasoning_privacy_tracks_response_without_admitting_nonexact_sft(tmp_path, redacted_stage):
+    """A redacted source prompt must not make intact response thinking disappear."""
+    secret = "synthetic-private-value"
+    registry = reviewed_registry()
+    payload = request()
+    if redacted_stage == "request":
+        payload["messages"][0]["content"] += " " + secret
+    payload, _ = reasoning_capture.apply(
+        "openrouter.chat", payload, policy=reasoning_capture.POLICY, registry=registry)
+    provider = response()
+    provider.update(provider="Route A", openrouter_metadata={"endpoints": {"available": [
+        {"selected": True, "model": "test/model", "provider": "Route A"}]}})
+    if redacted_stage == "response":
+        provider["api_key"] = secret
+    objects = LocalObjectStore(tmp_path)
+    call = capture.InternalCapture(objects).start(
+        purpose="admission_review", context={"api_key": secret} if redacted_stage == "context" else {},
+        request=payload, secrets=(secret,))
+    call.response(body=json.dumps(provider).encode(), status=200)
+    call.finish(outcome={"api_key": secret} if redacted_stage == "outcome" else
+                {"host_decision": {"passed": True}}, cost_microusd=12)
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json", registry=registry)
+
+    assert raw["completeness"]["complete"] is False
+    assert raw["completeness"]["gaps"] == ["privacy_redactions"]
+    assert raw["sft_exclusions"] == ["privacy_nonexact"] and candidate is None
+    assert secret not in json.dumps(raw)
+    assert raw["events"]["response"]["capture"]["redacted"] is (redacted_stage == "response")
+    expected = "redacted" if redacted_stage == "response" else "full_thinking"
+    assert raw["reasoning"]["status"]["returned"] == expected
+    assert bool(raw["reasoning"]["full_generated_thinking"]) is (redacted_stage != "response")
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry))
+    output = tmp_path / "export"
+    assert main(["--refs", call.prefix + "request.json", "--object-root", str(tmp_path),
+                 "--reasoning-registry", str(registry_path), "--output", str(output)]) == 2
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["counts"]["calls"] == 1
+    assert manifest["counts"].get("sft_candidates", 0) == 0
+    assert manifest["gap_counts"] == {"privacy_redactions": 1}
+    assert manifest["reasoning_status"] == {expected: 1}
+    assert (output / "sft.jsonl").read_text() == ""
+
+
 @pytest.mark.parametrize("finish", ["length", "content_filter", "error"])
 def test_truncated_or_refused_results_remain_raw_without_sft_targets(tmp_path, finish):
     provider = response()

@@ -349,7 +349,7 @@ def test_all_capture_storage_failures_are_observational():
     disabled.finish(outcome={})
 
 
-def test_index_outage_logs_only_fixed_metadata_without_secret_or_error_text(caplog):
+def test_index_outage_logs_only_fixed_metadata_without_secret_or_error_text(capsys):
     secret = "never-log-this-private-credential"
     class Broken:
         def put(self, *args):
@@ -359,20 +359,23 @@ def test_index_outage_logs_only_fixed_metadata_without_secret_or_error_text(capl
     response_result = call.response(body=json.dumps(response()).encode(), status=200)
     finish_result = call.finish(outcome={"committed_review": {"status": "passed"}, "private_note": secret}, cost_microusd=12)
     assert response_result["status"] == finish_result["status"] == "unavailable"
-    messages = [record.getMessage() for record in caplog.records if record.name == capture.__name__]
+    text = capsys.readouterr().err
+    messages = text.splitlines()
     assert messages == ["arena_internal_capture_write_failed stage=" + stage
                         + " purpose=admission_review call_id=" + call.call_id for stage in capture.STAGES]
-    assert secret not in caplog.text
-    assert "storage endpoint" not in caplog.text and "private_context" not in caplog.text
-    assert "private_note" not in caplog.text and "Supported answer" not in caplog.text
+    assert secret not in text
+    assert "storage endpoint" not in text and "private_context" not in text
+    assert "private_note" not in text and "Supported answer" not in text
 
 
-def test_unknown_purpose_and_logger_failure_cannot_expose_data_or_break_capture(monkeypatch, caplog):
+def test_unknown_purpose_and_stream_failure_cannot_expose_data_or_break_capture(monkeypatch, capsys):
     call = capture.InternalCapture(None).start(purpose="private_label", context={}, request=request())
-    assert "purpose=unknown" in caplog.text and "private_label" not in caplog.text
-    def failed_logger(*args, **kwargs):
-        raise RuntimeError("logging unavailable")
-    monkeypatch.setattr(capture._LOGGER, "warning", failed_logger)
+    text = capsys.readouterr().err
+    assert "purpose=unknown" in text and "private_label" not in text
+    class BrokenStream:
+        def write(self, _value):
+            raise RuntimeError("stream unavailable")
+    monkeypatch.setattr(capture.sys, "stderr", BrokenStream())
     call.response(body=b"{}", status=200)
     assert call.finish(outcome={"status": "unchanged"})["status"] == "unavailable"
 

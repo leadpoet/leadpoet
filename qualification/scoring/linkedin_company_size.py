@@ -538,8 +538,22 @@ def project_structured_linkedin_company_identity(
         or any(ord(character) < 32 for character in name)
     ):
         return None
+    raw_company_id = element.get("id")
+    if isinstance(raw_company_id, int) and not isinstance(raw_company_id, bool):
+        company_id = str(raw_company_id)
+    elif isinstance(raw_company_id, str) and re.fullmatch(r"[0-9]+", raw_company_id):
+        company_id = raw_company_id
+    else:
+        company_id = ""
+    if requested_slug.isdigit() and (
+        company_id != requested_slug or not _company_name(expected_company_name)
+    ):
+        return None
     if returned_slug == requested_slug:
-        if not website_matches:
+        if not website_matches or (
+            requested_slug.isdigit()
+            and _company_name(name) != _company_name(expected_company_name)
+        ):
             return None
         return {
             "name": name,
@@ -552,17 +566,6 @@ def project_structured_linkedin_company_identity(
         }
     observed_profile = _strict_linkedin_company_profile_url(observed_profile_url)
     observed_slug = linkedin_company_page_slug(observed_profile)
-    raw_company_id = element.get("id")
-    if isinstance(raw_company_id, int) and not isinstance(raw_company_id, bool):
-        company_id = str(raw_company_id)
-    elif (
-        isinstance(raw_company_id, str)
-        and raw_company_id == raw_company_id.strip()
-        and raw_company_id.isdigit()
-    ):
-        company_id = raw_company_id
-    else:
-        company_id = ""
     if not requested_slug.isdigit():
         # An exact old vanity lookup can return the main profile's canonical
         # URL. Require its full independent identity; a same-domain name or
@@ -588,6 +591,16 @@ def project_structured_linkedin_company_identity(
             "company_id": company_id,
             "requested_url": profile_url,
         }
+    universal_name = element.get("universalName")
+    # A numeric lookup may return its current vanity URL without a separate
+    # web observation. The provider must bind the exact ID and vanity name;
+    # it must never override a conflicting independent profile observation.
+    provider_vanity_matches = (
+        isinstance(universal_name, str)
+        and universal_name == returned_slug
+        and bool(returned_slug)
+        and not returned_slug.isdigit()
+    )
     identity_name = name
     identity_source_field = STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
     name_matches = _company_name(name) == _company_name(expected_company_name)
@@ -624,9 +637,13 @@ def project_structured_linkedin_company_identity(
     if (
         not requested_slug.isdigit()
         or company_id != requested_slug
-        or not observed_slug
-        or observed_slug.isdigit()
-        or returned_profile != observed_profile
+        or not returned_slug
+        or returned_slug.isdigit()
+        or (bool(observed_profile_url) and (
+            not observed_slug or returned_profile != observed_profile
+        ))
+        or (not observed_profile_url and not provider_vanity_matches)
+        or (universal_name is not None and not provider_vanity_matches)
         or not name_matches
         or not _company_name(expected_company_name)
     ):
@@ -741,6 +758,7 @@ def project_structured_linkedin_company_description(
         requested_domain,
         requested_profile_url,
         payload,
+        expected_company_name=expected_company_name,
     )
     elements = _structured_company_elements(payload)
     normalized_expected_name = _company_name(expected_company_name)
@@ -785,6 +803,7 @@ def project_structured_linkedin_company_headquarters(
 
     identity = project_structured_linkedin_company_identity(
         requested_domain, requested_profile_url, payload,
+        expected_company_name=expected_company_name,
     )
     elements = _structured_company_elements(payload)
     if (
@@ -1047,6 +1066,14 @@ async def fetch_structured_linkedin_company_size(
             }
         else:
             identity_evidence = None
+    if (
+        linkedin_company_page_slug(canonical_profile).isdigit()
+        and identity_evidence is None
+    ):
+        # An exact-URL size/type fallback cannot bypass a conflicting numeric
+        # company ID or missing independent name binding.
+        _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
+        return None
     projected_profile = (
         str(identity_evidence.get("url") or "")
         if isinstance(identity_evidence, Mapping)

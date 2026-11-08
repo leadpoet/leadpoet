@@ -762,8 +762,61 @@ def _terminal_accounting_matches(call, kind, amount) -> bool:
             and terminals[0]["amount_microusd"] == amount)
 
 
+def _uncompleted_transport_auxiliary(call) -> bool:
+    """Validate private failed-stream evidence without granting delivery proof."""
+    from lab_arena.broker import _TRANSPORT_ERROR_CLASSES
+
+    receipts = call.get("upstream_response_receipts")
+    if not isinstance(receipts, list) or len(receipts) != 1 or not isinstance(receipts[0], Mapping):
+        return False
+    heads = [row for row in call.get("lifecycle") or [] if row.get("entry_id") == call.get("terminal_entry_id")]
+    if len(heads) != 1:
+        return False
+    accounting = heads[0].get("accounting") or {}
+    if not isinstance(accounting, Mapping):
+        return False
+    authority = accounting.get("call", accounting)
+    if (not isinstance(authority, Mapping) or authority.get("call_succeeded") is not False
+            or not (authority.get("reason") == "transport_failure"
+                    or authority.get("reason") == "missing_provider_cost" and authority.get("transport_failure") is True)
+            or not isinstance(authority.get("transport_error_class"), str)
+            or authority["transport_error_class"] not in _TRANSPORT_ERROR_CLASSES | {"ProviderTransportError"}
+            or type(authority.get("observed_provider_status")) is not int
+            or not 100 <= authority["observed_provider_status"] <= 599):
+        return False
+    receipt = receipts[0]
+    response = receipt.get("response")
+    redactions = receipt.get("privacy_redactions")
+    if not isinstance(redactions, list) or not all(isinstance(reason, str) and reason in {
+            "credential", "hidden_reasoning", "deepline_person_entities"} for reason in redactions):
+        return False
+    if redactions:
+        cleaned, removed = training_capture.sanitize_training_value(response)
+        if cleaned != response or not set(removed) <= set(redactions):
+            return False
+    elif not training_steps._exact(response, response=True):
+        return False
+    return (type(receipt.get("entry_id")) is int and receipt["entry_id"] == call.get("terminal_entry_id")
+            and type(receipt.get("status")) is int and receipt["status"] == authority["observed_provider_status"]
+            and receipt.get("call_succeeded") is False
+            and all(receipt.get(key) == call.get(key) for key in ("call_identity", "operation_id", "request_hash"))
+            and receipt.get("provenance") == "private_upstream_response_receipt"
+            and receipt.get("delivery_to_worker") == "not_proved"
+            and bool(redactions) == ("upstream_response_privacy_nonexact" in (call.get("evidence_gaps") or []))
+            and isinstance(response, Mapping)
+            and receipt.get("response_sha256") == contracts.document_hash(response)
+            and isinstance(receipt.get("body_sha256"), str)
+            and contracts.SHA256_RE.fullmatch(receipt["body_sha256"]) is not None
+            and isinstance(receipt.get("wire_body_sha256"), str)
+            and contracts.SHA256_RE.fullmatch(receipt["wire_body_sha256"]) is not None
+            and (bool(redactions) or receipt["body_sha256"] == receipt["wire_body_sha256"])
+            and type(receipt.get("body_bytes")) is int and receipt["body_bytes"] > 0
+            and type(receipt.get("wire_body_bytes")) is int and receipt["wire_body_bytes"] > 0
+            and (bool(redactions) or receipt["body_bytes"] == receipt["wire_body_bytes"]))
+
+
 def _verified_unavailable_upstream_failure(example, call, *, worker_proofs=None) -> bool:
-    """Prove the observed no-upstream-response bridge error, not a free call."""
+    """Prove the unavailable worker result, not a free or delivered model call."""
     configuration = example.get("configuration") or {}
     if (training_coverage.MISSING_REASONING_SETTING not in configuration
             or not training_coverage.uses_host_result_evidence(configuration)
@@ -773,8 +826,10 @@ def _verified_unavailable_upstream_failure(example, call, *, worker_proofs=None)
             or not _terminal_accounting_matches(call, "uncertain", 0)
             or type(call.get("terminal_entry_id")) is not int or call["terminal_entry_id"] < 1
             or any(key in call for key in ("response", "response_sha256", "response_status"))
-            or any(key in call and (not isinstance(call[key], list) or call[key])
-                   for key in ("upstream_response_receipts", "response_privacy_redactions"))):
+            or "response_privacy_redactions" in call and call["response_privacy_redactions"] != []
+            or "upstream_response_receipts" in call and (
+                not isinstance(call["upstream_response_receipts"], list)
+                or call["upstream_response_receipts"] and not _uncompleted_transport_auxiliary(call))):
         return False
     receipts = call.get("response_receipts")
     if not isinstance(receipts, list) or len(receipts) != 1:
@@ -1042,6 +1097,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
                 or (request.get("effective_parameters") or {}).get("model") != body.get("model")
                 or not set(call.get("evidence_gaps") or []) <= (
                     {"provider_cost_unresolved", "full_response_unavailable"}
+                    | ({"upstream_response_privacy_nonexact"} if call.get("upstream_response_receipts") else set())
                     if "full_response_unavailable" in (call.get("evidence_gaps") or [])
                     and _verified_unavailable_upstream_failure(example, call, worker_proofs=worker_proofs)
                     else {"provider_cost_unresolved"})

@@ -30,7 +30,8 @@ def receipt(parameters, *, verdict='pass', cost='0.001234', provider='Nebius'):
     return body
 
 
-def reviewer(response, *, store=None, capture=None):
+def reviewer(response, *, store=None, capture=None,
+             prospective_alternate_model=code_review.FALLBACK_REVIEW_MODEL):
     payload = _archive(_source())
     prices = _price_table()
     prices['models'][DEEPSEEK] = dict(prices['models'][code_review.DEFAULT_REVIEW_MODEL])
@@ -39,7 +40,8 @@ def reviewer(response, *, store=None, capture=None):
     transport = ReviewTransport(response)
     instance = SubmissionCodeReviewer(store=store, objects=Objects(payload),
         credential_for=lambda row: MINER_KEY, price_table=prices, transport=transport,
-        prospective_primary_model=DEEPSEEK, capture=capture)
+        prospective_primary_model=DEEPSEEK, capture=capture,
+        prospective_alternate_model=prospective_alternate_model)
     row = {**SUBMISSION, 'source_size_bytes': len(payload), 'code_review_status': 'pending',
            'code_review_attempts': 0}
     return instance, row, store, transport
@@ -132,6 +134,7 @@ def test_real_wiring_requires_db_capability_and_selects_only_prospective_admissi
     from tests.lab_arena.broker_round_lease_wiring_test import _wired_factory
     service, _, _ = _wired_factory(monkeypatch)
     assert service.config.code_reviewer.prospective_primary_model == DEEPSEEK
+    assert service.config.code_reviewer.prospective_alternate_model == code_review.PROSPECTIVE_ALTERNATE_MODEL
 
 
 def test_reservation_uses_the_endpoint_ceiling_when_catalog_is_cheaper():

@@ -242,6 +242,16 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_file_count", "integer"),
         ("p_source_bytes", "bigint"),
     ),
+    "lab_arena_begin_submission_review_v2": (
+        ("p_submission_id", "text"),
+        ("p_miner_hotkey", "text"),
+        ("p_claim_token_hash", "text"),
+        ("p_reservation_microusd", "bigint"),
+        ("p_review_model", "text"),
+        ("p_file_count", "integer"),
+        ("p_source_bytes", "bigint"),
+        ("p_review_alternate_model", "text"),
+    ),
     "lab_arena_finish_submission_review": (
         ("p_submission_id", "text"),
         ("p_miner_hotkey", "text"),
@@ -1433,6 +1443,7 @@ class ArenaStore:
         self, *, require_refusal_fallback: bool = False,
         require_invalid_review_budget: bool = False,
         require_prospective_primary: bool = False,
+        require_prospective_alternate: bool = False,
     ) -> Dict[str, Any]:
         """Require the independently deployable pre-scoring review capability."""
 
@@ -1476,6 +1487,15 @@ class ArenaStore:
             "truncation_alternate": "openai/gpt-6.1-sol",
         }:
             raise ArenaStoreError("code review primary schema mismatch")
+        if require_prospective_alternate and result.get("prospective_alternate") != {
+            "model": "moonshotai/kimi-k3.1-pro",
+            "legacy_model": "openai/gpt-6.1-sol",
+            "rpc": "lab_arena_begin_submission_review_v2",
+            "binding": "first_primary_reservation_marker_or_legacy_sol",
+            "context_window_tokens": 1048576,
+            "max_output_tokens": 65536,
+        }:
+            raise ArenaStoreError("code review alternate schema mismatch")
         if require_invalid_review_budget and result.get("invalid_review_budget") != {
             "max_reservations": 3,
             "starts_at": "first_invalid_or_unverified_result",
@@ -2153,10 +2173,12 @@ class ArenaStore:
         review_model: str,
         file_count: int,
         source_bytes: int,
+        review_alternate_model: str | None = None,
     ) -> Dict[str, Any]:
         return _require_mapping(
             self._transport.rpc(
-                "lab_arena_begin_submission_review",
+                ("lab_arena_begin_submission_review_v2" if review_alternate_model is not None
+                 else "lab_arena_begin_submission_review"),
                 {
                     "p_submission_id": str(submission_id),
                     "p_miner_hotkey": str(miner_hotkey),
@@ -2165,6 +2187,8 @@ class ArenaStore:
                     "p_review_model": str(review_model),
                     "p_file_count": int(file_count),
                     "p_source_bytes": int(source_bytes),
+                    **({"p_review_alternate_model": review_alternate_model}
+                       if review_alternate_model is not None else {}),
                 },
             ),
             "begin_submission_review",

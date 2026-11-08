@@ -21,10 +21,11 @@ class LeaseStore(FakeLedgerStore):
         self.lease_expires_at = self.paid_at
 
     def code_review_schema(self, *, require_refusal_fallback=False, require_invalid_review_budget=False,
-                           require_prospective_primary=False):
+                           require_prospective_primary=False, require_prospective_alternate=False):
         assert require_refusal_fallback is True
         assert require_invalid_review_budget is True
         assert require_prospective_primary is True
+        assert require_prospective_alternate is True
         return {"refusal_fallback": {"max_primary_refusal_claims": 2, "max_alternate_claims": 2}}
 
     def submission_replacement_schema(self, *, require_per_round_cutoff=False):

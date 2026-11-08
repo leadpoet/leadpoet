@@ -165,17 +165,23 @@ def empty_value(value: Any) -> bool:
     return value is None or (isinstance(value, (str, list, dict)) and len(value) == 0)
 
 
-def _readable_text_payload(value: Any, part_type: str | None = None) -> bool:
+def _plaintext_text_payload(value: Any, part_type: str | None = None) -> bool:
+    """Validate exposed text shape, not whether it proves substantive thinking.
+
+    Blank strings and empty typed content lists carry exact provider/history
+    structure. An empty summary alone does not establish exposed plaintext.
+    Thinking coverage separately requires nonblank text segments.
+    """
     if isinstance(value, str):
-        return bool(value.strip())
-    return (isinstance(value, list) and bool(value)
+        return True
+    return (isinstance(value, list) and (bool(value) or part_type == "reasoning_text")
             and all(isinstance(part, Mapping) and part.get("type") == part_type
-                    and isinstance(part.get("text"), str) and bool(part["text"].strip())
+                    and isinstance(part.get("text"), str)
                     for part in value))
 
 
 def reasoning_kind(item: Mapping[str, Any]) -> str | None:
-    """Classify a typed provider reasoning item by its readable payload."""
+    """Classify a typed provider reasoning item by its exposed plaintext shape."""
     kind = item.get("type")
     if not isinstance(kind, str) or kind not in _REASONING_TYPES:
         return None
@@ -183,13 +189,13 @@ def reasoning_kind(item: Mapping[str, Any]) -> str | None:
         return "opaque"
     if kind == "reasoning":
         return "readable" if any((
-            _readable_text_payload(item.get("summary"), "summary_text"),
-            _readable_text_payload(item.get("content"), "reasoning_text"),
-            _readable_text_payload(item.get("text")),
+            _plaintext_text_payload(item.get("summary"), "summary_text"),
+            _plaintext_text_payload(item.get("content"), "reasoning_text"),
+            _plaintext_text_payload(item.get("text")),
         )) else "opaque"
     field_name = _READABLE_FIELDS.get(kind)
     if field_name is not None:
-        if not _readable_text_payload(item.get(field_name)):
+        if not _plaintext_text_payload(item.get(field_name)):
             return "opaque"
     return "readable"
 
@@ -397,11 +403,11 @@ def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_co
         return True
     if item_kind == "opaque" and name not in {"type", "id", "status", "index", "format"}:
         return True
-    if item_kind == "readable" and name == "summary" and not _readable_text_payload(child, "summary_text"):
+    if item_kind == "readable" and name == "summary" and not _plaintext_text_payload(child, "summary_text"):
         return True
-    if item_kind == "readable" and name == "content" and not _readable_text_payload(child, "reasoning_text"):
+    if item_kind == "readable" and name == "content" and not _plaintext_text_payload(child, "reasoning_text"):
         return True
-    if item_kind == "readable" and name in {"text", "thinking"} and not _readable_text_payload(child):
+    if item_kind == "readable" and name in {"text", "thinking"} and not _plaintext_text_payload(child):
         return True
     if name == "reasoning_details":
         return not isinstance(child, list)

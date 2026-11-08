@@ -192,6 +192,31 @@ def test_full_thinking_requires_approved_route_actual_provider_and_nonempty_text
     assert candidate["generated_thinking"] == []
 
 
+@pytest.mark.parametrize("has_full_thinking", [False, True])
+def test_chat_summary_text_remains_a_summary_through_internal_storage_and_export(tmp_path, has_full_thinking):
+    registry = reviewed_registry()
+    payload, _ = reasoning_capture.apply("openrouter.chat", request(), policy=reasoning_capture.POLICY,
+                                         registry=registry)
+    provider = response()
+    provider.update(provider="Route A", openrouter_metadata={"endpoints": {"available": [
+        {"selected": True, "model": "test/model", "provider": "Route A"}]}})
+    message = provider["choices"][0]["message"]
+    if not has_full_thinking:
+        message.pop("reasoning_content")
+    message["reasoning_details"] = [{"type": "summary_text", "text": "An ancillary summary."}]
+    objects, call = captured(tmp_path, provider=provider, payload=payload)
+    raw, candidate = capture.read_call(objects, call.prefix + "request.json", registry=registry)
+    assert raw["response"] == provider and raw["completeness"]["complete"] is True
+    assert raw["reasoning"]["contains_summary"] is True
+    assert raw["reasoning"]["available_segments"][-1] == {
+        "field": "reasoning_details.summary", "text": "An ancillary summary.",
+        "source_paths": [["choices", 0, "message", "reasoning_details", 0, "text"]]}
+    assert candidate["available_reasoning"] == raw["reasoning"]["available_segments"]
+    assert [segment["text"] for segment in candidate["generated_thinking"]] == (
+        ["Check the original source."] if has_full_thinking else [])
+    assert candidate["target"] == {"role": "assistant", "content": "Supported answer."}
+
+
 @pytest.mark.parametrize("finish", ["length", "content_filter", "error"])
 def test_truncated_or_refused_results_remain_raw_without_sft_targets(tmp_path, finish):
     provider = response()

@@ -49,6 +49,7 @@ async def test_exact_observed_fields_keep_their_meaning(monkeypatch):
     assert "isListed: true" in result["content"]
     assert "applyUrl: " + URL + "/application" in result["content"]
     assert "location: San Francisco" in result["content"]
+    assert result["source_publication_date"] == "2026-05-27"
     assert "accepting applications" not in result["content"]
 
 
@@ -82,6 +83,7 @@ async def test_old_publication_date_cannot_be_replaced_by_update_date(monkeypatc
     })
     assert "publishedAt: 2025-07-21T10:00:00Z" in result["content"]
     assert "2026-11-07" not in result["content"]
+    assert result["source_publication_date"] == "2025-07-21"
 
 
 @pytest.mark.asyncio
@@ -90,3 +92,26 @@ async def test_absent_metadata_is_not_synthesized(monkeypatch):
     result, _ = await fetch(monkeypatch, posting)
     assert result["ok"] is True
     assert "publishedAt:" not in result["content"] and "applyUrl:" not in result["content"]
+    assert result["source_publication_date"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("date_value", [None, True, "2026-02-30T10:00:00Z", "not a date"])
+async def test_invalid_publication_metadata_does_not_gain_a_date(monkeypatch, date_value):
+    result, _ = await fetch(monkeypatch, {**POSTING, "publishedAt": date_value})
+    assert result["source_publication_date"] == ""
+
+
+@pytest.mark.asyncio
+async def test_publication_metadata_reaches_the_native_prompt_projection(monkeypatch):
+    result, _ = await fetch(monkeypatch, deepcopy(POSTING))
+
+    async def ashby(_url):
+        assert _url == URL
+        return result
+
+    monkeypatch.setattr(intent, "_scrape_ashby_job", ashby)
+    contents = await intent._fetch_sd_then_exa([URL])
+    projected = intent._project_contents_for_prompt(contents)
+    assert projected["results"][0]["source_publication_date"] == "2026-05-27"
+    assert "applyUrl: " + URL + "/application" in projected["results"][0]["text"]

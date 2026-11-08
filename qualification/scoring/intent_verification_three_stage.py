@@ -864,6 +864,7 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
                 "ok": True,
                 "stage": f"sd:ashby_api:{attempt}",
                 "content": content,
+                "source_publication_date": _source_publication_date(posting.get("publishedAt")),
                 "observed_ownership_links": _observed_ownership_links(
                     str(posting.get("descriptionHtml") or ""), source_url
                 ),
@@ -4087,6 +4088,7 @@ async def _fetch_sd_then_exa(
                     "url": url,
                     "title": "",
                     "text": str(ashby["content"])[:max_chars],
+                    "source_publication_date": ashby.get("source_publication_date") or "",
                     "meta": {"kind": "ashby_job", "observed_ownership_links": ashby.get("observed_ownership_links") or []},
                 })
                 statuses.append({

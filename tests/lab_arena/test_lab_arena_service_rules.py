@@ -777,6 +777,7 @@ def test_completion_records_only_newly_committed_matching_outcome(
         "run_identity": _telemetry_run_identity(service._store.get_run("run-1")),
         "failure_stage": "-",
         "failure_error_class": "-",
+        "failure_reason": "-",
     })] if recorded else [])
 
 
@@ -798,6 +799,7 @@ def test_completion_records_newly_committed_accepted_run(monkeypatch):
         "run_identity": _telemetry_run_identity(service._store.get_run("run-1")),
         "failure_stage": "-",
         "failure_error_class": "-",
+        "failure_reason": "-",
     })]
 
 
@@ -842,6 +844,7 @@ def test_completion_identity_comes_from_committed_run_not_request(
         "run_identity": _telemetry_run_identity(run),
         "failure_stage": "-",
         "failure_error_class": "-",
+        "failure_reason": "-",
     })]
     assert observed[0][1]["run_identity"]["arena.runner_hotkey"] == runner_hotkey
     assert observed[0][1]["run_identity"]["arena.attempt"] == attempt

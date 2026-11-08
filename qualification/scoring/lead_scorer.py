@@ -62,6 +62,7 @@ from qualification.scoring.company_verification import (
 )
 from qualification.scoring.company_fit_decision import (
     verified_homepage_brand_name,
+    observed_linkedin_ampersand_slug,
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
@@ -13743,6 +13744,9 @@ def _exclusion_linkedin_key(value: str) -> str:
     ):
         return ""
     slug = parts[1].casefold()
+    ampersand_slug = observed_linkedin_ampersand_slug(slug)
+    if ampersand_slug:
+        return ampersand_slug
     return slug if re.fullmatch(r"[a-z0-9][a-z0-9._%+-]{0,99}", slug) else ""
 
 

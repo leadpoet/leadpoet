@@ -5,7 +5,7 @@ import unicodedata
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 from enum import Enum
 
 from qualification.competition_models import public_http_url
@@ -113,6 +113,12 @@ _PROMPT_REGISTRABLE_DOMAIN_RE = re.compile(
 )
 _PROMPT_LINKEDIN_COMPANY_SLUG_RE = re.compile(
     r"[a-z0-9][a-z0-9_.-]{0,99}",
+    re.ASCII,
+)
+# Real LinkedIn company slugs may contain "&" (served as "%26"). Same grammar
+# as company_fit_decision.observed_linkedin_ampersand_slug.
+_PROMPT_LINKEDIN_COMPANY_AMPERSAND_SLUG_RE = re.compile(
+    r"[a-z0-9][a-z0-9_.&-]{0,99}",
     re.ASCII,
 )
 
@@ -311,9 +317,16 @@ def candidate_linkedin_prompt_slug(
     if len(parts) != 2 or parts[0] not in {"company", "in"}:
         raise ValueError(f"{field_name} must contain one strict LinkedIn slug")
     slug = parts[1]
-    if _PROMPT_LINKEDIN_COMPANY_SLUG_RE.fullmatch(slug) is None:
-        raise ValueError(f"{field_name} slug is invalid")
-    return slug
+    if _PROMPT_LINKEDIN_COMPANY_SLUG_RE.fullmatch(slug) is not None:
+        return slug
+    if (
+        parts[0] == "company"
+        and "&" in slug
+        and _PROMPT_LINKEDIN_COMPANY_AMPERSAND_SLUG_RE.fullmatch(slug) is not None
+    ):
+        # Return the inert percent-encoded form LinkedIn itself serves.
+        return quote(slug, safe="._-")
+    raise ValueError(f"{field_name} slug is invalid")
 
 
 def candidate_company_prompt_identity(

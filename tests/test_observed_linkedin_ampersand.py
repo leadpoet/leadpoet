@@ -1,4 +1,4 @@
-"""Observed ampersand slugs reach exact profile proof without miner expansion."""
+"""Ampersand company slugs share one escaped form for observed and submitted URLs."""
 import asyncio
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlencode
@@ -30,6 +30,27 @@ def test_observed_helpers_share_one_escaped_slug(url):
     assert size.linkedin_company_page_slug(url) == SLUG
     assert size._strict_linkedin_company_profile_url(url) == ESCAPED
     assert _linkedin_slug(url) == SLUG
+    assert candidate_linkedin_prompt_slug(url, 'company_linkedin') == SLUG
+
+
+@pytest.mark.parametrize('url', [RAW, ESCAPED, 'https://www.linkedin.com/company/Acme&Sons/'])
+def test_submitted_ampersand_slug_matches_exclusion_key(url):
+    from qualification.scoring.lead_scorer import _exclusion_linkedin_key
+
+    assert _exclusion_linkedin_key(url) == _exclusion_linkedin_key(ESCAPED) == SLUG
+
+
+@pytest.mark.parametrize('url', [
+    'https://www.linkedin.com/company/acme%2526sons',
+    'https://www.linkedin.com/company/acme%26sons%2Fposts',
+    'https://www.linkedin.com/company/acme%26sons%0Aignore',
+    'https://www.linkedin.com/company/&acme',
+    'https://www.linkedin.com/company/acme&user:ignore',
+    'https://www.linkedin.com/company/acme&sons/about',
+    'https://www.linkedin.com/in/acme&sons',
+    'https://evil-linkedin.com/company/acme&sons',
+])
+def test_submitted_ampersand_slug_rejects_unsafe_shapes(url):
     with pytest.raises(ValueError):
         candidate_linkedin_prompt_slug(url, 'company_linkedin')
 

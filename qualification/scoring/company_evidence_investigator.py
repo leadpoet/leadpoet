@@ -1158,6 +1158,40 @@ def _is_known_provider_diagnostic_only(value: str) -> bool:
     )
 
 
+def _consent_only_search_refresh(value: str, prior_text: str) -> bool:
+    """Recognize a complete consent shell after an unchanged loaded title.
+
+    This does not select the longer page or merge old and new facts. Every
+    non-title word must be known consent/blocked-media interface copy. Any
+    changed offering, withdrawal, or other substantive text keeps the normal
+    replacement behavior. The caller supplies server-loaded same-URL text.
+    """
+    text = _normalized_span(_visible_quote_surface(value))
+    prior = _normalized_span(_visible_quote_surface(prior_text))
+    start = text.find("this button closes the dialog.")
+    title = text[:start].strip() if 0 < start <= 300 else ""
+    if not title or "|" not in title or not prior.startswith(title):
+        return False
+    body = text[start:]
+    body = re.sub(
+        r"you are currently viewing a placeholder content from [\w -]{1,80}\. "
+        r"to access the actual content, click the button below\. "
+        r"please note that doing so will share data with third-party providers\. "
+        r"more information unblock content(?: accept required service and unblock content)?",
+        " ", body,
+    )
+    for phrase in (
+        "this button closes the dialog. its functionality is identical to the accept only essential cookies button.",
+        "privacy preference",
+        "we use cookies on our website. some of them are essential, while others help us to improve this website and your experience.",
+        "the following is a list of service groups for which consent can be given. the first service group is essential and cannot be unchecked.",
+        "essential functional analytics marketing external media",
+        "accept all accept only essential cookies manage cookie preferences preferences privacy policy",
+    ):
+        body = body.replace(phrase, " ")
+    return not body.strip()
+
+
 def _plain_text(value: str) -> str:
     if _is_known_binary_document(value):
         return ""
@@ -5622,7 +5656,7 @@ async def investigate_company_evidence(
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async def fetch_fresh_page(url: str) -> dict[str, Any]:
+            async def fetch_fresh_page(url: str, *, retained_search_text: str = "") -> dict[str, Any]:
                 nonlocal fetch_calls
                 fetch_calls += 1
                 contents_attempted = False
@@ -5680,6 +5714,16 @@ async def investigate_company_evidence(
                         "broker_http_404" if exc.broker_status == 404
                         else f"http_{exc.broker_status}"
                     )}
+                if (retained_search_text and result.get("ok")
+                        and result.get("url") == url
+                        and industry_source_bound(url, str(result.get("final_url") or url))
+                        and _consent_only_search_refresh(
+                            str(result.get("text") or ""), retained_search_text)):
+                    # A selected refresh must not replace checked source facts
+                    # or their link provenance with a consent interface. Use
+                    # the existing failed-refresh retention without another read.
+                    result = {"ok": False, "error": "source_access_denied",
+                              "source_body_reason": "consent_only_body"}
                 # A company brochure may be a PDF even at an extensionless URL.
                 # Recover text through the existing exact-URL provider; never
                 # treat decoded PDF bytes as source text or add a local parser.
@@ -7803,7 +7847,10 @@ async def investigate_company_evidence(
                         prior_outcome_count = len(fetch_outcomes)
                         try:
                             local_tools.pending_executed = bool(safe_url)
-                            tool_result = await fetch_fresh_page(str(safe_url or ""))
+                            tool_result = await fetch_fresh_page(str(safe_url or ""),
+                                retained_search_text=(
+                                    fetched_pages.get(safe_url, "")
+                                    if refresh_search_source else ""))
                         except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                             if not refresh_search_source or isinstance(exc, _ArenaProviderFetchError):
                                 raise

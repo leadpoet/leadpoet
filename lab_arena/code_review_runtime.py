@@ -164,6 +164,8 @@ class SubmissionCodeReviewer:
             if review_model == code_review.FALLBACK_REVIEW_MODEL
             else code_review.PROSPECTIVE_CONTEXT_WINDOW_TOKENS
             if review_model == code_review.PROSPECTIVE_REVIEW_MODEL
+            else code_review.PROSPECTIVE_ALTERNATE_CONTEXT_WINDOW_TOKENS
+            if review_model == code_review.PROSPECTIVE_ALTERNATE_MODEL
             else code_review.DEFAULT_CONTEXT_WINDOW_TOKENS
         )
         prepared = None
@@ -270,9 +272,12 @@ class SubmissionCodeReviewer:
                         route.reservation_pricing, prepared.parameters,
                         max_output_tokens=prepared.parameters["max_tokens"], model=review_model,
                     )
-                elif review_model == code_review.PROSPECTIVE_REVIEW_MODEL:
+                elif review_model in {code_review.PROSPECTIVE_REVIEW_MODEL, code_review.PROSPECTIVE_ALTERNATE_MODEL}:
                     pricing = dict(self._prices["models"][review_model])
-                    for component, ceiling in code_review.PROSPECTIVE_PRICE_CEILING.items():
+                    ceilings = (code_review.PROSPECTIVE_ALTERNATE_PRICE_CEILING
+                                if review_model == code_review.PROSPECTIVE_ALTERNATE_MODEL
+                                else code_review.PROSPECTIVE_PRICE_CEILING)
+                    for component, ceiling in ceilings.items():
                         pricing[component] = str(max(Decimal(pricing[component]), Decimal(ceiling)))
                     reservation = broker._max_openrouter_cost_for_pricing(
                         pricing, prepared.parameters,
@@ -295,6 +300,8 @@ class SubmissionCodeReviewer:
             review_model,
             len(prepared.reviewed_files) if prepared else 0,
             prepared.reviewed_file_bytes if prepared else 0,
+            *((code_review.PROSPECTIVE_ALTERNATE_MODEL,)
+              if self._prospective_primary_model == code_review.PROSPECTIVE_REVIEW_MODEL else ()),
         )
         if claim.get("status") != "claimed":
             return claim
@@ -302,6 +309,14 @@ class SubmissionCodeReviewer:
         # have sent the paid request. Never dispatch that identity again.
         if claim.get("idempotent") is True:
             return claim
+        bound_alternate = claim.get("review_alternate_model", code_review.FALLBACK_REVIEW_MODEL)
+        if (bound_alternate not in code_review.ALTERNATE_REVIEW_MODELS
+                or (review_model in code_review.ALTERNATE_REVIEW_MODELS
+                    and review_model != bound_alternate)):
+            # The database has the final route authority. A stale reader must
+            # settle the undispatched claim at zero, never send the wrong model.
+            preparation_error = code_review_policy.diagnostic(
+                "code_review_preparation_unavailable", retryable=True)
         if preparation_error:
             return self._finish_review(
                 row, token, "error",
@@ -462,7 +477,7 @@ class SubmissionCodeReviewer:
                         document = code_review_policy.diagnostic(
                             "code_review_provider_refused",
                             provider_http_status=200,
-                            retryable=review_model != code_review.FALLBACK_REVIEW_MODEL,
+                            retryable=review_model not in code_review.ALTERNATE_REVIEW_MODELS,
                         )
                     elif response.status == 200:
                         if not isinstance(parsed, Mapping):
@@ -496,7 +511,7 @@ class SubmissionCodeReviewer:
                         document = code_review_policy.diagnostic(
                             "code_review_provider_refused",
                             provider_http_status=403,
-                            retryable=review_model != code_review.FALLBACK_REVIEW_MODEL,
+                            retryable=review_model not in code_review.ALTERNATE_REVIEW_MODELS,
                         )
                     else:
                         document = code_review_policy.provider_http_diagnostic(
@@ -545,13 +560,14 @@ class SubmissionCodeReviewer:
                 "refusal_episode_start": int(previous.get("refusal_episode_start") or claim.get("attempt") or 1),
                 "review_primary_attempts": primary_before + (review_model in {
                     code_review.DEFAULT_REVIEW_MODEL, code_review.PROSPECTIVE_REVIEW_MODEL}),
-                "review_alternate_attempts": alternate_before + (review_model == code_review.FALLBACK_REVIEW_MODEL)})
-        if status == "error" and review_model == code_review.FALLBACK_REVIEW_MODEL:
+                "review_alternate_attempts": alternate_before + (review_model in code_review.ALTERNATE_REVIEW_MODELS)})
+        if status == "error" and review_model in code_review.ALTERNATE_REVIEW_MODELS:
             previous = row.get("code_review_doc") or {}
             document["retryable"] = (int(previous.get("review_alternate_attempts") or 0) + 1 < 2
                 and code_review_policy.recovery_retryable(document))
         document.update({
             "model": review_model,
+            "review_alternate_model": bound_alternate,
             "file_count": len(prepared.reviewed_files),
             "source_bytes": prepared.reviewed_file_bytes,
         })

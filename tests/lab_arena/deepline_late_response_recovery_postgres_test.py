@@ -394,3 +394,74 @@ def test_worker_socket_to_gateway_and_real_ledger_recovers_original_action(datab
             assert cur.fetchone()[0] == 1
     finally:
         worker.stop()
+
+
+@pytest.mark.parametrize("provider_status", [404, 502])
+@pytest.mark.parametrize("billing_first", [False, True])
+def test_recovered_provider_error_uses_settlement_not_success_overlay(
+    database, tmp_path, monkeypatch, provider_status, billing_first
+):
+    """A saved failed reply is billable, but is not successful research."""
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+
+    class FailedReplyTransport(LateTransport):
+        def send(self, **request):
+            response = super().send(**request)
+            if request["method"] != "GET":
+                return response
+            document = json.loads(response.body)
+            if "/executions/by-key/" in request["url"] and self.complete:
+                document["responseStatus"] = provider_status
+                document["response"] = {
+                    "request_id": NATIVE,
+                    "error": {"code": "UPSTREAM_HTTP_ERROR"},
+                }
+            elif "/billing/usage?request_id=" in request["url"] and self.bill:
+                document["recent"]["entries"][0].update(credits=0, delta=0)
+            return br.ProviderResponse(response.status, response.headers, json.dumps(document).encode())
+
+    transport = FailedReplyTransport()
+    label = str(26 + (provider_status == 502) + 2 * billing_first)
+    h, lease, token, connect, broker = setup(database, tmp_path, label, transport)
+    first = deliver(h, lease, token)
+    assert first["status"] == 502 and first["call"]["outcome"] == "uncertain"
+    transport.complete = True
+    transport.bill = True
+    if billing_first:
+        candidate = h.service.store.list_deepline_cost_reconciliations(
+            h.round_id, run_id=lease["run_id"]
+        )[0]
+        assert broker.reconcile_deepline_cost(candidate)["status"] == "settled"
+    recovery_calls = []
+    original_recover = h.service.store.recover_deepline_response
+
+    def record_recovery(**kwargs):
+        recovery_calls.append(kwargs["terminal_response"])
+        return original_recover(**kwargs)
+
+    monkeypatch.setattr(h.service.store, "recover_deepline_response", record_recovery)
+    result = deliver(h, lease, token)
+    assert recovery_calls == []  # SQL accepts only successful 2xx response overlays.
+    assert not 200 <= result["status"] < 300
+    assert result["call"]["transport_recovery"] == "deepline_execution_lookup"
+    if billing_first:
+        assert result["call"]["outcome"] == "settled"
+        assert result["call"]["actual_microusd"] == 0
+    else:
+        # Ordinary settlement does not rewrite an uncertain head. Keep the
+        # existing exact-billing reconciliation path and its cost hold.
+        assert result["call"]["outcome"] == "uncertain"
+        candidate = h.service.store.list_deepline_cost_reconciliations(
+            h.round_id, run_id=lease["run_id"]
+        )[0]
+        assert broker.reconcile_deepline_cost(candidate)["status"] == "settled"
+    assert transport.paid == 1
+    assert sum(request["method"] == "POST" for request in transport.requests) == 1
+    rows = h.service.store.list_ledger(call_identity=first["call"]["call_identity"])
+    settled = [row for row in rows if row["entry_kind"] == "settlement"]
+    assert len(settled) == 1 and settled[0]["amount_microusd"] == 0
+    assert settled[0]["terminal_response"]["call_succeeded"] is False
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s",
+                    (first["call"]["call_identity"],))
+        assert cur.fetchone() == (0,)

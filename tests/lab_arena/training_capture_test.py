@@ -326,37 +326,31 @@ def test_public_basic_prose_is_not_a_credential(sentence):
     assert capture.sanitize_training_value(sentence) == (sentence, [])
 
 
-def test_source_code_dynamic_authorization_keeps_only_the_unbound_scheme(tmp_path):
+def test_source_code_dynamic_authorization_remains_privacy_ambiguous(tmp_path):
     source = 'headers = {"Authorization": "Bearer " + token}\n'
     user_content = contracts.canonical_json({
         "submission_files": [{"path": "agent.py", "content": source}],
     })
     request = {"model": "test-model", "messages": [{"role": "user", "content": user_content}]}
-    assert capture.sanitize_training_value(request) == (request, [])
-    assert capture.sanitize_training_value(request, aggregate_parts=True) == (request, [])
+    for aggregate_parts in (False, True):
+        cleaned, reasons = capture.sanitize_training_value(request, aggregate_parts=aggregate_parts)
+        assert cleaned != request
+        assert reasons == ["credential"]
     objects = LocalObjectStore(tmp_path)
     pointer = capture.RequestCapture(objects)({"request": request})
-    assert pointer["redacted"] is False
-    assert capture.read_request(objects, pointer)["request"] == request
+    assert pointer["redacted"] is True
+    assert capture.read_request(objects, pointer)["request"] != request
     with_secret, reasons = capture.sanitize_training_value(request, secrets=("token",))
     assert "token}" not in with_secret["messages"][0]["content"]
     assert reasons == ["credential"]
 
 
-def test_repeated_dynamic_bearer_source_scans_without_suffix_copies(monkeypatch):
+def test_repeated_dynamic_bearer_source_remains_conservatively_filtered():
     source = 'headers = {"Authorization": "Bearer " + token}\n' * 2048
-    original = trajectory._unbound_bearer_source_literal
-    positions = []
-
-    def checked(value, text, position, *, closing_quote_pending):
-        assert len(text) == len(source)
-        positions.append(position)
-        return original(value, text, position, closing_quote_pending=closing_quote_pending)
-
-    monkeypatch.setattr(trajectory, "_unbound_bearer_source_literal", checked)
-    assert trajectory.redact_text(source) == source
-    assert len(positions) >= 2048
-    assert all(0 <= position < len(source) for position in positions)
+    cleaned = trajectory.redact_text(source)
+    assert cleaned != source
+    assert cleaned.count("[REDACTED]") == 2048
+    assert trajectory.redact_text(cleaned) == cleaned
 
 
 def test_environment_lookup_still_uses_the_existing_credential_mask():

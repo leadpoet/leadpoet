@@ -6169,51 +6169,19 @@ async def investigate_company_evidence(
                 'careers_locators': bounded_homepage_navigation_locators,
                 'industry_bindings': industry_bindings,
             }
-            if industry_review_model and (
-                requested_venture_stage or requested_private_equity_stage or requested_public_stage
-            ):
-                # Stage discovery returns locators only. It neither reads nor
-                # changes the bound pages used by the initial industry review.
-                # Admit these existing independent calls together; keep both
-                # results and wait for settlement even if either one fails.
-                pending_discovery = asyncio.gather(
-                    discover_current_stage(),
-                    _review_industry_sources(session, research=True, **industry_review_arguments),
-                    return_exceptions=True,
-                )
-                try:
-                    stage_result, initial_result = await asyncio.shield(pending_discovery)
-                except asyncio.CancelledError:
-                    # Do not abandon already admitted paid requests when the
-                    # caller cancels. Broker timeouts still bound settlement.
-                    await asyncio.shield(pending_discovery)
-                    raise
-                for result in (stage_result, initial_result):
-                    if isinstance(result, BaseException):
-                        raise result
-            else:
-                await discover_current_stage()
-                if industry_review_model:
-                    initial_result = await _review_industry_sources(
-                        session, research=True, **industry_review_arguments
-                    )
-            if industry_review_model:
-                initial_industry, initial_failure, industry_review_calls = initial_result
-                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
-                    _record_failure(diagnostic, initial_failure)
-                    return {'claims': {}, 'failure_reason': initial_failure}
-                initial_review = initial_industry['_industry_review']
+            def industry_brief(industry, failure):
+                initial_review = industry['_industry_review']
                 industry_research_brief = {
                     key: initial_review[key]
                     for key in ('decision', 'missing_requirements', 'reason', 'packet_sha256',
                                 'source_urls', 'research_query')
                     if key in initial_review
                 }
-                if initial_failure:
+                if failure:
                     # This first review only guides discovery. A malformed
                     # advisory must not abort the existing bounded researcher;
                     # the independent final industry review is still required.
-                    industry_research_brief['advisory_failure_reason'] = initial_failure
+                    industry_research_brief['advisory_failure_reason'] = failure
                 # The shared researcher also sees sources admitted for other
                 # dimensions. Those must not silently close an industry gap
                 # when the final industry review cannot use them.
@@ -6249,6 +6217,42 @@ async def investigate_company_evidence(
                     'research for specific unanswered facts before submitting. '
                     'Keep all other requested targets and existing research limits.'
                 )
+                return industry_research_brief
+
+            if industry_review_model and (
+                requested_venture_stage or requested_private_equity_stage or requested_public_stage
+            ):
+                # Stage discovery returns locators only. It neither reads nor
+                # changes the bound pages used by the initial industry review.
+                # Admit these existing independent calls together; keep both
+                # results and wait for settlement even if either one fails.
+                pending_discovery = asyncio.gather(
+                    discover_current_stage(),
+                    _review_industry_sources(session, research=True, **industry_review_arguments),
+                    return_exceptions=True,
+                )
+                try:
+                    stage_result, initial_result = await asyncio.shield(pending_discovery)
+                except asyncio.CancelledError:
+                    # Do not abandon already admitted paid requests when the
+                    # caller cancels. Broker timeouts still bound settlement.
+                    await asyncio.shield(pending_discovery)
+                    raise
+                for result in (stage_result, initial_result):
+                    if isinstance(result, BaseException):
+                        raise result
+            else:
+                await discover_current_stage()
+                if industry_review_model:
+                    initial_result = await _review_industry_sources(
+                        session, research=True, **industry_review_arguments
+                    )
+            if industry_review_model:
+                initial_industry, initial_failure, industry_review_calls = initial_result
+                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
+                    _record_failure(diagnostic, initial_failure)
+                    return {'claims': {}, 'failure_reason': initial_failure}
+                industry_research_brief = industry_brief(initial_industry, initial_failure)
                 input_document['industry_source_research_brief'] = industry_research_brief
                 input_document['investigation_limits']['industry_search_exchange'] = (
                     'If industry facts remain unsupported after reading the loaded sources, '
@@ -6309,6 +6313,32 @@ async def investigate_company_evidence(
                 input_document['investigation_limits']['remaining_search_calls'] = (
                     MAX_SEARCH_CALLS - search_calls
                 )
+
+            # With no eligible initial pages the advisory spent no model turn.
+            # Discovery can now supply its first bound corpus. Spend that same
+            # initial turn once, before admitting the researcher, so its brief
+            # describes the loaded evidence rather than the earlier empty set.
+            if (industry_review_model and industry_review_calls == 0
+                    and not initial_failure
+                    and initial_industry['_industry_review']['source_urls'] == []
+                    and initial_industry['_industry_review']['missing_requirements']
+                    == ['Company-bound source text for the requested activity']
+                    and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
+                    - JUDGMENT_ADMISSION_RESERVE_SECONDS
+                    and any(_visible_quote_surface(text).strip()
+                            and industry_source_bound(url, fetched_final_urls.get(url, ''))
+                            for url, text in fetched_pages.items())):
+                initial_industry, initial_failure, deferred_calls = await _review_industry_sources(
+                    session, research=True, **industry_review_arguments
+                )
+                industry_review_calls += deferred_calls
+                reasoning_turn_limit -= deferred_calls
+                input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
+                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
+                    _record_failure(diagnostic, initial_failure)
+                    return {'claims': {}, 'failure_reason': initial_failure}
+                industry_research_brief = industry_brief(initial_industry, initial_failure)
+                input_document['industry_source_research_brief'] = industry_research_brief
 
             def industry_search_exchange():
                 """Use the same remaining allowance for disclosure and admission."""

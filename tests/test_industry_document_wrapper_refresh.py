@@ -38,7 +38,11 @@ def loop(monkeypatch, *, search_text=TITLE, raw=None, fetch_status=200,
     reads, documents, selections = [], [], []
 
     def review(result):
-        if not documents and search_text != FACT:
+        # A deferred advisory can now see search-loaded facts. Keep these
+        # explicit-refresh controls unresolved until the scripted selection;
+        # otherwise an initial match correctly enters submit-only handling.
+        if not documents and (search_text != FACT or (
+                selected and prefetch is None and not selections)):
             result.update(decision='unavailable', missing_requirements=['Account workflows'])
 
     run, calls, clock, reviews = install(monkeypatch, mutation=review,

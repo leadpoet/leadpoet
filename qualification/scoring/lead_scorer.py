@@ -8179,7 +8179,12 @@ def _is_explicitly_missing_web_linkedin_identity(
     verdict: Mapping[str, Any],
     receipt: Optional[Mapping[str, Any]],
 ) -> bool:
-    """Recognize a typed, same-entity observation without LinkedIn proof."""
+    """Recognize typed same-domain missing proof for completed-negative finality.
+
+    A different observed name cannot grant an identity match. It also must not
+    turn an explicit missing-LinkedIn repair into an infrastructure failure.
+    Callers still require the completed targeted repair and clear provider reads.
+    """
     value = receipt or {}
     return bool(
         all(isinstance(verdict.get(field), str) for field in (
@@ -8193,7 +8198,6 @@ def _is_explicitly_missing_web_linkedin_identity(
         and all(isinstance(value.get(field), str) and bool(value[field].strip())
                 for field in ("submitted_name", "submitted_domain", "observed_name",
                               "observed_domain", "submitted_linkedin_slug"))
-        and value.get("submitted_name") == value.get("observed_name")
         and value.get("submitted_domain") == value.get("observed_domain")
         and value.get("observed_linkedin_slug") == ""
     )
@@ -11764,7 +11768,7 @@ async def _llm_reverify_company(
         # instead of mixing them with the prior entity's validated findings.
         return result
     # The existing repair explicitly requested fresh identity research. A typed
-    # same-entity answer that still has no LinkedIn is completed missing proof,
+    # same-domain answer that still has no LinkedIn is completed missing proof,
     # never a match. Do not grant this finality to an initial answer or failure.
     completed_identity_repair = bool(
         "identity" in incomplete

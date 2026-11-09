@@ -238,11 +238,12 @@ def test_post_repair_investigation_keeps_provider_faults_retryable(monkeypatch, 
     ("VERIFIED", "VERIFIED"), ("UNPROVEN", "UNPROVEN"),
 ])
 @pytest.mark.parametrize("initial_missing_name", [False, True])
+@pytest.mark.parametrize("repair", ["missing", "wrong_name"])
 def test_explicit_identity_repair_can_exhaust_missing_linkedin(
-    monkeypatch, geography, industry, initial_missing_name,
+    monkeypatch, geography, industry, initial_missing_name, repair,
 ):
     result, events, investigations = _exercise(
-        monkeypatch, repair="missing", geography=geography, industry=industry,
+        monkeypatch, repair=repair, geography=geography, industry=industry,
         initial_missing_name=initial_missing_name,
     )
     assert events == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair", "investigate"]
@@ -258,10 +259,10 @@ def test_explicit_identity_repair_can_exhaust_missing_linkedin(
 
 
 @pytest.mark.parametrize("repair", [
-    "omitted", "null", "number", "whitespace", "invalid", "wrong_name",
+    "omitted", "null", "number", "whitespace", "invalid",
     "provider_error", "malformed_response",
 ])
-def test_only_explicit_typed_same_entity_identity_repair_can_exhaust(monkeypatch, repair):
+def test_only_explicit_typed_identity_repair_can_exhaust(monkeypatch, repair):
     result, events, investigations = _exercise(monkeypatch, repair=repair)
     assert events.count("lead_scorer_reverify_schema_repair") == 1
     assert len(investigations) <= 1
@@ -301,10 +302,11 @@ def test_unrelated_completed_investigation_cannot_exhaust_missing_identity(monke
     )
 
 
-def test_missing_linkedin_terminal_zero_survives_public_retry_and_checkpoints(monkeypatch):
+@pytest.mark.parametrize("repair", ["missing", "wrong_name"])
+def test_missing_linkedin_terminal_zero_survives_public_retry_and_checkpoints(monkeypatch, repair):
     from lab_arena import scoring
 
-    result, events, investigations = _exercise(monkeypatch, repair="missing")
+    result, events, investigations = _exercise(monkeypatch, repair=repair)
     terminal = {
         "company_name": "Acme", "final_score": 0.0,
         "verifier_gate_receipts": [result.receipt("company_fit")],

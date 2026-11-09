@@ -106,7 +106,8 @@ def _runtime_clone(tmp_path: Path, origin: str) -> str:
 
 def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
          runtime_clone: str = "", review_rows: list[dict] | None = None,
-         guard_scope: str = "gateway", paired: bool = False) -> subprocess.CompletedProcess[str]:
+         guard_scope: str = "gateway", paired: bool = False,
+         guard_phase: str = "gateway_destructive") -> subprocess.CompletedProcess[str]:
     preflight = tmp_path / "preflight"
     preflight.mkdir(exist_ok=True)
     (preflight / "marker").write_text("candidate\n", encoding="utf-8")
@@ -177,8 +178,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         '  active=true; if [ "${FAIL:-}" = expired_guard ]; then active=false; fi\n'
         '  printf \'{"schema_version":"leadpoet.lab_arena.restart_guard_state.v1",'
         '"guard_present":true,"guard_active":%s,"candidate_commit":"%s",'
-        '"restart_scope":"%s","restart_phase":"gateway_destructive",'
-        '"guard_generation":1}\\n\' "$active" "$requested" "${TEST_GUARD_SCOPE:-gateway}"\n'
+        '"restart_scope":"%s","restart_phase":"%s",'
+        '"guard_generation":1}\\n\' "$active" "$requested" "${TEST_GUARD_SCOPE:-gateway}" "${TEST_GUARD_PHASE:-gateway_destructive}"\n'
         '  exit 0\n'
         'fi\n'
         'if [ "${FAIL:-}" = occupied ] && [ "$1" = - ] && [ "$2" = 8794 ]; then exit 1; fi\n'
@@ -265,7 +266,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
           case "$2" in
             owned)
               generation=1
-              phase=gateway_destructive
+              phase="${TEST_GUARD_PHASE:-gateway_destructive}"
               if [ -f "$TASK_TMP/guard" ] && [ "$(cat "$TASK_TMP/guard")" = gateway_ready ]; then phase=gateway_ready; fi
               if [ "${FAIL:-}" = changed_generation ]; then
                 if [ -f "$TASK_TMP/owned-read" ]; then generation=2; else touch "$TASK_TMP/owned-read"; fi
@@ -385,6 +386,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     env = {**os.environ, "TASK_TMP": str(tmp_path), "INGRESS_FILE": str(ingress),
            "EVENTS": str(tmp_path / "events"), "TEST_SHA": sha, "FAIL": fail,
            "TEST_GUARD_SCOPE": guard_scope,
+           "TEST_GUARD_PHASE": guard_phase,
            "TEST_PAIRED_RESTART": str(int(paired)),
            "FAIL_IDLE": "1" if fail == "idle" else "0",
            "IDLE_REVIEW_FILE": str(tmp_path / "review-rows.json") if review_rows is not None else ""}
@@ -397,6 +399,95 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
 
 def _events(tmp_path: Path) -> list[str]:
     return (tmp_path / "events").read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("phase", ["validator_destructive", "validator_ready"])
+def test_paired_validator_phase_recovery_repeats_gateway_without_releasing_pair(tmp_path, phase):
+    assert _run(tmp_path, guard_scope="all", paired=True).returncode == 0
+    (tmp_path / "guard").write_text(phase + "\n")
+    before = len(_events(tmp_path))
+    retry = _run(tmp_path, sha="d" * 40, guard_scope="all", paired=True, guard_phase=phase)
+    assert retry.returncode == 0, retry.stderr
+    events = _events(tmp_path)[before:]
+    assert "guard:abort" not in events
+    assert events.index("guard:drain") < events.index("guard:authorize")
+    assert events.index("guard:authorize") < events.index("timing:shutdown_complete")
+    assert "guard:release" not in events
+    assert (tmp_path / "guard").read_text().strip() == "gateway_ready"
+    report = json.loads(retry.stdout.split("ARENA_PAIRED_GUARD=", 1)[1].splitlines()[0])
+    assert report["state"]["restart_scope"] == "all"
+    assert report["state"]["guard_generation"] == 1
+    assert report["state"]["paused"] is True
+
+
+@pytest.mark.parametrize("phase", ["validator_destructive", "validator_ready"])
+def test_paired_validator_phase_is_restored_after_predestructive_candidate_failure(tmp_path, phase):
+    assert _run(tmp_path, guard_scope="all", paired=True).returncode == 0
+    prior_ingress = (tmp_path / "ingress").read_text()
+    (tmp_path / "guard").write_text(phase + "\n")
+    before = len(_events(tmp_path))
+    retry = _run(tmp_path, fail="drain", sha="d" * 40, guard_scope="all", paired=True, guard_phase=phase)
+    assert retry.returncode != 0
+    events = _events(tmp_path)[before:]
+    assert "prior serving Arena guard was not restored" not in retry.stderr
+    assert any("lab_arena_restart_claim_guard.py drain" in event for event in events)
+    assert (tmp_path / "guard").read_text().strip() == phase
+    assert (tmp_path / "ingress").read_text() == prior_ingress
+    assert "guard:abort" not in events and "guard:release" not in events
+    assert "guard:authorize" not in events and "normal:restart" not in events
+
+
+def _recovery_predicate(action, scope, phase, *, required_phase="", **changes):
+    state = {"schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
+             "guard_present": True, "guard_active": True, "candidate_commit": SHA,
+             "restart_scope": scope, "restart_phase": phase, "guard_generation": 812, **changes}
+    if action == "recover":
+        source = _function("recover_arena_restart_owner")
+        program = "state = json.loads(sys.argv[3])" + source.split("state = json.loads(sys.argv[3])", 1)[1].split("\nPY\n", 1)[0]
+        arguments = [SHA, scope, json.dumps(state), required_phase]
+    else:
+        source = _function("restore_arena_recovery_guard_before_destructive")
+        program = "state = json.loads(sys.argv[2])" + source.split("state = json.loads(sys.argv[2])", 1)[1].split("\nPY\n", 1)[0]
+        arguments = [SHA, json.dumps(state), scope]
+    return subprocess.run([sys.executable, "-", *arguments], input="import json,sys\n" + program,
+                          text=True, capture_output=True, timeout=5)
+
+
+@pytest.mark.parametrize("action", ["recover", "restore"])
+@pytest.mark.parametrize("phase", ["validator_destructive", "validator_ready"])
+@pytest.mark.parametrize("scope", ["all", "gateway", "validator"])
+def test_validator_phase_recovery_predicates_require_exact_all_scope(action, phase, scope):
+    assert (_recovery_predicate(action, scope, phase).returncode == 0) is (scope == "all")
+
+
+@pytest.mark.parametrize("action", ["recover", "restore"])
+@pytest.mark.parametrize("changes", [
+    {"candidate_commit": "b" * 40}, {"restart_scope": "gateway"},
+    {"guard_present": False}, {"guard_generation": 0}, {"guard_generation": True},
+])
+def test_paired_recovery_phase_does_not_relax_identity_scope_or_generation(action, changes):
+    assert _recovery_predicate(action, "all", "validator_destructive", **changes).returncode != 0
+
+
+@pytest.mark.parametrize("phase", ["validator_destructive", "validator_ready"])
+def test_paired_recovery_cannot_bypass_required_gateway_phase(phase):
+    assert _recovery_predicate("recover", "all", phase, required_phase="gateway_destructive").returncode != 0
+
+
+@pytest.mark.parametrize("phase", ["validator_destructive", "validator_ready"])
+def test_validator_phase_recovery_does_not_weaken_retained_slot_cleanup_gate(tmp_path, phase):
+    assert _run(tmp_path, guard_scope="all", paired=True).returncode == 0
+    old_tree, _, components = _retained_slot_fixture(tmp_path)
+    (tmp_path / "guard").write_text(phase + "\n")
+    before = len(_events(tmp_path))
+    refused = _run(tmp_path, guard_scope="all", paired=True, guard_phase=phase)
+    assert refused.returncode != 0
+    assert "active owned idle gateway guard" in refused.stderr
+    events = _events(tmp_path)[before:]
+    assert not any(event.startswith("stop:") for event in events)
+    assert "guard:authorize" not in events and "guard:release" not in events
+    assert old_tree.exists()
+    assert all((tmp_path / "runtime" / f"{name}-slot0-process.json").exists() for name in components)
 
 
 @pytest.mark.parametrize("same_source", [True, False])

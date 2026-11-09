@@ -330,9 +330,11 @@ def _abort_if_owned_draining(
         state = _require_state(_request("lab_arena_restart_guard_state_v1", {}))
         expected_guard, expected_owner = _commitments(guard, owner)
         if (
-            state.get("guard_commitment") != expected_guard
+            state.get("guard_present") is not True
+            or state.get("guard_commitment") != expected_guard
             or state.get("owner_commitment") != expected_owner
             or state.get("candidate_commit") != args.candidate
+            or state.get("restart_scope") != args.scope
             or state.get("restart_phase") != "draining"
         ):
             return
@@ -351,10 +353,22 @@ def _abort_if_owned_draining(
         return
 
 
-def _acquire(args: argparse.Namespace) -> dict[str, Any]:
+def _acquire(
+    args: argparse.Namespace, *, expected_generation: int | None = None,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    def request(function: str, payload: Mapping[str, Any]) -> Any:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise GuardError("Arena leases did not drain before the restart deadline")
+        return _request(function, payload)
+
     guard, owner = _identity(args.candidate, args.invocation)
-    state = _require_state(_request("lab_arena_restart_guard_state_v1", {}))
+    state = _require_state(request("lab_arena_restart_guard_state_v1", {}))
     generation = _require_generation(state["guard_generation"])
+    if expected_generation is not None:
+        _require_owned_state(args, guard, owner, state)
+        if generation != expected_generation:
+            raise GuardError("Arena restart guard generation changed")
     if state.get("guard_present") is True:
         current_candidate = state.get("candidate_commit")
         if not isinstance(current_candidate, str) or not _SHA.fullmatch(current_candidate):
@@ -370,20 +384,20 @@ def _acquire(args: argparse.Namespace) -> dict[str, Any]:
             raise GuardError("Arena restart guard scope differs")
         if current_candidate != args.candidate:
             if state.get("restart_phase") == "draining":
-                _request("lab_arena_abort_restart_guard_v1", {
+                request("lab_arena_abort_restart_guard_v1", {
                     "p_guard_id": current_guard,
                     "p_owner_id": current_owner,
                     "p_guard_generation": generation,
                     "p_actor_ref": f"canonical-active-release:{args.candidate}",
                 })
                 state = _require_state(
-                    _request("lab_arena_restart_guard_state_v1", {})
+                    request("lab_arena_restart_guard_state_v1", {})
                 )
                 if state.get("guard_present") is True:
                     raise GuardError("Arena restart guard abort did not clear ownership")
                 generation = _require_generation(state["guard_generation"])
             else:
-                state = _require_state(_request(
+                state = _require_state(request(
                     "lab_arena_retarget_restart_guard_v1",
                     {
                         "p_current_guard_id": current_guard,
@@ -398,7 +412,7 @@ def _acquire(args: argparse.Namespace) -> dict[str, Any]:
                 ))
                 _require_owned_state(args, guard, owner, state)
                 return state
-    return _require_state(_request("lab_arena_acquire_restart_guard_v1", {
+    return _require_state(request("lab_arena_acquire_restart_guard_v1", {
         "p_guard_id": guard, "p_owner_id": owner,
         "p_expected_generation": generation,
         "p_lease_seconds": args.lease_seconds,
@@ -420,26 +434,43 @@ def _drain(args: argparse.Namespace) -> dict[str, Any]:
     try:
         for item in signals:
             signal.signal(item, interrupted)
-        state = _acquire(args)
-        generation = _require_generation(state["guard_generation"])
         deadline = time.monotonic() + args.timeout_seconds
-        last_renewal = 0.0
+        last_renewal: float | None = None
+        first_poll = True
         while True:
             now = time.monotonic()
-            if now - last_renewal >= min(30.0, args.lease_seconds / 3):
-                state = _acquire(args)
-                if _require_generation(state["guard_generation"]) != generation:
-                    raise GuardError("Arena restart guard generation changed")
-                last_renewal = now
+            if not first_poll and now >= deadline:
+                raise GuardError("Arena leases did not drain before the restart deadline")
+            first_poll = False
+            acquiring = False
             try:
+                if last_renewal is None or now - last_renewal >= min(30.0, args.lease_seconds / 3):
+                    acquiring = True
+                    state = _acquire(
+                        args, expected_generation=generation,
+                        deadline=deadline if args.timeout_seconds > 0 else None,
+                    )
+                    observed_generation = _require_generation(state["guard_generation"])
+                    _require_owned_state(args, guard, owner, state)
+                    if generation is not None and observed_generation != generation:
+                        raise GuardError("Arena restart guard generation changed")
+                    if state.get("restart_scope") != args.scope:
+                        raise GuardError("Arena restart guard scope differs")
+                    generation = observed_generation
+                    last_renewal = time.monotonic()
+                acquiring = False
+                if args.timeout_seconds > 0 and time.monotonic() >= deadline:
+                    raise GuardError("Arena leases did not drain before the restart deadline")
                 response = _request("lab_arena_restart_quiescence_v1", {
                     "p_guard_id": guard, "p_owner_id": owner,
                     "p_guard_generation": generation,
                 })
             except GuardRpcError as exc:
-                if (exc.rpc, exc.status, exc.code) != (
-                    "lab_arena_restart_quiescence_v1", 500, "55P03"
-                ):
+                retryable_rpcs = (
+                    {"lab_arena_restart_guard_state_v1", "lab_arena_acquire_restart_guard_v1"}
+                    if acquiring else {"lab_arena_restart_quiescence_v1"}
+                )
+                if exc.status != 500 or exc.code != "55P03" or exc.rpc not in retryable_rpcs:
                     raise
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -467,6 +498,9 @@ def _drain(args: argparse.Namespace) -> dict[str, Any]:
                 raise GuardError("Arena restart guard phase is invalid for scope")
             if drain["lost_or_mutated_count"]:
                 raise GuardError("Arena lease ended without a durable completion receipt")
+            now = time.monotonic()
+            if args.timeout_seconds > 0 and now >= deadline:
+                raise GuardError("Arena leases did not drain before the restart deadline")
             if drain["preserved"] is True:
                 return drain
             if now >= deadline:

@@ -155,8 +155,7 @@ def test_captured_source_absence_finishes_real_company_scorer(monkeypatch):
 @pytest.mark.parametrize("field,value", [
     ("code", "UPSTREAM_RATE_LIMIT"), ("provider", "generic_http"),
     ("operation", "another_operation"), ("failure_origin", "account"),
-    ("error_category", "provider_account"), ("credential_owner", "workspace"),
-    ("credential_source", "workspace"), ("upstream_status", 429),
+    ("error_category", "provider_account"), ("upstream_status", 429),
     ("upstream_status", "500"), ("upstream_error_code", "SCRAPE_TIMEOUT"),
     ("upstream_error_code", "INTERNAL_SERVER_ERROR"), ("tool_error", {}),
     ("executionRecovery", {"state": "pending"}),
@@ -164,6 +163,37 @@ def test_captured_source_absence_finishes_real_company_scorer(monkeypatch):
 def test_provider_faults_and_ambiguous_native_failures_stay_infrastructure(field, value):
     body = copy.deepcopy(CAPTURED)
     body[field] = value
+    assert not br._provider_request_refused("deepline", PARAMETERS, _response(body))
+
+
+@pytest.mark.parametrize("metadata", [
+    {}, {"credential_owner": "customer", "credential_source": "customer"},
+    {"credential_owner": "deepline_managed", "credential_source": "workspace"},
+])
+def test_same_proved_tls_failure_is_independent_of_credential_metadata(metadata):
+    body = copy.deepcopy(CAPTURED)
+    body.pop("credential_owner")
+    body.pop("credential_source")
+    body.update(metadata)
+    assert br._provider_request_refused("deepline", PARAMETERS, _response(body))
+
+
+def test_native_source_tls_proof_does_not_require_optional_envelope_mirrors():
+    body = {
+        "provider": "firecrawl", "operation": "firecrawl_scrape",
+        "upstream_error_code": "SCRAPE_SSL_ERROR",
+        "tool_error": {"retryable": False},
+        "executionRecovery": {"state": "completed"},
+    }
+    assert br._provider_request_refused("deepline", PARAMETERS, _response(body))
+
+
+@pytest.mark.parametrize("field", [
+    "provider", "operation", "upstream_error_code", "tool_error", "executionRecovery",
+])
+def test_missing_affirmative_source_proof_remains_provider_failure(field):
+    body = copy.deepcopy(CAPTURED)
+    body.pop(field)
     assert not br._provider_request_refused("deepline", PARAMETERS, _response(body))
 
 

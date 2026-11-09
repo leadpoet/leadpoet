@@ -3830,31 +3830,35 @@ def _deepline_firecrawl_tls_source_refusal(
         return False
     tool_error = document.get("tool_error")
     recovery = document.get("executionRecovery")
-    # The outer 502 alone says nothing about the target. Require the exact
-    # completed native failure classification, including its non-retryable
-    # source TLS code. Never expose diagnostics or bypass TLS verification.
+    # The outer 502 alone says nothing about the target. Require native
+    # source TLS proof and a completed, non-retryable result. Credential
+    # ownership is unrelated. Optional envelope mirrors must not contradict
+    # the proof, but their omission does not change its source-local meaning.
     return (
-        document.get("code") == "UPSTREAM_FAILURE"
-        and document.get("provider") == "firecrawl"
+        document.get("provider") == "firecrawl"
         and document.get("operation") == "firecrawl_scrape"
-        and document.get("credential_owner") == "deepline_managed"
-        and document.get("credential_source") == "env"
-        and document.get("failure_origin") == "provider"
-        and document.get("error_category") == "upstream"
-        and type(document.get("upstream_status")) is int
-        and document["upstream_status"] == 500
         and document.get("upstream_error_code") == "SCRAPE_SSL_ERROR"
         and isinstance(recovery, Mapping)
         and recovery.get("state") == "completed"
         and isinstance(tool_error, Mapping)
-        and tool_error.get("code") == "UPSTREAM_FAILURE"
-        and tool_error.get("provider") == "firecrawl"
-        and tool_error.get("operation") == "firecrawl_scrape"
-        and type(tool_error.get("statusCode")) is int
-        and tool_error["statusCode"] == 502
-        and tool_error.get("origin") == "provider"
-        and tool_error.get("category") == "upstream"
         and tool_error.get("retryable") is False
+        and all(document.get(field, expected) == expected for field, expected in (
+            ("code", "UPSTREAM_FAILURE"), ("failure_origin", "provider"),
+            ("error_category", "upstream"),
+        ))
+        and all(tool_error.get(field, expected) == expected for field, expected in (
+            ("code", "UPSTREAM_FAILURE"), ("provider", "firecrawl"),
+            ("operation", "firecrawl_scrape"), ("origin", "provider"),
+            ("category", "upstream"),
+        ))
+        and ("upstream_status" not in document or (
+            type(document["upstream_status"]) is int
+            and document["upstream_status"] == 500
+        ))
+        and ("statusCode" not in tool_error or (
+            type(tool_error["statusCode"]) is int
+            and tool_error["statusCode"] == 502
+        ))
     )
 
 

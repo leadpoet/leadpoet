@@ -179,17 +179,27 @@ def test_migration_rejects_schema_or_security_drift_atomically(scenario, drift):
     db = context[0]
     with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
         target = PROOF if drift.startswith('proof') else 'public.lab_arena__judge_calls_clear_v1(text)' if drift.startswith('clear') else old.HELPER
-        if drift.endswith('acl'):
-            cur.execute('GRANT EXECUTE ON FUNCTION ' + target + ' TO authenticated')
-        else:
-            definition = old.prior.scalar(cur, 'pg_get_functiondef(%s::regprocedure)', (target,))
-            cur.execute(definition.replace('AS $function$', 'AS $function$\n-- unexpected drift\n', 1))
-        conn.commit()
-        with pytest.raises(db[0].Error, match='differs'):
-            cur.execute(SQL.read_text())
-        conn.rollback()
-        cur.execute('SELECT has_function_privilege(%s,%s,%s)', ('lab_arena_service', old.HELPER, 'EXECUTE'))
-        assert cur.fetchone()[0] is False
+        definition = old.prior.scalar(cur, 'pg_get_functiondef(%s::regprocedure)', (target,))
+        metadata = old.prior.scalar(cur, "to_jsonb(p)-'prosrc' FROM pg_proc p WHERE oid=%s::regprocedure", (target,))
+        try:
+            if drift.endswith('acl'):
+                cur.execute('GRANT EXECUTE ON FUNCTION ' + target + ' TO authenticated')
+            else:
+                cur.execute(definition.replace('AS $function$', 'AS $function$\n-- unexpected drift\n', 1))
+            conn.commit()
+            with pytest.raises(db[0].Error, match='differs'):
+                cur.execute(SQL.read_text())
+            conn.rollback()
+            cur.execute('SELECT has_function_privilege(%s,%s,%s)', ('lab_arena_service', old.HELPER, 'EXECUTE'))
+            assert cur.fetchone()[0] is False
+        finally:
+            # The module-scoped database also serves later recovery tests.
+            # Restore committed drift even when its rejection assertion fails.
+            conn.rollback()
+            cur.execute(definition)
+            cur.execute('REVOKE ALL ON FUNCTION ' + target + ' FROM authenticated')
+            assert old.prior.scalar(cur, 'pg_get_functiondef(%s::regprocedure)', (target,)) == definition
+            assert old.prior.scalar(cur, "to_jsonb(p)-'prosrc' FROM pg_proc p WHERE oid=%s::regprocedure", (target,)) == metadata
 
 
 @pytest.mark.parametrize('bound', ['cost', 'scoring_deadline', 'publication_deadline'])

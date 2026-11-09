@@ -358,6 +358,8 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
         assert len(control["units"]) == 1
         repair_unit = control["units"][0]
         target = repair_unit.pop("relative_time_target")
+        assert "only to units with relative_time_target" in kwargs["system_prompt"]
+        assert "support from the same source_index; otherwise return UNPROVEN." in kwargs["system_prompt"]
         assert repair_unit == {
             "unit_id": 1,
             "contains_factual_claim": True,

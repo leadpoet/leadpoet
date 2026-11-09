@@ -156,3 +156,60 @@ synthetic rewards into the live competition.
 A healthy HTTP endpoint alone does not prove scoring or weights are healthy.
 Keep the prior release identity and accepted work for recovery, and use the
 canonical controllers for any rollback.
+
+## Keep the gateway's own HTTPS traffic local
+
+On the gateway host, `/etc/hosts` must include this one mapping:
+
+```text
+127.0.0.1 gateway.subnet71.com
+```
+
+This is host provisioning, not a change to the public DNS record or application
+URL. Caddy must still listen on loopback port 443 and serve its valid public
+certificate for `gateway.subnet71.com`. Its existing `/rest/v1/*` route forwards
+to the local database HTTP proxy; the proxy's connection to RDS remains remote.
+Arena and gateway routes keep their existing local upstreams and access checks.
+Do not add this mapping to validators, miner hosts, or sandbox containers.
+
+Before provisioning or restoring it, verify the AWS account and gateway
+instance, acquire the normal deployment/restart locks, and check local HTTPS
+with certificate verification enabled:
+
+```bash
+curl --fail --show-error --silent --noproxy '*' \
+  --resolve gateway.subnet71.com:443:127.0.0.1 \
+  https://gateway.subnet71.com/arena/v1/current > /dev/null
+```
+
+Preserve all other hosts entries, ownership, permissions and extended
+attributes. Reject a conflicting mapping instead of replacing it silently.
+Keep a private beforeimage and use an atomic, concurrent-change-checked edit.
+The current gateway has `hosts: files dns myhostname` and cloud-init
+`manage_etc_hosts: false`; verify these on a replacement host. The file survives
+service restarts, host reboots and canonical releases, which do not rewrite it.
+Reprovisioning a new host requires this step. No application or Caddy restart
+is required, and no new service or scheduled task is needed.
+
+Afterward, repeat the HTTPS read without `--resolve` and inspect the peer:
+
+```bash
+getent ahostsv4 gateway.subnet71.com
+curl --fail --show-error --silent --noproxy '*' --output /dev/null \
+  --write-out '%{http_code} peer=%{remote_ip} tls=%{ssl_verify_result}\n' \
+  https://gateway.subnet71.com/arena/v1/current
+```
+
+Require `200 peer=127.0.0.1 tls=0`, authenticated read-only database checks,
+unchanged external HTTPS access, and normal baseline/miner/scoring activity.
+Check actual application sockets and bounded interface counters or header-only
+packet counts: existing pooled connections can temporarily retain the public
+route. Do not terminate active work to clear them. Keep certificate renewal,
+Caddy configuration, public port rules and database credentials unchanged.
+
+Rollback removes only this mapping, after checking the applied file has not
+changed concurrently. Restore the exact beforeimage only if the live file's
+hash matches the recorded applied state. Recheck local and external access.
+Traffic savings can be measured immediately; dollar savings require later AWS
+billing evidence and depend on workload. Do not treat an estimate as a verified
+bill reduction.

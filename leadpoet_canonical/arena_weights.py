@@ -24,6 +24,7 @@ from leadpoet_canonical.lab_arena_rewards import (
     public_key_hash,
     sha256_json,
     validate_reward_basis,
+    validate_weekly_slot_decay,
     verify_reward_basis_signature,
 )
 
@@ -39,7 +40,7 @@ _BODY_FIELDS = (
     "valid_from_block", "valid_until_block", "reward_basis",
     "burn_hotkey", "issued_at",
 )
-_OPTIONAL_BODY_FIELDS = ("slot_eligibility",)
+_OPTIONAL_BODY_FIELDS = ("slot_eligibility", "weekly_slot_decay")
 _HOTKEY_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
 
@@ -150,6 +151,14 @@ def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
             and value["slot_eligibility"] == SLOT_ELIGIBILITY_UNTIL_REPLACED,
             "slot_eligibility is invalid",
         )
+    if "weekly_slot_decay" in value:
+        try:
+            validate_weekly_slot_decay(
+                value["weekly_slot_decay"], reward_basis,
+                epoch_id=epoch,
+            )
+        except LabArenaRewardError as exc:
+            raise ArenaWeightError(str(exc)) from exc
     _hotkey(value.get("burn_hotkey"), "burn_hotkey")
     body = accepted_weight_state_body(value)
     expected_hash = sha256_json(body)
@@ -195,6 +204,7 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
         by_hotkey = slot_allocations(
             state["reward_basis"], int(state["epoch"]), hotkeys,
             until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
+            weekly_slot_decay=state.get("weekly_slot_decay"),
         )
         champion_share = sum(by_hotkey.values(), Fraction(0))
     else:

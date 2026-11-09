@@ -40,6 +40,8 @@ from leadpoet_verifier.identity.normalization import NormalizationError, normali
 from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import (
     _company_name, verified_homepage_brand_name,
+    _INITIALISM_LEGAL_NAME_RE, _PARENTHETICAL_INITIALISM_RE,
+    _verified_parenthetical_name_alignment,
 )
 from qualification.scoring.checked_sources import (
     MAX_SEARCH_LOCATOR_EXCERPT_CHARS, checked_source_provenance,
@@ -2359,6 +2361,27 @@ def _validated_industry_bindings(value: Any, pages: Mapping[str, str], final_url
     return empty
 
 
+def _reversed_parenthetical_identity_names(identity: Mapping[str, Any]) -> bool:
+    """Keep an exact verified legal/initialism pair when its label is reversed."""
+    submitted = str(identity.get("submitted_name") or "").strip()
+    verified = str(identity.get("verified_name") or "").strip()
+    observed = str(identity.get("observed_name") or "").strip()
+    forward = _INITIALISM_LEGAL_NAME_RE.fullmatch(submitted)
+    reverse = _PARENTHETICAL_INITIALISM_RE.fullmatch(observed)
+    if (not forward or not reverse
+            or _normalized_span(submitted) != _normalized_span(verified)
+            or forward["initialism"] != reverse["initialism"]):
+        return False
+    # Reuse the identity gate's exact legal-name and real-initials parser.
+    # The caller still requires the complete homepage/domain/profile binding.
+    return _verified_parenthetical_name_alignment(
+        submitted, reverse["legal_name"].strip(),
+        observed_linkedin_slug=str(identity.get("observed_linkedin_slug") or "").strip().casefold(),
+        submitted_linkedin_slug=str(identity.get("submitted_linkedin_slug") or "").strip().casefold(),
+        evidence_source="company_homepage",
+    )
+
+
 def _complete_verified_first_party_identity(
     url: str,
     domains: set[str],
@@ -2420,7 +2443,8 @@ def _complete_verified_first_party_identity(
         and len(set(identity_domains)) == 1
         and identity_domains[0] == domain
         and all(identity_names)
-        and (len(set(identity_names)) == 1 or verified_alias_names)
+        and (len(set(identity_names)) == 1 or verified_alias_names
+             or _reversed_parenthetical_identity_names(identity))
         and observed_slug
         and observed_slug == verified_slug
         and (not submitted_slug or submitted_slug == verified_slug)

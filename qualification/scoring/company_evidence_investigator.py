@@ -1489,14 +1489,18 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
     if len(content) <= message_limit:
         return content
     collect(document)
-    for container, _text in evidence_texts:
-        container["text"] = ""
-    # New repair hints are optional. Preserve each failed slot/reason even
-    # when its duplicate source context cannot fit the existing broker cap.
+    # New optional hints must not displace original evidence. Shed them
+    # against the full message before the existing text-truncation algorithm.
+    # Keep each failed slot/reason even when its context cannot fit.
     for container, key in optional_repair_contexts:
         if len(encode()) <= message_limit:
             break
         container.pop(key, None)
+    content = encode()
+    if len(content) <= message_limit:
+        return content
+    for container, _text in evidence_texts:
+        container["text"] = ""
     # Additional source links are optional discovery. Drop trailing locators
     # before they can make the unchanged criterion/request metadata too large.
     for discovery in (document, document.get('server_industry_discovery')):

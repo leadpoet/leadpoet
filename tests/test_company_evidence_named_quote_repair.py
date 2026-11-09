@@ -130,6 +130,29 @@ def test_optional_named_candidates_respect_existing_message_limit():
     assert document['rejected_findings'][0]['company_bound_quote_candidate'] == TEXT
 
 
+@pytest.mark.parametrize('hint_key', ['company_bound_quote_candidate', 'source_context'])
+def test_optional_repair_hint_never_displaces_existing_source_text(hint_key):
+    source_text = 'original source evidence ' * 100
+    rejection = {
+        'supporting_evidence_slot': 2,
+        'reason': inv.REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+        hint_key: 'optional hint ' * 150,
+    }
+    document = {
+        'instruction': 'x' * 28000,
+        'prefetched_sources': [{'url': URL, 'text': source_text}],
+        'rejected_findings': [{'target': 'required_attribute',
+                               'rejected_supporting_evidence': [rejection]}],
+    }
+    feedback = json.loads(inv._bounded_message_json(document))
+    assert feedback['prefetched_sources'][0]['text'] == source_text
+    assert feedback['rejected_findings'][0]['rejected_supporting_evidence'] == [{
+        'supporting_evidence_slot': 2,
+        'reason': inv.REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+    }]
+    assert rejection[hint_key] == 'optional hint ' * 150
+
+
 def test_both_support_failures_are_exposed_in_one_existing_correction(monkeypatch):
     requests = []
     async def post(_session, _url, *, headers, payload):

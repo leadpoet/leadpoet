@@ -1969,7 +1969,8 @@ def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None
         rows = json.loads(match.group(0)) if match else []
     except Exception as exc:  # noqa: BLE001 - fail-open by design
         logger.warning("icp_exclusions_failed error_type=%s", type(exc).__name__)
-        capture.finish(normalized_output=[], committed_outcome="not_attempted")
+        capture.finish(normalized_output=[], committed_outcome="not_attempted",
+                       exception_class=type(exc).__name__)
         return []
     entries: List[str] = []
     for row in rows[:want] if isinstance(rows, list) else []:

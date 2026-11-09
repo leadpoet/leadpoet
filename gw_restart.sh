@@ -271,11 +271,14 @@ PY
 import json
 import sys
 state = json.loads(sys.argv[3])
+allowed_phases = ("gateway_destructive", "gateway_ready")
+if sys.argv[2] == "all":
+    allowed_phases += ("validator_destructive", "validator_ready")
 if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
         or state.get("guard_present") is not True
         or state.get("candidate_commit") != sys.argv[1]
         or state.get("restart_scope") != sys.argv[2]
-        or state.get("restart_phase") not in ("gateway_destructive", "gateway_ready")
+        or state.get("restart_phase") not in allowed_phases
         or (sys.argv[4] and state.get("restart_phase") != sys.argv[4])
         or type(state.get("guard_generation")) is not int
         or state["guard_generation"] <= 0):
@@ -303,15 +306,21 @@ restore_arena_recovery_guard_before_destructive() {
     --candidate "$ARENA_PREVIOUS_SHA" \
     --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
     --environment-file "$GATEWAY_ENV_FILE")" || return 1
-  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$state" <<'PY'
+  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$state" "$GATEWAY_RESTART_GUARD_SCOPE" <<'PY'
 import json
 import sys
 state = json.loads(sys.argv[2])
+allowed_phases = ("gateway_destructive", "gateway_ready")
+if sys.argv[3] == "all":
+    allowed_phases += ("validator_destructive", "validator_ready")
 if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
         or state.get("guard_present") is not True
         or state.get("guard_active") is not True
         or state.get("candidate_commit") != sys.argv[1]
-        or state.get("restart_phase") not in ("gateway_destructive", "gateway_ready")):
+        or state.get("restart_scope") != sys.argv[3]
+        or state.get("restart_phase") not in allowed_phases
+        or type(state.get("guard_generation")) is not int
+        or state["guard_generation"] <= 0):
     raise SystemExit("prior serving Arena guard was not restored")
 PY
 }

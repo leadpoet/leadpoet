@@ -108,7 +108,8 @@ frozen `reward_constants` and weekly schedule do not rescale new slot payouts.
 Validators must support the optional, signed `weekly_slot_decay` clock before
 the gateway enables it. Roll out support with the switch off, verify primary,
 Rizzo and Yuma have the matching shared parser and weight kernel, then enable
-the switch through the canonical gateway release. The clock carries the
+the switch with `configure_lab_arena_production.py --weekly-slot-decay enabled`
+through its existing check/apply controls and the canonical gateway release. The clock carries the
 verified source hash and promotion epoch for each occupied slot. It
 uses the existing accepted-state persistence; no new reward table is needed.
 Missing source or promotion proof stops new state issuance instead of inventing

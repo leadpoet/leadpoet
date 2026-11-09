@@ -40,6 +40,13 @@ PAYING_KING_OUTCOMES = ("crowned", "defended")
 SIGNING_KEY_HASH_ENV = "LAB_ARENA_SIGNING_PUBLIC_KEY_HASH"
 REWARDS_ENABLED_ENV = "LAB_ARENA_REWARDS_ENABLED"
 MAX_WEEK_SHARES = 12
+# Bound exact Fraction denominators before exponentiation. This is a validation
+# limit, not a payout floor: weekly state clocks reject greater ages rather than
+# freezing rewards or silently dropping tiny positive shares. At weekly decay,
+# 4096 halvings cover more than 78 years. Keep even underflowing shares exact
+# through same-hotkey aggregation and the shared float32/u16 weight conversion.
+MAX_EXACT_SLOT_DECAY_HALVINGS = 4096
+EPOCHS_PER_SLOT_REWARD_WEEK = 140
 FULL_CHAMPION_REWARD_FACTOR_PPM = 1_000_000
 FALLBACK_CHAMPION_REWARD_FACTOR_PPM = 500_000
 CHAMPION_REWARD_FACTORS_PPM = (
@@ -618,8 +625,59 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
     }
 
 
+def validate_weekly_slot_decay(
+    value: Any, basis: Any, *, epoch_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Validate signed per-model epoch starts without changing the source basis.
+
+    Source identity and promotion provenance are established by the issuing
+    gateway. Every consumer checks these positional and epoch
+    bindings before deriving rewards from the signed state. The clock can
+    predate a source achievement when an unchanged model retained its age.
+    """
+
+    document = validate_reward_basis(basis)
+    if document["schema_version"] != REWARD_BASIS_V2_SCHEMA_VERSION:
+        raise LabArenaRewardError("weekly_slot_decay requires a v2 reward basis")
+    if not isinstance(value, Mapping) or set(value) != {"epochs_per_halving", "slots"}:
+        raise LabArenaRewardError("weekly_slot_decay fields are invalid")
+    epochs = _require_int(value["epochs_per_halving"], "epochs_per_halving", EPOCHS_PER_SLOT_REWARD_WEEK, EPOCHS_PER_SLOT_REWARD_WEEK)
+    if epoch_id is not None:
+        epoch_id = _require_epoch(epoch_id, "epoch_id")
+        if epoch_id < document["effective_reward_epoch"]:
+            raise LabArenaRewardError("weekly_slot_decay reward basis is not effective")
+    slots = value["slots"]
+    if not isinstance(slots, list) or len(slots) != len(document["reward_slots"]):
+        raise LabArenaRewardError("weekly_slot_decay slots must contain three ordered entries")
+    normalized = []  # type: List[Optional[Dict[str, Any]]]
+    for clock, achievement in zip(slots, document["reward_slots"]):
+        if achievement is None:
+            if clock is not None:
+                raise LabArenaRewardError("weekly_slot_decay empty slot must have no clock")
+            normalized.append(None)
+            continue
+        if not isinstance(clock, Mapping) or set(clock) != {
+            "start_epoch", "source_normalized_sha256",
+        }:
+            raise LabArenaRewardError("weekly_slot_decay occupied slot clock fields are invalid")
+        start_epoch = _require_epoch(clock["start_epoch"], "weekly_slot_decay start_epoch")
+        source_epoch = achievement.get("start_epoch")
+        if source_epoch is None:
+            source_epoch = document["effective_reward_epoch"]
+        if start_epoch > source_epoch:
+            raise LabArenaRewardError("weekly_slot_decay start_epoch follows its source epoch")
+        if epoch_id is not None and (epoch_id - start_epoch) // epochs > MAX_EXACT_SLOT_DECAY_HALVINGS:
+            raise LabArenaRewardError("weekly_slot_decay exceeds exact-arithmetic bounds")
+        normalized.append({
+            "start_epoch": start_epoch,
+            "source_normalized_sha256": _require_hash(clock["source_normalized_sha256"], "weekly_slot_decay source_normalized_sha256"),
+        })
+    return {"epochs_per_halving": epochs, "slots": normalized}
+
+
 def slot_allocations(
     basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str], *, until_replaced: bool = False,
+    weekly_slot_decay: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Fraction]:
     """Exact registered slot allocations, with optional signed per-slot decay.
 
@@ -628,11 +686,15 @@ def slot_allocations(
     original total-emissions arithmetic. The existing funding
     factor applies only to slots held by the current funding-responsible king.
     The accepted-state weight kernel routes every remaining share to burn.
+    An optional signed state clock continues halving every 140 epochs instead
+    of applying the basis's legacy cap. No source history is changed.
     """
 
     document = validate_reward_basis(basis)
     if document["schema_version"] != REWARD_BASIS_V2_SCHEMA_VERSION:
         raise LabArenaRewardError("slot_allocations requires a v2 reward basis")
+    weekly = (None if weekly_slot_decay is None else
+              validate_weekly_slot_decay(weekly_slot_decay, document, epoch_id=epoch_id))
     hotkeys = _require_hotkeys(metagraph_hotkeys)
     if len(set(hotkeys)) != len(hotkeys):
         raise LabArenaRewardError("metagraph contains duplicate hotkeys")
@@ -643,12 +705,15 @@ def slot_allocations(
     factor = _basis_fields(document)["champion_reward_factor_ppm"]
     pool = Fraction(document["slot_policy"].get("pool_percent", 100), 100)
     decay = document["slot_policy"].get("decay")
-    for tier, achievement in zip(document["slot_policy"]["tiers"], document["reward_slots"]):
+    for index, (tier, achievement) in enumerate(zip(document["slot_policy"]["tiers"], document["reward_slots"])):
         if achievement is None or achievement["miner_hotkey"] not in registered:
             continue
         hotkey = achievement["miner_hotkey"]
         share = pool * Fraction(tier["allocation_percent"], 100)
-        if decay is not None:
+        if weekly is not None:
+            halvings = (epoch_id - weekly["slots"][index]["start_epoch"]) // weekly["epochs_per_halving"]
+            share *= Fraction(1, 2 ** halvings)
+        elif decay is not None:
             start = achievement["start_epoch"]
             if start is None:
                 start = document["effective_reward_epoch"]

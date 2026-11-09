@@ -1,5 +1,5 @@
 """
-LeadPoet Canonical AWS Nitro Attestation Verification
+Subnet 71 Canonical AWS Nitro Attestation Verification
 
 This module provides AWS Nitro Enclave attestation verification for the TEE system.
 

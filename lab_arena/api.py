@@ -118,7 +118,7 @@ def _lease_header(value: Optional[str]) -> str:
 
 
 def create_app(service: ArenaService) -> FastAPI:
-    app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Subnet 71 Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
     # Create this in an async context for AnyIO 3 as well as AnyIO 4. Each app
     # admits at most PROVIDER_WORKER_LIMIT provider calls and keeps

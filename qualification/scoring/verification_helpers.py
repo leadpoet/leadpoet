@@ -813,7 +813,7 @@ async def openrouter_chat(
                         "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json",
                         "HTTP-Referer": "https://leadpoet.ai",
-                        "X-Title": "Leadpoet Qualification"
+                        "X-Title": "Subnet 71 Qualification"
                     },
                     json=payload,
                     timeout=(timeout_seconds if timeout_seconds is not None else

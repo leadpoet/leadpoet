@@ -46,7 +46,7 @@ def _install_arena_telemetry(app) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the Leadpoet Lab Arena service")
+    parser = argparse.ArgumentParser(description="Run the Subnet 71 Lab Arena service")
     parser.add_argument(
         "--environment-file",
         type=Path,

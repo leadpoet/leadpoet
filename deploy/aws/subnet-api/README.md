@@ -31,7 +31,7 @@ plus the optional names listed after them:
 
 Optional:
 
-- `capture_reader_key`: Leadpoet website's own distinct `sb_secret_` key; maps
+- `capture_reader_key`: the operator website's own distinct `sb_secret_` key; maps
   to `leadpoet_capture_reader`. nginx exposes only its canonical summary POST
   (`lab_arena/RUNBOOK.md`, "Capture summary reader"). The database role can
   retain privileges inherited from existing `PUBLIC` grants; this key's narrow

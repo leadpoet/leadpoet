@@ -576,7 +576,7 @@ def scrub_transaction_event(
     """Scrub manually-created operational transactions and spans.
 
     Auto-instrumentation is disabled in the bootstrap. This allowlist exists
-    solely for static Leadpoet operation/stage names and bounded metadata.
+    solely for static Subnet 71 operation/stage names and bounded metadata.
     """
 
     if not isinstance(event, dict):

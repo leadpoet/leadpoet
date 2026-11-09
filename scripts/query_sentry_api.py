@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Read bounded, redacted Leadpoet events from the Sentry API.
+"""Read bounded, redacted Subnet 71 events from the Sentry API.
 
 The API token is loaded from a production Secrets Manager document over
 read-only SSH and remains inside this process. It is never accepted as a CLI
-argument, printed, persisted, or forwarded to a Leadpoet runtime. The helper
+argument, printed, persisted, or forwarded to a Subnet 71 runtime. The helper
 uses only the Python standard library and has no relationship to Sentry SDK
 initialization or any V2 authority path.
 """

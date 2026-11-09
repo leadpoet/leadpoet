@@ -4,7 +4,7 @@ An epoch is identified by ``SubnetEpochIndex`` and anchored by
 ``LastEpochBlock``. All storage fields in this module are read at one exact
 block hash so callers never combine state from different chain heads.
 
-Existing LeadPoet reward schedules use a monotonic integer epoch ordinal. A
+Existing Subnet 71 reward schedules use a monotonic integer epoch ordinal. A
 signed and attested mapping projects the official subnet index onto that
 ordinal so historical rows are never reused when the counters differ. The
 official identity remains available as ``epoch_ref`` and

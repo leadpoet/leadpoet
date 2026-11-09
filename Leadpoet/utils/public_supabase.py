@@ -1,4 +1,4 @@
-"""Dependency-free access to Leadpoet's fixed public database HTTP authority."""
+"""Dependency-free access to Subnet 71's fixed public database HTTP authority."""
 
 from __future__ import annotations
 

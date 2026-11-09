@@ -1,4 +1,4 @@
-"""Cross-runtime observability helpers for Leadpoet HOST processes.
+"""Cross-runtime observability helpers for Subnet 71 HOST processes.
 
 Currently: opt-in, non-authoritative Sentry host observability. See
 ``docs/sentry_error_monitoring.md`` and ``sentry_bootstrap.py`` for the

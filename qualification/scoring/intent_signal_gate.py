@@ -487,7 +487,7 @@ async def _call_openrouter_once(payload: Dict[str, Any],
         "Authorization": f"Bearer {openrouter_api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://leadpoet.ai",
-        "X-Title": "Leadpoet Intent Gate",
+        "X-Title": "Subnet 71 Intent Gate",
     }
 
     owns_client = client is None

@@ -1,5 +1,5 @@
 [Unit]
-Description=Leadpoet normal Arena validator
+Description=Subnet 71 normal Arena validator
 After=network-online.target
 Wants=network-online.target
 

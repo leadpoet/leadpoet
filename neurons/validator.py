@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the normal Leadpoet validator with its existing wallet and state."""
+"""Run the normal Subnet 71 validator with its existing wallet and state."""
 
 from __future__ import annotations
 

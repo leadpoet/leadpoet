@@ -17,7 +17,7 @@ def _load_leadpoet_taxonomy() -> tuple[
     path = Path(__file__).with_name("leadpoet_industry_taxonomy.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("version") != 1:
-        raise RuntimeError("Unsupported Leadpoet industry taxonomy version")
+        raise RuntimeError("Unsupported Subnet 71 industry taxonomy version")
 
     parents = {
         normalized_industry_text(parent): parent
@@ -43,7 +43,7 @@ def leadpoet_taxonomy_match(
     candidate_industry: Any,
     candidate_subindustry: Any,
 ) -> tuple[Optional[bool], dict[str, Any]]:
-    """Return an authoritative decision when exact Leadpoet labels are present.
+    """Return an authoritative decision when exact Subnet 71 labels are present.
 
     The repository taxonomy is stricter than semantic aliases: adjacent parent
     categories such as Payments and Financial Services remain distinct unless
@@ -61,7 +61,7 @@ def leadpoet_taxonomy_match(
     candidate_subindustry_key = normalized_industry_text(candidate_subindustry)
     subindustry_entry = LEADPOET_SUBINDUSTRY_PARENTS.get(candidate_subindustry_key)
     if subindustry_entry is None and candidate_parent is None:
-        # Some providers emit a Leadpoet subindustry label in their broader
+        # Some providers emit a Subnet 71 subindustry label in their broader
         # industry field. Treat that exact label as taxonomy evidence too.
         subindustry_entry = LEADPOET_SUBINDUSTRY_PARENTS.get(candidate_parent_key)
 

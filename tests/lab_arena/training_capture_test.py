@@ -326,6 +326,80 @@ def test_public_basic_prose_is_not_a_credential(sentence):
     assert capture.sanitize_training_value(sentence) == (sentence, [])
 
 
+def test_source_code_dynamic_authorization_keeps_only_the_unbound_scheme(tmp_path):
+    source = 'headers = {"Authorization": "Bearer " + token}\n'
+    user_content = contracts.canonical_json({
+        "submission_files": [{"path": "agent.py", "content": source}],
+    })
+    request = {"model": "test-model", "messages": [{"role": "user", "content": user_content}]}
+    assert capture.sanitize_training_value(request) == (request, [])
+    assert capture.sanitize_training_value(request, aggregate_parts=True) == (request, [])
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)({"request": request})
+    assert pointer["redacted"] is False
+    assert capture.read_request(objects, pointer)["request"] == request
+    with_secret, reasons = capture.sanitize_training_value(request, secrets=("token",))
+    assert "token}" not in with_secret["messages"][0]["content"]
+    assert reasons == ["credential"]
+
+
+def test_repeated_dynamic_bearer_source_scans_without_suffix_copies(monkeypatch):
+    source = 'headers = {"Authorization": "Bearer " + token}\n' * 2048
+    original = trajectory._unbound_bearer_source_literal
+    positions = []
+
+    def checked(value, text, position, *, closing_quote_pending):
+        assert len(text) == len(source)
+        positions.append(position)
+        return original(value, text, position, closing_quote_pending=closing_quote_pending)
+
+    monkeypatch.setattr(trajectory, "_unbound_bearer_source_literal", checked)
+    assert trajectory.redact_text(source) == source
+    assert len(positions) >= 2048
+    assert all(0 <= position < len(source) for position in positions)
+
+
+def test_environment_lookup_still_uses_the_existing_credential_mask():
+    source = 'api_key = os.environ.get("APP_API_KEY")\n'
+    cleaned, reasons = capture.sanitize_training_value(source)
+    assert cleaned != source
+    assert reasons == ["credential"]
+
+
+@pytest.mark.parametrize("padded", [True, False])
+def test_valid_basic_auth_stays_redacted_with_or_without_padding(padded):
+    token = base64.b64encode(b"user:passw").decode("ascii")
+    if not padded:
+        token = token.rstrip("=")
+    cleaned, reasons = capture.sanitize_training_value("Authorization: Basic " + token)
+    assert token not in cleaned
+    assert reasons == ["credential"]
+
+
+def test_basic_prose_is_still_masked_with_a_quoted_private_field():
+    prose = "Basic information."
+    private_content = contracts.canonical_json({"submission_files": [
+        {"path": "agent.py", "content": 'settings = {"secret": "actual-private-value"}\n'},
+        {"path": "README", "content": prose},
+    ]})
+    private_cleaned, private_reasons = capture.sanitize_training_value(private_content)
+    assert "actual-private-value" not in private_cleaned
+    assert prose not in private_cleaned
+    assert private_reasons == ["credential"]
+    actual = 'headers = {"Authorization": "Bearer actual-private-token"}\n'
+    static_content = contracts.canonical_json({
+        "submission_files": [{"path": "agent.py", "content": actual}],
+    })
+    cleaned, reasons = capture.sanitize_training_value(static_content)
+    assert "actual-private-token" not in cleaned
+    assert reasons == ["credential"]
+
+    static_concat = 'headers = {"Authorization": "Bearer " + "sk-abcdefghijklmnopqrstuvwxyz0123456789"}\n'
+    concat_cleaned, concat_reasons = capture.sanitize_training_value(static_concat)
+    assert "sk-abcdefghijklmnopqrstuvwxyz0123456789" not in concat_cleaned
+    assert concat_reasons == ["credential"]
+
+
 @pytest.mark.parametrize("plain", [b"user:secret", b"user:se"])
 def test_unpadded_basic_credential_in_free_text_is_redacted(tmp_path, plain):
     token = base64.b64encode(plain).decode("ascii").rstrip("=")

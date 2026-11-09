@@ -192,7 +192,7 @@ Current reward tiers are cumulative:
 | +15 points | 30% |
 | +20 points | 50% |
 
-Slots remain with their holder until replaced. Each slot halves every 140 epochs, reaching a 1/16 floor after four periods. A new win resets only the slots it replaces. See [reward rules](docs/arena_reward_slots.md) for activation and historical policies.
+Slots remain with their holder until replaced. With weekly decay enabled, each slot halves every 140 epochs (about seven days), without a reward floor; a genuinely new promoted model resets only the slots it replaces, even on the same hotkey. See [reward rules](docs/arena_reward_slots.md) for activation and historical policies.
 
 **Champion miners must keep their submitted API credentials funded. If Leadpoet funds a champion rebenchmark, that period's champion incentive is reduced by 50%.**
 

@@ -12,7 +12,7 @@ from leadpoet_canonical.arena_weights import (
     WEIGHT_STATE_SIGNATURE_PREFIX,
     validate_accepted_weight_state,
 )
-from leadpoet_canonical.lab_arena_rewards import REWARD_BASIS_V2_SCHEMA_VERSION, sha256_json
+from leadpoet_canonical.lab_arena_rewards import REWARD_BASIS_V2_SCHEMA_VERSION, sha256_json, validate_weekly_slot_decay
 
 CHAIN_OUTCOME_SCHEMA_VERSION = "leadpoet.arena.chain_outcome.v1"
 
@@ -30,6 +30,7 @@ def build_accepted_weight_state(
     burn_hotkey: str,
     issued_at: str,
     slot_eligibility: Optional[str] = SLOT_ELIGIBILITY_UNTIL_REPLACED,
+    weekly_slot_decay: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build and sign the small immutable state consumed by normal validators."""
 
@@ -47,6 +48,11 @@ def build_accepted_weight_state(
     }
     if reward_basis.get("schema_version") == REWARD_BASIS_V2_SCHEMA_VERSION and slot_eligibility is not None:
         body["slot_eligibility"] = slot_eligibility
+    if weekly_slot_decay is not None:
+        body["weekly_slot_decay"] = validate_weekly_slot_decay(
+            weekly_slot_decay, reward_basis,
+            epoch_id=epoch,
+        )
     state_hash = sha256_json(body)
     signature = signer.sign((WEIGHT_STATE_SIGNATURE_PREFIX + state_hash).encode("utf-8"))
     import base64

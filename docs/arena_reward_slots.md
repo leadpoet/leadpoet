@@ -47,17 +47,26 @@ improvement below +8 changes the champion as usual but earns
 no slot. Unpromoted, ineligible, incomplete, cancelled and other-network
 results cannot create slot achievements.
 
-Each slot's reward halves after every completed reward week, up to four
-halvings. A reward week uses the existing 140 settlement epochs. The multiplier
-is 100% initially, 50% after one week, 25% after two, 12.5% after three, and
-6.25% after four or more. Removed allocation goes to burn; it is not shared
-among other holders. `REWARD_SLOT_POLICY.decay` holds the interval and limit.
+With `LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED=true`, each occupied slot halves
+after every 140 settlement epochs (the existing reward week, about seven days),
+without a reward floor.
+The multiplier is 100% initially, 50% after one week, 25% after two, 12.5%
+after three, 6.25% after four, 3.125% after five, and so on. The normal chain
+weight precision eventually rounds tiny allocations to zero. Removed allocation
+goes to burn; it is not shared among other holders.
 
 Each clock starts at the source winning round's original effective reward
-epoch. A daily baseline or a new daily reward document does not reset it.
-A new qualifying achievement resets only the slots that it replaces, including
-when the same miner wins again. Different slots held by one miner can have
-different ages. Empty or unregistered slots do not pause their clocks.
+epoch. A daily baseline, restart or new daily reward
+document does not reset it. A genuinely new promoted model resets only the
+slots that it replaces, including when the same miner wins again. Repackaging
+the same normalized source does not reset its age. Signed promotion history
+establishes uninterrupted occupation; an intervening different owner or model
+starts a new tenure. Different slots held by one miner can have different ages.
+Unregistered owners do not pause their clocks.
+
+All validators use the same chain epoch and immutable accepted state, without
+local wall clocks or a mid-epoch weight change. Old states without
+`weekly_slot_decay` retain their signed four-halving limit.
 
 Activation uses published, successfully promoted history in the same chain
 scope, including eligible historical winners. Each signed slot binds its
@@ -96,10 +105,14 @@ without `pool_percent` keep their original total-emissions arithmetic. Policies
 without `decay` retain their original non-decaying payouts. The
 frozen `reward_constants` and weekly schedule do not rescale new slot payouts.
 
-Validators must support the signed decay policy and slot start epochs before
-the new policy becomes effective. They must also support the optional signed
-slot eligibility field before the gateway issues marked states; older validators
-reject the new field.
+Validators must support the optional, signed `weekly_slot_decay` clock before
+the gateway enables it. Roll out support with the switch off, verify primary,
+Rizzo and Yuma have the matching shared parser and weight kernel, then enable
+the switch through the canonical gateway release. The clock carries the
+verified source hash and promotion epoch for each occupied slot. It
+uses the existing accepted-state persistence; no new reward table is needed.
+Missing source or promotion proof stops new state issuance instead of inventing
+tenure. Already issued states remain available during recovery.
 Version 1 bases keep their original hashes, signatures and arithmetic. The
 accepted-weight-state envelope gains one optional, hash-covered field. The
 transaction format does not change. Existing signed transactions, pending

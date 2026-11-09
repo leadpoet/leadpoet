@@ -307,8 +307,8 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
         "own internal console or workflow remain customer_user or internal_function"
     ) in prompt
     assert (
-        "prove every independent mandatory industry, sub-industry, and product/service "
-        "condition, including those repeated in the required attribute" in prompt
+        "prove every independent mandatory condition that is not separately checked "
+        "by the required attribute" in prompt
     )
     assert "The independent required-attribute check must still prove" in prompt
     assert "An adjacent activity for the same customer group is UNPROVEN" in prompt

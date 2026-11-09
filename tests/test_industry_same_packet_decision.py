@@ -30,7 +30,7 @@ def test_same_packet_completed_match_is_not_sampled_again(monkeypatch):
     assert not calls['search'] and not calls['primary']
 
 
-@pytest.mark.parametrize('change', ['body', 'criterion', 'required_attribute', 'company', 'model', 'redirect'])
+@pytest.mark.parametrize('change', ['body', 'criterion', 'company', 'model', 'redirect'])
 def test_changed_packet_or_authority_cannot_reuse_a_match(monkeypatch, change):
     seen = []
 
@@ -48,8 +48,6 @@ def test_changed_packet_or_authority_cannot_reuse_a_match(monkeypatch, change):
                 kwargs['fetched_pages'][URL] += ' Coreworks no longer offers account workflows.'
             elif change == 'criterion':
                 kwargs['criteria'] = {**kwargs['criteria'], 'product_service': 'Also supplies voice support'}
-            elif change == 'required_attribute':
-                kwargs['required_attribute'] = 'Supplies account workflows AND voice support'
             elif change == 'company':
                 kwargs['company_locator'] = {**kwargs['company_locator'], 'name': 'Another company'}
             elif change == 'model':
@@ -66,8 +64,10 @@ def test_changed_packet_or_authority_cannot_reuse_a_match(monkeypatch, change):
     assert len(reviews) == (1 if change == 'redirect' else 2)
 
 
-def test_unproven_initial_assessment_is_not_a_reusable_verdict(monkeypatch):
-    run, _, _, reviews = install(monkeypatch, decision='unavailable', missing=['Account workflows'])
+@pytest.mark.parametrize('decision', ['unavailable', 'mismatch'])
+def test_unproven_initial_assessment_is_not_a_reusable_verdict(monkeypatch, decision):
+    # A supplier mismatch remains UNPROVEN under the existing native rules.
+    run, _, _, reviews = install(monkeypatch, decision=decision, missing=['Account workflows'])
     result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
                             prior_observations={'submitted_source_urls': [URL]}))
     assert result['claims']['industry']['status'] == 'UNPROVEN'
@@ -75,10 +75,9 @@ def test_unproven_initial_assessment_is_not_a_reusable_verdict(monkeypatch):
     assert len(reviews) >= 2
 
 
-@pytest.mark.parametrize('role', ['customer_user', 'supplier_operator'])
-def test_same_packet_completed_mismatch_is_preserved_without_mutating_initial(monkeypatch, role):
+def test_same_packet_completed_mismatch_is_preserved_without_mutating_initial(monkeypatch):
     run, _, _, reviews = install(monkeypatch, decision='mismatch',
-                                mutation=lambda result: result.update(role=role))
+                                mutation=lambda result: result.update(role='customer_user'))
     original_review = c._review_industry_sources
     reused = []
 

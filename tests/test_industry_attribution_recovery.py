@@ -2,13 +2,19 @@
 import asyncio
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
 from qualification.scoring import company_evidence_investigator as c
 from tests.test_company_evidence_investigator import _finding
 from tests.test_company_evidence_judgment_reserve import _response
-from tests.test_industry_semantic_projection import CAPTURE, DOMAIN, URL, QUOTE
+
+
+CAPTURE = json.loads((Path(__file__).parent / 'fixtures/company_evidence/ait_industry_attribution.json').read_text())
+DOMAIN = 'aitworldwide.com'
+URL = CAPTURE['evidence'][0]['url']
+QUOTE = CAPTURE['evidence'][0]['quote']
 
 
 NAMED = 'https://www.aitworldwide.com/about-us/'

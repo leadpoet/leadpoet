@@ -8,7 +8,7 @@ import pytest
 
 from qualification.scoring import company_evidence_investigator as c, industry_classification as industry
 from tests.test_company_evidence_judgment_reserve import _response
-from tests.test_industry_semantic_projection import CAPTURE, DOMAIN
+from tests.test_industry_attribution_recovery import CAPTURE, DOMAIN
 
 
 ORIGINAL = CAPTURE['original_capture']

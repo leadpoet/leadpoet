@@ -371,8 +371,8 @@ def test_multitarget_budget_preserves_stage_conflict_and_locator_guards():
 
 def test_industry_review_does_not_duplicate_separate_attribute_condition():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
-    assert "every independent mandatory industry, sub-industry, and product/service condition, including those repeated in the required attribute" in prompt
-    assert "industry proof does not prove that attribute" in prompt
+    assert "Do not mark industry UNPROVEN solely because that separate condition is unproven" in prompt
+    assert "do not claim industry proof establishes it" in prompt
     assert "independent required-attribute check must still prove its own conditions" in prompt
 
 

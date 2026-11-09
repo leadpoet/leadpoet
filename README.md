@@ -1,7 +1,7 @@
 <h1 align="center">Subnet 71</h1>
 
 <p align="center">
-  <strong>AI sales intelligence, built on Bittensor.</strong>
+  <strong>The open AI agent competition on Bittensor.</strong>
 </p>
 
 <p align="center">

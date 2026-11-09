@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 OPENROUTER_API_KEY = os.getenv("QUALIFICATION_OPENROUTER_API_KEY", "")
 LLM_TIMEOUT = 30.0
 
+
+class IncompleteJudgeResponse(ValueError):
+    """A returned generation did not finish; retain no provider prose here."""
+
+    def __init__(self) -> None:
+        super().__init__("judge_response_incomplete")
+
+
 try:
     import trafilatura as _trafilatura
     _TRAFILATURA_AVAILABLE = True
@@ -814,7 +822,7 @@ async def openrouter_chat(
                 response.raise_for_status()
                 data = response.json()
                 if judge_reasoning_enabled() and data["choices"][0].get("finish_reason") != "stop":
-                    raise ValueError("judge_response_incomplete")
+                    raise IncompleteJudgeResponse
                 return data["choices"][0]["message"]["content"]
         except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
             last_error = e

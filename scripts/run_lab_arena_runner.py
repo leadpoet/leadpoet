@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
-import time
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,16 +44,31 @@ def main(argv=None) -> int:
         return 2
     from lab_arena.wiring import build_runner_from_environment  # lazy: bittensor wallet, runsc host checks
 
-    runner = build_runner_from_environment(args)
+    stop = threading.Event()
+    previous_handlers = {
+        signum: signal.signal(signum, lambda _signum, _frame: stop.set())
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    runner = None
     try:
-        while True:
-            taken = runner.run_once()
+        runner = build_runner_from_environment(args)
+        while not stop.is_set():
+            # Stop only new claims. The shared runner keeps accepted work,
+            # capture and signed completion delivery alive through its drain.
+            taken = runner.run_once(stop_event=stop)
             if args.once and taken == 0:
                 return 0
             if taken == 0:
-                time.sleep(max(5, int(args.poll_seconds)))
+                stop.wait(max(5, int(args.poll_seconds)))
+        return 0
     finally:
-        runner.close()
+        stop.set()
+        try:
+            if runner is not None:
+                runner.close()
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

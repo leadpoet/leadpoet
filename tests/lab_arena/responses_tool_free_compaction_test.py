@@ -84,16 +84,19 @@ def test_unknown_or_malformed_controls_still_fail_admission(change):
 
 @pytest.mark.parametrize('variant,expect_search,expect_serial', [
     ('compaction', False, False),
-    ('research', True, False),
-    ('serial_function', True, True),
-    ('parallel_empty', True, False),
-    ('additional_tools', True, True),
+    ('research', False, False),
+    ('serial_function', False, True),
+    ('parallel_empty', False, False),
+    ('additional_tools', False, True),
+    ('native_search', True, True),
 ])
 def test_native_bridge_broker_capture_and_wire_preserve_tool_intent(monkeypatch, tmp_path,
                                                                     variant, expect_search, expect_serial):
     request = compaction_request()
     if variant in ('research', 'serial_function'):
         request['tools'] = native_request()['tools']
+    if variant == 'native_search':
+        request['tools'] = native_request()['tools'] + [{'type': 'web_search'}]
     if variant in ('research', 'parallel_empty'):
         request['parallel_tool_calls'] = True
     if variant == 'additional_tools':

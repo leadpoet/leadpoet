@@ -439,7 +439,7 @@ def test_bridge_error_code_serialization_is_closed_and_extractable():
         codex._BridgeRequestError(secret)
 
 
-def test_live_web_search_is_injected_as_one_bounded_native_server_tool(monkeypatch):
+def test_explicit_live_web_search_is_translated_to_one_bounded_native_server_tool(monkeypatch):
     payload = response(
         id="gen-live-search",
         output=[
@@ -481,7 +481,7 @@ def test_live_web_search_is_injected_as_one_bounded_native_server_tool(monkeypat
                 headers={"Authorization": "Bearer " + bridge.token},
                 json={
                     "model": "openai/gpt-4o-mini", "input": "Search now",
-                    "tools": None, "stream": True,
+                    "tools": [{"type": "web_search"}], "stream": True,
                 },
             )
 
@@ -1043,9 +1043,9 @@ def test_real_codex_live_web_search_crosses_bridge_with_history_and_citation(
     assert "ARENA_WEB_SEARCH_OK" in result
     assert len(posts) == 2
     for post in posts:
-        assert post["tools"][-1]["type"] == "openrouter:web_search"
-        assert post["tools"][-1]["parameters"]["engine"] == "native"
-        assert post["max_tool_calls"] == codex.WEB_SEARCH_MAX_TOOL_CALLS
+        assert not any(tool.get("type") == "openrouter:web_search"
+                       for tool in post.get("tools", []))
+        assert "max_tool_calls" not in post
 
 
 @pytest.mark.skipif(
@@ -2002,3 +2002,103 @@ def test_codex_in_real_gvisor(monkeypatch):
         assert result.output_bytes == b'{"companies":[]}'
         assert len(transport.sent) == 2
         assert sum(call["actual"] for call in store.calls.values()) == 24
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ARENA_TEST_CODEX_BINARY"),
+    reason="set ARENA_TEST_CODEX_BINARY for native DeepSeek local web proof",
+)
+def test_real_deepseek_local_web_retains_reasoning_without_hosted_declaration(
+    monkeypatch, tmp_path,
+):
+    _pin_real_codex(monkeypatch)
+    posts = []
+    pages = []
+    reasoning = {"type": "reasoning", "summary": [], "content": [
+        {"type": "reasoning_text", "text": "PRIVATE_REASONING_CONTINUITY_MARKER"},
+    ]}
+
+    def fetch(url, **_kwargs):
+        pages.append(url)
+        return url, ["VISIBLE_PAGE_RESULT_MARKER"]
+
+    def dispatch(_socket, body, **_kwargs):
+        ops.validate_operation_request("openrouter.responses", body)
+        posts.append(body)
+        standalone = isinstance(body.get("input"), str)
+        ordinary = [post for post in posts if isinstance(post.get("input"), list)]
+        if standalone:
+            output = [{"id": "search-tool", "type": "openrouter:web_search",
+                       "status": "completed", "action": {"type": "search",
+                       "query": "fixture search", "sources": [{"type": "url",
+                       "url": "https://example.com/source"}]}},
+                      {"id": "search-source", "type": "message",
+                       "role": "assistant", "status": "completed", "content": [{
+                           "type": "output_text", "text": "SEARCH_RESULT_MARKER",
+                           "annotations": [{"type": "url_citation",
+                                            "url": "https://example.com/source",
+                                            "title": "Source", "start_index": 0,
+                                            "end_index": 6}],
+                       }]}]
+        else:
+            assert not any(tool.get("type") in ("web_search", "openrouter:web_search")
+                           for tool in body.get("tools", []))
+            assert "max_tool_calls" not in body
+            assert any(tool.get("type") == "namespace" and tool.get("name") == "web"
+                       for tool in body["tools"])
+            step = len(ordinary)
+            if step > 1:
+                assert any(item.get("type") == "reasoning"
+                           and item.get("content") == reasoning["content"]
+                           for item in body["input"])
+            commands = [
+                {"search_query": [{"q": "fixture search"}]},
+                {"open": [{"ref_id": "https://example.com/source"}]},
+                {"find": [{"ref_id": "https://example.com/source", "pattern": "VISIBLE"}]},
+            ]
+            if step <= len(commands):
+                output = ([dict(reasoning, id="rs-local")] if step == 1 else []) + [{
+                    "type": "function_call", "id": "fc-%d" % step,
+                    "call_id": "call-%d" % step, "name": "run", "namespace": "web",
+                    "arguments": json.dumps(commands[step - 1]), "status": "completed",
+                }]
+            else:
+                history = json.dumps(body["input"])
+                assert "SEARCH_RESULT_MARKER" in history
+                assert "VISIBLE_PAGE_RESULT_MARKER" in history
+                output = [{"type": "message", "id": "msg-final", "role": "assistant",
+                           "status": "completed", "content": [{"type": "output_text",
+                           "text": "DEEPSEEK_LOCAL_WEB_OK", "annotations": []}]}]
+        return 200, json.dumps(response(output=output, model=body["model"])).encode()
+
+    monkeypatch.setattr(codex, "_fetch_visible_page", fetch)
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    result = codex.run("Search, open and find the fixture.",
+                       model="deepseek/deepseek-v4.1-flash-1017", cwd=tmp_path,
+                       timeout_seconds=60, web_search="live")
+    assert result == "DEEPSEEK_LOCAL_WEB_OK"
+    assert len(posts) == 5  # Four conversational calls and one accounted search.
+    assert pages == ["https://example.com/source", "https://example.com/source"]
+
+
+@pytest.mark.parametrize("model", ["deepseek/deepseek-v4.1-flash-1017", "openai/gpt-5.6-luna"])
+def test_live_web_search_does_not_attach_hosted_tool_to_ordinary_reasoning(monkeypatch, model):
+    posts = []
+    reasoning = {"type": "reasoning", "summary": [], "content": [
+        {"type": "reasoning_text", "text": "RETAIN_ORIGINAL_REASONING"},
+    ]}
+
+    def dispatch(_socket, body, **_kwargs):
+        posts.append(body)
+        return 200, json.dumps(response(model=model)).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.ResponsesBridge("/fixture-worker.sock", web_search="live") as bridge:
+        with httpx.Client(trust_env=False) as client:
+            result = client.post(bridge.base_url + "/responses",
+                                 headers={"Authorization": "Bearer " + bridge.token},
+                                 json={"model": model, "input": [reasoning], "tools": []})
+    assert result.status_code == 200
+    assert posts[0]["input"] == [reasoning]
+    assert posts[0]["tools"] == []
+    assert "max_tool_calls" not in posts[0]

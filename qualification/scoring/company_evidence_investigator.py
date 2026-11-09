@@ -406,10 +406,8 @@ literally say that vendors qualify. A customer sector named only as a target
 market remains insufficient, and a supplier does not satisfy a criterion that
 explicitly requires the investigated company itself to be the institution or
 downstream operator. For industry, VERIFIED means direct supplier/operator
-evidence for the requested activity. A separate required-attribute condition,
-such as recurring commercial terms or a recent milestone, is reviewed by the
-scorer independently. Do not mark industry UNPROVEN solely because that
-separate condition is unproven; do not claim industry proof establishes it.
+evidence for every mandatory condition in the requested activity. Judge the
+required attribute independently from its own source proof.
 A first-party URL, site ownership, footer, navigation, logo, URL path, or page
 title does not by itself establish that a quoted capability is supplied by the
 investigated company. Decide the activity role from the fetched page body.
@@ -476,12 +474,10 @@ only the company's relationship to the cited activity; it does not establish
 that the activity satisfies the requested industry criterion. For the industry
 finding, verify that the company itself supplies or operates the requested
 sector activity, using the complete industry, sub-industry, product/service,
-and required-attribute context to identify that activity. Do not make the
-industry finding depend on a commercial or other condition that is separately
-stated in the required attribute; that condition needs its own independent
-required-attribute judgment and source proof before company fit can match.
-Apply the industry precedence above and prove every independent mandatory
-condition that is not separately checked by the required attribute.
+and required-attribute context to identify that activity. Apply the industry
+precedence above and prove every independent mandatory industry, sub-industry,
+and product/service condition, including those repeated in the required attribute.
+An independent required-attribute judgment and source proof are still necessary.
 Equivalent source language is sufficient; do not require literal
 taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
 Populate observed industry, sub-industry, and value only from the source; never
@@ -3021,7 +3017,7 @@ async def _review_industry_sources(
     admitted_final_judgment=False,
     completed_review=None,
     careers_locators=(),
-    industry_bindings=None,
+    industry_bindings=None, required_attribute="",
 ):
     """Use one reserved turn for the full criterion; retain every bound quote.
 
@@ -3073,7 +3069,8 @@ async def _review_industry_sources(
         return unproven, '', 0
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
-    }, pages, evaluation_date=evaluation_date_value, conditional_sources=conditional['brands'])
+    }, pages, evaluation_date=evaluation_date_value, conditional_sources=conditional['brands'],
+        required_attribute=required_attribute)
     # This identifies the supplied source bytes, not a completed verdict. Keep
     # checked text available to the identity-bound retry cache if review fails.
     review['packet_sha256'] = packet.digest
@@ -3181,8 +3178,9 @@ async def _review_industry_sources(
                'activity_role': {'partner_other': 'third_party'}.get(result['role'], result['role']),
                'evidence_url': primary['url'], 'evidence_quote': primary['quote'],
                'reason': result['reason']}
-        # Reuse the native relationship and source gates, including the existing
-        # treatment of a supplier whose offered activity does not match.
+        # Reuse native source and identity gates. The host-resolved semantic
+        # decision distinguishes a supplier in another industry from a match;
+        # model-authored legacy findings cannot supply that decision context.
         arguments = {'findings': [raw]}
         targets = ('industry',)
         if rebrand.get('status') == 'VERIFIED':
@@ -3191,7 +3189,7 @@ async def _review_industry_sources(
         validated = _validated_findings(arguments, targets=targets,
             fetched_pages=fetched_pages, fetched_final_urls=fetched_final_urls,
             first_party_domains=first_party_domains, identity_anchor=identity_anchor,
-            identity_names=identity_names)
+            identity_names=identity_names, semantic_industry_decision=result['decision'])
         if validated is None:
             raise ValueError('industry_review_finding_malformed')
         finding = validated['industry']
@@ -4335,6 +4333,7 @@ def _validated_findings(
     requested_stage: str = "",
     priority_headquarters_url: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
+    semantic_industry_decision: str = "",
 ) -> Optional[dict[str, dict[str, Any]]]:
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
@@ -4669,7 +4668,10 @@ def _validated_findings(
                 )
                 and not (
                     target in {"industry", "required_attribute"}
-                    and status == "VERIFIED"
+                    and (status == "VERIFIED" or (
+                        target == "industry" and status == "CONTRADICTED"
+                        and semantic_industry_decision == "mismatch"
+                    ))
                     and (
                         target == "required_attribute"
                         or finding["activity_role"] == "supplier_operator"
@@ -4886,6 +4888,10 @@ def _validated_findings(
                 or (
                     status == "CONTRADICTED"
                     and finding["activity_role"] == "supplier_operator"
+                    # Only the full-criterion reviewer can distinguish a
+                    # supplier in a different industry from a non-supplier.
+                    # Ordinary model submissions retain their role contract.
+                    and semantic_industry_decision != "mismatch"
                 )
                 or finding["activity_role"] == "unresolved"
             ):
@@ -5229,7 +5235,7 @@ async def investigate_company_evidence(
     # Reserve the final judgment inside the existing reasoning budget. An
     # initial source assessment, when possible, uses another existing turn.
     reasoning_turn_limit = MAX_REASONING_TURNS - bool(industry_review_model)
-    research_system_prompt = _SYSTEM_PROMPT
+    research_system_prompt = _SYSTEM_PROMPT + "\n" + industry_classification.REQUIREMENT_CONTEXT_RULES
     if industry_review_model:
         research_system_prompt += (
             "\nIndustry: research the full criterion, including capabilities and "
@@ -6184,6 +6190,7 @@ async def investigate_company_evidence(
                 'model': industry_review_model, 'openrouter_key': openrouter_key,
                 'started': started, 'company_locator': company_locator,
                 'evaluation_date_value': input_document['evaluation_date'],
+                'required_attribute': requested_attribute or '',
                 'criteria': {'industry': requested_industry or '',
                              'subindustry': requested_subindustry or '',
                              'product_service': requested_product_service or ''},
@@ -6424,6 +6431,7 @@ async def investigate_company_evidence(
                          for key in ('name', 'website', 'linkedin')},
                         loaded_industry_sources,
                         evaluation_date=input_document['evaluation_date'],
+                        required_attribute=requested_attribute or '',
                         conditional_sources=current_industry_bindings()['brands'],
                     )
                     messages.append({'role': 'user', 'content': (
@@ -8101,6 +8109,7 @@ async def investigate_company_evidence(
                          for key in ('name', 'website', 'linkedin')},
                         added_industry_sources,
                         evaluation_date=input_document['evaluation_date'],
+                        required_attribute=requested_attribute or '',
                     )
                     messages.extend(industry_classification.source_messages(packet))
     except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):

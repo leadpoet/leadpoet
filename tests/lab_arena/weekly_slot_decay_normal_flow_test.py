@@ -9,8 +9,9 @@ import urllib.request
 
 from bittensor_wallet import Keypair
 from fastapi.testclient import TestClient
+from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
 
-from lab_arena import contracts, rewards, submission_similarity
+from lab_arena import contracts, rewards, submission_similarity, wiring
 from lab_arena.api import create_app
 from lab_arena.local_weight_signer import load_public_chain_signing_profile
 from lab_arena.promotion import GitPromoter
@@ -84,12 +85,24 @@ def test_weekly_clock_scoring_publication_persistence_and_three_normal_signers(
 
     def gateway(epoch, *, enabled):
         harness.chain.epoch = epoch
-        harness.chain.accepted_weight_epoch_scope = lambda: {
-            "genesis_hash": profile["genesis_hash"], "epoch": epoch,
-            "valid_from_block": 100, "valid_until_block": 459,
-        }
+        snapshot = SubnetEpochSnapshot(
+            network_genesis_hash="0x" + profile["genesis_hash"], netuid=71, head_kind="finalized",
+            block_hash="0x" + "2" * 64, current_block=104, last_epoch_block=100,
+            pending_epoch_at=0, subnet_epoch_index=10 + epoch - SOURCE_EPOCH,
+            tempo=360, blocks_since_last_step=4, observed_at="2026-11-09T00:00:00Z",
+        )
+        adapter = wiring.ChainReadsAdapter(harness.chain)
+        adapter._cutover = SubnetEpochCutover(
+            network_genesis_hash=snapshot.network_genesis_hash, netuid=71,
+            cutover_block=100, cutover_block_hash="0x" + "3" * 64,
+            first_subnet_epoch_index=10, first_settlement_epoch_id=SOURCE_EPOCH,
+            last_legacy_epoch_id=SOURCE_EPOCH - 1,
+        )
+        monkeypatch.setattr(wiring.chain_module, "finalized_epoch_snapshot", lambda _: snapshot)
+        assert adapter.accepted_weight_epoch_scope()["genesis_hash"] == "0x" + profile["genesis_hash"]
         harness.clock.now = datetime.now(timezone.utc)
         service = harness.build_service()
+        service.config.chain = adapter
         service.config.accepted_burn_hotkey = burn
         service.config.weekly_slot_decay_enabled = enabled
         return service

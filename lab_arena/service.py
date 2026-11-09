@@ -32,6 +32,7 @@ from leadpoet_canonical.arena_weights import (
     validate_accepted_weight_state,
     verify_accepted_weight_state_signature,
 )
+from leadpoet_canonical.chain_source_v2 import normalize_raw_hash
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
@@ -8857,6 +8858,7 @@ class ArenaService:
             epoch_scope = dict(self._config.chain.accepted_weight_epoch_scope())
             if int(epoch_scope.get("epoch", -1)) != requested_epoch:
                 raise ServiceError("accepted_weight_epoch_not_current", 409)
+            epoch_scope["genesis_hash"] = normalize_raw_hash(epoch_scope.get("genesis_hash"), "genesis_hash")
         except ServiceError:
             raise
         except Exception as exc:

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import rewards, signing, submission_similarity, weight_state
+from lab_arena import rewards, signing, submission_similarity, weight_state, wiring
+from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
 from lab_arena.service import ArenaService, ServiceError
 from leadpoet_canonical import arena_weights
 from tests.lab_arena.slot_decay_kernel_test import ALICE, BURN, HOTKEYS, _basis, _win
@@ -87,7 +88,7 @@ def _harness(*, enabled=True):
     return service, data, signer
 
 
-def _previous(data, signer, *, clock=True, epoch=EPOCH - 1, genesis="1" * 64):
+def _previous(data, signer, *, clock=True, epoch=EPOCH - 1, genesis="1" * 64, network="finney", netuid=71):
     kwargs = {}
     if clock:
         kwargs["weekly_slot_decay"] = {
@@ -97,7 +98,7 @@ def _previous(data, signer, *, clock=True, epoch=EPOCH - 1, genesis="1" * 64):
                       for _ in range(3)],
         }
     state = weight_state.build_accepted_weight_state(
-        signer, network="finney", genesis_hash=genesis, netuid=71, epoch=epoch,
+        signer, network=network, genesis_hash=genesis, netuid=netuid, epoch=epoch,
         valid_from_block=BLOCK - 10, valid_until_block=BLOCK,
         reward_basis=data.current, burn_hotkey=BURN, issued_at=data.current["published_at"],
         **kwargs,
@@ -105,6 +106,80 @@ def _previous(data, signer, *, clock=True, epoch=EPOCH - 1, genesis="1" * 64):
     data.previous = {key: state[key] for key in ("network", "netuid", "epoch", "state_hash")}
     data.previous["state_doc"] = state
     return state
+
+
+def _actual_adapter(monkeypatch):
+    snapshot = SubnetEpochSnapshot(
+        network_genesis_hash="0x" + "1" * 64, netuid=71, head_kind="finalized",
+        block_hash="0x" + "2" * 64, current_block=BLOCK + 4,
+        last_epoch_block=BLOCK, pending_epoch_at=0, subnet_epoch_index=20,
+        tempo=360, blocks_since_last_step=4, observed_at="2026-11-09T00:00:00Z",
+    )
+    adapter = wiring.ChainReadsAdapter(object())
+    adapter._cutover = SubnetEpochCutover(
+        network_genesis_hash=snapshot.network_genesis_hash, netuid=71,
+        cutover_block=BLOCK, cutover_block_hash="0x" + "3" * 64,
+        first_subnet_epoch_index=20, first_settlement_epoch_id=EPOCH,
+        last_legacy_epoch_id=EPOCH - 1,
+    )
+    monkeypatch.setattr(wiring.chain_module, "finalized_epoch_snapshot", lambda _: snapshot)
+    return adapter
+
+
+@pytest.mark.parametrize("clock", [False, True], ids=["legacy-previous", "weekly-previous"])
+def test_actual_chain_adapter_prefixed_genesis_accepts_the_same_signed_chain(monkeypatch, clock):
+    service, data, signer = _harness()
+    previous = _previous(data, signer, clock=clock)
+    before = deepcopy(previous)
+    service._config.chain = _actual_adapter(monkeypatch)
+    assert service._config.chain.accepted_weight_epoch_scope()["genesis_hash"] == "0x" + previous["genesis_hash"]
+    state = service.public_weight_state(EPOCH)["state"]
+    assert state["genesis_hash"] == previous["genesis_hash"] == "1" * 64
+    assert previous == before
+    assert state["weekly_slot_decay"]["slots"] == [{
+        "start_epoch": SOURCE_EPOCH,
+        "source_normalized_sha256": data.submission["source_normalized_sha256"],
+    }] * 3
+    arena_weights.verify_accepted_weight_state_signature(
+        state, public_key_der=signer.public_key_der,
+        expected_public_key_hash=signer.public_key_hash,
+    )
+    assert len(data.publish_calls) == 1
+
+
+@pytest.mark.parametrize("clock", [False, True])
+@pytest.mark.parametrize("changed", [
+    {"genesis": "2" * 64}, {"network": "testnet"}, {"netuid": 72}, {"epoch": EPOCH + 1},
+])
+def test_actual_adapter_still_rejects_a_different_previous_state_scope(monkeypatch, clock, changed):
+    service, data, signer = _harness()
+    _previous(data, signer, clock=clock, **changed)
+    service._config.chain = _actual_adapter(monkeypatch)
+    with pytest.raises(ServiceError, match="reward_clock_previous_invalid"):
+        service.public_weight_state(EPOCH)
+    assert data.publish_calls == data.object_calls == []
+
+
+@pytest.mark.parametrize("genesis", [None, "", "0x1234", "0x" + "g" * 64, "0x" + "1" * 65])
+def test_malformed_chain_genesis_cannot_pass_scope_normalization(monkeypatch, genesis):
+    service, data, signer = _harness()
+    _previous(data, signer)
+    adapter = _actual_adapter(monkeypatch)
+    service._config.chain.accepted_weight_epoch_scope = lambda: {
+        **adapter.accepted_weight_epoch_scope(), "genesis_hash": genesis,
+    }
+    with pytest.raises(ServiceError, match="accepted_weight_epoch_scope_unavailable"):
+        service.public_weight_state(EPOCH)
+    assert data.publish_calls == data.object_calls == []
+
+
+def test_actual_adapter_still_rejects_a_noncurrent_requested_epoch(monkeypatch):
+    service, data, signer = _harness()
+    _previous(data, signer)
+    service._config.chain = _actual_adapter(monkeypatch)
+    with pytest.raises(ServiceError, match="accepted_weight_epoch_not_current"):
+        service.public_weight_state(EPOCH + 1)
+    assert data.publish_calls == data.object_calls == []
 
 
 def test_issue_epoch_clock_from_signed_history_and_verified_frozen_archive():

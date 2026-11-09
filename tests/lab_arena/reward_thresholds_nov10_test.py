@@ -7,6 +7,8 @@ from fractions import Fraction
 import pytest
 
 from lab_arena import reward_decay, rewards, signing, weight_state
+from lab_arena.service import ServiceError
+from lab_arena.store import ArenaStoreError
 from leadpoet_canonical import lab_arena_rewards as kernel
 from tests.lab_arena.slot_decay_kernel_test import ALICE, BOB, BURN, CAROL, HOTKEYS, _basis, _win
 from tests.lab_arena.reward_thresholds_oct23_test import _service
@@ -147,6 +149,67 @@ def test_same_epoch_latest_race_preserves_preexisting_oct23_projection_bytes():
     before = kernel.canonical_json(accepted)
     assert kernel.canonical_json(service.public_weight_state(cutover)["state"]) == before
     assert saved == {}
+
+
+def _publish_race(*, earlier=True, mutation=None, weekly=False):
+    cutover = rewards.REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH
+    service, original, saved, calls, signer = _service(epoch=cutover)
+    policy = rewards.REWARD_SLOT_POLICY_OCT23 if earlier else _policy()
+    winner_basis = rewards.reward_basis_policy_projection_document(original, policy)
+    if mutation == "source":
+        winner_basis["reward_slots"][2]["submission_id"] = "unrelated-source"
+        winner_basis = rewards.finalize_reward_basis({
+            key: value for key, value in winner_basis.items() if key != "reward_basis_hash"})
+    elif mutation == "policy":
+        winner_basis["slot_policy"]["tiers"][0]["allocation_percent"] += 1
+        winner_basis["slot_policy"]["tiers"][1]["allocation_percent"] -= 1
+        winner_basis = rewards.finalize_reward_basis({
+            key: value for key, value in winner_basis.items() if key != "reward_basis_hash"})
+    winner_basis = signing.sign_document(signer, winner_basis, hash_field="reward_basis_hash")
+    clock = {"epochs_per_halving": 140, "slots": [None, None, {
+        "start_epoch": 25846, "source_normalized_sha256": "sha256:" + "1" * 64,
+    }]}
+    if weekly:
+        service._config.weekly_slot_decay_enabled = True
+        service._store.latest_weight_state = lambda *_args: None
+        service._weekly_reward_clock = lambda *_args, **_kwargs: deepcopy(clock)
+    def publish(network, netuid, epoch, digest, candidate):
+        kwargs = {}
+        if weekly:
+            winner_clock = deepcopy(clock)
+            if mutation == "clock":
+                winner_clock["slots"][2]["start_epoch"] -= 1
+            kwargs["weekly_slot_decay"] = winner_clock
+        winner = weight_state.build_accepted_weight_state(
+            signer, network=network, netuid=netuid, genesis_hash="1" * 64,
+            epoch=epoch, valid_from_block=1000,
+            valid_until_block=1101 if mutation == "validity" else 1100,
+            reward_basis=winner_basis, burn_hotkey=BOB if mutation == "burn" else BURN,
+            issued_at=original["published_at"], **kwargs,
+        )
+        if mutation == "signature":
+            winner["signature"]["signature_b64"] = "AAAA"
+        saved[epoch] = {"state_doc": winner}
+        raise ArenaStoreError("lab_arena_weight_state_conflict")
+    service._store.publish_weight_state = publish
+    return service, saved, cutover
+
+
+@pytest.mark.parametrize("weekly", [False, True])
+def test_old_policy_first_publisher_wins_cutover_race_on_first_request(weekly):
+    service, saved, epoch = _publish_race(weekly=weekly)
+    returned = service.public_weight_state(epoch)["state"]
+    assert returned["reward_basis"]["slot_policy"] == rewards.REWARD_SLOT_POLICY_OCT23
+    assert returned == saved[epoch]["state_doc"]
+    assert service.public_weight_state(epoch)["state"] == returned
+
+
+@pytest.mark.parametrize("earlier", [False, True])
+@pytest.mark.parametrize("mutation", ["source", "policy", "clock", "burn", "validity", "signature"])
+def test_publish_race_still_rejects_unrelated_authority_or_changed_body(earlier, mutation):
+    service, saved, epoch = _publish_race(earlier=earlier, mutation=mutation, weekly=True)
+    with pytest.raises(ServiceError, match="accepted_weight_state_(reward_conflict|conflict|invalid)"):
+        service.public_weight_state(epoch)
 
 
 @pytest.mark.parametrize("delta,occupied,expected", [

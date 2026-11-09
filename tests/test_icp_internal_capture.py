@@ -238,6 +238,8 @@ def test_exclusion_parse_failure_captures_reply_and_logs_only_error_type(monkeyp
     call, = spy.calls
     assert len(call["responses"]) == len(call["finishes"]) == 1
     assert call["finishes"][0]["cost_microusd"] is None
+    assert isinstance(call["finishes"][0]["outcome"]["exception_class"], str)
+    assert "test-provider-secret" not in json.dumps(call["finishes"][0]["outcome"])
     assert "test-provider-secret" not in caplog.text
 
 
@@ -254,6 +256,8 @@ def test_exclusion_transport_failure_finishes_unknown_without_provider_reply(mon
     assert call["responses"] == []
     assert len(call["finishes"]) == 1
     assert call["finishes"][0]["cost_microusd"] is None
+    assert call["finishes"][0]["outcome"]["exception_class"] == "ReadTimeout"
+    assert "test-provider-secret" not in json.dumps(call["finishes"][0]["outcome"])
     assert "test-provider-secret" not in caplog.text
 
 

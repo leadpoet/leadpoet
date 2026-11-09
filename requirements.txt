@@ -1,6 +1,8 @@
 # Arena validators and gateway hosts use Python 3.11.
 bittensor==10.5.0
 async-substrate-interface==2.2.1
+# Keep the tested transitive hash implementation stable across judge builds.
+xxhash==4.0.2
 py-sr25519-bindings>=0.2.0
 
 # HTTP and networking

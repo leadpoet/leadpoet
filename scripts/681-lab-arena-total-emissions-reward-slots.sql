@@ -23,7 +23,7 @@ BEGIN
     RAISE EXCEPTION '681 reward slot security differs' USING ERRCODE = '55000';
   END IF;
   v_hash := pg_catalog.encode(extensions.digest(v_definition, 'sha256'), 'hex');
-  IF v_hash = '953fce9f8c5b5fff1cfc01e296113bd9844d957c8981ba216c14d619e91d6ad1' THEN RETURN; END IF;
+  IF v_hash = '71700c2885e479b2a367cdcb27729d083525095731ee74b52f71408daac30956' THEN RETURN; END IF;
   IF v_hash <> '0870c5ab466388cdc89b8396e7565e547f4278b2870ea18c3e8bd2bb4dfca5c6' THEN
     RAISE EXCEPTION '681 reward slot preimage differs' USING ERRCODE = '55000';
   END IF;
@@ -55,7 +55,7 @@ BEGIN
   IF v_total_emissions THEN
     SELECT * INTO v_prior FROM public.lab_arena_rounds AS prior
     WHERE prior.round_id <> p_round_id
-      AND prior.status = 'published' AND prior.rewards_enabled
+      AND prior.rewards_enabled
       AND prior.configuration_doc ->> 'mode' = 'live'
       AND prior.arena_network_name = v_round.arena_network_name
       AND prior.arena_netuid = v_round.arena_netuid
@@ -68,6 +68,11 @@ BEGIN
     ORDER BY prior.effective_reward_epoch DESC, prior.evaluation_date DESC, prior.round_id DESC
     LIMIT 1;
     IF FOUND THEN
+      -- A reopened signed governing basis still owns its seats. Wait for its
+      -- publication proof instead of falling back to an older displaced owner.
+      IF v_prior.status <> 'published' THEN
+        RAISE EXCEPTION 'lab_arena_reward_carried_source_unavailable' USING ERRCODE = '22023';
+      END IF;
       v_carried := v_prior.reward_basis_doc -> 'reward_slots';
       IF pg_catalog.jsonb_typeof(v_carried) IS DISTINCT FROM 'array' THEN
         RAISE EXCEPTION 'lab_arena_reward_carried_slots_invalid' USING ERRCODE = '22023';
@@ -189,7 +194,7 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_reward_carried_slots_invalid' USING ERRCODE = '22023';
   END IF;
   IF v_round.status = 'published' AND v_round.rewards_enabled$new9$);
-  IF pg_catalog.encode(extensions.digest(v_updated, 'sha256'), 'hex') <> '953fce9f8c5b5fff1cfc01e296113bd9844d957c8981ba216c14d619e91d6ad1' THEN
+  IF pg_catalog.encode(extensions.digest(v_updated, 'sha256'), 'hex') <> '71700c2885e479b2a367cdcb27729d083525095731ee74b52f71408daac30956' THEN
     RAISE EXCEPTION '681 reward slot postimage differs' USING ERRCODE = '55000';
   END IF;
   EXECUTE v_updated;

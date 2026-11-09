@@ -268,3 +268,30 @@ def test_non_crowned_target_carries_current_signed_holders(state):
     pub['king_decision'].update(outcome='defended',winner_submission_id=None)
     target=_insert(c,chain,'defended',activated=False,publication=pub)
     assert [s['round_id'] for s in store.reward_slot_snapshot(target,POLICY)]==ids
+
+
+def test_reopened_governing_basis_cannot_revive_displaced_older_owner(state):
+    store,c,chain=state
+    a=winner(c,chain,'top',25,day='2026-10-05',epoch=100)
+    seed(c,a,store.reward_slot_snapshot(a,OLD_POLICY))
+    b=winner(c,chain,'mid',17,day='2026-10-06',epoch=200)
+    seed(c,b,store.reward_slot_snapshot(b,OLD_POLICY))
+    d=winner(c,chain,'low',9,day='2026-10-07',epoch=300)
+    seed(c,d,store.reward_slot_snapshot(d,OLD_POLICY))
+    target=winner(c,chain,'target',4.999,activated=False)
+    before=store.reward_slot_snapshot(target,POLICY)
+    assert [s['round_id'] for s in before]==[a,b,d]
+    with c.cursor() as cur:
+        cur.execute('BEGIN');cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("UPDATE public.lab_arena_rounds SET status='scored' WHERE round_id=%s",(d,))
+        cur.execute('COMMIT')
+        cur.execute('SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE arena_netuid=%s ORDER BY round_id',(chain,))
+        reopened=cur.fetchall()
+    with pytest.raises(ArenaStoreError,match='carried_source_unavailable'):store.reward_slot_snapshot(target,POLICY)
+    with c.cursor() as cur:
+        cur.execute('SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE arena_netuid=%s ORDER BY round_id',(chain,))
+        assert cur.fetchall()==reopened
+        cur.execute('BEGIN');cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("UPDATE public.lab_arena_rounds SET status='published' WHERE round_id=%s",(d,))
+        cur.execute('COMMIT')
+    assert store.reward_slot_snapshot(target,POLICY)==before

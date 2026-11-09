@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "26f697bf4e997aa467cb67979c243186e2c329e4",
+  "baseline_commit": "4bcab73785b17874b04ee432d8fe7a2bb4509d9b",
   "entries": [
     {
       "ast_sha256": "sha256:0322239466f9d95f17c77713b5ddd188d15318676bb4e0cbd6d2cacbd19c74ad",
@@ -587,12 +587,12 @@
       "symbol": "ArenaService.public_reward_basis"
     },
     {
-      "ast_sha256": "sha256:04e01f366be082d71402c44bf5ada2791793d5415ce8714d03c4bf0cc38cfc93",
+      "ast_sha256": "sha256:0bdf23a99cb554c90e029d517d3345fc9515cc7a24612523eef7c935115b405f",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService.public_weight_state"
     },
     {
-      "ast_sha256": "sha256:33ac74f2e874636ccaa68cf0d01137cb2bb08429b971d1893d49925de954fc53",
+      "ast_sha256": "sha256:091a9d992d0e8e6eede21158ab7193984e39171a7e3a1b2eab525fc2d8bd5df3",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "derive_arena_weights"
     },
@@ -757,7 +757,7 @@
       "symbol": "signing_key_hash_from_environment"
     },
     {
-      "ast_sha256": "sha256:2fd306bc1af4826b5cdc9f403dfeead4b8dfceb7c5d523f5eb666856370d3cfe",
+      "ast_sha256": "sha256:c9c7e5758fd9965d2881a74384c089c1bf8e3bf8c3f690e56bfd8569d2f6802e",
       "path": "leadpoet_canonical/lab_arena_rewards.py",
       "symbol": "slot_allocations"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1fa90147dc8bc929ac9c176c37448fe0a15919b1b26b087224291be9bd20617c",
-  "protected_source_commit": "66300ad3b44cccc5572fec1f653b2e7da2a01803",
+  "manifest_hash": "sha256:b0a666a75a0b56aee47c45236855da94124a2694e5a9641aa64c6df524a31142",
+  "protected_source_commit": "4bcab73785b17874b04ee432d8fe7a2bb4509d9b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

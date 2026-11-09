@@ -1463,8 +1463,25 @@ class HttpxProviderTransport:
                 operations.GENERIC_UNAVAILABLE_BODY, "redirect_rejected",
             )
         if oversized:
+            receipt_headers = {"content-type": "application/json"}
+            target = urlsplit(url)
+            # Keep only the existing validated receipt from an original paid
+            # dispatch. A key/billing lookup's edge trace is not that receipt.
+            if method == "POST" and not target.query and not target.fragment:
+                if (target.netloc == "code.deepline.com"
+                    and (target.path == "/api/v2/execute" or re.fullmatch(
+                        r"/api/v2/integrations/[A-Za-z0-9_-]+/execute", target.path))
+                    and deepline_job_id is not None):
+                    receipt_name = ("x-deepline-request-id"
+                                    if "x-deepline-request-id" in response_headers
+                                    else "x-vercel-id")
+                    receipt_headers[receipt_name] = deepline_job_id
+                elif (target.netloc == "openrouter.ai"
+                      and target.path in ("/api/v1/chat/completions", "/api/v1/responses")
+                      and openrouter_generation_id is not None):
+                    receipt_headers[_OPENROUTER_GENERATION_HEADER] = openrouter_generation_id
             return ProviderResponse(
-                502, {"content-type": "application/json"},
+                502, receipt_headers,
                 operations.GENERIC_UNAVAILABLE_BODY, "response_too_large",
             )
         return ProviderResponse(status, response_headers, bytes(content))

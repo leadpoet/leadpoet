@@ -5104,6 +5104,32 @@ def _web_identity_receipt(
                 verified_new_domain=new_domain,
             )
             return receipt
+    # An independently bound homepage already proves this entity. A standalone
+    # ampersand/"and" spelling change does not require historical rebrand proof.
+    # Keep the global name normalizer and strict company-quality alias rules.
+    def conjunction_name(value: Any) -> str:
+        return _company_name(re.sub(r"(?<!\w)&(?!\w)", " and ", str(value or "")))
+
+    submitted_raw_name = str(company.company_name or "")
+    observed_raw_name = observed_values["name"]
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH
+        and receipt_submitted_domain == receipt_observed_domain == verified_alias_domain
+        and receipt_submitted_slug
+        and receipt_submitted_slug == receipt_observed_slug == verified_alias_slug
+        and receipt.get("submitted_name") != receipt.get("observed_name")
+        and (
+            re.search(r"(?<!\w)&(?!\w)", submitted_raw_name)
+            or re.search(r"(?<!\w)&(?!\w)", observed_raw_name)
+        )
+        and conjunction_name(submitted_raw_name) == conjunction_name(observed_raw_name)
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verified_homepage_name_conjunction",
+        )
+        return receipt
     if rebrand.get("status") == "UNPROVEN" and (
         same_domain_name_alias
         or (

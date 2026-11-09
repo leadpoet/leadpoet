@@ -79,6 +79,8 @@ def test_real_http_socket_interruption_retains_cause_and_original_event_time(tmp
 @pytest.mark.parametrize('cause,expected', [
     (httpx.ReadTimeout('private exception prose https://private.example/path'), 'ReadTimeout'),
     (httpx.ConnectError('private exception prose'), 'ConnectError'),
+    (type('PrivateCredentialLikeToken123', (httpx.HTTPError,), {})('private prose'), 'unknown'),
+    (type('ReadTimeout', (httpx.HTTPError,), {})('private prose'), 'unknown'),
     (type('bad-class https://private.example', (httpx.HTTPError,), {})('private prose'), 'unknown'),
     (type('X' * 80, (httpx.HTTPError,), {})('private prose'), 'unknown'),
     (ValueError('private exception prose'), None),

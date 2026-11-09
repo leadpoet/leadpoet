@@ -2059,7 +2059,8 @@ def _provider_error_event(
     if isinstance(cause, httpx.HTTPError):
         name = type(cause).__name__
         content["transport_cause"] = (
-            name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "unknown"
+            name if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name)
+                     and getattr(httpx, name, None) is type(cause)) else "unknown"
         )
     return trajectory.event("runtime.provider_error", content)
 

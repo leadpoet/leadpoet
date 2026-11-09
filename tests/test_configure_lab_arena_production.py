@@ -787,6 +787,116 @@ def test_operator_contacts_generation_scope_preserves_unrelated_values(tmp_path,
     }
 
 
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_operator_weekly_slot_decay_preserves_every_other_env_key(encoded, apply, value):
+    source = {
+        "KEEP": "fixture-sensitive-value", "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_REWARDS_ENABLED": "true", "LAB_ARENA_CONTACTS_GENERATION_ENABLED": "false",
+        "LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": "false" if value == "true" else "true",
+    }
+    raw = (json.dumps(source, separators=(",", ":")) if encoded else
+           "".join(f"export {key}={entry}\n" for key, entry in source.items()))
+    client = _MemorySecrets(raw)
+    result = MODULE._configure_secret_request({
+        "secret_id": MODULE.GATEWAY_SECRET, "allowed_accounts": ["493765492819"],
+        "apply": apply, "role": "weekly_slot_decay_only", "aliases": {},
+        "updates": {"LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": value},
+    }, client=client, account="493765492819")
+    assert result["changed_keys"] == ["LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED"]
+    assert result["applied"] is apply
+    assert "fixture-sensitive-value" not in json.dumps(result)
+    assert client.state["versions"]["initial"] == raw
+    if not apply:
+        assert client.puts == [] and client.state["current"] == "initial"
+    else:
+        assert len(client.puts) == 1
+        updated = client.state["versions"][client.state["current"]]
+        expected = {**source, "LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": value}
+        if encoded:
+            assert json.loads(updated) == expected
+        else:
+            assert updated == "".join(f"export {key}={entry}\n" for key, entry in expected.items())
+
+
+@pytest.mark.parametrize("extra", [
+    {"secret_id": MODULE.VALIDATOR_SECRET},
+    {"role": "gateway"},
+    {"role": "validator"},
+    {"role": "contacts_generation_only"},
+    {"role": "unknown"},
+    {"aliases": {"SOURCE": "TARGET"}},
+    {"service_key": "sb_secret_fixture"},
+    {"updates": {}},
+    {"updates": {"WRONG_KEY": "true"}},
+    {"updates": {"LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": "true", "KEEP": "changed"}},
+    {"role": "gateway", "updates": {"LAB_ARENA_MODE": "live"},
+     "aliases": {"KEEP": "LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED"},
+     "service_key": "sb_secret_fixture"},
+])
+def test_operator_weekly_slot_decay_rejects_wrong_secret_key_or_role(extra):
+    client = _MemorySecrets('{"KEEP":"same"}')
+    request = {
+        "secret_id": MODULE.GATEWAY_SECRET, "allowed_accounts": ["493765492819"],
+        "apply": True, "role": "weekly_slot_decay_only", "aliases": {},
+        "updates": {"LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": "true"}, **extra,
+    }
+    with pytest.raises(MODULE.ConfigurationError, match="weekly_slot_decay_scope_invalid"):
+        MODULE._configure_secret_request(request, client=client, account="493765492819")
+    assert client.puts == []
+    assert client.state == {"current": "initial", "versions": {"initial": '{"KEEP":"same"}'}}
+
+
+@pytest.mark.parametrize("value", [True, False, 1, None, {}, "TRUE", "1", "enabled", "true\n", ""])
+def test_operator_weekly_slot_decay_rejects_non_boolean_strings(value):
+    client = _MemorySecrets('{}')
+    with pytest.raises(MODULE.ConfigurationError, match="weekly_slot_decay_invalid"):
+        MODULE._configure_secret_request({
+            "secret_id": MODULE.GATEWAY_SECRET, "allowed_accounts": ["493765492819"],
+            "apply": True, "role": "weekly_slot_decay_only", "aliases": {},
+            "updates": {"LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": value},
+        }, client=client, account="493765492819")
+    assert client.puts == []
+
+
+@pytest.mark.parametrize("selection,value", [("enabled", "true"), ("disabled", "false")])
+@pytest.mark.parametrize("apply", [False, True])
+def test_weekly_slot_decay_cli_routes_only_the_gateway_key(monkeypatch, capsys, selection, value, apply):
+    monkeypatch.setenv(MODULE.AUTH_ENV, "1")
+    calls = []
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **authority: calls.append((request, authority)) or {"ok": True})
+    assert MODULE.main([
+        "--weekly-slot-decay", selection, "--apply" if apply else "--check",
+        "--allowed-account", "493765492819", "--aws-profile", "fixture-profile",
+    ]) == 0
+    assert calls == [({
+        "secret_id": MODULE.GATEWAY_SECRET, "allowed_accounts": ["493765492819"],
+        "apply": apply, "role": "weekly_slot_decay_only", "aliases": {},
+        "updates": {"LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": value},
+    }, {"profile": "fixture-profile"})]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize("options", [
+    ["--weekly-slot-decay", "true"],
+    ["--weekly-slot-decay", "enabled", "--contacts-generation", "enabled"],
+    ["--weekly-slot-decay", "disabled", "--scorer-image-only"],
+])
+def test_weekly_slot_decay_cli_rejects_invalid_or_mixed_scope(options):
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args(options + ["--allowed-account", "493765492819"])
+
+
+def test_weekly_slot_decay_apply_requires_existing_authorization(monkeypatch, capsys):
+    monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda *a, **k: pytest.fail("unauthorized remote call"))
+    assert MODULE.main([
+        "--weekly-slot-decay", "enabled", "--apply", "--allowed-account", "493765492819",
+    ]) == 2
+    assert MODULE.AUTH_ENV in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("role,updates,extra", [
     (
         "contacts_from_only",

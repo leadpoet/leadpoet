@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Proto
 
 from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_coverage, training_eligibility, training_reader, baseline_reasoning
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
-from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
+from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, reward_decay, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     SLOT_ELIGIBILITY_UNTIL_REPLACED,
@@ -847,6 +847,8 @@ class ServiceConfig:
     # Supplies plain accepted economic inputs. It must not return receipts,
     # ancestry, release identity, or a preconstructed weight vector.
     accepted_burn_hotkey: str = ""
+    # Enable only after normal validators support signed model tenure.
+    weekly_slot_decay_enabled: bool = False
     # Identity-only test seam for existing leases. New claims and capacity
     # always require the finalized permit/stake snapshot, never this override.
     validator_authorizer: Optional[
@@ -8607,6 +8609,7 @@ class ArenaService:
         eligibility = None
         week = None
         governing = None
+        weekly_clock = None
         if epoch is not None:
             governing = self.public_reward_basis(epoch, public_only=True)
             if governing is None:
@@ -8626,6 +8629,7 @@ class ArenaService:
                         if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], governing, epoch):
                             raise ServiceError("accepted_weight_state_reward_conflict", 409)
                         governing = state["reward_basis"]
+                        weekly_clock = state.get("weekly_slot_decay")
                         eligibility = rewards.epoch_eligible(
                             governing, epoch,
                             until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
@@ -8662,6 +8666,7 @@ class ArenaService:
             "reward_slot_policy": governing.get("slot_policy") if governing else None,
             "reward_slots": governing.get("reward_slots") if governing else None,
             "current_epoch": epoch,
+            **({"weekly_slot_decay": weekly_clock} if weekly_clock is not None else {}),
         }
 
     def public_reward_basis(self, epoch: int, *, public_only: bool = False) -> Optional[Dict[str, Any]]:
@@ -8734,6 +8739,102 @@ class ArenaService:
                 raise ServiceError("accepted_weight_state_conflict", 409)
         return state
 
+    def _weekly_reward_clock(
+        self, basis: Mapping[str, Any], epoch_scope: Mapping[str, Any], *,
+        network: str, netuid: int, previous_state: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Bind signed decay tenure to verified source bytes and promotion epochs."""
+        signer = self._reward_signer()
+        epoch = int(epoch_scope["epoch"])
+        try:
+            signing.verify_document_signature(
+                basis, public_key_der=signer.public_key_der,
+                hash_field="reward_basis_hash",
+                expected_public_key_hash=signer.public_key_hash,
+            )
+            previous = previous_state or {}
+            prior_slots = (previous.get("reward_basis") or {}).get("reward_slots", [None] * 3)
+            prior_clocks = (previous.get("weekly_slot_decay") or {}).get("slots", [None] * 3)
+            checkpoint_only = all(
+                achievement is None or (
+                    prior_clocks[index] is not None and prior_slots[index] is not None
+                    and all(prior_slots[index][key] == achievement[key]
+                            for key in ("round_id", "submission_id", "miner_hotkey"))
+                ) for index, achievement in enumerate(basis["reward_slots"])
+            )
+            history = []
+            history_complete = False
+            if not checkpoint_only:
+                rows = self._store.published_reward_bases(
+                    mode="live", network_name=network, netuid=netuid, limit=201,
+                    public_only=True,
+                )
+                rows = [self._public_current_round(row) for row in rows]
+                history_complete = len(rows) < 201
+                for row in rows:
+                    if (row.get("arena_network_name") != network
+                            or row.get("arena_netuid") != netuid
+                            or not row.get("reward_activated_at")
+                            or row.get("rewards_enabled") is not True
+                            or (row.get("configuration_doc") or {}).get("mode") != "live"):
+                        raise ValueError("reward decay history scope differs")
+                    document = rewards.validate_reward_basis(row.get("reward_basis_doc"))
+                    # Authorized reward corrections preserve the original
+                    # signed basis under a -rewardhistory<migration> row ID.
+                    # The signed identity and epoch remain authoritative.
+                    archived_identity = re.fullmatch(
+                        re.escape(document["round_id"]) + r"-rewardhistory[0-9]+",
+                        str(row.get("round_id") or ""),
+                    )
+                    if ((document["round_id"] != row.get("round_id") and not archived_identity)
+                            or document["effective_reward_epoch"] != row.get("effective_reward_epoch")):
+                        raise ValueError("reward decay history identity differs")
+                    signing.verify_document_signature(
+                        document, public_key_der=signer.public_key_der,
+                        hash_field="reward_basis_hash",
+                        expected_public_key_hash=signer.public_key_hash,
+                    )
+                history = [item for item in self._usable_reward_bases(rows)
+                           if item["effective_reward_epoch"] <= epoch]
+            identities: Dict[Tuple[str, str, str], str] = {}
+
+            def identity(achievement: Mapping[str, Any]) -> str:
+                key = tuple(achievement[name] for name in ("round_id", "submission_id", "miner_hotkey"))
+                if key not in identities:
+                    submission = self._store.get_submission(achievement["submission_id"])
+                    if (not isinstance(submission, Mapping)
+                            or any(submission.get(name) != achievement[name]
+                                   for name in ("round_id", "submission_id", "miner_hotkey"))
+                            or submission.get("status") != "frozen"
+                            or submission.get("is_king") is not False):
+                        raise ValueError("reward decay frozen source identity differs")
+                    size = submission.get("source_size_bytes")
+                    if (isinstance(size, bool) or not isinstance(size, int)
+                            or not 0 < size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                            or not isinstance(submission.get("source_ref"), str)
+                            or not submission["source_ref"]):
+                        raise ValueError("reward decay frozen source transport differs")
+                    archive_hash = contracts.require_sha256(submission.get("source_archive_sha256"), "reward source archive hash")
+                    normalized_hash = contracts.require_sha256(submission.get("source_normalized_sha256"), "reward source normalized hash")
+                    payload = self._objects.get_bounded(submission["source_ref"], source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+                    if len(payload) != size or not hmac.compare_digest(archive_hash, "sha256:" + hashlib.sha256(payload).hexdigest()):
+                        raise ValueError("reward decay frozen source bytes differ")
+                    inspected = submission_similarity.inspect_archive(payload)
+                    if (not hmac.compare_digest(inspected.archive_sha256, archive_hash)
+                            or not hmac.compare_digest(inspected.normalized_sha256, normalized_hash)):
+                        raise ValueError("reward decay normalized source differs")
+                    identities[key] = inspected.normalized_sha256
+                return identities[key]
+
+            return reward_decay.weekly_slot_decay(
+                basis, epoch=epoch, source_identity=identity, history=history,
+                previous_state=previous_state, history_complete=history_complete,
+            )
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise ServiceError("accepted_weight_state_reward_clock_unavailable", 503) from exc
+
     def public_weight_state(self, epoch: int) -> Dict[str, Any]:
         """Return or atomically publish one accepted state for an Arena epoch."""
 
@@ -8761,6 +8862,34 @@ class ArenaService:
         except Exception as exc:
             raise ServiceError("accepted_weight_epoch_scope_unavailable", 503) from exc
         basis = self._project_reward_basis(basis, requested_epoch)
+        weekly_clock = None
+        if (getattr(self._config, "weekly_slot_decay_enabled", False)
+                and basis.get("schema_version") == contracts.REWARD_BASIS_V2_SCHEMA_VERSION):
+            latest = self._store.latest_weight_state(network, netuid)
+            previous = None
+            if latest is not None:
+                try:
+                    previous = validate_accepted_weight_state(latest.get("state_doc"))
+                    signer = self._reward_signer()
+                    verify_accepted_weight_state_signature(
+                        previous, public_key_der=signer.public_key_der,
+                        expected_public_key_hash=signer.public_key_hash,
+                    )
+                    if ((previous["network"], previous["netuid"], previous["genesis_hash"])
+                            != (network, netuid, epoch_scope["genesis_hash"])
+                            or previous["epoch"] > requested_epoch
+                            or any(latest.get(key) != previous[key]
+                                   for key in ("network", "netuid", "epoch", "state_hash"))):
+                        raise ValueError("reward decay previous state scope differs")
+                except (TypeError, ValueError) as exc:
+                    raise ServiceError("accepted_weight_state_reward_clock_previous_invalid", 503) from exc
+                if previous["epoch"] == requested_epoch:
+                    return {"state": self._validated_existing_weight_state(
+                        latest, basis, network=network, netuid=netuid, epoch=requested_epoch,
+                    ), "lookup_ok": True}
+            weekly_clock = self._weekly_reward_clock(
+                basis, epoch_scope, network=network, netuid=netuid, previous_state=previous,
+            )
         try:
             state = weight_state.build_accepted_weight_state(
                 self._reward_signer(), network=network,
@@ -8771,6 +8900,7 @@ class ArenaService:
                 reward_basis=basis,
                 burn_hotkey=self._config.accepted_burn_hotkey,
                 issued_at=str(basis["published_at"]),
+                **({"weekly_slot_decay": weekly_clock} if weekly_clock is not None else {}),
             )
             stored = self._store.publish_weight_state(
                 network, netuid, requested_epoch, state["state_hash"], state

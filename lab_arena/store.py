@@ -1684,6 +1684,16 @@ class ArenaStore:
             "publish_weight_state",
         )
 
+    def latest_weight_state(self, network: str, netuid: int) -> Optional[Dict[str, Any]]:
+        """Read the last signed state, including its durable reward clocks."""
+        rows = self._transport.select(
+            "lab_arena_accepted_weight_states",
+            filters={"network": str(network), "netuid": int(netuid)},
+            order="epoch", descending=True, limit=1,
+            columns="network,netuid,epoch,state_hash,state_doc,created_at",
+        )
+        return rows[0] if rows else None
+
     def record_chain_outcome(self, *, network: str, netuid: int, epoch: int, validator_hotkey: str, request_id: str, extrinsic_hash: str, outcome_doc: Mapping[str, Any]) -> Dict[str, Any]:
         return _require_mapping(
             self._transport.rpc(

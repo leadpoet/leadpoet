@@ -416,6 +416,20 @@ def _configure_secret_request(request, *, client, account):
             values[key] = raw_value
 
     updates = dict(request["updates"])
+    if (request["role"] == "weekly_slot_decay_only"
+            or "LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED" in updates
+            or "LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED" in (request.get("aliases") or {}).values()):
+        if (
+            request["role"] != "weekly_slot_decay_only"
+            or secret_id != GATEWAY_SECRET
+            or set(updates) != {"LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED"}
+            or request.get("aliases")
+            or request.get("service_key")
+        ):
+            fail("weekly_slot_decay_scope_invalid")
+        value = updates["LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED"]
+        if not isinstance(value, str) or value not in {"true", "false"}:
+            fail("weekly_slot_decay_invalid")
     if request["role"] == "openrouter_concurrency_only":
         if (
             secret_id != "leadpoet/prod/gateway/env"
@@ -725,6 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reasoning-baseline-source-sha256", default=None, metavar="SHA256", help="tested baseline archive digest required for reasoning activation")
     parser.add_argument("--reasoning-baseline-source-url", default=None, metavar="URL", help="immutable baseline commit archive URL required for reasoning activation")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
+    scope.add_argument("--weekly-slot-decay", choices=("enabled", "disabled"), default=None, help="configure only gateway weekly slot decay; activate with the canonical gateway restart")
     authority = parser.add_mutually_exclusive_group()
     authority.add_argument("--aws-profile", default=None, help="named temporary operator profile for secret configuration or IAM guard (default: leadpoet-lab)")
     authority.add_argument("--aws-instance-role", action="store_true", help="use the host IAM role credential chain for the validator IAM guard only")
@@ -809,6 +824,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or getattr(args, "intent_details_from", None) is not None
         or getattr(args, "reasoning_capture_from", None) is not None
         or getattr(args, "contacts_generation", None) is not None
+        or getattr(args, "weekly_slot_decay", None) is not None
     )
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
         raise ConfigurationError("validator IAM guard requires the exact production account")
@@ -938,6 +954,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 request["updates"]["LAB_ARENA_REASONING_BASELINE_SOURCE_URL"] = (
                     args.reasoning_baseline_source_url
                 )
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.weekly_slot_decay is not None:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "weekly_slot_decay_only", "aliases": {},
+                "updates": {
+                    "LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED": (
+                        "true" if args.weekly_slot_decay == "enabled" else "false"
+                    )
+                },
+            }
             result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0

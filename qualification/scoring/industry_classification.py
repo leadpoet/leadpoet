@@ -31,6 +31,15 @@ REASONING_RESPONSE_CONTRACT = (
 CONDITIONAL_SOURCE_KEYS = ('child_source_url', 'parent_source_url', 'parent_quote', 'child_brand',
                            'official_child_homepage', 'parent_body_sha256', 'child_body_sha256',
                            'child_final_url', 'pointer_kind', 'printed_reference')
+REQUIREMENT_CONTEXT_RULES = (
+    "Treat product_service and required_attribute as independent stated requirements. "
+    "An OR in one does not weaken an AND or required capability in the other. "
+    "Judge industry against the complete industry, subindustry and product_service criterion. "
+    "The required_attribute is context and has its own independent check. "
+    "Do not import an attribute-only condition into industry or waive a product/service "
+    "condition because the attribute also checks it. "
+    "Preserve each requirement's original wording and stated scope."
+)
 CRITERION_RULES = """Preserve every required offering, capability, channel and customer role, including the scope of AND and OR. Explicit logical AND and mandatory wording take precedence over descriptive-list guidance: 'must serve hospitals and clinics' requires both customer types; 'manufactures pumps AND valves' requires both products; 'must manufacture pumps and valves' requires both products. Preserve the stated scope of must, required, each, all, both and only; do not turn mandatory requirements into examples. Examples introduced by 'such as' or 'including' are illustrative. An ordinary descriptive list of customer types, buyer segments or user teams describes the customer base: an offering positioned for that base meets it without proof of each listed type. An ordinary descriptive product list identifies the manufacturer's product line: proof of products within that line can establish fit without proof of every listed product. An ordinary descriptive list of lifecycle stages, disease areas or indications, markets or regions states the offering's scope: proof of an offering within that scope establishes fit without proof of each listed item, unless must, each, all, both, only or explicit logical AND requires every item. An offering wholly outside that scope does not fit, even when it shares a field or modality word with it: an antibody company does not supply 'genetic medicines', and an oncology-only cell therapy does not serve 'genetic and rare diseases'. Do not turn every grammatical 'and' in a descriptive list into a separate requirement. Each listed function or capability of a required product or service remains required. Read subscription, recurring and fee-based terms by ordinary meaning: a priced monthly or annual plan for the offering proves a subscription. Read delivery or form words such as cloud, online, digital, web-based, mobile-first and app-based by the same ordinary meaning: an offering customers reach over the internet, in a browser or by API is cloud, online, digital or web-based; one centered on a mobile app is mobile-first or app-based. This reading covers only how the offering is delivered; it does not supply a missing function or capability. Do not add narrower requirements. Functional equivalents count. A specialized workflow can satisfy a required function; do not require a more general-purpose product unless the original criterion explicitly requires it. Every required function and the customer base must still be established. Concrete facts can establish a requirement by a clear inference; explain that inference. Mere industry proximity, possible applicability or an unsupported guess does not count.
 Bind every capability, channel and customer class to the subject specified by the criterion. A company required to provide several products or services can supply them through separate offerings; do not require one connected service or platform unless the criterion requires that connection. A requirement for a platform or product with several functions must be met by that platform or product, including its supported integrations, not unrelated offerings. Do not require a documented project for every capability/customer or capability/channel pairing unless explicitly requested. Use the relevant offering's stated customer positioning and respect explicit limitations; one customer example does not restrict it to that segment.
 Do not combine independently supplied offerings to fill a required platform's missing function or channel without evidence that the platform connects them. Keep comparative performance claims and named-workload support bound to the same qualifying offering: lower power use or better performance per watt at maintained performance does not establish faster execution, and generic AI performance does not establish performance on a named workload.
@@ -72,12 +81,15 @@ class Packet:
     pages: tuple[tuple[str, str, str], ...]
     evaluation_date: str
     conditional_sources: tuple[tuple[str, ...], ...] = ()
+    required_attribute: str = ""
 
     @property
     def digest(self):
         values = [self.criteria, self.company, self.pages, self.evaluation_date]
         if self.conditional_sources:
             values.append(self.conditional_sources)
+        if self.required_attribute:
+            values.append({'required_attribute': self.required_attribute})
         return hashlib.sha256(_canonical(values).encode()).hexdigest()
 
     def spans(self):
@@ -101,8 +113,16 @@ class Packet:
         return spans
 
 
-def prepare(criteria, company_locator, source_pages, *, evaluation_date, conditional_sources=None):
+def prepare(criteria, company_locator, source_pages, *, evaluation_date, conditional_sources=None,
+            required_attribute=""):
     """Use already-fetched text; byte references do not attest source authority."""
+    if (not isinstance(required_attribute, str)
+            or (required_attribute and not required_attribute.strip())):
+        raise ValueError("invalid required attribute context")
+    try:
+        required_attribute.encode('utf-8', errors='strict')
+    except UnicodeEncodeError as exc:
+        raise ValueError("invalid required attribute context") from exc
     try:
         valid_date = (isinstance(evaluation_date, str)
                       and date.fromisoformat(evaluation_date).isoformat() == evaluation_date)
@@ -186,7 +206,7 @@ def prepare(criteria, company_locator, source_pages, *, evaluation_date, conditi
         conditional.append(tuple(record[key] for key in CONDITIONAL_SOURCE_KEYS))
     pages = [page for page in pages if page[2] not in excluded]
     return Packet(values, tuple(company_locator.get(k, "") for k in locator_keys), tuple(pages),
-                  evaluation_date, tuple(conditional))
+                  evaluation_date, tuple(conditional), required_attribute)
 
 
 def source_messages(packet):
@@ -215,6 +235,8 @@ def request_payload(packet, *, model, research=False):
         "criterion": dict(zip(("industry", "subindustry", "product_service"), packet.criteria)),
         "company_locator": dict(zip(("name", "website", "linkedin"), packet.company)),
     }
+    if packet.required_attribute:
+        metadata['criterion_context'] = {'required_attribute': packet.required_attribute}
     if packet.conditional_sources:
         source_ids = {url: source_id for source_id, _, url in packet.pages}
         bodies = {url: body for _, body, url in packet.pages}
@@ -239,6 +261,8 @@ def request_payload(packet, *, model, research=False):
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": _canonical(metadata)},
                 *source_messages(packet)]
+    if packet.required_attribute:
+        messages[0]['content'] += '\n' + REQUIREMENT_CONTEXT_RULES
     if packet.conditional_sources:
         messages[0]['content'] += (
             '\nConditional child-source metadata proves source provenance only, never ownership. '

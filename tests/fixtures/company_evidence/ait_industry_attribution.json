@@ -35,5 +35,249 @@
     }
   ],
   "reason": "The supplied AIT Truckload Solutions page supports the criterion: it explicitly identifies AIT\u2019s offering as truckload brokerage, describes matching/booking with participating carriers and capacity across truckload and intermodal modes, and lists logistics/transportation-management services such as freight consolidation and network optimization. These facts establish freight brokerage and functionally equivalent third-party logistics services covering truckload, intermodal, and supply chain transportation.",
-  "limits": "Original investigator anchor and actual fetched-final URL map were not captured. Test variants reconstruct reported observations; matching anchors and self-final URLs are controlled inputs, not claims about the original run."
+  "limits": "The saved row alone lacked the investigator anchor. original_capture now contains the recovered actual empty verified identity, original observations and exact reviewer bytes. Exact source fetched-final URL is still absent; self-final URL maps in replay are controlled inputs, not original observations. Fully matching and reported-homepage anchor variants are separate controls.",
+  "original_capture": {
+    "capture_hashes": {
+      "22": "3be54ce94f46b2256c9da87b036afbf54094b8416a1338667a178d6263bb55ea",
+      "23": "9b3bc00fb38a7054bf6401e4f9f4372a2465bcfe5c46729fe9e47bb5ab093c7b",
+      "25": "345396f102cc100ba29e0cc586ad12e3099c69af0ba0eac2fb23708536cdaf19",
+      "26": "494d1460d690a18276affafa62e2f3131dfac8608a6ed88586f0af83093b65bb",
+      "31": "4ba77c1e4e95572f460a60c43a46021d1f57d4a0e4ebb76f19041a4180b1c997"
+    },
+    "investigator_input": {
+      "company_locator": {
+        "linkedin": "https://www.linkedin.com/company/ait-worldwide-logistics/",
+        "name": "AIT Worldwide Logistics",
+        "website": "https://www.aitworldwide.com/"
+      },
+      "requested_industry": "Transportation",
+      "requested_subindustry": "Freight Brokerage and Logistics",
+      "requested_product_service": "Freight brokerage and third-party logistics services that match shippers with carriers and manage truckload, intermodal, and supply chain transportation.",
+      "requested_attribute": "Provides freight brokerage, trucking, or third-party logistics services moving goods for shippers across North America.",
+      "requested_targets": [
+        "headcount",
+        "required_attribute",
+        "industry"
+      ],
+      "requested_employee_buckets": [
+        "1,001-5,000",
+        "201-500",
+        "501-1,000"
+      ],
+      "positive_semantic_review": true,
+      "prior_observations": {
+        "employee_size_evidence_quote": "",
+        "employee_size_evidence_url": "",
+        "geography_evidence_quote": "AIT Worldwide Logistics is headquartered in Itasca, IL.",
+        "geography_evidence_url": "https://pitchbook.com/profiles/company/144323-20",
+        "geography_matches": true,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_quote": "AIT Worldwide Logistics is a global freight forwarder that delivers customized supply chain solutions via air, sea, and ground, including customs clearance and other special services for industries with unique shipping requirements.",
+        "industry_evidence_url": "https://linkedin.com/company/ait-worldwide-logistics",
+        "industry_matches": true,
+        "observed_company_linkedin": "https://www.linkedin.com/company/ait-worldwide-logistics",
+        "observed_company_name": "AIT Worldwide Logistics",
+        "observed_company_stage": "",
+        "observed_company_website": "https://www.aitworldwide.com",
+        "observed_employee_count": null,
+        "observed_hq_country": "United States",
+        "observed_hq_state": "Illinois",
+        "observed_industry": "Logistics and freight forwarding",
+        "observed_subindustry": "Freight forwarding via air, sea, and ground with customs clearance",
+        "required_attribute_evidence_quote": "",
+        "required_attribute_evidence_url": "",
+        "stage_evidence_quote": "",
+        "stage_evidence_url": "",
+        "submitted_source_hints": [
+          {
+            "text": "AIT's 3PL services act as an extension of your business to ensure smooth shipping operations. Our experienced professionals are equipped to handle every aspect of moving goods through your supply chain, optimizing your business for cost savings, enhanced risk management, and end-to-end efficiencies.",
+            "url": "https://www.aitworldwide.com/services/third-party-logistics/"
+          }
+        ],
+        "submitted_source_urls": [
+          "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/",
+          "https://linkedin.com/company/ait-worldwide-logistics",
+          "https://careers-aitworldwide.icims.com/jobs/search?ss=1&searchKeyword=carrier%20sales",
+          "https://www.aitworldwide.com/services/third-party-logistics/",
+          "https://www.aitworldwide.com/"
+        ]
+      },
+      "verified_homepage_identity": {},
+      "evaluation_date": "2026-11-09",
+      "prefetched_sources": [
+        {
+          "text": "Truckload Brokerage | AIT Truckload Solutions Skip to Main Content Events Logistics Library Newsroom Contact Us FasTrak My Shipment Track My Shipment MyAIT Toggle search Search site Submit search Toggle menu Events Logistics Library Newsroom Contact Us Toggle search Search site Submit search AIT Truckload Solutions Easily Expand Your North American Reach with Expert Truckload Brokers Quickly grow your business with proven truckload brokerage solutions for LTL, full truckloads and more When you partner with AIT Truckload Solutions, our North American truckload brokerage, you gain industry-leading, modern services backed by reliable, scalable capacity across modes (intermodal, hot shot, full truckload and less\u2011than\u2011truckload), plus customized capacity solutions, dedicated trucks, support for surge\u2011volume requests and seasonal coverage to keep your shipments moving. Why choose AIT\u2019s North American Truckload Brokerage? Unlike traditional truckload brokers, AIT\u2019s solutions-based approach is rooted in strong connections with preferred, trusted industry partners, giving our customers important advantages like proven security, flexibility, cost savings and operational efficiency. The AIT Difference 24/7 shipment monitoring and customer service Industry-leading on-time performance GPS tracking on every shipment Warehousing available at 40 major hubs AIT teammates\u2019 average level of experience is more than twice the industry standard An NASTC \u201cBest Broker\u201d EPA SmartWay Transport partner Transportation Intermediaries Association (TIA) Performance Certified member Access true digital freight matching via AIT\u2019s next-generation technology AIT\u2019s truckload solutions are supported by technology platforms tailored to the data distribution and integration needs of each customer. Providing a transparent view of each shipment, our delivery tracking system provides client-specific, web-based reports, and contains a range of reporting tools capable of generating customized financial, operational and KPI reports. Book shipments automatically with participating carriers Track every possible KPI\u2014or only specific milestones Easily connect via EDI or API Quickly view receivables, invoices, client statements, POD copies, and more What services do AIT\u2019s truckload brokers offer? Logistics Freight consolidation Final mile delivery Reverse logistics Network optimization Project logistics Transportation management U.S. Domestic Full truckload Dry van Refrigerated Flatbed Volume/partial Intermodal and drayage Less-than-truckload (LTL) Expedited Air freight Local cartage North American Cross-borderexpertise Air/expedited GroundserviceCanada GroundserviceMexico Customssupport Bondedfreightservices What industries do AIT\u2019s truckload brokers support? For decades, we\u2019ve used our resources and expertise to develop innovative transportation solutions for customers of all sizes, across a variety of industries, with a strong focus on consumer and retail products, food and beverage, home building supplies, industrial products, packaging materials, paper materials, and pharmaceuticals (Opens in a new window). Customer and Carrier Log In Click Here (Opens in a new window) Review Our Terms and Conditions Download the PDF (Opens in a new window) Partner with a leading North American truckload brokerage Whether you're moving full truckloads or partial shipments, the dedicated truckload logistics team at AIT Truckload Solutions is here to help your business grow with on-time, secure deliveries. Contact an AIT Representative LinkedIn Facebook YouTube [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/#site-main https://www.aitworldwide.com/events/ https://www.aitworldwide.com/logistics-library/ https://www.aitworldwide.com/newsroom/ https://www.aitworldwide.com/contact-us/ https://myait.aitworldwide.com/ https://www.aitworldwide.com/ https://www.aitworldwide.com/solutions/ https://www.aitworldwide.com/solutions/consumer-retail/ https://www.aitworldwide.com/solutions/food/ https://www.aitworldwide.com/solutions/industrial/ https://www.aitworldwide.com/solutions/life-sciences/ https://ats.aitworldwide.com/ https://www.aitworldwide.com/getcontentasset/2bdfe7cb-3aa4-4662-8e6a-39db4172be74/dfc3d011-8f63-43f6-9ed8-4b444333a1d0/ait-truckload-solutions-terms-and-conditions-v08222022?language=en-US https://www.linkedin.com/company/24870 https://www.facebook.com/AITWorldwide https://www.youtube.com/user/aitait701",
+          "url": "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/"
+        }
+      ]
+    },
+    "reviewer_metadata": {
+      "company_locator": {
+        "linkedin": "https://www.linkedin.com/company/ait-worldwide-logistics/",
+        "name": "AIT Worldwide Logistics",
+        "website": "https://www.aitworldwide.com/"
+      },
+      "criterion": {
+        "industry": "Transportation",
+        "product_service": "Freight brokerage and third-party logistics services that match shippers with carriers and manage truckload, intermodal, and supply chain transportation.",
+        "subindustry": "Freight Brokerage and Logistics"
+      },
+      "evaluation_date": "2026-11-09"
+    },
+    "reviewer_source": {
+      "source_id": "s0",
+      "source_url": "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/",
+      "body": "Truckload Brokerage | AIT Truckload Solutions Skip to Main Content Events Logistics Library Newsroom Contact Us FasTrak My Shipment Track My Shipment MyAIT Toggle search Search site Submit search Toggle menu Events Logistics Library Newsroom Contact Us Toggle search Search site Submit search AIT Truckload Solutions Easily Expand Your North American Reach with Expert Truckload Brokers Quickly grow your business with proven truckload brokerage solutions for LTL, full truckloads and more When you partner with AIT Truckload Solutions, our North American truckload brokerage, you gain industry-leading, modern services backed by reliable, scalable capacity across modes (intermodal, hot shot, full truckload and less\u2011than\u2011truckload), plus customized capacity solutions, dedicated trucks, support for surge\u2011volume requests and seasonal coverage to keep your shipments moving. Why choose AIT\u2019s North American Truckload Brokerage? Unlike traditional truckload brokers, AIT\u2019s solutions-based approach is rooted in strong connections with preferred, trusted industry partners, giving our customers important advantages like proven security, flexibility, cost savings and operational efficiency. The AIT Difference 24/7 shipment monitoring and customer service Industry-leading on-time performance GPS tracking on every shipment Warehousing available at 40 major hubs AIT teammates\u2019 average level of experience is more than twice the industry standard An NASTC \u201cBest Broker\u201d EPA SmartWay Transport partner Transportation Intermediaries Association (TIA) Performance Certified member Access true digital freight matching via AIT\u2019s next-generation technology AIT\u2019s truckload solutions are supported by technology platforms tailored to the data distribution and integration needs of each customer. Providing a transparent view of each shipment, our delivery tracking system provides client-specific, web-based reports, and contains a range of reporting tools capable of generating customized financial, operational and KPI reports. Book shipments automatically with participating carriers Track every possible KPI\u2014or only specific milestones Easily connect via EDI or API Quickly view receivables, invoices, client statements, POD copies, and more What services do AIT\u2019s truckload brokers offer? Logistics Freight consolidation Final mile delivery Reverse logistics Network optimization Project logistics Transportation management U.S. Domestic Full truckload Dry van Refrigerated Flatbed Volume/partial Intermodal and drayage Less-than-truckload (LTL) Expedited Air freight Local cartage North American Cross-borderexpertise Air/expedited GroundserviceCanada GroundserviceMexico Customssupport Bondedfreightservices What industries do AIT\u2019s truckload brokers support? For decades, we\u2019ve used our resources and expertise to develop innovative transportation solutions for customers of all sizes, across a variety of industries, with a strong focus on consumer and retail products, food and beverage, home building supplies, industrial products, packaging materials, paper materials, and pharmaceuticals (Opens in a new window). Customer and Carrier Log In Click Here (Opens in a new window) Review Our Terms and Conditions Download the PDF (Opens in a new window) Partner with a leading North American truckload brokerage Whether you're moving full truckloads or partial shipments, the dedicated truckload logistics team at AIT Truckload Solutions is here to help your business grow with on-time, secure deliveries. Contact an AIT Representative LinkedIn Facebook YouTube"
+    },
+    "packet_sha256": "601a5e0a9535e643f04a7e6b3478182dafc20f8350d737a3cdafc1b16ccbe8f6",
+    "source_final_url_limit": "Original reviewer packet proves requested and fetched-final source URLs passed domain binding, but the exact final URL is not included in captured prompts. No self-final URL is asserted as original.",
+    "submitted_company": {
+      "company_linkedin": "https://www.linkedin.com/company/ait-worldwide-logistics/",
+      "company_name": "AIT Worldwide Logistics",
+      "company_stage": "",
+      "company_stage_evidence": [],
+      "company_website": "https://www.aitworldwide.com/",
+      "country": "United States of America",
+      "employee_count": "1,001-5,000",
+      "industry": "Transportation",
+      "intent_details": "AIT is actively hiring for carrier sales roles: its careers site lists open Carrier Sales Representative II postings. This hiring may help AIT Worldwide Logistics expand its freight Brokerage and Logistics offering.",
+      "intent_signals": [
+        {
+          "date": null,
+          "description": "AIT is actively hiring for carrier sales roles: its careers site lists open Carrier Sales Representative II postings.",
+          "matched_icp_signal": 0,
+          "url": "https://careers-aitworldwide.icims.com/jobs/search?ss=1&searchKeyword=carrier%20sales"
+        }
+      ],
+      "required_attribute": {
+        "evidence_quote": "AIT's 3PL services act as an extension of your business to ensure smooth shipping operations. Our experienced professionals are equipped to handle every aspect of moving goods through your supply chain, optimizing your business for cost savings, enhanced risk management, and end-to-end efficiencies.",
+        "evidence_url": "https://www.aitworldwide.com/services/third-party-logistics/",
+        "explanation": "AIT provides third-party logistics services moving goods for shippers across North America and globally.",
+        "passed": true,
+        "text": "Provides freight brokerage, trucking, or third-party logistics services moving goods for shippers across North America."
+      },
+      "state": "Illinois"
+    },
+    "final_claims": {
+      "headcount": {
+        "activity_role": "supplier_operator",
+        "evidence_quote": "External link for AIT Worldwide Logistics Industry Transportation, Logistics, Supply Chain and Storage Company size 1,001-5,000 employees Headquarters Itasca, Illinois",
+        "evidence_url": "https://www.linkedin.com/company/ait-worldwide-logistics/",
+        "new_domain": "aitworldwide.com",
+        "new_name": "AIT Worldwide Logistics",
+        "observed_country": "United States",
+        "observed_industry": "Transportation, Logistics, Supply Chain and Storage",
+        "observed_state": "Illinois",
+        "observed_subindustry": "Freight brokerage and logistics",
+        "observed_value": "1,001-5,000",
+        "old_domain": "aitworldwide.com",
+        "old_name": "AIT Worldwide Logistics",
+        "reason": "Exact-entity LinkedIn profile states current company size band 1,001-5,000 employees, matching the requested bucket, with headquarters in Itasca, Illinois.",
+        "shared_linkedin_slug": "ait-worldwide-logistics",
+        "status": "VERIFIED",
+        "supporting_evidence": [],
+        "target": "headcount"
+      },
+      "industry": {
+        "_industry_review": {
+          "decision": "match",
+          "evidence": [
+            {
+              "quote": "Truckload Brokerage | AIT Truckload Solutions Skip to Main Content Events Logistics Library Newsroom Contact Us FasTrak My Shipment Track My Shipment MyAIT Toggle search Search site Submit search Toggle menu Events Logistics Library Newsroom Contact Us Toggle search Search site Submit search AIT Truckload Solutions Easily Expand Your North American Reach with Expert Truckload Brokers Quickly grow your business with proven truckload brokerage solutions for LTL, full truckloads and more When you partner with AIT Truckload Solutions, our North American truckload brokerage, you gain industry-leading, modern services backed by reliable, scalable capacity across modes (intermodal, hot shot, full truckload and less\u2011than\u2011truckload), plus customized capacity solutions, dedicated trucks, support for surge\u2011volume requests and seasonal coverage to keep your shipments moving. Why choose AIT\u2019s North American Truckload Brokerage? Unlike traditional truckload brokers, AIT\u2019s solutions-based approach is rooted in strong connections with preferred, trusted industry partners, giving our customers important advantages like proven security, flexibility, cost savings and operational efficiency. The AIT Difference 24/7 shipment monitoring and customer service Industry-leading on-time performance GPS tracking on every shipment Warehousing available at 40 major hubs AIT teammates\u2019 average level of experience is more than twice the industry standard An NASTC \u201cBest Broker\u201d EPA SmartWay Transport partner Transportation Intermediaries Association (TIA) Performance Certified member Access true digital fr",
+              "url": "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/"
+            },
+            {
+              "quote": "eight matching via AIT\u2019s next-generation technology AIT\u2019s truckload solutions are supported by technology platforms tailored to the data distribution and integration needs of each customer. Providing a transparent view of each shipment, our delivery tracking system provides client-specific, web-based reports, and contains a range of reporting tools capable of generating customized financial, operational and KPI reports. Book shipments automatically with participating carriers Track every possible KPI\u2014or only specific milestones Easily connect via EDI or API Quickly view receivables, invoices, client statements, POD copies, and more What services do AIT\u2019s truckload brokers offer? Logistics Freight consolidation Final mile delivery Reverse logistics Network optimization Project logistics Transportation management U.S. Domestic Full truckload Dry van Refrigerated Flatbed Volume/partial Intermodal and drayage Less-than-truckload (LTL) Expedited Air freight Local cartage North American Cross-borderexpertise Air/expedited GroundserviceCanada GroundserviceMexico Customssupport Bondedfreightservices What industries do AIT\u2019s truckload brokers support? For decades, we\u2019ve used our resources and expertise to develop innovative transportation solutions for customers of all sizes, across a variety of industries, with a strong focus on consumer and retail products, food and beverage, home building supplies, industrial products, packaging materials, paper materials, and pharmaceuticals (Opens in a new window). Customer and Carrier Log In Click Here (Opens in a new window) Review Our Terms ",
+              "url": "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/"
+            }
+          ],
+          "missing_requirements": [],
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "packet_sha256": "601a5e0a9535e643f04a7e6b3478182dafc20f8350d737a3cdafc1b16ccbe8f6",
+          "reason": "The supplied AIT Truckload Solutions page supports the criterion: it explicitly identifies AIT\u2019s offering as truckload brokerage, describes matching/booking with participating carriers and capacity across truckload and intermodal modes, and lists logistics/transportation-management services such as freight consolidation and network optimization. These facts establish freight brokerage and functionally equivalent third-party logistics services covering truckload, intermodal, and supply chain transportation.",
+          "research_brief": {
+            "decision": "match",
+            "excluded_source_urls": [],
+            "missing_requirements": [],
+            "notice": "Fallible, not proof. source_urls are eligible; excluded_source_urls remain available for other targets under their own rules. Unrelated third parties and marketplaces are not proof. Use bound first-party sources, exact employer-linked ATS, verified rebrand, or guarded fetch_page.industry_brand_source: an exact visible parent relation quote and observed link or complete printed official child URL. This is industry-only provenance, not ownership or other-dimension proof; final review must prove the as-of operating relation and full criterion. Company job descriptions may describe work on its own offering; experience requested from applicants alone does not prove a product capability. Use remaining research to resolve these specific capability or customer-role gaps. Search for the missing fact, then select specific product/service documentation, technical brochures, or company customer/project evidence from the results. Choose sources that can support OR contradict the requirement. Generic category pages, internal use and a separate partner offering do not resolve a missing supplied capability. PDF brochures are eligible locators. Search-loaded text may be incomplete; fetch_page may refresh it once within the remaining ordinary fetch/time allowance. Prefetched, retained and exact-read sources remain cached. Never treat snippets as proof. After fetching a page, check the remaining gaps; one new page does not by itself resolve them. Use remaining research for specific unanswered facts before submitting. Keep all other requested targets and existing research limits.",
+            "packet_sha256": "601a5e0a9535e643f04a7e6b3478182dafc20f8350d737a3cdafc1b16ccbe8f6",
+            "reason": "The supplied page explicitly describes AIT\u2019s \u201cNorth American truckload brokerage\u201d and \u201ctruckload brokerage solutions,\u201d including \u201cfreight matching\u201d technology and the ability to \u201cBook shipments automatically with participating carriers.\u201d It also lists logistics and transportation management services and modes including full truckload, intermodal and drayage, LTL, and expedited. These facts establish freight brokerage and third-party logistics activity matching shippers with carriers and managing truckload, intermodal, and supply chain transportation.",
+            "research_query": "",
+            "source_urls": [
+              "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/"
+            ]
+          },
+          "schema": "industry_evidence_review_v1",
+          "source_urls": [
+            "https://www.aitworldwide.com/services/ground-distribution/truckload-solutions/"
+          ]
+        },
+        "activity_role": "supplier_operator",
+        "evidence_quote": "",
+        "evidence_url": "",
+        "new_domain": "",
+        "new_name": "",
+        "observed_country": "",
+        "observed_industry": "AIT\u2019s Truckload Solutions page presents AIT as a North American truckload brokerage providing LTL, full truckload, intermodal, hot shot, dedicated trucks, and customized capacity solutions. It lists l",
+        "observed_state": "",
+        "observed_subindustry": "",
+        "observed_value": null,
+        "old_domain": "",
+        "old_name": "",
+        "reason": "source quote did not identify the investigated company",
+        "shared_linkedin_slug": "",
+        "status": "UNPROVEN",
+        "supporting_evidence": [],
+        "target": "industry"
+      },
+      "required_attribute": {
+        "activity_role": "supplier_operator",
+        "evidence_quote": "AIT Worldwide Logistics is a global freight forwarder that helps companies grow by expanding access to markets all over the world where they can sell and/or procure their raw materials, components and finished goods. For more than 45 years, the Chicago-based supply chain solutions leader has relied on a consultative approach to build a global network and trusted partnerships in nearly every industry, including aerospace, automotive, consumer retail, energy, food, government, high-tech, industrial, life sciences and marine. Backed by scalable, user-friendly technology, AIT\u2019s flexible business model customizes end-to-end deliveries via sea, air, ground and rail \u2014 on time and on budget.",
+        "evidence_url": "https://www.linkedin.com/company/ait-worldwide-logistics/",
+        "new_domain": "aitworldwide.com",
+        "new_name": "AIT Worldwide Logistics",
+        "observed_country": "United States",
+        "observed_industry": "Transportation",
+        "observed_state": "Illinois",
+        "observed_subindustry": "Freight brokerage and logistics",
+        "observed_value": null,
+        "old_domain": "aitworldwide.com",
+        "old_name": "AIT Worldwide Logistics",
+        "reason": "First-party LinkedIn About proves AIT Worldwide Logistics itself supplies freight forwarding and end-to-end deliveries via sea, air, ground and rail for shipper customers worldwide including North America; combined with its North American truckload brokerage services (full truckload, LTL, intermodal",
+        "shared_linkedin_slug": "ait-worldwide-logistics",
+        "status": "VERIFIED",
+        "supporting_evidence": [
+          {
+            "quote": "AIT Worldwide Logistics is a global freight forwarder that helps companies grow by expanding access to markets all over the world where they can sell and/or procure their raw materials, components and finished goods.",
+            "url": "https://www.linkedin.com/company/ait-worldwide-logistics/"
+          },
+          {
+            "quote": "External link for AIT Worldwide Logistics Industry Transportation, Logistics, Supply Chain and Storage Company size 1,001-5,000 employees Headquarters Itasca, Illinois",
+            "url": "https://www.linkedin.com/company/ait-worldwide-logistics/"
+          }
+        ],
+        "target": "required_attribute"
+      }
+    },
+    "linkedin_tool_result": {
+      "ok": true,
+      "remaining_research_budget": {
+        "industry_search_exchange_available": false,
+        "remaining_fetch_calls": 3,
+        "remaining_search_calls": 2
+      },
+      "text": "AIT Worldwide Logistics | LinkedIn\n\n \n\n# AIT Worldwide Logistics \n\n## Transportation, Logistics, Supply Chain and Storage \n\n### Itasca, Illinois 80,830 followers \n\n## About us \n\n AIT Worldwide Logistics is a global freight forwarder that helps companies grow by expanding access to markets all over the world where they can sell and/or procure their raw materials, components and finished goods. For more than 45 years, the Chicago-based supply chain solutions leader has relied on a consultative approach to build a global network and trusted partnerships in nearly every industry, including aerospace, automotive, consumer retail, energy, food, government, high-tech, industrial, life sciences and marine. Backed by scalable, user-friendly technology, AIT\u2019s flexible business model customizes end-to-end deliveries via sea, air, ground and rail \u2014 on time and on budget. With expert teammates staffing more than 170 worldwide locations in Asia, Europe, the Middle East and North America, AIT\u2019s full-service options also include customs clearance, warehouse management and white glove services. Learn more at www.aitworldwide.com. Our Mission At AIT, we provide solutions to earn our customers' trust, leveraging our products, regions and vertical markets, all backed by a high-performance culture. Our Vision Become the global logistics provider respected for delivering a world-class experience. \n\n Website \n\n https://www.aitworldwide.com/ \n\nExternal link for AIT Worldwide Logistics\n\n Industry \n\n Transportation, Logistics, Supply Chain and Storage \n\n Company size \n\n 1,001-5,000 employees \n\n Headquarters \n\n Itasca, Illinois \n\n Type \n\n Privately Held \n\n Specialties \n\n Air, ocean and ground transportation, Logistics solutions, Freight forwarding, Data integration, Supply chain management, Import, Export, Ocean Freight, Air Freight, Road Freight, Technology, Global Supply Chain, Global, Customs Brokerage, Data Sciences, Air Freight, Ocean Freight, Sea Freight, Road Freight, and Ground Distribution \n\n## Employees at AIT Worldwide Logistics \n\n- ### Michael Sullivan \n\n## Locations \n\n- Primary \n\n 2 Pierce Pl \n\n Suite 2100 \n\n Itasca, Illinois 60143, US \n\n Get directions \n\n## Updates \n\n- \n\n AIT Worldwide Logistics \n\n 80,830 followers \n\n 2d \n\n- Report this post \n\nAIT Worldwide Logistics celebrated the opening of its new Houston facility, supporting growth in one of the most important U.S. logistics markets. Located just two miles from George Bush Intercontinental Airport, the nearly 300,000-square-foot office and warehouse features extensive yard space and provides convenient access to the Port of Houston. Leveraging vast contract logistics and project cargo expertise, AIT-Houston\u2019s supply chain professionals are serving global transportation needs for customers across a variety of industries, including the energy sector. Thank you to our local teammates whose commitment to world-class solutions continue to drive AIT's success. Take a closer look at the station\u2019s expanded capabilities: https://bit.ly/4isvE7N #OurPeopleDeliver #AerospaceLogistics #EnergyLogistics #MarineLogistics\n\n \u2026more \n\n 225 5 Comments \n\n Like \n\n Comment \n\n Share \n- \n\n AIT Worldwide Logistics \n\n 80,830 followers \n\n 3d \n\n- Report this post \n\nMRO Europe brought the AIT Worldwide Logistics team together with customers and partners in Amsterdam to discuss logistics demands across the aircraft lifecycle. From fleet maintenance to engine repairs and aircraft transitions, AIT Worldwide Logistics\u2019 global network and dedicated aerospace experts ensure transportation is aligned with operational priorities. Thank you to everyone who connected with the team. Aviation Week Events #MROEurope #AerospaceLogistics #OurPeopleDeliver\n\n \u2026more \n\n 102 1 Comment \n\n Like \n\n Comment \n\n Share \n- \n\n AIT Worldwide Logistics \n\n 80,830 followers \n\n 4d \n\n- Report this post \n\nHeather Loebner has joined AIT Worldwide Logistics as senior vice president, global sustainability. In this role, Heather will build and lead AIT\u2019s ",
+      "url": "https://www.linkedin.com/company/ait-worldwide-logistics/"
+    }
+  },
+  "fresh_alternative_source": {
+    "requested_url": "https://www.aitworldwide.com/north-america/united-states/",
+    "final_url": "https://www.aitworldwide.com/north-america/united-states/",
+    "retrieved_date": "2026-11-09",
+    "source": "fresh unauthenticated HTTPS read; not original capture",
+    "text": "US Shipping | AIT Worldwide Logistics Skip to Main Content Events Logistics Library Newsroom Contact Us FasTrak My Shipment Track My Shipment MyAIT Toggle search Search site Submit search Toggle menu Events Logistics Library Newsroom Contact Us Toggle search Search site Submit search United States From helping you clear customs to finding cargo capacity on tight timelines, AIT\u2019s U.S. shipping and freight forwarding teams are here to deliver for your business. Start revamping your logistics strategy now. Contact an AIT representative Partner with One of the Best U.S. Shipping Companies AIT Worldwide Logistics: One of the Top Shipping Companies in the USA Whether your organization is based in North America, or halfway around the world, AIT\u2019s experienced U.S. shipping and freight forwarding team is ready to develop a customized supply chain solution to fit your business needs. As one of the leading shipping companies in the USA, AIT-United States is your go-to contact for sea, air and road transportation services, including: The Middle Mile Network, an innovative expedited LTL alternative In-house North American truckload brokerage In-house customs brokerage White glove, concierge-level delivery options Reverse logistics and asset recovery Long- and short-term warehousing Best-in-class asset monitoring and shipment tracking Transborder services And more! Why choose AIT over other U.S. shipping companies? AIT serves as a strategic partner in your global supply chain. Whether you're an international or regional shipper seeking a U.S. freight forwarder, AIT combines deep industry knowledge with global infrastructure to streamline your operations. The AIT-United States freight forwarding experts leverage decades of experience and powerful technology to manage multimodal cargo movements, while maintaining visibility and compliance at every step. Our collection of logistics support services includes a mix of offerings shippers won't find anywhere else, including advanced technology integrations, specialized shipping expertise for sensitive, high-value, temperature-controlled and/or big and bulky goods, low- or no-cost options to reduce emissions, and much more. With what commodities is AIT\u2019s U.S. team most familiar? Our professional team of freight forwarders is part of a global network that creates transportation logistics solutions every day for nearly every industry, with a strong national focus on the aerospace, energy, home delivery, life sciences, marine and technology markets. Does AIT have freight forwarding facilities outside of the United States? Yes! AIT\u2019s expanding footprint currently includes more than 170 facilities across Asia, Europe, the Middle East, and North America. This global reach enables our AIT-United States freight forwarders to offer fast, connected solutions that scale with your supply chain. Explore AIT\u2019s global locations What cargo security measures and certifications do AIT\u2019s U.S. locations provide? AIT is a member of the Transport Asset Protection Association, and all of AIT\u2019s North American locations feature multiple, advanced safety and security features, including 24-hour monitoring, closed-circuit cameras, keypad ac",
+    "limit": "Actual fetched visible source excerpt, captured on 2026-11-09 after original scoring; this is an alternative-source control, never original-run evidence.",
+    "full_visible_text_sha256": "64538df4a2193ff5a6677d5fc9d3b0b90be234ce77ea4ad771f510e7feb3d423",
+    "excerpt_sha256": "77fd6e3f11bf9702d76a735dc360a7a0828bdd5340b7433138d7b7d22a7c2e22"
+  }
 }

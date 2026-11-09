@@ -2790,6 +2790,16 @@ copy a conclusion from the invalid answer. No particular decision is requested.
 """
 
 
+_INCOMPLETE_RESPONSE_CORRECTION = """
+
+STRUCTURED REVIEW CORRECTION:
+The previous generation was incomplete. It is invalid and is not evidence.
+Re-evaluate the complete unchanged document and return one fresh complete
+schema-valid verdict with every required check, unit and evidence binding.
+Do not continue or copy the incomplete answer. No particular decision is requested.
+"""
+
+
 async def review_intent_details(
     company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
     company_fit_receipt: Mapping[str, Any],
@@ -2801,7 +2811,9 @@ async def review_intent_details(
 Provider errors and malformed verdicts remain retryable. Never convert a
 missing review into an accepted paragraph or a terminal company mismatch.
 """
-    from qualification.scoring.verification_helpers import openrouter_chat
+    from qualification.scoring.verification_helpers import (
+        IncompleteJudgeResponse, openrouter_chat,
+    )
     from qualification.scoring.openrouter_options import (
         judge_reasoning_enabled, JUDGE_REASONING_TIMEOUT_SECONDS,
     )
@@ -2880,8 +2892,14 @@ missing review into an accepted paragraph or a terminal company mismatch.
             timeout=remaining,
         )
 
+    incomplete_generation = False
     try:
         response = await request_review(prompt, system_prompt, _RESPONSE_FORMAT)
+    except IncompleteJudgeResponse:
+        # A returned, unfinished generation is not a transport failure. Spend
+        # the existing correction allowance without parsing any partial fields.
+        incomplete_generation = True
+        response = None
     except Exception:
         # No exception message, input prose or raw provider response is logged.
         return {
@@ -2893,6 +2911,10 @@ missing review into an accepted paragraph or a terminal company mismatch.
     citation_failure = False
     validated_response = response
     try:
+        if incomplete_generation:
+            raise _BoundedReviewRepairNeeded(
+                {}, {}, set(), complete_response_correction=True,
+            )
         checks = _validate_review_response(response, document)
     except _BoundedReviewRepairNeeded as exc:
         # Use the one remaining call for the identified structural or factual
@@ -2902,7 +2924,10 @@ missing review into an accepted paragraph or a terminal company mismatch.
         try:
             if exc.complete_response_correction:
                 repair_prompt = prompt
-                repair_system_prompt = system_prompt + _COMPLETE_RESPONSE_CORRECTION
+                repair_system_prompt = system_prompt + (
+                    _INCOMPLETE_RESPONSE_CORRECTION
+                    if incomplete_generation else _COMPLETE_RESPONSE_CORRECTION
+                )
                 repair_response_format = _RESPONSE_FORMAT
             elif semantic_unit_ids:
                 repair_prompt = _semantic_repair_user_prompt(
@@ -2932,12 +2957,26 @@ missing review into an accepted paragraph or a terminal company mismatch.
         except ValueError:
             checks = None
         else:
+            if incomplete_generation and deadline <= loop.time():
+                return {
+                    **receipt, "decision": "unavailable",
+                    "failure_class": "intent_details_review_unavailable",
+                    "failure_reason_code": "malformed_response",
+                }
             try:
                 repair_response = await request_review(
                     repair_prompt,
                     repair_system_prompt,
                     repair_response_format,
                 )
+            except IncompleteJudgeResponse:
+                # The one correction is spent. Keep incomplete citation and
+                # semantic repairs systemic, never exhausted source evidence.
+                return {
+                    **receipt, "decision": "unavailable",
+                    "failure_class": "intent_details_review_unavailable",
+                    "failure_reason_code": "malformed_response",
+                }
             except Exception:
                 return {
                     **receipt,

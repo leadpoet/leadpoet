@@ -634,7 +634,10 @@ def _build_pinned_service(
         rewards_enabled=False,
         daily_cutoff_hour_utc=None,
         baseline_source_url=replay["source_url"] if replay else DEFAULT_BASELINE_SOURCE_URL,
-        **({"benchmark_icp_count": len(replay["icps"])} if replay else {}),
+        **({"benchmark_icp_count": len(replay["icps"]),
+            "reasoning_baseline_source_url": replay["source_url"],
+            "reasoning_baseline_source_sha256": replay["evidence"]["archive_hash"]}
+           if replay else {}),
         **({"benchmark_icp_count": 2, "runner_slot_ceiling": 1} if fresh else {}),
     )
     config = replace(
@@ -715,6 +718,11 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
 
     configuration = row.get("configuration_doc") or {}
     defaults = service.config.defaults
+    replay = getattr(service, "_saved_output_replay", None)
+    baseline_source_url = defaults.baseline_source_url
+    if (replay is None
+        and configuration.get("reasoning_capture_policy") == "full_generated_thinking_v1"):
+        baseline_source_url = defaults.reasoning_baseline_source_url
     benchmark_icp_count = int(defaults.benchmark_icp_count)
     expected = {
         "round_id": row.get("round_id"),
@@ -727,7 +735,7 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
         "promotion_margin": float(defaults.promotion_margin),
         "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
         "baseline_hotkey": defaults.baseline_hotkey,
-        "baseline_source_url": defaults.baseline_source_url,
+        "baseline_source_url": baseline_source_url,
         "scorer_image_digest": defaults.scorer_image_digest,
         "scorer_image_reference": defaults.scorer_image_reference,
         "runner_hotkeys": list(defaults.runner_hotkeys),
@@ -759,8 +767,11 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
         or participants[0].get("miner_hotkey") != defaults.baseline_hotkey
     ):
         mismatches.append("baseline_only_participants")
-    replay = getattr(service, "_saved_output_replay", None)
     if replay is not None:
+        if (configuration.get("reasoning_capture_policy") == "full_generated_thinking_v1"
+            and (not contracts.shadow_replay_baseline_source_matches(configuration)
+                 or configuration.get("reasoning_baseline_source_sha256") != replay["archive_hash"])):
+            mismatches.append("replay_reasoning_baseline_source")
         try:
             contacts_enabled = contact_policy.enabled(configuration)
             output_schema = contact_policy.output_schema(configuration)

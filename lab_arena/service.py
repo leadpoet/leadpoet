@@ -1289,6 +1289,9 @@ class ArenaService:
         """Refuse a round owned by another Arena mode or chain scope."""
 
         configuration = row.get("configuration_doc") or {}
+        if (contracts.shadow_replay_baseline_source_matches(configuration)
+            and self._pinned_round_id() != row.get("round_id")):
+            raise ServiceError("round_scope_mismatch", 409)
         try:
             policy_enabled = integrity.enabled(configuration)
             contacts_enabled = contact_policy.enabled(configuration)
@@ -1822,11 +1825,22 @@ class ArenaService:
                 unready_reason = "registry_unavailable"
                 logger.warning("arena_full_thinking_registry_unavailable round_id=%s error=%s",
                                round_id, type(exc).__name__)
+            private_replay_source = (
+                self._pinned_round_id() == round_id
+                and self._config.mode == "shadow"
+                and defaults.rewards_enabled is False
+                and contracts.shadow_replay_baseline_source_matches({
+                    **document,
+                    "baseline_source_url": defaults.reasoning_baseline_source_url,
+                    "reasoning_baseline_source_sha256": baseline_digest,
+                })
+            )
             if unready_reason is None and (
                 not isinstance(baseline_digest, str)
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_digest) is None
                 or not isinstance(defaults.reasoning_baseline_source_url, str)
-                or FULL_THINKING_BASELINE_URL_RE.fullmatch(defaults.reasoning_baseline_source_url) is None
+                or (FULL_THINKING_BASELINE_URL_RE.fullmatch(defaults.reasoning_baseline_source_url) is None
+                    and not private_replay_source)
             ):
                 unready_reason = "baseline_unready"
             if unready_reason is None and not defaults.flat_per_icp_cost_policy:

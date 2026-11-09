@@ -2053,6 +2053,14 @@ def _provider_error_event(
         content["http_status"] = exc.http_status
     if exc.denial_code is not None:
         content["denial_code"] = exc.denial_code
+    # Keep the HTTPX category, never its request, URL or exception prose.
+    # Unknown transport outcomes retain their existing no-replay semantics.
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPError):
+        name = type(cause).__name__
+        content["transport_cause"] = (
+            name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "unknown"
+        )
     return trajectory.event("runtime.provider_error", content)
 
 

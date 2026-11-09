@@ -1149,6 +1149,235 @@ def test_run_once_rechecks_older_round_at_next_free_slot(tmp_path, older_eligibl
         worker.close()
 
 
+@pytest.mark.parametrize("change", ["older", "newer", "ended", "error", "stop", "discovery-stop", "cap", "pinned", "early"])
+def test_run_once_discovers_round_changes_before_refill(tmp_path, monkeypatch, change):
+    old_round = "arena-2026-09-01"
+    later_round = "arena-2026-09-03"
+    replacement_started = threading.Event()
+    initial_full = threading.Event()
+    quick_release = threading.Event()
+    slow_release = threading.Event()
+    stop = threading.Event()
+    now = [0.0]
+
+    class RoundApi(FakeApi):
+        def __init__(self):
+            super().__init__([])
+            self.polls = 0
+            self.verified = []
+            self.changed = False
+            self.count = 0
+
+        def current(self):
+            self.polls += 1
+            if self.changed and change == "error":
+                raise rn.RunnerError("discovery unavailable", http_status=503)
+            if self.changed and change == "discovery-stop":
+                stop.set()
+            ids = [ROUND]
+            if self.changed:
+                if change == "older":
+                    ids = [old_round, ROUND]
+                elif change == "newer":
+                    ids = [ROUND, later_round]
+                elif change == "ended":
+                    ids = []
+            return {"running_rounds": [
+                {"round_id": rid, "status": "stage2_scoring"} for rid in ids
+            ]}
+
+        def round(self, round_id):
+            self.verified.append(round_id)
+            return {"round_id": round_id, "configuration": {"schedule": {}}}
+
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            rid = envelope["round_id"]
+            if rid == ROUND:
+                self.count += 1
+                if self.count > 2 and change == "newer":
+                    return {"status": "no_pending"}
+                run_id = "new-" + str(self.count)
+            else:
+                run_id = "discovered"
+            return dict(lease(run_id, 0), round_id=rid)
+
+    api = RoundApi()
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=2)
+    config.round_id = ROUND if change == "pinned" else None
+    config.claim_poll_seconds = 0.01
+    worker = rn.Runner(config)
+    # Keep production's monotonic cadence without a real one-second sleep.
+    monkeypatch.setattr(rn, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    real_slots = worker._slots
+
+    class ObservableSlots:
+        def acquire(self, *args, **kwargs):
+            acquired = real_slots.acquire(*args, **kwargs)
+            if not acquired:
+                initial_full.set()
+            return acquired
+
+        def release(self):
+            real_slots.release()
+
+    worker._slots = ObservableSlots()
+    finished = []
+    replays = []
+    worker._replay_pending_completions = lambda: replays.append(True)
+
+    def run_lease(row):
+        try:
+            if row["run_id"] == "new-1":
+                assert slow_release.wait(timeout=3)
+            elif row["run_id"] == "new-2":
+                # Both claims have reached their workers. Cap mode then drains.
+                if change == "cap":
+                    initial_full.set()
+                assert quick_release.wait(timeout=3)
+            else:
+                replacement_started.set()
+            finished.append(row["run_id"])
+        finally:
+            worker._slots.release()
+
+    worker._run_lease = run_lease
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(worker.run_once, max_claims=2 if change == "cap" else 3,
+                               stop_event=stop)
+        assert initial_full.wait(timeout=2)
+        assert api.polls == (0 if change == "pinned" else 1)
+        # Full slots do not poll current again, even when discovery is due.
+        now[0] = 0.5 if change == "early" else 2.0
+        time.sleep(0.03)
+        assert api.polls == (0 if change == "pinned" else 1)
+        api.changed = True
+        if change == "stop":
+            stop.set()
+        quick_release.set()
+        if change in {"older", "newer", "pinned", "early"}:
+            assert replacement_started.wait(timeout=2)
+            expected = old_round if change == "older" else later_round if change == "newer" else ROUND
+            assert api.claims[-1]["round_id"] == expected
+            if change in {"older", "newer"}:
+                assert api.verified == [ROUND, expected]
+        else:
+            # Discovery failure or an ended round must drain accepted work.
+            assert not replacement_started.wait(timeout=0.05)
+            assert len(api.claims) == 2
+        assert not slow_release.is_set() and not result.done()
+        replay_count = len(replays)
+        time.sleep(0.03)
+        assert len(replays) > replay_count  # outbox delivery continues during drain
+        slow_release.set()
+        assert result.result(timeout=2) == (3 if change in {"older", "newer", "pinned", "early"} else 2)
+        assert len(finished) == (3 if replacement_started.is_set() else 2)
+        assert api.polls == (0 if change == "pinned" else 1 if change in {"stop", "cap", "early"} else 2)
+        assert worker._slots.acquire(blocking=False)
+        assert worker._slots.acquire(blocking=False)
+        worker._slots.release()
+        worker._slots.release()
+    finally:
+        quick_release.set()
+        slow_release.set()
+        caller.shutdown(wait=True)
+        worker.close()
+
+
+def test_run_once_unchanged_discovery_preserves_position_after_slow_empty_claim(tmp_path, monkeypatch):
+    old_round = "arena-2026-09-01"
+    now = [0.0]
+
+    class RoundApi(FakeApi):
+        def __init__(self):
+            super().__init__([])
+            self.polls = 0
+
+        def current(self):
+            self.polls += 1
+            if self.polls > 5:
+                # Bound a broken restart loop so the regression cannot hang.
+                return {"running_rounds": []}
+            return {"running_rounds": [
+                {"round_id": rid, "status": "stage2_scoring"}
+                for rid in [old_round, ROUND]
+            ]}
+
+        def round(self, round_id):
+            return {"round_id": round_id, "configuration": {"schedule": {}}}
+
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            if envelope["round_id"] == old_round:
+                now[0] += 2.0  # an empty RPC takes longer than discovery cadence
+                return {"status": "no_pending"}
+            return lease("later-work", 0)
+
+    api = RoundApi()
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.round_id = None
+    config.claim_poll_seconds = 0.01
+    worker = rn.Runner(config)
+    monkeypatch.setattr(rn, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    finished = []
+
+    def run_lease(row):
+        finished.append(row["run_id"])
+        worker._slots.release()
+
+    worker._run_lease = run_lease
+    try:
+        assert worker.run_once(max_claims=1) == 1
+        assert [row["round_id"] for row in api.claims] == [old_round, ROUND]
+        assert api.polls == 2
+        assert finished == ["later-work"]
+    finally:
+        worker.close()
+
+
+def test_run_once_releases_slot_on_unexpected_refill_discovery_error(tmp_path, monkeypatch):
+    now = [0.0]
+
+    class RoundApi(FakeApi):
+        def __init__(self):
+            super().__init__([lease("first", 0), lease("second", 1)])
+            self.polls = 0
+
+        def current(self):
+            self.polls += 1
+            if self.polls > 1:
+                raise ValueError("unexpected discovery metadata failure")
+            return {"running_rounds": [{"round_id": ROUND, "status": "stage2_scoring"}]}
+
+        def round(self, round_id):
+            return {"round_id": round_id, "configuration": {"schedule": {}}}
+
+    api = RoundApi()
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.round_id = None
+    config.claim_poll_seconds = 0.01
+    worker = rn.Runner(config)
+    monkeypatch.setattr(rn, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def run_lease(row):
+        now[0] = 2.0
+        worker._slots.release()
+
+    worker._run_lease = run_lease
+    try:
+        with pytest.raises(ValueError, match="unexpected discovery metadata failure"):
+            worker.run_once(max_claims=2)
+        assert len(api.claims) == 1
+        assert worker._slots.acquire(blocking=False)
+        worker._slots.release()
+    finally:
+        worker.close()
+
+
 def test_run_once_stop_prevents_refill_after_idle(tmp_path):
     class RetryApi(FakeApi):
         def __init__(self):

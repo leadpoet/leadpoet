@@ -5485,8 +5485,8 @@ class Runner:
         """Follow every running round the Arena reports; a new round is verified before any claim.
 
         Rounds overlap, so a runner started without ``--round-id`` asks
-        ``/arena/v1/current`` at every idle poll for the rounds with work
-        (executing or scoring), adopts each new round's configuration once,
+        ``/arena/v1/current`` at idle polls and bounded free-slot refills for
+        rounds with work (executing or scoring), adopts each new round's configuration once,
         and drops rounds that ended. The daily rounds roll over without a
         restart.
         """
@@ -5930,7 +5930,8 @@ class Runner:
         self._replay_pending_completions()
         log = self._config.operational_logger
         pickup_failed = False
-        if not self._pinned:
+
+        def discover_rounds() -> bool:
             try:
                 self.refresh_round()
             except RunnerError as exc:
@@ -5944,7 +5945,14 @@ class Runner:
                     http_status=exc.http_status,
                     denial_code=exc.denial_code,
                 )
-                return 0  # the Arena or the round is unavailable: poll again later
+                return False
+            return True
+
+        if not self._pinned and not discover_rounds():
+            return 0  # the Arena or the round is unavailable: poll again later
+        discovery_cadence = max(1.0, float(self._config.claim_poll_seconds))
+        next_discovery = time.monotonic() + discovery_cadence
+        discovery_failed = False
         taken = 0
         futures = set()
 
@@ -6010,6 +6018,31 @@ class Runner:
                         rescan_after_completion = True
                         break
                     continue
+                if not self._pinned and time.monotonic() >= next_discovery:
+                    # A long-running round can keep every refill busy while an
+                    # older round reopens. Rediscover only with a free slot, at
+                    # most once per poll interval, and retain all active work.
+                    try:
+                        discovered = discover_rounds()
+                    except BaseException:
+                        self._slots.release()
+                        raise
+                    if not discovered:
+                        self._slots.release()
+                        pickup_failed = discovery_failed = True
+                        break  # no stale-list claims; drain accepted work below
+                    next_discovery = time.monotonic() + discovery_cadence
+                    if round_ids != self._round_ids:
+                        self._slots.release()
+                        round_ids = list(self._round_ids)
+                        round_index = 0  # current reports running rounds oldest first
+                        rescan_after_completion = True
+                        break
+                    # Keep this position when discovery is unchanged. A slow
+                    # empty older-round claim must not starve later rounds.
+                if stop_event is not None and stop_event.is_set():
+                    self._slots.release()
+                    break  # shutdown may have started during discovery
                 try:
                     if log is not None:
                         log.state(scoring_state="claiming")
@@ -6072,6 +6105,8 @@ class Runner:
                         log.activity(-1)
                     raise
                 futures.add(future)
+            if discovery_failed:
+                break
             if rescan_after_completion:
                 # A retry in an older round may have become eligible while
                 # this round was busy. Keep all other active futures running.

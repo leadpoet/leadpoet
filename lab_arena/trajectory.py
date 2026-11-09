@@ -57,27 +57,6 @@ _KEY_VALUE_RE = re.compile(
     r"(?i)\b(api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)\s*[:=]\s*((?:basic|bearer)\s+[^\s,;]+|[^\s,;]{4,})"
 )
-_CLOSING_SOURCE_QUOTE_RE = re.compile(r"\\*[\"']")
-_UNBOUND_BEARER_CONCAT_RE = re.compile(
-    r"[ \t]{0,16}\+[ \t]{0,16}[A-Za-z_][A-Za-z0-9_]{0,127}"
-    r"(?=[ \t]{0,16}(?:[}\]),;]|\\n|\r?\n|$))"
-)
-
-
-def _unbound_bearer_source_literal(
-    value: str, text: str, position: int, *, closing_quote_pending: bool,
-) -> bool:
-    """Keep only a scheme literal concatenated with a variable, never a token."""
-    if len(value) != 7 or value.lower() != "bearer ":
-        return False
-    if closing_quote_pending:
-        quote = _CLOSING_SOURCE_QUOTE_RE.match(text, position)
-        if quote is None:
-            return False
-        position = quote.end()
-    return _UNBOUND_BEARER_CONCAT_RE.match(text, position) is not None
-
-
 # A closing delimiter after an existing marker is markup, not secret material.
 # Any other suffix still follows the ordinary credential-redaction path.
 _REDACTED_VALUE_RE = re.compile(
@@ -123,10 +102,7 @@ def redact_auth_schemes(text: str) -> str:
     # A serialized string containing a declared private field retains the
     # previous conservative Basic mask, including after escaped quotes/slashes.
     private_context = _QUOTED_SENSITIVE_CONTEXT_RE.search(text) is not None
-    text = _QUOTED_SENSITIVE_VALUE_RE.sub(
-        lambda match: match[0] if _unbound_bearer_source_literal(
-            match[2], text, match.end(), closing_quote_pending=True
-        ) else match[1] + "[REDACTED]", text)
+    text = _QUOTED_SENSITIVE_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
 
     def redact_authorization_value(match: re.Match[str]) -> str:
         value = match[0][len(match[1]):]
@@ -172,15 +148,13 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
     ):
         text = text.replace(secret, "[REDACTED]")
     text = _QUOTED_KEY_VALUE_RE.sub(
-        lambda match: match[0] if _unbound_bearer_source_literal(
-            match.group(3), text, match.end(), closing_quote_pending=False
-        ) else "%s%s[REDACTED]%s" % (
+        lambda match: "%s%s[REDACTED]%s" % (
             match.group(1), match.group(2), match.group(4)
-        ), text)
+        ),
+        text,
+    )
     text = _ESCAPED_QUOTED_KEY_VALUE_RE.sub(
-        lambda match: match.group(0) if (match.group(3) == "[REDACTED]"
-            or _unbound_bearer_source_literal(
-                match.group(3), text, match.end(), closing_quote_pending=False))
+        lambda match: match.group(0) if match.group(3) == "[REDACTED]"
         else "%s%s[REDACTED]%s" % (
             match.group(1), match.group(2), match.group(4)
         ),

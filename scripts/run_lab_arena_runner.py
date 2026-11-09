@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a Leadpoet Lab Arena runner")
+    parser = argparse.ArgumentParser(description="Run a Subnet 71 Lab Arena runner")
     parser.add_argument("--api-base-url", required=False, default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))
     parser.add_argument("--round-id", required=False, default=os.environ.get("LAB_ARENA_ROUND_ID", ""), help="pin one round; unset follows every running Arena round across days")
     parser.add_argument("--wallet-name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))

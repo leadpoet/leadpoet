@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Isolated Leadpoet Arena PostgreSQL migration destination. Creates only new
+  Isolated Subnet 71 Arena PostgreSQL migration destination. Creates only new
   resources in the existing lab VPC. No production clients or source data move.
 
 Parameters:

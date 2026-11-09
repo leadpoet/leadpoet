@@ -63,7 +63,7 @@ or automatic retention deletion.
 
 ## Capture summary reader
 
-Leadpoet's admin Data capture tab reads captured competition model usage for
+The operator's admin Data capture tab reads captured competition model usage for
 one submission. Public round data shows verified reasoning only for runs that
 pass the training check, so the site needs this private aggregate.
 

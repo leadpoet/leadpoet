@@ -33,7 +33,7 @@ def _common_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Leadpoet Arena miner helper")
+    parser = argparse.ArgumentParser(description="Subnet 71 Arena miner helper")
     commands = parser.add_subparsers(dest="command", required=True)
     source = commands.add_parser(
         "submit-model",

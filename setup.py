@@ -25,7 +25,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/leadpoet/leadpoet",  
-    author="Leadpoet",  
+    author="Subnet 71",  
     author_email="hello@leadpoet.com",  
     license="AGPL-3.0-only",
     packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'leadpoet_observability', 'leadpoet_observability.*', 'lab_arena', 'lab_arena.*', 'arena_reviewer_runtime', 'arena_reviewer_runtime.*', 'neurons', 'validator_tee']) + ['leadpoet_canonical.config'],

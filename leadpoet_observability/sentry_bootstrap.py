@@ -1,4 +1,4 @@
-"""Opt-in, fail-open Sentry observability for Leadpoet HOST processes.
+"""Opt-in, fail-open Sentry observability for Subnet 71 HOST processes.
 
 Same contract style as ``gateway/observability/otel_bootstrap.py``:
 
@@ -491,7 +491,7 @@ def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
                 environment=environment,
                 release=release,
                 server_name="leadpoet-host",
-                # Only explicit manual Leadpoet spans are sampled. Framework,
+                # Only explicit manual Subnet 71 spans are sampled. Framework,
                 # HTTP, DB, and chain auto-instrumentation remain disabled.
                 traces_sample_rate=_trace_sample_rate(),
                 propagate_traces=False,

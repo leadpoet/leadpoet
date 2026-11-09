@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Temporary, isolated Leadpoet source-export and RDS restore runner. No export,
+  Temporary, isolated Subnet 71 source-export and RDS restore runner. No export,
   restore, secret retrieval or application job starts during bootstrap.
 
 Parameters:

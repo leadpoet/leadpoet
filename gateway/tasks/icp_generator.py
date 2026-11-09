@@ -1509,7 +1509,7 @@ Each ICP must also return these structured fields for the people to find at ever
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://leadpoet.ai",
-                    "X-Title": "LeadPoet ICP Generator",
+                    "X-Title": "Subnet 71 ICP Generator",
                     **({"X-OpenRouter-Metadata": "enabled"} if candidate is not None else {}),
                 },
                 json=request,

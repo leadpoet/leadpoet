@@ -1,6 +1,6 @@
 # Sentry host observability (opt-in and non-authoritative)
 
-One integration covers Leadpoet **host** runtimes. It captures terminal errors
+One integration covers Subnet 71 **host** runtimes. It captures terminal errors
 at 100% and a conservative sample of explicitly named operational stage
 transactions. It does not auto-instrument HTTP, databases, chain clients, or
 frameworks, and it never runs inside Nitro enclaves.
@@ -192,7 +192,7 @@ lead-processing, or LLM-client surfaces are replaced wholesale by
 `[leadpoet-redacted:protected-surface]`. `redact-all` applies that policy to
 every message and drops breadcrumbs.
 
-Manual transactions use static Leadpoet names and separately scrubbed span
+Manual transactions use static Subnet 71 names and separately scrubbed span
 data. Automatic trace propagation is disabled, so correlation metadata never
 enters signed requests or trusted V2 artifacts.
 

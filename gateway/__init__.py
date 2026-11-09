@@ -1,5 +1,5 @@
 """
-LeadPoet Trustless Gateway
+Subnet 71 Trustless Gateway
 ==========================
 
 Open-source, reproducible gateway for lead validation.
@@ -14,5 +14,5 @@ Features:
 """
 
 __version__ = "1.0.0"
-__author__ = "LeadPoet Team"
+__author__ = "Subnet 71 Team"
 

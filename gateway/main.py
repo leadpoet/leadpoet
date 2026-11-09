@@ -1,5 +1,5 @@
 """
-LeadPoet Arena Gateway
+Subnet 71 Arena Gateway
 ======================
 
 FastAPI gateway for Arena proxying, epoch reads, and measured runtime identity.
@@ -299,7 +299,7 @@ async def lifespan(app: FastAPI):
 # ============================================================
 
 app = FastAPI(
-    title="LeadPoet Arena Gateway",
+    title="Subnet 71 Arena Gateway",
     description="Gateway for Arena proxying, epoch reads, and runtime identity",
     version="1.0.0",
     lifespan=lifespan,  # Use lifespan context manager
@@ -479,7 +479,7 @@ if __name__ == "__main__":
     _bind_host = "127.0.0.1" if _bind_port == "8001" else "0.0.0.0"
     
     print("=" * 60)
-    print("🚀 Starting LeadPoet Trustless Gateway")
+    print("🚀 Starting Subnet 71 Trustless Gateway")
     print("=" * 60)
     _build_info = get_build_info()
     print(f"Build ID: {BUILD_ID}")

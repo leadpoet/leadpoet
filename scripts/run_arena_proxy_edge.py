@@ -82,7 +82,7 @@ def create_app() -> FastAPI:
     from gateway.middleware.priority import PriorityMiddleware
 
     app = FastAPI(
-        title="LeadPoet Arena Proxy",
+        title="Subnet 71 Arena Proxy",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

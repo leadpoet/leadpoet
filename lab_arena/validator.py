@@ -621,7 +621,7 @@ def _default_runsc_path(environment: Mapping[str, str], *, path_exists=os.path.e
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run one normal Leadpoet Arena validator", add_help=True)
+    parser = argparse.ArgumentParser(description="Run one normal Subnet 71 Arena validator", add_help=True)
     parser.add_argument("--netuid", type=int)
     parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"), help="Chain identity (finney or test); use --subtensor.chain_endpoint for a local node")
     parser.add_argument("--subtensor.chain_endpoint", dest="chain_endpoint", default=os.environ.get("LAB_ARENA_CHAIN_ENDPOINT", ""), help="Explicit ws:// or wss:// RPC URL; defaults to the selected network's public endpoint")

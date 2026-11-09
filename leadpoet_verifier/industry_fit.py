@@ -5,7 +5,7 @@ verifier's ``adapter.py`` (commits 69b01ae9/c95d5a89 B2B-SaaS evidence,
 ac2538a6 structured industry criteria, a680e218/b7fe23d3 canonical taxonomy):
 
 - ``industry_fit`` — conservative structured-industry match: authoritative
-  Leadpoet taxonomy first, bounded canonical concepts second, and an exact
+  Subnet 71 taxonomy first, bounded canonical concepts second, and an exact
   non-generic token fallback only when the taxonomy is silent and the request
   carries no specific concept beyond the contextual broad ones.
 - ``b2b_saas_evidence`` — B2B SaaS requires BOTH a buyer-audience signal and a
@@ -183,7 +183,7 @@ def industry_fit(
 ) -> tuple[bool, dict[str, Any]]:
     """Match provider labels to a structured buyer industry conservatively.
 
-    Exact Leadpoet parent/subindustry labels use the repository's authoritative
+    Exact Subnet 71 parent/subindustry labels use the repository's authoritative
     taxonomy. Provider-specific labels fall back to bounded semantic aliases
     and, only for unknown or broad-only requests, exact non-generic tokens. The
     downstream source-grounded intent verifier and required-attribute evidence

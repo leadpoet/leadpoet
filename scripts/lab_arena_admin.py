@@ -25,7 +25,7 @@ PUBLIC_ROUND_FIELDS = ("round_id", "status", "status_generation", "stage_generat
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Leadpoet Lab Arena operator commands")
+    parser = argparse.ArgumentParser(description="Subnet 71 Lab Arena operator commands")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="print the current round's public state")
     advance = commands.add_parser("advance", help="apply one idempotent round transition")

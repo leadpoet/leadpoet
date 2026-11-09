@@ -1,5 +1,5 @@
 # ============================================================
-# LeadPoet Arena Gateway - Dockerfile
+# Subnet 71 Arena Gateway - Dockerfile
 # ============================================================
 # Multi-stage build for minimal production image
 # Non-root user for security

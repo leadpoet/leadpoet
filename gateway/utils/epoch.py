@@ -1,4 +1,4 @@
-"""Exact-hash SN71 epoch authority for the LeadPoet gateway.
+"""Exact-hash SN71 epoch authority for the Subnet 71 gateway.
 
 The Subtensor scheduler is read at one block hash and its official
 ``SubnetEpochIndex`` is mapped to the monotonic settlement ordinal established

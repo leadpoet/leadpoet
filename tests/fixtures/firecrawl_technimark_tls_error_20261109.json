@@ -1,0 +1,40 @@
+{
+  "error": "An SSL/TLS certificate error occurred while trying to establish a secure connection to this website. This usually happens when a website has an expired, self-signed, or misconfigured SSL certificate. If you trust this website and are not submitting sensitive data, you can bypass this error by setting `skipTlsVerification: true` in your scrape request. Note: Only do this for trusted sites as it disables certificate validation.",
+  "message": "An SSL/TLS certificate error occurred while trying to establish a secure connection to this website. This usually happens when a website has an expired, self-signed, or misconfigured SSL certificate. If you trust this website and are not submitting sensitive data, you can bypass this error by setting `skipTlsVerification: true` in your scrape request. Note: Only do this for trusted sites as it disables certificate validation.",
+  "request_id": "public-execute:4b300b80-2880-49e8-aa90-afda6070deaf",
+  "requestId": "public-execute:4b300b80-2880-49e8-aa90-afda6070deaf",
+  "credential_source": "env",
+  "credential_owner": "deepline_managed",
+  "code": "UPSTREAM_FAILURE",
+  "failure_origin": "provider",
+  "error_category": "upstream",
+  "failure_description": "Provider returned a server-side failure.",
+  "operator_hint": "Retry later. If this repeats, include upstream_error_code and upstream_body_compact when escalating.",
+  "upstream_status": 500,
+  "provider": "firecrawl",
+  "operation": "firecrawl_scrape",
+  "upstream_error_code": "SCRAPE_SSL_ERROR",
+  "upstream_body": "{\"success\":false,\"code\":\"SCRAPE_SSL_ERROR\",\"error\":\"An SSL/TLS certificate error occurred while trying to establish a secure connection to this website. This usually happens when a website has an expired, self-signed, or misconfigured SSL certificate. If you trust this website and are not submitting sensitive data, you can bypass this error by setting `skipTlsVerification: true` in your scrape request. Note: Only do this for trusted sites as it disables certificate validation.\"}",
+  "upstream_body_compact": "{\"success\":false,\"code\":\"SCRAPE_SSL_ERROR\",\"error\":\"An SSL/TLS certificate error occurred while trying to establish a secure connection to this website. This usually happens when a website has an expired, self-signed, or misconfigured SSL certificate. If you trust this website and are not submitting sensitive data, you can bypass this error by setting `skipTlsVerification: true` in your scrape request. Note: Only do this for trusted sites as it disables certificate validation.\"}",
+  "tool_error": {
+    "schemaVersion": 1,
+    "toolId": "firecrawl_scrape",
+    "provider": "firecrawl",
+    "operation": "firecrawl_scrape",
+    "code": "UPSTREAM_FAILURE",
+    "origin": "provider",
+    "category": "upstream",
+    "retryable": false,
+    "statusCode": 502,
+    "requestId": "public-execute:4b300b80-2880-49e8-aa90-afda6070deaf",
+    "retryAfterMs": null,
+    "networkKind": null,
+    "networkScope": null
+  },
+  "executionRecovery": {
+    "idempotencyKey": "arena:82b703991d33677fe8c2902c47b4343ede3c9a2b3b6a0150c19a54db7123c7f4",
+    "state": "completed",
+    "replayed": false,
+    "expiresAt": "2026-11-10T09:57:06.544Z"
+  }
+}

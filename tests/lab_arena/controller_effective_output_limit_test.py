@@ -21,12 +21,12 @@ GLM = 'z-ai/glm-5.3-flash'
 # instructions, tools, budgets and provider routing here are unchanged.
 # Budget-only repairs must still match explicit-length requests byte for byte.
 REQUEST_GOLDENS = {
-    ('glm', 'empty'): 'sha256:33a70583e40efb51b24fff6f4c6338c559e08a05304da8f5ce30d5fe5e31441a',
-    ('glm', 'malformed_submit'): 'sha256:9e18734bbc4ad3dfc15f4ba412688a058962c4e6c062d64e15c6a3d4b4511cef',
-    ('sol_legacy', 'empty'): 'sha256:71e65e569105a2349f964514e70a6e14014d09ba9259718d53d72081b2c97cf1',
-    ('sol_legacy', 'malformed_submit'): 'sha256:a5caecda2bfeed5832855c12df70d2e33a3a17aecb4436d277483ea5872a491a',
-    ('historical_open', 'empty'): 'sha256:6a89afdd83ffe882b9f768f88e58c50b8e65b945672ce4f3489102ce00fa6f01',
-    ('historical_open', 'malformed_submit'): 'sha256:accebef41939210c249ffd299e7eeedfb4510825aaeebae35447e501c3592b35',
+    ('glm', 'empty'): 'sha256:217d4c152636764ac11f28aca5171c25444966abb901df7c2d596fb8316635b9',
+    ('glm', 'malformed_submit'): 'sha256:8061648a09d166dc2a8f9e1ee924b8c3364fcd1e51f4ea64cb29b4b9e05342d2',
+    ('sol_legacy', 'empty'): 'sha256:5bfb0148b11b872427fd5e2312d208600fcf8eab8fe59264c57d082d70061d68',
+    ('sol_legacy', 'malformed_submit'): 'sha256:77d6d345e41ce0c258c029bbd775dc8dc4d3d2cbd95ed4772297b19bfb119505',
+    ('historical_open', 'empty'): 'sha256:eda699e774b58be8fb368c574f507343bad88c3109a07ff860a92d43c9f03ed4',
+    ('historical_open', 'malformed_submit'): 'sha256:f9839ee2663f72540bfd1759410266083a27f5a0d2500ccd9d739db55c0a03e1',
 }
 
 

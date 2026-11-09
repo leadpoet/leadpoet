@@ -49,6 +49,18 @@ class ArenaWeightError(ValueError):
     """An accepted state or derived Arena vector is invalid."""
 
 
+def normalize_genesis_hash(value: Any) -> str:
+    """Return the canonical stored form of a chain genesis hash.
+
+    The chain reports the hash as ``0x``-prefixed, mixed-case hex; an accepted
+    weight state stores the bare lowercase digits. Comparing the two raw forms
+    never matches, so every caller that compares a chain-reported hash against
+    a stored one must normalize through here.
+    """
+
+    return str(value or "").lower().removeprefix("0x")
+
+
 def compare_weights_hash(netuid: int, epoch_id: int, weights: Sequence[tuple[int, int]]) -> str:
     """Hash the exact sparse Arena vector for finalized-chain comparison."""
     sorted_weights = sorted(weights, key=lambda x: x[0])

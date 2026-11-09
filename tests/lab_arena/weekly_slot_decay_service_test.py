@@ -312,3 +312,17 @@ def test_public_current_reports_only_an_existing_accepted_decay_clock(mode):
         assert "weekly_slot_decay" not in public
     assert data.current == before
     assert data.publish_calls == data.object_calls == data.submission_calls == []
+
+
+def test_chain_reported_genesis_hash_matches_the_stored_canonical_form():
+    """The chain reports "0x"-prefixed mixed-case hex; the state stores bare lowercase."""
+    service, data, signer = _harness()
+    service._config.chain = SimpleNamespace(accepted_weight_epoch_scope=lambda: {
+        "epoch": EPOCH, "genesis_hash": "0x" + "AB" * 32,
+        "valid_from_block": BLOCK, "valid_until_block": BLOCK + 100,
+    })
+    _previous(data, signer, genesis="ab" * 32)
+    state = service.public_weight_state(EPOCH)["state"]
+    assert state["genesis_hash"] == "ab" * 32
+    assert data.publish_calls == [("finney", 71, EPOCH, state["state_hash"])]
+    assert [clock["start_epoch"] for clock in state["weekly_slot_decay"]["slots"]] == [SOURCE_EPOCH] * 3

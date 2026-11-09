@@ -10,6 +10,7 @@ from leadpoet_canonical.arena_weights import (
     ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION,
     SLOT_ELIGIBILITY_UNTIL_REPLACED,
     WEIGHT_STATE_SIGNATURE_PREFIX,
+    normalize_genesis_hash,
     validate_accepted_weight_state,
 )
 from leadpoet_canonical.lab_arena_rewards import REWARD_BASIS_V2_SCHEMA_VERSION, sha256_json, validate_weekly_slot_decay
@@ -37,7 +38,7 @@ def build_accepted_weight_state(
     body = {
         "schema_version": ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION,
         "network": str(network),
-        "genesis_hash": str(genesis_hash).lower().removeprefix("0x"),
+        "genesis_hash": normalize_genesis_hash(genesis_hash),
         "netuid": int(netuid),
         "epoch": int(epoch),
         "valid_from_block": int(valid_from_block),

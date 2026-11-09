@@ -29,6 +29,7 @@ from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     SLOT_ELIGIBILITY_UNTIL_REPLACED,
     accepted_weight_state_body,
+    normalize_genesis_hash,
     validate_accepted_weight_state,
     verify_accepted_weight_state_signature,
 )
@@ -8875,8 +8876,10 @@ class ArenaService:
                         previous, public_key_der=signer.public_key_der,
                         expected_public_key_hash=signer.public_key_hash,
                     )
+                    # The chain reports a "0x"-prefixed hash; the stored state
+                    # holds the bare lowercase digits. Compare canonical forms.
                     if ((previous["network"], previous["netuid"], previous["genesis_hash"])
-                            != (network, netuid, epoch_scope["genesis_hash"])
+                            != (network, netuid, normalize_genesis_hash(epoch_scope["genesis_hash"]))
                             or previous["epoch"] > requested_epoch
                             or any(latest.get(key) != previous[key]
                                    for key in ("network", "netuid", "epoch", "state_hash"))):

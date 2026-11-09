@@ -120,6 +120,7 @@ def test_three_binding_limit_is_consistent_in_initial_and_repair_contracts():
     )
     semantic_prompt = intent_details._semantic_repair_prompt(
         intent_details._SYSTEM, {0: {"too_many_quotes"}}, response, {0},
+        {0: {"disputed_clause": "recent coverage"}},
     )
     assert "one to three evidence bindings" in intent_details._SYSTEM
     assert "at most three bindings" in citation_prompt

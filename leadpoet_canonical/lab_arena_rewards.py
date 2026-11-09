@@ -174,12 +174,20 @@ def validate_slot_policy(policy: Any) -> Dict[str, Any]:
     if (
         not isinstance(policy, Mapping)
         or not {"assignment_mode", "tiers"} <= set(policy)
-        or set(policy) - {"assignment_mode", "tiers", "pool_percent", "decay"}
+        or set(policy) - {"assignment_mode", "tiers", "pool_percent", "decay", "allocation_basis"}
     ):
         raise LabArenaRewardError("slot_policy fields are invalid")
     mode = policy["assignment_mode"]
     if mode not in ("highest_only", "all_qualifying"):
         raise LabArenaRewardError("slot_policy assignment_mode is invalid")
+    total_emissions = "allocation_basis" in policy
+    if total_emissions and (
+        policy["allocation_basis"] != "total_emissions" or "pool_percent" not in policy
+    ):
+        raise LabArenaRewardError("slot_policy allocation_basis requires total_emissions and pool_percent")
+    pool_percent = None
+    if "pool_percent" in policy:
+        pool_percent = _require_int(policy["pool_percent"], "pool_percent", 0, 100)
     tiers = policy["tiers"]
     if not isinstance(tiers, list) or len(tiers) != 3:
         raise LabArenaRewardError("slot_policy must contain three tiers")
@@ -194,11 +202,14 @@ def validate_slot_policy(policy: Any) -> Dict[str, Any]:
     thresholds = [tier["minimum_improvement"] for tier in normalized]
     if any(left <= right for left, right in zip(thresholds, thresholds[1:])):
         raise LabArenaRewardError("slot_policy thresholds must be strictly descending")
-    if sum(tier["allocation_percent"] for tier in normalized) != 100:
-        raise LabArenaRewardError("slot_policy allocation percents must sum to 100")
+    allocation_total = pool_percent if total_emissions else 100
+    if sum(tier["allocation_percent"] for tier in normalized) != allocation_total:
+        raise LabArenaRewardError("slot_policy allocation percents must sum to %s" % allocation_total)
     result = {"assignment_mode": mode, "tiers": normalized}
     if "pool_percent" in policy:
-        result["pool_percent"] = _require_int(policy["pool_percent"], "pool_percent", 0, 100)
+        result["pool_percent"] = pool_percent
+    if total_emissions:
+        result["allocation_basis"] = "total_emissions"
     if "decay" in policy:
         decay = policy["decay"]
         if not isinstance(decay, Mapping) or set(decay) != {"epochs_per_halving", "max_halvings"}:
@@ -682,8 +693,9 @@ def slot_allocations(
     """Exact registered slot allocations, with optional signed per-slot decay.
 
     Missing owners leave their allocation for burn. A signed pool_percent
-    scales new slot shares; older signed policies without it keep their
-    original total-emissions arithmetic. The existing funding
+    scales slot shares unless allocation_basis explicitly declares that the
+    tiers already express total emissions. Older policies keep their original
+    arithmetic. The existing funding
     factor applies only to slots held by the current funding-responsible king.
     The accepted-state weight kernel routes every remaining share to burn.
     An optional signed state clock continues halving every 140 epochs instead
@@ -703,7 +715,9 @@ def slot_allocations(
     registered = set(hotkeys)
     allocations = {}  # type: Dict[str, Fraction]
     factor = _basis_fields(document)["champion_reward_factor_ppm"]
-    pool = Fraction(document["slot_policy"].get("pool_percent", 100), 100)
+    policy = document["slot_policy"]
+    pool = (Fraction(1) if policy.get("allocation_basis") == "total_emissions"
+            else Fraction(policy.get("pool_percent", 100), 100))
     decay = document["slot_policy"].get("decay")
     for index, (tier, achievement) in enumerate(zip(document["slot_policy"]["tiers"], document["reward_slots"])):
         if achievement is None or achievement["miner_hotkey"] not in registered:

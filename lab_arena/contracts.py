@@ -1007,6 +1007,31 @@ ROUND_CONFIGURATION_FIELDS = (
 )
 
 
+def shadow_replay_baseline_source_matches(configuration: Mapping[str, Any]) -> bool:
+    """Recognize only a private saved-output archive bound to its actual digest.
+
+    This does not authorize creation: the service also requires the process's
+    explicit pinned round. Live and reward-enabled sources keep the GitHub rule.
+    """
+
+    round_id = configuration.get("round_id")
+    if (configuration.get("mode") != "shadow"
+        or configuration.get("rewards_enabled") is not False
+        or not isinstance(round_id, str) or ROUND_ID_RE.fullmatch(round_id) is None
+        or round_id[16:17] != "-"):
+        return False
+    match = re.fullmatch(
+        r"https://arena\.invalid/saved-output-replay/"
+        r"(?:miner-score-route/(arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[a-z0-9]{1,16})?)/)?"
+        r"([0-9a-f]{64})\.tar\.gz",
+        str(configuration.get("baseline_source_url") or ""),
+    )
+    return bool(
+        match and match.group(1) != round_id
+        and configuration.get("reasoning_baseline_source_sha256") == "sha256:" + match.group(2)
+    )
+
+
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
     from lab_arena import contact_policy, integrity, intent_details_policy, quality_policy
@@ -1129,7 +1154,7 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         if re.fullmatch(
             r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz",
             config["baseline_source_url"],
-        ) is None:
+        ) is None and not shadow_replay_baseline_source_matches(config):
             raise ArenaContractError("full thinking requires a pinned baseline source URL")
         if config.get("sourcing_cost_eligibility_policy") != FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
             raise ArenaContractError("full thinking requires flat per-ICP cost policy")

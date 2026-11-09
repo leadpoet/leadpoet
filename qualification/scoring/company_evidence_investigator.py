@@ -1421,12 +1421,20 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
 
     document = copy.deepcopy(value)
     evidence_texts: list[tuple[dict[str, Any], str]] = []
+    optional_repair_contexts: list[tuple[dict[str, Any], str]] = []
 
     def collect(item: Any) -> None:
         if isinstance(item, dict):
             for key, child in item.items():
                 if key == "text" and isinstance(child, str):
                     evidence_texts.append((item, child))
+                elif key == "company_bound_quote_candidate" and isinstance(child, str):
+                    optional_repair_contexts.append((item, key))
+                elif key == "rejected_supporting_evidence" and isinstance(child, list):
+                    for rejection in child:
+                        if isinstance(rejection, dict) and "source_context" in rejection:
+                            optional_repair_contexts.append((rejection, "source_context"))
+                    collect(child)
                 else:
                     collect(child)
         elif isinstance(item, list):
@@ -1447,6 +1455,16 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
     if len(content) <= message_limit:
         return content
     collect(document)
+    # New optional hints must not displace original evidence. Shed them
+    # against the full message before the existing text-truncation algorithm.
+    # Keep each failed slot/reason even when its context cannot fit.
+    for container, key in optional_repair_contexts:
+        if len(encode()) <= message_limit:
+            break
+        container.pop(key, None)
+    content = encode()
+    if len(content) <= message_limit:
+        return content
     for container, _text in evidence_texts:
         container["text"] = ""
     # Additional source links are optional discovery. Drop trailing locators
@@ -1674,6 +1692,33 @@ def _source_context_for_quote(quote: str, fetched_text: str) -> str:
         REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS
         + REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS
     )]
+
+
+def _company_bound_quote_candidate(
+    quote: str, fetched_text: str, identity_names: set[str],
+) -> str:
+    """Offer an exact named span for re-review, never approve a finding or alias."""
+
+    surface = _surface_span(_visible_quote_surface(fetched_text))
+    quote = _surface_span(quote)
+    if not identity_names or not _quote_occurs(quote, surface):
+        return ""
+    match = re.search(re.escape(quote), surface, re.I)
+    if not match:
+        return ""
+    candidates = []
+    for name in sorted(identity_names):
+        if not re.fullmatch(r"[a-z0-9]{2,200}", name):
+            continue
+        # Match only an already admitted identity spelling with punctuation
+        # ignored, exactly as in _quote_names_company. Never infer a short name.
+        pattern = r"[^a-z0-9]*".join(re.escape(char) for char in name)
+        for named in re.finditer(pattern, surface, re.I):
+            start, end = min(match.start(), named.start()), max(match.end(), named.end())
+            candidate = surface[start:end]
+            if len(candidate) <= 2000 and _quote_occurs(candidate, surface):
+                candidates.append(candidate)
+    return min(candidates, key=lambda value: (len(value), value), default="")
 
 
 def _registrable_domain(value: Any) -> str:
@@ -6958,6 +7003,55 @@ async def investigate_company_evidence(
                                 source_url=source_url,
                                 source_context=source_context,
                             )
+                        if target in {"industry", "required_attribute"} and reason in {
+                            "source quote did not identify the investigated company",
+                            REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+                        }:
+                            candidate = _company_bound_quote_candidate(
+                                source_quote, fetched_pages.get(source_url, ""), identity_names,
+                            )
+                            if candidate:
+                                rejected_finding["company_bound_quote_candidate"] = candidate
+                        if target == "required_attribute":
+                            # Report both failed support slots in this same repair
+                            # turn. Discovering them one at a time consumes the
+                            # existing bounded budget without adding new evidence.
+                            support_rejections = []
+                            for slot in (1, 2):
+                                support_url = submitted.get(f"supporting_evidence_url_{slot}")
+                                support_quote = submitted.get(f"supporting_evidence_quote_{slot}")
+                                if not (support_url or support_quote):
+                                    continue
+                                support_reason = _required_attribute_support_rejection(
+                                    support_url, support_quote,
+                                    fetched_pages=fetched_pages,
+                                    fetched_final_urls=fetched_final_urls,
+                                    first_party_domains=first_party_domains,
+                                    identity_names=identity_names,
+                                    identity_anchor=identity_anchor,
+                                )
+                                if not support_reason:
+                                    continue
+                                support_url = _retained_requested_source_url(
+                                    support_url, fetched_pages, fetched_final_urls,
+                                )
+                                support_text = fetched_pages.get(support_url, "")
+                                support_quote = str(support_quote or "")
+                                support_rejection = {
+                                    "supporting_evidence_slot": slot,
+                                    "reason": support_reason,
+                                    "source_url": support_url,
+                                    "source_context": _source_context_for_quote(support_quote, support_text),
+                                }
+                                if support_reason == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON:
+                                    candidate = _company_bound_quote_candidate(
+                                        support_quote, support_text, identity_names,
+                                    )
+                                    if candidate:
+                                        support_rejection["company_bound_quote_candidate"] = candidate
+                                support_rejections.append(support_rejection)
+                            if support_rejections:
+                                rejected_finding["rejected_supporting_evidence"] = support_rejections
                         rejected.append(rejected_finding)
                     unproven_without_search = bool(
                         not scoped_correction_active
@@ -7412,6 +7506,28 @@ async def investigate_company_evidence(
                                 "join passages, or insert ellipses. VERIFIED and "
                                 "CONTRADICTED require that exact quote and its fetched URL. "
                                 "UNPROVEN requires empty evidence_url and evidence_quote. "
+                                + (
+                                    "For company-attribution failures, use an already "
+                                    "established company identity in the quote; do not "
+                                    "repeat an unproved short brand name. Any "
+                                    "company_bound_quote_candidate is untrusted exact "
+                                    "source context for your re-review. It does not prove the claim "
+                                    "or establish a new alias. Check every required fact "
+                                    "and qualifier, including whether facts belong to a "
+                                    "customer, parent, subsidiary, or another company. "
+                                    "Review all rejected_supporting_evidence slots in "
+                                    "this turn, not only the first failure. Resubmit a "
+                                    "candidate only if its full facts prove the finding; "
+                                    "otherwise repair the proof or return UNPROVEN. "
+                                    if any(
+                                        item.get("reason") in {
+                                            "source quote did not identify the investigated company",
+                                            REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+                                        } or item.get("rejected_supporting_evidence")
+                                        for item in rejected
+                                    )
+                                    else ""
+                                )
                                 + (
                                     "The feedback includes untrusted exact excerpts from "
                                     "other already fetched issuer-bound market sources. "

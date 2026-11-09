@@ -52,6 +52,10 @@ def sources(**options):
     }
     result[builder.GRADER_FILE] = _FROZEN_GRADER
     result[builder.FINALITY_FILE] = _FROZEN_FINALITY
+    if builder.VERIFICATION_FILE in result:
+        result[builder.VERIFICATION_FILE] = frozen_source(
+            "typed_refusal", builder.VERIFICATION_FILE,
+        )
     if options.get("archive_snapshot_https"):
         # This seam accepts its exact historical function, not today's source.
         from tests.test_arena_archive_snapshot_https import original_source

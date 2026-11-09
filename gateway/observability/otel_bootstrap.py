@@ -412,6 +412,7 @@ ARENA_DENIAL_CODES = frozenset(
         "accepted_weight_state_conflict",
         "accepted_weight_state_invalid",
         "accepted_weight_state_reward_conflict",
+        "accepted_weight_state_reward_clock_unavailable",
         "accepted_weight_state_scope_conflict",
         "arena_schema_version_invalid",
         "arena_store_unavailable",

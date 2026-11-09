@@ -313,6 +313,16 @@ def _rewards_enabled_from_environment() -> bool:
     raise ServiceError("LAB_ARENA_REWARDS_ENABLED must be true or false", 500)
 
 
+def _weekly_slot_decay_enabled_from_environment() -> bool:
+    """Roll out parsing to validators before issuing the new signed tenure."""
+    raw = os.environ.get("LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED", "false").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ServiceError("LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED must be true or false", 500)
+
+
 def _max_challengers_from_environment() -> int:
     """LAB_ARENA_MAX_CHALLENGERS: the admitted challenger ceiling per round, 1..MAX_CHALLENGERS."""
 
@@ -690,6 +700,7 @@ def build_service_from_environment(mode: str):
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
+        weekly_slot_decay_enabled=_weekly_slot_decay_enabled_from_environment(),
         scorer_image_access=image_access,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
         baseline_promoter_factory=baseline_promoter_from_environment,

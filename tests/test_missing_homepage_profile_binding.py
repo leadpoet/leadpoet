@@ -116,3 +116,13 @@ def test_provider_returning_different_profile_is_not_projected():
     payload = deepcopy(PAYLOAD)
     payload['result']['data']['element']['linkedinUrl'] = URL+'-parent'
     assert proof(payload) is None
+
+
+def test_saved_match_remains_bound_to_exact_company_claim():
+    from qualification.scoring.company_fit_decision import company_quality_receipt_matches_claim
+    result = s._web_identity_receipt(COMPANY, OBSERVED,
+        verified_homepage_transport_domain=DOMAIN, verified_structured_identity=proof(), company_quality=True)
+    saved = json.loads(json.dumps(result))
+    assert saved['decision'] == 'match'
+    assert company_quality_receipt_matches_claim(saved, vars(COMPANY))
+    assert not company_quality_receipt_matches_claim(saved, {**vars(COMPANY), 'company_name':'Warby Parker Subsidiary'})

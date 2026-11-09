@@ -906,7 +906,8 @@ class ResponsesBridge:
                     if web_tools and (
                             owner._web_search != "live" or len(web_tools) != 1):
                         raise _BridgeRequestError("web_search_unavailable")
-                    if owner._web_search == "live" and not _tool_free_serial_request(body):
+                    if (owner._web_search == "live" and (standalone_search or web_tools)
+                            and not _tool_free_serial_request(body)):
                         if len(web_tools) > 1:
                             raise _BridgeRequestError("web_search_unavailable")
                         if web_tools:
@@ -1069,7 +1070,8 @@ def session(
     Call only inside an Arena execute sandbox with private loopback enabled.
     Provider keys and the caller's Codex login/configuration are not inherited.
     ``web_search="live"`` enables Codex 0.154's standalone web tool. Search
-    commands use one bounded, accounted OpenRouter native-search request.
+    commands use one bounded, accounted standalone search request through
+    OpenRouter's Exa adapter.
     Full-URL open/find commands read visible text through the attempt-owned
     loopback web proxy without another model request. OpenRouter documents
     ``native`` as a preference that workspace policy may fall back; this bridge
@@ -1123,6 +1125,9 @@ def session(
             '[agents]',
             'enabled = false',
             '[features]',
+            # Keep web lookup in the local adapter, including unknown models.
+            # Hosted search on conversational DeepSeek requests drops reasoning.
+            'standalone_web_search = true',
             'enable_request_compression = false',
             'shell_snapshot = false',
             'multi_agent = false',

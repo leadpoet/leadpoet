@@ -134,7 +134,9 @@ def test_running_key_resume_uses_original_input_and_key_once(monkeypatch):
     assert sum(r['method'] == 'POST' for r in transport.requests) == 2
 
 
-def test_routed_score_recovers_running_key_with_original_paid_request(monkeypatch):
+@pytest.mark.parametrize("target_status", [200, 404])
+@pytest.mark.parametrize("known_bill", [False, True])
+def test_routed_score_recovers_running_key_with_original_paid_request(monkeypatch, target_status, known_bill):
     from tests.lab_arena.test_lab_arena_broker import DL_KEY
 
     class RoutedTransport(LateTransport):
@@ -143,12 +145,12 @@ def test_routed_score_recovers_running_key_with_original_paid_request(monkeypatc
             if request['method'] == 'POST':
                 return br.ProviderResponse(200, {}, json.dumps({
                     'job_id': NATIVE, 'status': 'completed',
-                    'billing': {'credits_charged': 0.02},
+                    **({'billing': {'credits_charged': 0.02}} if known_bill else {}),
                     'result': {'data': {
                         'rawHtml': '<html>Recovered page</html>',
                         'metadata': {'url': 'https://example.com/',
                                      'sourceURL': 'https://example.com/',
-                                     'statusCode': 200},
+                                     'statusCode': target_status},
                     }},
                 }).encode())
             payload = json.loads(response.body)
@@ -168,6 +170,22 @@ def test_routed_score_recovers_running_key_with_original_paid_request(monkeypatc
         credential_for=lambda _context, _provider: DL_KEY,
         funding_source_for=lambda _context: 'miner_key',
     )
+    uncertain_docs = []
+    original_uncertain = store.mark_uncertain
+
+    def record_uncertain(**kwargs):
+        uncertain_docs.append(kwargs['call_doc'])
+        return original_uncertain(**kwargs)
+
+    monkeypatch.setattr(store, 'mark_uncertain', record_uncertain)
+    recovered_terminals = []
+    original_recover = store.recover_deepline_response
+
+    def record_recovery(**kwargs):
+        recovered_terminals.append(kwargs['terminal_response'])
+        return original_recover(**kwargs)
+
+    monkeypatch.setattr(store, 'recover_deepline_response', record_recovery)
     context = replace(CONTEXT, kind='score', round_id='arena-2026-10-06')
     request = dict(operation_id='scrapingdog.scrape',
                    parameters={'url': 'https://example.com/'},
@@ -177,9 +195,22 @@ def test_routed_score_recovers_running_key_with_original_paid_request(monkeypatc
     assert first.status == 502 and first.call['outcome'] == 'uncertain'
     second = broker.execute(context, **request)
 
-    assert second.status == 200 and b'Recovered page' in second.body
+    if target_status == 200:
+        assert second.status == 200 and b'Recovered page' in second.body
+        if known_bill:
+            assert second.call['actual_microusd'] == 2000
+        else:
+            assert 'actual_microusd' not in second.call
+    else:
+        assert second.status == (409 if known_bill else 502)
+        assert second.call['outcome'] == 'uncertain'
+        assert second.call['error_code'] == ('call_uncertain' if known_bill else 'provider_unavailable')
+    if not known_bill:
+        # Outer completed 200 is successful even when the adapted source is 404.
+        # This exercises the pending-price overlay's final-status gate.
+        assert uncertain_docs[-1]['call_succeeded'] is True
+    assert len(recovered_terminals) == (1 if target_status == 200 else 0)
     assert second.call['call_identity'] == first.call['call_identity']
-    assert second.call['actual_microusd'] == 2000
     assert transport.paid == 1 and store.log.count('dispatch') == 1
     posts = [item for item in transport.requests if item['method'] == 'POST']
     assert len(posts) == 2

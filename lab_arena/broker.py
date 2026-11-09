@@ -7278,6 +7278,7 @@ class Broker:
                                    response_hash=contracts.hash_bytes(sanitized_body))
                     return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
                 if (effective_operation.provider == "deepline" and call_succeeded
+                    and 200 <= sanitized_status < 300
                     and isinstance(raw_document, Mapping) and raw_document.get("status") == "completed"
                     and deepline_execution_key is not None
                     and deepline_response_request_id is not None
@@ -7467,6 +7468,8 @@ class Broker:
                 call_identity=call_identity, actual_microusd=actual,
                 terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
             )
+            # The response overlay RPC accepts successful 2xx research only.
+            # A recovered failure still uses ordinary exact-cost settlement.
             for attempt in range(_SETTLEMENT_STORE_MAX_ATTEMPTS):
                 try:
                     settled = (self._persist_provider_accounting(self._store.recover_deepline_response,
@@ -7475,7 +7478,8 @@ class Broker:
                         execution_key=deepline_execution_key,
                         credential_fingerprint=provider_credential_fingerprint,
                         request_id=deepline_response_request_id, operation=deepline_operation,
-                    ) if deepline_response_recovery else self._persist_provider_accounting(
+                    ) if (deepline_response_recovery and call_succeeded
+                          and 200 <= sanitized_status < 300) else self._persist_provider_accounting(
                         self._store.settle_call, deadline=accounting_store_deadline, **settlement))
                 except ArenaStoreError as exc:
                     if attempt + 1 == _SETTLEMENT_STORE_MAX_ATTEMPTS:

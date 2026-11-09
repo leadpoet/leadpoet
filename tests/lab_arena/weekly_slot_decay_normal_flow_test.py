@@ -4,6 +4,8 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
+import re
+import pytest
 from pathlib import Path
 import urllib.request
 
@@ -30,13 +32,21 @@ SOURCE_EPOCH = 35001
 WEEK = 140
 
 
+@pytest.mark.parametrize("total_emissions", [False, True])
 def test_weekly_clock_scoring_publication_persistence_and_three_normal_signers(
-    integrated_database, tmp_path, monkeypatch,
+    integrated_database, tmp_path, monkeypatch, total_emissions,
 ):
-    policy = rewards.reward_slot_policy_document(date(2026, 11, 1))
+    policy = rewards.reward_slot_policy_document(date(2026, 11, 11 if total_emissions else 1))
     monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_, **__: deepcopy(policy))
     psycopg2, dsn = integrated_database
     connect = lambda: psycopg2.connect(**dsn)
+    if total_emissions:
+        with connect() as database, database.cursor() as cursor:
+            scripts = Path("scripts")
+            cursor.execute((scripts / "591-lab-arena-legacy-baseline-reward-comparison.sql").read_text())
+            prior = (scripts / "592-arena-2026-10-29-authorized-champion.sql").read_text()
+            cursor.execute(re.search(r'DO \$oct29_snapshot592\$.*?\$oct29_snapshot592\$;', prior, re.S)[0])
+            cursor.execute((scripts / "681-lab-arena-total-emissions-reward-slots.sql").read_text())
     harness = _NormalWeightHarness(
         connect, tmp_path, challengers=["NormalSlotWinner71"], runners=["alpha", "beta"],
     )
@@ -62,7 +72,8 @@ def test_weekly_clock_scoring_publication_persistence_and_three_normal_signers(
     basis = published["reward_basis_doc"]
     assert published["baseline_promoted_at"] is not None
     assert basis["effective_reward_epoch"] == SOURCE_EPOCH
-    assert basis["reward_slots"][:2] == [None, None]
+    assert basis["reward_slots"][0] is None
+    assert (basis["reward_slots"][1] == basis["reward_slots"][2]) if total_emissions else (basis["reward_slots"][1] is None)
     achievement = basis["reward_slots"][2]
     assert achievement["winner_score"] == 83.6
     assert achievement["baseline_score"] == 69.8
@@ -117,10 +128,14 @@ def test_weekly_clock_scoring_publication_persistence_and_three_normal_signers(
     assert contracts.canonical_json(enabled_gateway.public_weight_state(SOURCE_EPOCH)["state"]) == old_bytes
 
     states, epoch_vectors = [], []
-    for epoch, expected_share, expected_weights in (
-        (SOURCE_EPOCH + WEEK - 1, 150_000_000, [65535, 11565]),
-        (SOURCE_EPOCH + WEEK, 75_000_000, [65535, 5314]),
-    ):
+    controls = (
+        ((SOURCE_EPOCH + WEEK - 1, 400_000_000, [65535, 43690]),
+         (SOURCE_EPOCH + WEEK, 200_000_000, [65535, 16384]))
+        if total_emissions else
+        ((SOURCE_EPOCH + WEEK - 1, 150_000_000, [65535, 11565]),
+         (SOURCE_EPOCH + WEEK, 75_000_000, [65535, 5314]))
+    )
+    for epoch, expected_share, expected_weights in controls:
         service = gateway(epoch, enabled=True)
         vectors = []
         with TestClient(create_app(service)) as http, monkeypatch.context() as patcher:
@@ -139,10 +154,10 @@ def test_weekly_clock_scoring_publication_persistence_and_three_normal_signers(
                 clock = state["weekly_slot_decay"]
                 assert clock == {
                     "epochs_per_halving": WEEK,
-                    "slots": [None, None, {
+                    "slots": [None if slot is None else {
                         "start_epoch": SOURCE_EPOCH,
                         "source_normalized_sha256": identity.normalized_sha256,
-                    }],
+                    } for slot in basis["reward_slots"]],
                 }
                 arena_weights.verify_accepted_weight_state_signature(
                     state, public_key_der=harness.signer.public_key_der,

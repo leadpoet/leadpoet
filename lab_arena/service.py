@@ -8863,6 +8863,7 @@ class ArenaService:
             raise
         except Exception as exc:
             raise ServiceError("accepted_weight_epoch_scope_unavailable", 503) from exc
+        source_basis = basis
         basis = self._project_reward_basis(basis, requested_epoch)
         weekly_clock = None
         if (getattr(self._config, "weekly_slot_decay_enabled", False)
@@ -8887,7 +8888,7 @@ class ArenaService:
                     raise ServiceError("accepted_weight_state_reward_clock_previous_invalid", 503) from exc
                 if previous["epoch"] == requested_epoch:
                     return {"state": self._validated_existing_weight_state(
-                        latest, basis, network=network, netuid=netuid, epoch=requested_epoch,
+                        latest, source_basis, network=network, netuid=netuid, epoch=requested_epoch,
                     ), "lookup_ok": True}
             weekly_clock = self._weekly_reward_clock(
                 basis, epoch_scope, network=network, netuid=netuid, previous_state=previous,

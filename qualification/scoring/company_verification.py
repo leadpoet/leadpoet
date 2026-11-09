@@ -57,6 +57,12 @@ from qualification.scoring.company_fit_decision import (
 )
 
 
+from qualification.scoring.verification_helpers import (
+    _VisibleHTMLTextParser,
+    _css_hidden_selectors,
+)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -925,6 +931,75 @@ class _HomepageNavigationParser(HTMLParser):
             self._label_parts.append(data)
 
 
+class _InlineFooterCopyrightParser(_VisibleHTMLTextParser):
+    """Read one visible footer paragraph across bounded inline text nodes."""
+
+    _INLINE = frozenset({"span", "b", "strong", "em", "i", "small"})
+    # Footer text is the intended identity source; shared visibility rules
+    # still exclude its hidden ancestors, descendants and stylesheet selectors.
+    _HIDDEN_ELEMENTS = (_VisibleHTMLTextParser._HIDDEN_ELEMENTS - {"footer"}) | {"svg", "math"}
+
+    def __init__(self, page_text: str) -> None:
+        hidden_classes, hidden_ids = _css_hidden_selectors(page_text)
+        super().__init__(hidden_classes=hidden_classes, hidden_ids=hidden_ids)
+        self.names: list[str] = []
+        self._parts: list[str] | None = None
+        self._size = 0
+
+    def _is_hidden(self, tag: str, attrs) -> bool:
+        return "inert" in self._attribute_map(attrs) or super()._is_hidden(tag, attrs)
+
+    def _finish_paragraph(self) -> None:
+        if self._parts is not None:
+            text = " ".join(self._parts)
+            self.names.extend(
+                match.group("name").strip()[:200]
+                for match in _COPYRIGHT_LEGAL_NAME_RE.finditer(text)
+                # Do not treat an interrupted name as a complete copyright.
+                if re.match(r"[.\s]*all rights reserved\b", text[match.end():], re.I)
+            )
+        self._parts = None
+        self._size = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.casefold()
+        super().handle_starttag(tag, attrs)
+        if self._parts is not None and (tag not in self._INLINE or self._hidden_depth):
+            self._finish_paragraph()
+        if (tag == "p" and not self._hidden_depth
+                and any(parent == "footer" for parent, _hidden, _start in self._stack)):
+            self._parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() not in self._INLINE:
+            self._finish_paragraph()
+        super().handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if self._parts is not None and not self._hidden_depth:
+            self._size += len(data)
+            if self._size > 500:
+                self._parts = None
+            else:
+                self._parts.append(data)
+
+
+def _inline_footer_copyright_names(
+    page_text: str, existing_names: list[str],
+) -> list[str]:
+    page_text = str(page_text or "")[:_MAX_BYTES]
+    parser = _InlineFooterCopyrightParser(page_text)
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return []
+    # Multiple legal owners do not establish one exact company identity.
+    names = list(dict.fromkeys(parser.names))
+    return names if len({re.sub(r"[^a-z0-9]+", "", name.casefold())
+                         for name in [*names, *existing_names]}) == 1 else []
+
+
 def _commercial_terms_navigation_locator(url: str, label: str) -> bool:
     """Recognize a legal-source locator, never infer its commercial contents."""
 
@@ -1138,7 +1213,10 @@ def _homepage_company_names(
         parser.feed(str(page_text or "")[:_MAX_BYTES])
     except Exception:
         return []
-    candidates = [*parser.metadata_names, *parser.copyright_legal_names]
+    candidates = [
+        *parser.metadata_names, *parser.copyright_legal_names,
+        *_inline_footer_copyright_names(page_text, parser.copyright_legal_names),
+    ]
     # Preserve brand discovery while requiring a unique explicit legal relation.
     organization_names: dict[str, str] = {}
     if observed_domain and observed_linkedin:
@@ -1947,9 +2025,16 @@ async def verify_company_exists(
             verified_homepage_transport_domain=domain,
             observed_homepage_organization_identity=bound_organization,
         )
+    unavailable_receipts = [
+        receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"
+    ]
+    # Retain an exact observed name as lookup context before SEO copy. This
+    # grants no identity; preserve the independent Organization conflict below.
     unavailable = next(
-        (receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"),
-        None,
+        (receipt for receipt in unavailable_receipts
+         if len(observed_linkedins) == 1
+         and receipt["observed_name"] == submitted_name_key),
+        unavailable_receipts[0] if unavailable_receipts else None,
     )
     if unavailable is not None:
         return _identity_result(

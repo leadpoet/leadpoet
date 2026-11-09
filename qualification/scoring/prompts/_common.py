@@ -533,6 +533,12 @@ FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
   API for automated reporting can support "reporting API launch." Do not
   require that standalone wording to appear in the body, and do not accept a
   broader claim that adds functions the body does not prove.
+- Check every distinct event and material factual detail asserted within
+  miner_claim, including dates asserted for additional events. A supported
+  qualifying event does not establish another release or event in the same
+  claim. If an added material assertion is unproven, return partially_supported
+  and name it in unsupported_parts, even when the supported part meets the target.
+  Do not count faithful wording for the same supported event as a separate event.
 - Page titles, navigation menus, headers, and breadcrumbs are NOT evidence.
   Only specific factual claims in the page BODY count.
 - If the body contains explicit negation about the claim ("0 open positions",

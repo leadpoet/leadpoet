@@ -15,18 +15,18 @@ from tests.lab_arena.judge_default_activation_test import EXCEPTIONS, PREVIOUS_O
 SOL = 'openai/gpt-6.1-sol'
 GLM = 'z-ai/glm-5.3-flash'
 
-# Complete explicit-length requests with the reviewed stage/scope prompts.
-# This industry-only fixture changes only system text from reviewed4157;
+# Complete explicit-length requests with the reviewed industry evidence rules.
+# The November 7 audit changes only the criterion-rule system text;
 # stage-field descriptions are covered by the stage contract tests. Repair
 # instructions, tools, budgets and provider routing here are unchanged.
 # Budget-only repairs must still match explicit-length requests byte for byte.
 REQUEST_GOLDENS = {
-    ('glm', 'empty'): 'sha256:8d623905f754e74302f3c1e1096383cda44c20dba6241b49c9a7d83777bc41de',
-    ('glm', 'malformed_submit'): 'sha256:9400af628550ec1a034e28bb2452354909dc93edd8d68a618bd8c82a91019a07',
-    ('sol_legacy', 'empty'): 'sha256:ff260880c060639a6c21aac4054c391edddfd21e0b855ef63d95667f940a7654',
-    ('sol_legacy', 'malformed_submit'): 'sha256:5b9a1c3c9f489ca3a52c9819a4204912beec4f7a172f08399f9514d6ebdc6156',
-    ('historical_open', 'empty'): 'sha256:73cedeef1e8c60935cbdff32b17559ee4c59d91183e977eb6162ea8062f4e27b',
-    ('historical_open', 'malformed_submit'): 'sha256:074bcc5e0c65b698b20d3a38e10df8a35018cf6ec97aefa5aacf3e2606cd0d06',
+    ('glm', 'empty'): 'sha256:217d4c152636764ac11f28aca5171c25444966abb901df7c2d596fb8316635b9',
+    ('glm', 'malformed_submit'): 'sha256:8061648a09d166dc2a8f9e1ee924b8c3364fcd1e51f4ea64cb29b4b9e05342d2',
+    ('sol_legacy', 'empty'): 'sha256:5bfb0148b11b872427fd5e2312d208600fcf8eab8fe59264c57d082d70061d68',
+    ('sol_legacy', 'malformed_submit'): 'sha256:77d6d345e41ce0c258c029bbd775dc8dc4d3d2cbd95ed4772297b19bfb119505',
+    ('historical_open', 'empty'): 'sha256:eda699e774b58be8fb368c574f507343bad88c3109a07ff860a92d43c9f03ed4',
+    ('historical_open', 'malformed_submit'): 'sha256:f9839ee2663f72540bfd1759410266083a27f5a0d2500ccd9d739db55c0a03e1',
 }
 
 

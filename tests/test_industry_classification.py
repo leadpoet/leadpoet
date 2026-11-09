@@ -235,3 +235,29 @@ def test_customer_and_product_requirement_prompt_contract(criterion, rule, resea
     assert rule in system
     assert "Explicit logical AND and mandatory wording take precedence over descriptive-list guidance" in system
     assert json.loads(request['messages'][1]['content'])['criterion']['product_service'] == criterion
+
+
+@pytest.mark.parametrize('research', [False, True])
+@pytest.mark.parametrize('criterion', [
+    'Software used by medical practices for patient calls and scheduling.',
+    'Managed IT infrastructure services for large enterprises.',
+    'A platform managing tickets and account workflows across Slack, email and chat.',
+    'Must sell directly to private-sector enterprises and replace their ticketing system.',
+])
+def test_original_scope_rule_reaches_final_and_research_without_relaxing_requirements(criterion, research):
+    value = industry.prepare({**CRITERION, 'product_service': criterion}, COMPANY, [
+        {'source_id': 's0', 'source_url': 'https://example.com/products',
+         'body': 'Example supplies its own workflow platform through documented integrations.'},
+    ], evaluation_date='2026-10-24')
+    request = industry.request_payload(value, model='openai/gpt-6.1-sol', research=research)
+    system = request['messages'][0]['content']
+    assert 'Unless explicitly required by the criterion, do not require direct sales to end users, private-sector customers, or built-in replacement of existing systems' in system
+    assert 'Enterprise-scale public-sector organizations can satisfy an enterprise customer requirement' in system
+    assert "verify the company's own contribution and do not substitute a partner's separate functionality" in system
+    assert "Assess a supported qualifying offering even when the company's broader category differs" in system
+    assert 'This does not waive any required capability, channel, customer class, or explicit restriction' in system
+    assert 'Explicit logical AND and mandatory wording take precedence' in system
+    assert 'Each listed function or capability of a required product or service remains required' in system
+    assert 'Do not combine independently supplied offerings' in system
+    assert 'Integrations may deliver its customer-facing function' in system
+    assert json.loads(request['messages'][1]['content'])['criterion']['product_service'] == criterion

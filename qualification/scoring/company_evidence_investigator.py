@@ -1796,12 +1796,15 @@ def _public_stage_submitted_source_to_prefetch(
 
     def has_strong_market_hint(url: str) -> bool:
         return any(
+            # Rank a Markdown link by its visible label, never its href.
+            # This selects a read; fetched evidence is still validated below.
             # Submitted snippets sometimes wrap the whole sentence in a
             # quotation mark. Ignore that wrapper only for choosing which
             # source to fetch. Evidence validation still uses the unchanged
             # fetched text and strict quote gates.
             _public_quote_has_bound_market_locator(
-                re.sub(r'^\s*["“”‘’]\s*', '', text, count=1),
+                re.sub(r'^\s*["“”‘’]\s*', '',
+                       _visible_markdown_link_label_surface(text), count=1),
                 tuple(identity_names),
             )
             for text in submitted_source_hints.get(url, ())

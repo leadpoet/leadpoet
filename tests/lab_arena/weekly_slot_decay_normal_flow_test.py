@@ -22,7 +22,7 @@ from leadpoet_canonical import arena_weights
 from tests.lab_arena.test_lab_arena_normal_weight_flow import (
     _ExternalSource, _HostChain, _NormalWeightHarness, _local_signer_client,
     _public_api, _test_client_urlopen, assert_canary_absent, daily_icps,
-    frozen_image_judge_contract, integrated_database, local_worker_socket_polling,
+    frozen_image_judge_contract, integrated_database as _normal_database, local_worker_socket_polling,
     promotion_repository,
 )
 from tests.lab_arena.test_lab_arena_service_round import _start_round
@@ -30,6 +30,12 @@ from tests.lab_arena.test_lab_arena_service_round import _start_round
 
 SOURCE_EPOCH = 35001
 WEEK = 140
+
+
+@pytest.fixture()
+def integrated_database():
+    # Each policy control executes the same full round on a fresh database.
+    yield from _normal_database.__wrapped__()
 
 
 @pytest.mark.parametrize("total_emissions", [False, True])

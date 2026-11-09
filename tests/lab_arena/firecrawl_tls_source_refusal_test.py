@@ -27,14 +27,19 @@ def _response(document=CAPTURED, status=502, **kwargs):
     return br.ProviderResponse(status, {}, json.dumps(document).encode(), **kwargs)
 
 
-def _routed_call(*, funding_source="miner_key", credits=0, document=None):
+def _routed_call(*, funding_source="miner_key", credits=0, document=None, store=None):
     document = copy.deepcopy(CAPTURED if document is None else document)
-    entry = deepline_history_entry(
-        document["request_id"], "firecrawl_scrape", credits, provider="firecrawl",
-    )
-    entry.update(status="error", outcome="error")
+    if credits is None:
+        history = {"recent": {"request_id": document["request_id"], "entries": []}}
+    else:
+        entry = deepline_history_entry(
+            document["request_id"], "firecrawl_scrape", credits, provider="firecrawl",
+        )
+        entry.update(status="error", outcome="error")
+        history = deepline_history(entry)
     broker, store, transport = make_broker(
-        transport=FakeTransport([(502, document), (200, deepline_history(entry))]),
+        store=store,
+        transport=FakeTransport([(502, document), (200, history)]),
         credential_for=lambda *_: DL_KEY,
         funding_source_for=lambda *_: funding_source,
         **({"host_shadow_score_compat_round_id": "arena-2026-10-09",
@@ -75,6 +80,48 @@ def test_captured_tls_failure_keeps_source_local_settlement_and_replay(funding_s
     assert replay.call["actual_microusd"] == amount
     assert replay.call["idempotent"] is True
     assert len(transport.sent) == sent
+
+
+@pytest.mark.parametrize("funding_source", ["miner_key", "host"])
+def test_captured_tls_unknown_bill_keeps_reservation_and_same_call_replay(monkeypatch, funding_source):
+    from tests.lab_arena.deepline_host_payment_status_test import HostPaymentStore
+
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("completed TLS failure must not poll"))
+    store = HostPaymentStore()
+    capacity = store.openrouter_capacity
+    result, broker, store, transport, context, arguments = _routed_call(
+        funding_source=funding_source, credits=None, store=store,
+    )
+    assert result.status == 403
+    assert result.body == b'{"error":{"code":"provider_request_refused"}}'
+    assert result.call["provider_status"] == 502
+    assert result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    saved = store.calls[result.call["call_identity"]]
+    reserved = saved["amount"]
+    assert reserved > 0 and store.openrouter_capacity == capacity - reserved
+    assert saved["kind"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    uncertain = saved["uncertain_doc"]
+    assert uncertain["reason"] == "missing_provider_cost"
+    assert uncertain["call_succeeded"] is False
+    assert "account_failure_evidence" not in uncertain
+    assert json.loads(base64.b64decode(
+        uncertain["upstream_response_receipt"]["body_b64"],
+    )) == CAPTURED
+    assert "upstream_response_receipt" not in json.dumps(result.to_document())
+    sent = len(transport.sent)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == result.status and replay.body == result.body
+    assert replay.call["call_identity"] == result.call["call_identity"]
+    assert replay.call["idempotent"] is True
+    assert replay.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in replay.call
+    assert len(transport.sent) == sent
+    assert sum(request["method"] == "POST" for request in transport.sent) == 1
+    assert store.openrouter_capacity == capacity - reserved
+    assert saved["kind"] == "uncertain" and saved["amount"] == reserved
+    assert store.log.count("settle") == 0
 
 
 def test_captured_tls_failure_reaches_existing_exact_source_fallback(monkeypatch):
@@ -186,6 +233,33 @@ def test_native_source_tls_proof_does_not_require_optional_envelope_mirrors():
         "executionRecovery": {"state": "completed"},
     }
     assert br._provider_request_refused("deepline", PARAMETERS, _response(body))
+
+
+@pytest.mark.parametrize("scope,field,value", [
+    ("document", "code", "INSUFFICIENT_CREDITS"),
+    ("document", "code", None),
+    ("document", "failure_origin", "account"),
+    ("document", "error_category", "provider_account"),
+    ("document", "upstream_status", 429),
+    ("document", "upstream_status", 500.0),
+    ("tool_error", "code", "PROVIDER_AUTHORIZATION_FAILED"),
+    ("tool_error", "provider", "generic_http"),
+    ("tool_error", "provider", None),
+    ("tool_error", "operation", "other"),
+    ("tool_error", "origin", "account"),
+    ("tool_error", "category", "rate_limit"),
+    ("tool_error", "statusCode", 429),
+    ("tool_error", "statusCode", 502.0),
+])
+def test_optional_mirror_conflict_alone_rejects_otherwise_minimal_tls_proof(scope, field, value):
+    body = {
+        "provider": "firecrawl", "operation": "firecrawl_scrape",
+        "upstream_error_code": "SCRAPE_SSL_ERROR",
+        "tool_error": {"retryable": False},
+        "executionRecovery": {"state": "completed"},
+    }
+    (body if scope == "document" else body["tool_error"])[field] = value
+    assert not br._provider_request_refused("deepline", PARAMETERS, _response(body))
 
 
 @pytest.mark.parametrize("field", [

@@ -1294,6 +1294,8 @@ def test_absolute_funding_date_repair_gets_unconditional_date_standard(
         )
         assert "relative_time_target" not in control
         system = kwargs["system_prompt"]
+        assert "For relative_time_grounding_review" not in system
+        assert "support from the same source_index" not in system
         general = system.split("For relative_time_grounding_review", 1)[0]
         assert "For every semantic recheck" in general
         assert "published or first\nobserved" in general

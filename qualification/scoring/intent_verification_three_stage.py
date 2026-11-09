@@ -819,7 +819,10 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
             ):
                 history[-1] = (f"attempt_{attempt}", "posting_invalid")
                 continue
-            exact_fields = [title]
+            # Keep observed API field names. An unlabeled timestamp loses its
+            # publication meaning, and dropping listing/application metadata
+            # can make a listed posting appear unverified to the final judge.
+            exact_fields = [title, "isListed: true"]
             for field_name in (
                 "publishedAt",
                 "location",
@@ -830,7 +833,26 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
             ):
                 value = posting.get(field_name)
                 if isinstance(value, str) and value.strip() and "\x00" not in value:
-                    exact_fields.append(value)
+                    exact_fields.append(f"{field_name}: {value}")
+            apply_url = posting.get("applyUrl")
+            try:
+                application = urlsplit(apply_url) if isinstance(apply_url, str) else None
+                bound_application = bool(
+                    application and apply_url.isascii()
+                    and not any(char.isspace() for char in apply_url)
+                    and application.scheme == "https"
+                    and application.hostname == "jobs.ashbyhq.com"
+                    and application.port in (None, 443)
+                    and application.username is None and application.password is None
+                    and not application.query and not application.fragment
+                    and application.path.endswith("/application")
+                    and _ashby_posting_identity(apply_url[:-len("/application")])
+                    == source_identity
+                )
+            except ValueError:
+                bound_application = False
+            if bound_application:
+                exact_fields.append(f"applyUrl: {apply_url}")
             exact_fields.append(description)
             content = "\n".join(exact_fields)[:MAX_SCRAPED_CHARS]
             if len(content) < 20:
@@ -842,6 +864,7 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
                 "ok": True,
                 "stage": f"sd:ashby_api:{attempt}",
                 "content": content,
+                "source_publication_date": _source_publication_date(posting.get("publishedAt")),
                 "observed_ownership_links": _observed_ownership_links(
                     str(posting.get("descriptionHtml") or ""), source_url
                 ),
@@ -3511,6 +3534,31 @@ def _published_date_from_html(
     return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
+def _exact_native_ats_api_status(
+    source_url: str, statuses: Any,
+) -> Optional[Dict[str, str]]:
+    """Admit only the successful native API receipt for this exact posting."""
+
+    if not isinstance(source_url, str) or _prompt_exact_url_or_empty(source_url) != source_url:
+        return None
+    parsed = urlsplit(source_url)
+    if (parsed.scheme != "https" or parsed.query or parsed.fragment
+        or parsed.netloc.casefold() != parsed.hostname):
+        return None
+    provider = ("ashby" if _ashby_posting_identity(source_url) else
+                "greenhouse" if _greenhouse_posting_identity(source_url) else "")
+    if not provider or not isinstance(statuses, list) or len(statuses) != 1:
+        return None
+    status = statuses[0]
+    if (not isinstance(status, Mapping) or status.get("url") != source_url
+        or status.get("source") != f"scrapingdog_{provider}_api"
+        or not isinstance(status.get("stage"), str)
+        or not re.fullmatch(rf"sd:{provider}_api:[1-9][0-9]*", status["stage"])):
+        return None
+    # Preserve no arbitrary raw status fields in the private result.
+    return {key: status[key] for key in ("url", "source", "stage")}
+
+
 def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
     """Bound source fields while retaining the exact validated evidence URL."""
 
@@ -4065,6 +4113,7 @@ async def _fetch_sd_then_exa(
                     "url": url,
                     "title": "",
                     "text": str(ashby["content"])[:max_chars],
+                    "source_publication_date": ashby.get("source_publication_date") or "",
                     "meta": {"kind": "ashby_job", "observed_ownership_links": ashby.get("observed_ownership_links") or []},
                 })
                 statuses.append({
@@ -4375,6 +4424,11 @@ async def _call_openrouter(
             choices = resp.get("choices")
             first_choice = choices[0] if isinstance(choices, list) and choices else {}
             if judge_reasoning_enabled() and first_choice.get("finish_reason") != "stop":
+                # A truncated generation can recover with the unchanged request;
+                # share the existing attempt cap without accepting partial JSON.
+                if first_choice.get("finish_reason") == "length" and attempt + 1 < attempts:
+                    await asyncio.sleep(1)
+                    continue
                 return {"_error": "incomplete_response", "provider_usage": provider_usage}
             message = first_choice.get("message") if isinstance(first_choice, Mapping) else {}
             content = message.get("content", "") if isinstance(message, Mapping) else ""
@@ -5581,6 +5635,13 @@ async def verify_three_stage(
         for url in row["claimed_source_urls"]
     )
     contents = _project_contents_for_prompt(fetched_contents)
+    # Prompt statuses intentionally omit paths. Retain the exact native API
+    # receipt locally; only an unchanged single owned posting may return it.
+    native_ats_status = _exact_native_ats_api_status(
+        fetch_source_url, fetched_contents.get("statuses"),
+    ) if (integrity_policy and str(row.get("_evidence_type") or "").upper() == "HIRING"
+          and len(row["claimed_source_urls"]) == 1) else None
+    native_ats_results = json.loads(json.dumps(contents["results"])) if native_ats_status else None
     source_publication_dates = list(dict.fromkeys(
         str(result.get("source_publication_date") or "")
         for result in (contents.get("results") or [])
@@ -6618,6 +6679,17 @@ async def verify_three_stage(
             "job_publisher_relationship": job_publisher_relationship,
             "verified_job_source_urls": verified_job_source_urls,
         })
+        if (native_ats_status and len(contents["results"]) == 1
+            and contents["results"] == native_ats_results
+            and fetch_source_url == source_url
+            and contents["results"][0].get("url") == source_url
+            and (contents["results"][0].get("meta") or {}).get("kind") == {
+                "scrapingdog_ashby_api": "ashby_job",
+                "scrapingdog_greenhouse_api": "greenhouse_job",
+            }.get(native_ats_status["source"])
+            and verified_job_source_urls == [source_url]
+            and len(bundle) <= 1):
+            result["scrape"]["statuses"] = [native_ats_status]
         cited_wrong_entity_urls = {
             _normalize_url(url)
             for url in s3_item.get("evidence_urls_used") or []

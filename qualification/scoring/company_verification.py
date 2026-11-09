@@ -748,6 +748,108 @@ def _linked_identity_source_url(
     return ""
 
 
+HOMEPAGE_IDENTITY_LOOKUP_CONTEXT_KEY = "homepage_identity_lookup_context"
+
+
+def _same_public_https_host(url: str, approved_url: str) -> bool:
+    """Require standard HTTPS and the exact approved public host."""
+    try:
+        parts = [urlsplit(value) for value in (url, approved_url)]
+        for value, parsed in zip((url, approved_url), parts):
+            public_http_url(value)
+            if (
+                parsed.scheme.casefold() != "https"
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment or parsed.port not in {None, 443}
+            ):
+                return False
+        return parts[0].hostname.casefold() == parts[1].hostname.casefold()
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+class _HomepageLookupNameParser(HTMLParser):
+    """Read strong metadata only from an explicit, completed document head."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+        self.names: list[str] = []
+        self.head_seen = False
+        self.head_closed = False
+        self.invalid = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.casefold()
+        if not self.head_seen and tag not in {"html", "head"}:
+            self.invalid = True
+        if tag == "head":
+            if self.head_seen or self.stack not in ([], ["html"]):
+                self.invalid = True
+            self.head_seen = True
+        if tag == "body" and not self.head_closed:
+            self.invalid = True
+        if (
+            self.stack in (["head"], ["html", "head"])
+            and tag not in {"base", "link", "meta", "title", "script", "style", "template", "noscript"}
+        ):
+            self.invalid = True
+        if tag == "meta" and self.stack in (["head"], ["html", "head"]):
+            attributes = {}
+            for key, value in attrs:
+                key = str(key or "").casefold()
+                if key in attributes:
+                    self.invalid = True
+                attributes[key] = str(value or "").strip()
+            key = (attributes.get("property") or attributes.get("name") or "").casefold()
+            if key in {"og:site_name", "application-name"}:
+                name = attributes.get("content", "")
+                if not name or len(name) > _MAX_ORGANIZATION_NAME_LENGTH:
+                    self.invalid = True
+                self.names.append(name)
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self.stack.append(tag)
+
+    def handle_data(self, data: str) -> None:
+        if data.strip() and (
+            not self.head_seen or self.stack in (["head"], ["html", "head"])
+        ):
+            # Binary/placeholder prefixes and body text cannot open a valid
+            # document head merely by embedding a later metadata tag.
+            self.invalid = True
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self.handle_starttag(tag, attrs)
+        if self.stack and self.stack[-1] == tag.casefold():
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if tag == "head":
+            self.head_closed = self.stack in (["head"], ["html", "head"])
+            self.invalid |= not self.head_closed
+        if self.stack and self.stack[-1] == tag:
+            self.stack.pop()
+        elif not self.head_closed:
+            self.invalid = True
+
+
+def _homepage_lookup_name(text: str, requested_name: str) -> str:
+    parser = _HomepageLookupNameParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except (AssertionError, ValueError):
+        return ""
+    expected = _company_name(requested_name)
+    if (
+        parser.invalid or not parser.head_closed or not expected or not parser.names
+        or any(_company_name(name) != expected for name in parser.names)
+    ):
+        return ""
+    return parser.names[0]
+
+
 class _HomepageIdentityParser(HTMLParser):
     """Extract bounded first-party name metadata without trusting input text."""
 
@@ -1491,6 +1593,13 @@ async def verify_company_exists(
         homepage_navigation_locator_sink.clear()
     if homepage_evidence_sink is not None:
         homepage_evidence_sink.clear()
+    source_details: dict[str, object] = {}
+
+    def _result(*args, **kwargs) -> CompanyFitDecisionResult:
+        result = _identity_result(*args, **kwargs)
+        result.details.update(source_details)
+        return result
+
     submitted_identity = evaluate_company_identity(
         submitted_name=company_name,
         submitted_website=company_website,
@@ -1502,7 +1611,7 @@ async def verify_company_exists(
         company_quality=company_quality,
     )
     if submitted_identity["decision"] == "mismatch":
-        return _identity_result(
+        return _result(
             submitted_identity,
             "submitted company identity is missing or invalid",
         )
@@ -1519,12 +1628,12 @@ async def verify_company_exists(
         submitted_identity.update(
             decision="mismatch", reason_code="identity_unresolved"
         )
-        return _identity_result(
+        return _result(
             submitted_identity,
             f"company_website has no valid registrable domain: {company_website!r}",
         )
     except Exception as exc:  # Pinned identity primitive is unavailable.
-        return _identity_result(
+        return _result(
             submitted_identity,
             f"company identity normalization unavailable: {type(exc).__name__}",
         )
@@ -1547,13 +1656,42 @@ async def verify_company_exists(
                 record_source("homepage", {"url": request_url}, {
                     "status": status, "final_url": observed_url, "text": text,
                 }, ok=status < 400)
+                fallback = source_details.get("homepage_root_fallback")
+                if isinstance(fallback, dict):
+                    fallback.update(status=status, actual_final_url=observed_url)
+                    if not _same_public_https_host(observed_url, request_url):
+                        return _result(
+                            submitted_identity,
+                            "homepage identity evidence unavailable: root redirect changed approved HTTPS host",
+                            actual_final_url=observed_url,
+                        )
+                elif (
+                    status in {404, 410}
+                    and attempt + 1 < _TRANSIENT_FETCH_ATTEMPTS
+                    and urlsplit(request_url).path not in {"", "/"}
+                    and _same_public_https_host(observed_url, request_url)
+                ):
+                    original_request_url = request_url
+                    parts = urlsplit(request_url)
+                    request_url = urlunsplit(("https", parts.netloc, "/", "", ""))
+                    source_details["homepage_root_fallback"] = {
+                        "original_request_url": original_request_url,
+                        "original_status": status,
+                        "original_reason": f"website returned HTTP {status}",
+                        "original_actual_final_url": observed_url,
+                        "request_url": request_url,
+                    }
+                    # The root consumes the next existing fetch slot. It has no
+                    # separate retry loop or timeout allowance beyond the
+                    # existing per-attempt limit. Its source record is distinct.
+                    continue
                 break
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                 if attempt + 1 >= _TRANSIENT_FETCH_ATTEMPTS:
                     raise
                 await asyncio.sleep(_TRANSIENT_FETCH_RETRY_DELAY_SECS)
     except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
-        return _identity_result(
+        return _result(
             submitted_identity,
             f"website unreachable: {type(e).__name__}: {str(e)[:120]}",
             source_fetch_failed=(
@@ -1566,7 +1704,7 @@ async def verify_company_exists(
             ),
         )
     except _ArenaProviderFetchError as e:
-        return _identity_result(
+        return _result(
             submitted_identity,
             str(e),
             failure_reason_code=(
@@ -1577,12 +1715,12 @@ async def verify_company_exists(
             ),
         )
     except aiohttp.ClientError as e:
-        return _identity_result(
+        return _result(
             submitted_identity,
             f"website unreachable: {type(e).__name__}: {str(e)[:120]}",
         )
     except Exception as e:  # noqa: BLE001 - log everything else and fall through
-        return _identity_result(
+        return _result(
             submitted_identity,
             f"website fetch error: {type(e).__name__}: {str(e)[:120]}",
         )
@@ -1591,7 +1729,7 @@ async def verify_company_exists(
     # 200 = ideal.  3xx are already followed by aiohttp.  4xx/5xx mean
     # the page itself is not a usable company page.
     if status >= 400:
-        return _identity_result(
+        return _result(
             submitted_identity, f"website returned HTTP {status}",
             actual_final_url=observed_url,
             # These are failures of this bounded page fetch. Account and
@@ -1600,7 +1738,7 @@ async def verify_company_exists(
         )
 
     if require_https_transport and not _is_https_url(observed_url):
-        return _identity_result(
+        return _result(
             submitted_identity,
             "homepage identity evidence unavailable: final URL is not HTTPS",
             actual_final_url=observed_url,
@@ -1609,7 +1747,7 @@ async def verify_company_exists(
     try:
         observed_domain = _registrable_domain(observed_url)
     except Exception as exc:
-        return _identity_result(
+        return _result(
             submitted_identity,
             "homepage identity evidence unavailable: observed domain "
             f"normalization failed ({type(exc).__name__})",
@@ -1681,7 +1819,7 @@ async def verify_company_exists(
                                 text, canonical_request_url, canonical_final_url, evidence_text,
                                 company_name),
                         }
-        return _identity_result(
+        return _result(
             redirect_receipt,
             f"company identity conflict: redirect changed registrable domain "
             f"from {domain!r} to {observed_domain!r}",
@@ -1692,14 +1830,14 @@ async def verify_company_exists(
     # ----- Parked-domain detection ------------------------------------------
     if _PARKED_DOMAIN_RE.search(text):
         submitted_identity.update(decision="mismatch", reason_code="identity_mismatch")
-        return _identity_result(
+        return _result(
             submitted_identity,
             "website is a parked / for-sale page",
             actual_final_url=observed_url,
         )
 
     if _homepage_body_is_unusable(text):
-        return _identity_result(
+        return _result(
             submitted_identity,
             "website fetch error: homepage response body is unusable",
             actual_final_url=observed_url,
@@ -1715,7 +1853,10 @@ async def verify_company_exists(
             observed_linkedins[0] if len(observed_linkedins) == 1 else ""
         ),
     )
-    if observed_names and not observed_linkedins:
+    if (
+        observed_names and not observed_linkedins
+        and "homepage_root_fallback" not in source_details
+    ):
         source_url = _linked_identity_source_url(
             text,
             base_url=observed_url,
@@ -1764,13 +1905,22 @@ async def verify_company_exists(
                 ):
                     observed_linkedins = source_linkedins
     if not observed_names:
-        return _identity_result(
+        return _result(
             submitted_identity,
             "homepage identity evidence unavailable: company name metadata not found",
             actual_final_url=observed_url,
             verified_homepage_transport_domain=domain,
         )
     if not observed_linkedins:
+        lookup_name = _homepage_lookup_name(text, company_name)
+        if lookup_name and _same_public_https_host(observed_url, request_url):
+            source_details[HOMEPAGE_IDENTITY_LOOKUP_CONTEXT_KEY] = {
+                "source": "server_observed_head_metadata_v1",
+                "observed_name": lookup_name,
+                "registrable_dns_domain": domain,
+                "request_url": request_url,
+                "final_url": observed_url,
+            }
         # The missing LinkedIn binding makes identity unavailable, but the
         # already fetched same-domain homepage can still be useful as
         # untrusted evidence after independent web identity verification.
@@ -1821,7 +1971,7 @@ async def verify_company_exists(
                             text, final_url=observed_url, verified_domain=domain,
                         )
                     )
-        return _identity_result(
+        return _result(
             submitted_identity,
             "homepage identity evidence unavailable: LinkedIn company binding not found",
             actual_final_url=observed_url,
@@ -1935,7 +2085,7 @@ async def verify_company_exists(
                         text, canonical_request_url, canonical_final_url, evidence_text,
                         company_name),
                 }
-        return _identity_result(
+        return _result(
             matched_receipt,
             "verified: independently observed first-party name, final domain, "
             "and exact LinkedIn company identity",
@@ -2017,7 +2167,7 @@ async def verify_company_exists(
         # pages, and cross-domain redirects remain terminal checks above.
         unresolved = dict(conflict)
         unresolved.update(decision="unavailable", reason_code="identity_not_proven")
-        return _identity_result(
+        return _result(
             unresolved,
             "homepage identity evidence unavailable: page metadata and links "
             "do not prove the submitted identity",
@@ -2037,14 +2187,14 @@ async def verify_company_exists(
         unavailable_receipts[0] if unavailable_receipts else None,
     )
     if unavailable is not None:
-        return _identity_result(
+        return _result(
             unavailable,
             "homepage identity evidence unavailable: complete identity not proven",
             actual_final_url=observed_url,
             verified_homepage_transport_domain=domain,
             observed_homepage_organization_identity=bound_organization,
         )
-    return _identity_result(
+    return _result(
         submitted_identity,
         "homepage identity evidence unavailable: complete identity not proven",
         actual_final_url=observed_url,

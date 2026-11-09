@@ -87,7 +87,11 @@ def test_native_expiry_successor_reuses_completed_company_judgments(preserved_ca
         companies=[_company('A'), _company('B')], policy=cfg['scorer_policy'],
         evaluation_date='2026-11-06')
     document['company_judgment_cache'] = lease['company_judgment_cache']
-    output = scorer_entrypoint.score_input(document)
+    # Match the isolated scorer process rather than inheriting CI provider keys.
+    # Keep the real frozen-policy and placeholder-credential checks active.
+    with monkeypatch.context() as process:
+        process.setattr(scorer_entrypoint.os, 'environ', {})
+        output = scorer_entrypoint.score_input(document)
     assert 'failure' not in output
     assert len(output['breakdowns']) == 2
     assert calls == []

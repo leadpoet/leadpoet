@@ -3806,6 +3806,58 @@ def _deepline_firecrawl_unsupported_source_refusal(
     )
 
 
+def _deepline_firecrawl_tls_source_refusal(
+    parameters: Mapping[str, Any], response: ProviderResponse
+) -> bool:
+    """Keep the observed non-retryable target TLS failure source-local."""
+
+    if (
+        response.internal_provenance is not None
+        or response.status != 502
+        or parameters.get("tool") != "firecrawl_scrape"
+    ):
+        return False
+    payload = parameters.get("payload")
+    if not isinstance(payload, Mapping) or not (
+        scoring_provider_compat._safe_public_source_https_url(payload.get("url"))
+    ):
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    tool_error = document.get("tool_error")
+    recovery = document.get("executionRecovery")
+    # The outer 502 alone says nothing about the target. Require the exact
+    # completed native failure classification, including its non-retryable
+    # source TLS code. Never expose diagnostics or bypass TLS verification.
+    return (
+        document.get("code") == "UPSTREAM_FAILURE"
+        and document.get("provider") == "firecrawl"
+        and document.get("operation") == "firecrawl_scrape"
+        and document.get("credential_owner") == "deepline_managed"
+        and document.get("credential_source") == "env"
+        and document.get("failure_origin") == "provider"
+        and document.get("error_category") == "upstream"
+        and type(document.get("upstream_status")) is int
+        and document["upstream_status"] == 500
+        and document.get("upstream_error_code") == "SCRAPE_SSL_ERROR"
+        and isinstance(recovery, Mapping)
+        and recovery.get("state") == "completed"
+        and isinstance(tool_error, Mapping)
+        and tool_error.get("code") == "UPSTREAM_FAILURE"
+        and tool_error.get("provider") == "firecrawl"
+        and tool_error.get("operation") == "firecrawl_scrape"
+        and type(tool_error.get("statusCode")) is int
+        and tool_error["statusCode"] == 502
+        and tool_error.get("origin") == "provider"
+        and tool_error.get("category") == "upstream"
+        and tool_error.get("retryable") is False
+    )
+
+
 def _provider_request_refused(
     provider: str,
     parameters: Mapping[str, Any],
@@ -3821,6 +3873,7 @@ def _provider_request_refused(
         return (
             _deepline_generic_http_request_refusal(parameters, response)
             or _deepline_firecrawl_unsupported_source_refusal(parameters, response)
+            or _deepline_firecrawl_tls_source_refusal(parameters, response)
         )
     return False
 

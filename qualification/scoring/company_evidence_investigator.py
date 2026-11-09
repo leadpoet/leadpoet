@@ -6204,6 +6204,20 @@ async def investigate_company_evidence(
                                 'source_urls', 'research_query')
                     if key in initial_review
                 }
+                if (initial_review.get('decision') == 'match'
+                        and industry.get('status') == 'UNPROVEN'
+                        and industry.get('reason')
+                        == 'source quote did not identify the investigated company'):
+                    # Capability review is complete, but the native identity
+                    # gate still needs attribution. Keep that semantic receipt
+                    # unchanged and use only existing research admission to find
+                    # a company-named first-party passage. A search answer or
+                    # a short brand inferred from the name grants no authority.
+                    industry_research_brief['attribution_research_query'] = (
+                        'a first-party passage naming the investigated company '
+                        'and identifying its own supplied offering'
+                    )
+                    industry_research_brief['projection_rejection'] = industry['reason']
                 if failure:
                     # This first review only guides discovery. A malformed
                     # advisory must not abort the existing bounded researcher;
@@ -6294,9 +6308,11 @@ async def investigate_company_evidence(
                 input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
             industry_gap_search_needed = bool(
                 industry_research_brief
-                and industry_research_brief['decision'] != 'match'
-                and industry_research_brief['missing_requirements']
-                and industry_research_brief.get('research_query')
+                and (industry_research_brief.get('attribution_research_query') or (
+                    industry_research_brief['decision'] != 'match'
+                    and industry_research_brief['missing_requirements']
+                    and industry_research_brief.get('research_query')
+                ))
                 and any(_independently_bound_first_party_url(
                     f'https://{domain}/', first_party_domains, identity_anchor,
                 ) for domain in first_party_domains)
@@ -6318,7 +6334,8 @@ async def investigate_company_evidence(
                 query = (
                     'Find ' + str(company_locator.get('name') or '')[:100]
                     + "'s own product documentation or customer projects about: "
-                    + industry_research_brief['research_query'].strip()
+                    + (industry_research_brief.get('attribution_research_query')
+                       or industry_research_brief['research_query']).strip()
                 )[:500]
                 search_calls += 1
                 industry_discovery = await _search_web(
@@ -6370,8 +6387,10 @@ async def investigate_company_evidence(
             def industry_search_exchange():
                 """Use the same remaining allowance for disclosure and admission."""
                 if not (industry_review_model and industry_research_brief
-                        and industry_research_brief['decision'] != 'match'
-                        and industry_research_brief['missing_requirements']
+                        and (industry_research_brief.get('attribution_research_query') or (
+                            industry_research_brief['decision'] != 'match'
+                            and industry_research_brief['missing_requirements']
+                        ))
                         and search_calls <= MAX_SEARCH_CALLS
                         and fetch_calls < fetch_call_limit
                         and len(fetched_pages) < industry_classification.MAX_PAGES

@@ -5104,6 +5104,32 @@ def _web_identity_receipt(
                 verified_new_domain=new_domain,
             )
             return receipt
+    # An independently bound homepage already proves this entity. A standalone
+    # ampersand/"and" spelling change does not require historical rebrand proof.
+    # Keep the global name normalizer and strict company-quality alias rules.
+    def conjunction_name(value: Any) -> str:
+        return _company_name(re.sub(r"(?<!\w)&(?!\w)", " and ", str(value or "")))
+
+    submitted_raw_name = str(company.company_name or "")
+    observed_raw_name = observed_values["name"]
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH
+        and receipt_submitted_domain == receipt_observed_domain == verified_alias_domain
+        and receipt_submitted_slug
+        and receipt_submitted_slug == receipt_observed_slug == verified_alias_slug
+        and receipt.get("submitted_name") != receipt.get("observed_name")
+        and (
+            re.search(r"(?<!\w)&(?!\w)", submitted_raw_name)
+            or re.search(r"(?<!\w)&(?!\w)", observed_raw_name)
+        )
+        and conjunction_name(submitted_raw_name) == conjunction_name(observed_raw_name)
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verified_homepage_name_conjunction",
+        )
+        return receipt
     if rebrand.get("status") == "UNPROVEN" and (
         same_domain_name_alias
         or (
@@ -7233,6 +7259,32 @@ def _official_child_structured_profile_lookup(
     return {}
 
 
+def _missing_link_structured_profile_lookup(
+    web_identity: Mapping[str, Any], transport_domain: str,
+) -> Mapping[str, str]:
+    """Locate a submitted profile after same-domain transport, never approve it."""
+
+    slug = str(web_identity.get("submitted_linkedin_slug") or "")
+    name = _company_name(web_identity.get("submitted_name"))
+    if (
+        web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
+        or web_identity.get("reason_code") != "identity_not_proven"
+        or web_identity.get("evidence_source") != "company_web_reverification"
+        or not transport_domain
+        or web_identity.get("submitted_domain") != transport_domain
+        or web_identity.get("observed_domain") != transport_domain
+        or not name or name != _company_name(web_identity.get("observed_name"))
+        or web_identity.get("observed_linkedin_slug")
+        or not slug or slug.isdigit()
+        or not _strict_linkedin_company_profile_url(
+            f"https://www.linkedin.com/company/{slug}"
+        )
+    ):
+        return {}
+    return {"normalized_name": name, "registrable_dns_domain": transport_domain,
+            "linkedin_company_slug": slug}
+
+
 def _alias_unresolved_structured_profile_lookup(
     web_identity: Mapping[str, Any],
     transport_domain: str,
@@ -7243,6 +7295,11 @@ def _alias_unresolved_structured_profile_lookup(
     """Return a lookup-only anchor for one unresolved same-domain name alias."""
 
     if not server_verified_homepage_receipt:
+        missing_link_lookup = _missing_link_structured_profile_lookup(
+            web_identity, transport_domain,
+        )
+        if missing_link_lookup:
+            return missing_link_lookup
         child_lookup = _official_child_structured_profile_lookup(
             web_identity, transport_domain, homepage_navigation_locators,
         )
@@ -7379,6 +7436,10 @@ def _structured_profile_alias_identity_receipt(
         if server_verified_homepage_receipt
         else "company_web_reverification"
     )
+    missing_link = bool(
+        not server_verified_homepage_receipt
+        and _missing_link_structured_profile_lookup(web_identity, transport_domain)
+    )
     base_keys = {"name", "provider", "source_field", "url", "website"}
     profile_conflict = (
         _unverified_profile_conflict_lookup(web_identity)
@@ -7400,7 +7461,7 @@ def _structured_profile_alias_identity_receipt(
     expected_keys = base_keys | (
         {"company_id", "requested_url"} if numeric_alias else set()
     ) | (
-        {"provider_website_url"} if official_child else set()
+        {"provider_website_url"} if official_child or missing_link else set()
     ) | (
         {
             "provider_website_url",
@@ -7433,6 +7494,15 @@ def _structured_profile_alias_identity_receipt(
         or (
             profile_conflict
             and not _strict_linkedin_company_profile_url(evidence.get("url"))
+        )
+        or (
+            missing_link
+            and (
+                not _strict_linkedin_company_profile_url(evidence.get("url"))
+                or _canonical_company_domain(evidence.get("provider_website_url"))
+                != transport_domain
+                or _canonical_company_domain(evidence.get("website")) != transport_domain
+            )
         )
         or (
             official_child
@@ -7522,7 +7592,7 @@ def _structured_profile_alias_identity_receipt(
         or structured_receipt.get("observed_domain") != identity_domain
         or structured_receipt.get("observed_linkedin_slug")
         != web_identity.get(
-            "submitted_linkedin_slug" if profile_conflict else "observed_linkedin_slug"
+            "submitted_linkedin_slug" if profile_conflict or missing_link else "observed_linkedin_slug"
         )
         or (
             web_identity.get("submitted_linkedin_slug")
@@ -7541,6 +7611,11 @@ def _structured_profile_alias_identity_receipt(
         resolved.update(
             reason_code="structured_exact_profile_identity_verified",
             raw_observed_linkedin_slug=web_identity["observed_linkedin_slug"],
+            observed_linkedin_slug=structured_receipt["observed_linkedin_slug"],
+        )
+    if missing_link:
+        resolved.update(
+            reason_code="structured_missing_homepage_link_identity_verified",
             observed_linkedin_slug=structured_receipt["observed_linkedin_slug"],
         )
     if official_child:
@@ -11073,9 +11148,14 @@ async def _llm_reverify_company(
                 collect_identity=True,
                 preserve_identity_website=bool(
                     not server_verified_homepage_receipt
-                    and _official_child_structured_profile_lookup(
-                        lookup_receipt, verified_transport_domain,
-                        verified_homepage_navigation_locators,
+                    and (
+                        _missing_link_structured_profile_lookup(
+                            lookup_receipt, verified_transport_domain,
+                        )
+                        or _official_child_structured_profile_lookup(
+                            lookup_receipt, verified_transport_domain,
+                            verified_homepage_navigation_locators,
+                        )
                     )
                 ),
             )

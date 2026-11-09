@@ -67,6 +67,9 @@ Unregistered owners do not pause their clocks.
 All validators use the same chain epoch and immutable accepted state, without
 local wall clocks or a mid-epoch weight change. Old states without
 `weekly_slot_decay` retain their signed four-halving limit.
+The current-round API includes `weekly_slot_decay` only after a state with
+that clock is accepted for the current epoch. This field governs current
+decay; the returned frozen slot policy remains historical provenance.
 
 Activation uses published, successfully promoted history in the same chain
 scope, including eligible historical winners. Each signed slot binds its

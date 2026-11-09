@@ -8609,6 +8609,7 @@ class ArenaService:
         eligibility = None
         week = None
         governing = None
+        weekly_clock = None
         if epoch is not None:
             governing = self.public_reward_basis(epoch, public_only=True)
             if governing is None:
@@ -8628,6 +8629,7 @@ class ArenaService:
                         if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], governing, epoch):
                             raise ServiceError("accepted_weight_state_reward_conflict", 409)
                         governing = state["reward_basis"]
+                        weekly_clock = state.get("weekly_slot_decay")
                         eligibility = rewards.epoch_eligible(
                             governing, epoch,
                             until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
@@ -8664,6 +8666,7 @@ class ArenaService:
             "reward_slot_policy": governing.get("slot_policy") if governing else None,
             "reward_slots": governing.get("reward_slots") if governing else None,
             "current_epoch": epoch,
+            **({"weekly_slot_decay": weekly_clock} if weekly_clock is not None else {}),
         }
 
     def public_reward_basis(self, epoch: int, *, public_only: bool = False) -> Optional[Dict[str, Any]]:

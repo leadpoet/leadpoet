@@ -1,7 +1,7 @@
 """Gateway issuance proves frozen models and promotion epochs before signing."""
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -287,3 +287,28 @@ def test_truncated_history_cannot_claim_an_older_unproved_start():
     with pytest.raises(ServiceError, match="reward_clock_unavailable"):
         service.public_weight_state(EPOCH)
     assert data.publish_calls == []
+
+
+@pytest.mark.parametrize("mode", ["weekly", "legacy", "missing", "unknown_epoch"])
+def test_public_current_reports_only_an_existing_accepted_decay_clock(mode):
+    service, data, signer = _harness()
+    service._clock = lambda: datetime(2026, 11, 9, tzinfo=timezone.utc)
+    service.active_rounds = lambda **kwargs: []
+    service.latest_published_round = lambda **kwargs: None
+    service._config.chain.current_settlement_epoch = lambda: EPOCH if mode != "unknown_epoch" else None
+    if mode in {"weekly", "legacy"}:
+        state = _previous(data, signer, clock=mode == "weekly", epoch=EPOCH)
+        data.existing = data.previous
+    else:
+        state = None
+    service.public_weight_state = lambda *args: pytest.fail("public view must not issue a state")
+    before = deepcopy(data.current)
+    public = service.public_current()
+    if mode == "weekly":
+        assert public["weekly_slot_decay"] == state["weekly_slot_decay"]
+        assert public["reward_slot_policy"] == state["reward_basis"]["slot_policy"]
+        assert public["reward_slots"] == state["reward_basis"]["reward_slots"]
+    else:
+        assert "weekly_slot_decay" not in public
+    assert data.current == before
+    assert data.publish_calls == data.object_calls == data.submission_calls == []

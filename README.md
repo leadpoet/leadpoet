@@ -1,4 +1,4 @@
-<h1 align="center">Leadpoet</h1>
+<h1 align="center">Subnet 71</h1>
 
 <p align="center">
   <strong>AI sales intelligence, built on Bittensor.</strong>
@@ -7,16 +7,14 @@
 <p align="center">
   <a href="https://discord.gg/dVxQZmJwxB"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square"></a>
   <a href="https://subnet71.com"><img alt="Dashboard" src="https://img.shields.io/badge/Leaderboard-subnet71.com-e8c76d?style=flat-square"></a>
-  <a href="https://leadpoet.com"><img alt="Website" src="https://img.shields.io/badge/Website-leadpoet.com-f3f4f6?style=flat-square"></a>
   <a href="https://x.com/subnet71"><img alt="Subnet X" src="https://img.shields.io/badge/X-@subnet71-000000?style=flat-square"></a>
-  <a href="https://x.com/LeadpoetAI"><img alt="Leadpoet X" src="https://img.shields.io/badge/X-@LeadpoetAI-000000?style=flat-square"></a>
 </p>
 
 ---
 
-# Leadpoet - the first open research lab advancing AI models for sales reasoning.
+# Subnet 71 - the first open research lab advancing AI models for sales reasoning.
 
-Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [leadpoet-sales-agent](https://github.com/leadpoet/leadpoet-sales-agent).
+Subnet 71 is a Bittensor subnet where miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [leadpoet-sales-agent](https://github.com/leadpoet/leadpoet-sales-agent).
 
 ## Daily schedule
 
@@ -194,7 +192,7 @@ Current reward tiers are cumulative:
 
 Slots remain with their holder until replaced. Each slot halves every 140 epochs, reaching a 1/16 floor after four periods. A new win resets only the slots it replaces. See [reward rules](docs/arena_reward_slots.md) for activation and historical policies.
 
-**Champion miners must keep their submitted API credentials funded. If Leadpoet funds a champion rebenchmark, that period's champion incentive is reduced by 50%.**
+**Champion miners must keep their submitted API credentials funded. If the subnet owner funds a champion rebenchmark, that period's champion incentive is reduced by 50%.**
 
 Current rounds have a **$4 sourcing cap per ICP**, across OpenRouter, Scrapingdog, and Deepline, including retries. Only confirmed charges count toward admission. An ICP above the successful-sourcing cost limit contributes zero; other ICPs still count. Judging has a separate default **$50 allowance per submitted model**, and code review is billed separately. Historical rounds retain their original rules. See [cost details](docs/arena-score-integrity.md).
 

@@ -40,6 +40,9 @@ reviewed completed-negative predicate in the exact frozen79cd lead scorer.
 
 The exclusive --identity-repair-before-investigation-only mode inserts only
 the reviewed missing-identity ordering correction in exact frozen b699.
+
+The exclusive --completed-merger-survivor-only mode adds only reviewed
+completed-merger target proof to the exact frozen810 lead scorer.
 """
 from __future__ import annotations
 
@@ -280,6 +283,7 @@ def extract_frozen_sources(
     empty_domain_negative_finality_only: bool = False,
     identity_repair_before_investigation_only: bool = False,
     identity_repair_finality_only: bool = False,
+    completed_merger_survivor_only: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -311,7 +315,7 @@ def extract_frozen_sources(
             from scripts.arena_reviewer_verified_display_brand_seam import FILES
             names = FILES
         if (empty_domain_negative_finality_only or identity_repair_before_investigation_only
-                or identity_repair_finality_only):
+                or identity_repair_finality_only or completed_merger_survivor_only):
             names = (FINALITY_FILE,)
         for name in dict.fromkeys(names):
             path = destination / name
@@ -482,6 +486,10 @@ def main() -> int:
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
+        "--completed-merger-survivor-only", action="store_true",
+        help="compose only reviewed completed-merger target proof on exact frozen810; excludes other corrections",
+    )
+    parser.add_argument(
         "--visible-auxiliary-context", action="store_true",
         help="apply only the reviewed optional visible-context correction after exact2dc identity finality",
     )
@@ -590,6 +598,11 @@ def main() -> int:
         help="compose verified brand identity and its matching host-validator contract; deploy that host validator too; use the same option for --verify-image",
     )
     args = parser.parse_args()
+    if args.completed_merger_survivor_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"completed_merger_survivor_only", "push"}
+    ):
+        raise CompositionError("completed-merger-survivor-only mode cannot include other corrections")
     if args.visible_auxiliary_context and not args.identity_repair_finality_only:
         raise CompositionError("visible-auxiliary-context requires exact2dc identity-repair-finality-only mode")
     if args.identity_repair_finality_only and any(
@@ -624,6 +637,10 @@ def main() -> int:
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
+    if args.completed_merger_survivor_only:
+        from scripts.arena_reviewer_completed_merger_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("completed-merger target proof requires the exact frozen810 image")
     if args.identity_repair_finality_only:
         from scripts.arena_reviewer_identity_repair_finality_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
@@ -647,7 +664,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.identity_repair_finality_only:
+        if args.completed_merger_survivor_only:
+            from scripts.arena_reviewer_completed_merger_seam import convert_completed_merger_seam
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", completed_merger_survivor_only=True,
+            )
+            if set(original) != {FINALITY_FILE}:
+                raise CompositionError("frozen completed-merger source is incomplete")
+            files = {FINALITY_FILE: convert_completed_merger_seam(original[FINALITY_FILE])}
+        elif args.identity_repair_finality_only:
             from scripts.arena_reviewer_identity_repair_finality_seam import convert_identity_repair_finality_seam
             original = extract_frozen_sources(
                 args.grading_image, root / "original", identity_repair_finality_only=True,
@@ -779,6 +804,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-identity-repair-order" if args.identity_repair_before_investigation_only else "")
             + ("-identity-repair-finality" if args.identity_repair_finality_only else "")
             + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
+            + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -805,6 +831,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.completed_merger_survivor_only:
+            from scripts.arena_reviewer_completed_merger_seam import CORRECTION_ID as COMPLETED_MERGER_CORRECTION_ID
+            corrections.append(COMPLETED_MERGER_CORRECTION_ID)
         if args.identity_repair_finality_only:
             from scripts.arena_reviewer_identity_repair_finality_seam import CORRECTION_ID as IDENTITY_REPAIR_FINALITY_CORRECTION_ID
             corrections.append(IDENTITY_REPAIR_FINALITY_CORRECTION_ID)

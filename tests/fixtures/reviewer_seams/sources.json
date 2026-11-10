@@ -90,5 +90,14 @@
         "sha256": "06155e2987a21b4327885f1b7b49790144e8c3eb2b14da8db4d0db4d2bf45e7c"
       }
     }
+  },
+  "completed_merger810": {
+    "image_digest": "sha256:810de86a736380557fa8d4166b39ce28295ffd5b0471ffd5a3f3e4cd7d12e1b5",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "completed_merger810-lead_scorer.py.gz",
+        "sha256": "89c87b4dcfcabc5dc592d4425489c5bbdb6854eef97b038b167a0fb13cd26c3c"
+      }
+    }
   }
 }

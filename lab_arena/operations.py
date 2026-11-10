@@ -2383,6 +2383,7 @@ def build_outbound_request(
     parameters: Any,
     *,
     openrouter_provider_policy: Optional[Mapping[str, Any]] = None,
+    judge_provider_routing: Optional[list[str]] = None,
     deepline_catalog: Optional[Mapping[str, Any]] = None,
     allow_full_thinking: bool = False,
     source_html_profile: bool = False,
@@ -2416,6 +2417,13 @@ def build_outbound_request(
         raise OperationRequestError("invalid_request")
     if allow_full_thinking and (operation_id not in {"openrouter.chat", "openrouter.responses"}
                                 or openrouter_provider_policy is None):
+        raise OperationRequestError("invalid_request")
+    if judge_provider_routing is not None and (
+            not allow_full_thinking or not isinstance(judge_provider_routing, list)
+            or not 1 <= len(judge_provider_routing) <= 2
+            or any(not isinstance(route, str) or re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", route) is None
+                   for route in judge_provider_routing)
+            or len(set(judge_provider_routing)) != len(judge_provider_routing)):
         raise OperationRequestError("invalid_request")
     path = operation.outbound_path or _render_path(operation, normalized)
     host = operation.outbound_host or operation.host
@@ -2475,6 +2483,14 @@ def build_outbound_request(
                 and policy.get("allow_fallbacks") is False
                 and policy.get("require_parameters") is True
             )
+            judge_transport_route = (
+                judge_provider_routing is not None and isinstance(policy, dict)
+                and set(policy) == policy_fields | {"only", "order", "require_parameters"}
+                and policy.get("only") == judge_provider_routing
+                and policy.get("order") == judge_provider_routing
+                and policy.get("allow_fallbacks") is (len(judge_provider_routing) > 1)
+                and policy.get("require_parameters") is True)
+            exact_full_route = exact_full_route or judge_transport_route
             industry_region_route = (
                 not allow_full_thinking
                 and operation_id == "openrouter.chat"
@@ -2519,7 +2535,7 @@ def build_outbound_request(
             ):
                 raise OperationRequestError("invalid_request")
             if allow_full_thinking and normalized.get("provider") is not None:
-                if normalized["provider"]["only"] != policy.get("only"):
+                if not judge_transport_route and normalized["provider"]["only"] != policy.get("only"):
                     raise OperationRequestError("invalid_request")
             document["provider"] = policy
         document = _wrap_body(operation, normalized, document, deepline_catalog=deepline_catalog)

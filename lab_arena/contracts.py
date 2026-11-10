@@ -991,6 +991,7 @@ ROUND_CONFIGURATION_FIELDS = (
       minimum=0, maximum=100),
     F("reasoning_route_registry", "object", required=False),
     F("judge_reasoning_route_registry", "object", required=False),
+    F("judge_provider_routing", "object", required=False),
     F("baseline_reasoning_configuration", "object", required=False),
     F("reasoning_baseline_source_sha256", "sha256", required=False),
     F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
@@ -1180,9 +1181,14 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
             reasoning_capture.validate_judge_registry(
                 config.get("judge_reasoning_route_registry", config.get("reasoning_route_registry")),
                 config["scorer_policy"])
+            if "judge_provider_routing" in config:
+                reasoning_capture.validate_judge_provider_routing(
+                    config["judge_provider_routing"],
+                    config.get("judge_reasoning_route_registry", config.get("reasoning_route_registry")),
+                    config["scorer_policy"])
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ArenaContractError("judge thinking requires its frozen route registry") from exc
-    elif "judge_reasoning_route_registry" in config:
+    elif "judge_reasoning_route_registry" in config or "judge_provider_routing" in config:
         raise ArenaContractError("judge reasoning policy and registry must be frozen together")
     if (
         "benchmark_disclosure_policy" in config

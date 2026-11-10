@@ -58,6 +58,7 @@ used by the Arena lead scorer.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import html
 import json
 import logging
@@ -2082,7 +2083,9 @@ async def _resolve_ats_employer_ownership(
             "resolved": bool(anchors)}
 
 
-def _grounded_exact_text(source_text: str, quote: Any) -> bool:
+def _grounded_exact_text(
+    source_text: str, quote: Any, *, whole_words: bool = False, min_words: int = 0,
+) -> bool:
     """Match source text, ignoring whitespace and optional quotation wrappers.
 
     Do not accept paraphrases, omitted words, or reordered fragments. Quotation
@@ -2102,6 +2105,14 @@ def _grounded_exact_text(source_text: str, quote: Any) -> bool:
         and wrappers.get(normalized_quote[0]) == normalized_quote[-1]
     ):
         normalized_quote = normalized_quote[1:-1].strip()
+    if min_words and len(re.findall(r"\w+", normalized_quote)) < min_words:
+        return False
+    if whole_words:
+        return bool(normalized_quote and re.search(
+            (r"(?<!\w)" if normalized_quote[0].isalnum() else "")
+            + re.escape(normalized_quote)
+            + (r"(?!\w)" if normalized_quote[-1].isalnum() else ""), normalized_source,
+        ))
     return bool(normalized_quote and normalized_quote in normalized_source)
 
 
@@ -4501,13 +4512,75 @@ async def _call_openrouter(
 # ─────────────────────────────────────────────────────────────────────
 # Guardrails + decision (identical to standalone pipeline)
 # ─────────────────────────────────────────────────────────────────────
+_MISCOPIED_URL_MIN_SIMILARITY = 0.95
+
+
+def _supplied_url_for_miscopied_citation(
+    cited: str, supplied: Mapping[str, str],
+    *, supporting_quotes: Any, contents: Mapping[str, Any] | None,
+) -> str:
+    """Return the one supplied URL that an off-list citation miscopies.
+
+    Judges retype long URLs and can change a word. Accept only a near-identical
+    address with the same numbers and the same query, so a different posting
+    number, date or query is not a copy, and leave the citation unresolved
+    when two supplied URLs are that close.
+    """
+    numbers = re.findall(r"\d+", cited)
+    address, _, query = cited.partition("?")
+    matches = []
+    for key, url in supplied.items():
+        key_address, _, key_query = key.partition("?")
+        if not key or key_query != query or re.findall(r"\d+", key) != numbers:
+            continue
+        similarity = difflib.SequenceMatcher(
+            None, address, key_address, autojunk=False,
+        )
+        if (
+            similarity.quick_ratio() >= _MISCOPIED_URL_MIN_SIMILARITY
+            and similarity.ratio() >= _MISCOPIED_URL_MIN_SIMILARITY
+        ):
+            matches.append(url)
+    if len(matches) != 1 or not isinstance(supporting_quotes, list) or not supporting_quotes:
+        return ""
+    # Similar spelling is only a locator. A correction needs verbatim evidence
+    # from the page the judge actually received, not its invented URL or quote.
+    results = contents.get("results") if isinstance(contents, Mapping) else None
+    candidate = _normalize_url(matches[0])
+    pages = [page for page in (results if isinstance(results, list) else [])
+             if isinstance(page, Mapping)
+             and isinstance(page.get("url"), str)
+             and _normalize_url(page["url"]) == candidate
+             and isinstance(page.get("text"), str) and page["text"].strip()]
+    # Do not borrow a substantive quote from another page to justify this URL.
+    # Ambiguous multi-page citations must remain unresolved, not be repaired
+    # using a generic company-name quote on the candidate page.
+    return matches[0] if any(
+        all(isinstance(quote, str) and _grounded_exact_text(page["text"], quote, whole_words=True)
+            for quote in supporting_quotes)
+        # A name or isolated event label is too little for a repair. Count
+        # visible words, excluding Markdown destinations. This floor is only
+        # a repair safeguard; the semantic judge still decides claim support.
+        and any(_grounded_exact_text(page["text"], quote, whole_words=True, min_words=5)
+                for quote in supporting_quotes)
+        for page in pages
+    ) else ""
+
+
 def _apply_guardrails(
     row: Dict[str, Any], verdict: Dict[str, Any],
+    *, restore_miscopied_citations: bool = False,
+    contents: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Same rule as the standalone pipeline: in source_grounded mode, every
     cited evidence URL must be one of the supplied source URLs.  If any
     cited URL is off-list (or no URLs were cited), downgrade the status to
-    unable_to_verify."""
+    unable_to_verify.
+
+    A judge that read only the supplied pages can still miscopy a URL.
+    ``restore_miscopied_citations`` restores such a citation to the supplied
+    URL first. Leave it off when the judge could search, because it may then
+    have read the other page."""
     supplied_urls = list(row.get("claimed_source_urls") or [])
     claimed = {_normalize_url(url) for url in supplied_urls}
     stage_urls = (
@@ -4517,7 +4590,8 @@ def _apply_guardrails(
         else []
     )
     supplied_urls.extend(stage_urls)
-    supplied = {_normalize_url(url) for url in supplied_urls}
+    supplied_by_key = {_normalize_url(url): url for url in supplied_urls}
+    supplied = set(supplied_by_key)
     for item in (verdict.get("signal_evaluations") or []):
         item["source_urls_supplied"] = list(supplied_urls)
         if (
@@ -4529,6 +4603,22 @@ def _apply_guardrails(
                 for u in (item.get("evidence_urls_used") or [])
             ]
             evidence = [url for url in evidence if url]
+            if restore_miscopied_citations:
+                restored = [
+                    "" if _normalize_url(url) in supplied
+                    else _supplied_url_for_miscopied_citation(
+                        _normalize_url(url), supplied_by_key,
+                        supporting_quotes=item.get("supporting_quotes"), contents=contents,
+                    )
+                    for url in evidence
+                ]
+                if any(restored):
+                    evidence = list(dict.fromkeys(
+                        new or old for old, new in zip(evidence, restored)
+                    ))
+                    item.setdefault("risk_notes", []).append(
+                        "Restored a miscopied supplied evidence URL."
+                    )
             item["evidence_urls_used"] = list(evidence)
             normalized_evidence = [_normalize_url(url) for url in evidence]
             bad = [u for u in normalized_evidence if u not in supplied]
@@ -6105,7 +6195,11 @@ async def verify_three_stage(
                if unavailable_source_resolution is not None else {}),
         }
     s3_verdict_raw = (s3_envelope.get("answer") or {})
-    s3_verdict = _apply_guardrails(row, s3_verdict_raw)
+    s3_verdict = _apply_guardrails(
+        row, s3_verdict_raw,
+        restore_miscopied_citations=not stage3_hosted_search,
+        contents=contents,
+    )
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     if retained_fallback_original is not None:
         from qualification.scoring.arena_integrity import source_dates_from_verdict, source_grounded_date_verdict
@@ -6269,7 +6363,9 @@ async def verify_three_stage(
                 )
                 if not chain_envelope.get("_error"):
                     chain_verdict = _apply_guardrails(
-                        chain_row, chain_envelope.get("answer") or {}
+                        chain_row, chain_envelope.get("answer") or {},
+                        restore_miscopied_citations=not stage3_hosted_search,
+                        contents=chain_contents,
                     )
                     chain_item = (
                         (chain_verdict.get("signal_evaluations") or [{}])
@@ -6470,7 +6566,11 @@ async def verify_three_stage(
                 },
             }
         clarified_raw = clarification_envelope.get("answer") or {}
-        clarified = _apply_guardrails(row, clarified_raw)
+        clarified = _apply_guardrails(
+            row, clarified_raw,
+            restore_miscopied_citations=not stage3_hosted_search,
+            contents=contents,
+        )
         clarified_items = clarified.get("signal_evaluations") or []
         if isinstance(clarified_items, list) and len(clarified_items) == 1:
             s3_envelope = clarification_envelope

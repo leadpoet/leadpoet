@@ -152,6 +152,156 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["signal_status"], "unable_to_verify")
         self.assertEqual(item["source_urls_supplied"], [supplied])
 
+    def test_guardrail_restores_a_miscopied_supplied_evidence_url(self):
+        # Shapes of the November 8/9 judge answers: the judge confirmed the
+        # claim from the supplied page but changed one word while copying it.
+        long_supplied = "https://www.news.example/press-releases/" + "-".join([
+            "acme", "group", "announces", "the", "completion", "of", "its",
+            "acquisition", "of", "widget", "holdings", "a", "leading",
+            "provider", "of", "precision", "components", "for", "aerospace",
+            "defense", "medical", "and", "advanced", "industrial", "customers",
+            "across", "north", "america", "and", "europe",
+        ])
+        cases = [
+            ("https://www.fund.example/article/fund_closes_300_million_asset-based_financing_facility_with_acme",
+             "https://www.fund.example/article/fund_closes_300_million_asset_based_financing_facility_with_acme"),
+            ("https://www.news.example/news/2026091705/acme-raises-30-million-series-b-led-by-fund-to-bring-agentic-accounting-to-construction/",
+             "https://www.news.example/news/2026091705/acme-raises-30-million-series-b-led-by-fund-to-brace-agentic-accounting-to-construction/"),
+            ("https://www.acmehive.example/newsroom/acmehive-selects-partner-to-bring-competitive-spend-data-to-local-media",
+             "https://www.acmehove.example/newsroom/acmehove-selects-partner-to-bring-competitive-spend-data-to-local-media"),
+            ("https://news.example/fort-worths-acme-group-acquires-california-based-plasma-ruggedized-solutions/",
+             "https://news.example/fort-worths-acme-group-acquires-calcium-based-plasma-ruggedized-solutions/"),
+            # Longer than difflib's automatic junk threshold.
+            (long_supplied, long_supplied.replace("precision", "provision")),
+        ]
+        self.assertGreater(len(long_supplied), 200)
+        for status in ("supported", "partially_supported"):
+            for supplied, cited in cases:
+                with self.subTest(status=status, cited=cited):
+                    verdict = supported(cited)["answer"]
+                    verdict["signal_evaluations"][0]["signal_status"] = status
+                    verdict["signal_evaluations"][0]["supporting_quotes"] = ["Acme acquired Widget to expand its product portfolio."]
+                    guarded = _apply_guardrails(
+                        {"claimed_source_urls": [supplied]}, verdict,
+                        restore_miscopied_citations=True,
+                        contents={"results": [{"url": supplied, "text": "Acme acquired Widget to expand its product portfolio."}]},
+                    )
+                    item = guarded["signal_evaluations"][0]
+                    self.assertEqual(item["signal_status"], status)
+                    self.assertEqual(item["evidence_urls_used"], [supplied])
+                    self.assertEqual(
+                        item["risk_notes"],
+                        ["Restored a miscopied supplied evidence URL."],
+                    )
+
+    def test_guardrail_restores_one_copy_beside_the_exact_citation(self):
+        supplied = "https://www.acmehive.example/newsroom/acmehive-selects-partner-to-bring-competitive-spend-data-to-local-media"
+        verdict = supported(supplied)["answer"]
+        verdict["signal_evaluations"][0]["evidence_urls_used"] = [
+            supplied, supplied.replace("acmehive", "acmehove"),
+        ]
+        verdict["signal_evaluations"][0]["supporting_quotes"] = ["Acme acquired Widget to expand its product portfolio."]
+        item = _apply_guardrails(
+            {"claimed_source_urls": [supplied]}, verdict,
+            restore_miscopied_citations=True,
+            contents={"results": [{"url": supplied, "text": "Acme acquired Widget to expand its product portfolio."}]},
+        )["signal_evaluations"][0]
+        self.assertEqual(item["signal_status"], "supported")
+        self.assertEqual(item["evidence_urls_used"], [supplied])
+        self.assertEqual(
+            item["risk_notes"], ["Restored a miscopied supplied evidence URL."],
+        )
+
+    def test_guardrail_restores_a_miscopied_submitted_funding_source(self):
+        submitted = "https://news.example/acme-raises-thirty-million-series-b-led-by-fund-to-bring-agents-to-builders"
+        stage = "https://data.example/companies/acme-funding-history"
+        row = {
+            "claimed_source_urls": [submitted],
+            "_integrity_policy": True,
+            "_evidence_type": "FUNDING",
+            "_funding_stage_source_urls": [stage],
+        }
+        verdict = supported(submitted.replace("bring", "brace"))["answer"]
+        verdict["signal_evaluations"][0]["evidence_urls_used"].append(stage)
+        verdict["signal_evaluations"][0]["supporting_quotes"] = ["Acme raised funding in a Series B round."]
+        item = _apply_guardrails(
+            dict(row), verdict, restore_miscopied_citations=True,
+            contents={"results": [{"url": submitted, "text": "Acme raised funding in a Series B round."}]},
+        )["signal_evaluations"][0]
+        self.assertEqual(item["signal_status"], "supported")
+        self.assertEqual(item["evidence_urls_used"], [submitted, stage])
+
+        # The stage source alone still cannot replace the submitted source.
+        stage_only = supported(stage)["answer"]
+        item = _apply_guardrails(
+            dict(row), stage_only, restore_miscopied_citations=True,
+        )["signal_evaluations"][0]
+        self.assertEqual(item["signal_status"], "unable_to_verify")
+
+    def test_guardrail_does_not_restore_another_page_or_an_ambiguous_copy(self):
+        cases = [
+            # A different number is another posting, page or date.
+            (["https://boards.example/acme/jobs/4012345-senior-platform-engineer"],
+             "https://boards.example/acme/jobs/4012346-senior-platform-engineer"),
+            (["https://news.example/2026/10/acme-raises-30-million-series-b-led-by-fund"],
+             "https://news.example/2026/09/acme-raises-30-million-series-b-led-by-fund"),
+            # A different query is another resource at the same address.
+            (["https://news.example/acme-raises-thirty-million-series-b-led-by-fund?ref=alpha"],
+             "https://news.example/acme-raises-thirty-million-series-b-led-by-fund?ref=omega"),
+            # A long shared query does not make two addresses the same page.
+            (["https://one.example?q=which%20markets%20and%20industries%20does%20acme%20support%20for%20payouts"],
+             "https://two.example?q=which%20markets%20and%20industries%20does%20acme%20support%20for%20payouts"),
+            # Fewer than 95% of the characters are the same.
+            (["https://news.example/acme-opens-new-plant-in-ohio"],
+             "https://news.example/acme-opens-new-plant-in-utah"),
+            # Two supplied pages are equally close to the cited URL.
+            (["https://news.example/acme-raises-thirty-million-series-b-led-by-fund-a",
+              "https://news.example/acme-raises-thirty-million-series-b-led-by-fund-b"],
+             "https://news.example/acme-raises-thirty-million-series-b-led-by-fund-c"),
+        ]
+        for supplied, cited in cases:
+            with self.subTest(cited=cited):
+                guarded = _apply_guardrails(
+                    {"claimed_source_urls": list(supplied)},
+                    supported(cited)["answer"],
+                    restore_miscopied_citations=True,
+                )
+                item = guarded["signal_evaluations"][0]
+                self.assertEqual(item["signal_status"], "unable_to_verify")
+                self.assertEqual(item["evidence_urls_used"], [cited])
+                self.assertEqual(
+                    item["risk_notes"],
+                    ["Provider used non-supplied evidence URL."],
+                )
+
+    def test_guardrail_never_restores_a_citation_from_a_judge_that_can_search(self):
+        # With hosted search the judge may have read the other page, so the
+        # default keeps the exact-URL rule.
+        supplied = "https://news.example/fort-worths-acme-group-acquires-california-based-plasma-ruggedized-solutions/"
+        cited = supplied.replace("california", "calcium")
+        item = _apply_guardrails(
+            {"claimed_source_urls": [supplied]}, supported(cited)["answer"],
+        )["signal_evaluations"][0]
+        self.assertEqual(item["signal_status"], "unable_to_verify")
+        self.assertEqual(item["evidence_urls_used"], [cited])
+        self.assertEqual(
+            item["risk_notes"], ["Provider used non-supplied evidence URL."],
+        )
+
+    def test_guardrail_keeps_an_exact_supplied_evidence_url_unchanged(self):
+        supplied = "https://news.example/exact-article"
+        for restore in (False, True):
+            with self.subTest(restore=restore):
+                guarded = _apply_guardrails(
+                    {"claimed_source_urls": [supplied]},
+                    supported(supplied)["answer"],
+                    restore_miscopied_citations=restore,
+                )
+                item = guarded["signal_evaluations"][0]
+                self.assertEqual(item["signal_status"], "supported")
+                self.assertEqual(item["evidence_urls_used"], [supplied])
+                self.assertNotIn("risk_notes", item)
+
     async def test_exact_official_domain_can_establish_entity_but_not_claim(self):
         url = "https://advario.com/news/terminal-project"
         stage_three = contradicted(url)

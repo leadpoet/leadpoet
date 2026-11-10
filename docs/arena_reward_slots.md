@@ -4,8 +4,7 @@ Champion selection is unchanged. After final publication and successful code
 promotion, reward activation assigns slots from the original published winner
 and baseline scores in the same round. Neither scoring nor promotion is rerun.
 
-For new policy activations at reward epoch **26301** or later, or evaluation
-dates November 11, 2026 and later:
+For newly promoted models in evaluation rounds dated November 11, 2026 and later:
 
 | Improvement | Share of total emissions before decay |
 | --- | --- |
@@ -23,14 +22,22 @@ the signed miner pool.
 
 The transition carries the current signed holders into the corresponding
 slot positions: +20 becomes +15, +15 becomes +10, and +8 becomes +5. It keeps
-their source scores, submitted models and tenure clocks. Lower thresholds do
+their source scores, submitted models and tenure clocks. The November 3
+incumbent keeps its original 20%/15%/15% slot allocations, before decay,
+until a different owner or genuinely new promoted model replaces each slot.
+This exception is bound to the verified owner, normalized source and original
+epoch 26183; repackaging the same model does not remove it. Each replaced slot
+uses the new allocation independently. Unused allocation goes to burn.
+Lower thresholds do
 not revive old displaced winners or fill empty slots from historical results.
 Only a new, verified promoted winner can replace an incumbent. One miner can
 hold several slots, and smaller wins do not remove higher-tier holders.
 
 Previously activated bases and accepted weight states remain immutable. New
-states may contain a signed projection of the governing basis after the epoch
-cutover. A state already issued for an epoch is never rewritten. If the source
+states may contain a signed allocation projection of the governing basis.
+The earlier epoch-26301 trigger was premature and is retained only to validate
+already issued states, not to select the new policy. A state already issued for
+an epoch is never rewritten. If the source
 predates October 23, its currently represented achievements first undergo the
 existing October 23 projection; that policy transition is not undone.
 

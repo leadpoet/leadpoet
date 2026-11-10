@@ -32,7 +32,8 @@ def test_registered_date_and_epoch_boundaries_preserve_earlier_policy():
     assert rewards.reward_slot_policy_document(day - timedelta(days=1)) == rewards.REWARD_SLOT_POLICY_OCT23
     assert rewards.reward_slot_policy_document(effective_reward_epoch=cutover - 1) == rewards.REWARD_SLOT_POLICY_OCT23
     assert rewards.reward_slot_policy_document(day) == _policy()
-    assert rewards.reward_slot_policy_document(date(2026, 10, 22), effective_reward_epoch=cutover) == _policy()
+    assert rewards.reward_slot_policy_document(date(2026, 11, 10), effective_reward_epoch=cutover + 100) == rewards.REWARD_SLOT_POLICY_OCT23
+    assert rewards.reward_slot_policy_document(effective_reward_epoch=cutover + 100) == rewards.REWARD_SLOT_POLICY_OCT23
     assert _policy()["allocation_basis"] == "total_emissions"
     assert _policy()["pool_percent"] == 75
     assert [(tier["minimum_improvement"], tier["allocation_percent"]) for tier in _policy()["tiers"]] == [(15, 35), (10, 25), (5, 15)]

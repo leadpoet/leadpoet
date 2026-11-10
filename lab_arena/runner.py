@@ -875,6 +875,7 @@ class HttpArenaApiClient:
 
     def training_observations(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
+        *, timeout_seconds: float = TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
         training_input.object_ref(run_id, 1)
         if len(contracts.canonical_json(document).encode("utf-8")) > training_observations.MAX_OBJECT_BYTES:
@@ -882,7 +883,7 @@ class HttpArenaApiClient:
         return self._post(
             "/arena/v1/runs/%s/training-observations" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
+            timeout_seconds=min(TRAINING_OBSERVATIONS_TIMEOUT_SECONDS, max(0.001, float(timeout_seconds))),
             preserve_http_status=True,
         )
 
@@ -4126,8 +4127,19 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
         expected_digest = contracts.document_hash(training_observations._validate_payload(
             document, secrets=(lease_token,),
         ))
+        retention = getattr(getattr(config, "input_retention", None), "observations", None)
+        retained = None
+        if retention is not None:
+            try:
+                retained = retention.retain(lease, lease_token, document, expected_digest=expected_digest)
+            except Exception as exc:
+                _log_training_capture_failure("observations", exc)
         for attempt in range(2):
             try:
+                if retained is not None:
+                    if not retention.deliver(retained):
+                        raise RunnerError("retained training observations acknowledgment unavailable")
+                    return {**summary, "status": "stored", "payload_sha256": expected_digest}
                 result = send(str(lease["run_id"]), lease_token, document)
                 if (not isinstance(result, Mapping) or result.get("status") != "stored"
                         or getattr(result, "http_status", 200) != 200
@@ -4138,6 +4150,8 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
                 if attempt:
                     verify = getattr(config.api, "verify_training_observations", None)
                     if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
+                        if retained is not None:
+                            retention.acknowledge_verified(retained, expected_digest)
                         return {**summary, "status": "stored", "payload_sha256": expected_digest}
                     raise
     except Exception as exc:

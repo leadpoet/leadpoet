@@ -6948,7 +6948,8 @@ class ArenaService:
             raise ServiceError("lease_inactive", 409)
         return run
 
-    def _training_input_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+    def _training_input_capture_run(self, run_id: str, lease_token: str, *,
+                                    allow_accepted_score_finish_event: bool = False) -> Dict[str, Any]:
         """Grant only immutable input storage, never renewed execution authority."""
         try:
             return self._training_capture_run(run_id, lease_token)
@@ -6994,7 +6995,9 @@ class ArenaService:
                 if not started <= finished <= now:
                     raise ValueError("input finish anchor is invalid")
                 anchors.append(finished)
-                if run["status"] == "accepted":
+                accepted_score_event = (allow_accepted_score_finish_event and run.get("kind") == "score"
+                    and run.get("participation_accepted_at") is None)
+                if run["status"] == "accepted" and not accepted_score_event:
                     terminal = instant(run.get("participation_accepted_at"))
                 else:
                     event = self._store.get_input_finish_event(run_id)
@@ -7064,8 +7067,19 @@ class ArenaService:
             "privacy": snapshot["privacy"],
         }
 
+    def _training_final_observation_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Final evidence alone may use the existing authenticated finish grace."""
+        try:
+            return self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
+        except ServiceError as exc:
+            if exc.code != "lease_inactive":
+                raise
+        # Reuse the input capture's token/claim/terminal/server-time proof.
+        # This grants no execution, provider, completion or segment authority.
+        return self._training_input_capture_run(run_id, lease_token, allow_accepted_score_finish_event=True)
+
     def handle_training_observations(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
-        run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
+        run = self._training_final_observation_capture_run(run_id, lease_token)
         try:
             snapshot, compressed = training_observations.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,
@@ -7092,7 +7106,7 @@ class ArenaService:
     def verify_training_observations(self, run_id: str, lease_token: str, payload_sha256: str) -> str:
         """Confirm only the exact final snapshot under this owned lease identity."""
 
-        run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
+        run = self._training_final_observation_capture_run(run_id, lease_token)
         if not isinstance(payload_sha256, str) or not contracts.SHA256_RE.fullmatch(payload_sha256):
             raise ServiceError("training_observations_invalid", 400)
         objects = self._config.training_object_store

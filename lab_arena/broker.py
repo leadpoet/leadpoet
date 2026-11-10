@@ -6799,6 +6799,14 @@ class Broker:
                         (
                             response.status == 200
                             and (raw_document.get("status") == "completed"
+                                 or (response.internal_provenance is None
+                                     and provider_costs.deepline_final_no_result_cost(
+                                         raw_document, request_id=response_request_id,
+                                         execution_key=deepline_execution_key,
+                                         operation=effective_normalized.get("tool"),
+                                         operation_aliases=(deepline_catalog_entry["operation_aliases"]
+                                                            if deepline_catalog_entry else ()),
+                                     ) is not None)
                                  or deepline_async_ids or deepline_async_poll_accepted)
                         )
                         or not 200 <= response.status < 300

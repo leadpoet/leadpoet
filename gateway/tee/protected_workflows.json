@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "2405d902c7688963223e2a7cf1abfc0ccbdc2a46",
+  "baseline_commit": "ddd08abd411ab8758d9fc77cca7749830685ea1e",
   "entries": [
     {
       "ast_sha256": "sha256:0322239466f9d95f17c77713b5ddd188d15318676bb4e0cbd6d2cacbd19c74ad",
@@ -522,6 +522,26 @@
       "symbol": "verify_roles"
     },
     {
+      "ast_sha256": "sha256:97cfc684e0483852ee27ca22014c11f89012460166c153484d4b0ff3395d6b43",
+      "path": "lab_arena/rewards.py",
+      "symbol": "LEGACY_CHAMPION_AWARD_HOTKEY"
+    },
+    {
+      "ast_sha256": "sha256:930fe463f6287357d45c16fee8456fa1eeb698a5dac4f3b3a8f6ee395c1eee95",
+      "path": "lab_arena/rewards.py",
+      "symbol": "LEGACY_CHAMPION_AWARD_SHARES"
+    },
+    {
+      "ast_sha256": "sha256:e834888fc873f4cd426e1b7f36c55a6e4f22ba30b5cf3abd698ac6ebebd45e47",
+      "path": "lab_arena/rewards.py",
+      "symbol": "LEGACY_CHAMPION_AWARD_SOURCE"
+    },
+    {
+      "ast_sha256": "sha256:743e0511eabb530982f2b8467bf5840785053af2b5e340fcc4dfbd251e2268c7",
+      "path": "lab_arena/rewards.py",
+      "symbol": "LEGACY_CHAMPION_AWARD_START_EPOCH"
+    },
+    {
       "ast_sha256": "sha256:0f213acd65a7052a6ddb91af5f80082089ed0cd281b18647a1ab9de7d32c1225",
       "path": "lab_arena/rewards.py",
       "symbol": "REWARD_SLOT_POLICY"
@@ -565,6 +585,11 @@
       "ast_sha256": "sha256:6cd863a895ef3c5cdb4c8cd48a85c86eefb7d4a96fc7ff2b7b8261155415f6c0",
       "path": "lab_arena/rewards.py",
       "symbol": "REWARD_SLOT_POLICY_OCT23_START"
+    },
+    {
+      "ast_sha256": "sha256:3bfe113e1e5e9b0478465fede7abe20f2ccd2eb6cb5408c167a2147dd2f026c6",
+      "path": "lab_arena/rewards.py",
+      "symbol": "legacy_slot_allocation_projection_document"
     },
     {
       "ast_sha256": "sha256:c54118dcf175e12df1e85dce2c1844bb203476ea4f38b163e8e00964cf0b16d7",
@@ -942,7 +967,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:b3c028de5d9eec657377f87fcf6cc2bf00cb0e9ad4168e8d14a55aef15dddea5",
-  "protected_source_commit": "2405d902c7688963223e2a7cf1abfc0ccbdc2a46",
+  "manifest_hash": "sha256:5eadbe8e7a9851e16308ad817190eacbbb038cbcbcd5022ab43a4de38d117dff",
+  "protected_source_commit": "ddd08abd411ab8758d9fc77cca7749830685ea1e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

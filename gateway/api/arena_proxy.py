@@ -387,12 +387,13 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         lease_token = request.headers.get("x-lab-arena-lease", "")
         if not re.fullmatch(r"[0-9a-f]{64}", lease_token):
             raise HTTPException(status_code=401, detail="lease token invalid")
-        # Read-only active-lease/ownership check before buffering private data.
+        # Read-only final-write ownership check before buffering private data.
         # The upload handler rechecks authority after the body arrives.
         try:
             authority = await _request_sidecar(
                 "HEAD", arena_path, query="", body=b"",
-                headers={"x-lab-arena-lease": lease_token},
+                headers={"x-lab-arena-lease": lease_token,
+                         "x-lab-arena-observation-intent": "final-write"},
                 **({"testnet": True} if testnet else {}),
             )
         except httpx.HTTPError as exc:

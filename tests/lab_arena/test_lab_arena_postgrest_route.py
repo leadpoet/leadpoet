@@ -156,6 +156,8 @@ def stack(tmp_path_factory):
                 # its schema cache; the full-round test compares every RPC.
                 for migration in ("595-lab-arena-capture-called-icps.sql",
                                   "598-lab-arena-capture-summary-v2.sql",
+                                  "620-lab-arena-retained-success-capture.sql",
+                                  "684-lab-arena-capture-summary-v3.sql",
                                   "619-lab-arena-release-undispatched-call.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
                 # Current Store probes also cover the prospective evidence RPC.
@@ -533,7 +535,7 @@ def test_private_backend_has_no_anonymous_fallback(stack):
     assert response.returncode != 0 and "401" in response.stderr
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_capture_reader_opaque_key_returns_only_aggregates_and_cannot_escalate(stack, version):
     headers = {"apikey": stack["values"]["capture_reader_key"]}
     arguments = {"p_round_id": "capture-reader-route", "p_submission_id": "baseline-route"}
@@ -545,7 +547,10 @@ def test_capture_reader_opaque_key_returns_only_aggregates_and_cannot_escalate(s
             "model_calls": 0, "usage_calls": 0, "reasoning_tokens": None,
             "first_call_at": None, "last_call_at": None,
             **({"input_tokens": None, "output_tokens": None, "cached_input_tokens": None,
-                "token_calls": 0, "models": []} if version == "v2" else {})}]
+                "token_calls": 0, "models": []} if version in {"v2", "v3"} else {}),
+            **({"reasoning_calls": 0, "reasoning_capture": {
+                "complete_readable": 0, "partial_readable": 0, "tokens_only": 0,
+                "no_readable": 0, "unparseable": 0}} if version == "v3" else {})}]
         for table in ("lab_arena_ledger", "lab_arena_runs", "lab_arena_submissions"):
             assert client.get("/rest/v1/" + table + "?limit=1", headers=headers).status_code == 403
             assert client.post("/rest/v1/" + table, headers=headers, json={}).status_code == 403
@@ -581,7 +586,7 @@ def test_capture_reader_cannot_reach_retained_public_privileges(stack):
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"])
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_capture_reader_rejects_other_methods(stack, version, method):
     response = httpx.request(method, stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_" + version,
         headers={"apikey": stack["values"]["capture_reader_key"]}, timeout=10, trust_env=False)
@@ -598,7 +603,7 @@ def test_capture_reader_rejects_other_methods(stack, version, method):
     "/rest/v1/rpc/LAB_ARENA_CAPTURE_SUMMARY_V1",
     "/rest/v1/rpc/lab_arena_capture_summary_v1?select=*",
 ])
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_capture_reader_rejects_noncanonical_request_targets(stack, version, path):
     path = path.replace("_v1", "_" + version).replace("_V1", "_" + version.upper())
     # Keep the original target verbatim; HTTP client URL normalization must
@@ -622,7 +627,7 @@ def test_capture_reader_rejects_noncanonical_request_targets(stack, version, pat
     ("X-Original-URL", "/rest/v1/rpc/api_test_legacy_public"),
     ("X-Rewrite-URL", "/rest/v1/rpc/api_test_legacy_public"),
 ])
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_capture_reader_rejects_schema_method_and_path_override_headers(stack, version, header, value):
     response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_" + version,
         headers={"apikey": stack["values"]["capture_reader_key"], header: value},
@@ -630,7 +635,7 @@ def test_capture_reader_rejects_schema_method_and_path_override_headers(stack, v
     assert response.status_code == 403
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_capture_reader_accepts_explicit_public_profiles(stack, version):
     response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_" + version,
         headers={"apikey": stack["values"]["capture_reader_key"],
@@ -639,24 +644,23 @@ def test_capture_reader_accepts_explicit_public_profiles(stack, version):
     assert response.status_code == 200
 
 
-def test_capture_reader_request_timeout_is_applied_by_postgrest(stack):
-    # Fixture-only introspection at the sole allowed RPC name. Granting another
-    # function must no longer make it reachable through the opaque reader key.
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+def test_capture_reader_request_timeout_is_applied_by_postgrest(stack, version):
+    # Fixture-only introspection preserves each allowed RPC's signature and ACL.
+    signature = "public.lab_arena_capture_summary_" + version + "(text,text)"
     with stack["connection"].cursor() as cursor:
-        cursor.execute("SELECT pg_get_functiondef('public.lab_arena_capture_summary_v1(text,text)'::regprocedure)")
-        original = cursor.fetchone()[0]
-        cursor.execute("""
-            CREATE OR REPLACE FUNCTION public.lab_arena_capture_summary_v1(p_round_id text,p_submission_id text)
-            RETURNS TABLE (round_id text,submission_id text,execute_runs integer,icp_positions integer[],
-                model_calls integer,usage_calls integer,reasoning_tokens bigint,
-                first_call_at timestamptz,last_call_at timestamptz)
-            LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
-                SELECT current_setting('role'),current_setting('statement_timeout'),
-                    0,'{}'::integer[],0,0,NULL::bigint,NULL::timestamptz,NULL::timestamptz
-            $$
-        """)
+        cursor.execute("SELECT pg_get_functiondef(oid),prosrc FROM pg_proc WHERE oid=%s::regprocedure", (signature,))
+        original, source = cursor.fetchone()
+        assert original.count(source) == 1
+        cursor.execute(original.replace(source, """
+          BEGIN
+            round_id := current_setting('role');
+            submission_id := current_setting('statement_timeout');
+            RETURN NEXT;
+          END;
+        """))
     try:
-        response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_v1",
+        response = httpx.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_capture_summary_" + version,
             headers={"apikey": stack["values"]["capture_reader_key"]},
             json={"p_round_id": "route", "p_submission_id": "route"}, timeout=10, trust_env=False)
         assert response.status_code == 200, response.text
@@ -712,6 +716,14 @@ def test_capture_reader_baseline_and_miner_usage_reaches_http_without_private_bo
                 "token_calls": 1, "models": [{"model": "test/model", "calls": 1,
                     "input_tokens": 1000, "output_tokens": reported + 10, "reasoning_tokens": reported}]}
             assert "private-test" not in v2.text and "body_b64" not in v2.text
+            v3 = client.post("/rest/v1/rpc/lab_arena_capture_summary_v3",
+                headers={"apikey": stack["values"]["capture_reader_key"]},
+                json={"p_round_id": round_id, "p_submission_id": submission})
+            assert v3.status_code == 200, v3.text
+            assert v3.json()[0] == {**summary2, "reasoning_calls": 1, "reasoning_capture": {
+                "complete_readable": 0, "partial_readable": 0, "tokens_only": 1,
+                "no_readable": 0, "unparseable": 0}}
+            assert "private-test" not in v3.text and "body_b64" not in v3.text
 
 
 def test_long_run_filter_and_postgrest_content_location_survive_target(stack):

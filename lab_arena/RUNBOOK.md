@@ -90,8 +90,8 @@ Existing database `PUBLIC` grants also apply to this role. `NOINHERIT` does not
 remove them, and revoking a grant from the reader cannot override `PUBLIC`.
 Review and record that effective surface; do not revoke unrelated shared grants
 as part of this rollout. The distinct opaque reader key is restricted at nginx
-to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 after
-the additive rollout below), with JSON
+to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 and v3
+after the additive rollouts below), with JSON
 arguments in the body. Other methods, paths, query strings, non-public schema
 profiles and method/path override headers return 403. Explicit `public` profiles
 are allowed. Both the normalized URI and original request target must match.
@@ -129,6 +129,43 @@ baseline and miner submissions. Preserve PUBLIC privileges; verify the opaque
 key denies all routes except the two canonical POSTs. To roll back v2, remove
 only its allowlist route and revoke its EXECUTE from `leadpoet_capture_reader`;
 v1 and the existing reader key remain unchanged.
+
+### Additive v3 count of calls with reasoning
+
+Migration `684-lab-arena-capture-summary-v3.sql` adds
+`lab_arena_capture_summary_v3(p_round_id TEXT, p_submission_id TEXT)`. It returns
+every v2 column unchanged and adds `reasoning_calls INTEGER`: completed calls
+whose provider-reported reasoning tokens are greater than zero. A call with
+missing, invalid or zero reasoning usage is not counted. Positive usage does not
+prove that readable reasoning text was captured.
+
+`reasoning_capture JSONB` partitions the same saved successful calls into five
+non-negative counts. Every key is present and their sum equals `model_calls`:
+
+- `complete_readable`: nonblank, non-summary reasoning text and a normal provider
+  finish (`stop` or `tool_calls` for one Chat choice; `completed` for Responses),
+  with no conflicting provider error or incomplete output item.
+- `partial_readable`: readable reasoning text with an incomplete or unknown finish.
+- `tokens_only`: no readable non-summary reasoning text, with positive reported
+  reasoning usage. Summary-only and opaque-only replies can be in this count.
+- `no_readable`: parsed reply without readable reasoning text or positive usage.
+- `unparseable`: absent, invalid, or undecodable saved response body.
+
+These are saved response capture counts. They do not prove complete execution,
+reviewed routes, exact request or delivery evidence, or training export readiness.
+Readable aliases count once per call identity. Execution retries with different
+identities remain separate calls. All execute run states are included; failed or
+inflight calls without a saved successful reply are outside these counts. Score
+runs and separate internal capture events are excluded. V1 and V2 retain their
+exact post-620 definitions, including bound retained successes during billing
+uncertainty. The same reader role and key apply; no new credential is needed.
+
+Apply 620 first, then the exact committed migration through the owner path and
+deploy the renderer's v3 POST allowlist with it, in either order: the site reads
+v2 until v3 answers, then re-reads recent rows at 40 submissions per 30-minute
+pass. Read back the definition and permissions, and verify v2/v3 parity on a
+retained submission. To roll back v3, remove only its allowlist route and revoke
+its EXECUTE from `leadpoet_capture_reader`; v1, v2 and the key remain unchanged.
 
 To enable the original v1 reader:
 

@@ -903,6 +903,7 @@ class HttpArenaApiClient:
 
     def training_observation_segment(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
+        *, timeout_seconds: float = TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
         training_input.object_ref(run_id, 1)
         if len(contracts.canonical_json(document).encode("utf-8")) > training_observations.MAX_SEGMENT_BYTES:
@@ -910,7 +911,7 @@ class HttpArenaApiClient:
         return self._post(
             "/arena/v1/runs/%s/training-observation-segments" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=10.0,
+            timeout_seconds=min(TRAINING_OBSERVATIONS_TIMEOUT_SECONDS, max(0.001, float(timeout_seconds))),
             preserve_http_status=True,
         )
 
@@ -4178,8 +4179,9 @@ class _ObservationJournal:
 
     def stop(self) -> None:
         # The same uploader owns the final delta and any ambiguous retry.
-        # An already admitted segment has its existing ten-second transport
-        # window; at most two further requests fit this fixed stop allowance.
+        # An admitted periodic request can finish after this fixed join
+        # allowance. New terminal HTTP timeouts use the remaining allowance;
+        # no later delta can start after the final snapshot freezes.
         if self.stop_deadline is None:
             self.stop_deadline = time.monotonic() + self.STOP_TIMEOUT_SECONDS
         self.stop_event.set()
@@ -4304,9 +4306,22 @@ class _ObservationJournal:
         if self.pending is None:
             return False
         document, digest, observations, receipts, agents, prepared = self.pending
+        timeout_seconds = TRAINING_OBSERVATIONS_TIMEOUT_SECONDS
+        if self.stop_event.is_set():
+            if self.stop_deadline is None:
+                return False
+            remaining = self.stop_deadline - time.monotonic()
+            if remaining < TRAINING_CAPTURE_TIMEOUT_SECONDS:
+                return False
+            timeout_seconds = min(timeout_seconds, remaining)
         try:
-            result = self.api.training_observation_segment(
-                str(self.lease["run_id"]), self.token, document)
+            if isinstance(self.api, HttpArenaApiClient):
+                result = self.api.training_observation_segment(
+                    str(self.lease["run_id"]), self.token, document,
+                    timeout_seconds=timeout_seconds)
+            else:
+                result = self.api.training_observation_segment(
+                    str(self.lease["run_id"]), self.token, document)
             if (not isinstance(result, Mapping) or result.get("status") != "stored"
                     or result.get("number") != self.number
                     or result.get("segment_sha256") != digest):

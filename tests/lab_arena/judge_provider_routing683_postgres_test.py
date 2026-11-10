@@ -264,6 +264,23 @@ def test_old_request_cannot_claim_a_later_correction_is_still_active(database):
     finally:conn.close()
 
 
+def test_two_candidates_need_distinct_observed_provider_names(database):
+    def change(config):
+        routes=config['judge_reasoning_route_registry']['approved_routes']
+        primary=next(x for x in routes if x['model_id']==MODEL and x['api']=='openrouter.chat'and x['provider']=='near-ai/fp8')
+        alternative=next(x for x in routes if x['model_id']==MODEL and x['api']=='openrouter.chat'and x['provider']=='fireworks')
+        alternative['provider_name']=primary['provider_name']
+    conn,rid,config=seed(database,change=change)
+    try:
+        with conn.cursor()as cur:before=snapshot(cur,rid)
+        conn.commit()
+        with pytest.raises(database[0].Error,match='provider observation ambiguous'):
+            with conn.cursor()as cur:invoke(cur,rid,config,{MODEL:['near-ai/fp8','fireworks']})
+        conn.rollback()
+        with conn.cursor()as cur:assert snapshot(cur,rid)==before
+    finally:conn.close()
+
+
 @pytest.mark.parametrize('fault',['source','acl'])
 def test_migration_refuses_unknown_function_or_acl_drift(database,fault):
     conn=database[0].connect(**database[1])

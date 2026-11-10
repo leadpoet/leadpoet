@@ -13,7 +13,7 @@ DECLARE p RECORD;
 BEGIN
  SELECT * INTO p FROM pg_proc WHERE oid=to_regprocedure(
   'public.lab_arena_set_judge_provider_routing_v1(text,jsonb,jsonb,text,text,boolean)');
- IF FOUND AND (encode(extensions.digest(p.prosrc,'sha256'),'hex')<>'47740494c2a9734fc36c11513a2f6d155d85b6bdadbb06e80d0ccc2993b29082'
+ IF FOUND AND (encode(extensions.digest(p.prosrc,'sha256'),'hex')<>'6a444cbe712106e02f418d4f45884cdd89e78c37704b647e8a440c27d869e23a'
   OR pg_get_userbyid(p.proowner)<>'lab_arena_owner' OR NOT p.prosecdef
   OR p.proacl::TEXT IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner}'
   OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::TEXT[]
@@ -33,7 +33,7 @@ DECLARE r public.lab_arena_rounds; n public.lab_arena_rounds;
  prior public.lab_arena_scoring_supersessions; registry JSONB; models JSONB;
  bindings JSONB; source_routes JSONB; model TEXT; plan JSONB; api TEXT; provider TEXT;
  primary_route JSONB; candidate JSONB; request_hash TEXT; proof JSONB; revision BIGINT;
- required_apis TEXT[]; response JSONB; mode_keys JSONB;
+ required_apis TEXT[]; response JSONB; mode_keys JSONB; provider_names TEXT[];
 BEGIN
  IF p_round_id IS NULL OR p_round_id !~ '^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(-[a-z0-9]{1,16})?$'
   OR jsonb_typeof(p_expected_configuration) IS DISTINCT FROM 'object'
@@ -125,6 +125,7 @@ BEGIN
     RAISE EXCEPTION 'judge provider routing primary route invalid' USING ERRCODE='22023';
    END IF;
    SELECT jsonb_agg(k ORDER BY k) INTO mode_keys FROM jsonb_object_keys(primary_route->'mode') k;
+   provider_names:=ARRAY[]::TEXT[];
    FOR provider IN SELECT value FROM jsonb_array_elements_text(plan) LOOP
     IF provider !~ '^[a-z0-9][a-z0-9._/-]{0,127}$' THEN
      RAISE EXCEPTION 'judge provider routing provider invalid' USING ERRCODE='22023';
@@ -150,6 +151,12 @@ BEGIN
      OR (candidate->>'max_output_tokens')::NUMERIC<(primary_route->>'max_output_tokens')::NUMERIC THEN
      RAISE EXCEPTION 'judge provider routing candidate capacity or mode differs' USING ERRCODE='22023';
     END IF;
+    IF jsonb_typeof(candidate->'provider_name') IS DISTINCT FROM 'string'
+     OR length(candidate->>'provider_name') NOT BETWEEN 1 AND 128
+     OR candidate->>'provider_name'=ANY(provider_names) THEN
+     RAISE EXCEPTION 'judge provider routing provider observation ambiguous' USING ERRCODE='22023';
+    END IF;
+    provider_names:=array_append(provider_names,candidate->>'provider_name');
    END LOOP;
   END LOOP;
  END LOOP;
@@ -192,7 +199,7 @@ DECLARE p RECORD;
 BEGIN
  SELECT * INTO STRICT p FROM pg_proc WHERE oid=
   'public.lab_arena_set_judge_provider_routing_v1(text,jsonb,jsonb,text,text,boolean)'::regprocedure;
- IF encode(extensions.digest(p.prosrc,'sha256'),'hex')<>'47740494c2a9734fc36c11513a2f6d155d85b6bdadbb06e80d0ccc2993b29082'
+ IF encode(extensions.digest(p.prosrc,'sha256'),'hex')<>'6a444cbe712106e02f418d4f45884cdd89e78c37704b647e8a440c27d869e23a'
   OR pg_get_userbyid(p.proowner)<>'lab_arena_owner'
   OR p.proacl::TEXT IS DISTINCT FROM '{lab_arena_owner=X/lab_arena_owner}'
   OR NOT p.prosecdef OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public']::TEXT[] THEN

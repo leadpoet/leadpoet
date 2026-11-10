@@ -20,10 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 _FROZEN_GRADER = frozen_source(
     "native_industry_budget", "qualification/scoring/company_evidence_investigator.py",
 )
+# Exact pre-homepage-capture verifier; the frozen transport seam must reject
+# prospective helper changes rather than accept the evolving current source.
+_FROZEN_VERIFIER = frozen_source("typed_refusal", composer.VERIFICATION_FILE)
 
 
 def _sources(investigator=None):
-    verifier = (ROOT / composer.VERIFICATION_FILE).read_bytes()
+    verifier = _FROZEN_VERIFIER
     if investigator is None:
         investigator = _FROZEN_GRADER
     old_verifier = verifier
@@ -46,8 +49,8 @@ def _sources(investigator=None):
 
 def test_exact_helper_bytes_only_and_idempotent():
     (old_v, new_v), (old_i, new_i) = _sources()
-    # The current source may change outside these reviewed helper blocks.
-    # Exact frozen-image source is checked separately during image composition.
+    # Only the reviewed blocks may change in these historical source bytes.
+    # Exact frozen-image source is also checked during image composition.
     assert seam.convert_verification_seam(old_v) == new_v
     assert seam.convert_verification_seam(new_v) == new_v
     assert seam.convert_investigator_seam(old_i) == new_i
@@ -80,6 +83,17 @@ def test_prior_verifier_correction_only_adds_reviewed_homepage_catch():
         unexpected = prior.replace(new.encode(), old.encode(), 1)
         with pytest.raises(seam.TypedRefusalSeamError, match="partial"):
             seam.convert_verification_seam(unexpected)
+
+
+def test_prospective_homepage_capture_verifier_is_not_a_frozen_seam_input():
+    current = (ROOT / composer.VERIFICATION_FILE).read_bytes()
+    assert current != _FROZEN_VERIFIER
+    with pytest.raises(seam.TypedRefusalSeamError, match="unrecognized"):
+        seam.convert_verification_seam(current)
+    sources = _base_sources()
+    sources[composer.VERIFICATION_FILE] = current
+    with pytest.raises(seam.TypedRefusalSeamError, match="unrecognized"):
+        composer.expected_overlay(sources, authenticated_page_refusal=True)
 
 
 @pytest.mark.parametrize("file,fault", [

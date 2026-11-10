@@ -1,0 +1,30 @@
+{
+  "source_packet_sha256": "c459b4d6c1d5bb4b4f5bf335b7ff879ff4a89053107a256fccd3ae76785f1c9e",
+  "note": "Only locator and presence flags extracted from retained Nov9 identity requests. Full private request bodies are excluded.",
+  "requests": [
+    {
+      "request_capture_sha256": "sha256:590a30f64d5037702f12354b3fa31d1d6f148acb7745974338fbcd639ee39a54",
+      "schema_repair": false,
+      "locator": {
+        "registrable_dns_domain": "deere.com"
+      },
+      "requested_name_present": false,
+      "homepage_lookup_context_present": false
+    },
+    {
+      "request_capture_sha256": "sha256:7f74f046eac1a9ea31550679d934e1310d52223975ac065c89a81dc1f049640d",
+      "schema_repair": true,
+      "locator": {
+        "registrable_dns_domain": "deere.com"
+      },
+      "requested_name_present": false,
+      "homepage_lookup_context_present": false
+    }
+  ],
+  "root_fixture": {
+    "source_full_root_sha256": "7665b6e52b9f01eda89b38803ff705627af8bd655c66da9e8812e7aa52e06446",
+    "public_excerpt_sha256": "01be8d813753b8a0c11d0aa39ef66c951b747637d86c49a641b028d93ae67cd6",
+    "public_excerpt_bytes": 148,
+    "selection": "Exact original title tag and sole strong name metadata tag. Document wrappers and empty body are reconstructed. The excerpt is not byte-equal to the full capture."
+  }
+}

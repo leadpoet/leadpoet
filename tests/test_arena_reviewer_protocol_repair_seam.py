@@ -96,6 +96,10 @@ def test_builder_flag_is_explicit_and_preserves_existing_composition(prior_flags
         sources[composer.FINALITY_FILE] = frozen_source(
             "native_industry_budget", composer.FINALITY_FILE,
         )
+    if composer.VERIFICATION_FILE in sources:
+        sources[composer.VERIFICATION_FILE] = frozen_source(
+            "typed_refusal", composer.VERIFICATION_FILE,
+        )
     sources[composer.GRADER_FILE] = original
     flags = dict.fromkeys(("complete_negative_finality", "source_access_denied",
                            "pending_final_correction", "failed_attribute_source_recovery",

@@ -8729,12 +8729,24 @@ class ArenaService:
         if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], basis, epoch):
             raise ServiceError("accepted_weight_state_reward_conflict", 409)
         if expected_state is not None:
-            # ECDSA bytes may differ; every other accepted body field must match.
+            # During the registered cutover an old gateway can publish the
+            # preceding policy first. Its basis was matched to the raw source
+            # above. Preserve that first writer, but require every other body
+            # field, including clocks, burn and validity, to match exactly.
+            preceding_policy = (
+                epoch >= rewards.REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH
+                and expected_state["reward_basis"].get("slot_policy") == rewards.REWARD_SLOT_POLICY_NOV11
+                and state["reward_basis"].get("slot_policy") == rewards.REWARD_SLOT_POLICY_OCT23
+            )
             def comparable(value):
                 body = accepted_weight_state_body(value)
-                body["reward_basis"] = {
-                    key: item for key, item in body["reward_basis"].items() if key != "signature"
-                }
+                if preceding_policy:
+                    body.pop("reward_basis")
+                else:
+                    # Equivalent ECDSA signatures may have different bytes.
+                    body["reward_basis"] = {
+                        key: item for key, item in body["reward_basis"].items() if key != "signature"
+                    }
                 return body
             if comparable(state) != comparable(expected_state):
                 raise ServiceError("accepted_weight_state_conflict", 409)
@@ -8863,6 +8875,7 @@ class ArenaService:
             raise
         except Exception as exc:
             raise ServiceError("accepted_weight_epoch_scope_unavailable", 503) from exc
+        source_basis = basis
         basis = self._project_reward_basis(basis, requested_epoch)
         weekly_clock = None
         if (getattr(self._config, "weekly_slot_decay_enabled", False)
@@ -8887,7 +8900,7 @@ class ArenaService:
                     raise ServiceError("accepted_weight_state_reward_clock_previous_invalid", 503) from exc
                 if previous["epoch"] == requested_epoch:
                     return {"state": self._validated_existing_weight_state(
-                        latest, basis, network=network, netuid=netuid, epoch=requested_epoch,
+                        latest, source_basis, network=network, netuid=netuid, epoch=requested_epoch,
                     ), "lookup_ok": True}
             weekly_clock = self._weekly_reward_clock(
                 basis, epoch_scope, network=network, netuid=netuid, previous_state=previous,
@@ -8908,13 +8921,13 @@ class ArenaService:
                 network, netuid, requested_epoch, state["state_hash"], state
             )
         except ArenaStoreError as exc:
-            # Independently signed projections have the same basis body hash,
-            # but their nested ECDSA signatures can differ. Keep the first
-            # accepted bytes, and accept only a fully verified equivalent basis.
+            # Compare to the raw authority so a verified preceding-policy
+            # first writer survives rolling deployment. All other accepted
+            # fields remain bound to this request's expected state.
             existing = self._store.get_weight_state(network, netuid, requested_epoch)
             if existing is not None:
                 return {"state": self._validated_existing_weight_state(
-                    existing, basis, network=network, netuid=netuid, epoch=requested_epoch,
+                    existing, source_basis, network=network, netuid=netuid, epoch=requested_epoch,
                     expected_state=state,
                 ), "lookup_ok": True}
             raise ServiceError("accepted_weight_state_conflict", 409) from exc

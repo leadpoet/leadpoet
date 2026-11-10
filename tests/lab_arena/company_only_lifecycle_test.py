@@ -10,6 +10,9 @@ from urllib.parse import urlsplit
 
 import pytest
 
+# This module keeps its historical SQL and pre-Nov11 reward economics.
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
+
 from lab_arena import (
     company_judgments,
     contracts,

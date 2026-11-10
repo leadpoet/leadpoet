@@ -49,7 +49,8 @@ from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: 
 MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 
 # Slot policies follow evaluation day and the explicit reward-epoch cutover.
-# Tier percentages divide the miner pot. Every activated basis and accepted
+# Legacy tier percentages divide the miner pot; explicit total-emissions
+# policies carry their shares directly. Every activated basis and accepted
 # state signs its own copy; existing signed documents remain unchanged.
 REWARD_SLOT_POLICY = {
     "assignment_mode": "all_qualifying",
@@ -85,11 +86,33 @@ REWARD_SLOT_POLICY_OCT23 = {
     ],
 }
 
+# This transition carries the current signed holders by tier ordinal. It does
+# not make historical achievements newly eligible under the lower thresholds.
+REWARD_SLOT_POLICY_NOV11_START = date(2026, 11, 11)
+REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH = 26301
+REWARD_SLOT_POLICY_NOV11 = {
+    **REWARD_SLOT_POLICY_OCT23,
+    "allocation_basis": "total_emissions",
+    "pool_percent": 75,
+    "tiers": [
+        {"minimum_improvement": 15, "allocation_percent": 35},
+        {"minimum_improvement": 10, "allocation_percent": 25},
+        {"minimum_improvement": 5, "allocation_percent": 15},
+    ],
+}
+
 
 def reward_slot_policy_document(
     evaluation_date: Optional[date] = None, *, effective_reward_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Copy the round's policy; undated legacy callers retain their old policy."""
+    if (
+        (evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_NOV11_START)
+        or (effective_reward_epoch is not None
+            and _require_epoch(effective_reward_epoch, "effective_reward_epoch")
+            >= REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH)
+    ):
+        return _kernel.validate_slot_policy(REWARD_SLOT_POLICY_NOV11)
     if (
         (evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_OCT23_START)
         or (effective_reward_epoch is not None
@@ -110,39 +133,69 @@ def reward_slot_policy_document(
 def reward_basis_policy_projection_document(
     source: Mapping[str, Any], policy: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """Raise thresholds over current signed holders, without reviving old owners.
+    """Project registered policies over current holders without reviving owners.
 
     Under all_qualifying assignment, a lower source slot represents an
     achievement at least as recent as a higher slot. Scan those slots first;
     they are the current reward authority, including while a round is reopened.
-    The caller must verify the source signature before signing this document.
+    The registered 75-percent transition instead preserves tier ordinals after
+    applying the preceding Oct23 eligibility rules. The caller must verify the
+    source signature before signing this document.
     """
     source = validate_reward_basis(source)
     policy = _kernel.validate_slot_policy(policy)
     if (source["schema_version"] != _kernel.REWARD_BASIS_V2_SCHEMA_VERSION
             or source["slot_policy"]["assignment_mode"] != "all_qualifying"
             or policy["assignment_mode"] != "all_qualifying"
-            or any(new["minimum_improvement"] < old["minimum_improvement"]
-                   for new, old in zip(policy["tiers"], source["slot_policy"]["tiers"]))
             or policy.get("decay") != source["slot_policy"].get("decay")):
         raise LabArenaRewardError("reward policy projection requires increasing all_qualifying thresholds and unchanged decay")
-    slots = []
-    for index in range(3):
-        selected = None
-        for achievement in reversed(source["reward_slots"]):
-            if achievement is None:
-                continue
-            candidate = [achievement if position == index else None for position in range(3)]
-            try:
-                validate_reward_slots(
-                    candidate, policy, basis_round_id=source["round_id"],
-                    effective_reward_epoch=source["effective_reward_epoch"],
-                )
-            except LabArenaRewardError:
-                continue
-            selected = dict(achievement)
-            break
-        slots.append(selected)
+    # Decay is excluded only from registered economic-policy identity. The
+    # unchanged-decay guard above remains mandatory, including for historical
+    # source-identity reconstruction over policies without a decay field.
+    def economic_fields(value):
+        return {key: item for key, item in value.items() if key != "decay"}
+    if economic_fields(policy) == economic_fields(REWARD_SLOT_POLICY_NOV11):
+        source_policy = economic_fields(source["slot_policy"])
+        legacy_total_emissions = economic_fields(REWARD_SLOT_POLICY)
+        legacy_total_emissions.pop("pool_percent")
+        registered_sources = [economic_fields(registered) for registered in (
+            REWARD_SLOT_POLICY, REWARD_SLOT_POLICY_50_PERCENT,
+            REWARD_SLOT_POLICY_OCT23, REWARD_SLOT_POLICY_NOV11,
+        )]
+        if source_policy not in registered_sources + [legacy_total_emissions]:
+            raise LabArenaRewardError("reward policy projection source is not a registered transition policy")
+        incumbent = source
+        if source_policy not in (economic_fields(REWARD_SLOT_POLICY_OCT23),
+                                 economic_fields(REWARD_SLOT_POLICY_NOV11)):
+            preceding = dict(REWARD_SLOT_POLICY_OCT23)
+            if "decay" in source["slot_policy"]:
+                preceding["decay"] = source["slot_policy"]["decay"]
+            else:
+                preceding.pop("decay", None)
+            incumbent = reward_basis_policy_projection_document(source, preceding)
+        slots = [None if achievement is None else dict(achievement)
+                 for achievement in incumbent["reward_slots"]]
+    else:
+        if any(new["minimum_improvement"] < old["minimum_improvement"]
+               for new, old in zip(policy["tiers"], source["slot_policy"]["tiers"])):
+            raise LabArenaRewardError("reward policy projection requires increasing all_qualifying thresholds and unchanged decay")
+        slots = []
+        for index in range(3):
+            selected = None
+            for achievement in reversed(source["reward_slots"]):
+                if achievement is None:
+                    continue
+                candidate = [achievement if position == index else None for position in range(3)]
+                try:
+                    validate_reward_slots(
+                        candidate, policy, basis_round_id=source["round_id"],
+                        effective_reward_epoch=source["effective_reward_epoch"],
+                    )
+                except LabArenaRewardError:
+                    continue
+                selected = dict(achievement)
+                break
+            slots.append(selected)
     body = {key: value for key, value in source.items()
             if key not in ("reward_basis_hash", "signature")}
     body.update(slot_policy=policy, reward_slots=slots)
@@ -157,13 +210,21 @@ def reward_basis_matches_policy_projection(
         return True
     if epoch < REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH:
         return False
-    try:
-        expected = reward_basis_policy_projection_document(
-            source, reward_slot_policy_document(effective_reward_epoch=epoch),
-        )
-    except (TypeError, ValueError):
-        return False
-    return basis.get("reward_basis_hash") == expected["reward_basis_hash"]
+    policies = []
+    # Previously issued Oct23 projections remain valid after the next cutover.
+    # A total-emissions source cannot acquire an earlier policy retrospectively.
+    if source.get("slot_policy", {}).get("allocation_basis") != "total_emissions":
+        policies.append(REWARD_SLOT_POLICY_OCT23)
+    if epoch >= REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH:
+        policies.append(REWARD_SLOT_POLICY_NOV11)
+    for policy in policies:
+        try:
+            expected = reward_basis_policy_projection_document(source, policy)
+        except (TypeError, ValueError):
+            continue
+        if basis.get("reward_basis_hash") == expected["reward_basis_hash"]:
+            return True
+    return False
 
 
 def _require_epoch(value: Any, name: str) -> int:

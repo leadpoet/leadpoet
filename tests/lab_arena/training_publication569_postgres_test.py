@@ -13,6 +13,7 @@ import tarfile
 import pytest
 
 from lab_arena import contracts
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 from tests.lab_arena.historical_service_harness import bind_historical_judge_models
 from tests.lab_arena.complete_baseline_final_authority_postgres_test import (
     test_normal_complete_baseline_publishes_and_activates_with_all_guards as _prove_complete,

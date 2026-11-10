@@ -17,6 +17,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
+# This module keeps its historical SQL and pre-Nov11 reward economics.
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
+
 from lab_arena import broker as br, contracts, scoring, service as svc
 from lab_arena import source_bundle, submission_runtime, weight_state
 from lab_arena.code_review_runtime import SubmissionCodeReviewer

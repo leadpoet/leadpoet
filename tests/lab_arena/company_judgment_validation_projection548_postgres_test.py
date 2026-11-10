@@ -1,4 +1,5 @@
 """The large frozen catalog does not alter company judgment validation."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 import copy
 import hashlib
 import json

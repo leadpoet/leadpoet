@@ -1,4 +1,5 @@
 """PostgreSQL journey for integrity scoring with cutoff-public details."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone

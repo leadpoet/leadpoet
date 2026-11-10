@@ -10,6 +10,7 @@ from threading import Barrier
 import pytest
 
 from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy
 from tests.lab_arena.training_publication569_postgres_test import _verify, _training
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,

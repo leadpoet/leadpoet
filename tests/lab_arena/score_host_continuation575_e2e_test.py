@@ -1,4 +1,5 @@
 """Ten-slot execution, judging and publication with current recovery SQL."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 
 from pathlib import Path
 

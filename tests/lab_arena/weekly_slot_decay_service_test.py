@@ -20,6 +20,14 @@ BLOCK = 10000
 WEEK = 140
 
 
+@pytest.fixture(autouse=True)
+def historical_weekly_policy(monkeypatch):
+    # These existing tests isolate weekly tenure, using their original signed
+    # policy even though their synthetic epoch numbers exceed later cutovers.
+    policy = rewards.reward_slot_policy_document(date(2026, 11, 1))
+    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_, **__: deepcopy(policy))
+
+
 def _harness(*, enabled=True):
     signer = signing.LocalSigner.generate()
     winner = _win(delta=20, start=SOURCE_EPOCH, name="winner")

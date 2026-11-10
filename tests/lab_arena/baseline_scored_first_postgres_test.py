@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+# This module keeps its historical SQL and pre-Nov11 reward economics.
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
+
 from lab_arena import capacity, contracts, public_dashboard, verify
 from leadpoet_canonical import arena_weights
 from qualification.scoring.arena_integrity import canonical_company_identity

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 from tests.lab_arena.test_lab_arena_migration_sql import _assert_migration_numbering
 from tests.lab_arena.complete_baseline_final_authority_postgres_test import (
     test_normal_complete_baseline_publishes_and_activates_with_all_guards as _prove_round,

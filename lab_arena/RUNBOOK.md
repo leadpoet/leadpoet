@@ -90,8 +90,8 @@ Existing database `PUBLIC` grants also apply to this role. `NOINHERIT` does not
 remove them, and revoking a grant from the reader cannot override `PUBLIC`.
 Review and record that effective surface; do not revoke unrelated shared grants
 as part of this rollout. The distinct opaque reader key is restricted at nginx
-to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 after
-the additive rollout below), with JSON
+to the canonical `POST /rest/v1/rpc/lab_arena_capture_summary_v1` (and v2 and v3
+after the additive rollouts below), with JSON
 arguments in the body. Other methods, paths, query strings, non-public schema
 profiles and method/path override headers return 403. Explicit `public` profiles
 are allowed. Both the normalized URI and original request target must match.
@@ -129,6 +129,22 @@ baseline and miner submissions. Preserve PUBLIC privileges; verify the opaque
 key denies all routes except the two canonical POSTs. To roll back v2, remove
 only its allowlist route and revoke its EXECUTE from `leadpoet_capture_reader`;
 v1 and the existing reader key remain unchanged.
+
+### Additive v3 count of calls with reasoning
+
+Migration `683-lab-arena-capture-summary-v3.sql` adds
+`lab_arena_capture_summary_v3(p_round_id TEXT, p_submission_id TEXT)`. It returns
+every v2 column unchanged and adds `reasoning_calls INTEGER`: completed calls
+whose provider-reported reasoning tokens are greater than zero. A call with
+missing, invalid or zero reasoning usage is not counted. It uses the same reader
+role and key, and needs no new authenticator membership, setting or credential.
+
+Apply the exact committed migration through the same owner path as 598 and
+deploy the renderer's v3 POST allowlist with it, in either order: the site reads
+v2 until v3 answers, then re-reads recent rows at 40 submissions per 30-minute
+pass. Read back the definition and permissions, and verify v2/v3 parity on a
+retained submission. To roll back v3, remove only its allowlist route and revoke
+its EXECUTE from `leadpoet_capture_reader`; v1, v2 and the key remain unchanged.
 
 To enable the original v1 reader:
 

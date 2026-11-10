@@ -156,8 +156,9 @@ carry that same apikey. Unknown, changed-case, duplicate and mismatched
 credentials fail closed. Incoming role/JWT headers cannot select a role.
 
 When the optional capture key is configured, its role is allowed only the exact
-`POST /rest/v1/rpc/lab_arena_capture_summary_v1` or
-`POST /rest/v1/rpc/lab_arena_capture_summary_v2` request target, with no query
+`POST /rest/v1/rpc/lab_arena_capture_summary_v1`,
+`POST /rest/v1/rpc/lab_arena_capture_summary_v2` or
+`POST /rest/v1/rpc/lab_arena_capture_summary_v3` request target, with no query
 string. nginx checks both `$uri` and `$request_uri`; encoded paths, dot segments,
 repeated/trailing slashes and case variants do not provide alternate routes.
 The only accepted explicit schema profile is `public`. Method and path override

@@ -156,6 +156,7 @@ def stack(tmp_path_factory):
                 # its schema cache; the full-round test compares every RPC.
                 for migration in ("595-lab-arena-capture-called-icps.sql",
                                   "598-lab-arena-capture-summary-v2.sql",
+                                  "683-lab-arena-capture-summary-v3.sql",
                                   "619-lab-arena-release-undispatched-call.sql"):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
                 # Current Store probes also cover the prospective evidence RPC.
@@ -712,6 +713,12 @@ def test_capture_reader_baseline_and_miner_usage_reaches_http_without_private_bo
                 "token_calls": 1, "models": [{"model": "test/model", "calls": 1,
                     "input_tokens": 1000, "output_tokens": reported + 10, "reasoning_tokens": reported}]}
             assert "private-test" not in v2.text and "body_b64" not in v2.text
+            v3 = client.post("/rest/v1/rpc/lab_arena_capture_summary_v3",
+                headers={"apikey": stack["values"]["capture_reader_key"]},
+                json={"p_round_id": round_id, "p_submission_id": submission})
+            assert v3.status_code == 200, v3.text
+            assert v3.json()[0] == {**summary2, "reasoning_calls": 1}
+            assert "private-test" not in v3.text and "body_b64" not in v3.text
 
 
 def test_long_run_filter_and_postgrest_content_location_survive_target(stack):

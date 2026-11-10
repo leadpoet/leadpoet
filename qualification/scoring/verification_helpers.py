@@ -425,6 +425,56 @@ def visible_html_body_empty(content: str) -> bool:
     return not any(part.strip() for part in parser.parts)
 
 
+def visible_html_article_body_partial(content: str) -> bool:
+    """Hint at missing article prose without changing any visibility rule.
+
+    This is only a retrieval hint. Headings, links and other existing source
+    text remain usable even when a second exact-source read is unavailable.
+    """
+    class ArticleParser(_VisibleHTMLTextParser):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.article_depths: set[int] = set()
+            self.article_count = self.headings = self.paragraphs = 0
+            self.admitted_paragraph = False
+
+        def handle_starttag(self, tag: str, attrs: Any) -> None:
+            values = self._attribute_map(attrs)
+            non_executable = not any(parent in {"script", "style", "template", "noscript"}
+                                     for parent, _, _ in self._stack)
+            article = non_executable and (tag == "article" or (
+                values.get("role", "").casefold() == "main"
+                and "article" in values.get("class", "").casefold().split()))
+            super().handle_starttag(tag, attrs)
+            if article:
+                self.article_depths.add(len(self._stack))
+                self.article_count += 1
+            if non_executable and self.article_depths:
+                self.headings += tag == "h1"
+                self.paragraphs += tag == "p"
+
+        def handle_endtag(self, tag: str) -> None:
+            super().handle_endtag(tag)
+            self.article_depths = {depth for depth in self.article_depths if depth <= len(self._stack)}
+
+        def handle_data(self, data: str) -> None:
+            if (data.strip() and not self._hidden_depth and self.article_depths
+                and any(tag == "p" for tag, _, _ in self._stack)):
+                self.admitted_paragraph = True
+            super().handle_data(data)
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = ArticleParser(hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+                           include_scroll_reveal=True)
+    try:
+        parser.feed(content)
+        parser.close()
+    except Exception:
+        return False
+    return (parser.article_count == 1 and parser.headings == 1
+            and parser.paragraphs > 0 and not parser.admitted_paragraph)
+
+
 def visible_html_dialog_only(content: str) -> bool:
     """Detect a rendered dialog with no visible body text outside it.
 

@@ -2024,6 +2024,43 @@ def _unresolved_operation_failures(
     return credentials, providers
 
 
+def _final_unresolved_provider_failure(
+    completed_calls: Sequence[Mapping[str, Any]],
+    latest_calls: Sequence[Mapping[str, Any]],
+    recovered_identities: Collection[str],
+    response_receipts: Sequence[Mapping[str, Any]],
+    agent_observations: Sequence[Mapping[str, Any]],
+) -> bool:
+    """A bound last broker failure, not an earlier outage or unknown transport."""
+    if (not completed_calls or not latest_calls
+            or any(type(call.get("action_sequence")) is not int for call in latest_calls)):
+        return False
+    final = max(latest_calls, key=lambda call: call["action_sequence"])
+    identity = final.get("call_identity")
+    if not (isinstance(identity, str) and contracts.SHA256_RE.fullmatch(identity) is not None
+            and identity not in recovered_identities
+            and final.get("error_code") == "provider_unavailable"
+            and final.get("outcome") in ("settled", "uncertain")
+            and completed_calls[-1].get("call_identity") == identity
+            and completed_calls[-1].get("operation_id") == final.get("operation_id")):
+        return False
+    receipts = [row for row in response_receipts if row.get("call_identity") == identity
+                and row.get("action_sequence") == final["action_sequence"]
+                and row.get("operation_id") == final.get("operation_id")]
+    if len(receipts) != 1:
+        return False
+    receipt = receipts[0]
+    if (receipt.get("write_state") != "socket_written" or receipt.get("status") != 502
+            or receipt.get("body_sha256") != contracts.hash_bytes(operations.GENERIC_UNAVAILABLE_BODY)
+            or receipt.get("body_bytes") != len(operations.GENERIC_UNAVAILABLE_BODY)):
+        return False
+    return any(row.get("kind") == "response_received" and isinstance(row.get("data"), Mapping)
+               and row["data"].get("call_identity") == identity
+               and all(row["data"].get(key) == receipt.get(key) for key in
+                       ("status", "body_sha256", "body_bytes"))
+               for row in agent_observations)
+
+
 def _record_latest_operation_call_locked(
     state: RunState, key: Tuple[str, str], call: Dict[str, Any], sequence: int,
 ) -> bool:
@@ -5076,6 +5113,8 @@ class AssignmentExecutor:
                 latest_operation_calls = tuple(
                     state.operation_latest_calls.values()
                 )
+                response_receipts = tuple(state.worker_observations.response_receipts)
+                agent_observations = tuple(state.worker_observations.agent_observations)
             unresolved_credentials, unresolved_providers = (
                 _unresolved_operation_failures(
                     latest_operation_calls, recovered_responses_retries
@@ -5154,9 +5193,15 @@ class AssignmentExecutor:
             elif provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = _partial_company_judgment_output(output_document, lease) if scoring_run else None
-                if scoring_run and failure_diagnostic is None:
+                if scoring_run and (failure_diagnostic is None or (
+                        failure_diagnostic == {"stage": "scorer", "error_class": "judge_error", "reason": "provider_error"}
+                        and _final_unresolved_provider_failure(
+                            completed_calls, latest_operation_calls, recovered_responses_retries,
+                            response_receipts, agent_observations))):
                     # A previous page-fetch failure must not replace the
                     # trusted scorer's more specific terminal diagnostic.
+                    # Its generic provider error can retain the bound final
+                    # broker cause; SQL still proves the receipt and credit.
                     failure_diagnostic = {
                         "stage": "provider_call",
                         "error_class": "provider_unavailable",

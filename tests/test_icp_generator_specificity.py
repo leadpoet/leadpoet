@@ -10,6 +10,8 @@ free-text intent still resolves to a valid category, and the prompt no longer
 instructs the barebone shapes.
 """
 
+import asyncio
+
 import pytest
 
 from gateway.tasks import icp_generator as ig
@@ -133,6 +135,37 @@ def test_prompt_no_longer_instructs_barebone_shapes():
     assert "fulfillment style" in text.lower() or "fulfillment-style" in text.lower()
     assert "specific" in text.lower()
     assert "broad enough that many real companies" in text.lower()
+
+
+def test_prompt_reserves_and_for_requirements_every_company_must_meet(monkeypatch):
+    """Scoring treats offerings, capabilities and sales channels joined with
+    "and" as separate requirements. On 2026-11-09 a ``product_service`` that
+    listed "a branded online store and marketplaces" left most
+    direct-to-consumer brands unproven, while its ``required_attribute`` asked
+    for the store alone. The prompt sent to the author must say how such lists
+    are checked, keep "or" alternatives specific, and must not model an
+    incidental "and" list in its own examples."""
+    monkeypatch.setattr(ig, "OPENROUTER_API_KEY", "")
+    prepared = asyncio.run(ig.prepare_icp_probe_request(
+        "icp_generation", set_id=20261109, total_icps=10,
+    ))
+    prompt = "\n".join(
+        message["content"] for message in prepared["request"]["messages"]
+        if isinstance(message.get("content"), str)
+    )
+    assert "manage pipeline, deals, and customer workflows" not in prompt
+    assert prompt.count("manage pipeline, deals, or customer workflows") == 2
+    assert (
+        'Offerings, capabilities and sales channels joined with "and" are each '
+        "treated as\nrequired and must each be proven for the same company"
+    ) in prompt
+    assert 'no catch-all such as "or other software"' in prompt
+    assert "Use \"and\" only when every\nqualifying company must do both." in prompt
+    assert (
+        "`product_service` must not require anything that\n`required_attribute` "
+        "leaves optional."
+    ) in prompt
+    assert "11. Must EVERY qualifying company, not only the named example" in prompt
 
 
 def test_generated_brief_states_structured_required_and_bonus_intents():

@@ -312,7 +312,15 @@ async def test_observation_upload_authorizes_before_reading_more_than_eight_mib(
     events = []
     body = b"x" * (arena_proxy.training_input.MAX_INPUT_BYTES + 1)
 
+    body_sent = False
+
     async def receive():
+        nonlocal body_sent
+        if body_sent:
+            # A real ASGI server blocks after the complete body until disconnect.
+            import anyio
+            await anyio.sleep_forever()
+        body_sent = True
         events.append("body")
         return {"type": "http.request", "body": body, "more_body": False}
 

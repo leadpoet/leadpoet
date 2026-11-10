@@ -81,5 +81,14 @@
         "sha256": "f2417700fb3ff72311e0911498573ed27e735a0371cdca970b1cbcf1b926ae93"
       }
     }
+  },
+  "typed_refusal": {
+    "commit": "28261fd7468835d3e0f3456124fc7f3a8c5728be",
+    "files": {
+      "qualification/scoring/company_verification.py": {
+        "fixture": "typed_refusal-company_verification.py.gz",
+        "sha256": "06155e2987a21b4327885f1b7b49790144e8c3eb2b14da8db4d0db4d2bf45e7c"
+      }
+    }
   }
 }

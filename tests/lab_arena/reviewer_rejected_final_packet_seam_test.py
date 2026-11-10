@@ -55,6 +55,10 @@ def sources(**options):
         result[builder.FINALITY_FILE] = frozen_source(
             "native_industry_budget", builder.FINALITY_FILE,
         )
+    if builder.VERIFICATION_FILE in result:
+        result[builder.VERIFICATION_FILE] = frozen_source(
+            "typed_refusal", builder.VERIFICATION_FILE,
+        )
     result[builder.GRADER_FILE] = corrected_grader()
     assert result[builder.GRADER_FILE].count(NEW.encode()) == 1
     result[builder.GRADER_FILE] = result[builder.GRADER_FILE].replace(

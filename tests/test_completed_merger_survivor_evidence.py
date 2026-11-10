@@ -99,3 +99,47 @@ def test_completed_merger_still_requires_exact_loaded_source_and_company(entry_i
 def test_complete_merger_condition_cannot_escape_the_context_window(quote):
     assert not lead_scorer._acquired_stage_quote_supports_names(("Acme Analytics",), quote)
     assert not lead_scorer._stage_quote_supports_observation("acquired", quote)
+
+
+ADVERSARIAL_MERGER_QUOTES = [
+    f"Merger Sub {prefix}{whitespace}merged with and into Acme Analytics, with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings."
+    for prefix in ("has not", "would have", "proposed to have", "expects to have", "will have",
+                   "may have", "might have", "should have", "must have", "intends to have", "is anticipated to have",
+                   "failed to have", "denied having", "possibly having", "whether it has")
+    for whitespace in ("\n", "\r\n", "\t\n", "  ")
+] + [
+    f"Merger Sub merged with and into Acme Analytics ({qualification}), with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings."
+    for qualification in ("not yet completed", "proposed merger", "expected merger", "not yet effective", "rumored transaction")
+]
+
+ADVERSARIAL_MERGER_QUOTES += [
+    actor + "merged with and into Acme Analytics, with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings."
+    for actor in ("If Merger Sub, Inc. ", "If Chess Merger Sub, Inc. ", "Unless Merger Sub Ltd. ",
+                  "Proposed Merger Sub, Inc. ", "Unconfirmed Merger Sub Ltd. ")
+]
+
+
+@pytest.mark.parametrize("quote", ADVERSARIAL_MERGER_QUOTES)
+def test_uncertain_merger_cannot_create_a_fetched_or_saved_stage_mismatch(quote):
+    from tests.test_company_evidence_investigator import _finding, _company
+
+    assert not lead_scorer._stage_quote_supports_observation("acquired", quote)
+    assert not lead_scorer._acquired_stage_quote_supports_names(("Acme Analytics",), quote)
+    url = "https://www.sec.gov/Archives/edgar/data/1/0001/merger.htm"
+    finding = investigator._validated_findings(
+        {"findings": [_finding("stage", status="CONTRADICTED", observed_value="Acquired", evidence_url=url, evidence_quote=quote)]},
+        targets=("stage",), fetched_pages={url: quote}, fetched_final_urls={url: url},
+        first_party_domains={"acme.test"}, identity_names={"acmeanalytics"}, requested_stage="series b",
+    )["stage"]
+    assert finding["status"] == "UNPROVEN"
+    retained = json.loads(json.dumps(lead_scorer._project_investigator_stage({}, finding, icp_stage="series b")))
+    assert lead_scorer._decision_from_observed_stage(
+        retained, "series b", company=_company(name="Acme Analytics", website="https://acme.test"), evidence_attributed=True,
+    ) == "unavailable"
+
+
+@pytest.mark.parametrize("prefix", ["Merger Sub\n", "On May 11, 2026, Merger Sub\n", "Merger Sub has been\n"])
+def test_extracted_whitespace_keeps_genuine_completed_merger_proof(prefix):
+    quote = prefix + "merged with and into Acme Analytics (the “Merger”), with Acme Analytics surviving the Merger as a direct wholly owned subsidiary of Parent Holdings."
+    assert lead_scorer._stage_quote_supports_observation("acquired", quote)
+    assert lead_scorer._acquired_stage_quote_supports_names(("Acme Analytics",), quote)

@@ -37,7 +37,7 @@ def test_exact_source_changes_only_the_reviewed_merger_insertion():
     before, after = ast.parse(ORIGINAL), ast.parse(CORRECTED)
     allowed = {"_COMPLETED_MERGER_SURVIVOR_RE", "_ACQUIRED_STAGE_PROOF_PATTERNS",
                "_BOUND_ACQUISITION_SUBJECT_PATTERNS", "_has_affirmed_stage_proof",
-               "_acquired_stage_quote_supports_names"}
+               "_acquired_stage_quote_supports_names", "_completed_merger_match_has_uncertainty"}
     def unchanged(tree):
         return [ast.dump(node) for node in tree.body
                 if getattr(node, "name", "") not in allowed and not (
@@ -187,3 +187,15 @@ def test_mode_extracts_only_the_exact_frozen_lead_scorer(monkeypatch, tmp_path):
         reference, tmp_path, completed_merger_survivor_only=True,
     ) == {seam.FINALITY_FILE: ORIGINAL}
     assert [command[:2] for command in commands] == [["docker", "cp"], ["docker", "rm"]]
+
+
+@pytest.mark.parametrize("quote", controls.ADVERSARIAL_MERGER_QUOTES)
+def test_exact_corrected_frozen810_keeps_uncertain_fetched_and_saved_stages_unavailable(monkeypatch, quote):
+    import qualification.scoring
+
+    module = ModuleType("_uncertain_completed_merger_runtime")
+    exec(compile(CORRECTED, "corrected_frozen810.py", "exec"), vars(module))
+    monkeypatch.setattr(controls, "lead_scorer", module)
+    monkeypatch.setattr(qualification.scoring, "lead_scorer", module)
+    monkeypatch.setitem(sys.modules, "qualification.scoring.lead_scorer", module)
+    controls.test_uncertain_merger_cannot_create_a_fetched_or_saved_stage_mismatch(quote)

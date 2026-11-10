@@ -180,9 +180,11 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(status=status, cited=cited):
                     verdict = supported(cited)["answer"]
                     verdict["signal_evaluations"][0]["signal_status"] = status
+                    verdict["signal_evaluations"][0]["supporting_quotes"] = ["Acme acquired Widget."]
                     guarded = _apply_guardrails(
                         {"claimed_source_urls": [supplied]}, verdict,
                         restore_miscopied_citations=True,
+                        contents={"results": [{"url": supplied, "text": "Acme acquired Widget."}]},
                     )
                     item = guarded["signal_evaluations"][0]
                     self.assertEqual(item["signal_status"], status)
@@ -198,9 +200,11 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         verdict["signal_evaluations"][0]["evidence_urls_used"] = [
             supplied, supplied.replace("acmehive", "acmehove"),
         ]
+        verdict["signal_evaluations"][0]["supporting_quotes"] = ["Acme acquired Widget."]
         item = _apply_guardrails(
             {"claimed_source_urls": [supplied]}, verdict,
             restore_miscopied_citations=True,
+            contents={"results": [{"url": supplied, "text": "Acme acquired Widget."}]},
         )["signal_evaluations"][0]
         self.assertEqual(item["signal_status"], "supported")
         self.assertEqual(item["evidence_urls_used"], [supplied])
@@ -219,8 +223,10 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         }
         verdict = supported(submitted.replace("bring", "brace"))["answer"]
         verdict["signal_evaluations"][0]["evidence_urls_used"].append(stage)
+        verdict["signal_evaluations"][0]["supporting_quotes"] = ["Acme raised funding."]
         item = _apply_guardrails(
             dict(row), verdict, restore_miscopied_citations=True,
+            contents={"results": [{"url": submitted, "text": "Acme raised funding."}]},
         )["signal_evaluations"][0]
         self.assertEqual(item["signal_status"], "supported")
         self.assertEqual(item["evidence_urls_used"], [submitted, stage])

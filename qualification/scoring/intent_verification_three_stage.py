@@ -4507,6 +4507,7 @@ _MISCOPIED_URL_MIN_SIMILARITY = 0.95
 
 def _supplied_url_for_miscopied_citation(
     cited: str, supplied: Mapping[str, str],
+    *, supporting_quotes: Any, contents: Mapping[str, Any] | None,
 ) -> str:
     """Return the one supplied URL that an off-list citation miscopies.
 
@@ -4530,12 +4531,31 @@ def _supplied_url_for_miscopied_citation(
             and similarity.ratio() >= _MISCOPIED_URL_MIN_SIMILARITY
         ):
             matches.append(url)
-    return matches[0] if len(matches) == 1 else ""
+    if len(matches) != 1 or not isinstance(supporting_quotes, list) or not supporting_quotes:
+        return ""
+    # Similar spelling is only a locator. A correction needs verbatim evidence
+    # from the page the judge actually received, not its invented URL or quote.
+    results = contents.get("results") if isinstance(contents, Mapping) else None
+    candidate = _normalize_url(matches[0])
+    pages = [page for page in (results if isinstance(results, list) else [])
+             if isinstance(page, Mapping)
+             and isinstance(page.get("url"), str)
+             and _normalize_url(page["url"]) == candidate
+             and isinstance(page.get("text"), str) and page["text"].strip()]
+    # Do not borrow a substantive quote from another page to justify this URL.
+    # Ambiguous multi-page citations must remain unresolved, not be repaired
+    # using a generic company-name quote on the candidate page.
+    return matches[0] if any(
+        all(isinstance(quote, str) and _grounded_exact_text(page["text"], quote)
+            for quote in supporting_quotes)
+        for page in pages
+    ) else ""
 
 
 def _apply_guardrails(
     row: Dict[str, Any], verdict: Dict[str, Any],
     *, restore_miscopied_citations: bool = False,
+    contents: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Same rule as the standalone pipeline: in source_grounded mode, every
     cited evidence URL must be one of the supplied source URLs.  If any
@@ -4573,6 +4593,7 @@ def _apply_guardrails(
                     "" if _normalize_url(url) in supplied
                     else _supplied_url_for_miscopied_citation(
                         _normalize_url(url), supplied_by_key,
+                        supporting_quotes=item.get("supporting_quotes"), contents=contents,
                     )
                     for url in evidence
                 ]
@@ -6162,6 +6183,7 @@ async def verify_three_stage(
     s3_verdict = _apply_guardrails(
         row, s3_verdict_raw,
         restore_miscopied_citations=not stage3_hosted_search,
+        contents=contents,
     )
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     if retained_fallback_original is not None:
@@ -6328,6 +6350,7 @@ async def verify_three_stage(
                     chain_verdict = _apply_guardrails(
                         chain_row, chain_envelope.get("answer") or {},
                         restore_miscopied_citations=not stage3_hosted_search,
+                        contents=chain_contents,
                     )
                     chain_item = (
                         (chain_verdict.get("signal_evaluations") or [{}])
@@ -6531,6 +6554,7 @@ async def verify_three_stage(
         clarified = _apply_guardrails(
             row, clarified_raw,
             restore_miscopied_citations=not stage3_hosted_search,
+            contents=contents,
         )
         clarified_items = clarified.get("signal_evaluations") or []
         if isinstance(clarified_items, list) and len(clarified_items) == 1:

@@ -1,6 +1,7 @@
 """A lost final upload ACK recovers only an exact persisted, owned snapshot."""
 
 import copy
+from contextlib import contextmanager
 import gzip
 import json
 from datetime import timedelta
@@ -451,3 +452,157 @@ def test_conditional_headers_and_etags_stay_filtered_on_other_methods(monkeypatc
     response = TestClient(app).request(method, path, headers=_headers(WRONG_DIGEST))
     assert response.status_code == 200 and "etag" not in response.headers and "x-private" not in response.headers
     assert "if-match" not in forwarded[0]
+
+
+@pytest.mark.parametrize('prefix', ['/arena', '/testnet/arena'])
+@pytest.mark.parametrize('edge', [False, True])
+@pytest.mark.parametrize('kind', ['execute', 'score'])
+@pytest.mark.parametrize('ack', ['stored', 'lost', 'wrong'])
+def test_foreground_retained_final_uses_renewed_server_lease(
+    public_capture_stack, tmp_path, prefix, edge, kind, ack,
+):
+    from lab_arena.capture_retention import InputRetention
+
+    stack = public_capture_stack
+    service = stack.testnet if prefix.startswith('/testnet') else stack.main
+    objects = stack.testnet_objects if prefix.startswith('/testnet') else stack.main_objects
+    row = service._store.get_run('r1')
+    row['kind'] = kind
+    lease = {key: row[key] for key in ('run_id', 'round_id', 'kind', 'lease_generation',
+                                      'claim_request_hash', 'lease_expires_at')}
+    # Provider heartbeats renew durable server authority, not the original
+    # claim response held by a foreground runner or its immutable saved file.
+    now = NOW + timedelta(minutes=10)
+    row['lease_expires_at'] = (now + timedelta(minutes=2)).isoformat()
+    service._clock = lambda: now
+    server_before = copy.deepcopy(row)
+    public = stack.client(edge)
+    external = []
+    pending = []
+    config = SimpleNamespace(work_dir=tmp_path / 'work', identity=SimpleNamespace(hotkey='validator'),
+                             round_id=row['round_id'], clock=lambda: now, claim_poll_seconds=30)
+
+    def send(request):
+        external.append(request)
+        paths = list((config.work_dir / 'pending-observations').glob('*.json'))
+        assert len(paths) == 1  # The original survives every unacknowledged request.
+        pending.append(paths[0].read_bytes())
+        response = public.request(request.method, prefix + '/v1/runs/r1/training-observations',
+                                  content=request.content, headers=dict(request.headers))
+        assert response.status_code == (200 if request.method == 'POST' else 204)
+        if request.method == 'POST':
+            assert json.loads(pending[-1])['observations'] == json.loads(request.content)
+            if ack == 'lost':
+                raise httpx.ReadTimeout('synthetic lost final ACK', request=request)
+            document = response.json()
+            if ack == 'wrong':
+                document['payload_sha256'] = WRONG_DIGEST
+            return httpx.Response(200, json=document)
+        headers = dict(response.headers)
+        if ack == 'wrong':
+            headers['etag'] = '"' + WRONG_DIGEST + '"'
+        return httpx.Response(response.status_code, headers=headers)
+
+    with httpx.Client(transport=httpx.MockTransport(send)) as client:
+        config.api = runner.HttpArenaApiClient('http://localhost', client=client)
+        config.api.provider = lambda *_: pytest.fail('capture must not replay paid work')
+        config.input_retention = InputRetention(config)
+        retain = config.input_retention.observations.retained_delivery
+        @contextmanager
+        def replay_after_publish(*args, **kwargs):
+            from tests.lab_arena.input_retention_test import finish_poll
+            with retain(*args, **kwargs) as retained:
+                path, _descriptor = retained
+                original_bytes = path.read_bytes()
+                finish_poll(InputRetention(config))
+                assert path.read_bytes() == original_bytes and external == []
+                yield retained
+        config.input_retention.observations.retained_delivery = replay_after_publish
+        if ack == 'lost':
+            # Shutdown stops background replay before active workers finalize.
+            # Their bounded POST/HEAD recovery must still reach the server.
+            config.input_retention.stop()
+        state = _state(secret=True)
+        state.lease = lease
+        original = copy.deepcopy(state.worker_observations.document())
+        summary = runner._record_training_observations(config, lease, TOKEN, state)
+    assert summary['status'] == ('unavailable' if ack == 'wrong' else 'stored')
+    assert [request.method for request in external] == (['POST'] if ack == 'stored' else ['POST', 'POST', 'HEAD'])
+    assert pending and all(raw == pending[0] for raw in pending)
+    assert json.loads(pending[0])['lease_expires_at'] == lease['lease_expires_at']
+    paths = list((config.work_dir / 'pending-observations').glob('*.json'))
+    assert len(paths) == (1 if ack == 'wrong' else 0)
+    if paths:
+        assert paths[0].read_bytes() == pending[0]
+    assert not (config.work_dir / 'pending-observations' / 'audit').exists()
+    saved = obs.read_snapshot(objects, 'r1', kind, 1, CLAIM_HASH)
+    assert saved['payload'] == obs._validate_payload(original, secrets=(TOKEN,))
+    if ack != 'wrong':
+        assert summary['payload_sha256'] == saved['payload_sha256']
+    assert row == server_before and state.calls == [] and state.action_sequence == 0
+
+
+@pytest.mark.parametrize('prefix', ['/arena', '/testnet/arena'])
+@pytest.mark.parametrize('edge', [False, True])
+@pytest.mark.parametrize('mode', ['replay_expired', 'replay_renewed', 'server_expired', 'token_replaced'])
+def test_stale_claim_replay_obeys_snapshot_window_and_server_authority(
+    public_capture_stack, tmp_path, prefix, edge, mode,
+):
+    from lab_arena.capture_retention import InputRetention
+    from lab_arena.store import hash_lease_token
+
+    stack = public_capture_stack
+    service = stack.testnet if prefix.startswith('/testnet') else stack.main
+    objects = stack.testnet_objects if prefix.startswith('/testnet') else stack.main_objects
+    row = service._store.get_run('r1')
+    lease = {key: row[key] for key in ('run_id', 'round_id', 'kind', 'lease_generation',
+                                      'claim_request_hash', 'lease_expires_at')}
+    now = NOW + timedelta(minutes=10)
+    row['lease_expires_at'] = (now + timedelta(minutes=2)).isoformat()
+    if mode == 'server_expired':
+        row['lease_expires_at'] = (now - timedelta(seconds=181)).isoformat()
+    elif mode == 'token_replaced':
+        row['lease_token_hash'] = hash_lease_token('b' * 64)
+    service._clock = lambda: now
+    server_before = copy.deepcopy(row)
+    public = stack.client(edge)
+    external = []
+
+    def send(request):
+        external.append(request)
+        response = public.request(request.method, prefix + '/v1/runs/r1/training-observations',
+                                  content=request.content, headers=dict(request.headers))
+        return httpx.Response(response.status_code, content=response.content, headers=dict(response.headers))
+
+    with httpx.Client(transport=httpx.MockTransport(send)) as client:
+        config = SimpleNamespace(work_dir=tmp_path / 'work', identity=SimpleNamespace(hotkey='validator'),
+                                 round_id=row['round_id'], clock=lambda: now,
+                                 api=runner.HttpArenaApiClient('http://localhost', client=client))
+        retention = InputRetention(config).observations
+        path = retention.retain(lease, TOKEN, _state().worker_observations.document())
+        original = path.read_bytes()
+        if mode == 'replay_renewed':
+            assert retention.deliver(path, replay=True)
+            assert not path.exists() and not (path.parent / 'audit').exists()
+            assert [request.method for request in external] == ['POST']
+            assert [request.method for request in stack.observed] == ['HEAD', 'POST']
+            assert obs.read_snapshot(objects, 'r1', 'execute', 1, CLAIM_HASH)['payload'] == _state().worker_observations.document()
+            assert row == server_before
+            return
+        if mode == 'replay_expired':
+            now += timedelta(seconds=180)
+            row['lease_expires_at'] = (now + timedelta(minutes=2)).isoformat()
+            server_before = copy.deepcopy(row)
+            assert not retention.deliver(path, replay=True)
+        else:
+            with pytest.raises(runner.RunnerError) as error:
+                retention.deliver(path)
+            assert error.value.http_status == (409 if mode == 'server_expired' else 401)
+    assert not path.exists()
+    audit = next((path.parent / 'audit').iterdir())
+    assert audit.read_bytes() == original
+    assert audit.suffix == ('.expired' if mode == 'replay_expired' else '.rejected')
+    assert [request.method for request in external] == ([] if mode == 'replay_expired' else ['POST'])
+    assert [request.method for request in stack.observed] == ([] if mode == 'replay_expired' else ['HEAD'])
+    assert not list(objects._root.rglob('*.gz'))
+    assert row == server_before

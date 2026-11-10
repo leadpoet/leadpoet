@@ -482,10 +482,19 @@ def create_app(service: ArenaService) -> FastAPI:
         run_id: str, request: Request,
         x_lab_arena_lease: Optional[str] = Header(default=None),
         if_match: Optional[str] = Header(default=None),
+        x_lab_arena_observation_intent: Optional[str] = Header(default=None),
     ) -> Response:
         lease_token = _lease_header(x_lab_arena_lease)
         headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
-        if if_match is None:
+        if x_lab_arena_observation_intent is not None:
+            if x_lab_arena_observation_intent != "final-write" or if_match is not None:
+                raise HTTPException(status_code=400, detail="observation intent invalid")
+            # The gateway sets this only for final POST preauthorization.
+            # This is the same proof the final worker rechecks before storage.
+            await run_in_threadpool(
+                service._training_final_observation_capture_run, run_id, lease_token,
+            )
+        elif if_match is None:
             await run_in_threadpool(
                 service._training_capture_run, run_id, lease_token,
                 allow_observation_finalization=True,
@@ -511,8 +520,7 @@ def create_app(service: ArenaService) -> FastAPI:
         # Only final observations have a bounded lease-expiry grace. Reject
         # unauthorized bodies before buffering, then recheck after upload.
         await run_in_threadpool(
-            service._training_capture_run, run_id, lease_token,
-            allow_observation_finalization=True,
+            service._training_final_observation_capture_run, run_id, lease_token,
         )
         document = await _read_json(request, limits=contracts.StrictLimits(
             max_depth=64, max_list_items=250_000, max_object_keys=250_000,

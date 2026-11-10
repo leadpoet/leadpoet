@@ -1,7 +1,7 @@
-"""Private immutable capture files and bounded replay of original runtime inputs."""
+"""Private immutable inputs/final observations, with one bounded replay operation."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -14,12 +14,15 @@ import threading
 import time
 from typing import Any, Iterator, Mapping
 
-from lab_arena import contracts, training_input
+from lab_arena import contracts, training_input, training_observations
 
 INPUT_GRACE_SECONDS = 180
 INPUT_REPLAY_TIMEOUT_SECONDS = 5.0
 _INPUT_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_input.v1'
 _INPUT_RECORD_LIMIT = training_input.MAX_INPUT_BYTES + 64 * 1024
+_LEGACY_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v1'
+_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v2'
+_OBSERVATION_RECORD_LIMIT = training_observations.MAX_OBJECT_BYTES + 64 * 1024
 _RECORD_NAME = re.compile(r'[0-9a-f]{64}\.json')
 
 
@@ -116,7 +119,10 @@ def _time(value):
 
 
 class InputRetention:
-    """One immutable input per lease; replay never owns execution or completion."""
+    """One controller for retained captures; replay never owns execution/completion."""
+    _record_limit = _INPUT_RECORD_LIMIT
+    _label = 'input'
+
     def __init__(self, config):
         self.config = config
         self._next_poll = 0.0
@@ -124,6 +130,7 @@ class InputRetention:
         self._thread = None
         self._poll_lock = threading.Lock()
         self._stop = threading.Event()
+        self.observations = _FinalObservationRetention(config, self._stop)
 
     def _directory(self, *, create=False):
         return private_directory(self.config.work_dir, 'pending-inputs', create=create)
@@ -260,37 +267,46 @@ class InputRetention:
         except FileExistsError:
             source, saved = os.fstat(descriptor), target.lstat()
             if (source.st_dev, source.st_ino) != (saved.st_dev, saved.st_ino):
-                with locked_record(target, _INPUT_RECORD_LIMIT) as existing:
+                with locked_record(target, self._record_limit) as existing:
                     if existing is None:
-                        raise ValueError('input audit record is active')
+                        raise ValueError(self._label + ' audit record is active')
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     os.lseek(existing, 0, os.SEEK_SET)
-                    if os.read(existing, _INPUT_RECORD_LIMIT + 1) != os.read(descriptor, _INPUT_RECORD_LIMIT + 1):
-                        raise ValueError('input audit identity conflict')
+                    if os.read(existing, self._record_limit + 1) != os.read(descriptor, self._record_limit + 1):
+                        raise ValueError(self._label + ' audit identity conflict')
         # Make the audit link durable before removing the pending name.
         sync_directory(directory)
         path.unlink()
         sync_directory(path.parent)
         import sys
-        print("Arena pending input capture unavailable: " + reason, file=sys.stderr, flush=True)
+        print("Arena pending " + self._label + " capture unavailable: " + reason, file=sys.stderr, flush=True)
 
     def _replay_batch(self):
         deadline = time.monotonic() + INPUT_REPLAY_TIMEOUT_SECONDS
         try:
-            directory = self._directory()
-            if directory is None or self._stop.is_set():
+            if self._stop.is_set():
                 return
-            paths = sorted(path for path in directory.iterdir() if _RECORD_NAME.fullmatch(path.name))
-            paths = [p for p in paths if p.name > self._cursor] + [p for p in paths if p.name <= self._cursor]
-            for path in paths:
-                if self._stop.is_set() or time.monotonic() >= deadline:
-                    break
-                self._cursor = path.name
+            pending = []
+            for owner in (self, self.observations):
                 try:
-                    self.deliver(path, replay=True, replay_deadline=deadline)
+                    directory = owner._directory()
+                    if directory is not None:
+                        pending.extend((directory.name + '/' + path.name, owner, path)
+                            for path in directory.iterdir() if _RECORD_NAME.fullmatch(path.name))
                 except Exception as exc:
                     import sys
-                    print('Arena pending input deferred: %s' % type(exc).__name__, file=sys.stderr, flush=True)
+                    print('Arena pending capture deferred: %s' % type(exc).__name__, file=sys.stderr, flush=True)
+            pending.sort(key=lambda item: item[0])
+            pending = [item for item in pending if item[0] > self._cursor] + [item for item in pending if item[0] <= self._cursor]
+            for key, owner, path in pending:
+                if self._stop.is_set() or time.monotonic() >= deadline:
+                    break
+                self._cursor = key
+                try:
+                    owner.deliver(path, replay=True, replay_deadline=deadline)
+                except Exception as exc:
+                    import sys
+                    print('Arena pending %s deferred: %s' % (owner._label, type(exc).__name__), file=sys.stderr, flush=True)
         except Exception as exc:
             # Never print input, lease credentials or provider content.
             import sys
@@ -313,3 +329,156 @@ class InputRetention:
 
     def stop(self):
         self._stop.set()
+
+
+class _FinalObservationRetention(InputRetention):
+    """Final files share the input controller's one bounded replay operation."""
+    _record_limit = _OBSERVATION_RECORD_LIMIT
+    _label = 'observations'
+
+    def __init__(self, config, stop):
+        self.config, self._stop = config, stop
+
+    def _directory(self, *, create=False):
+        return private_directory(self.config.work_dir, 'pending-observations', create=create)
+
+    def _prepare(self, lease, token, document, expected_digest=None, *, retained_at=None):
+        training_observations.object_ref(lease['run_id'], lease['lease_generation'], lease['claim_request_hash'])
+        expiry = _time(lease['lease_expires_at'])
+        now = _time(self.config.clock())
+        retained_at = now if retained_at is None else _time(retained_at)
+        if retained_at > now:
+            raise ValueError('observation capture clock is invalid')
+        if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{64}', token):
+            raise ValueError('observation capture token is invalid')
+        if not isinstance(lease.get('round_id'), str) or not lease['round_id']:
+            raise ValueError('observation capture round is invalid')
+        if expected_digest is None:
+            expected_digest = contracts.document_hash(training_observations._validate_payload(document, secrets=(token,)))
+        if lease.get('kind', 'execute') not in {'execute', 'score'}:
+            raise ValueError('observation capture kind is invalid')
+        if not contracts.SHA256_RE.fullmatch(expected_digest):
+            raise ValueError('observation capture digest is invalid')
+        return {'schema_version': _OBSERVATION_RECORD_SCHEMA, 'validator_hotkey': self.config.identity.hotkey,
+            'round_id': lease['round_id'], 'run_id': lease['run_id'], 'kind': lease.get('kind', 'execute'),
+            'lease_generation': lease['lease_generation'], 'claim_request_hash': lease['claim_request_hash'],
+            'lease_token': token, 'lease_expires_at': expiry.isoformat(), 'retained_at': retained_at.isoformat(),
+            'observations': document,
+            'original_observations_sha256': contracts.document_hash(document), 'expected_payload_sha256': expected_digest,
+            'expected_snapshot_schema': training_observations.SCHEMA_VERSION if 'response_receipts' in document else training_observations.LEGACY_SCHEMA_VERSION}
+
+    def _read(self, descriptor, path):
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(descriptor), 'rb') as source:
+            raw = source.read(self._record_limit + 1)
+        if len(raw) > self._record_limit:
+            raise ValueError('pending observations exceed limit')
+        record = json.loads(raw)
+        schema = record.get('schema_version')
+        if (schema not in {_OBSERVATION_RECORD_SCHEMA, _LEGACY_OBSERVATION_RECORD_SCHEMA}
+                or record.get('validator_hotkey') != self.config.identity.hotkey
+                or self.config.round_id is not None and record.get('round_id') != self.config.round_id
+                or path.name != self._name(record)
+                or (schema == _OBSERVATION_RECORD_SCHEMA) != ('retained_at' in record)):
+            raise ValueError('pending observation identity is invalid')
+        expected = self._prepare(record, record['lease_token'], record['observations'],
+                                 retained_at=record.get('retained_at'))
+        if schema == _LEGACY_OBSERVATION_RECORD_SCHEMA:
+            # Existing files retain their old claim-expiry replay fence. Never
+            # manufacture a new finalization time when an old file is read.
+            expected['schema_version'] = schema
+            expected.pop('retained_at')
+        if expected != record:
+            raise ValueError('pending observation identity is invalid')
+        return record
+
+    @contextmanager
+    def retained_delivery(self, lease, token, document, *, expected_digest=None):
+        """Keep replay outside the foreground's publish-to-ack operation."""
+        record = self._prepare(lease, token, document, expected_digest)
+        path = self._directory(create=True) / self._name(record)
+        with retained_record(path, contracts.canonical_json(record).encode('utf-8'), self._record_limit,
+                             label=self._label) as (descriptor, created):
+            if not created:
+                existing = self._read(descriptor, path)
+                # Repeated foreground delivery cannot refresh the replay fence.
+                expected = dict(record, schema_version=existing['schema_version'])
+                if 'retained_at' in existing:
+                    expected['retained_at'] = existing['retained_at']
+                else:
+                    expected.pop('retained_at')
+                if existing != expected:
+                    raise ValueError('pending observation identity conflict')
+            yield path, descriptor
+
+    def retain(self, lease, token, document, *, expected_digest=None):
+        with self.retained_delivery(lease, token, document, expected_digest=expected_digest) as (path, _):
+            return path
+
+    @staticmethod
+    def matches(record, response):
+        return (isinstance(response, Mapping) and response.get('status') == 'stored'
+            and getattr(response, 'http_status', 200) == 200 and response.get('http_status', 200) == 200
+            and response.get('schema_version') == record['expected_snapshot_schema']
+            and response.get('ref') == training_observations.object_ref(record['run_id'], record['lease_generation'], record['claim_request_hash'])
+            and type(response.get('lease_generation')) is int and response['lease_generation'] == record['lease_generation']
+            and response.get('claim_request_hash') == record['claim_request_hash']
+            and response.get('payload_sha256') == record['expected_payload_sha256'])
+
+    def acknowledge_verified(self, path, payload_sha256, *, _descriptor=None):
+        """Called only after the authenticated exact-digest HEAD succeeds."""
+        lock = nullcontext(_descriptor) if _descriptor is not None else locked_record(path, self._record_limit, label=self._label)
+        with lock as descriptor:
+            if descriptor is None or not path.exists() or self._read(descriptor, path)['expected_payload_sha256'] != payload_sha256:
+                return False
+            path.unlink()
+            sync_directory(path.parent)
+            return True
+
+    def deliver(self, path, *, replay=False, replay_deadline=None, _descriptor=None):
+        if replay_deadline is not None and time.monotonic() >= replay_deadline:
+            return False
+        # Foreground callers already own the retained inode lock. Reopening
+        # and flocking it here would conflict with that same operation.
+        lock = nullcontext(_descriptor) if _descriptor is not None else locked_record(path, self._record_limit, label=self._label)
+        with lock as descriptor:
+            if descriptor is None or not path.exists():
+                return False
+            try:
+                record = self._read(descriptor, path)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                self._park(path, 'invalid', descriptor)
+                raise
+            anchor = record.get('retained_at', record['lease_expires_at'])
+            remaining = (_time(anchor) + timedelta(seconds=INPUT_GRACE_SECONDS) - self.config.clock()).total_seconds()
+            # Replay gets one bounded window from final snapshot retention;
+            # legacy files keep their original claim-expiry fence. Foreground
+            # delivery uses current server authority after provider renewals.
+            if replay and remaining <= 0:
+                self._park(path, 'expired', descriptor)
+                return False
+            if replay_deadline is not None:
+                remaining = min(remaining, replay_deadline - time.monotonic())
+                if remaining <= 0:
+                    return False
+            if replay and self._stop.is_set():
+                return False
+            try:
+                args = (record['run_id'], record['lease_token'], record['observations'])
+                response = (self.config.api.training_observations(*args,
+                    timeout_seconds=min(INPUT_REPLAY_TIMEOUT_SECONDS, remaining)) if replay
+                    else self.config.api.training_observations(*args))
+            except Exception as exc:
+                if getattr(exc, 'http_status', None) in {400, 401, 403, 404, 409, 413, 422}:
+                    self._park(path, 'rejected', descriptor)
+                raise
+            if self.matches(record, response):
+                path.unlink()
+                sync_directory(path.parent)
+                return True
+            status = getattr(response, 'http_status', None)
+            if status is None and isinstance(response, Mapping):
+                status = response.get('http_status')
+            if status in {400, 401, 403, 404, 409, 413, 422}:
+                self._park(path, 'rejected', descriptor)
+            return False

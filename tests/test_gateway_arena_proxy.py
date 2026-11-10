@@ -329,7 +329,8 @@ async def test_observation_upload_authorizes_before_reading_more_than_eight_mib(
         assert routing == ({"testnet": True} if testnet else {})
         if method == "HEAD":
             assert path == "v1/runs/r1/training-observations" and query == "" and body == b""
-            assert headers == {"x-lab-arena-lease": "a" * 64}
+            assert headers == {"x-lab-arena-lease": "a" * 64,
+                               "x-lab-arena-observation-intent": "final-write"}
             return httpx.Response(204)
         assert path == "v1/runs/r1/training-observations"
         assert query == "private=not-preflight" and len(body) > 8 * 1024 * 1024

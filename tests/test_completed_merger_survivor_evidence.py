@@ -87,3 +87,15 @@ def test_completed_merger_still_requires_exact_loaded_source_and_company(entry_i
             first_party_domains={"udemy.com"}, identity_names=names, requested_stage="acquired",
         )["stage"]
         assert finding["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    "If Merger Sub merged with and into Acme Analytics, with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings.",
+    "Unless Merger Sub merged with and into Acme Analytics, with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings.",
+    "Merger Sub conditionally merged with and into Acme Analytics, with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings.",
+    "Merger Sub merged with and into Acme Analytics, with Acme Analytics continuing as a direct wholly owned subsidiary of Parent Holdings, subject to regulatory approval.",
+    "If Merger Sub merged with and into Acme Analytics, with Acme Analytics continuing as the Surviving Corporation and as a direct wholly owned subsidiary of Parent Holdings.",
+])
+def test_complete_merger_condition_cannot_escape_the_context_window(quote):
+    assert not lead_scorer._acquired_stage_quote_supports_names(("Acme Analytics",), quote)
+    assert not lead_scorer._stage_quote_supports_observation("acquired", quote)

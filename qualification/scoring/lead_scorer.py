@@ -637,6 +637,12 @@ def _has_affirmed_stage_proof(
 
     for pattern in patterns:
         for match in pattern.finditer(text):
+            if pattern is _COMPLETED_MERGER_SURVIVOR_RE and re.search(
+                r"\b(?:if|unless|conditional(?:ly)?|subject\s+to)\b", text, re.I,
+            ):
+                # This full merger predicate can exceed the ordinary context
+                # window. Conditions anywhere in its bounded quote stay binding.
+                continue
             prefix = re.split(
                 r"[.!?;:\n]|\bbut\b|\bhowever\b",
                 text[max(0, match.start() - 100):match.start()],
@@ -1487,6 +1493,10 @@ def _acquired_stage_quote_supports_names(
         return False
     for pattern in _BOUND_ACQUISITION_SUBJECT_PATTERNS:
         for match in pattern.finditer(quote):
+            if pattern is _COMPLETED_MERGER_SURVIVOR_RE and re.search(
+                r"\b(?:if|unless|conditional(?:ly)?|subject\s+to)\b", quote, re.I,
+            ):
+                continue
             context = quote[max(0, match.start() - 100):match.end() + 100]
             exact_match = re.compile(re.escape(match.group(0)), re.I)
             if not _has_affirmed_stage_proof(

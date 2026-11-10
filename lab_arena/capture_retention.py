@@ -288,7 +288,11 @@ class InputRetention:
         print("Arena pending " + self._label + " capture unavailable: " + reason, file=sys.stderr, flush=True)
 
     def _replay_batch(self):
-        deadline = time.monotonic() + INPUT_REPLAY_TIMEOUT_SECONDS
+        # Drain one finite snapshot under the existing grace-sized admission
+        # bound. A five-second sweep otherwise admits only one large final
+        # between the runner's thirty-second polls. Each record still gets
+        # its own bounded HTTP attempt, never a retry inside this sweep.
+        deadline = time.monotonic() + INPUT_GRACE_SECONDS
         try:
             if self._stop.is_set():
                 return
@@ -309,7 +313,8 @@ class InputRetention:
                     break
                 self._cursor = key
                 try:
-                    owner.deliver(path, replay=True, replay_deadline=deadline)
+                    owner.deliver(path, replay=True, replay_deadline=(
+                        time.monotonic() + INPUT_REPLAY_TIMEOUT_SECONDS))
                 except Exception as exc:
                     import sys
                     print('Arena pending %s deferred: %s' % (owner._label, type(exc).__name__), file=sys.stderr, flush=True)
@@ -471,7 +476,7 @@ class _FinalObservationRetention(InputRetention):
                 # This final was admitted before the batch deadline. Its
                 # local privacy/identity validation can exceed the network
                 # budget for large documents. Exclude only that work here;
-                # the unchanged outer deadline prevents another slow record.
+                # the outer deadline still stops admission of later records.
                 remaining = min(remaining, replay_deadline + validation_seconds - time.monotonic())
                 if remaining <= 0:
                     return False

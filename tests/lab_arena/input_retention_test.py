@@ -468,7 +468,7 @@ def test_recovered_gateway_drains_more_than_six_distinct_pending_inputs_per_poll
     assert not any(path.exists() for path in paths)
 
 
-def test_replay_batch_has_one_total_budget_and_never_retries_a_record_inside_it(tmp_path, monkeypatch):
+def test_replay_batch_uses_bounded_attempts_and_never_retries_a_record_inside_it(tmp_path, monkeypatch):
     config, _rows, paths, _service, _objects, api, _clock = pending_burst(tmp_path, 8)
     monotonic = [0.0]
     monkeypatch.setattr(capture_retention, 'time', SimpleNamespace(monotonic=lambda: monotonic[0]))
@@ -481,10 +481,10 @@ def test_replay_batch_has_one_total_budget_and_never_retries_a_record_inside_it(
     api.training_input = timed
     api.fail = 1
     finish_poll(config.input_retention)
-    assert len(api.calls) == 3
-    assert len({row[0] for row in api.calls}) == 3
-    assert [row[3] for row in api.calls] == [5, 3, 1]
-    assert sum(path.exists() for path in paths) == 6
+    assert len(api.calls) == 8
+    assert len({row[0] for row in api.calls}) == 8
+    assert [row[3] for row in api.calls] == [5] * 8
+    assert sum(path.exists() for path in paths) == 1
     assert not config.input_retention._thread.is_alive()
     finish_poll(config.input_retention)
     finish_poll(config.input_retention)

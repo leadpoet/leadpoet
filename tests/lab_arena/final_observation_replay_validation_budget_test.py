@@ -33,7 +33,7 @@ def test_slow_final_records_use_one_post_each_and_rotate_between_batches(tmp_pat
     config, lease, _service, _objects, api, _clock = observation_local(tmp_path)
     retention = config.input_retention
     paths = [retention.observations.retain(dict(lease, run_id='run-%d' % index),
-             TOKEN, payload(observation())) for index in range(3)]
+             TOKEN, payload(observation())) for index in range(32)]
     monotonic = [100.0]
     monkeypatch.setattr(capture_retention.time, 'monotonic', lambda: monotonic[0])
     read = retention.observations._read
@@ -56,15 +56,15 @@ def test_slow_final_records_use_one_post_each_and_rotate_between_batches(tmp_pat
 
     monkeypatch.setattr(retention.observations, '_read', expensive_validation)
     api.training_observations = send
-    for count in range(1, 4):
+    for count in (30, 32):
         retention._replay_batch()
         assert len(validated) == len(api.observation_calls) == count
-        assert sum(path.exists() for path in paths) == 3 - count
-    assert len(set(validated)) == 3
+        assert sum(path.exists() for path in paths) == 32 - count
+    assert len(set(validated)) == 32
     assert all(0 < call[3] <= capture_retention.INPUT_REPLAY_TIMEOUT_SECONDS
                for call in api.observation_calls)
     retention._replay_batch()
-    assert len(api.observation_calls) == 3
+    assert len(api.observation_calls) == 32
 
 
 @pytest.mark.parametrize('condition', ['expired', 'stopped'])

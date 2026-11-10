@@ -565,7 +565,38 @@ _PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(r"\b(?:ceased|stopped)\s+trading\b", re.I),
     _COMPLETED_PRIVATE_EQUITY_ACQUISITION_RE,
 )
+_COMPLETED_MERGER_SURVIVOR_RE = re.compile(
+    r"\b(?:has\s+been\s+)?merged\s+with\s+and\s+into\s+"
+    r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+    r'(?:\s+\((?:the\s+)?[“"]?merger[”"]?\))?\s*,\s*with\s+(?P=subject)\s+'
+    r"(?:surviving\s+the\s+merger|continuing)\s+as\s+"
+    r"(?:the\s+surviving\s+corporation\s+and\s+as\s+)?"
+    r"(?:a\s+)?(?:direct\s+)?wholly[- ]owned\s+subsidiary\s+of\b",
+    re.I,
+)
+
+
+def _completed_merger_match_has_uncertainty(text: str, match: re.Match) -> bool:
+    """Apply a conservative uncertainty fence to this new, bounded proof form."""
+
+    context = re.sub(r"\s+", " ", text)
+    prefix = re.sub(r"\s+", " ", text[:match.start()])
+    return bool(
+        re.search(
+            r"\b(?:if|unless|conditional(?:ly)?|subject\s+to|not|never|no|without|"
+            r"unconfirmed|rumou?red|plans?|planned|planning|proposed|future|seeks?|"
+            r"seeking|expects?|expected|targets?|targeted|pending|might|could|would|will|"
+            r"should|shall|must|anticipates?|anticipated|intends?|intended|scheduled|"
+            r"failed|denied|cancelled|canceled|aborted|whether|possible|possibly|potentially)\b",
+            context, re.I,
+        )
+        or _has_stage_proof_uncertainty(prefix)
+        or _STAGE_PROOF_HISTORICAL_RE.search(prefix)
+    )
+
+
 _ACQUIRED_STAGE_PROOF_PATTERNS = (
+    _COMPLETED_MERGER_SURVIVOR_RE,
     re.compile(
         r"\b(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",
         re.I,
@@ -627,6 +658,10 @@ def _has_affirmed_stage_proof(
 
     for pattern in patterns:
         for match in pattern.finditer(text):
+            if pattern is _COMPLETED_MERGER_SURVIVOR_RE and (
+                _completed_merger_match_has_uncertainty(text, match)
+            ):
+                continue
             prefix = re.split(
                 r"[.!?;:\n]|\bbut\b|\bhowever\b",
                 text[max(0, match.start() - 100):match.start()],
@@ -1179,6 +1214,10 @@ def _stage_evidence_supports_observation(
 
 
 _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
+    # A completed merger must name the same surviving target twice and state
+    # its wholly owned subsidiary result. A buyer or another named party does
+    # not inherit that target's stage. The shared uncertainty guards still run.
+    _COMPLETED_MERGER_SURVIVOR_RE,
     re.compile(
         r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
         r"(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",
@@ -1473,6 +1512,10 @@ def _acquired_stage_quote_supports_names(
         return False
     for pattern in _BOUND_ACQUISITION_SUBJECT_PATTERNS:
         for match in pattern.finditer(quote):
+            if pattern is _COMPLETED_MERGER_SURVIVOR_RE and (
+                _completed_merger_match_has_uncertainty(quote, match)
+            ):
+                continue
             context = quote[max(0, match.start() - 100):match.end() + 100]
             exact_match = re.compile(re.escape(match.group(0)), re.I)
             if not _has_affirmed_stage_proof(

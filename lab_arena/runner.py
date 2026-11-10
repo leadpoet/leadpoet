@@ -875,6 +875,7 @@ class HttpArenaApiClient:
 
     def training_observations(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
+        *, timeout_seconds: float = TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
         training_input.object_ref(run_id, 1)
         if len(contracts.canonical_json(document).encode("utf-8")) > training_observations.MAX_OBJECT_BYTES:
@@ -882,7 +883,7 @@ class HttpArenaApiClient:
         return self._post(
             "/arena/v1/runs/%s/training-observations" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
+            timeout_seconds=min(TRAINING_OBSERVATIONS_TIMEOUT_SECONDS, max(0.001, float(timeout_seconds))),
             preserve_http_status=True,
         )
 
@@ -903,6 +904,7 @@ class HttpArenaApiClient:
 
     def training_observation_segment(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
+        *, timeout_seconds: float = TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
         training_input.object_ref(run_id, 1)
         if len(contracts.canonical_json(document).encode("utf-8")) > training_observations.MAX_SEGMENT_BYTES:
@@ -910,7 +912,7 @@ class HttpArenaApiClient:
         return self._post(
             "/arena/v1/runs/%s/training-observation-segments" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=10.0,
+            timeout_seconds=min(TRAINING_OBSERVATIONS_TIMEOUT_SECONDS, max(0.001, float(timeout_seconds))),
             preserve_http_status=True,
         )
 
@@ -4126,20 +4128,35 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
         expected_digest = contracts.document_hash(training_observations._validate_payload(
             document, secrets=(lease_token,),
         ))
-        for attempt in range(2):
-            try:
-                result = send(str(lease["run_id"]), lease_token, document)
-                if (not isinstance(result, Mapping) or result.get("status") != "stored"
-                        or getattr(result, "http_status", 200) != 200
-                        or result.get("payload_sha256") != expected_digest):
-                    raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
-                return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
-            except Exception:
-                if attempt:
-                    verify = getattr(config.api, "verify_training_observations", None)
-                    if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
+        retention = getattr(getattr(config, "input_retention", None), "observations", None)
+        with ExitStack() as saved:
+            retained = descriptor = None
+            if retention is not None:
+                try:
+                    retained, descriptor = saved.enter_context(retention.retained_delivery(
+                        lease, lease_token, document, expected_digest=expected_digest))
+                except Exception as exc:
+                    _log_training_capture_failure("observations", exc)
+            for attempt in range(2):
+                try:
+                    if retained is not None:
+                        if not retention.deliver(retained, _descriptor=descriptor):
+                            raise RunnerError("retained training observations acknowledgment unavailable")
                         return {**summary, "status": "stored", "payload_sha256": expected_digest}
-                    raise
+                    result = send(str(lease["run_id"]), lease_token, document)
+                    if (not isinstance(result, Mapping) or result.get("status") != "stored"
+                            or getattr(result, "http_status", 200) != 200
+                            or result.get("payload_sha256") != expected_digest):
+                        raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
+                    return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
+                except Exception:
+                    if attempt:
+                        verify = getattr(config.api, "verify_training_observations", None)
+                        if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
+                            if retained is not None:
+                                retention.acknowledge_verified(retained, expected_digest, _descriptor=descriptor)
+                            return {**summary, "status": "stored", "payload_sha256": expected_digest}
+                        raise
     except Exception as exc:
         try:
             _log_training_capture_failure("observations", exc)
@@ -4178,8 +4195,9 @@ class _ObservationJournal:
 
     def stop(self) -> None:
         # The same uploader owns the final delta and any ambiguous retry.
-        # An already admitted segment has its existing ten-second transport
-        # window; at most two further requests fit this fixed stop allowance.
+        # An admitted periodic request can finish after this fixed join
+        # allowance. New terminal HTTP timeouts use the remaining allowance;
+        # no later delta can start after the final snapshot freezes.
         if self.stop_deadline is None:
             self.stop_deadline = time.monotonic() + self.STOP_TIMEOUT_SECONDS
         self.stop_event.set()
@@ -4304,9 +4322,22 @@ class _ObservationJournal:
         if self.pending is None:
             return False
         document, digest, observations, receipts, agents, prepared = self.pending
+        timeout_seconds = TRAINING_OBSERVATIONS_TIMEOUT_SECONDS
+        if self.stop_event.is_set():
+            if self.stop_deadline is None:
+                return False
+            remaining = self.stop_deadline - time.monotonic()
+            if remaining < TRAINING_CAPTURE_TIMEOUT_SECONDS:
+                return False
+            timeout_seconds = min(timeout_seconds, remaining)
         try:
-            result = self.api.training_observation_segment(
-                str(self.lease["run_id"]), self.token, document)
+            if isinstance(self.api, HttpArenaApiClient):
+                result = self.api.training_observation_segment(
+                    str(self.lease["run_id"]), self.token, document,
+                    timeout_seconds=timeout_seconds)
+            else:
+                result = self.api.training_observation_segment(
+                    str(self.lease["run_id"]), self.token, document)
             if (not isinstance(result, Mapping) or result.get("status") != "stored"
                     or result.get("number") != self.number
                     or result.get("segment_sha256") != digest):

@@ -26,6 +26,8 @@ class ObservationService(CaptureService):
     def _training_capture_run(self, *args, **kwargs):
         return {}
 
+    _training_final_observation_capture_run = _training_capture_run
+
     def blocked(self, run_id, token, document):
         with self.lock:
             self.observation_calls.append(run_id)

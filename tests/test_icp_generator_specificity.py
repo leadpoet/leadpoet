@@ -138,8 +138,7 @@ def test_prompt_no_longer_instructs_barebone_shapes():
 
 
 def test_prompt_reserves_and_for_requirements_every_company_must_meet(monkeypatch):
-    """Scoring treats offerings, capabilities and sales channels joined with
-    "and" as separate requirements. On 2026-11-09 a ``product_service`` that
+    """On 2026-11-09 a ``product_service`` that
     listed "a branded online store and marketplaces" left most
     direct-to-consumer brands unproven, while its ``required_attribute`` asked
     for the store alone. The prompt sent to the author must say how such lists
@@ -155,17 +154,13 @@ def test_prompt_reserves_and_for_requirements_every_company_must_meet(monkeypatc
     )
     assert "manage pipeline, deals, and customer workflows" not in prompt
     assert prompt.count("manage pipeline, deals, or customer workflows") == 2
-    assert (
-        'Offerings, capabilities and sales channels joined with "and" are each '
-        "treated as\nrequired and must each be proven for the same company"
-    ) in prompt
+    assert 'write "must provide both A and B" or "must provide all of A, B and C"' in prompt
     assert 'no catch-all such as "or other software"' in prompt
-    assert "Use \"and\" only when every\nqualifying company must do both." in prompt
-    assert (
-        "`product_service` must not require anything that\n`required_attribute` "
-        "leaves optional."
-    ) in prompt
-    assert "11. Must EVERY qualifying company, not only the named example" in prompt
+    assert 'ordinary descriptive "and" list' in prompt
+    assert 'an alternative in one must not become mandatory in the other' in prompt
+    assert 'different, nonconflicting requirements' in prompt
+    assert 'Preserve each intended mandatory requirement' in prompt
+    assert 'do not turn it into an alternative merely to broaden the ICP' in prompt
 
 
 def test_generated_brief_states_structured_required_and_bonus_intents():

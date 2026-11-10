@@ -1363,14 +1363,16 @@ narrow it to a single tool, a single named event, or a niche so tight that fewer
 handful of companies qualify. Specificity belongs in the phrasing, not in shrinking the
 candidate pool.
 
-PRODUCT/SERVICE AND REQUIRED ATTRIBUTE — "AND" LISTS ARE CHECKED ITEM BY ITEM:
+PRODUCT/SERVICE AND REQUIRED ATTRIBUTE — MAKE REQUIREMENTS AND ALTERNATIVES EXPLICIT:
 Each candidate company is verified against `product_service` and `required_attribute` as
-written. Offerings, capabilities and sales channels joined with "and" are each treated as
-required and must each be proven for the same company; items joined with "or" need only
-one. Join alternatives with "or", and keep every alternative as specific as the rest of
-the sentence: no catch-all such as "or other software". Use "and" only when every
-qualifying company must do both. `product_service` must not require anything that
-`required_attribute` leaves optional.
+written. Join alternatives with "or", and keep every alternative as specific as the rest
+of the sentence: no catch-all such as "or other software". For mandatory combinations,
+write "must provide both A and B" or "must provide all of A, B and C". Do not rely on an
+ordinary descriptive "and" list to express a separate requirement for every item.
+Every explicitly required offering, capability and sales channel must be proven at its
+stated company or product scope. Keep shared conditions consistent across both fields:
+an alternative in one must not become mandatory in the other. The fields may impose
+different, nonconflicting requirements; they do not have to repeat one another.
 
 ALLOWED COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
 
@@ -1454,7 +1456,7 @@ FINAL CHECK before output (for every ICP):
 8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
 9. No job titles, no seniority, no contact-level descriptors in the prompts?
 10. Is the exact stage quota met, with no implicit funding/ownership-stage restrictions in the remaining ICPs?
-11. Must EVERY qualifying company, not only the named example, do each offering, capability and sales channel joined with "and" in `product_service` and `required_attribute`, and does `product_service` require nothing that `required_attribute` leaves optional? If not, join the true alternatives with "or" or remove the item."""
+11. Are mandatory combinations explicit with "must", "both" or "all", true alternatives joined with "or", and shared conditions consistent between `product_service` and `required_attribute`? Preserve each intended mandatory requirement; do not turn it into an alternative merely to broaden the ICP."""
 
     international_target = international_icp_target(total_icps)
     stage_target = generated_stage_target(total_icps)

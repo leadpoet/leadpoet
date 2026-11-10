@@ -150,7 +150,7 @@ def test_queued_final_after_completion_has_exact_180_second_boundary(tmp_path, d
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('denial', ['expired_finish', 'wrong_token', 'immutable_conflict'])
+@pytest.mark.parametrize('denial', ['expired_finish', 'wrong_token', 'wrong_generation', 'wrong_claim', 'immutable_conflict'])
 def test_unusable_replay_parks_exact_final_for_audit(tmp_path, denial):
     config, lease, service, objects, api, clock = observation_local(tmp_path)
     original = payload(observation())
@@ -162,14 +162,18 @@ def test_unusable_replay_parks_exact_final_for_audit(tmp_path, denial):
         clock[0] += timedelta(seconds=181)
     elif denial == 'wrong_token':
         row['lease_token_hash'] = 'sha256:' + '0' * 64
+    elif denial == 'wrong_generation':
+        row['lease_generation'] = 2
+    elif denial == 'wrong_claim':
+        row['claim_request_hash'] = 'invalid'
     else:
         service.handle_training_observations('r1', TOKEN, payload())
     finish_poll(config.input_retention)
-    attempts = 0 if denial == 'expired_finish' else 1
+    attempts = 1
     assert not path.exists() and len(api.observation_calls) == attempts
     audit = next((path.parent / 'audit').iterdir())
     assert audit.read_bytes() == original_bytes
-    assert audit.suffix == ('.expired' if denial == 'expired_finish' else '.rejected')
+    assert audit.suffix == '.rejected'
     finish_poll(config.input_retention)
     assert len(api.observation_calls) == attempts
 
@@ -358,7 +362,7 @@ def test_cache_only_finish_proof_rejects_every_unreliable_anchor(tmp_path, damag
 
 
 @pytest.mark.parametrize('head_seconds', [0, 60])
-def test_foreground_timeouts_leave_only_remaining_snapshot_replay_window(tmp_path, head_seconds):
+def test_foreground_timeouts_preserve_a_bounded_snapshot_replay_window(tmp_path, head_seconds):
     config, lease, _service, objects, api, clock = observation_local(tmp_path)
     timeouts = []
     def unavailable(_run, _token, _document, *, timeout_seconds=None):
@@ -382,15 +386,11 @@ def test_foreground_timeouts_leave_only_remaining_snapshot_replay_window(tmp_pat
     path = next((config.work_dir/'pending-observations').glob('*.json'))
     original = path.read_bytes()
     finish_poll(config.input_retention)
-    if head_seconds == 0:
-        assert len(timeouts) == 3 and timeouts[:2] == [60, 60] and 0 < timeouts[2] <= 5
-        assert path.read_bytes() == original
-    else:
-        # Two full POST timeouts and a full HEAD consume the entire window.
-        assert timeouts == [60, 60] and not path.exists()
+    assert len(timeouts) == 3 and timeouts[:2] == [60, 60] and 0 < timeouts[2] <= 5
+    assert path.read_bytes() == original
     attempts = tuple(timeouts)
     assert not list((tmp_path/'objects').rglob('*.gz'))
-    clock[0] = NOW + timedelta(seconds=180)
+    clock[0] = NOW + timedelta(seconds=capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS)
     finish_poll(config.input_retention)
     assert not path.exists() and tuple(timeouts) == attempts
     audit = next((path.parent/'audit').iterdir())
@@ -399,7 +399,11 @@ def test_foreground_timeouts_leave_only_remaining_snapshot_replay_window(tmp_pat
     assert tuple(timeouts) == attempts
 
 
-@pytest.mark.parametrize('seconds,allowed', [(179.999, True), (180, False), (181, False)])
+@pytest.mark.parametrize('seconds,allowed', [
+    (capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS - .001, True),
+    (capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS, False),
+    (capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS + 1, False),
+])
 def test_delayed_final_replay_keeps_snapshot_retention_bound_after_server_renewal(tmp_path, seconds, allowed):
     config, lease, service, _objects, api, clock = observation_local(tmp_path)
     path = config.input_retention.observations.retain(lease, TOKEN, payload(observation()))
@@ -488,7 +492,7 @@ def test_repeated_retention_never_refreshes_snapshot_replay_deadline(tmp_path):
     document = payload(observation())
     path = capture.retain(lease, TOKEN, document)
     original = path.read_bytes()
-    clock[0] += timedelta(seconds=181)
+    clock[0] += timedelta(seconds=capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS + 1)
     assert capture.retain(lease, TOKEN, document) == path
     assert path.read_bytes() == original
     assert not capture.deliver(path, replay=True) and not api.observation_calls

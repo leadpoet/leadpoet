@@ -199,6 +199,42 @@ def deepline_cost(response_json: Any) -> Optional[ProviderCost]:
     return None
 
 
+def deepline_final_no_result_cost(
+    document: Any, *, request_id: Optional[str], execution_key: Optional[str],
+    operation: Optional[str], operation_aliases: Sequence[str] = (),
+) -> Optional[ProviderCost]:
+    """Price a terminal negative result without treating it as a positive match.
+
+    The authenticated response must bind the current execution and expose one
+    consistent final price. Missing proof keeps the existing exact-bill path.
+    """
+
+    if (not isinstance(document, Mapping) or document.get("status") != "no_result"
+        or document.get("error") is not None or document.get("tool_error") is not None
+        or not isinstance(request_id, str) or not request_id.strip()
+        or len(request_id) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
+        or not isinstance(execution_key, str) or not execution_key
+        or document.get("job_id") != request_id
+        or any(document[name] != request_id for name in ("request_id", "requestId") if name in document)
+        or any(document[name] not in (operation, *operation_aliases)
+               for name in ("operation", "toolId") if name in document)):
+        return None
+    recovery, result, billing = (document.get(name) for name in ("executionRecovery", "result", "billing"))
+    if (not isinstance(recovery, Mapping)
+        or recovery.get("idempotencyKey") != execution_key
+        or recovery.get("state") != "completed"
+        or not isinstance(result, Mapping) or not isinstance(result.get("data"), (Mapping, list))
+        or not isinstance(billing, Mapping) or billing.get("pricing_status") != "final"
+        or billing.get("billing_mode") == "async_hold"):
+        return None
+    credits = _decimal(billing.get("credits_charged"))
+    usd = _decimal(billing.get("cost_usd"))
+    if (credits is None or usd is None or usd != credits * DEEPLINE_USD_PER_CREDIT
+        or any(_decimal(billing[name]) != credits for name in _DEEPLINE_CREDIT_FIELDS if name in billing)):
+        return None
+    return deepline_cost(document)
+
+
 def deepline_billing_history_cost(
     response_json: Any, *, request_id: str, operation: str, current_offset: int = 0
 ) -> Tuple[str, Optional[ProviderCost], bool, Optional[int]]:

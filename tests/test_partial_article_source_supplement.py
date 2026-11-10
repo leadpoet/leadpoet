@@ -37,7 +37,7 @@ def sd_result():
     return {"ok": True, "stage": "sd:baseline", "content": "Original acquisition fact.",
             "partial_article": True, "source_title": "Original title",
             "source_publication_date": "2025-11-13",
-            "meta": {"ownership_archive_url": "https://web.archive.org/web/20251113/" + URL}}
+            "meta": {"observed_ownership_links": []}}
 
 
 @pytest.mark.parametrize("body", [
@@ -149,7 +149,7 @@ async def test_shared_native_route_uses_one_optional_helper(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_wayback_partial_marker_preserves_archive_source_date_and_ownership(monkeypatch):
+async def test_wayback_preserves_archive_source_without_current_supplement(monkeypatch):
     snapshot = "https://web.archive.org/web/20261109000101/" + URL
     raw = HTML.replace("<head>", '<head><meta property="article:published_time" content="2025-11-13">')
     raw = raw.replace("</style>", "/*" + "x" * verifier.MAX_SCRAPED_CHARS + "*/</style>")
@@ -166,18 +166,37 @@ async def test_wayback_partial_marker_preserves_archive_source_date_and_ownershi
         return httpx.Response(200, text=raw, request=request)
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "offline-placeholder")
     monkeypatch.setattr(verifier.httpx, "AsyncClient", lambda *a, **kw: real_client(transport=httpx.MockTransport(respond)))
-    supplement = AsyncMock(return_value={"ok": True, "stage": "exa_scraped", "content": FULL_TEXT,
+    current_only = "Current-only acquisition claim that was absent from the archived source."
+    supplement = AsyncMock(return_value={"ok": True, "stage": "exa_scraped", "content": current_only,
                                         "source_publication_date": "2099-01-01"})
     monkeypatch.setattr(verifier, "_scrape_exa", supplement)
     result = await verifier._fetch_sd_then_exa([URL])
     source = result["results"][0]
     assert source["url"] == URL and source["source_publication_date"] == "2025-11-13"
-    assert source["meta"]["ownership_archive_url"] == snapshot
-    assert source["text"].startswith(helper.extract_article_body(raw) + "\n\n")
-    assert result["statuses"][0]["stage"] == "wayback"
-    assert result["statuses"][1]["source"] == "exa_fallback"
+    assert source["meta"] == {
+        "ownership_archive_url": snapshot,
+        "observed_ownership_links": verifier._observed_ownership_links(raw, URL, archive_url=snapshot),
+    }
+    assert source["text"] == helper.extract_article_body(raw)
+    assert current_only not in verifier._project_contents_for_prompt(result)["results"][0]["text"]
+    assert result["statuses"] == [{"url": URL, "source": "scrapingdog", "stage": "wayback"}]
     assert calls == ["api.scrapingdog.com", "archive.org", "web.archive.org"]
-    supplement.assert_awaited_once_with(URL)
+    supplement.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("archive_receipt", [
+    {"stage": "wayback"},
+    {"meta": {"ownership_archive_url": "https://web.archive.org/web/20251113/" + URL}},
+])
+async def test_archive_receipt_never_uses_current_body_even_with_partial_hint(monkeypatch, archive_receipt):
+    original = {**sd_result(), **archive_receipt}
+    snapshot = deepcopy(original)
+    fetch = AsyncMock(return_value={"ok": True, "content": "New current-only acquisition claim."})
+    monkeypatch.setattr(verifier, "_scrape_exa", fetch)
+    result, status = await verifier._supplement_partial_article(original, URL, max_chars=12000)
+    assert result == snapshot and original == snapshot and status is None
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

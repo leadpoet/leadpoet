@@ -2498,13 +2498,10 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                 }
             # Before truncating, reuse direct-fetch extraction so a large
             # style/script header cannot consume the whole evidence bound.
-            from qualification.scoring.verification_helpers import visible_html_article_body_partial
-            partial_article = visible_html_article_body_partial(body)
             if len(body) > MAX_SCRAPED_CHARS:
                 from qualification.scoring.verification_helpers import extract_article_body
                 body = extract_article_body(body)
             return {"ok": True, "stage": "wayback",
-                    "partial_article": partial_article,
                     "source_publication_date": source_publication_date,
                     "content": body[:MAX_SCRAPED_CHARS], "meta": ownership_meta, "error": None}
     except Exception as e:
@@ -2744,7 +2741,6 @@ async def _scrape_sd_hardened(
         archive_failure = wb.get("archive_failure")
         if wb["ok"]:
             return {"ok": True, "stage": "wayback",
-                    "partial_article": wb.get("partial_article") is True,
                     "content": wb["content"], "error": None,
                     "source_publication_date": wb.get("source_publication_date") or "",
                     "meta": wb.get("meta") or {}, "stage_history": history}
@@ -3080,6 +3076,13 @@ async def _supplement_partial_article(
     sd: Mapping[str, Any], url: str, *, max_chars: int,
 ) -> tuple[Mapping[str, Any], Optional[Dict[str, Any]]]:
     """Keep usable partial text if the existing exact-source fallback misses."""
+    meta = sd.get("meta")
+    # Current exact-URL content cannot inherit an archived snapshot's date or
+    # ownership proof. Preserve the archive without another provider request.
+    if sd.get("stage") == "wayback" or (
+        isinstance(meta, Mapping) and meta.get("ownership_archive_url")
+    ):
+        return sd, None
     if sd.get("partial_article") is not True or _careers_index_receipt(sd.get("meta")):
         return sd, None
     original = sd.get("content")

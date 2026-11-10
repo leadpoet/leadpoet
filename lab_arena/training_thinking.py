@@ -2106,6 +2106,8 @@ def _provider_visible_view(example, *, not_dispatched_host_observations=None, wo
     optional observations remain unchanged. All callers still prove the
     retained gateway inputs/results, host writes, source/output and costs.
     """
+    from lab_arena import training_observations
+
     if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
         return example, frozenset()
     proof = example.get("completeness") or {}
@@ -2122,7 +2124,12 @@ def _provider_visible_view(example, *, not_dispatched_host_observations=None, wo
         payload = artifact.get("payload") or {}
         if artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs):
             return example, frozenset()
+        parse_diagnostics_allowed = (payload.get("complete") is True
+                                     or training_observations.optional_capture_only(payload))
         for row in payload.get("observations") or []:
+            if parse_diagnostics_allowed and training_observations.optional_local_parse_redaction(row):
+                optional_redacted = True
+                continue
             if _required_observation_redacted(example, row):
                 # Eligibility alone supplies rows already proved by the exact
                 # no-ledger host classifier. Keep their privacy flags intact.

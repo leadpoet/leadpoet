@@ -227,9 +227,12 @@ def test_real_targeted_scoring_consumes_hq_and_keeps_evidence_geography_gates(
         required_attribute_source_cache={},
     ))
     assert result.decision == expected, json.dumps({"details": result.details, "reason": result.reason, "claims": claims})
-    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    messages = requests[0]["messages"]
+    user_message = next(message for message in messages if message["role"] == "user")
+    document = json.loads(user_message["content"].split("\n", 1)[1])
     assert document["prefetched_sources"] == [{"url": PROFILE, "text": cache["structured_profile_headquarters_evidence"]["text"]}]
-    assert "quote the\ncomplete bounded JSON containing name, the company profile URL" in requests[0]["messages"][0]["content"]
+    system = "".join(message["content"] for message in messages if message["role"] == "system")
+    assert "quote the\ncomplete bounded JSON containing name, the company profile URL" in system
     record = json.loads(document["prefetched_sources"][0]["text"])
     assert record["locations"][0]["headquarter"] is True
     assert document["investigation_limits"]["prefetched_pages"] == 1

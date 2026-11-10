@@ -33,6 +33,13 @@ def response(findings,call_id='submit'):
     }}]}}]}
 
 
+def system_text(payload):
+    from lab_arena.operations import validate_operation_request
+    validate_operation_request('openrouter.chat', payload)
+    return ''.join(message['content'] for message in payload['messages']
+                   if message['role']=='system')
+
+
 def tool_targets(payload):
     tool = next(t['function'] for t in payload['tools'] if t['function']['name']=='submit_findings')
     return tool['parameters']['properties']['findings']['items']['properties']['target']['enum']
@@ -59,8 +66,8 @@ def invoke(monkeypatch,targets,post,**kwargs):
 
 def test_generic_system_prompt_remains_exact_main_snapshot():
     assert len(inv._SYSTEM_PROMPT)==SNAPSHOT['main_system_characters']
-    assert len(inv._SYSTEM_PROMPT)<=31695
-    assert SNAPSHOT['five_ac_system_characters']<=31987
+    assert len(inv._SYSTEM_PROMPT)<=31920
+    assert SNAPSHOT['five_ac_system_characters']<=32212
     assert hashlib.sha256(inv._SYSTEM_PROMPT.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
     assert inv._SYSTEM_PROMPT.count(SNAPSHOT['old_paragraph'])==1
     assert inv._LITERAL_HEADQUARTERS_INSTRUCTION==SNAPSHOT['new_paragraph']
@@ -175,7 +182,7 @@ def test_literal_instruction_requires_the_actual_bound_quotable_provider_record(
         expected=expected.replace(SNAPSHOT['old_paragraph'],SNAPSHOT['new_paragraph'],1)
         assert hashlib.sha256(expected.encode()).hexdigest()==SNAPSHOT['five_ac_system_sha256']
         assert len(expected)==SNAPSHOT['five_ac_system_characters']
-    assert all(request['messages'][0]['content']==expected for request in requests),fault
+    assert all(system_text(request)==expected for request in requests),fault
 
 
 def test_bound_literal_hq_target_shrink_retains_original_prompt(monkeypatch):
@@ -198,7 +205,7 @@ def test_bound_literal_hq_target_shrink_retains_original_prompt(monkeypatch):
     assert len(requests)==2 and result.get('_completed_submit'),(result,[tool_targets(r) for r in requests])
     assert tool_targets(requests[1])==['industry']
     expected=inv._SYSTEM_PROMPT.replace(SNAPSHOT['old_paragraph'],SNAPSHOT['new_paragraph'],1)
-    assert all(request['messages'][0]['content']==expected for request in requests)
+    assert all(system_text(request)==expected for request in requests)
     assert result['claims']['geography']['status']=='VERIFIED'
     assert result['claims']['industry']['activity_role']=='supplier_operator'
 

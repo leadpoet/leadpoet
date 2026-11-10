@@ -1,0 +1,27 @@
+{
+  "description": "Public LinkedIn text and actual rejected headcount tool arguments retained from the Nov 9 tvScientific failed run. The final response URL was not returned to the tool; requested URL is preserved.",
+  "source_url": "https://www.linkedin.com/company/tvscientificbypinterest/",
+  "source_text": "tvScientific | LinkedIn\n\n \n\n# tvScientific \n\n## Advertising Services \n\n### Los Angeles, CA 31,028 followers \n\n#### Performance TV Advertising Platform \n\n## About us \n\n tvScientific by Pinterest is an advertising platform built for Performance TV, helping brands and apps reach future customers earlier, optimize toward real business outcomes, and prove TV\u2019s impact across the funnel. By combining Pinterest\u2019s predictive intent signal with tvScientific\u2019s AI-powered optimization and deterministic measurement, the platform helps advertisers turn earlier intent into measurable action across traffic, sales, installs, and more. With flexible outcome-based buying, tvScientific by Pinterest makes TV advertising more accessible, accountable, and measurable for businesses of all sizes. \n\n Website \n\n http://tvscientific.com \n\nExternal link for tvScientific\n\n Industry \n\n Advertising Services \n\n Company size \n\n 51-200 employees \n\n Headquarters \n\n Los Angeles, CA \n\n Type \n\n Privately Held \n\n Founded \n\n 2020 \n\n## Locations \n\n- Primary \n\n Los Angeles, CA, US \n\n Get directions \n\n## Employees at tvScientific \n\n- ### Craig Zeldin \n- ### Jason Fairchild \n- ### Shannon Jessup \n- ### Michael Collette \n\n## Updates \n\n- \n\n tvScientific \n\n 31,028 followers \n\n 4d Edited \n\n- Report this post \n\nWhat does it take to scale Performance TV without sacrificing efficiency? For Attain, that meant thinking carefully about how to expand audience acquisition while staying aligned with performance goals. Join us tomorrow at 10 am PST / 1 pm EST for Meet tvScientific by Pinterest, where Scott Whittemore from Attain will join us to discuss what marketers can learn from the latest 2027 State of Performance TV Report \u2014 and how those trends played out in practice. We\u2019ll cover: \ud83d\udc49Why Performance TV is becoming a bigger growth channel \ud83d\udc49Why reaching shoppers earlier is reshaping audience strategy \ud83d\udc49How Attain approached audience expansion while maintaining efficiency \ud83d\udc49What growth marketers should take into 2027 planning \ud83d\udd17 Register here: https://hubs.la/Q04Bz_BQ0 #PerformanceTV #CTV #GrowthMarketing #PerformanceMarketing\n\n 8 \n\n Like \n\n Comment \n\n Share \n- \n\n tvScientific \n\n 31,028 followers \n\n 5d \n\n- Report this post \n\n\ud83c\udfaf Black Friday Cyber Monday is still the moment no holiday seasonal strategy can ignore. 71% of marketers say they plan to use Performance TV for Black Friday Cyber Monday, while 65% of consumers say it is the shopping moment they pay attention to most. When both attention and investment peak at the same time, the pressure is not just to show up. It is to show up with a strategy that can turn that attention into action. \ud83d\udcd8 Access our 2026 Holiday & Seasonal Shopping Trends Report and see how brands are preparing for the season\u2019s most watched shopping moment: https://lnkd.in/ejRJV5qQ\n\n 6 \n\n Like \n\n Comment \n\n Share \n- \n\n tvScientific \n\n 31,028 followers \n\n 1w Edited \n\n- Report this post \n\nTurn hidden creative details into clear performance insights. \ud83c\udfaf Creative Advisor surfaces granular creative insights so you can see how audio, visuals, branding, and end cards influence outcomes across CTV campaigns. Move past subjective feedback and double down on the details that actually drive results. Unlock deeper creative insights with Creative Advisor: https://hubs.la/Q04BBBW40\n\n 6 \n\n Like \n\n Comment \n\n Share \n- \n\n tvScientific \n\n 31,028 followers \n\n 1w \n\n- Report this post \n\n\ud83d\udcfa It\u2019s almost showtime, and there\u2019s still time to register for our upcoming webinar, where we\u2019ll be joined by Attain. Plus, one lucky participant will win a special giveaway. \ud83c\udf7f We\u2019re giving away a premium TUMI bag to one lucky winner! Here\u2019s how to enter: 1\ufe0f\u20e3 Answer in the comments: What\u2019s one performance marketing trend you predict for 2027? 2\ufe0f\u20e3 Follow us here on LinkedIn 3\ufe0f\u20e3 Register for the webinar! \ud83c\udfac Don\u2019t miss out! \ud83d\udc40 https://hubs.la/Q04CGd8m0 #WebinarGiveaway #PerformanceTV NO PURCH NEC. Open to 50 US & DC, 18+. Ends 11:59 PM PST on Nov 5, 2026 Sponsor: tvScientific by Pinterest. Rules: h",
+  "rejected_finding": {
+    "activity_role": "supplier_operator",
+    "evidence_quote": "Company size \n\n 51-200 employees",
+    "evidence_url": "https://www.linkedin.com/company/tvscientificbypinterest/",
+    "new_domain": "",
+    "new_name": "",
+    "observed_country": "United States",
+    "observed_industry": "Advertising Services",
+    "observed_state": "California",
+    "observed_subindustry": "",
+    "observed_value": null,
+    "old_domain": "",
+    "old_name": "",
+    "reason": "LinkedIn profile lists company size 51-200 employees, which matches one of the requested headcount buckets.",
+    "shared_linkedin_slug": "tvscientificbypinterest",
+    "status": "VERIFIED",
+    "supporting_evidence_quote_1": "",
+    "supporting_evidence_quote_2": "",
+    "supporting_evidence_url_1": "",
+    "supporting_evidence_url_2": "",
+    "target": "headcount"
+  }
+}

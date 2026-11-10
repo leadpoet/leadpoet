@@ -16,17 +16,17 @@ SOL = 'openai/gpt-6.1-sol'
 GLM = 'z-ai/glm-5.3-flash'
 
 # Complete explicit-length requests with the reviewed industry evidence rules.
-# The November 7 audit changes only the criterion-rule system text;
-# stage-field descriptions are covered by the stage contract tests. Repair
-# instructions, tools, budgets and provider routing here are unchanged.
+# The November 10 feedback adds required-channel and headcount instructions.
+# Only composed system-message text changes; tools, budgets, repair allowances
+# and provider routing are unchanged. Stage descriptions have separate controls.
 # Budget-only repairs must still match explicit-length requests byte for byte.
 REQUEST_GOLDENS = {
-    ('glm', 'empty'): 'sha256:217d4c152636764ac11f28aca5171c25444966abb901df7c2d596fb8316635b9',
-    ('glm', 'malformed_submit'): 'sha256:8061648a09d166dc2a8f9e1ee924b8c3364fcd1e51f4ea64cb29b4b9e05342d2',
-    ('sol_legacy', 'empty'): 'sha256:5bfb0148b11b872427fd5e2312d208600fcf8eab8fe59264c57d082d70061d68',
-    ('sol_legacy', 'malformed_submit'): 'sha256:77d6d345e41ce0c258c029bbd775dc8dc4d3d2cbd95ed4772297b19bfb119505',
-    ('historical_open', 'empty'): 'sha256:eda699e774b58be8fb368c574f507343bad88c3109a07ff860a92d43c9f03ed4',
-    ('historical_open', 'malformed_submit'): 'sha256:f9839ee2663f72540bfd1759410266083a27f5a0d2500ccd9d739db55c0a03e1',
+    ('glm', 'empty'): 'sha256:e4a0cfdf8fa1456f8ea6e1d2b6afdc8efd9845f27a9e71a692eddef3e2321b24',
+    ('glm', 'malformed_submit'): 'sha256:4ea05cfebef7820e0133c5ec789a27b7e5e1a9cc1b0f939e4c3d7df8b2452193',
+    ('sol_legacy', 'empty'): 'sha256:95ff114908b1c3becdf2dde29fbf92ff40dcf090ee8ad898b0f4980e125a54d8',
+    ('sol_legacy', 'malformed_submit'): 'sha256:c9eb0cd7c4b32ee747eae912e49b5c804152ff601d364d5cb0698f8ebbd99f54',
+    ('historical_open', 'empty'): 'sha256:0ce10050fd2871a8d6a2f5b0c54d6219ca8fb13dce531999d8147c13e683394f',
+    ('historical_open', 'malformed_submit'): 'sha256:ea1377f219b609e03dee67848ede6dee6fd7e165f8c615c26be8e321eb57797a',
 }
 
 

@@ -261,3 +261,25 @@ def test_original_scope_rule_reaches_final_and_research_without_relaxing_require
     assert 'Do not combine independently supplied offerings' in system
     assert 'Integrations may deliver its customer-facing function' in system
     assert json.loads(request['messages'][1]['content'])['criterion']['product_service'] == criterion
+
+
+@pytest.mark.parametrize('research', [False, True])
+@pytest.mark.parametrize('criterion', [
+    'Consumer brands selling their own products through a branded online store and marketplaces.',
+    'Consumer brands selling through a branded online store OR marketplaces.',
+    'Consumer brands selling through online channels such as branded stores and marketplaces.',
+])
+def test_required_sales_channels_are_distinct_from_alternatives_and_examples(criterion, research):
+    # This checks the request contract; it does not simulate model accuracy.
+    value = industry.prepare({**CRITERION, 'product_service': criterion}, COMPANY, [
+        {'source_id': 's0', 'source_url': 'https://example.com/shop',
+         'body': 'Example sells its own products through its branded online store.'},
+    ], evaluation_date='2026-11-09')
+    request = industry.request_payload(value, model='deepseek/deepseek-v4.1-flash-1017', research=research)
+    system = request['messages'][0]['content']
+    assert 'Each named sales or distribution channel in a required selling activity likewise remains required, unless stated as alternatives or examples.' in system
+    assert "'sells through a branded online store and marketplaces' requires evidence for both channels" in system
+    assert 'Own-store sales do not establish marketplace sales.' in system
+    assert 'Descriptive-list guidance does not waive these required channels.' in system
+    assert "Examples introduced by 'such as' or 'including' are illustrative" in system
+    assert json.loads(request['messages'][1]['content'])['criterion']['product_service'] == criterion

@@ -18,6 +18,12 @@ from lab_arena import contracts, training_input, training_observations
 
 INPUT_GRACE_SECONDS = 180
 INPUT_REPLAY_TIMEOUT_SECONDS = 5.0
+# The final snapshot is retained before two POSTs and one exact-digest HEAD.
+# Their existing network budgets must not consume the entire local replay
+# lifetime. Server authorization still enforces its own unchanged finish grace.
+FINAL_OBSERVATION_REPLAY_SECONDS = INPUT_GRACE_SECONDS + (
+    training_observations.FINAL_UPLOAD_ATTEMPTS + 1
+) * training_observations.HTTP_TIMEOUT_SECONDS
 _INPUT_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_input.v1'
 _INPUT_RECORD_LIMIT = training_input.MAX_INPUT_BYTES + 64 * 1024
 _LEGACY_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v1'
@@ -450,7 +456,9 @@ class _FinalObservationRetention(InputRetention):
                 self._park(path, 'invalid', descriptor)
                 raise
             anchor = record.get('retained_at', record['lease_expires_at'])
-            remaining = (_time(anchor) + timedelta(seconds=INPUT_GRACE_SECONDS) - self.config.clock()).total_seconds()
+            lifetime = (FINAL_OBSERVATION_REPLAY_SECONDS if 'retained_at' in record
+                        else INPUT_GRACE_SECONDS)
+            remaining = (_time(anchor) + timedelta(seconds=lifetime) - self.config.clock()).total_seconds()
             # Replay gets one bounded window from final snapshot retention;
             # legacy files keep their original claim-expiry fence. Foreground
             # delivery uses current server authority after provider renewals.

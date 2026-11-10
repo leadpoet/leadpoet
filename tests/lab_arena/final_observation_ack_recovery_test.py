@@ -548,7 +548,7 @@ def test_foreground_retained_final_uses_renewed_server_lease(
 def test_stale_claim_replay_obeys_snapshot_window_and_server_authority(
     public_capture_stack, tmp_path, prefix, edge, mode,
 ):
-    from lab_arena.capture_retention import InputRetention
+    from lab_arena.capture_retention import FINAL_OBSERVATION_REPLAY_SECONDS, InputRetention
     from lab_arena.store import hash_lease_token
 
     stack = public_capture_stack
@@ -590,7 +590,7 @@ def test_stale_claim_replay_obeys_snapshot_window_and_server_authority(
             assert row == server_before
             return
         if mode == 'replay_expired':
-            now += timedelta(seconds=180)
+            now += timedelta(seconds=FINAL_OBSERVATION_REPLAY_SECONDS)
             row['lease_expires_at'] = (now + timedelta(minutes=2)).isoformat()
             server_before = copy.deepcopy(row)
             assert not retention.deliver(path, replay=True)

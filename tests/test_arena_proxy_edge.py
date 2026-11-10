@@ -22,7 +22,8 @@ def test_edge_observation_upload_crosses_both_old_limits_after_lease_preflight(m
         assert "authorization" not in headers
         if method == "HEAD":
             assert path == "v1/runs/r1/training-observations" and query == "" and body == b""
-            assert set(headers) == {"x-lab-arena-lease"}
+            assert headers == {"x-lab-arena-lease": "a" * 64,
+                               "x-lab-arena-observation-intent": "final-write"}
             return httpx.Response(204)
         assert path == "v1/runs/r1/training-observations" and len(body) == 11 * 1024 * 1024
         return httpx.Response(200, json={"status": "stored"})

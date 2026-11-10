@@ -1363,6 +1363,15 @@ narrow it to a single tool, a single named event, or a niche so tight that fewer
 handful of companies qualify. Specificity belongs in the phrasing, not in shrinking the
 candidate pool.
 
+PRODUCT/SERVICE AND REQUIRED ATTRIBUTE — "AND" LISTS ARE CHECKED ITEM BY ITEM:
+Each candidate company is verified against `product_service` and `required_attribute` as
+written. Offerings, capabilities and sales channels joined with "and" are each treated as
+required and must each be proven for the same company; items joined with "or" need only
+one. Join alternatives with "or", and keep every alternative as specific as the rest of
+the sentence: no catch-all such as "or other software". Use "and" only when every
+qualifying company must do both. `product_service` must not require anything that
+`required_attribute` leaves optional.
+
 ALLOWED COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
 
 FUNDING/OWNERSHIP STAGE — LIMITED SET QUOTA:
@@ -1420,7 +1429,7 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
       "country": "<the country portion of the geography, e.g. United States, United Kingdom, Canada>",
       "employee_count": ["<3-5 contiguous allowed LinkedIn buckets>"],
       "company_stage": "<from allowed stages for stage-pinned ICPs; empty string otherwise>",
-      "product_service": "<a specific, descriptive value proposition — what the company actually sells and the job it does for its buyer, e.g. 'A subscription B2B platform that revenue and operations teams use to manage pipeline, deals, and customer workflows'. NOT a bare category like 'B2B software'. Do NOT narrow to a single named tool.>",
+      "product_service": "<a specific, descriptive value proposition — what the company actually sells and the job it does for its buyer, e.g. 'A subscription B2B platform that revenue or operations teams use to manage pipeline, deals, or customer workflows'. NOT a bare category like 'B2B software'. Do NOT narrow to a single named tool.>",
       "required_attribute": "<a specific, descriptive attribute the company must have, written like the product_service — e.g. 'Sells a subscription software platform used by revenue or operations teams to manage pipeline, deals, or customer workflows'. Specific WORDING, but broad enough that many real companies match. NOT the bare template 'offers or provides X'.>",
       "intent_signal": "<a specific, descriptive intent sentence in fulfillment style — see the INTENT SIGNAL section above>",
       "intent_category": "<FUNDING | ACQUISITION | PARTNERSHIP | PRODUCT_LAUNCH | LEADERSHIP_CHANGE | MARKET_EXPANSION | REGULATORY_CLEARANCE | FACILITY_OPENING | HIRING>",
@@ -1444,7 +1453,8 @@ FINAL CHECK before output (for every ICP):
 7. Are there exactly {total_icps} ICPs, one for each listed industry slot in order?
 8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
 9. No job titles, no seniority, no contact-level descriptors in the prompts?
-10. Is the exact stage quota met, with no implicit funding/ownership-stage restrictions in the remaining ICPs?"""
+10. Is the exact stage quota met, with no implicit funding/ownership-stage restrictions in the remaining ICPs?
+11. Must EVERY qualifying company, not only the named example, do each offering, capability and sales channel joined with "and" in `product_service` and `required_attribute`, and does `product_service` require nothing that `required_attribute` leaves optional? If not, join the true alternatives with "or" or remove the item."""
 
     international_target = international_icp_target(total_icps)
     stage_target = generated_stage_target(total_icps)

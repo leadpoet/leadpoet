@@ -126,3 +126,58 @@ async def test_standalone_mode_preserves_first_pass_decision(monkeypatch, status
     assert call.await_args.args[1] == intent.STAGE1_MODEL
     fetch.assert_not_awaited()
     assert result["stage3"] is None
+
+
+LONG_URL = (
+    "https://news.example/fort-worths-acme-group-acquires-california-based-"
+    "plasma-ruggedized-solutions/"
+)
+MISCOPIED_URL = LONG_URL.replace("california", "calcium")
+
+
+async def _verify_miscopied_citation(monkeypatch, **mode):
+    response = _response()
+    response["answer"]["signal_evaluations"][0]["evidence_urls_used"] = [MISCOPIED_URL]
+
+    async def fetch(_urls):
+        return {
+            "results": [{"url": LONG_URL, "title": "Acme news", "text": CLAIM}],
+            "statuses": [{"url": LONG_URL, "source": "scrapingdog", "stage": "ok"}],
+        }
+
+    monkeypatch.setattr(intent, "_call_openrouter", AsyncMock(return_value=response))
+    monkeypatch.setattr(intent, "_fetch_sd_then_exa", AsyncMock(side_effect=fetch))
+    return await intent.verify_three_stage(
+        None,
+        company_name="Acme",
+        company_website="https://acme.com",
+        company_linkedin="https://www.linkedin.com/company/acme",
+        source_url=LONG_URL,
+        miner_claim=CLAIM,
+        target_signal_text="Launched a product",
+        stage1_soft_reject=True,
+        **mode,
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_only_judge_miscopying_the_supplied_url_still_approves(monkeypatch):
+    result = await _verify_miscopied_citation(monkeypatch, integrity_policy=True)
+
+    item = result["verdict"]["signal_evaluations"][0]
+    assert result["decision"] == "approve"
+    assert item["signal_status"] == "supported"
+    assert item["evidence_urls_used"] == [LONG_URL]
+    assert item["risk_notes"] == ["Restored a miscopied supplied evidence URL."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [
+    {"integrity_policy": False},
+    {"integrity_policy": True, "evidence_type": "SOCIAL_POSTING"},
+])
+async def test_searching_judge_citing_a_near_identical_url_is_not_approved(monkeypatch, mode):
+    result = await _verify_miscopied_citation(monkeypatch, **mode)
+
+    assert result["decision"] != "approve"
+    assert result["client_ready"] is False

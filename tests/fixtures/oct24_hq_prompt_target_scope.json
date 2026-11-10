@@ -1,10 +1,10 @@
 {
   "source_input_sha256": "51dfe2e0161b6b1d83239a62573dd733a818b8de1e8d514f4fa456b27cc05bc5",
   "source_frozen_plan_sha256": "78d6a88731f21a0a1fe2fbceb5badcf096d31e27b42dcb0d051e1fc4302c6ccb",
-  "main_system_sha256": "07e586a94a28e3bea280b909592fcadde4930d695741a9e83820b144cf57bc48",
-  "main_system_characters": 31599,
-  "five_ac_system_sha256": "a58e6809579a5720105c0d44875c07db34356bdf9f0f6c3b48081676f187040b",
-  "five_ac_system_characters": 31891,
+  "main_system_sha256": "ea45ea8ee181c2f85ec15ada1ee8ac2638734e642108406e94350412a8de969f",
+  "main_system_characters": 31824,
+  "five_ac_system_sha256": "361fe440e8a048ccb0b9c82caee94ccc1d86d406acddd3d1bae59eab8d93d3e6",
+  "five_ac_system_characters": 32116,
   "old_paragraph": "Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or server-fetched \"harvestapi_get_company\nlocations.headquarter=true\" projection, never generic profile locations.",
   "new_paragraph": "Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or the server-fetched harvestapi_get_company literal selected\nprovider record, never generic profile locations. For that record, quote the\ncomplete bounded JSON containing name, the company profile URL and the selected\nlocations entry with headquarter=true and its country/locality fields. A city fragment\nalone does not prove headquarters. The ordinary identity, source and exact-quote\nchecks still apply.",
   "cases": [

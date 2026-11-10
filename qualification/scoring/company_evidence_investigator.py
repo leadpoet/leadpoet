@@ -682,6 +682,9 @@ office, job, associated-member count, or stale evidence is UNPROVEN. An exact
 entity-bound LinkedIn Company size/employeeCountRange is primary over a
 third-party exact estimate. Other conflicts are UNPROVEN. Use only a canonical
 LinkedIn band or a strict current integer.
+For headcount VERIFIED or CONTRADICTED, observed_value must contain the
+non-null source-supported count or canonical band. A count in the quote or
+reason does not replace observed_value. Use null only for UNPROVEN headcount.
 
 Use submit_findings when research is complete. If deterministic validation
 rejects it and returns feedback, correct it within the remaining limits and
@@ -7137,7 +7140,7 @@ async def investigate_company_evidence(
                                 source_url=source_url,
                                 source_context=source_context,
                             )
-                        if target in {"industry", "required_attribute"} and reason in {
+                        if target in {"industry", "required_attribute", "headcount"} and reason in {
                             "source quote did not identify the investigated company",
                             REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
                         }:
@@ -7640,6 +7643,14 @@ async def investigate_company_evidence(
                                 "join passages, or insert ellipses. VERIFIED and "
                                 "CONTRADICTED require that exact quote and its fetched URL. "
                                 "UNPROVEN requires empty evidence_url and evidence_quote. "
+                                + (
+                                    "For headcount VERIFIED or CONTRADICTED, set observed_value "
+                                    "to the non-null source-supported count or canonical band; "
+                                    "a count in the quote or reason does not replace this field. "
+                                    "Use null only for UNPROVEN headcount. "
+                                    if any(item.get("target") == "headcount" for item in rejected)
+                                    else ""
+                                )
                                 + (
                                     "For company-attribution failures, use an already "
                                     "established company identity in the quote; do not "

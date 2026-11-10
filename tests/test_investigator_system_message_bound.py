@@ -65,8 +65,9 @@ def test_combined_industry_and_bound_hq_reaches_native_judgment(
         system = ''.join(m['content'] for m in request['messages'] if m['role'] == 'system')
         assert c._LITERAL_HEADQUARTERS_INSTRUCTION in system
         assert ('Industry: research the full criterion' in system) is industry_enabled
-        if not industry_enabled:
-            assert len([m for m in request['messages'] if m['role'] == 'system']) == 1
+        system_messages = [m for m in request['messages'] if m['role'] == 'system']
+        assert system_messages == c._bounded_system_messages(system)
+        assert all(len(m['content']) <= c.OPENROUTER_MAX_CONTENT_CHARS for m in system_messages)
     assert result['usage']['fetch_calls'] == 0
 
 

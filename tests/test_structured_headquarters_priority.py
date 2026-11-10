@@ -109,7 +109,8 @@ def test_private_structured_hq_at_capacity_fetches_contact_then_about(monkeypatc
     assert fetched == [CONTACT, ABOUT] + ([STAGE] if with_stage else [])
     assert result["claims"]["geography"]["status"] == "VERIFIED", result
     assert result["claims"]["geography"]["observed_country"] == "Singapore"
-    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    user_message = next(message for message in requests[0]["messages"] if message["role"] == "user")
+    document = json.loads(user_message["content"].split("\n", 1)[1])
     assert document["server_priority_submitted_source"]["url"] == CONTACT
     assert document["investigation_limits"]["remaining_fetch_calls"] == 3
 

@@ -2528,6 +2528,8 @@ async def _scrape_sd_hardened(
     verify_three_stage and the attribute-verification path work unchanged.
     A new 'stage_history' key carries the per-tier verdicts for telemetry.
     """
+    from qualification.scoring.verification_helpers import visible_html_article_body_partial
+
     api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
         "QUALIFICATION_SCRAPINGDOG_API_KEY"
     )
@@ -2668,6 +2670,7 @@ async def _scrape_sd_hardened(
                         )
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
+                            "partial_article": visible_html_article_body_partial(raw_body),
                             **({"source_title": source_title} if source_title else {}),
                             "source_publication_date": source_publication_date,
                             "meta": result_meta,
@@ -3067,6 +3070,51 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
         else:
             return {"ok": False, "stage": "exa_transient_exhausted",
                     "content": "", "error": last_error}
+
+
+async def _supplement_partial_article(
+    sd: Mapping[str, Any], url: str, *, max_chars: int,
+) -> tuple[Mapping[str, Any], Optional[Dict[str, Any]]]:
+    """Keep usable partial text if the existing exact-source fallback misses."""
+    meta = sd.get("meta")
+    # Current exact-URL content cannot inherit an archived snapshot's date or
+    # ownership proof. Preserve the archive without another provider request.
+    if sd.get("stage") == "wayback" or (
+        isinstance(meta, Mapping) and meta.get("ownership_archive_url")
+    ):
+        return sd, None
+    if sd.get("partial_article") is not True or _careers_index_receipt(sd.get("meta")):
+        return sd, None
+    original = sd.get("content")
+    if not isinstance(original, str) or (remaining := max_chars - len(original) - 2) <= 0:
+        return sd, None
+    try:
+        candidate = await _scrape_exa(url)
+    except Exception:
+        return sd, None
+    body = candidate.get("content") if isinstance(candidate, Mapping) else None
+    if (not isinstance(candidate, Mapping) or candidate.get("ok") is not True
+        or not isinstance(body, str) or not body.strip()
+        or _has_anti_bot_marker(body) or not _looks_textual(body)):
+        return sd, None
+    from qualification.scoring.verification_helpers import (
+        extract_article_body, visible_html_article_body_partial,
+    )
+    if visible_html_article_body_partial(body):
+        return sd, None
+    extracted = extract_article_body(body)
+    if ((re.search(r"</?[A-Za-z][^>]*>", body) and extracted == body)
+        or not extracted.strip() or _evaluate_extracted_sd_body(body, extracted) != "ok"):
+        return sd, None
+    supplement = extracted[:remaining]
+    if not supplement.strip():
+        return sd, None
+    # Preserve all original facts and source/date/ownership metadata. A second
+    # provider's overview must not replace an already useful original passage.
+    return {**sd, "content": original + "\n\n" + supplement}, {
+        "url": url, "source": "exa_fallback", "stage": candidate.get("stage") or "exa_scraped",
+        "sd_stage": sd.get("stage"),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -4235,6 +4283,9 @@ async def _fetch_sd_then_exa(
                 result_meta.update(listing_receipt)
             elif _lever_posting_identity(url) is not None:
                 result_meta.setdefault("kind", "lever_job")
+            supplement_status = None
+            if not prefer_dynamic_job_index:
+                sd, supplement_status = await _supplement_partial_article(sd, url, max_chars=max_chars)
             results.append({
                 "url": url, "title": sd.get("source_title") or "",
                 "text": sd["content"][:max_chars],
@@ -4246,6 +4297,8 @@ async def _fetch_sd_then_exa(
                 "url": url, "source": "scrapingdog",
                 "stage": sd.get("stage"),
             })
+            if supplement_status is not None:
+                statuses.append(supplement_status)
             continue
         exa = await _scrape_exa(url)
         if exa.get("ok") and exa.get("content"):

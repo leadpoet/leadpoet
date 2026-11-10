@@ -8946,7 +8946,7 @@ class ArenaService:
             if projected["reward_basis_hash"] != basis["reward_basis_hash"]:
                 basis = self._sign(projected, "reward_basis_hash")
         except (TypeError, ValueError) as exc:
-            raise ServiceError("reward_legacy_allocation_projection_invalid", 503) from exc
+            raise ServiceError("reward_policy_projection_invalid", 503) from exc
         try:
             state = weight_state.build_accepted_weight_state(
                 self._reward_signer(), network=network,

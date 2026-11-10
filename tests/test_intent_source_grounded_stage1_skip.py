@@ -137,11 +137,13 @@ MISCOPIED_URL = LONG_URL.replace("california", "calcium")
 
 async def _verify_miscopied_citation(monkeypatch, **mode):
     response = _response()
+    source_text = "Acme launched Atlas for enterprise customers."
     response["answer"]["signal_evaluations"][0]["evidence_urls_used"] = [MISCOPIED_URL]
+    response["answer"]["signal_evaluations"][0]["supporting_quotes"] = [source_text]
 
     async def fetch(_urls):
         return {
-            "results": [{"url": LONG_URL, "title": "Acme news", "text": CLAIM}],
+            "results": [{"url": LONG_URL, "title": "Acme news", "text": source_text}],
             "statuses": [{"url": LONG_URL, "source": "scrapingdog", "stage": "ok"}],
         }
 

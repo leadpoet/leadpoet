@@ -2083,7 +2083,9 @@ async def _resolve_ats_employer_ownership(
             "resolved": bool(anchors)}
 
 
-def _grounded_exact_text(source_text: str, quote: Any) -> bool:
+def _grounded_exact_text(
+    source_text: str, quote: Any, *, whole_words: bool = False, min_words: int = 0,
+) -> bool:
     """Match source text, ignoring whitespace and optional quotation wrappers.
 
     Do not accept paraphrases, omitted words, or reordered fragments. Quotation
@@ -2103,6 +2105,14 @@ def _grounded_exact_text(source_text: str, quote: Any) -> bool:
         and wrappers.get(normalized_quote[0]) == normalized_quote[-1]
     ):
         normalized_quote = normalized_quote[1:-1].strip()
+    if min_words and len(re.findall(r"\w+", normalized_quote)) < min_words:
+        return False
+    if whole_words:
+        return bool(normalized_quote and re.search(
+            (r"(?<!\w)" if normalized_quote[0].isalnum() else "")
+            + re.escape(normalized_quote)
+            + (r"(?!\w)" if normalized_quote[-1].isalnum() else ""), normalized_source,
+        ))
     return bool(normalized_quote and normalized_quote in normalized_source)
 
 
@@ -4546,8 +4556,13 @@ def _supplied_url_for_miscopied_citation(
     # Ambiguous multi-page citations must remain unresolved, not be repaired
     # using a generic company-name quote on the candidate page.
     return matches[0] if any(
-        all(isinstance(quote, str) and _grounded_exact_text(page["text"], quote)
+        all(isinstance(quote, str) and _grounded_exact_text(page["text"], quote, whole_words=True)
             for quote in supporting_quotes)
+        # A name or isolated event label is too little for a repair. Count
+        # visible words, excluding Markdown destinations. This floor is only
+        # a repair safeguard; the semantic judge still decides claim support.
+        and any(_grounded_exact_text(page["text"], quote, whole_words=True, min_words=5)
+                for quote in supporting_quotes)
         for page in pages
     ) else ""
 

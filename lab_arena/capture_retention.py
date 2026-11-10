@@ -18,6 +18,10 @@ from lab_arena import contracts, training_input, training_observations
 
 INPUT_GRACE_SECONDS = 180
 INPUT_REPLAY_TIMEOUT_SECONDS = 5.0
+# Retention precedes foreground capture and bounded completion recovery. Keep
+# one canonical minimum lease horizon plus the existing capture grace locally;
+# the server still owns current lease/finish authority and permanent denials.
+FINAL_OBSERVATION_REPLAY_SECONDS = contracts.LEASE_TTL_SECONDS + INPUT_GRACE_SECONDS
 _INPUT_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_input.v1'
 _INPUT_RECORD_LIMIT = training_input.MAX_INPUT_BYTES + 64 * 1024
 _LEGACY_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v1'
@@ -282,7 +286,11 @@ class InputRetention:
         print("Arena pending " + self._label + " capture unavailable: " + reason, file=sys.stderr, flush=True)
 
     def _replay_batch(self):
-        deadline = time.monotonic() + INPUT_REPLAY_TIMEOUT_SECONDS
+        # Drain one finite snapshot under the existing grace-sized admission
+        # bound. A five-second sweep otherwise admits only one large final
+        # between the runner's thirty-second polls. Each record still gets
+        # its own bounded HTTP attempt, never a retry inside this sweep.
+        deadline = time.monotonic() + INPUT_GRACE_SECONDS
         try:
             if self._stop.is_set():
                 return
@@ -303,7 +311,8 @@ class InputRetention:
                     break
                 self._cursor = key
                 try:
-                    owner.deliver(path, replay=True, replay_deadline=deadline)
+                    owner.deliver(path, replay=True, replay_deadline=(
+                        time.monotonic() + INPUT_REPLAY_TIMEOUT_SECONDS))
                 except Exception as exc:
                     import sys
                     print('Arena pending %s deferred: %s' % (owner._label, type(exc).__name__), file=sys.stderr, flush=True)
@@ -444,13 +453,17 @@ class _FinalObservationRetention(InputRetention):
         with lock as descriptor:
             if descriptor is None or not path.exists():
                 return False
+            validation_started = time.monotonic()
             try:
                 record = self._read(descriptor, path)
+                validation_seconds = time.monotonic() - validation_started
             except (ValueError, TypeError, KeyError, AttributeError):
                 self._park(path, 'invalid', descriptor)
                 raise
             anchor = record.get('retained_at', record['lease_expires_at'])
-            remaining = (_time(anchor) + timedelta(seconds=INPUT_GRACE_SECONDS) - self.config.clock()).total_seconds()
+            lifetime = (FINAL_OBSERVATION_REPLAY_SECONDS if 'retained_at' in record
+                        else INPUT_GRACE_SECONDS)
+            remaining = (_time(anchor) + timedelta(seconds=lifetime) - self.config.clock()).total_seconds()
             # Replay gets one bounded window from final snapshot retention;
             # legacy files keep their original claim-expiry fence. Foreground
             # delivery uses current server authority after provider renewals.
@@ -458,7 +471,11 @@ class _FinalObservationRetention(InputRetention):
                 self._park(path, 'expired', descriptor)
                 return False
             if replay_deadline is not None:
-                remaining = min(remaining, replay_deadline - time.monotonic())
+                # This final was admitted before the batch deadline. Its
+                # local privacy/identity validation can exceed the network
+                # budget for large documents. Exclude only that work here;
+                # the outer deadline still stops admission of later records.
+                remaining = min(remaining, replay_deadline + validation_seconds - time.monotonic())
                 if remaining <= 0:
                     return False
             if replay and self._stop.is_set():

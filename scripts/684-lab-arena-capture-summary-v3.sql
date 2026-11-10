@@ -298,11 +298,17 @@ BEGIN
           complete_response := CASE WHEN json_typeof(response_doc -> 'choices') = 'array'
             THEN json_array_length(response_doc -> 'choices') = 1 ELSE FALSE END
             AND response_doc #>> '{choices,0,finish_reason}' IN ('stop', 'tool_calls')
-            AND (response_doc ->> 'incomplete_details') IS NULL;
+            AND (response_doc ->> 'incomplete_details') IS NULL
+            AND (response_doc ->> 'error') IS NULL
+            AND ((response_doc ->> 'status') IS NULL OR response_doc ->> 'status' = 'completed');
           FOR choice IN SELECT element FROM json_array_elements(
             CASE WHEN json_typeof(response_doc -> 'choices') = 'array'
                  THEN response_doc -> 'choices' ELSE '[]'::JSON END) AS choices(element)
           LOOP
+            IF choice ->> 'error' IS NOT NULL
+               OR (choice ->> 'status' IS NOT NULL AND choice ->> 'status' <> 'completed') THEN
+              complete_response := FALSE;
+            END IF;
             message := choice -> 'message';
             FOREACH field IN ARRAY ARRAY['reasoning', 'reasoning_content'] LOOP
               payload_value := message -> field;
@@ -335,11 +341,17 @@ BEGIN
           END LOOP;
         ELSE
           complete_response := response_doc ->> 'status' = 'completed'
-            AND (response_doc ->> 'incomplete_details') IS NULL;
+            AND (response_doc ->> 'incomplete_details') IS NULL
+            AND (response_doc ->> 'error') IS NULL;
           FOR item IN SELECT element FROM json_array_elements(
             CASE WHEN json_typeof(response_doc -> 'output') = 'array'
                  THEN response_doc -> 'output' ELSE '[]'::JSON END) AS outputs(element)
           LOOP
+            -- Top-level completion cannot override an incomplete output item.
+            IF item ->> 'error' IS NOT NULL
+               OR (item ->> 'status' IS NOT NULL AND item ->> 'status' <> 'completed') THEN
+              complete_response := FALSE;
+            END IF;
             IF item ->> 'type' IS DISTINCT FROM 'reasoning' THEN CONTINUE; END IF;
             FOREACH field IN ARRAY ARRAY['text', 'thinking', 'content'] LOOP
               payload_value := item -> field;

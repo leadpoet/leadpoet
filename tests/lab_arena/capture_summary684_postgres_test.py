@@ -294,3 +294,30 @@ def test_inflight_and_failed_calls_are_not_successful_response_capture(database,
     summary = _read(database, "v3", submission)
     _assert_capture(summary, {})
     assert summary["execute_runs"] == 1 and summary["icp_positions"] == [2]
+
+
+@pytest.mark.parametrize("operation,body", [
+    ("openrouter.chat", {**_chat({"reasoning": "retained partial text"}), "error": {"message": "provider failed"}}),
+    ("openrouter.chat", {**_chat({"reasoning": "retained partial text"}), "status": "incomplete"}),
+    ("openrouter.chat", {"choices": [{"finish_reason": "stop", "error": {"message": "choice failed"},
+                                   "message": {"reasoning": "retained partial text"}}]}),
+    ("openrouter.responses", {"status": "completed", "error": {"message": "provider failed"},
+                              "output": [{"type": "reasoning", "text": "retained partial text"}]}),
+    ("openrouter.responses", {"status": "completed", "output": [
+        {"type": "reasoning", "status": "incomplete", "text": "retained partial text"}]}),
+    ("openrouter.responses", {"status": "completed", "output": [
+        {"type": "reasoning", "status": "in_progress", "text": "retained partial text"}]}),
+    ("openrouter.responses", {"status": "completed", "output": [
+        {"type": "reasoning", "status": "completed", "text": "retained partial text"},
+        {"type": "message", "status": "incomplete"}]}),
+])
+def test_contradictory_provider_completion_keeps_readable_text_partial(database, upgraded, operation, body):
+    submission = (_seed_response(database, body) if operation == "openrouter.responses"
+                  else _seed_bodies(database, [body]))
+    _assert_capture(_read(database, "v3", submission), {"partial_readable": 1})
+
+
+def test_completed_item_and_null_error_remain_complete_readable(database, upgraded):
+    body = {"status": "completed", "error": None, "output": [
+        {"type": "reasoning", "status": "completed", "text": "readable"}]}
+    _assert_capture(_read(database, "v3", _seed_response(database, body)), {"complete_readable": 1})

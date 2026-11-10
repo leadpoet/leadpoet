@@ -143,7 +143,8 @@ prove that readable reasoning text was captured.
 non-negative counts. Every key is present and their sum equals `model_calls`:
 
 - `complete_readable`: nonblank, non-summary reasoning text and a normal provider
-  finish (`stop` or `tool_calls` for one Chat choice; `completed` for Responses).
+  finish (`stop` or `tool_calls` for one Chat choice; `completed` for Responses),
+  with no conflicting provider error or incomplete output item.
 - `partial_readable`: readable reasoning text with an incomplete or unknown finish.
 - `tokens_only`: no readable non-summary reasoning text, with positive reported
   reasoning usage. Summary-only and opaque-only replies can be in this count.

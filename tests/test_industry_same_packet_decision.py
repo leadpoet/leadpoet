@@ -64,15 +64,26 @@ def test_changed_packet_or_authority_cannot_reuse_a_match(monkeypatch, change):
     assert len(reviews) == (1 if change == 'redirect' else 2)
 
 
-@pytest.mark.parametrize('decision', ['unavailable', 'mismatch'])
-def test_unproven_initial_assessment_is_not_a_reusable_verdict(monkeypatch, decision):
-    # A supplier mismatch remains UNPROVEN under the existing native rules.
-    run, _, _, reviews = install(monkeypatch, decision=decision, missing=['Account workflows'])
+def test_unavailable_initial_assessment_is_not_a_reusable_verdict(monkeypatch):
+    run, _, _, reviews = install(monkeypatch, decision='unavailable', missing=['Account workflows'])
     result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
                             prior_observations={'submitted_source_urls': [URL]}))
     assert result['claims']['industry']['status'] == 'UNPROVEN'
     assert not result['claims']['industry']['_industry_review'].get('reused_completed_packet')
-    assert len(reviews) >= 2
+    assert len(reviews) == 2
+
+
+def test_same_packet_grounded_supplier_mismatch_is_reused(monkeypatch):
+    run, _, _, reviews = install(monkeypatch, decision='mismatch', missing=['Account workflows'])
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    finding = result['claims']['industry']
+    assert result['_completed_submit'] is True
+    assert finding['status'] == 'CONTRADICTED'
+    assert finding['activity_role'] == 'supplier_operator'
+    assert finding['evidence_url'] and finding['evidence_quote']
+    assert finding['_industry_review']['reused_completed_packet'] is True
+    assert len(reviews) == result['usage']['industry_review_calls'] == 1
 
 
 def test_same_packet_completed_mismatch_is_preserved_without_mutating_initial(monkeypatch):

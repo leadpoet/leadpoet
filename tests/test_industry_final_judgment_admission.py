@@ -38,9 +38,9 @@ def test_admitted_submission_finishes_reserved_industry_review(monkeypatch, deci
     assert result['failure_reason'] == ''
     assert result['claims']['industry']['_industry_review']['decision'] == decision
     assert result['claims']['industry']['status'] == {
-        'match': 'VERIFIED', 'mismatch': 'UNPROVEN', 'unavailable': 'UNPROVEN'}[decision]
-    # The existing relationship gate keeps a supplier's different activity
-    # unproven. The deadline fix must not turn that negative into an admission.
+        'match': 'VERIFIED', 'mismatch': 'CONTRADICTED', 'unavailable': 'UNPROVEN'}[decision]
+    # A grounded full-criterion mismatch stays negative. Finishing the
+    # admitted review must not turn that mismatch into an approval.
     assert len(reviews) == result['usage']['industry_review_calls'] == 1
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
     assert len(calls['primary']) == 2

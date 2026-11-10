@@ -430,6 +430,29 @@ def _capture_failure_rows(document: Mapping[str, Any]) -> list[Mapping[str, Any]
             and isinstance(row["data"]["value"], dict) and row["data"]["value"].get("complete") is False]
 
 
+def optional_local_parse_redaction(row: Mapping[str, Any]) -> bool:
+    """A rejected local request has no admitted call or provider-visible result.
+
+    Only credential filtering in that diagnostic can be optional. Keep the
+    saved redaction and every other privacy category visible to the exporter.
+    """
+    try:
+        return (isinstance(row, Mapping)
+                and row.get("kind") == "local_parse_error"
+                and row.get("operation_id") == "unknown"
+                and row.get("action_sequence") is None
+                and row.get("call_identity") is None
+                and row.get("contributes_to_provider_call_count") is False
+                and (row.get("request") or {}).get("timeout_ms") == 0
+                and isinstance((row.get("outcome") or {}).get("error_code"), str)
+                and bool((row.get("outcome") or {}).get("error_code"))
+                and (row.get("outcome") or {}).get("response") is not None
+                and row.get("privacy") == {"redacted": True, "redactions": ["credential"]}
+                and clean_observation(row) == row)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def optional_capture_only(document: Mapping[str, Any]) -> bool:
     """A new explicit failure tag cannot excuse missing required host evidence."""
     try:
@@ -441,7 +464,8 @@ def optional_capture_only(document: Mapping[str, Any]) -> bool:
                     ("agent_observation_count", "agent_observations")))
                 or document["local_refusal_count"] != sum(row["kind"] == "local_refusal" for row in document["observations"])
                 or any(row["write_state"] != "socket_written" for row in document["response_receipts"])
-                or any(row["privacy"]["redacted"] for row in document["observations"])
+                or any(row["privacy"]["redacted"] and not optional_local_parse_redaction(row)
+                       for row in document["observations"])
                 or any(row["privacy"]["redacted"] for row in document["agent_observations"]
                        if row["kind"] == "response_received")):
             return False

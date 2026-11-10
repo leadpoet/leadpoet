@@ -1,5 +1,6 @@
 """Optional HTTP diagnostics never replace proof of required provider bytes."""
 from copy import deepcopy
+import base64
 
 import pytest
 
@@ -59,6 +60,170 @@ def captured_timeout():
         "run": {"kind": "execute", "status": "accepted", "research_process_gaps": ["worker_observations_incomplete"], "cost_gaps": []},
         "score": {"kind": "score", "status": "accepted", "research_process_gaps": [], "cost_gaps": []}}
     return refresh(example)
+
+
+def redacted_parse_row(ordinal):
+    """A rejected local HTTP request with no admitted provider identity."""
+    return {"ordinal": ordinal, "action_sequence": None, "operation_id": "unknown",
+        "kind": "local_parse_error", "call_identity": None,
+        "contributes_to_provider_call_count": False,
+        "request": {"admitted_parameters": {"method": "POST",
+            "url": "https://openrouter.ai/api/v1/responses",
+            "headers": {"authorization": "Bearer synthetic-private-value"},
+            "body_text": {"model": "synthetic/model"}}, "timeout_ms": 0},
+        "outcome": {"protocol": "http", "error_code": "invalid_request",
+            "response": {"status": 400, "headers": {}, "body_b64": base64.b64encode(
+                b'{"error":{"code":"invalid_request"}}').decode()}},
+        "privacy": {"redacted": False, "redactions": []}}
+
+
+@pytest.mark.parametrize("parse_count,receipt_count", [(4, 467), (2, 422)])  # Saved ICP4/7 shapes.
+def test_optional_capture_accepts_only_redacted_noncontributing_parse_diagnostics(parse_count, receipt_count):
+    buffer = observations.Buffer()
+    assert buffer.append_agent_observation(summary()) == 0
+    for ordinal in range(receipt_count):
+        assert buffer.append_response_receipt({
+            "ordinal": ordinal, "action_sequence": ordinal, "operation_id": "openrouter.chat",
+            "call_identity": contracts.hash_bytes(str(ordinal).encode()), "protocol": "http",
+            "status": 200, "body_sha256": contracts.hash_bytes(b"synthetic"), "body_bytes": 9,
+            "write_state": "socket_written", "socket_written_at": "2026-10-25T00:00:00Z"})
+    for ordinal in range(parse_count):
+        buffer.append(redacted_parse_row(receipt_count + ordinal))
+    payload = buffer.document()
+    assert payload["failures"] == [OPTIONAL]
+    assert payload["observation_count"] == parse_count
+    assert payload["response_receipt_count"] == receipt_count
+    assert all(row["privacy"] == {"redacted": True, "redactions": ["credential"]}
+               for row in payload["observations"])
+    assert observations.optional_capture_only(payload)
+    payload["observations"][0]["kind"] = "transport_failure"
+    payload["observations"][0]["operation_id"] = "openrouter.chat"
+    payload["observations"][0]["action_sequence"] = 0
+    payload["observations"][0]["contributes_to_provider_call_count"] = True
+    assert not observations.optional_capture_only(payload)
+
+
+@pytest.mark.parametrize("mutation", ["hidden_reasoning", "call_identity", "action_sequence",
+                                     "provider_count", "timeout", "error_code", "response"])
+def test_local_parse_diagnostic_exception_requires_exact_rejected_shape(mutation):
+    buffer = observations.Buffer()
+    assert buffer.append_agent_observation(summary()) == 0
+    buffer.append(redacted_parse_row(0))
+    payload = buffer.document()
+    row = payload["observations"][0]
+    if mutation == "hidden_reasoning":
+        row["privacy"]["redactions"].append("hidden_reasoning")
+    elif mutation == "call_identity":
+        row["call_identity"] = contracts.hash_bytes(b"admitted")
+    elif mutation == "action_sequence":
+        row["action_sequence"] = 0
+    elif mutation == "provider_count":
+        row["contributes_to_provider_call_count"] = True
+    elif mutation == "timeout":
+        row["request"]["timeout_ms"] = 1000
+    elif mutation == "error_code":
+        row["outcome"].pop("error_code")
+    else:
+        row["outcome"].pop("response")
+    assert not observations.optional_local_parse_redaction(row)
+    assert not observations.optional_capture_only(payload)
+
+
+def test_native_export_keeps_parse_privacy_but_selects_exact_provider_view():
+    from lab_arena import training_export
+    from tests.lab_arena.training_export_receipts_test import values_with_receipts
+    from tests.lab_arena.training_observations_test import save
+    from tests.lab_arena.training_eligibility_test import captured_example
+
+    values, original = values_with_receipts()
+    values["round_row"]["configuration_doc"].update(
+        captured_example()["configuration"], training_maximum_missing_reasoning_percent=0)
+    buffer = observations.Buffer()
+    for receipt in original["response_receipts"]:
+        assert buffer.append_response_receipt(receipt)
+    for row in original["agent_observations"]:
+        assert buffer.append_agent_observation(row) is not None
+    assert buffer.append_agent_observation({**summary(), "id": len(buffer.agent_observations)}) is not None
+    for ordinal in range(4):
+        buffer.append(redacted_parse_row(ordinal + 1))
+    saved = save(values, buffer.document())
+    example = training_export.assemble_example(**values)
+    assert example["worker_observation_artifacts"]["execute:1"] == saved
+    assert set(example["completeness"]["incomplete_reasons"]) == {
+        "worker_observations_incomplete", "worker_observation_privacy_nonexact"}
+    assert example["privacy"]["privacy_filtered"] is True
+    assert example["privacy"]["exact_replay"] is False
+    view, ignored = training_thinking.provider_visible_view(example)
+    assert ignored == {"worker_observations_incomplete", "worker_observation_privacy_nonexact"}
+    assert view["completeness"]["complete"] is True
+    assert example["completeness"]["complete"] is False
+    assert example["worker_observation_artifacts"]["execute:1"]["payload"]["observations"] == saved["payload"]["observations"]
+
+
+@pytest.mark.parametrize("damage", ["generic_failure", "failed_write"])
+def test_parse_diagnostic_never_covers_required_capture_damage(damage):
+    example = captured_timeout()
+    payload = example["worker_observation_artifacts"]["run"]["payload"]
+    payload["observations"] = [observations.clean_observation(redacted_parse_row(10))]
+    payload["observation_count"] = 1
+    if damage == "generic_failure":
+        payload["failures"].insert(0, "capture_incomplete")
+    else:
+        payload["response_receipts"][0].update(write_state="socket_write_failed", socket_written_at=None)
+    for values in (example["completeness"]["incomplete_reasons"],
+                   example["completeness"]["reasons_by_dimension"]["research_process"],
+                   example["related_run_gap_attribution"]["run"]["research_process_gaps"]):
+        values.append("worker_observation_privacy_nonexact")
+    refresh(example)
+    assert not observations.optional_capture_only(payload)
+    view, ignored = training_thinking.provider_visible_view(example)
+    assert view is example and not ignored
+
+
+def test_mixed_related_exact_score_artifact_preserves_optional_source_view():
+    example = captured_timeout()
+    payload = example["worker_observation_artifacts"]["run"]["payload"]
+    payload["observations"] = [observations.clean_observation(redacted_parse_row(10))]
+    payload["observation_count"] = 1
+    score, _ = observations.build_snapshot("score", "score", observations.Buffer().document(),
+        lease_generation=1, claim_request_hash=contracts.hash_bytes(b"score-claim"))
+    example["worker_observation_artifacts"]["score"] = score
+    for values in (example["completeness"]["incomplete_reasons"],
+                   example["completeness"]["reasons_by_dimension"]["research_process"],
+                   example["related_run_gap_attribution"]["run"]["research_process_gaps"]):
+        values.append("worker_observation_privacy_nonexact")
+    refresh(example)
+    view, ignored = training_thinking.provider_visible_view(example)
+    assert ignored == {"worker_observations_incomplete", "worker_observation_privacy_nonexact"}
+    assert view["completeness"]["complete"] is True
+    gate = training_eligibility.assess_capture(submission(), {"run": example}, ["run"], enabled=True)
+    assert gate["eligible"], gate
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert len(splits["train"]) + len(splits["eval"]) == 2
+
+
+def test_mixed_related_required_redaction_stays_hard():
+    from tests.lab_arena.training_observations_test import observation
+
+    example = captured_timeout()
+    source = example["worker_observation_artifacts"]["run"]["payload"]
+    source["observations"] = [observations.clean_observation(redacted_parse_row(10))]
+    source["observation_count"] = 1
+    score_buffer = observations.Buffer()
+    required = observation(kind="transport_failure", action=0, ordinal=0, contributes=True)
+    required["request"]["admitted_parameters"]["authorization"] = "Bearer synthetic-private-value"
+    score_buffer.append(required)
+    score, _ = observations.build_snapshot("score", "score", score_buffer.document(),
+        lease_generation=1, claim_request_hash=contracts.hash_bytes(b"score-claim"))
+    example["worker_observation_artifacts"]["score"] = score
+    for values in (example["completeness"]["incomplete_reasons"],
+                   example["completeness"]["reasons_by_dimension"]["research_process"],
+                   example["related_run_gap_attribution"]["run"]["research_process_gaps"],
+                   example["related_run_gap_attribution"]["score"]["research_process_gaps"]):
+        values.append("worker_observation_privacy_nonexact")
+    refresh(example)
+    view, ignored = training_thinking.provider_visible_view(example)
+    assert view is example and not ignored
 
 
 def test_timeout_source_stored_artifact_and_provider_dataset_agree():

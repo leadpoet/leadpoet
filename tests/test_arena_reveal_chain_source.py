@@ -116,6 +116,11 @@ SPEC488_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec488_block9443929.json"
 )
+SPEC490_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec490_block9478485.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -450,6 +455,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC484_FIXTURE, 484),
         (SPEC486_FIXTURE, 486),
         (SPEC488_FIXTURE, 488),
+        (SPEC490_FIXTURE, 490),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(

@@ -43,6 +43,9 @@ the reviewed missing-identity ordering correction in exact frozen b699.
 
 The exclusive --completed-merger-survivor-only mode adds only reviewed
 completed-merger target proof to the exact frozen810 lead scorer.
+Its --source-local-refusal-finality sub-option adds only the matching shim and
+homepage reader for host-proved, settled source refusals. Deploy the matching
+host broker too; old replies without this proof retain their prior behavior.
 """
 from __future__ import annotations
 
@@ -284,6 +287,7 @@ def extract_frozen_sources(
     identity_repair_before_investigation_only: bool = False,
     identity_repair_finality_only: bool = False,
     completed_merger_survivor_only: bool = False,
+    source_local_refusal_finality: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -317,6 +321,8 @@ def extract_frozen_sources(
         if (empty_domain_negative_finality_only or identity_repair_before_investigation_only
                 or identity_repair_finality_only or completed_merger_survivor_only):
             names = (FINALITY_FILE,)
+        if source_local_refusal_finality:
+            names += (VERIFICATION_FILE, "lab_arena/shim.py")
         for name in dict.fromkeys(names):
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -597,10 +603,16 @@ def main() -> int:
         "--verified-homepage-brand-alias", action="store_true",
         help="compose verified brand identity and its matching host-validator contract; deploy that host validator too; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--source-local-refusal-finality", action="store_true",
+        help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
+    )
     args = parser.parse_args()
+    if args.source_local_refusal_finality and not args.completed_merger_survivor_only:
+        raise CompositionError("source-local-refusal-finality requires completed-merger-survivor-only")
     if args.completed_merger_survivor_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"completed_merger_survivor_only", "push"}
+        if name not in {"completed_merger_survivor_only", "source_local_refusal_finality", "push"}
     ):
         raise CompositionError("completed-merger-survivor-only mode cannot include other corrections")
     if args.visible_auxiliary_context and not args.identity_repair_finality_only:
@@ -666,12 +678,22 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         root = Path(directory)
         if args.completed_merger_survivor_only:
             from scripts.arena_reviewer_completed_merger_seam import convert_completed_merger_seam
+            flags = {"completed_merger_survivor_only": True}
+            if args.source_local_refusal_finality:
+                flags["source_local_refusal_finality"] = True
             original = extract_frozen_sources(
-                args.grading_image, root / "original", completed_merger_survivor_only=True,
+                args.grading_image, root / "original", **flags,
             )
-            if set(original) != {FINALITY_FILE}:
+            expected_names = {FINALITY_FILE}
+            if args.source_local_refusal_finality:
+                from scripts.arena_reviewer_source_local_refusal_seam import convert_source_local_refusal_seam, ORIGINAL_SHA256
+                expected_names.update(ORIGINAL_SHA256)
+            if set(original) != expected_names:
                 raise CompositionError("frozen completed-merger source is incomplete")
             files = {FINALITY_FILE: convert_completed_merger_seam(original[FINALITY_FILE])}
+            if args.source_local_refusal_finality:
+                files.update({name: convert_source_local_refusal_seam(name, original[name])
+                              for name in ORIGINAL_SHA256})
         elif args.identity_repair_finality_only:
             from scripts.arena_reviewer_identity_repair_finality_seam import convert_identity_repair_finality_seam
             original = extract_frozen_sources(
@@ -805,6 +827,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-identity-repair-finality" if args.identity_repair_finality_only else "")
             + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
+            + ("-source-local-refusal" if args.source_local_refusal_finality else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -834,6 +857,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         if args.completed_merger_survivor_only:
             from scripts.arena_reviewer_completed_merger_seam import CORRECTION_ID as COMPLETED_MERGER_CORRECTION_ID
             corrections.append(COMPLETED_MERGER_CORRECTION_ID)
+        if args.source_local_refusal_finality:
+            from scripts.arena_reviewer_source_local_refusal_seam import CORRECTION_ID as SOURCE_LOCAL_REFUSAL_CORRECTION_ID
+            corrections.append(SOURCE_LOCAL_REFUSAL_CORRECTION_ID)
         if args.identity_repair_finality_only:
             from scripts.arena_reviewer_identity_repair_finality_seam import CORRECTION_ID as IDENTITY_REPAIR_FINALITY_CORRECTION_ID
             corrections.append(IDENTITY_REPAIR_FINALITY_CORRECTION_ID)

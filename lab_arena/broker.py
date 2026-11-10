@@ -111,6 +111,9 @@ GENERIC_ERRORS = {
     "miner_provider_not_configured": 400,
 }
 
+SOURCE_UNAVAILABLE_HEADER = "x-leadpoet-source-unavailable"
+SOURCE_UNAVAILABLE_VALUE = "verified-source-v1"
+
 _DECIMAL_RE = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?(?:[eE]-?[0-9]+)?$")
 _SAFE_EXCEPTION_CLASSES = frozenset(
     {
@@ -3883,6 +3886,61 @@ def _provider_request_refused(
     return False
 
 
+def _proved_source_unavailable(
+    provider: str, parameters: Mapping[str, Any], response: ProviderResponse,
+) -> bool:
+    """Separate proved source refusals from ambiguous authorization errors."""
+    if (provider != "deepline" or response.internal_provenance is not None
+            or _deepline_managed_provider_failure(response)):
+        return False
+    if _deepline_firecrawl_tls_source_refusal(parameters, response):
+        return True
+    if _deepline_firecrawl_unsupported_source_refusal(parameters, response):
+        document = json.loads(response.body.decode("utf-8"))
+        error = document.get("tool_error")
+        return bool(
+            document.get("provider") == "firecrawl"
+            and document.get("operation") == "firecrawl_scrape"
+            and document.get("credential_owner") == "deepline_managed"
+            and document.get("credential_source") == "env"
+            and document.get("failure_origin") == "caller"
+            and document.get("error_category") == "validation"
+            and type(document.get("upstream_status")) is int
+            and document["upstream_status"] == 403
+            and isinstance(error, Mapping)
+            and error.get("code") == "UPSTREAM_BAD_INPUT"
+            and error.get("provider") == "firecrawl"
+            and error.get("operation") == "firecrawl_scrape"
+            and type(error.get("statusCode")) is int
+            and error["statusCode"] == 422
+            and error.get("origin") == "caller"
+            and error.get("category") == "validation"
+            and error.get("retryable") is False
+        )
+    if not _deepline_generic_http_request_refusal(parameters, response):
+        return False
+    document = _deepline_provider_failure_document(response)
+    return bool(
+        document is not None
+        and document.get("credential_owner") == "none"
+        and document.get("credential_source") == "none"
+        and document.get("failure_origin") == "provider"
+        and document.get("error_category") == "provider_auth"
+        and document["tool_error"].get("origin") == "provider"
+        and document["tool_error"].get("category") == "provider_auth"
+        and document["tool_error"].get("retryable") is False
+    )
+
+
+def _request_refusal_result(call: Mapping[str, Any], *, source_unavailable: bool = False) -> BrokerResult:
+    result = _error_result("provider_request_refused", call)
+    if source_unavailable:
+        # The sanitizer drops every upstream header except content-type. Only
+        # this host-owned path can create the bounded provenance marker.
+        result.headers[SOURCE_UNAVAILABLE_HEADER] = SOURCE_UNAVAILABLE_VALUE
+    return result
+
+
 def _deepline_provider_failure_document(
     response: ProviderResponse,
 ) -> Optional[Mapping[str, Any]]:
@@ -7176,6 +7234,9 @@ class Broker:
                 effective_normalized,
                 response,
             )
+            source_unavailable = request_refused and _proved_source_unavailable(
+                effective_operation.provider, effective_normalized, response,
+            )
             miner_credential_failure = (
                 funding_source == "miner_key"
                 and not request_refused
@@ -7243,7 +7304,9 @@ class Broker:
             )
             if request_refused:
                 failure_stage = "response_sanitization"
-                refused = _error_result("provider_request_refused", summary)
+                refused = _request_refusal_result(
+                    summary, source_unavailable=source_unavailable and raw_actual is not None,
+                )
                 sanitized_status, sanitized_headers, sanitized_body = (
                     refused.status,
                     refused.headers,
@@ -7842,7 +7905,7 @@ class Broker:
                     "provider_status": provider_status_for_summary,
                 }
             )
-            return _error_result("provider_request_refused", summary)
+            return _request_refusal_result(summary, source_unavailable=source_unavailable)
         if settle_status == "settled" and miner_credential_failure:
             summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": provider_status_for_summary})
             return _error_result("miner_credentials_unavailable", summary)

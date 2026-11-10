@@ -97,6 +97,14 @@
       "qualification/scoring/lead_scorer.py": {
         "fixture": "completed_merger810-lead_scorer.py.gz",
         "sha256": "89c87b4dcfcabc5dc592d4425489c5bbdb6854eef97b038b167a0fb13cd26c3c"
+      },
+      "qualification/scoring/company_verification.py": {
+        "fixture": "typed_refusal-company_verification.py.gz",
+        "sha256": "06155e2987a21b4327885f1b7b49790144e8c3eb2b14da8db4d0db4d2bf45e7c"
+      },
+      "lab_arena/shim.py": {
+        "fixture": "completed_merger810-shim.py.gz",
+        "sha256": "27a667f715effdb06852cd3fd84b8ca382ddad4051b8e0db145dd29fd84bc610"
       }
     }
   }

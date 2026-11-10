@@ -1507,6 +1507,9 @@ class _ArenaProviderFetchError(aiohttp.ClientError):
 _ARENA_PROVIDER_REQUEST_REFUSED_BODY = (
     b'{"error":{"code":"provider_request_refused"}}'
 )
+_ARENA_SOURCE_UNAVAILABLE_HEADER = "x-leadpoet-source-unavailable"
+_ARENA_SOURCE_UNAVAILABLE_VALUE = "verified-source-v1"
+_ARENA_SOURCE_UNAVAILABLE_REASON = "website source unavailable: verified provider refusal"
 
 
 async def _fetch_bounded_html(
@@ -1524,6 +1527,7 @@ async def _fetch_bounded_html(
             and getattr(resp, "_lab_arena_response_url_validated", None) is False
         ):
             broker_error_code = ""
+            source_unavailable = False
             if (
                 resp.status == 403
                 and bool(getattr(resp, "headers", {}).get(
@@ -1544,8 +1548,20 @@ async def _fetch_bounded_html(
                     raw_error.extend(chunk)
                 if bytes(raw_error) == _ARENA_PROVIDER_REQUEST_REFUSED_BODY:
                     broker_error_code = "provider_request_refused"
+                    headers = getattr(resp, "headers", {})
+                    proof = [value for name, value in headers.items()
+                             if name.lower() == _ARENA_SOURCE_UNAVAILABLE_HEADER]
+                    identities = [value for name, value in headers.items()
+                                  if name.lower() == "x-leadpoet-call-identity"]
+                    source_unavailable = bool(
+                        proof == [_ARENA_SOURCE_UNAVAILABLE_VALUE]
+                        and len(identities) == 1
+                        and isinstance(identities[0], str)
+                        and re.fullmatch(r"sha256:[0-9a-f]{64}", identities[0])
+                    )
             raise _ArenaProviderFetchError(
-                "website fetch error: Arena provider response unavailable",
+                (_ARENA_SOURCE_UNAVAILABLE_REASON if source_unavailable
+                 else "website fetch error: Arena provider response unavailable"),
                 broker_status=resp.status,
                 broker_error_code=broker_error_code,
             )

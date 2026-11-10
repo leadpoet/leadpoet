@@ -65,6 +65,8 @@ DEFAULT_TIMEOUT_MS = 30_000
 SOCKET_GRACE_SECONDS = 15.0
 SETTLED_MICROUSD_HEADER = "x-leadpoet-settled-microusd"
 CALL_IDENTITY_HEADER = "x-leadpoet-call-identity"
+SOURCE_UNAVAILABLE_HEADER = "x-leadpoet-source-unavailable"
+SOURCE_UNAVAILABLE_VALUE = "verified-source-v1"
 ERROR_PREFIX = "lab arena: "
 SITECUSTOMIZE_SOURCE = "import lab_arena.shim as _lab_arena_shim\n_lab_arena_shim.install()\n"
 SHIM_IMAGE_MODULES = (
@@ -243,6 +245,7 @@ def _parse_worker_response_with_url(
         raise ShimTransportError("invalid_response")
     headers: Dict[str, str] = {}
     trusted_names = []
+    source_marker_seen = False
     for name, value in raw_headers.items():
         if not isinstance(name, str) or not isinstance(value, str):
             raise ShimTransportError("invalid_response")
@@ -264,6 +267,12 @@ def _parse_worker_response_with_url(
             if not valid:
                 raise ShimTransportError("invalid_response")
             headers[normalized_name] = value
+        elif normalized_name == SOURCE_UNAVAILABLE_HEADER:
+            if source_marker_seen:
+                raise ShimTransportError("invalid_response")
+            source_marker_seen = True
+            if value == SOURCE_UNAVAILABLE_VALUE:
+                headers[normalized_name] = value
     if SETTLED_MICROUSD_HEADER in headers and CALL_IDENTITY_HEADER not in headers:
         raise ShimTransportError("invalid_response")
     if len(trusted_names) > 1:
@@ -272,6 +281,11 @@ def _parse_worker_response_with_url(
         body = base64.b64decode(str(payload["body_b64"]), validate=True)
     except (TypeError, ValueError) as exc:
         raise ShimTransportError("invalid_response") from exc
+    if SOURCE_UNAVAILABLE_HEADER in headers and not (
+        status == 403 and CALL_IDENTITY_HEADER in headers
+        and body == b'{"error":{"code":"provider_request_refused"}}'
+    ):
+        headers.pop(SOURCE_UNAVAILABLE_HEADER)
     response_url = ""
     if trusted_names:
         try:

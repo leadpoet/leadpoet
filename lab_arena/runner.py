@@ -4128,32 +4128,34 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
             document, secrets=(lease_token,),
         ))
         retention = getattr(getattr(config, "input_retention", None), "observations", None)
-        retained = None
-        if retention is not None:
-            try:
-                retained = retention.retain(lease, lease_token, document, expected_digest=expected_digest)
-            except Exception as exc:
-                _log_training_capture_failure("observations", exc)
-        for attempt in range(2):
-            try:
-                if retained is not None:
-                    if not retention.deliver(retained):
-                        raise RunnerError("retained training observations acknowledgment unavailable")
-                    return {**summary, "status": "stored", "payload_sha256": expected_digest}
-                result = send(str(lease["run_id"]), lease_token, document)
-                if (not isinstance(result, Mapping) or result.get("status") != "stored"
-                        or getattr(result, "http_status", 200) != 200
-                        or result.get("payload_sha256") != expected_digest):
-                    raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
-                return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
-            except Exception:
-                if attempt:
-                    verify = getattr(config.api, "verify_training_observations", None)
-                    if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
-                        if retained is not None:
-                            retention.acknowledge_verified(retained, expected_digest)
+        with ExitStack() as saved:
+            retained = descriptor = None
+            if retention is not None:
+                try:
+                    retained, descriptor = saved.enter_context(retention.retained_delivery(
+                        lease, lease_token, document, expected_digest=expected_digest))
+                except Exception as exc:
+                    _log_training_capture_failure("observations", exc)
+            for attempt in range(2):
+                try:
+                    if retained is not None:
+                        if not retention.deliver(retained, _descriptor=descriptor):
+                            raise RunnerError("retained training observations acknowledgment unavailable")
                         return {**summary, "status": "stored", "payload_sha256": expected_digest}
-                    raise
+                    result = send(str(lease["run_id"]), lease_token, document)
+                    if (not isinstance(result, Mapping) or result.get("status") != "stored"
+                            or getattr(result, "http_status", 200) != 200
+                            or result.get("payload_sha256") != expected_digest):
+                        raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
+                    return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
+                except Exception:
+                    if attempt:
+                        verify = getattr(config.api, "verify_training_observations", None)
+                        if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
+                            if retained is not None:
+                                retention.acknowledge_verified(retained, expected_digest, _descriptor=descriptor)
+                            return {**summary, "status": "stored", "payload_sha256": expected_digest}
+                        raise
     except Exception as exc:
         try:
             _log_training_capture_failure("observations", exc)

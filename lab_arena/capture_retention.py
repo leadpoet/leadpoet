@@ -1,7 +1,7 @@
 """Private immutable inputs/final observations, with one bounded replay operation."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -20,7 +20,8 @@ INPUT_GRACE_SECONDS = 180
 INPUT_REPLAY_TIMEOUT_SECONDS = 5.0
 _INPUT_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_input.v1'
 _INPUT_RECORD_LIMIT = training_input.MAX_INPUT_BYTES + 64 * 1024
-_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v1'
+_LEGACY_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v1'
+_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v2'
 _OBSERVATION_RECORD_LIMIT = training_observations.MAX_OBJECT_BYTES + 64 * 1024
 _RECORD_NAME = re.compile(r'[0-9a-f]{64}\.json')
 
@@ -341,9 +342,13 @@ class _FinalObservationRetention(InputRetention):
     def _directory(self, *, create=False):
         return private_directory(self.config.work_dir, 'pending-observations', create=create)
 
-    def _prepare(self, lease, token, document, expected_digest=None):
+    def _prepare(self, lease, token, document, expected_digest=None, *, retained_at=None):
         training_observations.object_ref(lease['run_id'], lease['lease_generation'], lease['claim_request_hash'])
         expiry = _time(lease['lease_expires_at'])
+        now = _time(self.config.clock())
+        retained_at = now if retained_at is None else _time(retained_at)
+        if retained_at > now:
+            raise ValueError('observation capture clock is invalid')
         if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{64}', token):
             raise ValueError('observation capture token is invalid')
         if not isinstance(lease.get('round_id'), str) or not lease['round_id']:
@@ -357,7 +362,8 @@ class _FinalObservationRetention(InputRetention):
         return {'schema_version': _OBSERVATION_RECORD_SCHEMA, 'validator_hotkey': self.config.identity.hotkey,
             'round_id': lease['round_id'], 'run_id': lease['run_id'], 'kind': lease.get('kind', 'execute'),
             'lease_generation': lease['lease_generation'], 'claim_request_hash': lease['claim_request_hash'],
-            'lease_token': token, 'lease_expires_at': expiry.isoformat(), 'observations': document,
+            'lease_token': token, 'lease_expires_at': expiry.isoformat(), 'retained_at': retained_at.isoformat(),
+            'observations': document,
             'original_observations_sha256': contracts.document_hash(document), 'expected_payload_sha256': expected_digest,
             'expected_snapshot_schema': training_observations.SCHEMA_VERSION if 'response_receipts' in document else training_observations.LEGACY_SCHEMA_VERSION}
 
@@ -368,22 +374,46 @@ class _FinalObservationRetention(InputRetention):
         if len(raw) > self._record_limit:
             raise ValueError('pending observations exceed limit')
         record = json.loads(raw)
-        if (record.get('schema_version') != _OBSERVATION_RECORD_SCHEMA
+        schema = record.get('schema_version')
+        if (schema not in {_OBSERVATION_RECORD_SCHEMA, _LEGACY_OBSERVATION_RECORD_SCHEMA}
                 or record.get('validator_hotkey') != self.config.identity.hotkey
                 or self.config.round_id is not None and record.get('round_id') != self.config.round_id
                 or path.name != self._name(record)
-                or self._prepare(record, record['lease_token'], record['observations']) != record):
+                or (schema == _OBSERVATION_RECORD_SCHEMA) != ('retained_at' in record)):
+            raise ValueError('pending observation identity is invalid')
+        expected = self._prepare(record, record['lease_token'], record['observations'],
+                                 retained_at=record.get('retained_at'))
+        if schema == _LEGACY_OBSERVATION_RECORD_SCHEMA:
+            # Existing files retain their old claim-expiry replay fence. Never
+            # manufacture a new finalization time when an old file is read.
+            expected['schema_version'] = schema
+            expected.pop('retained_at')
+        if expected != record:
             raise ValueError('pending observation identity is invalid')
         return record
 
-    def retain(self, lease, token, document, *, expected_digest=None):
+    @contextmanager
+    def retained_delivery(self, lease, token, document, *, expected_digest=None):
+        """Keep replay outside the foreground's publish-to-ack operation."""
         record = self._prepare(lease, token, document, expected_digest)
         path = self._directory(create=True) / self._name(record)
         with retained_record(path, contracts.canonical_json(record).encode('utf-8'), self._record_limit,
                              label=self._label) as (descriptor, created):
-            if not created and self._read(descriptor, path) != record:
-                raise ValueError('pending observation identity conflict')
-        return path
+            if not created:
+                existing = self._read(descriptor, path)
+                # Repeated foreground delivery cannot refresh the replay fence.
+                expected = dict(record, schema_version=existing['schema_version'])
+                if 'retained_at' in existing:
+                    expected['retained_at'] = existing['retained_at']
+                else:
+                    expected.pop('retained_at')
+                if existing != expected:
+                    raise ValueError('pending observation identity conflict')
+            yield path, descriptor
+
+    def retain(self, lease, token, document, *, expected_digest=None):
+        with self.retained_delivery(lease, token, document, expected_digest=expected_digest) as (path, _):
+            return path
 
     @staticmethod
     def matches(record, response):
@@ -395,33 +425,43 @@ class _FinalObservationRetention(InputRetention):
             and response.get('claim_request_hash') == record['claim_request_hash']
             and response.get('payload_sha256') == record['expected_payload_sha256'])
 
-    def acknowledge_verified(self, path, payload_sha256):
+    def acknowledge_verified(self, path, payload_sha256, *, _descriptor=None):
         """Called only after the authenticated exact-digest HEAD succeeds."""
-        with locked_record(path, self._record_limit, label=self._label) as descriptor:
-            if descriptor is None or self._read(descriptor, path)['expected_payload_sha256'] != payload_sha256:
+        lock = nullcontext(_descriptor) if _descriptor is not None else locked_record(path, self._record_limit, label=self._label)
+        with lock as descriptor:
+            if descriptor is None or not path.exists() or self._read(descriptor, path)['expected_payload_sha256'] != payload_sha256:
                 return False
             path.unlink()
             sync_directory(path.parent)
             return True
 
-    def deliver(self, path, *, replay=False, replay_deadline=None):
+    def deliver(self, path, *, replay=False, replay_deadline=None, _descriptor=None):
         if replay_deadline is not None and time.monotonic() >= replay_deadline:
             return False
-        with locked_record(path, self._record_limit, label=self._label) as descriptor:
-            if descriptor is None:
+        # Foreground callers already own the retained inode lock. Reopening
+        # and flocking it here would conflict with that same operation.
+        lock = nullcontext(_descriptor) if _descriptor is not None else locked_record(path, self._record_limit, label=self._label)
+        with lock as descriptor:
+            if descriptor is None or not path.exists():
                 return False
             try:
                 record = self._read(descriptor, path)
             except (ValueError, TypeError, KeyError, AttributeError):
                 self._park(path, 'invalid', descriptor)
                 raise
-            remaining = (_time(record['lease_expires_at']) + timedelta(seconds=INPUT_GRACE_SECONDS) - self.config.clock()).total_seconds()
-            if remaining <= 0:
+            anchor = record.get('retained_at', record['lease_expires_at'])
+            remaining = (_time(anchor) + timedelta(seconds=INPUT_GRACE_SECONDS) - self.config.clock()).total_seconds()
+            # Replay gets one bounded window from final snapshot retention;
+            # legacy files keep their original claim-expiry fence. Foreground
+            # delivery uses current server authority after provider renewals.
+            if replay and remaining <= 0:
                 self._park(path, 'expired', descriptor)
                 return False
             if replay_deadline is not None:
                 remaining = min(remaining, replay_deadline - time.monotonic())
-            if remaining <= 0 or self._stop.is_set():
+                if remaining <= 0:
+                    return False
+            if replay and self._stop.is_set():
                 return False
             try:
                 args = (record['run_id'], record['lease_token'], record['observations'])

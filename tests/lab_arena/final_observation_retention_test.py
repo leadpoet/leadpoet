@@ -1,6 +1,7 @@
 """Exact final evidence survives completion, process loss and bounded denials."""
 import asyncio
 import copy
+from contextlib import contextmanager
 from datetime import timedelta
 import json
 from pathlib import Path
@@ -164,11 +165,13 @@ def test_unusable_replay_parks_exact_final_for_audit(tmp_path, denial):
     else:
         service.handle_training_observations('r1', TOKEN, payload())
     finish_poll(config.input_retention)
-    assert not path.exists() and len(api.observation_calls) == 1
+    attempts = 0 if denial == 'expired_finish' else 1
+    assert not path.exists() and len(api.observation_calls) == attempts
     audit = next((path.parent / 'audit').iterdir())
-    assert audit.read_bytes() == original_bytes and audit.suffix == '.rejected'
+    assert audit.read_bytes() == original_bytes
+    assert audit.suffix == ('.expired' if denial == 'expired_finish' else '.rejected')
     finish_poll(config.input_retention)
-    assert len(api.observation_calls) == 1
+    assert len(api.observation_calls) == attempts
 
 
 @pytest.mark.parametrize('field,value', [('status','unavailable'), ('schema_version','wrong'), ('ref','wrong'),
@@ -256,21 +259,27 @@ def test_concurrent_controllers_share_the_retained_final_lock(tmp_path):
     assert not path.exists() and len(calls) == 1
 
 
-def test_replay_wins_publish_to_foreground_race_and_exact_head_confirms(tmp_path, monkeypatch):
-    config, lease, service, _objects, api, _ = observation_local(tmp_path)
-    def verify(run_id, token, digest):
-        return service.verify_training_observations(run_id, token, digest) == digest
-    api.verify_training_observations = verify
+@pytest.mark.parametrize('renewed', [False, True])
+def test_foreground_keeps_publish_lock_until_exact_ack(tmp_path, monkeypatch, renewed):
+    config, lease, service, _objects, api, clock = observation_local(tmp_path)
+    if renewed:
+        clock[0] += timedelta(minutes=10)
+        service._store.get_run('r1')['lease_expires_at'] = (clock[0] + timedelta(minutes=2)).isoformat()
     capture = config.input_retention.observations
-    retain = capture.retain
+    retain = capture.retained_delivery
     paths = []
-    def replay_first(*args, **kwargs):
-        path = retain(*args, **kwargs)
-        paths.append(path)
-        finish_poll(config.input_retention)
-        assert not path.exists()
-        return path
-    monkeypatch.setattr(capture, 'retain', replay_first)
+    @contextmanager
+    def replay_after_publish(*args, **kwargs):
+        with retain(*args, **kwargs) as retained:
+            path, _descriptor = retained
+            paths.append(path)
+            original = path.read_bytes()
+            # Use another controller: its stop flag is not the foreground's,
+            # and flock must skip this inode instead of waiting or parking it.
+            finish_poll(capture_retention.InputRetention(config))
+            assert path.read_bytes() == original and not api.observation_calls
+            yield retained
+    monkeypatch.setattr(capture, 'retained_delivery', replay_after_publish)
     state = runner.RunState(lease=lease, lease_token=TOKEN)
     state.worker_observations.append(observation())
     summary = runner._record_training_observations(config, lease, TOKEN, state)
@@ -348,7 +357,8 @@ def test_cache_only_finish_proof_rejects_every_unreliable_anchor(tmp_path, damag
     assert row == before
 
 
-def test_full_foreground_window_and_five_second_replay_queue_keep_original_audit(tmp_path):
+@pytest.mark.parametrize('head_seconds', [0, 60])
+def test_foreground_timeouts_leave_only_remaining_snapshot_replay_window(tmp_path, head_seconds):
     config, lease, _service, objects, api, clock = observation_local(tmp_path)
     timeouts = []
     def unavailable(_run, _token, _document, *, timeout_seconds=None):
@@ -358,7 +368,7 @@ def test_full_foreground_window_and_five_second_replay_queue_keep_original_audit
         clock[0] += timedelta(seconds=delay)
         raise httpx.ReadTimeout('synthetic queue longer than client allowance')
     def missing_head(*_args):
-        clock[0] += timedelta(seconds=60)
+        clock[0] += timedelta(seconds=head_seconds)
         return False
     api.training_observations = unavailable
     api.verify_training_observations = missing_head
@@ -368,19 +378,139 @@ def test_full_foreground_window_and_five_second_replay_queue_keep_original_audit
     state.worker_observations.append(observation())
     result = runner._record_training_observations(config, lease, TOKEN, state)
     assert result['status'] == 'unavailable' and 'payload_sha256' not in result
-    assert clock[0] == NOW + timedelta(seconds=180) and timeouts == [60, 60]
+    assert clock[0] == NOW + timedelta(seconds=120 + head_seconds) and timeouts == [60, 60]
     path = next((config.work_dir/'pending-observations').glob('*.json'))
     original = path.read_bytes()
     finish_poll(config.input_retention)
-    assert len(timeouts) == 3 and timeouts[:2] == [60, 60] and 0 < timeouts[2] <= 5
-    assert path.read_bytes() == original
+    if head_seconds == 0:
+        assert len(timeouts) == 3 and timeouts[:2] == [60, 60] and 0 < timeouts[2] <= 5
+        assert path.read_bytes() == original
+    else:
+        # Two full POST timeouts and a full HEAD consume the entire window.
+        assert timeouts == [60, 60] and not path.exists()
     attempts = tuple(timeouts)
     assert not list((tmp_path/'objects').rglob('*.gz'))
-    # Once even the original lease+grace ends, retain for audit without HTTP.
-    clock[0] = NOW + timedelta(seconds=301)
+    clock[0] = NOW + timedelta(seconds=180)
     finish_poll(config.input_retention)
     assert not path.exists() and tuple(timeouts) == attempts
     audit = next((path.parent/'audit').iterdir())
     assert audit.suffix == '.expired' and audit.read_bytes() == original
     finish_poll(config.input_retention)
     assert tuple(timeouts) == attempts
+
+
+@pytest.mark.parametrize('seconds,allowed', [(179.999, True), (180, False), (181, False)])
+def test_delayed_final_replay_keeps_snapshot_retention_bound_after_server_renewal(tmp_path, seconds, allowed):
+    config, lease, service, _objects, api, clock = observation_local(tmp_path)
+    path = config.input_retention.observations.retain(lease, TOKEN, payload(observation()))
+    original = path.read_bytes()
+    clock[0] = capture_retention._time(json.loads(original)['retained_at']) + timedelta(seconds=seconds)
+    service._store.get_run('r1')['lease_expires_at'] = (clock[0] + timedelta(minutes=2)).isoformat()
+    assert config.input_retention.observations.deliver(path, replay=True) is allowed
+    assert not path.exists()
+    assert len(api.observation_calls) == (1 if allowed else 0)
+    if allowed:
+        assert 0 < api.observation_calls[0][3] <= .001
+    else:
+        audit = next((path.parent / 'audit').iterdir())
+        assert audit.suffix == '.expired' and audit.read_bytes() == original
+
+
+def test_stopping_replay_keeps_active_foreground_final_delivery(tmp_path):
+    config, lease, _service, objects, api, _clock = observation_local(tmp_path)
+    state = runner.RunState(lease=lease, lease_token=TOKEN)
+    state.worker_observations.append(observation())
+    document = state.worker_observations.document()
+    path = config.input_retention.observations.retain(lease, TOKEN, document)
+    original = path.read_bytes()
+    config.input_retention.stop()  # Runner.close stops replay before workers drain.
+    assert not config.input_retention.observations.deliver(path, replay=True)
+    assert not api.observation_calls and path.read_bytes() == original
+    summary = runner._record_training_observations(config, lease, TOKEN, state)
+    assert summary['status'] == 'stored' and len(api.observation_calls) == 1
+    assert not path.exists()
+    assert obs.read_snapshot(objects, 'r1', 'execute', 1, CLAIM_HASH)['payload'] == document
+
+
+def test_failed_foreground_context_releases_lock_and_keeps_final_for_restart(tmp_path):
+    import os
+
+    config, lease, _service, objects, api, _clock = observation_local(tmp_path)
+    document = payload(observation())
+    with pytest.raises(RuntimeError):
+        with config.input_retention.observations.retained_delivery(lease, TOKEN, document) as (path, descriptor):
+            original = path.read_bytes()
+            raise RuntimeError('synthetic foreground process loss')
+    assert path.read_bytes() == original and not api.observation_calls
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    finish_poll(capture_retention.InputRetention(config))
+    assert not path.exists() and len(api.observation_calls) == 1
+    assert obs.read_snapshot(objects, 'r1', 'execute', 1, CLAIM_HASH)['payload'] == document
+
+
+@pytest.mark.parametrize('damage', ['naive', 'future', 'invalid', 'missing'])
+def test_invalid_retention_clock_never_uploads_and_preserves_private_audit(tmp_path, damage):
+    config, lease, _service, _objects, api, _clock = observation_local(tmp_path)
+    path = config.input_retention.observations.retain(lease, TOKEN, payload(observation()))
+    record = json.loads(path.read_bytes())
+    if damage == 'naive':
+        record['retained_at'] = NOW.replace(tzinfo=None).isoformat()
+    elif damage == 'future':
+        record['retained_at'] = (NOW + timedelta(seconds=1)).isoformat()
+    elif damage == 'invalid':
+        record['retained_at'] = 'invalid'
+    else:
+        del record['retained_at']
+    path.write_text(json.dumps(record))
+    original = path.read_bytes()
+    finish_poll(config.input_retention)
+    assert not path.exists() and not api.observation_calls
+    audit = next((path.parent / 'audit').iterdir())
+    assert audit.suffix == '.invalid' and audit.read_bytes() == original
+
+
+@pytest.mark.parametrize('field', ['clock', 'lease_expires_at'])
+def test_invalid_initial_clock_or_claim_expiry_cannot_create_retained_final(tmp_path, field):
+    config, lease, _service, _objects, api, clock = observation_local(tmp_path)
+    if field == 'clock':
+        clock[0] = NOW.replace(tzinfo=None)
+    else:
+        lease['lease_expires_at'] = 'invalid'
+    with pytest.raises(ValueError):
+        config.input_retention.observations.retain(lease, TOKEN, payload(observation()))
+    assert not (config.work_dir / 'pending-observations').exists() and not api.observation_calls
+
+
+def test_repeated_retention_never_refreshes_snapshot_replay_deadline(tmp_path):
+    config, lease, _service, _objects, api, clock = observation_local(tmp_path)
+    capture = config.input_retention.observations
+    document = payload(observation())
+    path = capture.retain(lease, TOKEN, document)
+    original = path.read_bytes()
+    clock[0] += timedelta(seconds=181)
+    assert capture.retain(lease, TOKEN, document) == path
+    assert path.read_bytes() == original
+    assert not capture.deliver(path, replay=True) and not api.observation_calls
+    assert next((path.parent / 'audit').iterdir()).read_bytes() == original
+
+
+@pytest.mark.parametrize('seconds,allowed', [(179.999, True), (180, False)])
+def test_legacy_pending_final_keeps_old_expiry_fence_without_new_retention_time(tmp_path, seconds, allowed):
+    config, lease, service, _objects, api, clock = observation_local(tmp_path)
+    capture = config.input_retention.observations
+    document = payload(observation())
+    path = capture.retain(lease, TOKEN, document)
+    record = json.loads(path.read_bytes())
+    record['schema_version'] = capture_retention._LEGACY_OBSERVATION_RECORD_SCHEMA
+    del record['retained_at']
+    path.write_text(json.dumps(record))
+    original = path.read_bytes()
+    clock[0] = capture_retention._time(lease['lease_expires_at']) + timedelta(seconds=seconds)
+    service._store.get_run('r1')['lease_expires_at'] = (clock[0] + timedelta(minutes=2)).isoformat()
+    assert capture.retain(lease, TOKEN, document) == path and path.read_bytes() == original
+    assert capture.deliver(path, replay=True) is allowed
+    assert not path.exists() and len(api.observation_calls) == (1 if allowed else 0)
+    if not allowed:
+        audit = next((path.parent / 'audit').iterdir())
+        assert audit.suffix == '.expired' and audit.read_bytes() == original

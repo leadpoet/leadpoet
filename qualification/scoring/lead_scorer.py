@@ -5557,8 +5557,6 @@ def _unresolved_homepage_web_identity_conflict(
         and slug == observed.get("observed_linkedin_slug")
         and domain == web_receipt.get("submitted_domain")
         == web_receipt.get("observed_domain")
-        and (name != web_receipt.get("observed_name")
-             or web_receipt.get("reason_code") == "structured_homepage_numeric_identity_verified")
         and slug != web_receipt.get("observed_linkedin_slug")
     )
 
@@ -5603,11 +5601,29 @@ def _conflicting_homepage_numeric_profile_lookup(
             "linkedin_company_slug": submitted,
             "requested_profile_url": f"https://www.linkedin.com/company/{numeric}",
         }
-    if not _unresolved_homepage_web_identity_conflict(homepage, web_receipt):
+    # An omitted model locator must not select the current profile instead of
+    # the bound homepage's old locator. This candidate only selects the one
+    # request; it does not change the receipt or supply alias authority.
+    missing_web_slug = (
+        web_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and web_receipt.get("reason_code") == "identity_not_proven"
+        and not web_receipt.get("observed_linkedin_slug")
+        and web_receipt.get("submitted_name") == web_receipt.get("observed_name")
+        and web_receipt.get("evidence_source") == "company_web_reverification"
+        and domain == details.get("verified_homepage_transport_domain")
+        and observed.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and observed.get("evidence_source") == "company_homepage"
+    )
+    conflict_candidate = (
+        {**web_receipt, "decision": COMPANY_FIT_MATCH,
+         "reason_code": "verifier_accepted", "observed_linkedin_slug": submitted}
+        if missing_web_slug else web_receipt
+    )
+    if not _unresolved_homepage_web_identity_conflict(homepage, conflict_candidate):
         return {}
     observed = homepage.details.get("identity") or {}
     slug = str(observed.get("observed_linkedin_slug") or "")
-    vanity = str(web_receipt.get("observed_linkedin_slug") or "")
+    vanity = str(conflict_candidate.get("observed_linkedin_slug") or "")
     numeric_locator = (
         slug.isascii() and slug.isdigit()
         and observed.get("reason_code") == "identity_linkedin_alias_unresolved"
@@ -7403,8 +7419,16 @@ def _structured_profile_alias_identity_receipt(
         and all(isinstance(value, str) for value in evidence.values())
         and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
         and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
-        and numeric_requested.isascii() and numeric_requested.isdigit()
-        and evidence.get("company_id") == numeric_requested
+        and numeric_requested.isascii() and numeric_requested
+        and (
+            (numeric_requested.isdigit() and evidence.get("company_id") == numeric_requested)
+            or (not numeric_requested.isdigit()
+                and re.fullmatch(r"[1-9][0-9]*", evidence.get("company_id", ""))
+                and numeric_requested != web_identity.get("submitted_linkedin_slug")
+                and web_identity.get("observed_linkedin_slug") in {
+                    "", web_identity.get("submitted_linkedin_slug"),
+                })
+        )
         and _strict_linkedin_company_profile_url(evidence.get("requested_url"))
         and _strict_linkedin_company_profile_url(evidence.get("url"))
         and web_identity.get("evidence_source") == "company_web_reverification"

@@ -3184,8 +3184,9 @@ async def _review_industry_sources(
                'activity_role': {'partner_other': 'third_party'}.get(result['role'], result['role']),
                'evidence_url': primary['url'], 'evidence_quote': primary['quote'],
                'reason': result['reason']}
-        # Reuse the native relationship and source gates, including the existing
-        # treatment of a supplier whose offered activity does not match.
+        # The full-criterion classifier can reject a genuine supplier's fit.
+        # Keep all native attribution gates; only its legacy role-only negative
+        # rule differs from an ordinary research-model submission.
         arguments = {'findings': [raw]}
         targets = ('industry',)
         if rebrand.get('status') == 'VERIFIED':
@@ -3194,7 +3195,8 @@ async def _review_industry_sources(
         validated = _validated_findings(arguments, targets=targets,
             fetched_pages=fetched_pages, fetched_final_urls=fetched_final_urls,
             first_party_domains=first_party_domains, identity_anchor=identity_anchor,
-            identity_names=identity_names)
+            identity_names=identity_names,
+            classified_industry_mismatch=result['decision'] == 'mismatch')
         if validated is None:
             raise ValueError('industry_review_finding_malformed')
         finding = validated['industry']
@@ -3831,7 +3833,7 @@ async def _fetch_exa_exact_page(
             not isinstance(item, Mapping) for item in statuses
         ):
             return {"ok": False, "error": "invalid_contents_status"}
-        # Exa authenticated the API request; this exact target denied access.
+        # Exa authenticated the API request; this exact target is unreadable.
         # Do not confuse a crawl status with API auth, credits or an outage.
         if len(statuses) == 1 and body.get("results") == []:
             source = statuses[0]
@@ -3841,8 +3843,16 @@ async def _fetch_exa_exact_page(
                 and source.get("status") == "error"
                 and isinstance(error, Mapping)
                 and type(error.get("httpStatusCode")) is int
-                and error["httpStatusCode"] in {401, 403}
-                and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+                and (
+                    (error["httpStatusCode"] in {401, 403}
+                     and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"])
+                    # The authenticated API read completed, but this exact
+                    # target's TLS handshake failed. Like a source denial,
+                    # it is unreadable evidence, not a provider-wide outage.
+                    # Generic crawl/API 5xx errors retain infrastructure status.
+                    or (error["httpStatusCode"] == 500
+                        and error.get("tag") == "CRAWL_SSL_ERROR")
+                )
             ):
                 return {"ok": False, "error": "source_access_denied"}
         if any(
@@ -4338,7 +4348,10 @@ def _validated_findings(
     requested_stage: str = "",
     priority_headquarters_url: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
+    classified_industry_mismatch: bool = False,
 ) -> Optional[dict[str, dict[str, Any]]]:
+    # Host-only authority from _review_industry_sources after packet resolution.
+    # Never derive this permission from a research model's finding or receipt.
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
     raw_findings = arguments.get("findings")
@@ -4889,6 +4902,7 @@ def _validated_findings(
                 or (
                     status == "CONTRADICTED"
                     and finding["activity_role"] == "supplier_operator"
+                    and not classified_industry_mismatch
                 )
                 or finding["activity_role"] == "unresolved"
             ):

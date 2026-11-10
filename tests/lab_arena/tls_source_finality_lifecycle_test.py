@@ -34,9 +34,9 @@ def database():
     yield from current_service_database()
 
 
-@pytest.mark.parametrize("mode", ["tls", "tls_bounded", "pre_fix_tls", "provider_unavailable"])
+@pytest.mark.parametrize("mode", ["tls", "tls_bounded", "pre_fix_tls", "provider_unavailable", "exa_tls"])
 def test_captured_tls_baseline_and_miner_real_scorer_publish(database, tmp_path, monkeypatch, mode):
-    if mode != "tls":
+    if mode not in {"tls", "exa_tls"}:
         monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
     if mode == "pre_fix_tls":
         monkeypatch.setattr(br, "_deepline_firecrawl_tls_source_refusal", lambda *_: False)
@@ -76,7 +76,8 @@ def test_captured_tls_baseline_and_miner_real_scorer_publish(database, tmp_path,
             target = wire["payload"]["ids"][0]
             document = {"status": "completed", "job_id": native, "billing": {"credits_charged": .01},
                         "result": {"data": {"results": [], "statuses": [{"id": target, "status": "error",
-                        "error": {"httpStatusCode": 404, "tag": "CRAWL_HTTP_404"}}]}}}
+                        "error": {"httpStatusCode": 500 if mode == "exa_tls" else 404,
+                                  "tag": "CRAWL_SSL_ERROR" if mode == "exa_tls" else "CRAWL_HTTP_404"}}]}}}
             status, credits = 200, .01
         with self._deepline_lock:
             self._deepline_jobs.append({"id": native, "request_id": native, "operation": tool,
@@ -200,7 +201,7 @@ def test_captured_tls_baseline_and_miner_real_scorer_publish(database, tmp_path,
 
         client.post = checked_post
         harness.api_factory = lambda: runner.HttpArenaApiClient("http://localhost", client=client)
-        day = 25 + ("tls", "tls_bounded", "pre_fix_tls", "provider_unavailable").index(mode)
+        day = 25 + ("tls", "tls_bounded", "pre_fix_tls", "provider_unavailable", "exa_tls").index(mode)
         fixtures._start_round(harness, day=day, epoch=63000 + day)
         harness.advance_until("stage1_scoring", runners=1, max_steps=120)
         harness.run_stage_with_runners(1)
@@ -216,7 +217,7 @@ def test_captured_tls_baseline_and_miner_real_scorer_publish(database, tmp_path,
         harness.advance_until("scored", runners=1, max_steps=120)
         assert all("failure" not in output for output in outputs), outputs
         assert len(attempts) == 2 and set(attempts.values()) == {1}
-        assert provider_counts == ({"firecrawl_scrape": 4, "exa_contents": 4} if mode == "tls" else {"firecrawl_scrape": 2})
+        assert provider_counts == ({"firecrawl_scrape": 4, "exa_contents": 4} if mode in {"tls", "exa_tls"} else {"firecrawl_scrape": 2})
         affected = [output for output in outputs if output["scored_run_id"] in attempts]
         assert len(affected) == 2
         for output in affected:

@@ -1,0 +1,275 @@
+[
+  {
+    "run": "arena-2026-11-09:baseline-2026-11-09:1:7:1",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "match",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "observed_name": "mwcomponents",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "mwcomponents",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "match",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  },
+  {
+    "run": "arena-2026-11-09:sub-053bb132098918257acc37e709b89a0c:2:7:2",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "match",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "observed_name": "mwcomponents",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "mwcomponents",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "match",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  },
+  {
+    "run": "arena-2026-11-09:sub-5110fb77be5a7fce4f33e081cb1736e4:2:7:2",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "unavailable",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponents",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "unavailable",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  },
+  {
+    "run": "arena-2026-11-09:sub-df29179a59b3716f89c2db611fa4a728:2:7:1",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "unavailable",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponents",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "unavailable",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  },
+  {
+    "run": "arena-2026-11-09:sub-ab1cf93c22db11c1b447e55509b7196d:2:7:2",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "match",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "observed_name": "mwcomponents",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "mwcomponents",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "match",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  },
+  {
+    "run": "arena-2026-11-09:sub-31b1e72865ef60692b22916abbaa130c:2:7:2",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "match",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "observed_name": "mwcomponentsmwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "mwcomponents",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "match",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  },
+  {
+    "run": "arena-2026-11-09:sub-f3efd15e765999cc996ba1fe48816d73:2:7:1",
+    "identity": {
+      "reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "decision": "unavailable",
+      "identity": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponentsusmademetalcomponentmanufacturermwindustries",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_homepage",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "m-w-components",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "actual_final_url": "https://www.mwcomponents.com/",
+      "web_identity_receipt": {
+        "decision": "unavailable",
+        "reason_code": "identity_not_proven",
+        "observed_name": "mwcomponents",
+        "submitted_name": "mwcomponents",
+        "evidence_source": "company_web_reverification",
+        "observed_domain": "mwcomponents.com",
+        "submitted_domain": "mwcomponents.com",
+        "observed_linkedin_slug": "",
+        "submitted_linkedin_slug": "mwcomponents"
+      },
+      "web_identity_decision": "unavailable",
+      "homepage_identity_reason": "homepage identity evidence unavailable: page metadata and links do not prove the submitted identity",
+      "homepage_identity_decision": "unavailable",
+      "verified_homepage_transport_domain": "mwcomponents.com",
+      "observed_homepage_organization_identity": {
+        "normalized_name": "mwcomponents",
+        "linkedin_company_slug": "m-w-components",
+        "registrable_dns_domain": "mwcomponents.com"
+      }
+    }
+  }
+]

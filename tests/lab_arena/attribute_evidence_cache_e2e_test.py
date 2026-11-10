@@ -12,6 +12,7 @@ import pytest
 from lab_arena import contracts
 from lab_arena.api import create_app
 from lab_arena.promotion import GitPromoter
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy
 from tests.lab_arena.company_only_capacity_e2e_test import (
     _drain_both,
     _http_runner,

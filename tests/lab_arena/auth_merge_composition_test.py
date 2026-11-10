@@ -24,7 +24,7 @@ def test_serialized_private_context_keeps_literal_marker_and_removes_attached_va
              'literal': 'Bearer [REDACTED]', 'attached': 'Bearer [REDACTED]private-tail'}
     for _ in range(depth):
         value = json.dumps(value)
-    expected = {'Authorization': '[REDACTED]', 'public': '[REDACTED] products',
+    expected = {'Authorization': '[REDACTED]', 'public': 'basic security products',
                 'literal': 'Bearer [REDACTED]', 'attached': '[REDACTED]'}
     for cleaned in (trajectory.redact_text(value), training_capture.sanitize_training_value(value)[0]):
         decoded = cleaned

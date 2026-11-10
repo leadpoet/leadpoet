@@ -370,7 +370,7 @@ def test_valid_basic_auth_stays_redacted_with_or_without_padding(padded):
     assert reasons == ["credential"]
 
 
-def test_basic_prose_is_still_masked_with_a_quoted_private_field():
+def test_basic_prose_survives_an_unrelated_quoted_private_field():
     prose = "Basic information."
     private_content = contracts.canonical_json({"submission_files": [
         {"path": "agent.py", "content": 'settings = {"secret": "actual-private-value"}\n'},
@@ -378,7 +378,7 @@ def test_basic_prose_is_still_masked_with_a_quoted_private_field():
     ]})
     private_cleaned, private_reasons = capture.sanitize_training_value(private_content)
     assert "actual-private-value" not in private_cleaned
-    assert prose not in private_cleaned
+    assert prose in private_cleaned
     assert private_reasons == ["credential"]
     actual = 'headers = {"Authorization": "Bearer actual-private-token"}\n'
     static_content = contracts.canonical_json({

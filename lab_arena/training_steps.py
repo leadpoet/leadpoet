@@ -692,7 +692,22 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
     request = call.get('request') or {}
     annotation = call.get('reasoning_capture') or {}
     if isinstance(annotation, Mapping) and annotation.get('policy') == reasoning_capture.POLICY:
-        _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route')),
+        transport_routes = None
+        if 'judge_provider_routing' in annotation:
+            _require(role == 'judge', 'request_provider_route_mismatch')
+            configuration = training_dataset.label_scorer_configuration(example)
+            policy = contracts.validate_scorer_policy(configuration.get('scorer_policy'))
+            registry = configuration.get('judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))
+            plan = reasoning_capture.validate_judge_provider_routing(
+                configuration.get('judge_provider_routing'), registry, policy)
+            model = annotation.get('model_id')
+            primary = json.loads(policy['env_bindings'][contracts.JUDGE_PROVIDER_ROUTES_BINDING]).get(model)
+            transport_routes = plan.get(model)
+            _require(primary == annotation.get('provider_route') and annotation['judge_provider_routing'] ==
+                     reasoning_capture.judge_transport_candidates(annotation, registry, transport_routes),
+                     'request_provider_route_mismatch')
+        _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route'),
+                                                             transport_routes=transport_routes),
                  'request_provider_route_mismatch')
     _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request, worker_proofs=worker_proofs), 'request_privacy_nonexact')
     _require(request.get('operation_id') == op and request.get('request_hash') == call.get('request_hash')

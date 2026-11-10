@@ -2194,6 +2194,7 @@ class RunContext:
     # even when the sourcing round already requires full thinking.
     judge_reasoning_capture_policy: Optional[str] = None
     judge_reasoning_route_registry: Optional[Mapping[str, Any]] = None
+    judge_provider_routing: Optional[Mapping[str, Any]] = None
 
 
 def _judge_reasoning_exception(context: RunContext, model: Any, operation_id: Any) -> Optional[Dict[str, Any]]:
@@ -5101,6 +5102,8 @@ class Broker:
         reserve_remaining_budget = False
         openrouter_host_route: Optional[OpenRouterHostRoute] = None
         reasoning_annotation: Optional[Dict[str, Any]] = None
+        judge_transport_routes: Optional[list[str]] = None
+        judgment_cache_original_provider_policy: Optional[Dict[str, Any]] = None
         try:
             if effective_operation.provider == "openrouter":
                 # Record the request's price bound. Full-thinking admission
@@ -5149,21 +5152,39 @@ class Broker:
                     industry_review_model=self._judge_model_roles.get("industry_evidence_review"),
                 )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
-                    # Exact tested provider only. OpenRouter must neither pick
-                    # a different provider nor fail over within a model family.
+                    # Keep exact reviewed routes. Only a separately frozen
+                    # judge transport plan can authorize same-model failover.
+                    candidate_prices = [reasoning_annotation["price_ceiling"]]
+                    transport_plan = getattr(context, "judge_provider_routing", None)
+                    if getattr(context, "kind", "execute") == "score" and transport_plan is not None:
+                        try:
+                            transport_plan = reasoning_capture.validate_judge_provider_routing(
+                                transport_plan, capture_registry,
+                                context.judgment_cache_scope["scorer_policy"])
+                            judge_transport_routes = transport_plan.get(normalized["model"])
+                            if judge_transport_routes is not None:
+                                candidates = reasoning_capture.judge_transport_candidates(
+                                    reasoning_annotation, capture_registry, judge_transport_routes)
+                                if any(max_output_tokens > row["max_output_tokens"] for row in candidates):
+                                    raise BrokerError("invalid_request")
+                                reasoning_annotation = dict(reasoning_annotation,
+                                    judge_provider_routing=candidates)
+                                candidate_prices = [row["price_ceiling"] for row in candidates]
+                        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                            raise BrokerError("broker_unavailable") from exc
                     route_prices = {
                         component: max(
                             Decimal(str(pricing[component])),
-                            Decimal(str(reasoning_annotation["price_ceiling"].get(
-                                component, pricing[component],
-                            ))),
+                            *(Decimal(str(ceiling.get(component, pricing[component])))
+                              for ceiling in candidate_prices),
                         ) for component in PRICED_COMPONENTS
                     }
                     openrouter_host_route = OpenRouterHostRoute(
                         provider_policy={
                             "data_collection": "deny", "zdr": True,
-                            "only": [reasoning_annotation["provider_route"]],
-                            "allow_fallbacks": False,
+                            "only": judge_transport_routes or [reasoning_annotation["provider_route"]],
+                            **({"order": judge_transport_routes} if judge_transport_routes is not None else {}),
+                            "allow_fallbacks": bool(judge_transport_routes and len(judge_transport_routes) > 1),
                             "require_parameters": True,
                             "max_price": {
                                 "prompt": _json_decimal_number(route_prices["prompt"] * OPENROUTER_PRICE_PER_MILLION),
@@ -5181,6 +5202,22 @@ class Broker:
                             and normalized["model"] == self._judge_model_roles.get("industry_evidence_review")
                         ),
                     )
+                    if judge_transport_routes is not None:
+                        # Transport recovery must not change grading/cache
+                        # identity. Only the actual captured wire uses the plan.
+                        original_prices = {component: max(Decimal(str(pricing[component])),
+                            Decimal(str(reasoning_annotation["price_ceiling"].get(component, pricing[component]))))
+                            for component in PRICED_COMPONENTS}
+                        judgment_cache_original_provider_policy = {
+                            "data_collection": "deny", "zdr": True,
+                            "only": [reasoning_annotation["provider_route"]],
+                            "allow_fallbacks": False, "require_parameters": True,
+                            "max_price": {
+                                "prompt": _json_decimal_number(original_prices["prompt"] * OPENROUTER_PRICE_PER_MILLION),
+                                "completion": _json_decimal_number((original_prices["completion"] + original_prices["internal_reasoning"]) * OPENROUTER_PRICE_PER_MILLION),
+                                "request": _json_decimal_number(original_prices["request"]),
+                            },
+                        }
                 amount = _max_openrouter_cost_for_pricing(
                     (
                         openrouter_host_route.reservation_pricing
@@ -5314,6 +5351,7 @@ class Broker:
                         if openrouter_host_route is not None else None
                     ),
                     allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
+                    judge_provider_routing=judge_transport_routes,
                 )
                 prepared = capture_request({
                     "operation_id": operation_id,
@@ -5386,6 +5424,7 @@ class Broker:
                         if openrouter_host_route is not None else None
                     ),
                     allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
+                    judge_provider_routing=judge_transport_routes,
                 )
             except operations.OperationError:
                 return _error_result("invalid_request", summary)
@@ -5394,7 +5433,12 @@ class Broker:
                 requested_operation_id=operation_id,
                 effective_operation_id=effective_operation_id,
                 normalized_request=effective_normalized,
-                outbound_body=cached_outbound.body,
+                outbound_body=(operations.build_outbound_request(
+                    effective_operation_id, effective_normalized,
+                    openrouter_provider_policy=judgment_cache_original_provider_policy,
+                    allow_full_thinking=True,
+                    industry_schema_order=bool(openrouter_host_route and openrouter_host_route.industry_schema_order),
+                ).body if judgment_cache_original_provider_policy is not None else cached_outbound.body),
             )
             if material is not None:
                 judgment_cache_key, canonical_scope = material
@@ -6408,6 +6452,7 @@ class Broker:
                 else None
             ),
             allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
+            judge_provider_routing=judge_transport_routes,
         )
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None

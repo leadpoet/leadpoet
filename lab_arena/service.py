@@ -1876,6 +1876,17 @@ class ArenaService:
                     registry = source() if source is not None else reasoning_capture.load_registry()
                 document["judge_reasoning_route_registry"] = reasoning_capture.validate_judge_registry(
                     registry, document["scorer_policy"])
+                primary_routes = json.loads(document["scorer_policy"]["env_bindings"][
+                    contracts.JUDGE_PROVIDER_ROUTES_BINDING])
+                transport_routes = {model: list(routes) for model, routes in
+                    scoring.DEFAULT_JUDGE_PROVIDER_ROUTING.items()
+                    if primary_routes.get(model) == routes[0]}
+                if transport_routes and "judge_provider_routing" not in document:
+                    document["judge_provider_routing"] = transport_routes
+                if "judge_provider_routing" in document:
+                    reasoning_capture.validate_judge_provider_routing(
+                        document["judge_provider_routing"], document["judge_reasoning_route_registry"],
+                        document["scorer_policy"])
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 raise ServiceError("judge_reasoning_capture_activation_not_ready", 503) from exc
         self._freeze_deepline_catalog(document)
@@ -6495,6 +6506,8 @@ class ArenaService:
                 "env_bindings", {}).get("ARENA_JUDGE_REASONING_CAPTURE_POLICY"),
             judge_reasoning_route_registry=configuration.get(
                 "judge_reasoning_route_registry", configuration.get("reasoning_route_registry")),
+            judge_provider_routing=(configuration.get("judge_provider_routing")
+                                    if run.get("kind") == "score" else None),
         )
 
     def handle_signal_judgment(

@@ -125,4 +125,3 @@ def test_legacy_owner_requires_a_valid_clock():
 def test_no_legacy_owner_needs_no_clock_or_projection():
     source, _ = _source((False, False, False))
     assert rewards.legacy_slot_allocation_projection_document(source, None) == source
-

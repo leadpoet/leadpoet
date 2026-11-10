@@ -180,15 +180,15 @@ This example shows the output format. `matched_icp_signal` is the zero-based ind
 ```
 </details>
 
-Scoring checks company fit, intent, and supporting evidence. The highest eligible score must beat the daily baseline by **at least 8 points** to become champion in new rounds. Winning code becomes the next baseline.
+Scoring checks company fit, intent, and supporting evidence. The highest eligible score must beat the daily baseline by **at least 5 points** to become champion in new rounds. Winning code becomes the next baseline.
 
-Current reward tiers are cumulative:
+New reward tiers are cumulative (15%, 25%, and 35% per slot; 25% base burn):
 
 | Improvement over baseline | Total emissions before decay |
 | --- | --- |
-| +8 points | 15% |
-| +15 points | 30% |
-| +20 points | 50% |
+| +5 points | 15% |
+| +10 points | 40% |
+| +15 points | 75% |
 
 Slots remain with their holder until replaced. With weekly decay enabled, each slot halves every 140 epochs (about seven days), without a reward floor; a genuinely new promoted model resets only the slots it replaces, even on the same hotkey. See [reward rules](docs/arena_reward_slots.md) for activation and historical policies.
 

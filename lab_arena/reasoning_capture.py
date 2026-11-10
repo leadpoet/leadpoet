@@ -173,6 +173,66 @@ def validate_judge_registry(registry: Any, scorer_policy: Mapping[str, Any]) -> 
     return frozen
 
 
+def validate_judge_provider_routing(document: Any, registry: Any,
+                                    scorer_policy: Mapping[str, Any]) -> Dict[str, Any]:
+    """Validate a host transport plan without changing the grading policy."""
+    frozen = validate_judge_registry(registry, scorer_policy)
+    bindings = scorer_policy["env_bindings"]
+    primary = json.loads(bindings["ARENA_JUDGE_PROVIDER_ROUTES"])
+    if (not isinstance(document, Mapping) or not document or not set(document) <= set(primary)
+            or any(not isinstance(routes, list) or not 1 <= len(routes) <= 2
+                   or any(not isinstance(route, str) or re.fullmatch(
+                       r"[a-z0-9][a-z0-9._/-]{0,127}", route) is None for route in routes)
+                   or len(routes) != len(set(routes)) for routes in document.values())):
+        raise ValueError("invalid judge provider routing")
+    for model, routes in document.items():
+        # Judge registry validation already determines every API a role needs.
+        apis = {row["api"] for row in frozen["approved_routes"]
+                if row["model_id"] == model and row["provider"] == primary[model]}
+        for api in apis:
+            original = next(row for row in frozen["approved_routes"]
+                            if (row["model_id"], row["api"], row["provider"]) == (model, api, primary[model]))
+            candidates = [next((row for row in frozen["approved_routes"]
+                               if (row["model_id"], row["api"], row["provider"]) == (model, api, provider)), None)
+                          for provider in routes]
+            _validate_transport_candidates(original, candidates)
+    return copy.deepcopy(dict(document))
+
+
+def _validate_transport_candidates(original: Mapping[str, Any], candidates: Any) -> None:
+    if (not isinstance(candidates, list) or not 1 <= len(candidates) <= 2
+            or any(not isinstance(row, Mapping) for row in candidates)):
+        raise ValueError("unapproved judge transport route")
+    if len({row["provider"] for row in candidates}) != len(candidates):
+        raise ValueError("duplicate judge transport route")
+    if len({row["provider_name"] for row in candidates}) != len(candidates):
+        raise ValueError("ambiguous judge transport provider proof")
+    for row in candidates:
+        if (any(row[field] != original[field] for field in (
+                "model_id", "model_version", "api", "parser_version", "semantic_class", "full_text_fields"))
+                or set(row["mode"]) != set(original["mode"])
+                or row["context_tokens"] < original["context_tokens"]
+                or row["max_output_tokens"] < original["max_output_tokens"]):
+            raise ValueError("incompatible judge transport route")
+
+
+def judge_transport_candidates(annotation: Mapping[str, Any], registry: Any,
+                               providers: Any) -> list[Dict[str, Any]]:
+    """Bind each transport candidate to its existing exact reviewed registry row."""
+    frozen = validate_registry(registry)
+    original = next((row for row in frozen["approved_routes"]
+                     if (row["model_id"], row["api"], row["provider"]) ==
+                     (annotation["model_id"], annotation["api"], annotation["provider_route"])), None)
+    if original is None or not isinstance(providers, list):
+        raise ValueError("unapproved judge transport route")
+    candidates = [next((row for row in frozen["approved_routes"]
+                       if (row["model_id"], row["api"], row["provider"]) ==
+                       (annotation["model_id"], annotation["api"], provider)), None)
+                  for provider in providers]
+    _validate_transport_candidates(original, candidates)
+    return copy.deepcopy(candidates)
+
+
 def _apply_full(operation_id: str, parameters: Mapping[str, Any],
                 registry: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     frozen = validate_registry(registry)
@@ -274,7 +334,8 @@ def apply(operation_id: str, parameters: Mapping[str, Any], *, policy: Optional[
     return _apply_full(operation_id, parameters, registry)
 
 
-def explicit_provider_matches(request: Mapping[str, Any], provider_route: Any) -> bool:
+def explicit_provider_matches(request: Mapping[str, Any], provider_route: Any,
+                              *, transport_routes: Any = None) -> bool:
     """Bind explicit miner selection without changing selector-absent records."""
     if not isinstance(request, Mapping):
         return False
@@ -284,12 +345,20 @@ def explicit_provider_matches(request: Mapping[str, Any], provider_route: Any) -
         preference = parameters.get("provider") if isinstance(parameters, Mapping) else None
         selections.append((isinstance(preference, Mapping) and "only" in preference,
                            preference.get("only") if isinstance(preference, Mapping) else None))
-    if not any(present for present, _ in selections):
+    if transport_routes is None and not any(present for present, _ in selections):
         return True
     expected = [provider_route]
     outbound = request.get("outbound") or {}
     body = outbound.get("body") if isinstance(outbound, Mapping) else None
     provider = body.get("provider") if isinstance(body, Mapping) else None
+    if transport_routes is not None:
+        return (isinstance(provider_route, str) and bool(provider_route)
+                and all(present and isinstance(value, list) and value == expected for present, value in selections)
+                and isinstance(provider, Mapping) and provider.get("only") == transport_routes
+                and provider.get("order") == transport_routes
+                and provider.get("allow_fallbacks") is (len(transport_routes) > 1)
+                and provider.get("zdr") is True and provider.get("data_collection") == "deny"
+                and provider.get("require_parameters") is True)
     return (isinstance(provider_route, str) and bool(provider_route)
             and all(present and isinstance(value, list) and value == expected for present, value in selections)
             and isinstance(provider, Mapping) and provider.get("only") == expected)
@@ -317,6 +386,24 @@ def route_observation(response: Any, annotation: Mapping[str, Any]) -> Dict[str,
         "selected_endpoint_model": bounded(endpoint.get("model")),
         "selected_endpoint_provider_name": bounded(endpoint.get("provider")),
     }
+    candidates = annotation.get("judge_provider_routing")
+    if candidates is not None:
+        matching = [row for row in candidates if isinstance(row, Mapping)
+                    and row.get("provider_name") == observed["selected_endpoint_provider_name"]
+                    and row.get("model_version") == observed["selected_endpoint_model"]]
+        candidate = matching[0] if len(matching) == 1 else None
+        observed["selected_provider_route"] = candidate["provider"] if candidate else None
+        provider_name = candidate["provider_name"] if candidate else None
+        values = [observed["response_model"], observed["selected_endpoint_model"],
+                  observed["selected_endpoint_provider_name"]]
+        if annotation.get("api") != "openrouter.responses" or document.get("provider") is not None:
+            values.append(observed["response_provider_name"])
+        observed["status"] = ("unverified" if any(value is None for value in values)
+                              else "matched" if candidate is not None
+                              and observed["response_model"] == annotation["model_id"]
+                              and observed["response_provider_name"] in (provider_name, None)
+                              else "mismatch")
+        return observed
     checks = (("response_model", "requested_model"),
               ("response_provider_name", "expected_provider_name"),
               ("selected_endpoint_model", "expected_model_version"),
@@ -344,7 +431,13 @@ def valid_route_observation(value: Any) -> bool:
         "response_model", "response_provider_name",
         "selected_endpoint_model", "selected_endpoint_provider_name",
     }
-    if not isinstance(value, Mapping) or set(value) != set(required) | optional | {"status"}:
+    if not isinstance(value, Mapping) or set(value) not in (
+            set(required) | optional | {"status"},
+            set(required) | optional | {"status", "selected_provider_route"}):
+        return False
+    if "selected_provider_route" in value and value["selected_provider_route"] is not None and (
+            not isinstance(value["selected_provider_route"], str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", value["selected_provider_route"]) is None):
         return False
     if value["status"] not in ("matched", "mismatch", "unverified"):
         return False

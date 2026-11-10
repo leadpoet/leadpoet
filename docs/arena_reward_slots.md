@@ -4,48 +4,42 @@ Champion selection is unchanged. After final publication and successful code
 promotion, reward activation assigns slots from the original published winner
 and baseline scores in the same round. Neither scoring nor promotion is rerun.
 
-For evaluation dates October 23, 2026 and later, and pending activations whose
-effective reward epoch is at least **25954**:
+For new policy activations at reward epoch **26301** or later, or evaluation
+dates November 11, 2026 and later:
 
-| Improvement | Share of the 50% miner pot | Share of total emissions |
-| --- | --- | --- |
-| At least +20 | 40% | 20% |
-| At least +15 | 30% | 15% |
-| At least +8 | 30% | 15% |
+| Improvement | Share of total emissions before decay |
+| --- | --- |
+| At least +15 | 35% |
+| At least +10 | 25% |
+| At least +5 | 15% |
 
-Slot policies are defined in `lab_arena/rewards.py`. The
-`assignment_mode: all_qualifying` assigns a promoted win to every tier whose
-threshold it clears. Before decay or funding reductions, a +20 win holds all
-three slots and earns 50% of total emissions; +15 earns 30% through two slots;
-+8 earns 15% through one slot.
+The base burn is 25%. A promoted winner takes every slot whose threshold it
+clears: +5 earns 15%, +10 earns 40%, and +15 earns 75%, before reductions.
+New rounds require at least +5 for promotion; already committed rounds keep
+their frozen promotion margin. Slot policies are defined in `lab_arena/rewards.py`.
+The signed `allocation_basis: total_emissions` makes these exact percentages
+of total emissions. Absent that field, historical tier percentages still divide
+the signed miner pool.
 
-Activation selects the policy from the round's validated `evaluation_date`
-and its effective reward epoch. The epoch-25954 cutover also applies to delayed
-activations of earlier rounds. Before that boundary, October 21 and earlier
-use the original 30% pot with +10/+5/+1 thresholds and 50/30/20 pot shares;
-October 22 uses a 50% pot with those thresholds and 40/30/30 pot shares.
-Existing signed bases and accepted epoch states keep their original rules.
-The historical `LAB_ARENA_POOL_PERCENT` setting remains legacy signed metadata
-and does not set the v2 slot pot.
+The transition carries the current signed holders into the corresponding
+slot positions: +20 becomes +15, +15 becomes +10, and +8 becomes +5. It keeps
+their source scores, submitted models and tenure clocks. Lower thresholds do
+not revive old displaced winners or fill empty slots from historical results.
+Only a new, verified promoted winner can replace an incumbent. One miner can
+hold several slots, and smaller wins do not remove higher-tier holders.
 
-Starting at epoch 25954, a newly issued accepted state can carry a newly signed
-policy projection of the governing reward basis. This one-time transition uses
-only that basis's current signed achievements. It chooses the newest represented
-achievement that meets each new threshold; it does not revive replaced owners.
-It preserves every source score, submission, original effective epoch and decay
-clock. A +6.0454545 holder therefore loses its slots; the retained +11.1 holder
-qualifies for +8 only, for 15% miner emissions and 85% burn before reductions.
-The original published basis and every previously accepted state stay unchanged,
-including any state already issued at the cutover. Later round activations use
-the normal verified publication and promotion history.
+Previously activated bases and accepted weight states remain immutable. New
+states may contain a signed projection of the governing basis after the epoch
+cutover. A state already issued for an epoch is never rewritten. If the source
+predates October 23, its currently represented achievements first undergo the
+existing October 23 projection; that policy transition is not undone.
 
-A newer qualifying promoted winner replaces a slot holder, regardless of the
-holder's earlier score. Smaller wins do not remove larger-improvement holders.
-One miner can hold several slots through one or more achievements. There is no
-lock period or expiry tied to the age of a holder's achievement. A promoted
-improvement below +8 changes the champion as usual but earns
-no slot. Unpromoted, ineligible, incomplete, cancelled and other-network
-results cannot create slot achievements.
+Historical policies remain supported: October 21 and earlier used a 30% pool
+and +10/+5/+1 thresholds; October 22 used a 50% pool and the same thresholds.
+From October 23 or reward epoch 25954, thresholds were +20/+15/+8 with total
+shares 20%/15%/15%. The legacy `LAB_ARENA_POOL_PERCENT` setting does not change
+v2 slot allocations. Unpromoted, ineligible, incomplete, cancelled and
+other-network results cannot create slot achievements.
 
 With `LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED=true`, each occupied slot halves
 after every 140 settlement epochs (the existing reward week, about seven days),
@@ -71,8 +65,9 @@ The current-round API includes `weekly_slot_decay` only after a state with
 that clock is accepted for the current epoch. This field governs current
 decay; the returned frozen slot policy remains historical provenance.
 
-Activation uses published, successfully promoted history in the same chain
-scope, including eligible historical winners. Each signed slot binds its
+Activation carries the latest activated signed slots in the same chain scope
+and checks their original published and promoted source records. A newly
+promoted current-round winner replaces only the slots it qualifies for. Each signed slot binds its
 source round, winning submission, miner hotkey, baseline submission and both
 original scores. Decay-enabled slots also bind their start epoch. A slot
 from the current reward round stores `start_epoch: null`, which means that
@@ -101,12 +96,16 @@ Version 1 champion rewards keep that limit in every state.
 
 New activations use reward-basis v2 through the existing gateway, accepted
 weight state, normal validator and local signer. The signed `slot_policy`
-contains the selected miner pot and its tier percentages. The epoch-25954
+contains the selected miner pot, allocation basis and tier percentages. The epoch-25954
 threshold transition uses the existing v2 basis and accepted-state schemas;
 it adds no field or transaction format and needs no new validator schema. Historical v2 policies
 without `pool_percent` keep their original total-emissions arithmetic. Policies
 without `decay` retain their original non-decaying payouts. The
 frozen `reward_constants` and weekly schedule do not rescale new slot payouts.
+
+Validators must support `allocation_basis: total_emissions` before its gateway
+cutover. The dashboard must interpret this mode without multiplying the tier
+percentages by the pool a second time.
 
 Validators must support the optional, signed `weekly_slot_decay` clock before
 the gateway enables it. Roll out support with the switch off, verify primary,

@@ -1,4 +1,5 @@
 """Exercise migration 469 and its independent final-authority guard verbatim."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 import json
 from dataclasses import replace
 from datetime import datetime, timezone

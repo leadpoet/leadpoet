@@ -61,8 +61,18 @@ def _policy(call: Mapping[str, Any], registry: Any = None, *, worker_proofs=None
         return False
     if registry_hash is None:
         registry_hash = contracts.document_hash(frozen).split(":", 1)[1]
+    candidates = annotation.get("judge_provider_routing")
+    transport_routes = None
+    if candidates is not None:
+        try:
+            transport_routes = [row["provider"] for row in candidates]
+            if candidates != reasoning_capture.judge_transport_candidates(annotation, frozen, transport_routes):
+                return False
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
     if (registry_hash != annotation["registry_sha256"]
-            or not reasoning_capture.explicit_provider_matches(call.get("request") or {}, annotation.get("provider_route"))):
+            or not reasoning_capture.explicit_provider_matches(call.get("request") or {}, annotation.get("provider_route"),
+                                                               transport_routes=transport_routes)):
         return False
     matches = [entry for entry in frozen["approved_routes"]
                if entry["model_id"] == model and entry["api"] == operation
@@ -84,14 +94,23 @@ def _policy(call: Mapping[str, Any], registry: Any = None, *, worker_proofs=None
 def _observation_matches(observation: Any, annotation: Any) -> bool:
     if not isinstance(observation, Mapping) or not isinstance(annotation, Mapping):
         return False
+    candidates = annotation.get("judge_provider_routing")
+    selected = annotation
+    if candidates is not None:
+        matching = [row for row in candidates if isinstance(row, Mapping)
+                    and row.get("provider") == observation.get("selected_provider_route")]
+        if len(matching) != 1:
+            return False
+        selected = matching[0]
+    selected_name = selected.get("provider_name")
     expected = {"requested_model": annotation.get("model_id"),
                 "requested_provider_route": annotation.get("provider_route"),
                 "expected_provider_name": annotation.get("provider_name"),
                 "expected_model_version": annotation.get("model_version"),
                 "response_model": annotation.get("model_id"),
-                "response_provider_name": annotation.get("provider_name"),
+                "response_provider_name": selected_name,
                 "selected_endpoint_model": annotation.get("model_version"),
-                "selected_endpoint_provider_name": annotation.get("provider_name")}
+                "selected_endpoint_provider_name": selected_name}
     # Responses can omit the redundant top-level provider. The selected
     # endpoint still has to prove both the exact model and provider identity.
     if (annotation.get("api") == "openrouter.responses"
@@ -330,7 +349,8 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None, *
     annotation = annotation if isinstance(annotation, Mapping) else {}
     response = call.get("response")
     segments, summary, opaque = _segments(response, str(call.get("operation_id")))
-    policy_verified = _policy(call, registry, worker_proofs=worker_proofs)
+    policy_verified = (_policy(call, registry, worker_proofs=worker_proofs)
+                       and (role == "judge" or "judge_provider_routing" not in annotation))
     observation_verified = _observation_matches(_route_observation(call), annotation)
     route_verified = policy_verified and observation_verified
     allowed = set(annotation["full_text_fields"]) if policy_verified else set()
@@ -399,6 +419,8 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None, *
             "provider_attempt": call.get("provider_attempt"), "role": role,
             "model_id": annotation.get("model_id") or (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model"),
             "requested_provider_route": annotation.get("provider_route"), "api": call.get("operation_id"),
+            **({"selected_provider_route": (_route_observation(call) or {}).get("selected_provider_route")}
+               if "judge_provider_routing" in annotation else {}),
             "requested": request_state == "requested", "request_state": request_state,
             "outbound_reasoning_controls": outbound_controls,
             "outbound_reasoning_controls_status": controls_status,
@@ -1390,6 +1412,8 @@ def _capture_configuration(example: Mapping[str, Any], role: str = 'source') -> 
     return ({'reasoning_capture_policy': policy,
              'scorer_policy': scorer_policy,
              'judge_reasoning_exceptions': exceptions,
+             **({'judge_provider_routing': configuration['judge_provider_routing']}
+                if 'judge_provider_routing' in configuration else {}),
              'reasoning_route_registry': configuration.get(
                  'judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))}
             if policy == POLICY else {})
@@ -1421,6 +1445,18 @@ def _judge_frozen_route_error(example, call):
     # annotation. Registry approval alone does not authorize another provider.
     if not expected or (call.get('reasoning_capture') or {}).get('provider_route') != expected:
         return 'judge_frozen_provider_route_mismatch'
+    annotation = call.get('reasoning_capture') or {}
+    candidates = annotation.get('judge_provider_routing')
+    if candidates is not None:
+        try:
+            plan = reasoning_capture.validate_judge_provider_routing(
+                configuration.get('judge_provider_routing'),
+                configuration.get('reasoning_route_registry'), policy)
+            if candidates != reasoning_capture.judge_transport_candidates(
+                    annotation, configuration.get('reasoning_route_registry'), plan.get(model)):
+                return 'judge_frozen_provider_route_mismatch'
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return 'judge_frozen_provider_route_mismatch'
     return ''
 
 

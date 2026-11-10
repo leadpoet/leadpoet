@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 from leadpoet_canonical import arena_weights
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy
 from tests.lab_arena import proxy_model_capacity401_e2e_test as fullflow
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state

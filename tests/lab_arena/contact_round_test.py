@@ -1,6 +1,7 @@
 """Saved and public end-to-end journey for an opt-in contact round."""
 
 from __future__ import annotations
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 
 from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
 

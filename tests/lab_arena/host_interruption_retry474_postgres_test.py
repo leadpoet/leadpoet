@@ -1,4 +1,5 @@
 """Authenticated host losses retain normal attempts and cumulative authority."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 from pathlib import Path
 import pytest
 from tests.lab_arena import general_judge_continuation472_postgres_test as previous

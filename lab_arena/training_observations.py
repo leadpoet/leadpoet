@@ -21,8 +21,6 @@ from lab_arena import contracts, lab_arena_checkpoint, operations, training_capt
 
 LEGACY_SCHEMA_VERSION = "leadpoet.lab_arena.training_observations.v1"
 SCHEMA_VERSION = "leadpoet.lab_arena.training_observations.v2"
-HTTP_TIMEOUT_SECONDS = 60.0
-FINAL_UPLOAD_ATTEMPTS = 2
 # One run already admits up to 192 MiB of explicit agent control frames.
 # Retain that evidence plus 64 MiB for host receipts/catalogs and JSON overhead.
 # Single events keep their original bound; this is only an aggregate increase.

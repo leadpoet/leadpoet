@@ -399,7 +399,11 @@ def test_foreground_timeouts_preserve_a_bounded_snapshot_replay_window(tmp_path,
     assert tuple(timeouts) == attempts
 
 
-@pytest.mark.parametrize('seconds,allowed', [(359.999, True), (360, False), (361, False)])
+@pytest.mark.parametrize('seconds,allowed', [
+    (capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS - .001, True),
+    (capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS, False),
+    (capture_retention.FINAL_OBSERVATION_REPLAY_SECONDS + 1, False),
+])
 def test_delayed_final_replay_keeps_snapshot_retention_bound_after_server_renewal(tmp_path, seconds, allowed):
     config, lease, service, _objects, api, clock = observation_local(tmp_path)
     path = config.input_retention.observations.retain(lease, TOKEN, payload(observation()))

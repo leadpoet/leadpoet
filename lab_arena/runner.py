@@ -99,7 +99,7 @@ REQUIREMENT_RE = re.compile(
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
 TRAINING_CAPTURE_TIMEOUT_SECONDS = 10.0
-TRAINING_OBSERVATIONS_TIMEOUT_SECONDS = training_observations.HTTP_TIMEOUT_SECONDS
+TRAINING_OBSERVATIONS_TIMEOUT_SECONDS = 60.0
 COMPLETION_RECOVERY_RETRY_SECONDS = (
     2.0, 5.0, 10.0, 20.0, 30.0, 45.0,
     60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 80.0,
@@ -4137,7 +4137,7 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
                         lease, lease_token, document, expected_digest=expected_digest))
                 except Exception as exc:
                     _log_training_capture_failure("observations", exc)
-            for attempt in range(training_observations.FINAL_UPLOAD_ATTEMPTS):
+            for attempt in range(2):
                 try:
                     if retained is not None:
                         if not retention.deliver(retained, _descriptor=descriptor):
@@ -4150,7 +4150,7 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
                         raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
                     return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
                 except Exception:
-                    if attempt + 1 == training_observations.FINAL_UPLOAD_ATTEMPTS:
+                    if attempt:
                         verify = getattr(config.api, "verify_training_observations", None)
                         if callable(verify) and verify(str(lease["run_id"]), lease_token, expected_digest) is True:
                             if retained is not None:

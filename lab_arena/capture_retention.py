@@ -18,12 +18,10 @@ from lab_arena import contracts, training_input, training_observations
 
 INPUT_GRACE_SECONDS = 180
 INPUT_REPLAY_TIMEOUT_SECONDS = 5.0
-# The final snapshot is retained before two POSTs and one exact-digest HEAD.
-# Their existing network budgets must not consume the entire local replay
-# lifetime. Server authorization still enforces its own unchanged finish grace.
-FINAL_OBSERVATION_REPLAY_SECONDS = INPUT_GRACE_SECONDS + (
-    training_observations.FINAL_UPLOAD_ATTEMPTS + 1
-) * training_observations.HTTP_TIMEOUT_SECONDS
+# Retention precedes foreground capture and bounded completion recovery. Keep
+# one canonical minimum lease horizon plus the existing capture grace locally;
+# the server still owns current lease/finish authority and permanent denials.
+FINAL_OBSERVATION_REPLAY_SECONDS = contracts.LEASE_TTL_SECONDS + INPUT_GRACE_SECONDS
 _INPUT_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_input.v1'
 _INPUT_RECORD_LIMIT = training_input.MAX_INPUT_BYTES + 64 * 1024
 _LEGACY_OBSERVATION_RECORD_SCHEMA = 'leadpoet.lab_arena.pending_observations.v1'

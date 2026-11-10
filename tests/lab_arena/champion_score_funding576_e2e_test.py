@@ -32,6 +32,7 @@ from tests.lab_arena.baseline_scored_first_postgres_test import (
     _enable_verified_proxy_runtime,
 )
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 from tests.lab_arena.parallel_twenty_runtime_e2e_test import bounded_socket_shutdown_poll
 from tests.lab_arena.test_lab_arena_service_round import assert_canary_absent, keypair
 

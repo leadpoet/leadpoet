@@ -17,6 +17,7 @@ import time
 from collections import OrderedDict
 from typing import Mapping
 
+import anyio
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from starlette.requests import ClientDisconnect
@@ -290,6 +291,44 @@ async def _request_sidecar(
         )
 
 
+async def _capture_sidecar_request(request: Request, arena_path: str, **kwargs) -> httpx.Response:
+    """Close abandoned capture transports so sidecar admission sees disconnect.
+
+    The caller has fully read the body. The sidecar already drops queued work
+    on disconnect and shields admitted storage writes until they finish.
+    """
+    upstream = None
+    error = None
+    disconnected = False
+
+    async def forward() -> None:
+        nonlocal upstream, error
+        try:
+            upstream = await _request_sidecar(request.method, arena_path, **kwargs)
+        except BaseException as exc:
+            error = exc
+        finally:
+            group.cancel_scope.cancel()
+
+    async def watch_disconnect() -> None:
+        nonlocal disconnected
+        while True:
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                disconnected = True
+                group.cancel_scope.cancel()
+                return
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(watch_disconnect)
+        group.start_soon(forward)
+    if disconnected:
+        raise HTTPException(status_code=499, detail="client disconnected")
+    if error is not None:
+        raise error
+    return upstream
+
+
 @router.api_route("/{arena_path:path}", methods=("GET", "POST"))
 async def proxy_arena_request(arena_path: str, request: Request) -> Response:
     if not _arena_enabled():
@@ -410,14 +449,16 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
     if observation_verification:
         request_headers["if-match"] = request.headers["if-match"]
     try:
-        upstream = await _request_sidecar(
-            request.method,
-            arena_path,
-            query=request.url.query,
-            body=body,
-            headers=request_headers,
-            **({"testnet": True} if testnet else {}),
+        capture_request = observation_verification or (
+            request.method == "POST" and len(parts) == 4
+            and parts[:2] == ["v1", "runs"] and parts[3] in _CAPTURE_ROUTE_SUFFIXES
         )
+        kwargs = dict(query=request.url.query, body=body, headers=request_headers,
+                      **({"testnet": True} if testnet else {}))
+        if capture_request:
+            upstream = await _capture_sidecar_request(request, arena_path, **kwargs)
+        else:
+            upstream = await _request_sidecar(request.method, arena_path, **kwargs)
     except httpx.HTTPError as exc:
         if not testnet:
             _log_handoff(request, arena_path, body, None)

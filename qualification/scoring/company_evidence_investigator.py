@@ -3833,7 +3833,7 @@ async def _fetch_exa_exact_page(
             not isinstance(item, Mapping) for item in statuses
         ):
             return {"ok": False, "error": "invalid_contents_status"}
-        # Exa authenticated the API request; this exact target denied access.
+        # Exa authenticated the API request; this exact target is unreadable.
         # Do not confuse a crawl status with API auth, credits or an outage.
         if len(statuses) == 1 and body.get("results") == []:
             source = statuses[0]
@@ -3843,8 +3843,16 @@ async def _fetch_exa_exact_page(
                 and source.get("status") == "error"
                 and isinstance(error, Mapping)
                 and type(error.get("httpStatusCode")) is int
-                and error["httpStatusCode"] in {401, 403}
-                and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+                and (
+                    (error["httpStatusCode"] in {401, 403}
+                     and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"])
+                    # The authenticated API read completed, but this exact
+                    # target's TLS handshake failed. Like a source denial,
+                    # it is unreadable evidence, not a provider-wide outage.
+                    # Generic crawl/API 5xx errors retain infrastructure status.
+                    or (error["httpStatusCode"] == 500
+                        and error.get("tag") == "CRAWL_SSL_ERROR")
+                )
             ):
                 return {"ok": False, "error": "source_access_denied"}
         if any(

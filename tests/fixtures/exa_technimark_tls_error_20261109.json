@@ -1,0 +1,15 @@
+{
+  "requestId": "0bbc986b4949818c5c6ce83d1202420e",
+  "results": [],
+  "searchTime": 284.8927740000654,
+  "statuses": [
+    {
+      "error": {
+        "httpStatusCode": 500,
+        "tag": "CRAWL_SSL_ERROR"
+      },
+      "id": "https://www.technimark.com/",
+      "status": "error"
+    }
+  ]
+}

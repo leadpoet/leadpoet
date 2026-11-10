@@ -39,7 +39,13 @@ NON_PROVIDER_WORKER_RESERVE = 32
 TRAINING_INPUT_WORKER_LIMIT = 2
 # Segment storage and final verification both perform full privacy/hash scans.
 # Bound these together without consuming control-route worker permits.
-TRAINING_OBSERVATION_WORKER_LIMIT = 2
+# Sized from demand rather than from caution: on 2026-11-10 the lane served
+# ~2,800 uploads in an hour (~0.8/s) against a real service time of 1-3.5s,
+# which needs ~2 permits just to break even — i.e. the old ceiling of 2 ran at
+# 100% utilisation, where a queue stops draining and never recovers. Six
+# permits put the same demand near 40% utilisation, and still leave the 32
+# control-route workers of NON_PROVIDER_WORKER_RESERVE untouched.
+TRAINING_OBSERVATION_WORKER_LIMIT = 6
 # Public result reads fetch run outputs from the object store, so one slow
 # S3 leg holds a worker for the whole call. On 2026-11-04 these reads ran for
 # up to 22 minutes each; 12-19 of them were in flight at once and the shared

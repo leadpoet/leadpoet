@@ -450,8 +450,10 @@ class _FinalObservationRetention(InputRetention):
         with lock as descriptor:
             if descriptor is None or not path.exists():
                 return False
+            validation_started = time.monotonic()
             try:
                 record = self._read(descriptor, path)
+                validation_seconds = time.monotonic() - validation_started
             except (ValueError, TypeError, KeyError, AttributeError):
                 self._park(path, 'invalid', descriptor)
                 raise
@@ -466,7 +468,11 @@ class _FinalObservationRetention(InputRetention):
                 self._park(path, 'expired', descriptor)
                 return False
             if replay_deadline is not None:
-                remaining = min(remaining, replay_deadline - time.monotonic())
+                # This final was admitted before the batch deadline. Its
+                # local privacy/identity validation can exceed the network
+                # budget for large documents. Exclude only that work here;
+                # the unchanged outer deadline prevents another slow record.
+                remaining = min(remaining, replay_deadline + validation_seconds - time.monotonic())
                 if remaining <= 0:
                     return False
             if replay and self._stop.is_set():

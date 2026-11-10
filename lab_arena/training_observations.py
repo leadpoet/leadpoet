@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
@@ -95,7 +96,8 @@ def _expected_not_dispatched_response(response: Any) -> bool:
         return False
 
 
-def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
+def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = (), *,
+                      clean_text_digests: OrderedDict[bytes, None] | None = None) -> dict:
     """Decode response bytes before privacy filtering; never truncate evidence."""
     if len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
         raise ObservationError("size_limit")
@@ -123,7 +125,7 @@ def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> 
     request = value["request"]
     if not isinstance(request, dict) or set(request) != {"admitted_parameters", "timeout_ms"} or not isinstance(request["admitted_parameters"], dict) or type(request["timeout_ms"]) is not int:
         raise ObservationError("request_invalid")
-    request, redactions = training_capture.sanitize_training_value(request, secrets)
+    request, redactions = training_capture.sanitize_training_value(request, secrets, clean_text_digests=clean_text_digests)
     outcome = value["outcome"]
     if not isinstance(outcome, dict) or not set(outcome) <= {"protocol", "response", "exception_class", "error_code", "broker_disposition"} or outcome.get("protocol") not in {"http", "frame"}:
         raise ObservationError("outcome_invalid")
@@ -140,13 +142,13 @@ def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> 
             raise ObservationError("broker_disposition_invalid")
     outcome = dict(outcome)
     response = outcome.pop("response", None)
-    outcome, changes = training_capture.sanitize_training_value(outcome, secrets)
+    outcome, changes = training_capture.sanitize_training_value(outcome, secrets, clean_text_digests=clean_text_digests)
     redactions = set(redactions) | set(changes)
     if response is not None:
         if not isinstance(response, dict):
             raise ObservationError("response_invalid")
         if set(response) == {"error"} and outcome["protocol"] == "frame":
-            response, changes = training_capture.sanitize_training_value(response, secrets)
+            response, changes = training_capture.sanitize_training_value(response, secrets, clean_text_digests=clean_text_digests)
         elif set(response) == {"status", "headers", "body_b64"}:
             if type(response["status"]) is not int or not isinstance(response["headers"], dict) or not isinstance(response["body_b64"], str):
                 raise ObservationError("response_invalid")
@@ -156,8 +158,8 @@ def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> 
                 body = json.loads(text)
             except ValueError:
                 body = text
-            cleaned, body_changes = training_capture.sanitize_training_value(body, secrets)
-            headers, changes = training_capture.sanitize_training_value(response["headers"], secrets)
+            cleaned, body_changes = training_capture.sanitize_training_value(body, secrets, clean_text_digests=clean_text_digests)
+            headers, changes = training_capture.sanitize_training_value(response["headers"], secrets, clean_text_digests=clean_text_digests)
             changes = set(changes) | set(body_changes)
             # Preserve literal response bytes when privacy did not change them.
             if body_changes:
@@ -221,7 +223,8 @@ def clean_response_receipt(value: Mapping[str, Any]) -> dict:
     return dict(value)
 
 
-def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
+def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (), *,
+                            clean_text_digests: OrderedDict[bytes, None] | None = None) -> dict:
     """Keep only explicit, bounded agent reports; never infer hidden state."""
     required = {"id", "kind", "observed_at", "after_action_sequence", "depends_on", "data", "privacy"}
     if not isinstance(value, Mapping) or set(value) != required or len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
@@ -314,7 +317,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
           or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "judge_local_tool"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ObservationError("agent_failure_invalid")
-    cleaned, redactions = training_capture.sanitize_training_value(dict(data), secrets)
+    cleaned, redactions = training_capture.sanitize_training_value(dict(data), secrets, clean_text_digests=clean_text_digests)
     privacy = value["privacy"]
     if (not isinstance(privacy, dict) or set(privacy) != {"redacted", "redactions"}
             or type(privacy["redacted"]) is not bool or not isinstance(privacy["redactions"], list)
@@ -361,7 +364,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
                 raise ObservationError("binary_capture_bytes_invalid") from None
         # Latin-1 is a reversible byte mapping. The existing credential
         # sanitizer sees literal tokens before they can be hidden in base64.
-        binary_text, binary_changes = training_capture.sanitize_training_value(raw.decode("latin-1"), secrets)
+        binary_text, binary_changes = training_capture.sanitize_training_value(raw.decode("latin-1"), secrets, clean_text_digests=clean_text_digests)
         stored = binary_text.encode("latin-1")
         if len(stored) > lab_arena_checkpoint.MAX_TRAINING_BINARY_BODY_BYTES:
             raise ObservationError("binary_fetch_size_limit")
@@ -714,7 +717,8 @@ _SEGMENT_FIELDS = frozenset({
 })
 
 
-def _clean_segment_payload(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
+def _clean_segment_payload(value: Mapping[str, Any], secrets: Sequence[str] = (), *,
+                           clean_text_digests: OrderedDict[bytes, None] | None = None) -> dict:
     if not isinstance(value, Mapping) or set(value) != _SEGMENT_FIELDS:
         raise ObservationError("segment_payload_invalid")
     for key in ("observation_from", "receipt_from", "agent_from", "observation_count",
@@ -731,10 +735,10 @@ def _clean_segment_payload(value: Mapping[str, Any], secrets: Sequence[str] = ()
             or value["agent_from"] + len(value["agent_observations"]) > MAX_AGENT_OBSERVATIONS):
         raise ObservationError("segment_rows_invalid")
     cleaned = dict(value)
-    cleaned["observations"] = [clean_observation(row, secrets) for row in value["observations"]]
+    cleaned["observations"] = [clean_observation(row, secrets, clean_text_digests=clean_text_digests) for row in value["observations"]]
     cleaned["response_receipts"] = [clean_response_receipt(row) for row in value["response_receipts"]]
     cleaned["receipt_updates"] = [clean_response_receipt(row) for row in value["receipt_updates"]]
-    cleaned["agent_observations"] = [clean_agent_observation(row, secrets) for row in value["agent_observations"]]
+    cleaned["agent_observations"] = [clean_agent_observation(row, secrets, clean_text_digests=clean_text_digests) for row in value["agent_observations"]]
     if (any(row["write_state"] == "prepared" for row in cleaned["receipt_updates"])
             or len(_canonical(cleaned)) > MAX_SEGMENT_BYTES - 4096):
         raise ObservationError("segment_size_or_transition_invalid")
@@ -782,6 +786,8 @@ def read_segment(objects: Any, run_id: str, kind: str, lease_generation: int,
         if len(raw) > MAX_SEGMENT_BYTES:
             raise ObservationError("segment_size_limit")
         segment = json.loads(raw)
+        # A fresh existing digest memo shares only unchanged no-secret text.
+        # Every stored row still passes all identity, hash and privacy checks.
         if (not isinstance(segment, dict) or set(segment) != {
                 "schema_version", "run_id", "kind", "lease_generation", "claim_request_hash",
                 "number", "previous_sha256", "cumulative_bytes", "payload", "payload_sha256", "segment_sha256"}
@@ -800,7 +806,7 @@ def read_segment(objects: Any, run_id: str, kind: str, lease_generation: int,
                 or contracts.document_hash(segment["payload"]) != segment["payload_sha256"]
                 or contracts.document_hash({key: value for key, value in segment.items()
                                             if key != "segment_sha256"}) != segment["segment_sha256"]
-                or _clean_segment_payload(segment["payload"]) != segment["payload"]):
+                or _clean_segment_payload(segment["payload"], clean_text_digests=OrderedDict()) != segment["payload"]):
             raise ObservationError("journal_invalid")
         return segment
     except ObservationError:

@@ -1,4 +1,5 @@
 """Publication isolates unmeasured entrants under the real database guards."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone

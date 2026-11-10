@@ -1,4 +1,5 @@
 """Current service flows use the complete schema without migration seed state."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 import pytest
 from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.complete_baseline_final_authority_postgres_test import (

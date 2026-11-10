@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "be9488170f54eb55fb9ce1bdd27d9fdb64c2d319",
+  "baseline_commit": "bf652b96056d0c9e4722b95cfa7466c531006ebf",
   "entries": [
     {
       "ast_sha256": "sha256:0322239466f9d95f17c77713b5ddd188d15318676bb4e0cbd6d2cacbd19c74ad",
@@ -627,7 +627,7 @@
       "symbol": "ArenaService.public_reward_basis"
     },
     {
-      "ast_sha256": "sha256:457e318d5019ca384ddc92fb3e4f5da9c736fda4613a9581db78dcb99501c046",
+      "ast_sha256": "sha256:007f7a07ea9f20eb9b962ecb533666548f9688a26f21d93cffb9c5e8d9b0bb9a",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService.public_weight_state"
     },
@@ -967,7 +967,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:ba690a04849cfda7eeaaceade649b523b0a8cd0ca5c3975bc9b3e5387a46511b",
-  "protected_source_commit": "be9488170f54eb55fb9ce1bdd27d9fdb64c2d319",
+  "manifest_hash": "sha256:60e477dee0a16ba141e245ca1f808c584b3554c5023a0b81e0abd75ed51caeef",
+  "protected_source_commit": "bf652b96056d0c9e4722b95cfa7466c531006ebf",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

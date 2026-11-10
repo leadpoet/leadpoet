@@ -96,13 +96,46 @@ class TrajectoryError(ValueError):
     """One trajectory event violated the bounded private contract."""
 
 
+def _redact_quoted_sensitive_values(text: str) -> str:
+    """Redact complete quoted values, including serialized inner quotes."""
+    pieces = []
+    cursor = 0
+    while (match := _QUOTED_SENSITIVE_CONTEXT_RE.search(text, cursor)) is not None:
+        start = match.end()
+        quote = text[start - 1]
+        opening = start - 2
+        while opening >= match.start() and text[opening] == "\\":
+            opening -= 1
+        depth = start - 2 - opening
+        end = start
+        while True:
+            closing = text.find(quote, end)
+            if closing < 0:
+                # An unterminated declared private value has no safe suffix.
+                pieces.extend((text[cursor:start], "[REDACTED]" if start < len(text) else ""))
+                return "".join(pieces)
+            run = closing - 1
+            while run >= start and text[run] == "\\":
+                run -= 1
+            escapes = closing - 1 - run
+            if escapes >= depth and (escapes - depth) % (2 * (depth + 1)) == 0:
+                pieces.extend((text[cursor:start], "[REDACTED]" if closing - depth > start else "",
+                               text[closing - depth:closing + 1]))
+                cursor = closing + 1
+                break
+            end = closing + 1
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def redact_auth_schemes(text: str) -> str:
     """Keep Basic prose; redact credentials and explicit sensitive values."""
 
-    # A serialized string containing a declared private field retains the
-    # previous conservative Basic mask, including after escaped quotes/slashes.
-    private_context = _QUOTED_SENSITIVE_CONTEXT_RE.search(text) is not None
-    text = _QUOTED_SENSITIVE_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
+    # Quoted fields are private at their own value boundary. Their presence
+    # must not turn unrelated Basic prose elsewhere in full-source input
+    # into a credential. Explicit auth values and decodable Basic credentials
+    # remain covered below.
+    text = _redact_quoted_sensitive_values(text)
 
     def redact_authorization_value(match: re.Match[str]) -> str:
         value = match[0][len(match[1]):]
@@ -112,8 +145,6 @@ def redact_auth_schemes(text: str) -> str:
 
     text = _AUTHORIZATION_VALUE_RE.sub(redact_authorization_value, text)
     text = _BEARER_RE.sub("[REDACTED]", text)
-    if private_context:
-        text = _PRIVATE_BASIC_RE.sub("[REDACTED]", text)
 
     def basic(match: re.Match[str]) -> str:
         token = match[1]
@@ -147,6 +178,7 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         reverse=True,
     ):
         text = text.replace(secret, "[REDACTED]")
+    text = _redact_quoted_sensitive_values(text)
     text = _QUOTED_KEY_VALUE_RE.sub(
         lambda match: "%s%s[REDACTED]%s" % (
             match.group(1), match.group(2), match.group(4)

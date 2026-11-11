@@ -2209,7 +2209,11 @@ def _partial_research_evidence(example, *, role='source'):
                 or not _source_context_verified(proof)
                 or 'final_judge_unavailable' not in by_dimension.get('input_output_label', [])
                 or not set(by_dimension['input_output_label']) <= {
-                    'final_judge_unavailable', 'failed_execution_output_unavailable', 'execution_not_accepted'}):
+                    'final_judge_unavailable', 'failed_execution_output_unavailable', 'execution_not_accepted',
+                    # Signal-policy rounds also report this when no final
+                    # judge exists. It remains a label gap, never authority
+                    # for a signal verdict or a full execution trajectory.
+                    'signal_authority_unverified'}):
             return None
         configuration = example.get('configuration') or {}
         training_coverage.missing_reasoning_percent_from_configuration(configuration)

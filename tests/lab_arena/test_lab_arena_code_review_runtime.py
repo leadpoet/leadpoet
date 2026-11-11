@@ -261,6 +261,13 @@ def test_review_telemetry_reports_policy_categories_without_provider_text():
         "category": "fabricated_evidence", "file": "harness.py",
         "evidence": "from src.agent import run_icp",
         "explanation": private_explanation,
+        "source_trace": [
+            {"role": "claim_origin", "file": "src/agent.py",
+             "excerpt": "def run_icp(icp, tools): return tools.search(icp.industry)"},
+            {"role": "output_path", "file": "harness.py", "excerpt": "from src.agent import run_icp"},
+            {"role": "evidence_control", "file": "prompts/evidence.txt",
+             "excerpt": "Use only facts supported by the supplied pages."},
+        ],
     }]
     transport = ReviewTransport(lambda parameters: {
         "body": _review_body(parameters, verdict="reject", findings=findings),
@@ -756,6 +763,20 @@ def test_terminal_review_is_not_dispatched_or_charged_twice():
     }
     assert len(transport.sent) == 1
     assert len(store.finish_calls) == 1
+
+
+@pytest.mark.parametrize("status", ["passed", "rejected"])
+def test_completed_rows_return_before_preparation_credentials_or_accounting(monkeypatch, status):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("completed review must not prepare, read a key, or dispatch")
+
+    monkeypatch.setattr(code_review, "prepare_request", forbidden)
+    reviewer, row, store, objects = _reviewer(
+        b"not read for completed reviews", ReviewTransport(forbidden), credential_for=forbidden,
+    )
+    row["code_review_status"] = status
+    assert reviewer.review(row) == {"status": "existing", "code_review_status": status}
+    assert objects.calls == store.begin_calls == store.finish_calls == []
 
 
 class KeyStore:

@@ -57,6 +57,10 @@ def test_fabrication_finding_still_requires_exact_source_and_complete_coverage()
         "category": "fabricated_evidence", "file": "output.py",
         "evidence": '"country": icp["country"]',
         "explanation": "run_icp calls company_row without verification; its emitted country field copies the requested country without company evidence.",
+        "source_trace": [
+            {"role": "claim_origin", "file": "output.py", "excerpt": '"country": icp["country"]'},
+            {"role": "output_path", "file": "harness.py", "excerpt": "company_row("},
+        ],
     }
     response = _openrouter_response(prepared, verdict="reject", findings=[finding])
     assert not code_review.parse_response(response, prepared).passed

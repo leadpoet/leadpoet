@@ -66,6 +66,7 @@ RESEARCH_POLICY_ID = "model_directed_research_v1"
 RESEARCH_REVIEWER_VERSION = "full_source_reviewer_research_v1"
 RESEARCH_CLASSIFICATIONS = frozenset({"model_directed", "workflow", "unverified"})
 _RESEARCH_CLAIMS = frozenset({"observation_to_action", "finish_continue", "fixed_control", "uncertainty"})
+_FABRICATION_TRACE_ROLES = frozenset({"claim_origin", "output_path", "evidence_control"})
 _RESEARCH_PROMPT = """
 
 For this full-generated-thinking round, also assess whether the complete source
@@ -209,7 +210,7 @@ class CodeReviewResult:
     summary: str
     reviewed_files: Tuple[str, ...]
     reviewed_file_bytes: int
-    findings: Tuple[Mapping[str, str], ...]
+    findings: Tuple[Mapping[str, Any], ...]
     research_control: Mapping[str, Any] | None = None
 
     @property
@@ -330,6 +331,24 @@ including why required evidence checks do not establish it. If hypothetical
 versus factual meaning remains unresolved, apply the same clear-evidence
 threshold above; do not assume either verification or fabrication.
 
+For fabricated_evidence only, include source_trace: 2-8 objects with exactly
+role, file, excerpt. role is claim_origin, output_path, or evidence_control.
+Include claim_origin and output_path, and include evidence_control entries
+whenever relevant evidence-producing instructions, semantic review, validation,
+or publication gates exist. Each excerpt must be a nonblank exact contiguous
+substring of its supplied file, at most 2000 characters. Trace the source of the
+assertion and its reachable final or recovery output across files, active
+defaults and saved state. In explanation, identify the actual factual claim and
+emitted field, consider the relevant semantic evidence controls, and explain
+why the code positively forces an unsupported assertion or bypasses those
+controls. Evidence-directed model classification and required semantic review
+are relevant controls even without a dedicated machine check for that field.
+A missing machine check alone is not a violation. Instructions to use evidence
+are also not proof that every output is checked: inspect reachable bypasses.
+Do not infer either fabrication or a pass from the mere presence or absence of
+a control. These source traces support the existing clear-evidence threshold;
+they do not replace the independent review of all five misconduct categories.
+
 The user message is a JSON document whose submission_files array is the entire
 validated archive. Inspect every item and return each supplied path exactly
 once, in the supplied order, in reviewed_files. A reject verdict requires at
@@ -345,7 +364,8 @@ prose outside it. Use this structure for both pass and reject:
  "explanation":"why this excerpt shows a disallowed behavior"}]}
 The category codes are hardcoded_prepared_answers, fabricated_evidence,
 malicious_behavior, reviewer_manipulation, and duplicate_submission. Only a
-duplicate_submission finding must also include "comparison_id" from a supplied
+fabricated_evidence finding must also include "source_trace" as specified above.
+Only a duplicate_submission finding must also include "comparison_id" from a supplied
 similarity context and numeric "confidence" between 0.98 and 1.0. Do not use
 duplicate_submission if no similarity context is supplied. Similarity contexts
 may omit private reference source. Do not infer its contents or identity from
@@ -417,8 +437,16 @@ def _response_schema(
     text = {"type": "string"}
     path = {"type": "string", "enum": list(paths)}
     finding = {"category": {"type": "string", "enum": [
-        category for category in REVIEW_CATEGORIES if category != "duplicate_submission"
+        category for category in REVIEW_CATEGORIES
+        if category not in {"duplicate_submission", "fabricated_evidence"}
     ]}, "file": path, "evidence": text, "explanation": text}
+    fabrication = {**finding, "category": {"type": "string", "enum": ["fabricated_evidence"]},
+                   "source_trace": {"type": "array", "minItems": 2, "maxItems": 8,
+                                    "items": obj({
+                                        "role": {"type": "string", "enum": sorted(_FABRICATION_TRACE_ROLES)},
+                                        "file": path,
+                                        "excerpt": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                    })}}
     duplicate = {**finding, "category": {"type": "string", "enum": ["duplicate_submission"]},
                  "comparison_id": {"type": "string", "enum": list(comparison_ids)},
                  "confidence": {"type": "number"}}
@@ -428,8 +456,9 @@ def _response_schema(
         "reviewed_files": {"type": "array", "minItems": 1, "items": path},
         "reviewed_comparisons": {"type": "array", "items": (
             {"type": "string", "enum": list(comparison_ids)} if comparison_ids else text)},
-        "findings": {"type": "array", "items": (
-            {"anyOf": [obj(finding), obj(duplicate)]} if comparison_ids else obj(finding))},
+        "findings": {"type": "array", "items": {"anyOf": [
+            obj(finding), obj(fabrication), *([obj(duplicate)] if comparison_ids else []),
+        ]}},
     }
     if research_bindings is not None:
         properties["research_control"] = obj({
@@ -841,7 +870,11 @@ def parse_response(
             if not isinstance(finding, Mapping):
                 invalid("finding_keys")
             duplicate = finding.get("category") == "duplicate_submission"
-            required_keys = finding_keys | ({"comparison_id", "confidence"} if duplicate else set())
+            fabrication = finding.get("category") == "fabricated_evidence"
+            required_keys = finding_keys | (
+                {"comparison_id", "confidence"} if duplicate else
+                {"source_trace"} if fabrication else set()
+            )
             if set(finding) != required_keys:
                 invalid("finding_keys")
             category = finding["category"]
@@ -856,6 +889,29 @@ def parse_response(
                 invalid("finding_evidence_mismatch")
             if not isinstance(explanation, str) or not 1 <= len(explanation) <= 4_000:
                 invalid("finding_explanation")
+            source_trace = []
+            if fabrication:
+                if not explanation.strip():
+                    invalid("finding_explanation")
+                trace = finding["source_trace"]
+                if not isinstance(trace, list) or not 2 <= len(trace) <= 8:
+                    invalid("finding_evidence")
+                roles = set()
+                for entry in trace:
+                    if not isinstance(entry, Mapping) or set(entry) != {"role", "file", "excerpt"}:
+                        invalid("finding_evidence")
+                    role, trace_path, excerpt = entry["role"], entry["file"], entry["excerpt"]
+                    if (not isinstance(role, str) or role not in _FABRICATION_TRACE_ROLES
+                            or not isinstance(trace_path, str) or trace_path not in contents):
+                        invalid("finding_evidence")
+                    if not isinstance(excerpt, str) or not excerpt.strip() or not 1 <= len(excerpt) <= 2_000:
+                        invalid("finding_evidence")
+                    if excerpt not in contents[trace_path]:
+                        invalid("finding_evidence_mismatch")
+                    roles.add(role)
+                    source_trace.append({"role": role, "file": trace_path, "excerpt": excerpt})
+                if not {"claim_origin", "output_path"}.issubset(roles):
+                    invalid("finding_evidence")
             if duplicate:
                 confidence = finding["confidence"]
                 if (
@@ -874,6 +930,8 @@ def parse_response(
             }
             if duplicate:
                 normalized.update({"comparison_id": finding["comparison_id"], "confidence": confidence})
+            if fabrication:
+                normalized["source_trace"] = source_trace
             normalized_findings.append(normalized)
     except _ReviewResponseInvalid as exc:
         raise CodeReviewError(

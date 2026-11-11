@@ -19,6 +19,13 @@ def receipt(parameters, *, verdict='pass', cost='0.001234', provider='Nebius'):
         'category': 'fabricated_evidence', 'file': 'src/agent.py',
         'evidence': 'def run_icp(icp, tools): return tools.search(icp.industry)',
         'explanation': 'Fixture finding, not an external source judgment.',
+        'source_trace': [
+            {'role': 'claim_origin', 'file': 'src/agent.py',
+             'excerpt': 'def run_icp(icp, tools): return tools.search(icp.industry)'},
+            {'role': 'output_path', 'file': 'harness.py', 'excerpt': 'from src.agent import run_icp'},
+            {'role': 'evidence_control', 'file': 'prompts/evidence.txt',
+             'excerpt': 'Use only facts supported by the supplied pages.'},
+        ],
     }], cost=cost)
     body.update(provider=provider, openrouter_metadata={
         'requested': parameters['model'], 'strategy': 'direct', 'attempt': 1, 'pipeline': [],
@@ -173,7 +180,7 @@ def test_deepseek_research_format_suffix_repeats_only_existing_native_contract()
     native_prefix = code_review._SYSTEM_PROMPT + code_review._RESEARCH_PROMPT + code_review._RESEARCH_RESPONSE_GUIDANCE
     suffix = code_review._PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
     assert prepared.parameters['messages'][0]['content'] == native_prefix + suffix
-    assert contracts.document_hash(prepared.parameters) == 'sha256:54c47c5c77e1e4cf3177d8e91f1315b2576da9cd3753d1b2f6c80abadfa6a8c0'
+    assert contracts.document_hash(prepared.parameters) == 'sha256:93c3faa367d7ba2c97f5553cb9536dbaaf6f8ba752a080f8e2e3ac273dcdb62e'
     assert '12 non-whitespace characters' in suffix
     assert 'exact contiguous substring' in suffix
     assert 'adjacent source lines' in suffix
@@ -241,19 +248,20 @@ def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_pat
     assert entry['mode'] == {'effort': 'high'}
 
 
-# Exact Sonnet/Sol requests from merged1056 parent185791ca3. Its authorized
-# policy paragraph applies unchanged; candidate controls add nothing to these.
+# Exact future request bindings for the configured routes and output plans.
+# The source-trace evidence contract applies when a new review is prepared;
+# completed historical rows return before preparation or provider dispatch.
 @pytest.mark.parametrize('model,research,cap,digest', [
-    ('anthropic/claude-sonnet-5.5', False, 32768, 'c5a87dd9c04d9bf3844136539bcc87f5930f3d4577d5b0a37eec46cad48ebc6f'),
-    ('anthropic/claude-sonnet-5.5', False, 65536, '5a26e546032c3ace143d0a0d7fe32b7096d2b57941659fa4bf379e9c74b535dc'),
-    ('anthropic/claude-sonnet-5.5', True, 32768, 'cf8823cf4c53f454f5ffcdddbfbefd59331f674c86a543f0110e5607a5807279'),
-    ('anthropic/claude-sonnet-5.5', True, 65536, '5ab0e3dcb6d97fb5fda7729f9840a9974ac46bf59446a2e73ab3ced5b63699be'),
-    ('openai/gpt-6.1-sol', False, 32768, 'f309cd5f91e1e37ae03f2886aec38c1579d87c998b0157eadc377f2b96c91ff3'),
-    ('openai/gpt-6.1-sol', False, 65536, 'eb2947e23f279c2eb2c2d8e5ef9de5ea675ceac5e9bf01d17a4e771a7e41417c'),
-    ('openai/gpt-6.1-sol', True, 32768, '6c2611270d87bcd5e8d27420c599daa4adf7fe948af1bb27643322241b317dbf'),
-    ('openai/gpt-6.1-sol', True, 65536, '1f6dd6903f975c74b654641e0c81635527b253d03d01ad8c3021cad8799d7d4f'),
+    ('anthropic/claude-sonnet-5.5', False, 32768, 'b6f136c4f70722ed4c53be1a97ac5f92b1a03abd7dbc8749de740cbbf21e3b30'),
+    ('anthropic/claude-sonnet-5.5', False, 65536, '28b2c986435b52b31d1ec4a852c3f448d382d86d3c6ff7b1da0cdaf10e77bed3'),
+    ('anthropic/claude-sonnet-5.5', True, 32768, '1f9eee27f411ce3a7e70e2551d6447ee643705a5601dd5c7a0521f84272b5296'),
+    ('anthropic/claude-sonnet-5.5', True, 65536, '206d7460d4cdea2604ba65e0a3710c460fe38bc57f9ad4f616ef08374b59c50a'),
+    ('openai/gpt-6.1-sol', False, 32768, '7864dcac074a9215889fc4df85b4d2ed5320a8ddaa93478b585c174cf817bc59'),
+    ('openai/gpt-6.1-sol', False, 65536, 'a7fb15da101b3661c6972307733dff213ad632ab643705dc9ded90be35705878'),
+    ('openai/gpt-6.1-sol', True, 32768, 'f81dda048b6b22312366720b84d51e1218bfd4a2a88239c066f2b89ea09ee9d6'),
+    ('openai/gpt-6.1-sol', True, 65536, '2e5506ee4719b556201da0a489d2fc5e0aff6db6c7ddf0db83c22b981c75b13d'),
 ])
-def test_historical_request_bytes_are_unchanged(model, research, cap, digest):
+def test_configured_route_request_bytes_are_bound(model, research, cap, digest):
     prepared = code_review.prepare_request(_archive(_source()), model=model,
         research_control=research, max_output_tokens=cap,
         context_window_tokens=1050000 if model == code_review.FALLBACK_REVIEW_MODEL else 1000000)

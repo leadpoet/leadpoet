@@ -12,7 +12,7 @@ from lab_arena import contracts, service as service_module
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, _PublicResultInFlightReads, ServiceError
 from tests.lab_arena.scoring_validator_attribution_test import (
-    ROUND_ID, SUBMISSION_ID, _execution, _service,
+    MINER, ROUND_ID, SUBMISSION_ID, _execution, _service,
 )
 
 
@@ -349,3 +349,89 @@ def test_unpublished_and_undisclosed_results_do_not_fetch_objects():
             result = service.public_results(ROUND_ID, SUBMISSION_ID)
             assert result["outputs"] == {}
             assert result["public_icp_status"] == "pending"
+
+
+@pytest.mark.parametrize("status", ["stage2", "scored", "cancelled"])
+def test_unpublished_round_results_also_share_the_in_flight_output_get(monkeypatch, status):
+    """Completed unpublished results share reads without changing their output."""
+    joined = _observed_future(monkeypatch)
+    document = json.dumps({
+        "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "companies": [],
+    }).encode()
+
+    class Objects:
+        def __init__(self):
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+
+        def get_bounded(self, ref, max_bytes):
+            assert (ref, max_bytes) == ("public-output", service_module.MAX_OUTPUT_BYTES)
+            self.calls += 1
+            self.entered.set()
+            assert self.release.wait(3)
+            return document
+
+    execution = _execution("execute-public", 0)
+    execution["output_ref"] = "public-output"
+    service = _service([execution], public_positions={0}, status=status)
+    objects = Objects()
+    service._objects = objects
+    service._public_result_reads = _PublicResultInFlightReads(objects)
+    participant = {"submission_id": SUBMISSION_ID, "miner_hotkey": MINER,
+                   "is_baseline": False}
+    service._round = lambda _round_id: {
+        "round_id": ROUND_ID,
+        "status": status,
+        "configuration_doc": {},
+        "participants": [participant],
+        "publication_doc": {},
+    }
+    # Unpublished results read completed scores instead of a publication
+    # document; only the object read is under test here.
+    completion_checks = []
+
+    def completed_scores(_row):
+        completion_checks.append(_row["status"])
+        return {
+            SUBMISSION_ID: {"submission_id": SUBMISSION_ID,
+                            "execution_runs": [execution]},
+        }
+
+    service.completed_submission_scores = completed_scores
+    path = f"/arena/v1/rounds/{ROUND_ID}/results/{SUBMISSION_ID}"
+
+    async def calls():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(service)),
+            base_url="http://private",
+        ) as client:
+            first = asyncio.create_task(client.get(path))
+            assert await asyncio.to_thread(objects.entered.wait, 3)
+            second = asyncio.create_task(client.get(path))
+            assert await asyncio.to_thread(joined.wait, 3)
+            objects.release.set()
+            return await asyncio.gather(first, second)
+
+    first, second = asyncio.run(calls())
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    assert objects.calls == 1
+    assert completion_checks == [status, status]
+
+    async def later():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(service)),
+            base_url="http://private",
+        ) as client:
+            return await client.get(path)
+
+    later_response = asyncio.run(later())
+    assert later_response.content == first.content
+    assert objects.calls == 2
+    assert completion_checks == [status, status, status]
+    service.completed_submission_scores = lambda _row: {}
+    denied = asyncio.run(later())
+    assert denied.status_code == 403
+    assert objects.calls == 2

@@ -758,6 +758,20 @@ def test_terminal_review_is_not_dispatched_or_charged_twice():
     assert len(store.finish_calls) == 1
 
 
+@pytest.mark.parametrize("status", ["passed", "rejected"])
+def test_completed_rows_return_before_preparation_credentials_or_accounting(monkeypatch, status):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("completed review must not prepare, read a key, or dispatch")
+
+    monkeypatch.setattr(code_review, "prepare_request", forbidden)
+    reviewer, row, store, objects = _reviewer(
+        b"not read for completed reviews", ReviewTransport(forbidden), credential_for=forbidden,
+    )
+    row["code_review_status"] = status
+    assert reviewer.review(row) == {"status": "existing", "code_review_status": status}
+    assert objects.calls == store.begin_calls == store.finish_calls == []
+
+
 class KeyStore:
     def __init__(self, row, *, round_row=None, encrypted=None):
         self.row = row

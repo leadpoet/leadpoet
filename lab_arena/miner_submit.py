@@ -370,6 +370,36 @@ def _post_submission_with_retry(
         return response
 
 
+def read_submission_review(
+    *, round_id: str, submission_id: str, api_base_url: str,
+    keypair: Any, session: Any = requests, now: Callable[[], float] = time.time,
+) -> Mapping[str, Any]:
+    """Read private rejection excerpts using the original submitting hotkey."""
+    base = _api_base_url(api_base_url)
+    try:
+        body = contracts.validate_submission_credit_retry_body({"submission_id": submission_id})
+        if not isinstance(round_id, str) or not contracts.ROUND_ID_RE.fullmatch(round_id):
+            raise contracts.ArenaContractError("round_id invalid")
+    except contracts.ArenaContractError as exc:
+        raise MinerSubmissionError("submission_review_request_invalid") from exc
+    envelope = _signed_request(
+        scope=contracts.SCOPE_SUBMISSION_REVIEW, round_id=round_id,
+        body=body, keypair=keypair, now=now,
+    )
+    try:
+        response = session.post(
+            base + "/arena/v1/submissions/" + submission_id + "/review",
+            json=envelope, timeout=30, allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+    document = _json_response(response, "submission_review")
+    if (document.get("submission_id") != submission_id or document.get("round_id") != round_id
+            or not isinstance(document.get("owner_findings"), Mapping)):
+        raise MinerSubmissionError("arena_response_invalid", "submission_review")
+    return document
+
+
 def retry_credit_failures(
     *, round_id: str, submission_id: str, api_base_url: str,
     keypair: Any, session: Any = requests, now: Callable[[], float] = time.time,

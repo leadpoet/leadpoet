@@ -607,6 +607,8 @@ ARENA_DENIAL_CODES = frozenset(
         "submission_replacement_limit_reached",
         "submission_replacement_policy_invalid",
         "submission_replacement_schema_unavailable",
+        "submission_review_owner_required",
+        "submission_review_request_invalid",
         "submission_similarity_schema_unavailable",
         "submission_source_immutable",
         "submission_superseded",

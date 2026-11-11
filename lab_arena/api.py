@@ -383,6 +383,20 @@ def create_app(service: ArenaService) -> FastAPI:
             service.handle_submission_credit_retry, submission_id, envelope
         )
 
+    @app.post("/arena/v1/submissions/{submission_id}/review")
+    async def submission_owner_review(submission_id: str, request: Request) -> JSONResponse:
+        try:
+            envelope = await _read_json(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                                headers={"Cache-Control": "private, no-store",
+                                         "X-Content-Type-Options": "nosniff"})
+        response = await no_store_public_call(
+            service.handle_submission_review, submission_id, envelope,
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
     # -- runner -------------------------------------------------------------
 
     @app.post("/arena/v1/runs/claim")

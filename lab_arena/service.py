@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Proto
 from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_coverage, training_eligibility, training_reader, baseline_reasoning
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, reward_decay, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
+from lab_arena import owner_review
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     SLOT_ELIGIBILITY_UNTIL_REPLACED,
@@ -2337,6 +2338,30 @@ class ArenaService:
             "replaces_submission_id": row.get("replaces_submission_id"),
             "replaced_by_submission_id": row.get("replaced_by_submission_id"),
             "code_review": self._public_code_review(row, round_row=round_row, now=self.now()),
+        }
+
+    def handle_submission_review(self, submission_id: str, envelope: Any) -> Dict[str, Any]:
+        """Read private admission excerpts with the submitting hotkey's signature."""
+        validated, round_row = self._request_round(
+            envelope, scope=contracts.SCOPE_SUBMISSION_REVIEW,
+        )
+        try:
+            # Both operations use the same strict, single-submission body.
+            body = contracts.validate_submission_credit_retry_body(validated["body"])
+        except ArenaContractError as exc:
+            raise ServiceError("submission_review_request_invalid", 400) from exc
+        if body["submission_id"] != submission_id:
+            raise ServiceError("submission_review_request_invalid", 400)
+        self._enforce_submission_request_limit(validated["hotkey"])
+        row = self._store.get_submission(submission_id)
+        if (row is None or row.get("round_id") != round_row["round_id"]
+                or row.get("miner_hotkey") != validated["hotkey"]):
+            raise ServiceError("submission_review_owner_required", 403)
+        return {
+            "submission_id": submission_id, "round_id": round_row["round_id"],
+            "status": row["status"], "rejection_rule": row.get("rejection_rule"),
+            "code_review": self._public_code_review(row, round_row=round_row, now=self.now()),
+            "owner_findings": owner_review.private_projection(row),
         }
 
     @staticmethod

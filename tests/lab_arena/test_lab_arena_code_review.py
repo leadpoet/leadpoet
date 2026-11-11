@@ -138,14 +138,6 @@ def test_miner_style_rejections_include_main_and_supporting_file_evidence(
         "evidence": evidence,
         "explanation": "The source uses this value to produce an unsupported result.",
     }
-    if category == "fabricated_evidence":
-        finding["source_trace"] = [
-            {"role": "claim_origin", "file": finding_file, "excerpt": evidence},
-            {"role": "output_path", "file": finding_file,
-             "excerpt": "return {'description': f'{company} announced rapid expansion', 'date': '2026-09-09'}"},
-            {"role": "evidence_control", "file": "prompts/company.txt",
-             "excerpt": "Use only the supplied search evidence. Omit unsupported claims."},
-        ]
     result = code_review.parse_response(
         _openrouter_response(prepared, verdict="reject", findings=[finding]),
         prepared,
@@ -434,7 +426,7 @@ def test_parse_response_normalizes_reordered_complete_coverage():
 def test_parse_response_rejects_finding_without_exact_source_evidence():
     prepared = code_review.prepare_request(_archive(_pydantic_style_source()))
     finding = {
-        "category": "malicious_behavior",
+        "category": "fabricated_evidence",
         "file": "agent.py",
         "evidence": "words absent from the source",
         "explanation": "Unsupported output.",
@@ -467,7 +459,7 @@ def test_parse_response_accepts_complete_verbose_findings_for_compact_persistenc
     members["agent.py"] += b"\nFLAG = 'reject me'\n"
     prepared = code_review.prepare_request(_archive(members))
     finding = {
-        "category": "malicious_behavior",
+        "category": "fabricated_evidence",
         "file": "agent.py",
         "evidence": "reject me",
         "explanation": "x" * 4_000,

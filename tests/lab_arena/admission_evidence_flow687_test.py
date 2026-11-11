@@ -58,13 +58,6 @@ def _finding(source):
             'The evidence instruction exists but is bypassed by the direct return; this '
             'positive unsupported output, rather than a missing machine check, is the violation.'
         ),
-        'source_trace': [
-            {'role': 'claim_origin', 'file': 'src/agent.py', 'excerpt': '"country": icp["country"]'},
-            {'role': 'output_path', 'file': 'src/agent.py',
-             'excerpt': 'return [{"country": icp["country"]}]'},
-            {'role': 'evidence_control', 'file': 'prompts/evidence.txt',
-             'excerpt': source['prompts/evidence.txt'].decode().strip()},
-        ],
     }
 
 
@@ -121,7 +114,7 @@ def test_runtime_sql_ledger_owner_findings_and_signed_reader(context, case, cost
             content = json.loads(body['choices'][0]['message']['content'])
             item = deepcopy(finding)
             if case == 'malformed-recovery' and not responses:
-                item.pop('source_trace')
+                item.pop('explanation')
             content.update(verdict='reject', findings=[item])
             body['choices'][0]['message']['content'] = json.dumps(content)
         responses.append(body)
@@ -177,7 +170,6 @@ def test_runtime_sql_ledger_owner_findings_and_signed_reader(context, case, cost
                                              'evidence': finding['evidence']}]
             assert saved['code_review_doc']['owner_findings']['findings'] == excerpts['findings']
             assert finding['explanation'] not in private.text
-            assert 'source_trace' not in private.text
             assert finding['evidence'] not in client.get('/arena/v1/submissions/' + sid).text
         else:
             assert not private.json()['owner_findings']['available']

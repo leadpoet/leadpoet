@@ -173,21 +173,13 @@ def test_gateway_forwards_signed_private_read_and_headers(signed_client, monkeyp
 
 
 
-def source_trace(source):
-    return [
-        {'role': role, 'file': path, 'excerpt': source[path].decode().strip()}
-        for role, path in [('claim_origin', 'src/agent.py'), ('output_path', 'harness.py'),
-                           ('evidence_control', 'prompts/evidence.txt')]
-    ]
-
-
 @pytest.mark.parametrize('cost', ['0.001234', None])
 def test_runtime_rejected_excerpt_persistence_preserves_unknown_cost(cost):
     source = _source()
     evidence = source['src/agent.py'].decode().strip()
     def responder(parameters):
         items = [{'category': CATEGORY, 'file': 'src/agent.py', 'evidence': evidence,
-                  'explanation': 'private explanation', 'source_trace': source_trace(source)}]
+                  'explanation': 'private explanation'}]
         return {'status': 200, 'body': _review_body(parameters, verdict='reject', findings=items, cost=cost)}
     reviewer, submitted, store, _ = _reviewer(_archive(source), ReviewTransport(responder))
     reviewer.review(submitted)
@@ -203,8 +195,7 @@ def test_optional_findings_failure_preserves_verdict(monkeypatch):
     def responder(parameters):
         return {'status': 200, 'body': _review_body(parameters, verdict='reject', findings=[{
             'category': CATEGORY, 'file': 'src/agent.py',
-            'evidence': source['src/agent.py'].decode().strip(), 'explanation': 'private',
-            'source_trace': source_trace(source)}])}
+            'evidence': source['src/agent.py'].decode().strip(), 'explanation': 'private'}])}
     reviewer, submitted, store, _ = _reviewer(_archive(source), ReviewTransport(responder))
     reviewer.review(submitted)
     assert store.finish_calls[0][3] == 'rejected' and 'owner_findings' not in store.finish_calls[0][4]
@@ -217,7 +208,7 @@ def test_runtime_redacts_source_credential_before_persistence():
         return {'status': 200, 'body': _review_body(parameters, verdict='reject', findings=[{
             'category': CATEGORY, 'file': 'prompts/evidence.txt',
             'evidence': source['prompts/evidence.txt'].decode().strip(),
-            'explanation': 'private', 'source_trace': source_trace(source)}])}
+            'explanation': 'private'}])}
     reviewer, submitted, store, _ = _reviewer(_archive(source), ReviewTransport(responder))
     reviewer.review(submitted)
     assert store.finish_calls[0][3] == 'rejected'

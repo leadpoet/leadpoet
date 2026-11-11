@@ -261,13 +261,6 @@ def test_review_telemetry_reports_policy_categories_without_provider_text():
         "category": "fabricated_evidence", "file": "harness.py",
         "evidence": "from src.agent import run_icp",
         "explanation": private_explanation,
-        "source_trace": [
-            {"role": "claim_origin", "file": "src/agent.py",
-             "excerpt": "def run_icp(icp, tools): return tools.search(icp.industry)"},
-            {"role": "output_path", "file": "harness.py", "excerpt": "from src.agent import run_icp"},
-            {"role": "evidence_control", "file": "prompts/evidence.txt",
-             "excerpt": "Use only facts supported by the supplied pages."},
-        ],
     }]
     transport = ReviewTransport(lambda parameters: {
         "body": _review_body(parameters, verdict="reject", findings=findings),

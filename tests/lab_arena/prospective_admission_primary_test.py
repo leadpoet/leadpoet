@@ -19,13 +19,6 @@ def receipt(parameters, *, verdict='pass', cost='0.001234', provider='Nebius'):
         'category': 'fabricated_evidence', 'file': 'src/agent.py',
         'evidence': 'def run_icp(icp, tools): return tools.search(icp.industry)',
         'explanation': 'Fixture finding, not an external source judgment.',
-        'source_trace': [
-            {'role': 'claim_origin', 'file': 'src/agent.py',
-             'excerpt': 'def run_icp(icp, tools): return tools.search(icp.industry)'},
-            {'role': 'output_path', 'file': 'harness.py', 'excerpt': 'from src.agent import run_icp'},
-            {'role': 'evidence_control', 'file': 'prompts/evidence.txt',
-             'excerpt': 'Use only facts supported by the supplied pages.'},
-        ],
     }], cost=cost)
     body.update(provider=provider, openrouter_metadata={
         'requested': parameters['model'], 'strategy': 'direct', 'attempt': 1, 'pipeline': [],
@@ -180,7 +173,7 @@ def test_deepseek_research_format_suffix_repeats_only_existing_native_contract()
     native_prefix = code_review._SYSTEM_PROMPT + code_review._RESEARCH_PROMPT + code_review._RESEARCH_RESPONSE_GUIDANCE
     suffix = code_review._PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
     assert prepared.parameters['messages'][0]['content'] == native_prefix + suffix
-    assert contracts.document_hash(prepared.parameters) == 'sha256:93c3faa367d7ba2c97f5553cb9536dbaaf6f8ba752a080f8e2e3ac273dcdb62e'
+    assert contracts.document_hash(prepared.parameters) == 'sha256:b011ba9a73b760cb8efc9bd825258a0800c08137c889a4d333cd3d7fbee30d34'
     assert '12 non-whitespace characters' in suffix
     assert 'exact contiguous substring' in suffix
     assert 'adjacent source lines' in suffix
@@ -249,17 +242,17 @@ def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_pat
 
 
 # Exact future request bindings for the configured routes and output plans.
-# The source-trace evidence contract applies when a new review is prepared;
+# The evidence-reasoning prompt applies when a new review is prepared;
 # completed historical rows return before preparation or provider dispatch.
 @pytest.mark.parametrize('model,research,cap,digest', [
-    ('anthropic/claude-sonnet-5.5', False, 32768, 'b6f136c4f70722ed4c53be1a97ac5f92b1a03abd7dbc8749de740cbbf21e3b30'),
-    ('anthropic/claude-sonnet-5.5', False, 65536, '28b2c986435b52b31d1ec4a852c3f448d382d86d3c6ff7b1da0cdaf10e77bed3'),
-    ('anthropic/claude-sonnet-5.5', True, 32768, '1f9eee27f411ce3a7e70e2551d6447ee643705a5601dd5c7a0521f84272b5296'),
-    ('anthropic/claude-sonnet-5.5', True, 65536, '206d7460d4cdea2604ba65e0a3710c460fe38bc57f9ad4f616ef08374b59c50a'),
-    ('openai/gpt-6.1-sol', False, 32768, '7864dcac074a9215889fc4df85b4d2ed5320a8ddaa93478b585c174cf817bc59'),
-    ('openai/gpt-6.1-sol', False, 65536, 'a7fb15da101b3661c6972307733dff213ad632ab643705dc9ded90be35705878'),
-    ('openai/gpt-6.1-sol', True, 32768, 'f81dda048b6b22312366720b84d51e1218bfd4a2a88239c066f2b89ea09ee9d6'),
-    ('openai/gpt-6.1-sol', True, 65536, '2e5506ee4719b556201da0a489d2fc5e0aff6db6c7ddf0db83c22b981c75b13d'),
+    ('anthropic/claude-sonnet-5.5', False, 32768, '77d5fa07e1574088935a3414fe096103ce5c02813326e47aa4adf73b0362c6e7'),
+    ('anthropic/claude-sonnet-5.5', False, 65536, '17225be7ed2a0e9755a0fd9a323099bc292920c8b0722007089fa415d3a79ae8'),
+    ('anthropic/claude-sonnet-5.5', True, 32768, '1637c92b10484d17525576971bbe521a602a8ebc4958729726ef75e12c0aaab4'),
+    ('anthropic/claude-sonnet-5.5', True, 65536, '4d23157f2402ccee9a3a5bdea5c9bf0f5c4f81ab303eeac0303a23775728402a'),
+    ('openai/gpt-6.1-sol', False, 32768, 'edfa909cd8d9d8463090fd61c9c1b3a11ec4a2d7eeeda399366d2e644126bfd6'),
+    ('openai/gpt-6.1-sol', False, 65536, '63aa63e65275a9f18ec07b9d9b462153c773f066bc2ce47d4078bc62302546fc'),
+    ('openai/gpt-6.1-sol', True, 32768, 'ca464b6adb0b841baef635b601b2a9ec9da9f0ac3a2cc800437769b2330fef1e'),
+    ('openai/gpt-6.1-sol', True, 65536, 'c7138ec393b589ca84635171986e8ad5d638636d97d70267bdf5ee47a02f7c7d'),
 ])
 def test_configured_route_request_bytes_are_bound(model, research, cap, digest):
     prepared = code_review.prepare_request(_archive(_source()), model=model,

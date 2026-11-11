@@ -115,11 +115,8 @@ _RESEARCH_RESPONSE_GUIDANCE = """
 
 Complete the review in this response; do not emit placeholders or an empty
 assessment. Include every supplied file in reviewed_files. For each research
-claim, copy a short, exact, contiguous source span from the named file. Check
-that it appears verbatim, including arguments and punctuation. Never rewrite
-calls, fill in arguments, synthesize result objects, add placeholders or
-ellipses, or stitch separate branches or spans into one excerpt. Use separate
-evidence items for separate source spans. Put interpretation and cross-file
+claim, copy a short, contiguous excerpt directly from the named source file,
+without editing, combining, or paraphrasing it. Put interpretation and cross-file
 connections in explanation, not excerpt. Prefer executable controller statements
 over comments describing them. Include the required claims for the selected
 classification and a nonempty source-only limitations list. If control cannot be
@@ -343,18 +340,6 @@ including why required evidence checks do not establish it. If hypothetical
 versus factual meaning remains unresolved, apply the same clear-evidence
 threshold above; do not assume either verification or fabrication.
 
-For each fabrication finding, use the existing explanation to trace the factual
-claim's origin and its reachable final or recovery output across files, active
-defaults and saved state. Consider relevant evidence-producing instructions,
-semantic review, validation and publication gates. Explain the unsupported
-substitution or invention and why those controls do not establish the emitted
-claim, including any reachable bypass. Evidence-directed model classification
-and required semantic review are relevant controls even without a dedicated
-machine check for that field. A missing machine check alone is not a violation.
-Instructions to use evidence are also not proof that every output is checked.
-Do not infer either fabrication or a pass from a control's presence or absence;
-apply the same clear-evidence threshold and all five misconduct categories.
-
 The user message is a JSON document whose submission_files array is the entire
 validated archive. Inspect every item and return each supplied path exactly
 once, in the supplied order, in reviewed_files. A reject verdict requires at
@@ -575,6 +560,7 @@ def prepare_request(
             else {"type": "json_object"}),
     }
     if model == PROSPECTIVE_REVIEW_MODEL:
+        parameters["temperature"] = 0.0
         parameters["reasoning"] = {"effort": "low", "exclude": False}
         parameters["provider"].update({
             "max_price": {"prompt": 0.3, "completion": 1.2, "request": 0.0},

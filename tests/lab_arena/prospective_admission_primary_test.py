@@ -58,11 +58,22 @@ def test_new_primary_uses_exact_native_route_and_actual_ledger_identity(verdict,
     assert body['provider']['max_price'] == {'prompt': 0.3, 'completion': 1.2, 'request': 0.0}
     assert body['provider']['enforce_distillable_text'] is True
     assert body['reasoning'] == {'effort': 'low', 'exclude': False}
+    assert body['temperature'] == 0.0
     assert body['max_tokens'] == 32768
     assert body['response_format']['type'] == 'json_schema'
     assert body['response_format']['json_schema']['strict'] is True
     assert store.begin_calls[0][4] == store.finish_calls[0][4]['model'] == DEEPSEEK
     assert store.finish_calls[0][5] == 1234
+
+
+@pytest.mark.parametrize('model', [
+    code_review.DEFAULT_REVIEW_MODEL, code_review.FALLBACK_REVIEW_MODEL,
+    code_review.PROSPECTIVE_ALTERNATE_MODEL, 'anthropic/claude-sonnet-5',
+])
+@pytest.mark.parametrize('research', [False, True])
+def test_primary_sampling_change_does_not_add_sampling_to_other_models(model, research):
+    prepared = code_review.prepare_request(_archive(_source()), model=model, research_control=research)
+    assert not {'temperature', 'top_p', 'top_k', 'seed'} & prepared.parameters.keys()
 
 
 def test_prospective_truncation_uses_existing_alternate_slot_not_65536_deepseek():
@@ -173,7 +184,7 @@ def test_deepseek_research_format_suffix_repeats_only_existing_native_contract()
     native_prefix = code_review._SYSTEM_PROMPT + code_review._RESEARCH_PROMPT + code_review._RESEARCH_RESPONSE_GUIDANCE
     suffix = code_review._PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
     assert prepared.parameters['messages'][0]['content'] == native_prefix + suffix
-    assert contracts.document_hash(prepared.parameters) == 'sha256:f3c2988b8d556c1321d933d7749ff3564f838eb5ffee08670d27b938790131bd'
+    assert contracts.document_hash(prepared.parameters) == 'sha256:845c8b632adfa05589edace605b10770eb98558ca4d0e87f420014a079a6c76f'
     assert '12 non-whitespace characters' in suffix
     assert 'exact contiguous substring' in suffix
     assert 'adjacent source lines' in suffix
@@ -242,17 +253,17 @@ def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_pat
 
 
 # Exact future request bindings for the configured routes and output plans.
-# The evidence-reasoning prompt applies when a new review is prepared;
+# The observed-normalization prompt applies when a new review is prepared;
 # completed historical rows return before preparation or provider dispatch.
 @pytest.mark.parametrize('model,research,cap,digest', [
-    ('anthropic/claude-sonnet-5.5', False, 32768, 'de28db48f89666c5b033bb4c1669034c3fb310392dcd08525fea60da462fa557'),
-    ('anthropic/claude-sonnet-5.5', False, 65536, '81c124769fb3b771f8c7a57b0dfc4a2093906eb8bef8d99b964b8467839022f5'),
-    ('anthropic/claude-sonnet-5.5', True, 32768, 'd4374c56d7e467c3932b50c4d89518ca02a86a1b5ec52b9737b35de85cda2fc7'),
-    ('anthropic/claude-sonnet-5.5', True, 65536, '7f6b0369f896ca856b3b219013237160965ce4af8fa3ca82928c8f7ac17b6d82'),
-    ('openai/gpt-6.1-sol', False, 32768, '79e915f7c1103bf05e241db0aaa466a987fa76b7cb170ab64efec5f6d62b4156'),
-    ('openai/gpt-6.1-sol', False, 65536, '89919366ab480126c38118fe018f39c7281094997b0df9a1400ffe0bdbd4ca51'),
-    ('openai/gpt-6.1-sol', True, 32768, 'b4bbb2e4b198e9123066c99a41db72c972d0c9ef2c5b9818f0132a36c1187c36'),
-    ('openai/gpt-6.1-sol', True, 65536, 'c2dcb997f3dc12f250d907204532e1388590cd90e65b31b119cfa8609ead81d0'),
+    ('anthropic/claude-sonnet-5.5', False, 32768, '2f2f39c588b178cbd5eea97a83cccf4bc9ffca2ce183a0434b94fadc6a44e795'),
+    ('anthropic/claude-sonnet-5.5', False, 65536, '04f8b5a22bb74acb047b1ab59221a7f38d8e06aac802a3bcde94e8271995a764'),
+    ('anthropic/claude-sonnet-5.5', True, 32768, 'd97b05ff52c5158c5c5d44c2ee4ced122101ee17e9ef93ebc03c258416964c8f'),
+    ('anthropic/claude-sonnet-5.5', True, 65536, '93776a050ee26a6817829fc065d71c0554dcfa51d03970837442555b69ec53d4'),
+    ('openai/gpt-6.1-sol', False, 32768, '0432af13808bc4123adb797e841ff786eb63d5f9b81bc58c228e73c14f933e06'),
+    ('openai/gpt-6.1-sol', False, 65536, '832392a4153df23c6fff1f09136c3da2c4c76bd71537f74d44cdf0824da5a946'),
+    ('openai/gpt-6.1-sol', True, 32768, '63b70b6407d1865d43eb52c8dffbcd13941f4347a0de924affb176fa5573a57b'),
+    ('openai/gpt-6.1-sol', True, 65536, '1d0c1590e6b8c4f729ac17fc5d973ad6424b82d24c83d134a9bd58e84cc6145d'),
 ])
 def test_configured_route_request_bytes_are_bound(model, research, cap, digest):
     prepared = code_review.prepare_request(_archive(_source()), model=model,

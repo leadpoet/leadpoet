@@ -33,17 +33,9 @@ def _finding():
     code_review.PROSPECTIVE_REVIEW_MODEL, code_review.PROSPECTIVE_ALTERNATE_MODEL,
 ])
 @pytest.mark.parametrize("research", [False, True])
-def test_existing_explanation_requests_claim_origin_output_and_semantic_controls(model, research):
+def test_normalization_uses_observed_evidence_without_allowing_prepared_answers(model, research):
     prepared = code_review.prepare_request(_archive(SOURCE), model=model, research_control=research)
     prompt = prepared.parameters["messages"][0]["content"]
-    assert "use the existing explanation to trace the factual" in prompt
-    assert "claim's origin and its reachable final or recovery output" in prompt
-    assert "defaults and saved state" in prompt
-    assert "required semantic review are relevant controls" in prompt
-    assert "A missing machine check alone is not a violation" in prompt
-    assert "Instructions to use evidence are also not proof" in prompt
-    assert "including any reachable bypass" in prompt
-    assert "same clear-evidence threshold and all five misconduct categories" in prompt
     assert "deterministic processing of observed evidence" in prompt
     assert "company identity and factual content still come from" in prompt
     assert "Exact text matching, a narrow selection rule" in prompt
@@ -53,7 +45,11 @@ def test_existing_explanation_requests_claim_origin_output_and_semantic_controls
     assert "calling a\nprewritten answer a normalization does not make it evidence-backed" in prompt
     assert "source_trace" not in prompt
     assert prepared.parameters["max_tokens"] == code_review.DEFAULT_MAX_OUTPUT_TOKENS
-    assert not {"temperature", "top_p", "top_k"} & prepared.parameters.keys()
+    assert not {"top_p", "top_k", "seed"} & prepared.parameters.keys()
+    if model == code_review.PROSPECTIVE_REVIEW_MODEL:
+        assert prepared.parameters["temperature"] == 0.0
+    else:
+        assert "temperature" not in prepared.parameters
     submitted = json.loads(prepared.parameters["messages"][1]["content"])
     assert {x["path"]: x["content"].encode() for x in submitted["submission_files"]} == SOURCE
     schema = prepared.parameters["response_format"]["json_schema"]["schema"]

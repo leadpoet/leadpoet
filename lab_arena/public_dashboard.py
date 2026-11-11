@@ -928,7 +928,10 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
     published_stage1 = _rankings(row, "stage1_ranking") if per_icp_policy else {}
     final_rankings = _rankings(row, "final_ranking") if per_icp_policy else {}
     selected: Dict[tuple[str, int], Mapping[str, Any]] = {}
-    for run in service._store.list_runs(str(row["round_id"]), stage=1, kind="execute"):
+    for run in service._store.list_runs(
+        str(row["round_id"]), stage=1, kind="execute",
+        columns=_STAGE1_SCORE_COLUMNS,
+    ):
         if run.get("per_icp_score") is None:
             continue
         submission_id = str(run.get("submission_id") or "")
@@ -1117,6 +1120,14 @@ def code_review_summary(
     ):
         result["failure_reason"] = "provider_credit_exhausted"
     return result
+
+
+# Four score scalars plus run_id for pagination are sufficient here.
+# Naming them keeps the four JSONB columns on lab_arena_runs (claim_response,
+# result_doc, terminal_doc, reviewer_runtime_doc) out of a public page read.
+_STAGE1_SCORE_COLUMNS = (
+    "run_id,submission_id,icp_position,attempt,per_icp_score"
+)
 
 
 _EVALUATION_COLUMNS = (

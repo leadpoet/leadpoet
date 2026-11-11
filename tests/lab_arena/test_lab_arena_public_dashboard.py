@@ -5,11 +5,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from lab_arena import contracts, public_dashboard, source_disclosure
 from lab_arena.service import ArenaService, ServiceError
-from lab_arena.store import ArenaStore
+from lab_arena.store import ArenaStore, PostgrestTransport
 
 
 BASELINE_HOTKEY = "5" + "A" * 47
@@ -691,7 +692,10 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
 
         @staticmethod
         def list_runs(_round_id, **filters):
-            assert filters == {"stage": 1, "kind": "execute"} or filters == {
+            assert filters == {
+                "stage": 1, "kind": "execute",
+                "columns": public_dashboard._STAGE1_SCORE_COLUMNS,
+            } or filters == {
                 "columns": public_dashboard._EVALUATION_COLUMNS,
                 "submission_ids": ["baseline-1", "sub-miner"],
             }
@@ -838,6 +842,79 @@ def test_per_icp_stage1_uses_frozen_cost_adjusted_baseline_and_miner_scores():
         for run in _stage1_runs()
         if run["submission_id"] == "baseline-1"
     ) / 10 == 7.5
+
+
+def test_published_stage1_projection_pages_without_changing_public_scores_or_privacy():
+    row = _per_icp_published_round()
+    canary = "private-run-output-canary"
+    runs = [
+        {"submission_id": "not-a-participant", "icp_position": 0,
+         "attempt": 1, "per_icp_score": None}
+        for _ in range(580)
+    ] + _stage1_runs() + [
+        {"submission_id": "baseline-1", "icp_position": 8,
+         "attempt": 2, "per_icp_score": 64.8},
+        {"submission_id": "baseline-1", "icp_position": 8,
+         "attempt": 3, "per_icp_score": None},
+        {"submission_id": "baseline-1", "icp_position": 8,
+         "attempt": 2, "per_icp_score": 999.0},
+    ]
+    for index, run in enumerate(runs):
+        run.update(run_id=f"run-{index:04d}", round_id=row["round_id"],
+                   kind="execute", status="accepted", stage=1)
+        run.update({key: {"private": canary * 128} for key in (
+            "claim_response", "result_doc", "terminal_doc", "reviewer_runtime_doc",
+        )})
+
+    def snapshot(list_runs):
+        service = DashboardService(
+            _round=lambda _round_id: row, now=_now,
+            _store=SimpleNamespace(
+                list_runs=list_runs,
+                list_submissions=lambda *_args, **_kwargs: _published_submission_records(),
+                list_runtime_starts=lambda *_args, **_kwargs: [],
+            ),
+        )
+        return public_dashboard.submissions_snapshot(service, row["round_id"])
+
+    # A full-row read supplies the reference public JSON, including frozen
+    # costs and evaluation data. The HTTP mock below really applies SELECT.
+    expected = snapshot(lambda *_args, **_kwargs: runs)
+    stage_cursors = []
+
+    def respond(request):
+        params = request.url.params
+        assert params["round_id"] == "eq." + row["round_id"]
+        assert params["order"] == "run_id.asc" and params["limit"] == "500"
+        selected = runs
+        if "run_id" in params:
+            selected = [run for run in selected if run["run_id"] > params["run_id"][3:]]
+        if "submission_id" in params:
+            ids = params["submission_id"][4:-1].replace('"', "").split(",")
+            selected = [run for run in selected if run["submission_id"] in ids]
+        if "stage" in params:
+            assert params["stage"] == "eq.1" and params["kind"] == "eq.execute"
+            assert params["select"] == "run_id,submission_id,icp_position,attempt,per_icp_score"
+            stage_cursors.append(params.get("run_id"))
+        columns = params["select"].split(",")
+        projected = [
+            {column.split(":")[0]: run.get(column.split(":")[0]) for column in columns}
+            for run in sorted(selected, key=lambda run: run["run_id"])[:500]
+        ]
+        assert canary not in json.dumps(projected)
+        return httpx.Response(200, json=projected)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        store = ArenaStore(PostgrestTransport(
+            "http://127.0.0.1:3000", service_key="sb_secret_test", http_client=client,
+        ))
+        actual = snapshot(store.list_runs)
+
+    assert stage_cursors == [None, "gt.run-0499"]
+    assert actual == expected
+    scores = {item["submission_id"]: item["stage1_score"] for item in actual["submissions"]}
+    assert scores == {"baseline-1": 6.48, "sub-miner": 2.1}
+    assert canary not in json.dumps(actual)
 
 
 def test_per_icp_submissions_snapshot_changes_only_stage1_projection():

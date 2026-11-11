@@ -546,6 +546,17 @@ class Buffer:
     def append_agent_observation(self, value: Mapping[str, Any], secrets: Sequence[str] = ()) -> int | None:
         self.agent_observation_count += 1
         try:
+            # Source URLs are data, not unique storage keys after redaction.
+            # Normalize new host traces only; historical payload hashes and the
+            # investigator's native result must remain unchanged.
+            data = value.get("data")
+            result = data.get("result") if isinstance(data, dict) else None
+            pages = result.get("_server_fetched_pages") if isinstance(result, dict) else None
+            if (value.get("kind") == "judge_local_tool" and isinstance(pages, dict)
+                    and all(isinstance(url, str) for url in pages)):
+                value = {**value, "data": {**data, "result": {**result,
+                    "_server_fetched_pages": [{"url": url, "page": page}
+                                              for url, page in pages.items()]}}}
             cleaned = clean_agent_observation(value, secrets)
             if cleaned["kind"] == "response_received":
                 # A runtime observer and an existing agent hook can acknowledge

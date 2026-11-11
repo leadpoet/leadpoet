@@ -176,7 +176,10 @@ def test_actual_terminal_callback_reaches_worker_without_another_model_turn(monk
             assert result["_completed_submit"] is True and len(calls) == 1
             assert server.wait_for_handlers()
             records = [r for r in state.worker_observations.agent_observations if r["kind"] == "judge_local_tool"]
-            assert len(records) == 1 and records[0]["data"]["result"] == result
+            expected = {**result, investigator.PRIVATE_FETCHED_PAGES_KEY: [
+                {"url": url, "page": page}
+                for url, page in result[investigator.PRIVATE_FETCHED_PAGES_KEY].items()]}
+            assert len(records) == 1 and records[0]["data"]["result"] == expected
             assert records[0]["data"]["disposition"] == "accepted_terminal"
             assert api.provider_frames == []  # Native model stub is separate; capture adds no provider call.
         finally:

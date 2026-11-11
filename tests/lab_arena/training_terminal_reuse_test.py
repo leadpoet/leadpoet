@@ -82,6 +82,7 @@ BEFORE_EXPORT_HASHES = {
 def test_complete_export_matches_prechange_evidence(case):
     values = values_for(case)
     before_rows = copy.deepcopy(values["ledger_rows"])
+    before_runs = copy.deepcopy(values["runs"])
     exported = training_export.assemble_example(**values)
     # The additive provenance fields have their own exact assertions. Retain
     # the original hash for every historical payload, receipt and privacy flag.
@@ -90,10 +91,22 @@ def test_complete_export_matches_prechange_evidence(case):
     assert historical.pop("label_authority") == {
         "origin": "automated_native_scorer", "ground_truth": "not_established",
         "external_adjudication": "not_established_by_export"}
+    # Attempt bindings are additive evidence. Check their exact persisted
+    # values before excluding only these new keys from the historical hash.
+    persisted_runs = {row["run_id"]: row for row in before_runs}
+    for attempt in historical["attempts"]:
+        persisted = persisted_runs[attempt["run_id"]]
+        assert attempt.pop("claim_request_hash") == persisted["claim_request_hash"]
+        assert contracts.SHA256_RE.fullmatch(persisted["claim_request_hash"])
+        if attempt["kind"] == "score":
+            assert attempt.pop("scored_run_id") == persisted["scored_run_id"] == values["run_id"]
+        else:
+            assert "scored_run_id" not in attempt
     historical.pop("example_hash")
     historical["example_hash"] = contracts.document_hash(historical)
     assert contracts.document_hash(historical) == BEFORE_EXPORT_HASHES[case]
     assert values["ledger_rows"] == before_rows
+    assert values["runs"] == before_runs
     call = exported["provider_calls"][0]
     if case == "credential":
         assert "offline-private-value" not in json.dumps(exported)

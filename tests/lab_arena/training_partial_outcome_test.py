@@ -300,3 +300,42 @@ def test_failed_judge_cannot_borrow_unverified_runtime_identity(damage):
         example['related_run_gap_attribution'] = {attempt['run_id']: {
             'research_process_gaps': ['prior_attempt_reviewer_runtime_identity_unverified']}}
     assert built(example, 'judge')[0] == []
+
+
+@pytest.mark.parametrize('role', ['source', 'judge'])
+def test_completed_tool_choice_survives_later_run_failure_without_claiming_tool_execution(role):
+    from tests.lab_arena.judge_chat_annotations_test import bind_response
+    example = partial_example(failed_execution=True)
+    if role == 'source':
+        example['provider_calls'].pop()  # Bind the source call with the same byte-proof helper.
+    call = example['provider_calls'][-1]
+    body = call['request']['outbound']['body']
+    body['tools'] = [{'type': 'function', 'function': {
+        'name': 'lookup', 'parameters': {'type': 'object'}}}]
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    choice = call['response']['choices'][0]
+    choice['finish_reason'] = 'tool_calls'
+    choice['message'].update(content=None, tool_calls=[{
+        'id': 'lookup-1', 'type': 'function', 'function': {'name': 'lookup', 'arguments': '{}'}}])
+    bind_response(example)
+    records, _ = built(example, role)
+    assert len(records) == 1
+    assert records[0]['target']['tool_calls'] == choice['message']['tool_calls']
+    assert records[0]['source_refs'][0]['outcome']['per_icp_score'] is None
+    assert records[0]['quality']['correct_action'] == 'not_established'
+
+
+def test_partial_source_missing_runtime_input_retains_exact_pair_and_explicit_absence():
+    example = partial_example()
+    del example['input_snapshots'][example['run_id']]
+    proof = example['completeness']
+    proof['incomplete_reasons'].append('runtime_input_snapshot_missing')
+    proof['reasons_by_dimension']['exact_inputs'] = ['runtime_input_snapshot_missing']
+    proof['dimensions']['exact_inputs'] = False
+    records, _ = built(example)
+    assert len(records) == 1
+    evidence = records[0]['source_refs'][0]['selected_research_evidence']
+    assert evidence['complete'] is False
+    assert evidence['runtime_input_availability'] == 'unavailable'
+    assert evidence['missing_runtime_input_run_ids'] == [example['run_id']]
+    assert 'output' not in records[0] and 'judgment' not in records[0]

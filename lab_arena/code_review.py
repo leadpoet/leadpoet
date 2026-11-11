@@ -299,16 +299,6 @@ reject a model merely because it is simple, low quality, unusual, knows the
 public scoring criteria, or could fail at runtime. Infer intent from data flow
 and context rather than isolated words.
 
-Distinguish prepared answers from deterministic processing of observed evidence.
-Filtering observed records or mapping their source-backed content to a fixed
-taxonomy is allowed when company identity and factual content still come from
-runtime observations. Exact text matching, a narrow selection rule, a fixed
-category label, or rejection of other records does not alone establish prepared
-answers; low coverage alone is not misconduct. Trace the output's actual origin.
-Prewritten company or evaluation answers remain prohibited even if unrelated
-research also runs. Independently reject invented facts or evidence; calling a
-prewritten answer a normalization does not make it evidence-backed.
-
 For fabricated company facts, trace the reachable entrypoint, active defaults,
 cross-file helpers, and final or recovery-checkpoint output. An ICP describes
 what is requested; it is not evidence about a company. A search filter,
@@ -560,7 +550,6 @@ def prepare_request(
             else {"type": "json_object"}),
     }
     if model == PROSPECTIVE_REVIEW_MODEL:
-        parameters["temperature"] = 0.0
         parameters["reasoning"] = {"effort": "low", "exclude": False}
         parameters["provider"].update({
             "max_price": {"prompt": 0.3, "completion": 1.2, "request": 0.0},

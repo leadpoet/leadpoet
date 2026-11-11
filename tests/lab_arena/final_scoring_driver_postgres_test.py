@@ -24,10 +24,14 @@ from tests.lab_arena.test_lab_arena_service_round import keypair
 
 
 @pytest.fixture
-def database():
+def database(monkeypatch):
     bindir = _server_bindir()
     if bindir is None or not (bindir / 'pg_dump').is_file() or not (bindir / 'psql').is_file():
         pytest.skip('native PostgreSQL snapshot tools are required')
+    # Use the same native installation for the server and its dump/restore
+    # clients. A newer pg_dump can emit settings an older Docker server
+    # cannot restore (for example transaction_timeout in PostgreSQL17).
+    monkeypatch.setenv('LAB_ARENA_PG_LOCAL', '1')
     for psycopg, dsn in current_service_database():
         connection = psycopg.connect(**dsn)
         try:

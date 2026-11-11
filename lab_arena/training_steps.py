@@ -483,7 +483,7 @@ def _worker_artifact(example, call, *, allow_journal_prefix=False):
     if field is None:
         return (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
     kind = ('execute' if run_id == example.get('run_id') else
-            'score' if run_id == example.get('score_run_id') else None)
+            'score' if run_id == example.get('score_run_id') or _failed_judge_attempt(example, call) else None)
     _require(field == 'partial_worker_observation_artifacts' and allow_journal_prefix
              and training_coverage.uses_host_result_evidence(example.get('configuration') or {})
              and kind is not None, 'worker_journal_prefix_unavailable')
@@ -676,14 +676,112 @@ def _outbound_request_exact(call):
                 call.get('operation_id'), outbound.get('body'), outbound.get('body_sha256')))
 
 
+def _individual_run_input_valid(example, identity, kind, *, allow_absent=False):
+    """Validate saved attempt context; absence never supplies a prompt or label."""
+    attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == identity]
+    if len(attempts) != 1 or attempts[0].get('kind') != kind:
+        return False
+    attempt = attempts[0]
+    snapshots = example.get('input_snapshots') or {}
+    if identity not in snapshots:
+        reasons = set((example.get('completeness') or {}).get('incomplete_reasons') or [])
+        return (allow_absent and 'runtime_input_snapshot_missing' in reasons
+                and not reasons & {'runtime_input_snapshot_invalid', 'runtime_input_privacy_nonexact',
+                                   'runtime_input_context_mismatch', 'judge_input_context_mismatch'})
+    snapshot = snapshots[identity]
+    if not isinstance(snapshot, Mapping):
+        return False
+    document = snapshot.get('input')
+    if (set(snapshot) != {'schema_version', 'run_id', 'kind', 'lease_generation',
+                         'claim_request_hash', 'input', 'input_sha256', 'privacy'}
+            or snapshot.get('schema_version') != 'leadpoet.lab_arena.training_input.v1'
+            or snapshot.get('run_id') != identity or snapshot.get('kind') != kind
+            or type(snapshot.get('lease_generation')) is not int or snapshot['lease_generation'] < 1
+            or type(attempt.get('lease_generation')) is not int
+            or snapshot['lease_generation'] != attempt['lease_generation']
+            or not isinstance(snapshot.get('claim_request_hash'), str)
+            or not contracts.SHA256_RE.fullmatch(snapshot['claim_request_hash'])
+            or ('claim_request_hash' in attempt and snapshot['claim_request_hash'] != attempt['claim_request_hash'])
+            or snapshot.get('privacy') != {'redacted': False, 'redactions': []}
+            or snapshot['privacy']['redacted'] is not False
+            or not isinstance(document, dict)
+            or snapshot.get('input_sha256') != contracts.document_hash(document)):
+        return False
+    for field in ('worker_observation_artifacts', 'partial_worker_observation_artifacts'):
+        artifact = (example.get(field) or {}).get(identity) or {}
+        if any(key in artifact and snapshot[key] != artifact[key]
+               for key in ('run_id', 'kind', 'lease_generation', 'claim_request_hash')):
+            return False
+    if document.get('evaluation_date') != example.get('evaluation_date'):
+        return False
+    if kind == 'score':
+        configuration = training_dataset.label_scorer_configuration(example)
+        if (document.get('scored_run_id') != example.get('run_id')
+                or not isinstance(document.get('companies'), list)
+                or ('output' in example and document['companies'] != example['output'].get('companies'))
+                or document.get('scorer_policy') != configuration.get('scorer_policy')
+                or ('scoring_policy_hash' in attempt and attempt['scoring_policy_hash'] !=
+                    contracts.document_hash(configuration.get('scorer_policy')))):
+            return False
+    if kind == 'execute' or 'icp' in document:
+        configuration = example.get('configuration') or {}
+        expected = (training_export.integrity.agent_visible_icp(
+            example['icp'], contacts_required=training_export.contact_policy.enabled(configuration))
+            if training_export.integrity.enabled(configuration) else dict(example['icp']))
+        if not training_export.contact_policy.enabled(configuration):
+            expected.pop('contact_policy', None)
+        actual = dict(document.get('icp') or {})
+        for key in ('output_schema_version', 'company_quality_policy', 'company_requirements',
+                    'intent_details_policy', '_arena_provider_observations'):
+            actual.pop(key, None)
+        if actual != expected:
+            return False
+    return True
+
+
+def _failed_judge_attempt(example, call):
+    """A failed attempt can prove an individual reply, never a final judgment."""
+    try:
+        identity = call.get('run_id')
+        attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == identity]
+        if (len(attempts) != 1 or attempts[0].get('kind') != 'score'
+                or attempts[0].get('status') != 'failed'
+                or attempts[0].get('scored_run_id') != example.get('run_id')
+                or not _individual_run_input_valid(example, identity, 'score')):
+            return False
+        attempt = attempts[0]
+        gaps = ((example.get('related_run_gap_attribution') or {}).get(identity) or {}).get(
+            'research_process_gaps') or []
+        if 'prior_attempt_reviewer_runtime_identity_unverified' in gaps:
+            return False
+        from lab_arena import reviewer_runtime
+        configuration = training_dataset.label_scorer_configuration(example)
+        runtime = dict(attempt.get('runtime_identity') or {})
+        basis = runtime.pop('selection_basis', None)
+        if basis == 'frozen_round':
+            if (set(runtime) != set(reviewer_runtime.AUDIT_FIELDS)
+                    or runtime['runtime_image_digest'] != runtime['grading_image_digest']
+                    or runtime['runtime_image_reference'] != runtime['grading_image_reference']):
+                return False
+            runtime.update(schema_version=reviewer_runtime.SCHEMA_VERSION,
+                           run_id=identity, lease_generation=attempt['lease_generation'])
+        elif basis != 'persisted_lease_binding':
+            return False
+        reviewer_runtime.lease_binding(dict(attempt, reviewer_runtime_doc=runtime), configuration)
+        return True
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def _model_request(example, call, *, worker_proofs=None, role='source'):
     """Shared exact model request checks, independent of delivery or target."""
     if role == 'judge':
         selected = [row for row in example.get('attempts') or []
                     if row.get('run_id') == example.get('score_run_id')]
-        _require(call.get('run_id') == example.get('score_run_id')
-                 and len(selected) == 1 and selected[0].get('kind') == 'score'
-                 and selected[0].get('status') == 'accepted', 'not_selected_judge_call')
+        accepted = (call.get('run_id') == example.get('score_run_id')
+                    and len(selected) == 1 and selected[0].get('kind') == 'score'
+                    and selected[0].get('status') == 'accepted')
+        _require(accepted or _failed_judge_attempt(example, call), 'not_selected_judge_call')
     else:
         _require(role == 'source', 'invalid_target_role')
         _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
@@ -803,6 +901,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
     # Individual exporters may retain a proven prefix pair. The full-ICP
     # eligibility caller keeps the default final-snapshot requirement.
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
+    failed_judge = role == 'judge' and _failed_judge_attempt(example, call)
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -893,8 +992,11 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
         judge_context = {'role': 'judge', 'judge_context': {
             'scored_run_id': example.get('run_id'), 'icp_position': example.get('icp_position'),
             'icp_sha256': contracts.document_hash(example.get('icp') or {}),
-            'scored_output_sha256': contracts.document_hash(example.get('output') or {}),
-            'judgment_sha256': contracts.document_hash(example.get('judgment') or {}),
+            'scored_output_sha256': contracts.document_hash(example['output']) if 'output' in example else None,
+            'judgment_sha256': (contracts.document_hash(example.get('judgment') or {})
+                                if call['run_id'] == example.get('score_run_id') else None),
+            **({'attempt_status': 'failed', 'outcome_availability': 'unavailable'}
+               if failed_judge else {}),
             'scorer_policy_sha256': contracts.document_hash(configuration.get('scorer_policy') or {}),
             'scorer_image_digest': configuration.get('scorer_image_digest'),
             'evidence_scope': 'exact_provider_visible_input',
@@ -902,6 +1004,16 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
             'worker_observation_payload_sha256': (call.get('response_provenance') or {}).get(
                 'worker_receipt_ref', {}).get('payload_sha256'),
             'provider_call_sequence': call.get('action_sequence')}}
+    provenance = _training_provenance(example)
+    if failed_judge:
+        # This target has no final label. The raw export still retains any
+        # later accepted episode outcome, without assigning it to this reply.
+        provenance['label_authority'].update(origin='unavailable', input_output_label_verified=False)
+        provenance.update(score_run_id=None, judgment_sha256=None, company_outcomes=[])
+        attempt = next(row for row in example['attempts'] if row['run_id'] == call['run_id'])
+        runtime = attempt.get('runtime') or {}
+        provenance['dates'].update(judge_started_at=runtime.get('started_at'),
+                                   judge_finished_at=runtime.get('finished_at'))
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
             **({'role': 'judge'} if role == 'judge' else {}),
             'target': target,
@@ -919,8 +1031,11 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'round_id': example.get('round_id'), 'model': body['model'],
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
                                                 and example.get('round_status') == 'published'),
-                             'outcome': {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'), 'score_run_id': example.get('score_run_id')},
-                             'training_provenance': _training_provenance(example),
+                             'outcome': ({'per_icp_score': None, 'score_run_id': None}
+                                         if failed_judge else
+                                         {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'),
+                                          'score_run_id': example.get('score_run_id')}),
+                             'training_provenance': provenance,
                              'source_quality': copy.deepcopy(example.get('completeness') or {})}]}
 
 

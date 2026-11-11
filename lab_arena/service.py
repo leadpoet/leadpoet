@@ -4458,6 +4458,7 @@ class ArenaService:
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
         return {
             "status": transition.get("status"),
+            **({"round_status": "scored"} if transition.get("status") == "ok" else {}),
             "judge_executions": judge_executions,
             "ineligible_submissions": [],
         }

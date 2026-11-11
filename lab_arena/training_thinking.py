@@ -1419,16 +1419,16 @@ def _capture_configuration(example: Mapping[str, Any], role: str = 'source') -> 
             if policy == POLICY else {})
 
 
-def _judge_exception(example, call):
-    if (call.get('run_id') != example.get('score_run_id') or _role(example, call) != 'judge'
+def _judge_exception(example, call, *, individual=False):
+    if ((not individual and call.get('run_id') != example.get('score_run_id')) or _role(example, call) != 'judge'
             or call.get('operation_id') != 'openrouter.chat'):
         return None
     body = (((call.get('request') or {}).get('outbound') or {}).get('body') or {})
     return _capture_configuration(example, 'judge').get('judge_reasoning_exceptions', {}).get(body.get('model'))
 
 
-def _judge_frozen_route_error(example, call):
-    if (call.get('run_id') != example.get('score_run_id') or _role(example, call) != 'judge'
+def _judge_frozen_route_error(example, call, *, individual=False):
+    if ((not individual and call.get('run_id') != example.get('score_run_id')) or _role(example, call) != 'judge'
             or call.get('operation_id') not in reasoning_capture.OPERATIONS):
         return ''
     configuration = _capture_configuration(example, 'judge')
@@ -1987,6 +1987,28 @@ def _selected_input_output_binding(example: Mapping[str, Any]) -> set[str] | Non
     return score_ids
 
 
+def _source_context_verified(proof):
+    dimensions = proof.get("dimensions") or {}
+    by_dimension = proof.get("reasons_by_dimension") or {}
+    source_verified = (dimensions.get("source_identity") is True
+                       and by_dimension.get("source_identity") == [])
+    # The validator checkout marker is best-effort operational metadata, not
+    # proof of the miner archive or captured bytes. Retain its warning while
+    # requiring every other source, scorer, input/output and privacy check.
+    checkout_diagnostic_only = (
+        dimensions.get("source_identity") is False
+        and by_dimension.get("source_identity") == ["runtime_source_unverified"]
+        and proof.get("complete") is False
+        and isinstance(proof.get("incomplete_reasons"), list)
+        and all(isinstance(reason, str) for reason in proof["incomplete_reasons"])
+        and all(isinstance(value, list) and all(isinstance(reason, str) for reason in value)
+                for value in by_dimension.values())
+        and set(proof["incomplete_reasons"]) == set().union(*(set(value) for value in by_dimension.values()))
+        and all(dimensions.get(name) is (not value) for name, value in by_dimension.items()))
+    return (dimensions.get("context") is True and by_dimension.get("context") == []
+            and (source_verified or checkout_diagnostic_only))
+
+
 def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None, role='source') -> frozenset[str] | None:
     """Bind selected source and labels without an all-attempt or billing veto.
 
@@ -2005,25 +2027,7 @@ def _selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=Non
     if _selected_input_output_binding(example) is None:
         return None
     proof = example.get("completeness") or {}
-    dimensions = proof.get("dimensions") or {}
-    by_dimension = proof.get("reasons_by_dimension") or {}
-    source_verified = (dimensions.get("source_identity") is True
-                       and by_dimension.get("source_identity") == [])
-    # The validator checkout marker is best-effort operational metadata, not
-    # proof of the miner archive or captured bytes. Retain its warning while
-    # requiring every other source, scorer, input/output and privacy check.
-    checkout_diagnostic_only = (
-        dimensions.get("source_identity") is False
-        and by_dimension.get("source_identity") == ["runtime_source_unverified"]
-        and proof.get("complete") is False
-        and isinstance(proof.get("incomplete_reasons"), list)
-        and all(isinstance(reason, str) for reason in proof["incomplete_reasons"])
-        and all(isinstance(value, list) and all(isinstance(reason, str) for reason in value)
-                for value in by_dimension.values())
-        and set(proof["incomplete_reasons"]) == set().union(*(set(value) for value in by_dimension.values()))
-        and all(dimensions.get(name) is (not value) for name, value in by_dimension.items()))
-    if (dimensions.get("context") is not True or by_dimension.get("context") != []
-            or not (source_verified or checkout_diagnostic_only)):
+    if not _source_context_verified(proof):
         return None
     return frozenset(proof.get("incomplete_reasons") or [])
 
@@ -2185,11 +2189,57 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
     return None if result is None else result | diagnostic_gaps
 
 
+def _partial_research_evidence(example, *, role='source'):
+    """Individual request/result proof is independent of an absent final outcome."""
+    try:
+        if (example.get('score_run_id') is not None or example.get('judgment') is not None
+                or example.get('companies')):
+            return None
+        proof = example.get('completeness') or {}
+        dimensions = proof.get('dimensions') or {}
+        by_dimension = proof.get('reasons_by_dimension') or {}
+        reasons = proof.get('incomplete_reasons') or []
+        if (proof.get('complete') is not False or not isinstance(reasons, list)
+                or any(not isinstance(reason, str) for reason in reasons)
+                or set(dimensions) != set(by_dimension)
+                or any(not isinstance(value, list) or any(not isinstance(reason, str) for reason in value)
+                       for value in by_dimension.values())
+                or set(reasons) != set().union(*(set(value) for value in by_dimension.values()))
+                or any(dimensions[name] is not (not value) for name, value in by_dimension.items())
+                or not _source_context_verified(proof)
+                or 'final_judge_unavailable' not in by_dimension.get('input_output_label', [])
+                or not set(by_dimension['input_output_label']) <= {
+                    'final_judge_unavailable', 'failed_execution_output_unavailable', 'execution_not_accepted'}):
+            return None
+        configuration = example.get('configuration') or {}
+        training_coverage.missing_reasoning_percent_from_configuration(configuration)
+        training_coverage.percent_from_configuration(configuration)
+        if not reasoning_capture.enabled(_capture_configuration(example, role)):
+            return None
+        run_id = example.get('run_id')
+        attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == run_id]
+        if (len(attempts) != 1 or attempts[0].get('kind') != 'execute'
+                or attempts[0].get('status') not in {'accepted', 'failed'}
+                or not training_steps._individual_run_input_valid(example, run_id, 'execute', allow_absent=True)):
+            return None
+        if 'output' in example:
+            if not verified_output_projection(example):
+                return None
+        elif attempts[0]['status'] != 'failed':
+            return None
+        return frozenset(reasons)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def _individual_research_evidence(example, *, role='source', worker_proofs=None):
     """Builder-only absence exception; never establish full-ICP eligibility."""
     selected = selected_research_evidence(example, role=role, worker_proofs=worker_proofs)
     if selected is not None:
         return selected
+    partial = _partial_research_evidence(example, role=role)
+    if partial is not None:
+        return partial
     try:
         run_id, score_id = example.get("run_id"), example.get("score_run_id")
         snapshots = example.get("input_snapshots", {})
@@ -2323,11 +2373,11 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
                      if row.get("call_identity") == ref["call_identity"] and row.get("run_id") == ref["run_id"]), None)
         if call is None:
             return
-        if role == 'judge' and _judge_exception(example, call) is not None:
+        if role == 'judge' and _judge_exception(example, call, individual=True) is not None:
             reasons["proprietary_thinking_unavailable"] += 1
             return
         if role == 'judge':
-            error = _judge_frozen_route_error(example, call)
+            error = _judge_frozen_route_error(example, call, individual=True)
             if error:
                 reasons[error] += 1
                 return
@@ -2360,7 +2410,9 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
             diagnostic_gaps_by_source[source] = provider_visible_view(example, worker_proofs=worker_proofs)[1]
         diagnostic_gaps = diagnostic_gaps_by_source[source]
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
-                                if identity not in (example.get("input_snapshots") or {}))
+                                if isinstance(identity, str) and identity not in (example.get("input_snapshots") or {}))
+        partial_outcome = (example.get("score_run_id") is None or
+                           role == 'judge' and training_steps._failed_judge_attempt(example, call))
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   **({'role': 'judge'} if role == 'judge' else {}),
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
@@ -2371,14 +2423,16 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
                                    "response_sha256": ref["delivered_response_sha256"],
                                    "route": copy.deepcopy(call["reasoning_capture"]),
                                    ("selected_judge_evidence" if role == 'judge' else "selected_research_evidence"): {
-                                       "complete": not missing_inputs,
+                                       "complete": not missing_inputs and not partial_outcome,
+                                       **({"scope": "individual_model_request_result",
+                                           "outcome_availability": "unavailable"} if partial_outcome else {}),
                                        **({"judge_full_thinking_complete": coverage_by_source.get(
-                                           source, {}).get("trajectories", {}).get("complete_full_thinking") == 1}
+                                           source, {}).get("trajectories", {}).get("complete_full_thinking") == 1 and not partial_outcome}
                                           if role == 'judge' else {}),
                                        **({"scope": "individual_model_request_result",
                                            "runtime_input_availability": "unavailable",
                                            "missing_runtime_input_run_ids": missing_inputs} if missing_inputs else
-                                          {"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
+                                          {"scope": "provider_visible_request_results"} if not partial_outcome and training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
                                        "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps
                                            - ({"runtime_input_snapshot_missing"} if missing_inputs else set())),
                                        **({"diagnostic_capture_gaps": sorted(diagnostic_gaps)}

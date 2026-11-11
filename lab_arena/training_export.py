@@ -1892,6 +1892,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         reasons["source_identity"].add("scorer_image_identity_missing")
     try:
         expected_output_ref = "arena/%s/outputs/%s.json" % (run["round_id"], run_id)
+        if run.get("status") == "failed" and run.get("output_ref") is None:
+            raise ExportError("failed_execution_output_unavailable")
         if run.get("output_ref") != expected_output_ref:
             raise ExportError("execution_output_reference_mismatch")
         stored_output = _json_object(objects, expected_output_ref, MAX_OUTPUT_BYTES)
@@ -1966,7 +1968,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                                   int(row.get("attempt") or 0), row["run_id"]))
     run_ids = {row["run_id"] for row in related}
     example["attempts"] = [{"run_id": row["run_id"], "kind": row["kind"], "attempt": row.get("attempt"),
-                             "lease_generation": row.get("lease_generation"), "status": row.get("status"),
+                             "lease_generation": row.get("lease_generation"),
+                             "claim_request_hash": row.get("claim_request_hash"),
+                             **({"scored_run_id": row.get("scored_run_id")} if row["kind"] == "score" else {}),
+                             "status": row.get("status"),
                              "terminal_cause": row.get("terminal_cause"), "runtime": _runtime(row)}
                             for row in related]
     for row in ledger_rows:

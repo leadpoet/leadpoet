@@ -1020,6 +1020,8 @@ def run_sandbox(
     threads: List[threading.Thread] = []
     pipe_stop = threading.Event()
     result: Optional[SandboxResult] = None
+    failure: Optional[Exception] = None
+    failure_capture: Optional[Dict[str, Any]] = None
     try:
         runsc_root.mkdir(mode=0o700)
         config_path = bundle / "config.json"
@@ -1241,6 +1243,9 @@ def run_sandbox(
             automatic_capture_handoff=handoff_frames,
             automatic_capture_handoff_invalid=handoff_invalid,
         )
+    except Exception as exc:
+        failure = exc
+        raise
     finally:
         if process is not None and process.poll() is None:
             try:
@@ -1261,6 +1266,26 @@ def run_sandbox(
             cleanup_runsc_namespace(runsc_root, process_runner, timeout=config.cleanup_timeout_seconds)
         except (ArenaRuntimeError, OSError) as exc:
             cleanup_errors.append("namespace: %s" % type(exc).__name__)
+        if failure is not None and process is not None:
+            # A failure before SandboxResult still owns passive, bounded
+            # evidence. Copy after the stop/delete attempts and before tmpfs
+            # removal, only from a prepared output directory after launch.
+            # Capture faults cannot replace the original failure.
+            try:
+                handoff_frames, handoff_invalid = read_automatic_capture_handoff(spec)
+            except Exception:
+                handoff_frames, handoff_invalid = (), True
+            try:
+                capture_summary = read_automatic_capture_summary(spec)
+            except Exception:
+                capture_summary = {"source": "runtime_http_v1", "complete": False,
+                                   "failure": "summary_unavailable"}
+            failure_capture = {
+                "automatic_capture_handoff": handoff_frames,
+                "automatic_capture_handoff_invalid": handoff_invalid,
+                "automatic_capture_summary": capture_summary,
+            }
+            failure.__dict__.update(failure_capture)
         if output_mounted:
             try:
                 if _run_command(process_runner, output_unmount_command(spec), timeout=config.cleanup_timeout_seconds) != 0:
@@ -1275,10 +1300,15 @@ def run_sandbox(
             except OSError as exc:
                 cleanup_errors.append("rmtree %s: %s" % (directory.name, type(exc).__name__))
         if cleanup_errors:
-            raise SandboxCleanupError(
+            cleanup_failure = SandboxCleanupError(
                 "sandbox cleanup incomplete: " + "; ".join(cleanup_errors),
                 result=result,
             )
+            if failure_capture is not None:
+                # Cleanup remains dominant. Passive evidence grants neither
+                # a SandboxResult nor scorer-checkpoint acceptance authority.
+                cleanup_failure.__dict__.update(failure_capture)
+            raise cleanup_failure
     assert result is not None
     return result
 

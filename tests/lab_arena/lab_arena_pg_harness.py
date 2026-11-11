@@ -11,6 +11,7 @@ Supabase shim, so the migration is exercised identically. Both paths yield
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -200,6 +201,28 @@ def current_service_database():
             cursor.execute((SCRIPTS / "668-lab-arena-content-addressed-score-checkpoint.sql").read_text(encoding="utf-8"))
             # Only the disposable authority fixture's unrelated seed is removed.
             cursor.execute("TRUNCATE public.lab_arena_rounds CASCADE")
+        yield psycopg2, dsn
+    finally:
+        database.close()
+
+
+def current_total_emissions_service_database():
+    """Current service fixture with the deployed total-emissions slot RPC."""
+    database = current_service_database()
+    try:
+        psycopg2, dsn = next(database)
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            # 592 also carries a production-only October 29 data correction.
+            # Its exact function patch is the guarded preimage for 681.
+            source = (SCRIPTS / "592-arena-2026-10-29-authorized-champion.sql").read_text(
+                encoding="utf-8"
+            )
+            patch = re.search(r"DO \$oct29_snapshot592\$.*?\$oct29_snapshot592\$;", source, re.S)
+            assert patch is not None
+            cursor.execute(patch.group())
+            cursor.execute((SCRIPTS / "681-lab-arena-total-emissions-reward-slots.sql").read_text(
+                encoding="utf-8"
+            ))
         yield psycopg2, dsn
     finally:
         database.close()

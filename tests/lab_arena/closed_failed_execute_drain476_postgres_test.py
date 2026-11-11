@@ -1,4 +1,5 @@
 """A closed failed provider call can drain without declaring its bill free."""
+from tests.lab_arena.historical_slot_policy_fixture import historical_slot_policy  # noqa: F401
 import base64
 import hashlib
 import json

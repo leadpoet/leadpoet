@@ -170,6 +170,30 @@ def test_protected_manifest_detects_policy_constant_change(
         verify_manifest(tmp_path, manifest)
 
 
+@pytest.mark.parametrize("original,replacement", [
+    ("LEGACY_CHAMPION_AWARD_SHARES = (20, 15, 15)",
+     "LEGACY_CHAMPION_AWARD_SHARES = (35, 25, 15)"),
+    ('and tenure["source_normalized_sha256"] == LEGACY_CHAMPION_AWARD_SOURCE',
+     'and True'),
+])
+def test_legacy_reward_allocation_and_source_guard_are_protected(tmp_path, monkeypatch, original, replacement):
+    relative = "lab_arena/rewards.py"
+    protected = PROTECTED_SYMBOLS[relative]
+    assert {"LEGACY_CHAMPION_AWARD_HOTKEY", "LEGACY_CHAMPION_AWARD_SOURCE",
+            "LEGACY_CHAMPION_AWARD_START_EPOCH", "LEGACY_CHAMPION_AWARD_SHARES",
+            "legacy_slot_allocation_projection_document"} <= set(protected)
+    source = (ROOT / relative).read_text()
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source)
+    monkeypatch.setattr(protected_workflows_module, "PROTECTED_SYMBOLS", {relative: protected})
+    manifest = build_manifest(tmp_path, baseline_commit="1" * 40, protected_source_commit="2" * 40)
+    assert source.count(original) == 1
+    target.write_text(source.replace(original, replacement, 1))
+    with pytest.raises(ProtectedWorkflowError, match="lab_arena/rewards.py:"):
+        verify_manifest(tmp_path, manifest)
+
+
 def test_extracted_investigation_settlement_remains_ast_protected(tmp_path, monkeypatch):
     relative = "qualification/scoring/lead_scorer.py"
     source = (ROOT / relative).read_text()

@@ -48,7 +48,8 @@ from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: 
 
 MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 
-# Slot policies follow evaluation day and the explicit reward-epoch cutover.
+# October's policy follows evaluation day or its reward-epoch cutover.
+# November's new allocations follow evaluation day only.
 # Legacy tier percentages divide the miner pot; explicit total-emissions
 # policies carry their shares directly. Every activated basis and accepted
 # state signs its own copy; existing signed documents remain unchanged.
@@ -89,6 +90,7 @@ REWARD_SLOT_POLICY_OCT23 = {
 # This transition carries the current signed holders by tier ordinal. It does
 # not make historical achievements newly eligible under the lower thresholds.
 REWARD_SLOT_POLICY_NOV11_START = date(2026, 11, 11)
+# Preserve recognition of already issued states; this is not an activation trigger.
 REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH = 26301
 REWARD_SLOT_POLICY_NOV11 = {
     **REWARD_SLOT_POLICY_OCT23,
@@ -101,17 +103,20 @@ REWARD_SLOT_POLICY_NOV11 = {
     ],
 }
 
+# The November 3 champion's verified model tenure predates the new allocation.
+# A new submission of the same normalized model retains this award. A new
+# model, owner, or uninterrupted-tenure start does not.
+LEGACY_CHAMPION_AWARD_HOTKEY = "5HDmNaBQNVQoyApQbFQdSx6pD4ajcJdaYDJePufpWvoxCsrq"
+LEGACY_CHAMPION_AWARD_SOURCE = "sha256:1047b383f4b32dbc38d19e5f052384174d4a9a89a7c48b4620cecb18714ed06d"
+LEGACY_CHAMPION_AWARD_START_EPOCH = 26183
+LEGACY_CHAMPION_AWARD_SHARES = (20, 15, 15)
+
 
 def reward_slot_policy_document(
     evaluation_date: Optional[date] = None, *, effective_reward_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Copy the round's policy; undated legacy callers retain their old policy."""
-    if (
-        (evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_NOV11_START)
-        or (effective_reward_epoch is not None
-            and _require_epoch(effective_reward_epoch, "effective_reward_epoch")
-            >= REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH)
-    ):
+    if evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_NOV11_START:
         return _kernel.validate_slot_policy(REWARD_SLOT_POLICY_NOV11)
     if (
         (evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_OCT23_START)
@@ -202,8 +207,47 @@ def reward_basis_policy_projection_document(
     return finalize_reward_basis(body)
 
 
+def legacy_slot_allocation_projection_document(
+    source: Mapping[str, Any], weekly_slot_decay: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Keep one verified legacy model's slot shares in an otherwise new basis.
+
+    The issuer verifies the signed source and the model bytes before calling
+    this builder. The signed per-model clock is the proof of uninterrupted
+    tenure, including when the model is submitted again under a new ID.
+    """
+    source = validate_reward_basis(source)
+    if source.get("slot_policy") != REWARD_SLOT_POLICY_NOV11:
+        return source
+    legacy_owner_present = any(
+        slot is not None and slot["miner_hotkey"] == LEGACY_CHAMPION_AWARD_HOTKEY
+        for slot in source["reward_slots"]
+    )
+    if weekly_slot_decay is None:
+        if legacy_owner_present:
+            raise LabArenaRewardError("legacy champion award requires a verified weekly clock")
+        return source
+    clock = _kernel.validate_weekly_slot_decay(weekly_slot_decay, source)
+    policy = _kernel.validate_slot_policy(REWARD_SLOT_POLICY_NOV11)
+    changed = False
+    for index, (slot, tenure) in enumerate(zip(source["reward_slots"], clock["slots"])):
+        if (slot is not None and slot["miner_hotkey"] == LEGACY_CHAMPION_AWARD_HOTKEY
+                and tenure["source_normalized_sha256"] == LEGACY_CHAMPION_AWARD_SOURCE
+                and tenure["start_epoch"] == LEGACY_CHAMPION_AWARD_START_EPOCH):
+            policy["tiers"][index]["allocation_percent"] = LEGACY_CHAMPION_AWARD_SHARES[index]
+            changed = True
+    if not changed:
+        return source
+    policy["pool_percent"] = sum(tier["allocation_percent"] for tier in policy["tiers"])
+    body = {key: value for key, value in source.items()
+            if key not in ("reward_basis_hash", "signature")}
+    body["slot_policy"] = policy
+    return finalize_reward_basis(body)
+
+
 def reward_basis_matches_policy_projection(
-    basis: Mapping[str, Any], source: Mapping[str, Any], epoch: int,
+    basis: Mapping[str, Any], source: Mapping[str, Any], epoch: int, *,
+    weekly_slot_decay: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     """Match exact source or its deterministic projection, without re-signing."""
     if basis.get("reward_basis_hash") == source.get("reward_basis_hash"):
@@ -224,6 +268,12 @@ def reward_basis_matches_policy_projection(
             continue
         if basis.get("reward_basis_hash") == expected["reward_basis_hash"]:
             return True
+    if weekly_slot_decay is not None:
+        try:
+            expected = legacy_slot_allocation_projection_document(source, weekly_slot_decay)
+        except (TypeError, ValueError):
+            return False
+        return basis.get("reward_basis_hash") == expected["reward_basis_hash"]
     return False
 
 

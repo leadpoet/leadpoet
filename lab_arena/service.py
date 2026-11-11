@@ -8654,7 +8654,10 @@ class ArenaService:
                         # storage, as for the governing basis above. Signature
                         # verification remains mandatory in public_weight_state.
                         state = validate_accepted_weight_state(existing.get("state_doc"))
-                        if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], governing, epoch):
+                        if not rewards.reward_basis_matches_policy_projection(
+                            state["reward_basis"], governing, epoch,
+                            weekly_slot_decay=state.get("weekly_slot_decay"),
+                        ):
                             raise ServiceError("accepted_weight_state_reward_conflict", 409)
                         governing = state["reward_basis"]
                         weekly_clock = state.get("weekly_slot_decay")
@@ -8716,6 +8719,11 @@ class ArenaService:
         if (int(epoch) < rewards.REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH
                 or basis.get("schema_version") != contracts.REWARD_BASIS_V2_SCHEMA_VERSION):
             return basis
+        # November's policy follows the winning round, not a guessed chain
+        # epoch. Keep its immutable source; legacy allocations are projected
+        # below only after the per-model tenure proof has been verified.
+        if basis["slot_policy"].get("allocation_basis") == "total_emissions":
+            return basis
         policy = rewards.reward_slot_policy_document(effective_reward_epoch=int(epoch))
         if basis["slot_policy"] == policy:
             return basis
@@ -8753,21 +8761,22 @@ class ArenaService:
             raise ServiceError("accepted_weight_state_invalid", 500) from exc
         if (state["network"], state["netuid"], state["epoch"]) != (network, netuid, epoch):
             raise ServiceError("accepted_weight_state_scope_conflict", 409)
-        if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], basis, epoch):
+        if not rewards.reward_basis_matches_policy_projection(
+            state["reward_basis"], basis, epoch,
+            weekly_slot_decay=state.get("weekly_slot_decay"),
+        ):
             raise ServiceError("accepted_weight_state_reward_conflict", 409)
         if expected_state is not None:
-            # During the registered cutover an old gateway can publish the
-            # preceding policy first. Its basis was matched to the raw source
-            # above. Preserve that first writer, but require every other body
-            # field, including clocks, burn and validity, to match exactly.
-            preceding_policy = (
-                epoch >= rewards.REWARD_SLOT_POLICY_NOV11_EFFECTIVE_EPOCH
-                and expected_state["reward_basis"].get("slot_policy") == rewards.REWARD_SLOT_POLICY_NOV11
-                and state["reward_basis"].get("slot_policy") == rewards.REWARD_SLOT_POLICY_OCT23
+            # A rolling gateway can publish a registered preceding policy
+            # first. Both bases must match this same immutable source. Every
+            # other field, including clocks, burn and validity, remains exact.
+            policy_race = rewards.reward_basis_matches_policy_projection(
+                expected_state["reward_basis"], basis, epoch,
+                weekly_slot_decay=expected_state.get("weekly_slot_decay"),
             )
             def comparable(value):
                 body = accepted_weight_state_body(value)
-                if preceding_policy:
+                if policy_race:
                     body.pop("reward_basis")
                 else:
                     # Equivalent ECDSA signatures may have different bytes.
@@ -8932,6 +8941,12 @@ class ArenaService:
             weekly_clock = self._weekly_reward_clock(
                 basis, epoch_scope, network=network, netuid=netuid, previous_state=previous,
             )
+        try:
+            projected = rewards.legacy_slot_allocation_projection_document(basis, weekly_clock)
+            if projected["reward_basis_hash"] != basis["reward_basis_hash"]:
+                basis = self._sign(projected, "reward_basis_hash")
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("reward_policy_projection_invalid", 503) from exc
         try:
             state = weight_state.build_accepted_weight_state(
                 self._reward_signer(), network=network,

@@ -6,13 +6,13 @@
 -- No payload columns, partial predicates, row changes, functions or grants.
 -- Failed/invalid concurrent builds require explicit approved repair; replay
 -- never silently accepts an unusable or differently defined existing object.
-DO $guard687$
+DO $guard688$
 DECLARE
   v_index OID := pg_catalog.to_regclass('public.lab_arena_runs_round_run_idx');
 BEGIN
   IF (SELECT pg_catalog.pg_get_userbyid(relowner) FROM pg_catalog.pg_class
       WHERE oid='public.lab_arena_runs'::REGCLASS) IS DISTINCT FROM 'lab_arena_owner' THEN
-    RAISE EXCEPTION '687 runs owner differs' USING ERRCODE='55000';
+    RAISE EXCEPTION '688 runs owner differs' USING ERRCODE='55000';
   END IF;
   IF v_index IS NOT NULL AND NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_index i
@@ -25,21 +25,21 @@ BEGIN
       AND pg_catalog.pg_get_indexdef(c.oid)=
         'CREATE INDEX lab_arena_runs_round_run_idx ON public.lab_arena_runs USING btree (round_id, run_id)'
   ) THEN
-    RAISE EXCEPTION '687 existing index differs or is unusable' USING ERRCODE='55000';
+    RAISE EXCEPTION '688 existing index differs or is unusable' USING ERRCODE='55000';
   END IF;
 END;
-$guard687$;
+$guard688$;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS lab_arena_runs_round_run_idx
 ON public.lab_arena_runs (round_id, run_id);
 
-DO $verify687$
+DO $verify688$
 DECLARE
   v_index OID := pg_catalog.to_regclass('public.lab_arena_runs_round_run_idx');
 BEGIN
   IF (SELECT pg_catalog.pg_get_userbyid(relowner) FROM pg_catalog.pg_class
       WHERE oid='public.lab_arena_runs'::REGCLASS) IS DISTINCT FROM 'lab_arena_owner' THEN
-    RAISE EXCEPTION '687 runs owner differs' USING ERRCODE='55000';
+    RAISE EXCEPTION '688 runs owner differs' USING ERRCODE='55000';
   END IF;
   IF v_index IS NULL OR NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_index i
@@ -52,7 +52,7 @@ BEGIN
       AND pg_catalog.pg_get_indexdef(c.oid)=
         'CREATE INDEX lab_arena_runs_round_run_idx ON public.lab_arena_runs USING btree (round_id, run_id)'
   ) THEN
-    RAISE EXCEPTION '687 existing index differs or is unusable' USING ERRCODE='55000';
+    RAISE EXCEPTION '688 existing index differs or is unusable' USING ERRCODE='55000';
   END IF;
 END;
-$verify687$;
+$verify688$;

@@ -96,6 +96,9 @@ class RuntimeHostError(ArenaRuntimeError):
         launch_exit_code=None, launch_timed_out=False, launch_stderr=b"",
         launch_stderr_truncated=False, diagnostic_secrets: Sequence[str] = (),
         checkpoint_bytes: bytes | None = None,
+        automatic_capture_handoff: tuple[bytes, ...] = (),
+        automatic_capture_handoff_invalid: bool = False,
+        automatic_capture_summary: dict | None = None,
     ):
         # Preserve existing callers' exception text, but never log that text.
         super().__init__(
@@ -114,6 +117,11 @@ class RuntimeHostError(ArenaRuntimeError):
         self.checkpoint_bytes = (
             checkpoint_bytes if isinstance(checkpoint_bytes, bytes) else None
         )
+        # Passive run-local evidence copied before runtime cleanup. These
+        # fields never enter diagnostics or grant execution/output authority.
+        self.automatic_capture_handoff = automatic_capture_handoff
+        self.automatic_capture_handoff_invalid = automatic_capture_handoff_invalid
+        self.automatic_capture_summary = automatic_capture_summary
         self.launch_stderr, self.launch_stderr_truncated = _safe_launch_stderr(
             launch_stderr, truncated=bool(launch_stderr_truncated),
             secrets=diagnostic_secrets,

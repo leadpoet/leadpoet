@@ -1168,6 +1168,7 @@ def run_sandbox(
         def launch_failure(
             reason: str, *, checkpoint_bytes: Optional[bytes] = None,
         ) -> RuntimeHostError:
+            handoff_frames, handoff_invalid = read_automatic_capture_handoff(spec)
             return RuntimeHostError(
                 reason=reason, runsc_path=config.runsc_path,
                 launch_exit_code=process.returncode,
@@ -1176,6 +1177,9 @@ def run_sandbox(
                 launch_stderr_truncated=stderr_capture.truncated,
                 diagnostic_secrets=tuple(spec.extra_environment.values()),
                 checkpoint_bytes=checkpoint_bytes,
+                automatic_capture_handoff=handoff_frames,
+                automatic_capture_handoff_invalid=handoff_invalid,
+                automatic_capture_summary=read_automatic_capture_summary(spec),
             )
 
         if startup_timed_out:

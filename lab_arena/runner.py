@@ -5040,16 +5040,16 @@ class AssignmentExecutor:
                     with state.lock:
                         state.worker_observations.failures.add("capture_incomplete")
             capture_source = result
-            if capture_source is None and isinstance(primary_exception, RuntimeHostError):
+            if capture_source is None:
                 capture_source = primary_exception
             if not scoring_run and capture_source is not None:
                 # Runtime copied these bounded bytes before cleanup. Import
                 # after admitted socket handlers settle, including a cleanup
                 # error carrying a result, before final journal/snapshot freeze.
-                if capture_source.automatic_capture_handoff_invalid:
+                if getattr(capture_source, "automatic_capture_handoff_invalid", False):
                     with state.lock:
                         state.worker_observations.failures.add("capture_incomplete")
-                for raw in capture_source.automatic_capture_handoff:
+                for raw in getattr(capture_source, "automatic_capture_handoff", ()):
                     if not server._allow_training_frame(len(raw)):
                         break
                     reply = server._handle_training_control(raw, replayed=True)
@@ -5060,7 +5060,7 @@ class AssignmentExecutor:
                     if not recorded:
                         with state.lock:
                             state.worker_observations.failures.add("capture_incomplete")
-                capture_summary = capture_source.automatic_capture_summary
+                capture_summary = getattr(capture_source, "automatic_capture_summary", None)
                 if capture_summary is not None:
                     # The exit report remains evidence, never run authority.
                     with state.lock:

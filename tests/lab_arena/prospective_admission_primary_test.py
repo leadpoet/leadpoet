@@ -173,7 +173,7 @@ def test_deepseek_research_format_suffix_repeats_only_existing_native_contract()
     native_prefix = code_review._SYSTEM_PROMPT + code_review._RESEARCH_PROMPT + code_review._RESEARCH_RESPONSE_GUIDANCE
     suffix = code_review._PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
     assert prepared.parameters['messages'][0]['content'] == native_prefix + suffix
-    assert contracts.document_hash(prepared.parameters) == 'sha256:b011ba9a73b760cb8efc9bd825258a0800c08137c889a4d333cd3d7fbee30d34'
+    assert contracts.document_hash(prepared.parameters) == 'sha256:f3c2988b8d556c1321d933d7749ff3564f838eb5ffee08670d27b938790131bd'
     assert '12 non-whitespace characters' in suffix
     assert 'exact contiguous substring' in suffix
     assert 'adjacent source lines' in suffix
@@ -245,14 +245,14 @@ def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_pat
 # The evidence-reasoning prompt applies when a new review is prepared;
 # completed historical rows return before preparation or provider dispatch.
 @pytest.mark.parametrize('model,research,cap,digest', [
-    ('anthropic/claude-sonnet-5.5', False, 32768, '77d5fa07e1574088935a3414fe096103ce5c02813326e47aa4adf73b0362c6e7'),
-    ('anthropic/claude-sonnet-5.5', False, 65536, '17225be7ed2a0e9755a0fd9a323099bc292920c8b0722007089fa415d3a79ae8'),
-    ('anthropic/claude-sonnet-5.5', True, 32768, '1637c92b10484d17525576971bbe521a602a8ebc4958729726ef75e12c0aaab4'),
-    ('anthropic/claude-sonnet-5.5', True, 65536, '4d23157f2402ccee9a3a5bdea5c9bf0f5c4f81ab303eeac0303a23775728402a'),
-    ('openai/gpt-6.1-sol', False, 32768, 'edfa909cd8d9d8463090fd61c9c1b3a11ec4a2d7eeeda399366d2e644126bfd6'),
-    ('openai/gpt-6.1-sol', False, 65536, '63aa63e65275a9f18ec07b9d9b462153c773f066bc2ce47d4078bc62302546fc'),
-    ('openai/gpt-6.1-sol', True, 32768, 'ca464b6adb0b841baef635b601b2a9ec9da9f0ac3a2cc800437769b2330fef1e'),
-    ('openai/gpt-6.1-sol', True, 65536, 'c7138ec393b589ca84635171986e8ad5d638636d97d70267bdf5ee47a02f7c7d'),
+    ('anthropic/claude-sonnet-5.5', False, 32768, 'de28db48f89666c5b033bb4c1669034c3fb310392dcd08525fea60da462fa557'),
+    ('anthropic/claude-sonnet-5.5', False, 65536, '81c124769fb3b771f8c7a57b0dfc4a2093906eb8bef8d99b964b8467839022f5'),
+    ('anthropic/claude-sonnet-5.5', True, 32768, 'd4374c56d7e467c3932b50c4d89518ca02a86a1b5ec52b9737b35de85cda2fc7'),
+    ('anthropic/claude-sonnet-5.5', True, 65536, '7f6b0369f896ca856b3b219013237160965ce4af8fa3ca82928c8f7ac17b6d82'),
+    ('openai/gpt-6.1-sol', False, 32768, '79e915f7c1103bf05e241db0aaa466a987fa76b7cb170ab64efec5f6d62b4156'),
+    ('openai/gpt-6.1-sol', False, 65536, '89919366ab480126c38118fe018f39c7281094997b0df9a1400ffe0bdbd4ca51'),
+    ('openai/gpt-6.1-sol', True, 32768, 'b4bbb2e4b198e9123066c99a41db72c972d0c9ef2c5b9818f0132a36c1187c36'),
+    ('openai/gpt-6.1-sol', True, 65536, 'c2dcb997f3dc12f250d907204532e1388590cd90e65b31b119cfa8609ead81d0'),
 ])
 def test_configured_route_request_bytes_are_bound(model, research, cap, digest):
     prepared = code_review.prepare_request(_archive(_source()), model=model,

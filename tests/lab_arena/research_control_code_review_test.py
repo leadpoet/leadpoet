@@ -170,13 +170,24 @@ def test_strict_schema_rejects_observed_empty_review_sections(model, empty_field
         jsonschema.validate(document, schema)
 
 
-def test_response_guidance_preserves_policy_and_does_not_accept_paraphrased_evidence():
+@pytest.mark.parametrize("excerpt", [
+    "choice = model.decide(icp, previous_observations)",
+    "choice = model.decide(icp, observations, tools)",
+    "choice = model.decide(...)",
+    'response = {"content": result, "isError": False}',
+    "observations = []\n        choice = model.decide(icp, observations)",
+])
+def test_response_guidance_preserves_policy_and_does_not_accept_paraphrased_evidence(excerpt):
     prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
     system = prepared.parameters["messages"][0]["content"]
     assert code_review._RESEARCH_PROMPT in system
-    assert "without editing, combining, or paraphrasing" in system
+    assert "copy a short, exact, contiguous source span" in system
+    assert "appears verbatim, including arguments and punctuation" in system
+    assert "Never rewrite" in system and "synthesize result objects" in system
+    assert "stitch separate branches or spans" in system
+    assert "Use separate\nevidence items for separate source spans" in system
     assessment = _assessment(prepared)
-    assessment["evidence"][0]["excerpt"] = "choice = model.decide(icp, previous_observations)"
+    assessment["evidence"][0]["excerpt"] = excerpt
     with pytest.raises(code_review.CodeReviewError) as failure:
         code_review.parse_response(_response(prepared, assessment), prepared)
     assert failure.value.response_reason == "research_evidence_mismatch"

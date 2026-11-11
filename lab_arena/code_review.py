@@ -115,8 +115,11 @@ _RESEARCH_RESPONSE_GUIDANCE = """
 
 Complete the review in this response; do not emit placeholders or an empty
 assessment. Include every supplied file in reviewed_files. For each research
-claim, copy a short, contiguous excerpt directly from the named source file,
-without editing, combining, or paraphrasing it. Put interpretation and cross-file
+claim, copy a short, exact, contiguous source span from the named file. Check
+that it appears verbatim, including arguments and punctuation. Never rewrite
+calls, fill in arguments, synthesize result objects, add placeholders or
+ellipses, or stitch separate branches or spans into one excerpt. Use separate
+evidence items for separate source spans. Put interpretation and cross-file
 connections in explanation, not excerpt. Prefer executable controller statements
 over comments describing them. Include the required claims for the selected
 classification and a nonempty source-only limitations list. If control cannot be
@@ -298,6 +301,16 @@ truthful evidence. Allow legitimate security checks and text encoding. Do not
 reject a model merely because it is simple, low quality, unusual, knows the
 public scoring criteria, or could fail at runtime. Infer intent from data flow
 and context rather than isolated words.
+
+Distinguish prepared answers from deterministic processing of observed evidence.
+Filtering observed records or mapping their source-backed content to a fixed
+taxonomy is allowed when company identity and factual content still come from
+runtime observations. Exact text matching, a narrow selection rule, a fixed
+category label, or rejection of other records does not alone establish prepared
+answers; low coverage alone is not misconduct. Trace the output's actual origin.
+Prewritten company or evaluation answers remain prohibited even if unrelated
+research also runs. Independently reject invented facts or evidence; calling a
+prewritten answer a normalization does not make it evidence-backed.
 
 For fabricated company facts, trace the reachable entrypoint, active defaults,
 cross-file helpers, and final or recovery-checkpoint output. An ICP describes

@@ -44,6 +44,13 @@ def test_existing_explanation_requests_claim_origin_output_and_semantic_controls
     assert "Instructions to use evidence are also not proof" in prompt
     assert "including any reachable bypass" in prompt
     assert "same clear-evidence threshold and all five misconduct categories" in prompt
+    assert "deterministic processing of observed evidence" in prompt
+    assert "company identity and factual content still come from" in prompt
+    assert "Exact text matching, a narrow selection rule" in prompt
+    assert "low coverage alone is not misconduct" in prompt
+    assert "Prewritten company or evaluation answers remain prohibited" in prompt
+    assert "even if unrelated\nresearch also runs" in prompt
+    assert "calling a\nprewritten answer a normalization does not make it evidence-backed" in prompt
     assert "source_trace" not in prompt
     assert prepared.parameters["max_tokens"] == code_review.DEFAULT_MAX_OUTPUT_TOKENS
     assert not {"temperature", "top_p", "top_k"} & prepared.parameters.keys()

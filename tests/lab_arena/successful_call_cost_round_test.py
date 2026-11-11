@@ -12,7 +12,7 @@ import pytest
 from lab_arena import broker as br, contracts, runtime, scoring, shim, submission_runtime
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.lab_arena_pg_harness import current_total_emissions_service_database
 
 
 class ChargedTransport(fixtures.FakeProviderTransport):
@@ -64,7 +64,7 @@ class CostHarness(fixtures.Harness):
 
 @pytest.fixture
 def database():
-    yield from current_service_database()
+    yield from current_total_emissions_service_database()
 
 
 def test_successful_call_cost_survives_publication_restart_and_promotion(database, tmp_path):

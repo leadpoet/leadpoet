@@ -250,8 +250,8 @@ def test_owner_credit_retry_requires_bound_checkpoint_and_original_credit_gates(
 def round_database():
     # The app lifecycle uses the full runtime schema. Raw migration468 proofs
     # above continue to use their exact historical database fixture.
-    from tests.lab_arena.lab_arena_pg_harness import current_service_database
-    yield from current_service_database()
+    from tests.lab_arena.lab_arena_pg_harness import current_total_emissions_service_database
+    yield from current_total_emissions_service_database()
 
 
 @pytest.mark.parametrize('failure', ['judge_error', 'judge_timeout'])

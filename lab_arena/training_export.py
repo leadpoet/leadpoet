@@ -550,6 +550,79 @@ def _runtime(row):
             if key in result}
 
 
+def _partial_judge_feedback(row, snapshot, objects, *, input_invalid=False):
+    """Retain saved failed-attempt feedback without granting label authority."""
+    result = {"status": "unavailable", "scope": "failed_attempt_partial_feedback",
+              "origin": "automated_native_scorer", "ground_truth": "not_established",
+              "final_label": False, "verified_for_training": False,
+              "source_ref": row.get("output_ref")}
+    ref = row.get("output_ref")
+    if not ref:
+        return {**result, "reason": "output_ref_absent"}
+    prefix = "arena/%s/scores/items/%s" % (row["round_id"], row["run_id"])
+    if (not isinstance(ref, str) or ref != prefix + ".json"
+            and not re.fullmatch(re.escape(prefix) + r"-[0-9a-f]{64}\.json", ref)):
+        return {**result, "status": "invalid", "reason": "output_reference_mismatch"}
+    if input_invalid:
+        return {**result, "status": "invalid", "reason": "saved_input_invalid"}
+    if snapshot is None:
+        return {**result, "reason": "saved_input_unavailable"}
+    if snapshot.get("privacy") != {"redacted": False, "redactions": []}:
+        return {**result, "status": "invalid", "reason": "saved_input_invalid"}
+    result["input_sha256"] = snapshot["input_sha256"]
+    try:
+        raw = objects.get_bounded(ref, scoring.MAX_SCORING_OUTPUT_BYTES)
+    except ValueError:
+        return {**result, "status": "invalid", "reason": "saved_output_invalid"}
+    except Exception:
+        return {**result, "reason": "saved_output_unavailable"}
+    try:
+        document = snapshot["input"]
+        if document.get("schema_version") != scoring.SCORING_INPUT_SCHEMA_VERSION:
+            raise ExportError("partial_input_schema_invalid")
+        output = json.loads(raw)
+        scoring.validate_scoring_output_document(output)
+        digest = contracts.document_hash(output)
+        receipt = (row.get("result_doc") or {}).get("legacy_partial_checkpoint") or {}
+        hashes = [value for value in (row.get("output_hash"), receipt.get("source_output_hash"))
+                  if value not in (None, "")]
+        result.update(output_sha256=digest, recorded_hash_present=bool(hashes))
+        if (ref != prefix + ".json" and ref != prefix + "-" + digest[7:] + ".json"
+                or any(value != digest for value in hashes)
+                or receipt and receipt.get("source_output_ref") != ref):
+            return {**result, "status": "invalid", "reason": "output_hash_mismatch"}
+        if (output.get("scored_run_id") != row.get("scored_run_id")
+                or output.get("scored_run_id") != document.get("scored_run_id")
+                or "failure" not in output
+                or row.get("terminal_cause") != "credential_error"
+                and output["failure"] != row.get("terminal_cause")):
+            return {**result, "status": "invalid", "reason": "partial_output_identity_mismatch"}
+        if company_judgments.enabled(document["scorer_policy"]):
+            lease = document.get("company_judgment_cache")
+            if lease != (row.get("claim_response") or {}).get("company_judgment_cache"):
+                raise ExportError("partial_company_lease_mismatch")
+            judgments = company_judgments.validate_new_company_judgments(
+                output.get("company_judgments") or [], lease_context=lease, require_complete=False)
+            refs = {ref["company_index"]: company_judgments.validate_company_ref(ref)
+                    for ref in row.get("company_judgment_refs") or []}
+            for judgment in judgments:
+                company_ref = refs[judgment["company_index"]]
+                if any(judgment[key] != company_ref[key] for key in ("cache_key", "company_input_hash")):
+                    raise ExportError("partial_company_ref_mismatch")
+                company_judgments.validate_raw_judgment_mode(
+                    judgment["raw_judgment"], company_ref["scope_doc"])
+        else:
+            judgments = scoring.validate_terminal_breakdowns_for_work_item(
+                output.get("terminal_breakdowns") or [], icp=document["icp"],
+                companies=document["companies"], policy=document["scorer_policy"])
+        if not judgments:
+            return {**result, "reason": "partial_feedback_empty"}
+        return {**result, "status": "available", "output": output}
+    except Exception:
+        # Optional feedback cannot erase the source export or its final labels.
+        return {**result, "status": "invalid", "reason": "partial_output_invalid"}
+
+
 def _reviewer_runtime_identity(row, configuration):
     """Retain lease selection separately from frozen grading, not attestation."""
     binding = reviewer_runtime.lease_binding(row, configuration)
@@ -2023,8 +2096,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             launched_ids.add(row["run_id"])
     snapshot_ids = selected_ids | launched_ids
     attempt_by_id = {row["run_id"]: row for row in example["attempts"]}
+    invalid_snapshot_ids = set()
 
     def attempt_gap(attempt_id, dimension, code):
+        if dimension == "exact_inputs":
+            invalid_snapshot_ids.add(attempt_id)
         if attempt_id in selected_ids:
             reasons[dimension].add(code)
         else:
@@ -2287,6 +2363,26 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         "ground_truth": "not_established",
         "external_adjudication": "not_established_by_export",
     }
+    # Keep optional model-generated feedback outside final labels, capture
+    # eligibility and their privacy projection. Each artifact owns its checks.
+    for attempt in clean["attempts"]:
+        identity = attempt["run_id"]
+        if attempt["kind"] == "score" and attempt.get("status") == "failed":
+            feedback = _partial_judge_feedback(
+                by_id[identity], snapshots.get(identity), objects,
+                input_invalid=identity in invalid_snapshot_ids)
+            feedback, redactions = sanitize_training_value(feedback, max_nodes=MAX_EXAMPLE_NODES)
+            feedback, hidden_removed = without_hidden_reasoning(feedback)
+            if "output" in feedback:
+                feedback["exported_output_sha256"] = contracts.document_hash(feedback["output"])
+                if (redactions or hidden_removed
+                        or feedback["exported_output_sha256"] != feedback["output_sha256"]):
+                    feedback.update(status="privacy_filtered", reason="output_privacy_nonexact")
+            feedback["privacy"] = {
+                "redacted": bool(redactions or hidden_removed),
+                "redactions": sorted(set(redactions) | ({"hidden_reasoning"} if hidden_removed else set())),
+            }
+            attempt["partial_judge_feedback"] = feedback
     clean["example_hash"] = contracts.document_hash(clean)
     # Both privacy walks own their context containers. Worker artifacts and
     # journal prefixes come from freshly decoded JSON, with no caller-owned

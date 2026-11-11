@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_capture, training_coverage
+from lab_arena import owner_review
 
 
 _ROUND_NOT_PROVIDED = object()
@@ -489,14 +490,22 @@ class SubmissionCodeReviewer:
                                 "review_response_invalid", response_reason="envelope"
                             )
                         result = code_review.parse_response(parsed, prepared)
-                        # Validate source excerpts in memory, then persist only
-                        # counts and category codes. No submitted instructions or
-                        # provider-authored prose enters the durable review row.
+                        # Retain only bounded, redacted own-source excerpts for
+                        # the signed owner route. Public projections omit these.
                         document = {
                             "passed": result.passed, "verdict": result.verdict,
                             "categories": sorted({item["category"] for item in result.findings}),
                         }
                         status = "passed" if result.passed else "rejected"
+                        if status == "rejected":
+                            try:
+                                document["owner_findings"] = owner_review.from_validated_findings(
+                                    result.findings, secrets=(secret,),
+                                )
+                            except Exception:
+                                # Optional owner diagnostics cannot alter a
+                                # validated verdict, retry, or accounted cost.
+                                pass
                         if research_control:
                             document["research_control"] = dict(result.research_control)
                             classification = result.research_control["classification"]

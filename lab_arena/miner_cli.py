@@ -9,6 +9,7 @@ import sys
 
 from lab_arena.miner_submit import (
     MinerSubmissionError,
+    read_submission_review,
     retry_credit_failures,
     run_interactive_submission,
     submission_credentials_from_environment,
@@ -52,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("--round-id", required=True)
     retry.add_argument("--submission-id", required=True)
     _common_arguments(retry)
+    review = commands.add_parser("review", help="read private admission findings with the submitting hotkey")
+    review.add_argument("--round-id", required=True)
+    review.add_argument("--submission-id", required=True)
+    _common_arguments(review)
     return parser
 
 
@@ -118,4 +123,15 @@ def main(argv=None) -> int:
         return interactive(args)
     if args.command == "retry-credit-failures":
         return retry_credits(args)
+    if args.command == "review":
+        try:
+            result = read_submission_review(
+                round_id=args.round_id, submission_id=args.submission_id,
+                api_base_url=args.api_base_url, keypair=_keypair(args),
+            )
+        except MinerSubmissionError as exc:
+            print("review unavailable: %s" % exc.format_for_cli(), file=sys.stderr)
+            return 2
+        print(json.dumps(dict(result), sort_keys=True))
+        return 0
     return 2

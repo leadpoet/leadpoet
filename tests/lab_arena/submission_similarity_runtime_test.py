@@ -156,7 +156,19 @@ def test_duplicate_finding_needs_eligible_id_and_high_confidence():
     runtime, row, store, transport, _, _ = reviewer(new, [(old, False)], transport=Transport(finding))
     assert runtime.review(row)["status"] == "rejected"
     assert store.finishes[0][4]["categories"] == ["duplicate_submission"]
-    assert "return target" not in repr(store.finishes)
+    document = store.finishes[0][4]
+    assert document["owner_findings"] == {
+        "findings": [{"category": "duplicate_submission", "file": "agent.py",
+                      "evidence": "return target"}],
+        "truncated": False, "redacted": False,
+    }
+    # Only the candidate's own validated excerpt may survive for its owner.
+    # Peer source, comparison identity and model explanation are not retained.
+    sent = json.loads(json.loads(transport.calls[0]["body"])["messages"][1]["content"])
+    comparison_id = sent["similarity_contexts"][0]["comparison_id"]
+    for private_value in ("return item", "reference-0", "comparison_id",
+                          comparison_id, "Only an identifier changed."):
+        assert private_value not in repr(document)
 
     def invalid(submitted):
         result = finding(submitted)

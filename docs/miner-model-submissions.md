@@ -137,6 +137,33 @@ attempt, so it does not reuse the failed call's identity or delete its history.
 
 ## Submission status and results
 
+Use the original submitting hotkey to read private admission findings:
+
+```bash
+python3 scripts/lab_arena_miner.py review \
+  --round-id ROUND_ID --submission-id SUBMISSION_ID \
+  --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY
+```
+
+This signed read does not run a review or use provider credit. It works after
+the round closes. Other hotkeys, including another hotkey on the same coldkey,
+cannot read these excerpts. Public status and dashboard routes keep the excerpts
+private. The response contains at most eight findings with a category, file,
+and up to 1,000 UTF-8 bytes of the miner's own source evidence. `truncated` and
+`redacted` show when limits or credential removal changed the excerpts. Raw
+reviewer explanations, summaries, and other miners' source are not returned.
+
+Historical reviews without stored findings return `available: false`. This
+command does not backfill old findings or change an admission decision.
+
+| Finding category | Check in your source |
+|---|---|
+| `hardcoded_prepared_answers` | Replace prepared answers with research for the supplied ICP. |
+| `fabricated_evidence` | Trace each output claim to a real provider observation. |
+| `malicious_behavior` | Remove attempts to access credentials, host resources, or unapproved services. |
+| `reviewer_manipulation` | Remove instructions that try to change the reviewer or scoring policy. |
+| `duplicate_submission` | Make a meaningful behavior change and submit your own work. |
+
 Retry an unchanged archive with the same hotkey. The gateway reuses its upload
 reservation. If an unfinished archive changes, the gateway keeps the old row
 and bytes and assigns a new upload target. A late finalize for the replaced

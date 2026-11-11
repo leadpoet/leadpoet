@@ -132,3 +132,34 @@ def test_only_exact_final_scoring_progress_gets_followup(result):
     service.advance_round = lambda _: calls.append(1) or result
     drive_once(service)
     assert calls == [1]
+
+
+@pytest.mark.parametrize('stage', [1, 2])
+@pytest.mark.parametrize('cas_status', ['ok', 'stale', 'retry', 'existing'])
+def test_real_score_stage_reports_final_progress_only_after_successful_cas(
+    monkeypatch, stage, cas_status,
+):
+    from tests.lab_arena.partial_close_scoring_test import _score_stage_stub
+
+    service, _, _ = _score_stage_stub(
+        monkeypatch, incomplete_submission=None, stage=stage,
+    )
+    transitions = []
+
+    def transition(*args):
+        transitions.append(args)
+        return {'status': cas_status, 'round_status': 'concurrent-state'}
+
+    service._store.transition_round = transition
+    round_id = service._round('ignored')['round_id']
+    result = service.score_stage(round_id, stage)
+
+    assert result['status'] == cas_status
+    assert transitions[0][:3] == (
+        round_id, 'stage%d_judged' % stage,
+        'scored' if stage == 2 else 'stage1_scored',
+    )
+    if stage == 2 and cas_status == 'ok':
+        assert result['round_status'] == 'scored'
+    else:
+        assert 'round_status' not in result

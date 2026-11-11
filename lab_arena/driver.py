@@ -76,19 +76,42 @@ def _advance_active(service) -> str:
     except Exception as exc:
         return "failed active_rounds: %s" % type(exc).__name__
     outcomes = []
-    for row in active:
-        try:
-            with telemetry.stage("advance_round") as observed:
-                service.advance_round(row["round_id"])
-                observed.count = 1
-        except Exception as exc:
-            outcomes.append(
-                "failed advance_round %s: %s"
-                % (row["round_id"], type(exc).__name__)
-            )
-        else:
-            outcomes.append("advanced %s" % row["round_id"])
+    pending = active
+    # Only successful final scoring progress can use the two remaining steps:
+    # scoring -> judged -> scored -> published. Finish each pass before the
+    # next, so another active round is not delayed by these extra steps.
+    for _ in range(3):
+        following = []
+        queued = set()
+        for row in pending:
+            result = _advance_one(service, row, outcomes)
+            if isinstance(result, dict) and (
+                (result.get("status"), result.get("round_status"))
+                in (("closed", "stage2_judged"), ("ok", "scored"))
+            ):
+                if row["round_id"] not in queued:
+                    following.append(row)
+                    queued.add(row["round_id"])
+        if not following:
+            break
+        pending = following
     return "; ".join(outcomes) if outcomes else "idle"
+
+
+def _advance_one(service, row, outcomes):
+    try:
+        with telemetry.stage("advance_round") as observed:
+            result = service.advance_round(row["round_id"])
+            observed.count = 1
+    except Exception as exc:
+        outcomes.append(
+            "failed advance_round %s: %s"
+            % (row["round_id"], type(exc).__name__)
+        )
+    else:
+        if "advanced %s" % row["round_id"] not in outcomes:
+            outcomes.append("advanced %s" % row["round_id"])
+        return result
 
 
 def _ensure_daily_round(service) -> str:

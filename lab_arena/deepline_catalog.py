@@ -10,6 +10,7 @@ import ipaddress
 import itertools
 import json
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
@@ -480,6 +481,17 @@ def _hash(document: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()).hexdigest()
 
 
+_VALIDATED_LOCK = threading.RLock()
+
+
+def _validated_bytes(encoded: str) -> dict[str, Any]:
+    # lru_cache protects its bookkeeping, but concurrent misses can each run
+    # the full schema/policy rebuild. Acquire before the cache lookup so one
+    # caller fills this exact-byte entry and waiting callers reuse the result.
+    with _VALIDATED_LOCK:
+        return _validated(encoded)
+
+
 @lru_cache(maxsize=4)
 def _validated(encoded: str) -> dict[str, Any]:
     """Cache only exact immutable bytes; never expose the cached object."""
@@ -525,18 +537,18 @@ class _PreparedCatalog(Mapping[str, Any]):
         # Direct construction grants no authority. Keep the full exact-byte
         # schema, hash and policy validator, including after LRU eviction.
         try:
-            _validated(self.encoded)
+            _validated_bytes(self.encoded)
         except (TypeError, ValueError, RecursionError) as exc:
             raise CatalogError("invalid_catalog_snapshot") from exc
 
     def __getitem__(self, key: str) -> Any:
-        return _copy(_validated(self.encoded)[key])
+        return _copy(_validated_bytes(self.encoded)[key])
 
     def __iter__(self):
-        return iter(_validated(self.encoded))
+        return iter(_validated_bytes(self.encoded))
 
     def __len__(self) -> int:
-        return len(_validated(self.encoded))
+        return len(_validated_bytes(self.encoded))
 
 
 def prepare_catalog(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -550,7 +562,7 @@ def _validated_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     # Only the exact immutable type can avoid serialization. Mutable mappings
     # still use their complete current content, never a hash or object identity.
     encoded = snapshot.encoded if type(snapshot) is _PreparedCatalog else _encoded(snapshot)
-    return _validated(encoded)
+    return _validated_bytes(encoded)
 
 
 def tool_entry(snapshot: Mapping[str, Any], tool_id: str) -> dict[str, Any]:

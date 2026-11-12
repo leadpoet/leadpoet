@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyValidatorGatewayAuthoritySigning",
+      "Effect": "Deny",
+      "Action": "kms:Sign",
+      "Resource": "arn:aws:kms:us-east-1:493765492819:key/864c6f6d-fbff-44c4-9001-e8adc0e0a75a"
+    }
+  ]
+}

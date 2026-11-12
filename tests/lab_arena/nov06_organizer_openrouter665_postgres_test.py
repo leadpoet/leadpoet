@@ -43,6 +43,14 @@ def database():
     pg, dsn, _ = next(gen)
     try:
         with pg.connect(**dsn) as c, c.cursor() as q:
+            # Repeated disposable seeding crosses autoanalyze thresholds. Its
+            # maintenance lock can race the production migration's deliberate
+            # NOWAIT gate. Isolate only these fixture tables (and their large
+            # JSON TOAST storage); keep application writer races unchanged.
+            for table in ('lab_arena_runs', 'lab_arena_submissions', 'lab_arena_ledger'):
+                q.execute('ALTER TABLE public.' + table + ' SET '
+                          '(autovacuum_enabled=false, toast.autovacuum_enabled=false)')
+            c.commit()
             # Install committed639's helper and claim fragment without its dated
             # live correction. The fixture already has all other predecessors.
             text = historical.SQL.read_text()

@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from lab_arena import contracts, source_bundle, telemetry, trajectory, training_input, training_observations, validator_events
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
-from lab_arena.store import ArenaStoreUnavailable
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
 MAX_JSON_BODY_BYTES = 1_048_576
 
@@ -278,6 +278,21 @@ def create_app(service: ArenaService) -> FastAPI:
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
                 "Retry-After": "1",
+            },
+        )
+
+    @app.exception_handler(ArenaStoreError)
+    async def _store_error(request: Request, exc: ArenaStoreError) -> JSONResponse:
+        # A durable-state failure that is not the retryable ArenaStoreUnavailable
+        # subclass. The status stays 500 because the failure is unclassified, but
+        # the response and the span now name it instead of leaving a bare 500.
+        telemetry.note_denial("arena_store_error", error=exc)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "code": "arena_store_error"},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
             },
         )
 

@@ -242,3 +242,30 @@ def test_final_http_export_rejects_injected_diagnostics_without_changing_respons
     assert response.status_code == 503
     assert response.json() == {'status': 'unavailable', 'code': 'arena_store_unavailable'}
     assert exporter.get_finished_spans() == ()
+
+
+def test_base_store_error_keeps_500_and_names_the_refusal(monkeypatch):
+    # The retryable subclass answers 503; its parent used to escape unhandled and
+    # reach the client as a bare 500 with no denial on the span, which the Arena
+    # has no logs to explain.
+    error = ArenaStoreError(CANARY, operation='rpc', resource=CLAIM, code='XX000')
+
+    class Service(StubService):
+        def handle_claim(self, envelope):
+            raise error
+
+    exporter = InMemorySpanExporter()
+    app = create_app(Service())
+    recorder = configure_arena_otel(app, span_exporter=exporter)
+    monkeypatch.setattr(telemetry, '_recorder', recorder)
+    with TestClient(app, raise_server_exceptions=False) as api:
+        response = api.post('/arena/v1/runs/claim', json={})
+    assert response.status_code == 500
+    assert response.json() == {'status': 'error', 'code': 'arena_store_error'}
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert 'retry-after' not in response.headers
+    span, = exporter.get_finished_spans()
+    assert span.attributes['arena.denial'] == 'arena_store_error'
+    assert _metadata(span) == dict(operation='rpc', resource=CLAIM, code='XX000')
+    assert CANARY not in response.text + str(span)

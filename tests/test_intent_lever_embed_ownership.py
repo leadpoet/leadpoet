@@ -125,3 +125,39 @@ def test_browser_inert_fallback_and_raw_text_do_not_establish_ownership(tag):
 
 def test_plaintext_cannot_reactivate_a_widget_with_a_literal_closing_tag():
     assert not extract('<plaintext>example</plaintext>'+HTML)
+
+
+@pytest.mark.parametrize('tag', ['iframe', 'xmp', 'noembed', 'noscript', 'textarea', 'title', 'template'])
+def test_ancestor_close_does_not_escape_browser_inert_scope(tag):
+    assert not extract(f'<div><{tag}></div>'+HTML+f'</{tag}>')
+
+
+@pytest.mark.parametrize('tag', ['iframe', 'xmp', 'noembed', 'noscript', 'textarea', 'title', 'template'])
+def test_widget_after_closed_inert_scope_remains_usable(tag):
+    assert extract(f'<{tag}><div>example</div></{tag}>'+HTML)
+
+
+def test_nested_template_cannot_close_outer_hidden_wrapper_to_reactivate_widget():
+    assert not extract('<div hidden><template></div>'+HTML+'</template>')
+
+
+def test_plaintext_example_inside_textarea_does_not_hide_following_widget():
+    assert extract('<textarea><plaintext>example</textarea>'+HTML)
+
+
+@pytest.mark.parametrize('tag', ['iframe', 'xmp', 'noembed', 'noscript', 'textarea', 'title', 'template'])
+def test_self_closing_slash_does_not_end_nonvoid_inert_element(tag):
+    assert not extract(f'<{tag}/>'+HTML)
+
+
+@pytest.mark.parametrize('tag', ['svg', 'math'])
+def test_foreign_namespace_script_src_is_not_html_widget_loader(tag):
+    body=HTML.replace(f"<script src='{LOADER}'></script>",
+                      f"<{tag}><script src='{LOADER}'></script></{tag}>")
+    assert not extract(body)
+
+
+@pytest.mark.parametrize('tag', ['svg', 'math'])
+def test_foreign_namespace_ancestor_close_cannot_enable_html_widget(tag):
+    assert not extract(f'<div><{tag}></div>'+HTML+f'</{tag}>')
+    assert extract(f'<{tag}></{tag}>'+HTML)

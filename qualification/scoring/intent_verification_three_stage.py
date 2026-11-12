@@ -1943,6 +1943,12 @@ def _configured_lever_embed(
     loader = "https://andreasmb.github.io/lever-jobs-embed/index.js"
 
     class EmbedParser(HTMLParser):
+        # Do not parse tags in browser raw-text/RCDATA or scripting fallbacks.
+        # In particular, an unrelated ancestor close cannot end an iframe.
+        CDATA_CONTENT_ELEMENTS = (
+            "script", "style", "iframe", "xmp", "noembed", "noscript", "textarea", "title",
+        )
+
         def __init__(self):
             super().__init__(convert_charrefs=True)
             self.stack: list[tuple[str, bool]] = []
@@ -1962,6 +1968,7 @@ def _configured_lever_embed(
             self.plaintext = self.plaintext or tag == "plaintext"
             hidden = self.plaintext or any(inert for _, inert in self.stack) or tag in {
                 "template", "noscript", "iframe", "xmp", "noembed", "textarea", "title",
+                "svg", "math",  # Only the supported HTML widget is recognized.
             }
             style = re.sub(r"\s+", "", str(values.get("style") or "")).casefold()
             hidden = hidden or "hidden" in values or str(values.get("aria-hidden") or "").casefold() == "true" \
@@ -1978,6 +1985,12 @@ def _configured_lever_embed(
             if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
                 self.stack.append((tag, bool(hidden)))
 
+        def handle_startendtag(self, tag, attrs):
+            # HTML ignores a self-closing slash on non-void elements.
+            self.handle_starttag(tag, attrs)
+            if tag in self.CDATA_CONTENT_ELEMENTS:
+                self.set_cdata_mode(tag)
+
         def handle_data(self, data):
             if self.script is not None:
                 self.script.append(data)
@@ -1992,6 +2005,9 @@ def _configured_lever_embed(
             for index in range(len(self.stack) - 1, -1, -1):
                 if self.stack[index][0] == tag:
                     del self.stack[index:]
+                    break
+                if self.stack[index][0] in {"template", "svg", "math"}:
+                    # Do not escape template or unsupported foreign content.
                     break
 
     parser = EmbedParser()

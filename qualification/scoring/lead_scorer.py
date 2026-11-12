@@ -13293,10 +13293,6 @@ def _matched_company_source_contexts(
         getattr(submitted_attribute, "evidence_url", None)
     )
     submitted_quote = getattr(submitted_attribute, "evidence_quote", None)
-    submitted_name = (
-        _compact_company_name(company.company_name)
-        if company is not None else ""
-    )
     identity = verified_identity_receipt([company_fit.receipt("company_fit")])
     source_entry = (
         matched_company_source_cache.get(submitted_url)
@@ -13305,32 +13301,26 @@ def _matched_company_source_contexts(
         <= _max_retained_investigator_contexts()
         else None
     )
+    # Use the paragraph consumer's visible body and identity binding. Locator
+    # metadata can contain the company name but cannot admit an optional page.
+    submitted_context = (
+        _validated_first_party_source_context(
+            submitted_url, source_entry, identity,
+            company_name=company.company_name,
+        )
+        if company is not None else None
+    )
     if (
         company is not None
         and company_fit.decision == COMPANY_FIT_MATCH
-        and submitted_name
-        and isinstance(identity, Mapping)
-        and submitted_url.startswith("https://")
-        and _registrable_domain(submitted_url)
-        == str(identity.get("observed_domain") or "").casefold()
+        and submitted_context is not None
         and isinstance(submitted_quote, str)
-        and isinstance(source_entry, Mapping)
-        and set(source_entry) == {"final_url", "text"}
-        and isinstance(source_entry["final_url"], str)
-        and source_entry["final_url"].startswith("https://")
-        and _valid_web_evidence_url(source_entry["final_url"])
-        == source_entry["final_url"]
-        and _registrable_domain(source_entry.get("final_url"))
-        == _registrable_domain(submitted_url)
-        and isinstance(source_entry.get("text"), str)
-        and 0 < len(source_entry["text"]) <= MAX_PAGE_CHARACTERS
-        and _quote_occurs(submitted_quote, source_entry["text"])
-        and submitted_name in _compact_company_name(source_entry["text"])
+        and _quote_occurs(submitted_quote, submitted_context["text"])
     ):
         contexts.append({
             "dimension": "first_party_company",
             "url": submitted_url,
-            "text": source_entry["text"],
+            "text": submitted_context["text"],
         })
     auxiliary = _matched_first_party_source_context(
         company_fit, matched_company_source_cache, company, paragraph=paragraph,

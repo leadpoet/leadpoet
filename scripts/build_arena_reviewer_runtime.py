@@ -39,6 +39,9 @@ completed missing-LinkedIn repair predicate to exact frozen2dc in one file.
 Its --visible-auxiliary-context sub-option also aligns optional context admission
 and ranking with the unchanged paragraph consumer's visible surface.
 
+The exclusive --submitted-company-context-only mode aligns that same visible
+surface for the submitted-attribute auxiliary in the exact frozen d657 runtime.
+
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
 
@@ -272,6 +275,7 @@ def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
     shim_only: bool = False,
     legacy_company_progress_only: bool = False,
+    submitted_company_context_only: bool = False,
     intent_target_denial: bool = False,
     homepage_profile_alias: bool = False,
     verified_display_brand: bool = False,
@@ -327,7 +331,8 @@ def extract_frozen_sources(
             from scripts.arena_reviewer_verified_display_brand_seam import FILES
             names = FILES
         if (empty_domain_negative_finality_only or identity_repair_before_investigation_only
-                or identity_repair_finality_only or completed_merger_survivor_only):
+                or identity_repair_finality_only or completed_merger_survivor_only
+                or submitted_company_context_only):
             names = (FINALITY_FILE,)
         if source_local_refusal_finality:
             names += (VERIFICATION_FILE, "lab_arena/shim.py")
@@ -500,6 +505,10 @@ def main() -> int:
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
+        "--submitted-company-context-only", action="store_true",
+        help="compose only the reviewed submitted-company visible-context correction on exact d657",
+    )
+    parser.add_argument(
         "--legacy-company-progress-only", action="store_true",
         help="compose only reviewed two-file legacy company progress on exact frozen51bc; excludes other corrections",
     )
@@ -620,6 +629,11 @@ def main() -> int:
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
     args = parser.parse_args()
+    if args.submitted_company_context_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"submitted_company_context_only", "push"}
+    ):
+        raise CompositionError("submitted-company-context-only mode cannot include other corrections")
     if args.legacy_company_progress_only and any(
         value is True for name, value in vars(args).items()
         if name not in {"legacy_company_progress_only", "push"}
@@ -666,6 +680,10 @@ def main() -> int:
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
+    if args.submitted_company_context_only:
+        from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_FROZEN_IMAGE_DIGEST
+        if match[2] != SUBMITTED_FROZEN_IMAGE_DIGEST:
+            raise CompositionError("submitted company context requires the exact frozen d657 image")
     if args.legacy_company_progress_only:
         from scripts.arena_reviewer_legacy_company_progress_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
@@ -697,7 +715,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.legacy_company_progress_only:
+        if args.submitted_company_context_only:
+            from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_submitted_company_context_seam
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", submitted_company_context_only=True,
+            )
+            if set(original) != {FINALITY_FILE}:
+                raise CompositionError("frozen submitted company context source is incomplete")
+            files = {FINALITY_FILE: convert_submitted_company_context_seam(original[FINALITY_FILE])}
+        elif args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import convert_legacy_company_progress_files
             original = extract_frozen_sources(
                 args.grading_image, root / "original", legacy_company_progress_only=True,
@@ -856,6 +882,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
             + ("-source-local-refusal" if args.source_local_refusal_finality else "")
             + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
+            + ("-submitted-company-context" if args.submitted_company_context_only else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -882,6 +909,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.submitted_company_context_only:
+            from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_CORRECTION_ID
+            corrections.append(SUBMITTED_CORRECTION_ID)
         if args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import CORRECTION_ID as LEGACY_COMPANY_PROGRESS_CORRECTION_ID
             corrections.append(LEGACY_COMPANY_PROGRESS_CORRECTION_ID)

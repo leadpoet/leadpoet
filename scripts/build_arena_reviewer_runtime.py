@@ -17,6 +17,10 @@ An observed-locator option adds only single-decoded ampersand company slugs.
 A separate brand option requires its matching host receipt validator deployment.
 No option imports today's complete grading implementation.
 
+The exclusive --legacy-company-progress-only mode changes only the reviewed
+two-file company progress path. Exact frozen51bc must match the checksum-bound
+repository reference pair; other source generations fail closed.
+
 The exclusive --intent-target-denial mode adds only the reviewed native Exa
 target-denial alias to two exact frozen modules. It copies no runtime package.
 The exclusive --homepage-profile-alias mode retains that correction and adds
@@ -267,6 +271,7 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
 def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
     shim_only: bool = False,
+    legacy_company_progress_only: bool = False,
     intent_target_denial: bool = False,
     homepage_profile_alias: bool = False,
     verified_display_brand: bool = False,
@@ -309,6 +314,9 @@ def extract_frozen_sources(
             names += (ARCHIVE_FILE,)
         if shim_only:
             names = ("lab_arena/shim.py", "lab_arena/operations.py")
+        if legacy_company_progress_only:
+            from scripts.arena_reviewer_legacy_company_progress_seam import FILES
+            names = FILES
         if intent_target_denial:
             from scripts.arena_reviewer_intent_target_denial_seam import FILES
             names = FILES
@@ -492,6 +500,10 @@ def main() -> int:
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
+        "--legacy-company-progress-only", action="store_true",
+        help="compose only reviewed two-file legacy company progress on exact frozen51bc; excludes other corrections",
+    )
+    parser.add_argument(
         "--completed-merger-survivor-only", action="store_true",
         help="compose only reviewed completed-merger target proof on exact frozen810; excludes other corrections",
     )
@@ -608,6 +620,11 @@ def main() -> int:
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
     args = parser.parse_args()
+    if args.legacy_company_progress_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"legacy_company_progress_only", "push"}
+    ):
+        raise CompositionError("legacy-company-progress-only mode cannot include other corrections")
     if args.source_local_refusal_finality and not args.completed_merger_survivor_only:
         raise CompositionError("source-local-refusal-finality requires completed-merger-survivor-only")
     if args.completed_merger_survivor_only and any(
@@ -649,6 +666,10 @@ def main() -> int:
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
+    if args.legacy_company_progress_only:
+        from scripts.arena_reviewer_legacy_company_progress_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("legacy company progress requires the exact frozen51bc image")
     if args.completed_merger_survivor_only:
         from scripts.arena_reviewer_completed_merger_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
@@ -676,7 +697,13 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.completed_merger_survivor_only:
+        if args.legacy_company_progress_only:
+            from scripts.arena_reviewer_legacy_company_progress_seam import convert_legacy_company_progress_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", legacy_company_progress_only=True,
+            )
+            files = convert_legacy_company_progress_files(original)
+        elif args.completed_merger_survivor_only:
             from scripts.arena_reviewer_completed_merger_seam import convert_completed_merger_seam
             flags = {"completed_merger_survivor_only": True}
             if args.source_local_refusal_finality:
@@ -828,6 +855,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
             + ("-source-local-refusal" if args.source_local_refusal_finality else "")
+            + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -854,6 +882,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.legacy_company_progress_only:
+            from scripts.arena_reviewer_legacy_company_progress_seam import CORRECTION_ID as LEGACY_COMPANY_PROGRESS_CORRECTION_ID
+            corrections.append(LEGACY_COMPANY_PROGRESS_CORRECTION_ID)
         if args.completed_merger_survivor_only:
             from scripts.arena_reviewer_completed_merger_seam import CORRECTION_ID as COMPLETED_MERGER_CORRECTION_ID
             corrections.append(COMPLETED_MERGER_CORRECTION_ID)

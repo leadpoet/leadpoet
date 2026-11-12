@@ -179,3 +179,84 @@ def test_launch_and_proof_source_rules_reach_the_buyer_context_prompt():
     assert "reliable independent reporting of the same company event can prove it" in prompt
     assert "Preserve explicitly mandatory evidence source types and issuer requirements" in prompt
     assert "does not need the word 'only' to be mandatory" in prompt
+
+
+PRIMARY = "Announced a strategic partnership in the last 12 months, per a press release."
+CANONICAL_PREFIX = (
+    "Find companies meeting every company requirement. Industry: Technology; "
+    "Product/service requirement: Security software"
+)
+CANONICAL_REQUEST = (
+    CANONICAL_PREFIX + "\n\nIntent qualification:\n"
+    + f"Required primary intent (365 days): {PRIMARY}\n"
+    + f"Optional bonus intent (365 days): {TARGET}\n"
+    + "These intent requirements govern qualification. The primary intent is required; "
+    "an optional bonus cannot replace it."
+)
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_canonical_context_projects_only_selected_criterion(index):
+    from qualification.scoring.prompts._common import matched_buyer_request_context
+    signals = [PRIMARY, TARGET]
+    projected = matched_buyer_request_context(CANONICAL_REQUEST, signals, index)
+    assert projected == f"Chosen intent criterion (365 days): {signals[index]}"
+    assert signals[1 - index] not in projected
+
+
+@pytest.mark.parametrize("buyer_context,signals", [
+    (SHIPPED_REQUEST, [PRIMARY, TARGET]),
+    (CANONICAL_REQUEST.replace(CANONICAL_PREFIX, SHIPPED_REQUEST), [PRIMARY, TARGET]),
+    (CANONICAL_REQUEST, [PRIMARY, "Different launch requirement"]),
+    (CANONICAL_REQUEST + "\nThe new capability must be shipped.", [PRIMARY, TARGET]),
+])
+def test_context_projection_preserves_unstructured_or_mismatched_constraints(buyer_context, signals):
+    from qualification.scoring.prompts._common import matched_buyer_request_context
+    assert matched_buyer_request_context(buyer_context, signals, 1) == buyer_context
+
+
+@pytest.mark.parametrize("status", ["supported", "contradicted"])
+def test_bonus_actual_judge_request_excludes_unrelated_primary(monkeypatch, status):
+    seen = []
+    body = (
+        "On July 28, 2026, Cyberhaven released Flow's detection capability; "
+        "it is available now."
+    )
+
+    async def fetch(urls, *args, **kwargs):
+        return {"results": [{"url": URL, "text": body,
+                             "source_publication_date": "2026-07-28"}], "statuses": []}
+
+    async def judge(_client, _model, prompt, *, hosted_search):
+        signal = json.loads(prompt.split("Intent signal to verify:\n", 1)[1].split(
+            "\n\nThree-part verification", 1,
+        )[0])
+        assert signal["buyer_original_request"] == f"Chosen intent criterion (365 days): {TARGET}"
+        assert signal["target_icp_signal"] == TARGET
+        assert PRIMARY not in prompt
+        assert "caller enforces the" in prompt
+        seen.append(prompt)
+        return _model_verdict(status, body)
+
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
+    monkeypatch.setattr(verifier, "_call_openrouter", judge)
+    signal = _company_model([{
+        "source": "news", "description": "Cyberhaven introduced Flow on July 28, 2026",
+        "url": URL, "date": "2026-07-28", "snippet": "Cyberhaven introduces Flow",
+        "matched_icp_signal": 1,
+    }]).intent_signals[0]
+    icp = _icp_model().model_copy(update={
+        "prompt": CANONICAL_REQUEST, "intent_signals": [PRIMARY, TARGET],
+        "intent_signal_evidence_types": ["PARTNERSHIP", "PRODUCT_LAUNCH"],
+    })
+    with use_evaluation_date("2026-10-01"):
+        result = asyncio.run(lead_scorer._score_single_intent_signal(
+            signal, icp, None, "Cyberhaven", "https://www.cyberhaven.com",
+            stage1_soft_reject=True, llm_only_intent_gate=True, integrity_policy=True,
+        ))
+    assert len(seen) == 1
+    assert (result[0] > 0) == (status == "supported")
+    # A positive bonus remains insufficient for required-primary qualification.
+    assert not lead_scorer.required_intent_satisfied([
+        {"matched_icp_signal": 1, "raw": result[0], "after_decay": result[0]},
+    ])

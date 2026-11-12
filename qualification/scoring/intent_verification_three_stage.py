@@ -171,7 +171,7 @@ JOB_BOARD_HOSTS = (
     "lever.co", "wellfound.com", "ziprecruiter.com",
     "greenhouse.io", "glassdoor.com",
     "startup.jobs", "remoterocketship.com", "salesjobs.com",
-    "myworkdayjobs.com",
+    "myworkdayjobs.com", "paylocity.com", "icims.com",
 )
 JOB_BODY_ANCHORS = (
     "responsibilities", "qualifications", "requirements",
@@ -230,9 +230,50 @@ def _looks_like_job_body(text: str) -> bool:
     return any(a in low for a in JOB_BODY_ANCHORS)
 
 
+
+def _substantial_official_posting_body(
+    result: Mapping[str, Any], source_url: str, *, trusted_official: bool,
+    native_api_status: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """Defer varied verified posting prose to the unchanged semantic judge.
+
+    This retrieval prefilter does not prove hiring, identity, duties or freshness.
+    Unverified and third-party sources retain the existing body-anchor rule.
+    """
+    native_receipt = _exact_native_ats_api_status(
+        source_url, [native_api_status] if native_api_status is not None else [],
+    )
+    expected_kind = (
+        "ashby_job" if native_receipt and native_receipt["source"] == "scrapingdog_ashby_api"
+        else "greenhouse_job" if native_receipt else ""
+    )
+    native_posting = bool(
+        expected_kind and (result.get("meta") or {}).get("kind") == expected_kind
+        and not (result.get("meta") or {}).get("is_closed")
+    )
+    if not native_posting:
+        if not trusted_official:
+            return False
+        segments = [part for part in urlsplit(source_url).path.split("/") if part]
+        if not (2 <= len(segments) <= 4 and segments[0].casefold() in {"careers", "jobs"}):
+            return False
+    if _normalize_url(str(result.get("url") or "")) != _normalize_url(source_url):
+        return False
+    text = str(result.get("text") or "").strip()
+    if len(text) < 900 or not _looks_textual(text) or _has_anti_bot_marker(text):
+        return False
+    # A title, repeated navigation, footer, or length alone is insufficient.
+    passages = {
+        " ".join(part.casefold().split())
+        for part in re.split(r"[\n.!?]+", text)
+        if len(re.findall(r"\b\w+\b", part)) >= 8
+    }
+    return len(passages) >= 6
+
+
 def _is_job_board_url(url: str) -> bool:
     host = _host(url)
-    return any(h in host for h in JOB_BOARD_HOSTS)
+    return any(host == h or host.endswith("." + h) for h in JOB_BOARD_HOSTS)
 
 
 def _is_careers_index_url(url: str) -> bool:
@@ -1951,6 +1992,32 @@ def _ats_board_identity(url: str) -> tuple[str, str] | None:
         parsed = urlsplit(url)
         clean = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
         host = (parsed.hostname or "").casefold()
+        # These shared platforms need an exact tenant, never a company-name
+        # guess or the provider's shared hostname. Keep presentation queries
+        # separate from tenant identity.
+        typed_url = (
+            parsed.scheme == "https" and not parsed.username
+            and not parsed.password and parsed.port is None and not parsed.fragment
+        )
+        if typed_url and re.fullmatch(r"careers-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.icims\.com", host):
+            query = parse_qsl(parsed.query, keep_blank_values=True)
+            allowed_query = all(
+                (key == "hashed" and re.fullmatch(r"-?[0-9]{1,20}", value))
+                or (key in {"mobile", "needsRedirect"} and value in {"true", "false"})
+                or (key == "in_iframe" and value == "1")
+                for key, value in query
+            )
+            if allowed_query and re.fullmatch(
+                r"/jobs(?:/intro|/[1-9][0-9]*/[a-zA-Z0-9_-]+/job)?/?", parsed.path,
+            ):
+                return "icims", host
+        if typed_url and host == "recruiting.paylocity.com" and not parsed.query:
+            board = re.fullmatch(
+                r"/recruiting/jobs/all/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:/[a-z0-9_-]+)?/?",
+                parsed.path, re.I,
+            )
+            if board:
+                return "paylocity", board[1].casefold()
         provider = host
         if host == "boards-api.greenhouse.io":
             provider = "greenhouse:"
@@ -1989,6 +2056,40 @@ def _ats_ownership_anchors(
 ) -> list[Dict[str, str]]:
     """Require a fetched careers relationship, not name or domain mentions."""
     anchors = []
+    # Paylocity's numeric posting URL has no tenant. Only the selected fetched
+    # posting's observed All Jobs link can supply that association. A second
+    # observed link from the official company property must bind the same GUID.
+    paylocity_associations: Dict[str, tuple[tuple[str, str], str]] = {}
+    for target in target_urls:
+        parsed_target = urlsplit(target)
+        if not (
+            parsed_target.scheme == "https"
+            and parsed_target.hostname == "recruiting.paylocity.com"
+            and not parsed_target.username and not parsed_target.password
+            and parsed_target.port is None
+            and not parsed_target.query and not parsed_target.fragment
+            and re.fullmatch(
+                r"/recruiting/jobs/details/[1-9][0-9]*(?:/[a-z0-9_-]+){0,2}/?",
+                parsed_target.path, re.I,
+            )
+        ):
+            continue
+        associations = {}
+        for selected in results:
+            if _normalize_url(str(selected.get("url") or "")) != _normalize_url(target):
+                continue
+            for selected_link in _ownership_links_for_result(selected):
+                if not isinstance(selected_link, Mapping):
+                    continue
+                selected_url = str(selected_link.get("url") or "")
+                board = _ats_board_identity(selected_url)
+                if board and board[0] == "paylocity" and re.fullmatch(
+                    r"all jobs|all (?:open )?positions|job opportunities",
+                    str(selected_link.get("label") or "").strip(), re.I,
+                ):
+                    associations[board] = selected_url
+        if len(associations) == 1:
+            paylocity_associations[target] = next(iter(associations.items()))
     for result in results:
         source = str(result.get("url") or "")
         official = _url_on_verified_company_identity(source, identity)
@@ -1999,10 +2100,28 @@ def _ats_ownership_anchors(
             parsed = urlsplit(url)
             clean = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
             for target in target_urls:
+                same_posting = _normalize_url(url) == _normalize_url(target)
+                target_id = _ashby_posting_identity(target) or _lever_posting_identity(target)
+                # Some employers publish an ATS posting on their own careers
+                # site under the same UUID. Never match short numeric job IDs,
+                # names, query parameters, or UUIDs on unrelated site sections.
+                official_posting_id = bool(
+                    target_id
+                    and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", target_id[1], re.I)
+                    and _url_on_verified_company_identity(url, identity)
+                    and re.fullmatch(r"/(?:careers|jobs)/" + re.escape(target_id[1]) + r"/?", parsed.path, re.I)
+                    and not parsed.query
+                )
+                associated = paylocity_associations.get(target)
+                observed_paylocity_board = bool(
+                    associated and _ats_board_identity(url) == associated[0]
+                )
                 if (
                     official
-                    and _ats_board_identity(url) == _ats_board_identity(target)
-                    and _ats_board_identity(target) is not None
+                    and (same_posting or official_posting_id or observed_paylocity_board or (
+                        _ats_board_identity(url) == _ats_board_identity(target)
+                        and _ats_board_identity(target) is not None
+                    ))
                     and (_is_careers_index_url(source) or re.search(
                         r"\b(careers?|jobs?|apply|open positions|join (?:us|our team))\b",
                         label, re.I,
@@ -2010,6 +2129,9 @@ def _ats_ownership_anchors(
                 ):
                     anchors.append({"source_url": source, "linked_url": url,
                                     "posting_url": target, "kind": "official_careers_link",
+                                    **({"association_source_url": target,
+                                        "association_linked_url": associated[1]}
+                                       if observed_paylocity_board else {}),
                                     **({"archive_url": result["meta"]["ownership_archive_url"]}
                                        if (result.get("meta") or {}).get("ownership_archive_url") else {})})
                 elif (
@@ -2617,9 +2739,11 @@ async def _scrape_sd_hardened(
                                 listing_count = int(
                                     board.get("observed_job_link_count") or 0
                                 )
-                        if not listing_count and tier_name == "dynamic_render":
-                            last_verdict = "job_links_absent"
-                            history[-1] = (tier_name, last_verdict)
+                        observed_board_link = any(
+                            _ats_board_identity(link["url"]) is not None
+                            for link in _observed_ownership_links(body, url)
+                        )
+                        if not listing_count and not observed_board_link and tier_name == "dynamic_render":
                             continue
                         if listing_count:
                             listing_receipt = {
@@ -2664,6 +2788,10 @@ async def _scrape_sd_hardened(
                             break
                     result_meta: Dict[str, Any] = dict(listing_receipt or {})
                     result_meta["observed_ownership_links"] = _observed_ownership_links(raw_body, url)
+                    if prefer_dynamic_job_index and not listing_count and not observed_board_link:
+                        # The body is usable; the careers-link lookup is not
+                        # complete. Preserve the body if exact-source Exa fails.
+                        result_meta["careers_link_lookup_incomplete"] = True
                     if same_host_event_links and listing_receipt is None:
                         result_meta["same_host_event_links"] = (
                             same_host_event_links
@@ -3396,7 +3524,13 @@ _SYS_MESSAGE = (
     "A true claim alone is not enough. Bind each required attribute to the "
     "actor, event, or object it qualifies; another participant's attributes "
     "cannot substitute. Preserve every condition within the chosen alternative "
-    "without adding requirements from other alternatives. Return JSON matching "
+    "without adding requirements from other alternatives. Reconcile contrary "
+    "source-body statements before approving; a headline or isolated supporting "
+    "quote cannot override them. For a launched, released, shipped or available "
+    "capability, future availability of that same capability at the claimed "
+    "event date prevents support unless the source explicitly establishes "
+    "current access at the scope the buyer requests. An announcement criterion "
+    "can instead be met by an announcement of a future release. Return JSON matching "
     "the required schema."
 )
 
@@ -3932,7 +4066,7 @@ def _build_final_judge_prompt(
             "the same event rules above; they do not replace submitted evidence.\n"
             + json.dumps(row["_funding_company_source_urls"])
         )
-    if "_ats_employer_ownership" in row:
+    if "_ats_employer_ownership" in row and row.get("_ats_ownership_required", True):
         suffix += (
             "\n\nATS EMPLOYER OWNERSHIP:\n"
             "For this ATS hiring source, a shared company name or tenant is not "
@@ -3943,10 +4077,22 @@ def _build_final_judge_prompt(
             "Apply this requirement to ATS evidence actually relied on. Fetched "
             "official-company job pages or structured LinkedIn job evidence remain "
             "eligible under their existing source-grounding rules. "
+            "A failed or incomplete fetch cannot prove a different employer. "
             "If no ownership anchor is observed for relied-on ATS evidence, "
             "do not infer same_entity=pass "
             "from name resemblance. Use unclear unless independent supplied "
             "evidence proves a different employer.\n"
+            + json.dumps(row["_ats_employer_ownership"], sort_keys=True)
+        )
+    elif "_ats_employer_ownership" in row:
+        suffix += (
+            "\n\nOPTIONAL EMPLOYER RELATIONSHIP OBSERVATIONS:\n"
+            "Observed official careers links may corroborate the employer, but "
+            "their absence or a failed fetch does not disprove identity. Apply "
+            "the existing source-grounded employer rule: the fetched posting "
+            "body, official careers page, or reliable independent observation "
+            "may establish identity. Links alone do not prove duties, current "
+            "hiring or ICP fit. Do not approve unclear or different employers.\n"
             + json.dumps(row["_ats_employer_ownership"], sort_keys=True)
         )
     if row.get("_same_event_resolution") is True:
@@ -4278,12 +4424,39 @@ async def _fetch_sd_then_exa(
         if sd.get("ok") and sd.get("content"):
             sd_meta = sd.get("meta")
             result_meta = dict(sd_meta) if isinstance(sd_meta, Mapping) else {}
+            supplement_status = None
+            if prefer_dynamic_job_index and result_meta.get("careers_link_lookup_incomplete") is True:
+                try:
+                    supplement = await _scrape_exa(url)
+                except Exception:
+                    supplement = {"ok": False, "stage": "exa_exception"}
+                supplement_text = str(supplement.get("content") or "")
+                accepted = bool(supplement.get("ok") and supplement_text.strip()
+                                and _looks_textual(supplement_text)
+                                and not _has_anti_bot_marker(supplement_text))
+                supplement_status = {
+                    "url": url, "source": "exa_careers_link_fallback",
+                    "stage": supplement.get("stage"),
+                    "sd_stage": sd.get("stage"),
+                    "accepted": accepted,
+                    "original_text_chars": len(str(sd.get("content") or "")),
+                    "supplement_text_chars": len(supplement_text),
+                }
+                if accepted:
+                    observed = list(result_meta.get("observed_ownership_links") or [])
+                    observed.extend(_observed_ownership_links(supplement_text, url))
+                    result_meta["observed_ownership_links"] = sorted(observed,
+                        key=lambda link: _ownership_link_priority(link["url"], link["label"]))[:80]
+                    # One exact-source result avoids ambiguous duplicate URL
+                    # bodies. Keep the accepted original and append bounded text.
+                    original = str(sd.get("content") or "")
+                    remaining = max(0, max_chars - len(original) - 2)
+                    sd = {**sd, "content": original + ("\n\n" + supplement_text[:remaining] if remaining else "")}
             listing_receipt = _careers_index_receipt(result_meta)
             if listing_receipt is not None:
                 result_meta.update(listing_receipt)
             elif _lever_posting_identity(url) is not None:
                 result_meta.setdefault("kind", "lever_job")
-            supplement_status = None
             if not prefer_dynamic_job_index:
                 sd, supplement_status = await _supplement_partial_article(sd, url, max_chars=max_chars)
             results.append({
@@ -5603,6 +5776,20 @@ async def verify_three_stage(
     ats_posting_urls = [url for url in row["claimed_source_urls"]
                         if _is_recognized_ats_posting(url)]
     require_ats_employer_identity = is_hiring_claim and bool(ats_posting_urls)
+    ownership_observation_urls = list(ats_posting_urls)
+    if integrity_policy and is_hiring_claim:
+        for url in row["claimed_source_urls"]:
+            parsed_job = urlsplit(url)
+            board = _ats_board_identity(url)
+            if ((board and board[0] == "icims") or (
+                parsed_job.scheme == "https"
+                and parsed_job.hostname == "recruiting.paylocity.com"
+                and re.fullmatch(r"/recruiting/jobs/details/[1-9][0-9]*(?:/[a-z0-9_-]+){0,2}/?", parsed_job.path, re.I)
+                and not parsed_job.query and not parsed_job.fragment
+                and not parsed_job.username and not parsed_job.password
+                and parsed_job.port is None
+            )) and url not in ownership_observation_urls:
+                ownership_observation_urls.append(url)
 
     # Structural same-entity override: when the source URL is on the
     # lead's own ``company_website`` host (or subdomain), or on the
@@ -6042,10 +6229,27 @@ async def verify_three_stage(
         combined_for_gate = "\n".join(
             (r.get("text") or "") for r in (contents.get("results") or [])
         )
-        if (
-            not _looks_like_job_body(combined_for_gate)
-            and not first_party_careers_listing_count
-        ):
+        has_body_anchors = _looks_like_job_body(combined_for_gate)
+        official_posting_deferred = bool(
+            integrity_policy and is_hiring_claim and company_quality
+            and any(_substantial_official_posting_body(
+                result, fetch_source_url,
+                trusted_official=_on_verified_company_property,
+                native_api_status=native_ats_status,
+            ) for result in contents.get("results") or [])
+        )
+        contents.setdefault("statuses", []).append({
+            "stage": "job_body_gate",
+            "reason": (
+                "body_anchors" if has_body_anchors else
+                "observed_careers_listing" if first_party_careers_listing_count else
+                "substantial_official_posting_deferred_to_judge" if official_posting_deferred else
+                "body_unproven"
+            ),
+            "text_chars": len(combined_for_gate),
+            "result_count": len(contents.get("results") or []),
+        })
+        if not (has_body_anchors or first_party_careers_listing_count or official_posting_deferred):
             return {
                 "client_ready": False,
                 "decision": "reject",
@@ -6083,14 +6287,15 @@ async def verify_three_stage(
     ats_ownership = None
     # Publisher credit applies to every Arena evidence type. Keep the stricter
     # hiring approval guard separate from this existing bounded ownership lookup.
-    if require_ats_employer_identity or (integrity_policy and ats_posting_urls):
+    if require_ats_employer_identity or (integrity_policy and ownership_observation_urls):
         ats_ownership = await _resolve_ats_employer_ownership(
             contents,
-            ats_posting_urls,
+            ownership_observation_urls,
             verified_identity_context,
             row["claimed_source_urls"],
         )
         row["_ats_employer_ownership"] = ats_ownership
+        row["_ats_ownership_required"] = require_ats_employer_identity
     # ── STAGE 3: source-grounded final judge ───────────────────────
     funding_stage_sources = []
     stage_context_valid = False
@@ -6653,15 +6858,15 @@ async def verify_three_stage(
         _normalize_url(item.get("url") or "") in cited_urls
         and (
             (_url_on_verified_company_identity(str(item.get("url") or ""), verified_identity_context)
-             and _looks_like_job_body(str(item.get("text") or "")))
+             and (_looks_like_job_body(str(item.get("text") or ""))
+                  or _substantial_official_posting_body(item, str(item.get("url") or ""), trusted_official=True)))
             or ((item.get("meta") or {}).get("kind") == "linkedin_job"
                 and bool(_extract_linkedin_job_id(str(item.get("url") or ""))))
         )
         for item in contents.get("results") or []
     ))
     if require_ats_employer_identity and s3_decision == "approve":
-        cited_ats = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []
-                     if _is_recognized_ats_posting(url)}
+        cited_ats = cited_urls.intersection(_normalize_url(url) for url in ats_posting_urls)
         if ((cited_ats and not cited_ats.issubset(owned))
             or (not cited_ats and not grounded_alternative_job)):
             s3_decision = "review"
@@ -6697,6 +6902,12 @@ async def verify_three_stage(
         and (
             _looks_like_job_body(combined_text)
             or bool(first_party_careers_listing_count)
+            or any(_substantial_official_posting_body(
+                item, str(item.get("url") or ""),
+                trusted_official=bool(integrity_policy and is_hiring_claim and company_quality
+                    and _url_on_verified_company_identity(str(item.get("url") or ""), verified_identity_context)),
+                native_api_status=native_ats_status,
+            ) for item in contents.get("results") or [])
         )
         and (
             official_publisher_binding
@@ -6805,6 +7016,12 @@ async def verify_three_stage(
             item["url"] for item in contents.get("results") or []
             if (
                 _looks_like_job_body(item.get("text") or "")
+                or _substantial_official_posting_body(
+                    item, str(item.get("url") or ""),
+                    trusted_official=bool(is_hiring_claim and company_quality
+                        and _url_on_verified_company_identity(str(item.get("url") or ""), verified_identity_context)),
+                    native_api_status=native_ats_status,
+                )
                 or (
                     first_party_careers_listing_count
                     and _normalize_url(item.get("url") or "")

@@ -194,4 +194,3 @@ def test_replacement_rejects_nontransport_or_reused_authority(current, fault):
             finite.grant(p, request_id='replacement', approval='approval:replacement')
     p.c.rollback()
     assert base.snapshot(p) == rows
-

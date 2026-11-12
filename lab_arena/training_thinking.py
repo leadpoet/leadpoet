@@ -1449,12 +1449,9 @@ def _judge_frozen_route_error(example, call, *, individual=False):
     candidates = annotation.get('judge_provider_routing')
     if candidates is not None:
         try:
-            plan = reasoning_capture.validate_judge_provider_routing(
-                configuration.get('judge_provider_routing'),
-                configuration.get('reasoning_route_registry'), policy)
-            if candidates != reasoning_capture.judge_transport_candidates(
-                    annotation, configuration.get('reasoning_route_registry'), plan.get(model)):
-                return 'judge_frozen_provider_route_mismatch'
+            reasoning_capture.recorded_judge_transport_routes(
+                annotation, configuration.get('reasoning_route_registry'),
+                configuration.get('judge_provider_routing'), policy)
         except (ValueError, TypeError, KeyError, AttributeError):
             return 'judge_frozen_provider_route_mismatch'
     return ''

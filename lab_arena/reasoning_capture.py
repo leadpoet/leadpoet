@@ -233,6 +233,33 @@ def judge_transport_candidates(annotation: Mapping[str, Any], registry: Any,
     return copy.deepcopy(candidates)
 
 
+def recorded_judge_transport_routes(annotation: Mapping[str, Any], registry: Any,
+                                    document: Any, scorer_policy: Mapping[str, Any]) -> list[str]:
+    """Keep recorded priority while requiring the exact authorized candidate set."""
+    plan = validate_judge_provider_routing(document, registry, scorer_policy)
+    primary = json.loads(scorer_policy["env_bindings"]["ARENA_JUDGE_PROVIDER_ROUTES"])
+    model = annotation.get("model_id")
+    if not primary.get(model) or annotation.get("provider_route") != primary[model]:
+        raise ValueError("unapproved judge transport route")
+    expected = judge_transport_candidates(annotation, registry, plan.get(model))
+    recorded = annotation.get("judge_provider_routing")
+    if (not isinstance(recorded, list) or len(recorded) != len(expected)
+            or any(not isinstance(row, Mapping) for row in recorded)):
+        raise ValueError("unapproved judge transport route")
+    providers = [row.get("provider") for row in recorded]
+    authorized = {row["provider"]: row for row in expected}
+    if (any(not isinstance(provider, str) for provider in providers)
+            or len(set(providers)) != len(providers) or set(providers) != set(authorized)):
+        raise ValueError("unapproved judge transport route")
+    for row, provider in zip(recorded, providers):
+        # Canonical equality keeps every reviewed field and JSON type exact;
+        # registry approval alone cannot add a provider or change its descriptor.
+        if json.dumps(dict(row), sort_keys=True, separators=(",", ":"), allow_nan=False) != json.dumps(
+                authorized[provider], sort_keys=True, separators=(",", ":"), allow_nan=False):
+            raise ValueError("unapproved judge transport route")
+    return providers
+
+
 def _apply_full(operation_id: str, parameters: Mapping[str, Any],
                 registry: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     frozen = validate_registry(registry)

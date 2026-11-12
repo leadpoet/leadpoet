@@ -95,6 +95,10 @@ class ScorerPolicyConflict(ScoringError):
     """The process environment conflicts with the signed scorer policy."""
 
 
+class _JudgeExhausted(ScoringError):
+    """The native judge used its existing local attempt limit."""
+
+
 
 # ---------------------------------------------------------------------------
 # Policy
@@ -787,7 +791,7 @@ def score_work_item(
                 unresolved_failures
             )
             continue
-    raise ScoringError(
+    raise _JudgeExhausted(
         ("judge_exhausted attempts=%d reason=%s %s"
          % (attempts, last_failure_reason or "unknown", last_private_diagnostic))[
              :MAX_FAILURE_DETAIL_CHARS
@@ -821,9 +825,14 @@ def _score_legacy_company_work_item(
     for miss in lease["misses"]:
         first_miss.setdefault(miss["cache_key"], miss)
     new_judgments = []
+    failures_by_key = {}
+    deferred_indexes = set()
     def resolve(index):
         ref = refs[index]
         key = ref["cache_key"]
+        if key in failures_by_key:
+            deferred_indexes.add(index)
+            return None
         if key not in raw_by_key:
             from contextlib import nullcontext
             from qualification.scoring.signal_judgment_cache import install_exchange
@@ -834,8 +843,15 @@ def _score_legacy_company_work_item(
             with (install_exchange(exchange_signal) if signal_exchange is not None else nullcontext()), \
                  (install_company_fit_exchange(exchange_signal)
                   if signal_exchange is not None and enabled() else nullcontext()):
-                rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
-                                       _original_company_indexes=[index])
+                try:
+                    rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
+                                           _original_company_indexes=[index])
+                except _JudgeExhausted as exc:
+                    # Keep the ordered pre-provider gates, while allowing later
+                    # independent companies to checkpoint their real judgments.
+                    failures_by_key[key] = exc
+                    deferred_indexes.add(index)
+                    return None
             if len(rows) != 1:
                 raise ScoringError("intrinsic company judgment is missing")
             raw = {**raw_company_judgment(rows[0]), "company_judgment_policy": company_judgments.POLICY}
@@ -852,7 +868,10 @@ def _score_legacy_company_work_item(
     scored, _ = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
     full = apply_company_judgment_context(sliced, [None] * len(sliced), company_quality=False,
                                         scored_indexes=scored, resolve_raw=resolve,
+                                        deferred_indexes=deferred_indexes,
                                         company_input_contract=getattr(scorer, "company_input_contract", ""))
+    if failures_by_key:
+        raise next(iter(failures_by_key.values()))
     validate_breakdowns_for_item(full, icp=icp, companies=sliced,
         max_scored_companies=max_scored_companies, integrity_policy=True)
     return full, company_judgments.validate_new_company_judgments(

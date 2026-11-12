@@ -166,6 +166,224 @@ def test_failure_keeps_prior_completed_intrinsic_and_retry_uses_it(monkeypatch):
     assert "failure" not in retry and calls[-1] == "B" and calls.count("A") == 1
 
 
+@pytest.mark.parametrize("later_verdict", ["match", "mismatch", "inconclusive"])
+def test_failed_first_company_keeps_later_completed_judgments(monkeypatch, later_verdict):
+    calls, checkpoints = [], []
+    failed = True
+
+    async def transient(**kwargs):
+        name = kwargs["company"].company_name
+        calls.append(name)
+        if name == "A" and failed:
+            raise RuntimeError("provider unavailable")
+        row = _positive_breakdown(name, name.lower()+".example")
+        if later_verdict != "match":
+            row.update(final_score=0.0, failure_reason="Company fit unavailable", intent_signals_detail=[])
+            row["verifier_gate_receipts"][0]["decision"] = (
+                "unavailable" if later_verdict == "inconclusive" else "mismatch"
+            )
+            if later_verdict == "inconclusive":
+                row["verifier_gate_receipts"][0]["failure_class"] = "insufficient_fit_evidence"
+        return row
+
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
+    output = _score(_input(), on_company_judgments=lambda rows: checkpoints.append(copy.deepcopy(rows)))
+    assert output["failure"] == "judge_error"
+    assert "breakdowns" not in output
+    assert calls == ["A", "A", "A", "B"]
+    assert [row["company_index"] for row in output["company_judgments"]] == [1]
+    assert [len(rows) for rows in checkpoints] == [1]
+    assert output["company_judgments"][0]["raw_judgment"]["final_score"] == (60 if later_verdict == "match" else 0)
+    assert output["detail"].startswith("judge_exhausted attempts=3 ")
+    saved = {row["cache_key"]: row["raw_judgment"] for row in output["company_judgments"]}
+    failed = False
+    retry = _score(_input(), saved)
+    assert "failure" not in retry
+    assert calls == ["A", "A", "A", "B", "A"]
+
+
+def test_failed_cache_key_is_not_retried_at_later_duplicate_index(monkeypatch):
+    calls = []
+
+    async def transient(**kwargs):
+        name = kwargs["company"].company_name
+        calls.append(name)
+        if name == "A":
+            raise RuntimeError("provider unavailable")
+        return _positive_breakdown(name, name.lower()+".example")
+
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
+    output = _score(_input(("A", "A", "B")))
+    assert output["failure"] == "judge_error" and "breakdowns" not in output
+    assert calls == ["A", "A", "A", "B"]
+    assert [row["company_index"] for row in output["company_judgments"]] == [2]
+
+
+def test_deferred_failure_preserves_cached_verified_duplicate_gate(judge, monkeypatch):
+    document = _input(("A", "B", "B", "C"))
+    original = _score(_input(("B",)))
+    saved = {row["cache_key"]: row["raw_judgment"] for row in original["company_judgments"]}
+    judge.clear()
+    document["companies"][2]["intent_signals"][0]["url"] += "-other-evidence"
+
+    async def transient(**kwargs):
+        name = kwargs["company"].company_name
+        judge.append(name)
+        if name == "A":
+            raise RuntimeError("provider unavailable")
+        return _positive_breakdown(name, name.lower()+".example")
+
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
+    output = _score(document, saved)
+    assert output["failure"] == "judge_error"
+    assert judge == ["A", "A", "A", "C"]
+    assert [row["company_index"] for row in output["company_judgments"]] == [3]
+
+
+def test_later_company_uses_original_signal_and_fit_exchange_index(judge, monkeypatch):
+    from lab_arena import signal_cache_control
+    from qualification.scoring import company_fit_evidence_reuse, signal_judgment_cache
+
+    policy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2",
+        company_judgment_cache=True, evidence_judgment_cache=True)
+    original = _score(_input(("A", "B", "C"), policy=policy))
+    saved = {row["cache_key"]: row["raw_judgment"] for row in original["company_judgments"]}
+    judge.clear()
+    exchanges = []
+
+    async def exchange(request):
+        exchanges.append(request)
+        return {}
+
+    async def transient(**kwargs):
+        name = kwargs["company"].company_name
+        judge.append(name)
+        await signal_judgment_cache.current_exchange()({"operation": "lookup", "signal_index": 0})
+        await company_fit_evidence_reuse.current_exchange()({"operation": "lookup"})
+        if name == "D":
+            raise RuntimeError("provider unavailable")
+        return _positive_breakdown(name, name.lower()+".example")
+
+    monkeypatch.setattr(signal_cache_control, "exchange", exchange)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
+    output = _score(_input(("A", "B", "C", "D", "E"), policy=policy), saved)
+    assert output["failure"] == "judge_error" and "breakdowns" not in output
+    assert judge == ["D", "D", "D", "E"]
+    assert [(row["company_index"], row["signal_index"]) for row in exchanges] == [
+        (3, 0), (3, -1), (3, 0), (3, -1), (3, 0), (3, -1), (4, 0), (4, -1),
+    ]
+    assert [row["company_index"] for row in output["company_judgments"]] == [4]
+    assert signal_judgment_cache.current_exchange() is None
+    assert company_fit_evidence_reuse.current_exchange() is None
+
+
+def test_deferred_failure_preserves_schema_bucket_and_max_gates(monkeypatch):
+    calls = []
+    document = _input(("A", "B", "C", "D", "E"))
+    document["companies"][1]["employee_count"] = "1-10"
+    document["companies"][2]["company_linkedin"] = "https://www.linkedin.com/company/acme%2Fposts"
+    document["scorer_policy"]["max_scored_companies"] = 3
+
+    async def transient(**kwargs):
+        name = kwargs["company"].company_name
+        calls.append(name)
+        if name == "A":
+            raise RuntimeError("provider unavailable")
+        return _positive_breakdown(name, name.lower()+".example")
+
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
+    output = _score(document)
+    assert output["failure"] == "judge_error"
+    assert calls == ["A", "A", "A", "D"]
+    assert [row["company_index"] for row in output["company_judgments"]] == [3]
+
+
+def test_first_native_exhaustion_is_raised_unchanged_after_independent_progress(monkeypatch):
+    document = _input(("A", "B", "C"))
+    first = scoring._JudgeExhausted("first private diagnostic", failure_reason="provider_error")
+    second = scoring._JudgeExhausted("second private diagnostic", failure_reason="malformed_response")
+    calls, checkpoints = [], []
+
+    def score_one(_item, *, companies, _original_company_indexes, **_kwargs):
+        name = companies[0]["company_name"]
+        calls.append((name, _original_company_indexes))
+        if name in {"A", "B"}:
+            raise first if name == "A" else second
+        return apply_company_judgment_context(
+            companies, [_positive_breakdown(name, name.lower()+".example")], company_quality=False,
+        )
+
+    monkeypatch.setattr(scoring, "score_work_item", score_one)
+    scorer = scoring.lab_scorer(document["scorer_policy"])
+    with pytest.raises(scoring.ScoringError) as caught:
+        scoring.score_quality_work_item({}, icp=document["icp"], companies=document["companies"],
+            scorer=scorer, cache_context=_lease(document), on_company_judgments=checkpoints.append)
+    assert caught.value is first
+    assert calls == [("A", [0]), ("B", [1]), ("C", [2])]
+    assert [row["company_index"] for row in checkpoints[-1]] == [2]
+
+
+@pytest.mark.parametrize("fatal", [scoring.ScoringError("contract failure"), RuntimeError("programming failure")])
+def test_non_exhaustion_failures_stop_before_later_company(monkeypatch, fatal):
+    document = _input()
+    calls = []
+
+    def score_one(_item, *, companies, **_kwargs):
+        calls.append(companies[0]["company_name"])
+        raise fatal
+
+    monkeypatch.setattr(scoring, "score_work_item", score_one)
+    with pytest.raises(type(fatal)) as caught:
+        scoring.score_quality_work_item({}, icp=document["icp"], companies=document["companies"],
+            scorer=scoring.lab_scorer(document["scorer_policy"]), cache_context=_lease(document))
+    assert caught.value is fatal and calls == ["A"]
+
+
+def test_native_scorer_count_contract_error_stops_before_later_company():
+    document = _input()
+    calls = []
+
+    def malformed(companies, _buyer, _reference):
+        calls.append(companies[0]["company_name"])
+        return []
+
+    malformed.integrity_policy = True
+    malformed.company_quality = False
+    with pytest.raises(scoring.ScoringError, match="0 breakdowns for 1") as caught:
+        scoring.score_quality_work_item({}, icp=document["icp"], companies=document["companies"],
+            scorer=malformed, cache_context=_lease(document))
+    assert not isinstance(caught.value, scoring._JudgeExhausted)
+    assert calls == ["A"]
+
+
+@pytest.mark.parametrize("fault", ["checkpoint", "cache"])
+def test_checkpoint_or_cache_failure_stops_walk_even_after_deferred_failure(monkeypatch, fault):
+    document = _input(("A", "B", "C"))
+    calls = []
+    fatal = scoring.ScoringError("checkpoint or cache contract failure")
+
+    def score_one(_item, *, companies, **_kwargs):
+        name = companies[0]["company_name"]
+        calls.append(name)
+        if name == "A":
+            raise scoring._JudgeExhausted("judge exhausted", failure_reason="provider_error")
+        return apply_company_judgment_context(
+            companies, [_positive_breakdown(name, name.lower()+".example")], company_quality=False,
+        )
+
+    def fail(*_args, **_kwargs):
+        raise fatal
+
+    monkeypatch.setattr(scoring, "score_work_item", score_one)
+    if fault == "cache":
+        monkeypatch.setattr(company_judgments, "validate_new_company_judgments", fail)
+    with pytest.raises(scoring.ScoringError) as caught:
+        scoring.score_quality_work_item({}, icp=document["icp"], companies=document["companies"],
+            scorer=scoring.lab_scorer(document["scorer_policy"]), cache_context=_lease(document),
+            on_company_judgments=fail if fault == "checkpoint" else None)
+    assert caught.value is fatal and calls == ["A", "B"]
+
+
 def test_bucket_max_and_malformed_skips_are_not_cached_or_judged(judge):
     document = _input(("A", "B", "C"))
     document["companies"][0]["employee_count"] = "1-10"

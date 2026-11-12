@@ -163,6 +163,28 @@ def test_prompt_reserves_and_for_requirements_every_company_must_meet(monkeypatc
     assert 'do not turn it into an alternative merely to broaden the ICP' in prompt
 
 
+def test_prompt_keeps_hiring_intents_provable_from_one_posting(monkeypatch):
+    """The 2026-11-05 and 2026-11-11 rounds each had a hiring intent that
+    asked for roles "in multiple locations" or "across multiple openings".
+    The intent check passed for 23 of 89 rows on those two ICPs, against 32
+    of 36 on a plain hiring ICP in the 2026-11-11 round. One posting proves
+    one opening, so the prompt must tell the author not to ask for more."""
+    monkeypatch.setattr(ig, "OPENROUTER_API_KEY", "")
+    prepared = asyncio.run(ig.prepare_icp_probe_request(
+        "icp_generation", set_id=20261111, total_icps=10,
+    ))
+    prompt = "\n".join(
+        message["content"] for message in prepared["request"]["messages"]
+        if isinstance(message.get("content"), str)
+    )
+    assert "ONE JOB POSTING MUST BE ENOUGH PROOF" in prompt
+    assert 'Name the role families only, joined with "or"' in prompt
+    assert 'Do not add\na count or spread condition such as "multiple openings"' in prompt
+    assert "one posting proves one opening in one place" in prompt
+    # The prompt's own hiring example must stay provable from one posting.
+    assert "Actively hiring for platform, integration, or revenue-operations roles" in prompt
+
+
 def test_generated_brief_states_structured_required_and_bonus_intents():
     primary = "Announced a strategic partnership in the last 12 months."
     bonus = "Announced a leadership change in the last 12 months."

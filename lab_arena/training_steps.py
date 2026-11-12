@@ -796,14 +796,11 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
             configuration = training_dataset.label_scorer_configuration(example)
             policy = contracts.validate_scorer_policy(configuration.get('scorer_policy'))
             registry = configuration.get('judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))
-            plan = reasoning_capture.validate_judge_provider_routing(
-                configuration.get('judge_provider_routing'), registry, policy)
-            model = annotation.get('model_id')
-            primary = json.loads(policy['env_bindings'][contracts.JUDGE_PROVIDER_ROUTES_BINDING]).get(model)
-            transport_routes = plan.get(model)
-            _require(primary == annotation.get('provider_route') and annotation['judge_provider_routing'] ==
-                     reasoning_capture.judge_transport_candidates(annotation, registry, transport_routes),
-                     'request_provider_route_mismatch')
+            try:
+                transport_routes = reasoning_capture.recorded_judge_transport_routes(
+                    annotation, registry, configuration.get('judge_provider_routing'), policy)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                _require(False, 'request_provider_route_mismatch')
         _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route'),
                                                              transport_routes=transport_routes),
                  'request_provider_route_mismatch')

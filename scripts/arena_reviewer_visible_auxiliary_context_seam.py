@@ -79,9 +79,13 @@ def convert_visible_auxiliary_context_seam(source: bytes) -> bytes:
 
 
 # The submitted-attribute auxiliary uses the same unchanged visible-body
-# validator. This independent one-file correction preserves the d657 runtime.
+# validator. Both independently verified image bases contain identical source.
 SUBMITTED_CORRECTION_ID = "visible_submitted_company_context_v1"
 SUBMITTED_FROZEN_IMAGE_DIGEST = "sha256:d6574b368e228b08f2136322e4eaf52f5d8bc9ab7b02f979d0195e60e51a8bc0"
+SUBMITTED_FROZEN_IMAGE_DIGESTS = frozenset({
+    SUBMITTED_FROZEN_IMAGE_DIGEST,
+    "sha256:50deca7b8bf5129816abaeb59fd5bc1aabb554c529cc4151b8175f9edd0b8144",
+})
 SUBMITTED_ORIGINAL_SHA256 = "f783730a48ea0196fce6983dfa75f42b068662219bfb965cd216ec5c0efc8c3a"
 SUBMITTED_REPAIRED_SHA256 = "d1dbdd48d89ec52218c0e82270771f88924d40b4a4216fab98ba444a174cd08c"
 _SUBMITTED_BEFORE = '''    submitted_name = (

@@ -1,4 +1,4 @@
-"""The exact d657 overlay changes only optional submitted-source admission."""
+"""Exact d657 and 50de overlays change only optional source admission."""
 import ast
 import copy
 import hashlib
@@ -65,10 +65,11 @@ def test_frozen_source_reproduces_then_corrects_real_preflight(monkeypatch):
 
 
 @pytest.mark.parametrize("verify_existing", [False, True])
-def test_composer_proves_one_file_one_layer_and_unchanged_configuration(monkeypatch, capsys, verify_existing):
-    base_ref = "registry.example/reviewer@" + seam.SUBMITTED_FROZEN_IMAGE_DIGEST
+@pytest.mark.parametrize("base_digest", sorted(seam.SUBMITTED_FROZEN_IMAGE_DIGESTS))
+def test_composer_proves_one_file_one_layer_and_unchanged_configuration(monkeypatch, capsys, verify_existing, base_digest):
+    base_ref = "registry.example/reviewer@" + base_digest
     tag = composer.bounded_build_tag(
-        "registry.example/reviewer:reviewer-" + seam.SUBMITTED_FROZEN_IMAGE_DIGEST[7:19]
+        "registry.example/reviewer:reviewer-" + base_digest[7:19]
         + "-" + "c" * 12 + "-submitted-company-context"
     )
     candidate_ref = "registry.example/reviewer@sha256:" + "b" * 64 if verify_existing else tag
@@ -112,8 +113,15 @@ def test_exclusive_mode_rejects_other_repairs_before_docker(monkeypatch, options
 def test_wrong_frozen_image_fails_before_docker(monkeypatch):
     monkeypatch.setattr(composer.sys, "argv", ["build_arena_reviewer_runtime.py", "--grading-image",
         "registry.example/reviewer@sha256:" + "0" * 64, "--submitted-company-context-only"])
-    with pytest.raises(composer.CompositionError, match="exact frozen d657"):
+    with pytest.raises(composer.CompositionError, match="exact frozen d657 or 50de"):
         composer.main()
+
+
+def test_only_the_two_independently_verified_bases_are_allowed():
+    assert seam.SUBMITTED_FROZEN_IMAGE_DIGESTS == {
+        "sha256:d6574b368e228b08f2136322e4eaf52f5d8bc9ab7b02f979d0195e60e51a8bc0",
+        "sha256:50deca7b8bf5129816abaeb59fd5bc1aabb554c529cc4151b8175f9edd0b8144",
+    }
 
 
 @pytest.mark.parametrize("change", [None, "bytes", "extra_file"])

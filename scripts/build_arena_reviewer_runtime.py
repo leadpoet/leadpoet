@@ -40,7 +40,8 @@ Its --visible-auxiliary-context sub-option also aligns optional context admissio
 and ranking with the unchanged paragraph consumer's visible surface.
 
 The exclusive --submitted-company-context-only mode aligns that same visible
-surface for the submitted-attribute auxiliary in the exact frozen d657 runtime.
+surface for the submitted-attribute auxiliary in exact d657 and 50de images.
+Both bases must contain the same checksum-bound original source.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -506,7 +507,7 @@ def main() -> int:
     parser.add_argument("--push", action="store_true")
     parser.add_argument(
         "--submitted-company-context-only", action="store_true",
-        help="compose only the reviewed submitted-company visible-context correction on exact d657",
+        help="compose only the reviewed submitted-company visible-context correction on exact d657 or 50de",
     )
     parser.add_argument(
         "--legacy-company-progress-only", action="store_true",
@@ -681,9 +682,9 @@ def main() -> int:
     if not match:
         raise CompositionError("grading image must be pinned by digest")
     if args.submitted_company_context_only:
-        from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_FROZEN_IMAGE_DIGEST
-        if match[2] != SUBMITTED_FROZEN_IMAGE_DIGEST:
-            raise CompositionError("submitted company context requires the exact frozen d657 image")
+        from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_FROZEN_IMAGE_DIGESTS
+        if match[2] not in SUBMITTED_FROZEN_IMAGE_DIGESTS:
+            raise CompositionError("submitted company context requires exact frozen d657 or 50de")
     if args.legacy_company_progress_only:
         from scripts.arena_reviewer_legacy_company_progress_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:

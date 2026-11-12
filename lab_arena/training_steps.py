@@ -757,7 +757,8 @@ def _unlabeled_judge_attempt(example, call):
             from lab_arena import training_thinking
             source = [row for row in example.get('attempts') or []
                       if row.get('run_id') == example.get('run_id')]
-            if (len(source) != 1 or source[0].get('status') != 'accepted'
+            if (attempt.get('terminal_cause') != 'accepted'
+                    or len(source) != 1 or source[0].get('status') != 'accepted'
                     or 'icp' not in example['input_snapshots'][identity]['input']
                     or not _individual_run_input_valid(example, example.get('run_id'), 'execute')
                     or not training_thinking.verified_output_projection(example)

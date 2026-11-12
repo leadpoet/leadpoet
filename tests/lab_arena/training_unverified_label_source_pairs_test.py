@@ -115,7 +115,7 @@ def test_accepted_judge_with_unverified_final_labels_keeps_only_exact_unlabeled_
 @pytest.mark.parametrize('damage', ['source_input_missing', 'source_input_privacy', 'source_input_claim',
     'source_input_icp', 'source_status', 'judge_input_missing', 'judge_input_hash', 'judge_input_claim',
     'judge_input_companies', 'judge_input_policy', 'judge_input_icp', 'judge_input_icp_missing',
-    'judge_input_scored_run', 'judge_scored_run', 'judge_runtime', 'judge_runtime_grading',
+    'judge_input_scored_run', 'judge_scored_run', 'judge_runtime', 'judge_runtime_grading', 'judge_terminal',
     'output_hash', 'output_body', 'request_privacy', 'request_hash', 'response_privacy', 'response_body',
     'delivery', 'worker_hash', 'route', 'history', 'unknown_label_gap'])
 def test_unverified_final_labels_do_not_waive_accepted_judge_pair_evidence(damage):
@@ -141,6 +141,7 @@ def test_unverified_final_labels_do_not_waive_accepted_judge_pair_evidence(damag
     elif damage == 'judge_runtime': example['attempts'][-1].pop('runtime_identity')
     elif damage == 'judge_runtime_grading':
         example['attempts'][-1]['runtime_identity']['grading_image_digest'] = 'sha256:' + 'd' * 64
+    elif damage == 'judge_terminal': example['attempts'][-1]['terminal_cause'] = 'judge_timeout'
     elif damage == 'output_hash': example['output_identity']['document_hash'] = contracts.hash_bytes(b'foreign')
     elif damage == 'output_body': example['output']['companies'] = [{'foreign': True}]
     elif damage == 'request_privacy': call['request_capture'] = {'redacted': True}

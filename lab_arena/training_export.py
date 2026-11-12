@@ -806,6 +806,46 @@ def response_entry_id(call):
     return selected
 
 
+def _recovered_deepline_operation(call, request, reservations):
+    """Resolve the broker's recorded compatibility transport, never a new route."""
+    operation = operations.get_operation(call.get("operation_id"))
+    if operation is None or operation.provider == "deepline":
+        return operation
+    from lab_arena import scoring_provider_compat
+    route = request.get("route") or {}
+    recorded = (reservations[0].get("accounting") or {}) if len(reservations) == 1 else {}
+    effective = operations.get_operation(request.get("effective_operation_id"))
+    parameters = request.get("effective_parameters") or {}
+    outbound = request.get("outbound") or {}
+    if not all(isinstance(value, Mapping) for value in (route, recorded, parameters, outbound)):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    body = outbound.get("body")
+    fields = ("effective_operation_id", "compatibility_version", "adapter")
+    if (operation.provider != "scrapingdog" or call.get("provider") != "deepline"
+        or request.get("operation_id") != call.get("operation_id")
+        or set(route) != set(fields)
+        or any(route.get(key) != recorded.get(key) for key in fields)
+        or route.get("compatibility_version") not in {
+            scoring_provider_compat.COMPATIBILITY_VERSION,
+            scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION}
+        or not isinstance(route.get("adapter"), str) or not route["adapter"]
+        or effective is None or effective.operation_id != scoring_provider_compat.EFFECTIVE_OPERATION_ID
+        or effective.provider != "deepline" or route["effective_operation_id"] != effective.operation_id
+        or not isinstance(parameters.get("tool"), str)
+        or parameters["tool"] not in operations.DEEPLINE_TOOL_PROVIDERS
+        or recorded.get("tool") != parameters.get("tool")
+        or not isinstance(body, Mapping)
+        or body != {"provider": operations.DEEPLINE_TOOL_PROVIDERS.get(parameters.get("tool")),
+                    "operation": parameters.get("tool"), "payload": parameters.get("payload")}
+        or outbound.get("method") != effective.method
+        or outbound.get("host") != effective.host
+        or outbound.get("path") != operations._render_path(effective, parameters)
+        or outbound.get("query") not in (None, {})
+        or not operations.outbound_body_hash_matches(effective.operation_id, body, outbound.get("body_sha256"))):
+        raise ExportError("recovered_deepline_response_identity_invalid")
+    return effective
+
+
 def recovered_response_ref(call):
     """Validate the separate saved Deepline response; it is not a ledger row."""
     ref = call.get("recovered_response_ref")
@@ -819,7 +859,7 @@ def recovered_response_ref(call):
     reservations = [row for row in call.get("lifecycle", []) if row.get("entry_kind") == "reservation"]
     request = call.get("request") or {}
     parameters = request.get("effective_parameters") or {}
-    operation = operations.get_operation(call.get("operation_id"))
+    operation = _recovered_deepline_operation(call, request, reservations)
     tool = (operation.deepline_tool or parameters.get("tool")) if operation is not None else None
     provider_cost = metadata.get("provider_cost") or {}
     if (ref.get("table") != "lab_arena_deepline_call_responses"
@@ -1123,6 +1163,7 @@ def _calls(rows, run_ids, objects, run_order):
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
                              "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
+                             "effective_operation_id", "compatibility_version", "adapter", "tool",
                              "transport_elapsed_ms", "timing_scope",
                              "transport_not_started", "undispatched_dispatch_entry_id"}
         call["lifecycle"] = []

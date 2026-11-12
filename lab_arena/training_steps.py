@@ -483,7 +483,7 @@ def _worker_artifact(example, call, *, allow_journal_prefix=False):
     if field is None:
         return (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
     kind = ('execute' if run_id == example.get('run_id') else
-            'score' if run_id == example.get('score_run_id') or _failed_judge_attempt(example, call) else None)
+            'score' if run_id == example.get('score_run_id') or _unlabeled_judge_attempt(example, call) else None)
     _require(field == 'partial_worker_observation_artifacts' and allow_journal_prefix
              and training_coverage.uses_host_result_evidence(example.get('configuration') or {})
              and kind is not None, 'worker_journal_prefix_unavailable')
@@ -739,17 +739,31 @@ def _individual_run_input_valid(example, identity, kind, *, allow_absent=False):
     return True
 
 
-def _failed_judge_attempt(example, call):
-    """A failed attempt can prove an individual reply, never a final judgment."""
+def _unlabeled_judge_attempt(example, call):
+    """Bind an individual judge reply without assigning final-label authority."""
     try:
         identity = call.get('run_id')
         attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == identity]
         if (len(attempts) != 1 or attempts[0].get('kind') != 'score'
-                or attempts[0].get('status') != 'failed'
+                or attempts[0].get('status') not in {'failed', 'accepted'}
                 or attempts[0].get('scored_run_id') != example.get('run_id')
                 or not _individual_run_input_valid(example, identity, 'score')):
             return False
         attempt = attempts[0]
+        if attempt['status'] == 'accepted':
+            # Native export can retain an accepted judge whose final label
+            # could not be verified. Prove its source/output and both inputs;
+            # an unavailable label never supplies evidence for these bytes.
+            from lab_arena import training_thinking
+            source = [row for row in example.get('attempts') or []
+                      if row.get('run_id') == example.get('run_id')]
+            if (attempt.get('terminal_cause') != 'accepted'
+                    or len(source) != 1 or source[0].get('status') != 'accepted'
+                    or 'icp' not in example['input_snapshots'][identity]['input']
+                    or not _individual_run_input_valid(example, example.get('run_id'), 'execute')
+                    or not training_thinking.verified_output_projection(example)
+                    or training_thinking._partial_research_evidence(example, role='judge') is None):
+                return False
         gaps = ((example.get('related_run_gap_attribution') or {}).get(identity) or {}).get(
             'research_process_gaps') or []
         if 'prior_attempt_reviewer_runtime_identity_unverified' in gaps:
@@ -781,7 +795,7 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
         accepted = (call.get('run_id') == example.get('score_run_id')
                     and len(selected) == 1 and selected[0].get('kind') == 'score'
                     and selected[0].get('status') == 'accepted')
-        _require(accepted or _failed_judge_attempt(example, call), 'not_selected_judge_call')
+        _require(accepted or _unlabeled_judge_attempt(example, call), 'not_selected_judge_call')
     else:
         _require(role == 'source', 'invalid_target_role')
         _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
@@ -898,7 +912,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
     # Individual exporters may retain a proven prefix pair. The full-ICP
     # eligibility caller keeps the default final-snapshot requirement.
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
-    failed_judge = role == 'judge' and _failed_judge_attempt(example, call)
+    unlabeled_judge = role == 'judge' and _unlabeled_judge_attempt(example, call)
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -992,8 +1006,9 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
             'scored_output_sha256': contracts.document_hash(example['output']) if 'output' in example else None,
             'judgment_sha256': (contracts.document_hash(example.get('judgment') or {})
                                 if call['run_id'] == example.get('score_run_id') else None),
-            **({'attempt_status': 'failed', 'outcome_availability': 'unavailable'}
-               if failed_judge else {}),
+            **({'attempt_status': next(row['status'] for row in example['attempts']
+                                      if row['run_id'] == call['run_id']),
+                'outcome_availability': 'unavailable'} if unlabeled_judge else {}),
             'scorer_policy_sha256': contracts.document_hash(configuration.get('scorer_policy') or {}),
             'scorer_image_digest': configuration.get('scorer_image_digest'),
             'evidence_scope': 'exact_provider_visible_input',
@@ -1002,7 +1017,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                 'worker_receipt_ref', {}).get('payload_sha256'),
             'provider_call_sequence': call.get('action_sequence')}}
     provenance = _training_provenance(example)
-    if failed_judge:
+    if unlabeled_judge:
         # This target has no final label. The raw export still retains any
         # later accepted episode outcome, without assigning it to this reply.
         provenance['label_authority'].update(origin='unavailable', input_output_label_verified=False)
@@ -1029,7 +1044,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
                                                 and example.get('round_status') == 'published'),
                              'outcome': ({'per_icp_score': None, 'score_run_id': None}
-                                         if failed_judge else
+                                         if unlabeled_judge else
                                          {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'),
                                           'score_run_id': example.get('score_run_id')}),
                              'training_provenance': provenance,

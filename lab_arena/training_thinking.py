@@ -2196,12 +2196,11 @@ def _partial_research_evidence(example, *, role='source'):
         dimensions = proof.get('dimensions') or {}
         by_dimension = proof.get('reasons_by_dimension') or {}
         reasons = proof.get('incomplete_reasons') or []
-        unavailable_labels = {'final_judge_unavailable'}
-        if role == 'source':
-            # A saved accepted judge can still have unverified label evidence.
-            # Source pairs retain no label and prove their own exact bytes;
-            # judge targets and full-ICP assessment keep their existing gates.
-            unavailable_labels.add('judge_evidence_unverified')
+        # Accepted judge calls can prove individual pairs when final labels
+        # are unverified. Their attempt binder still requires exact source,
+        # output, both input snapshots and reviewer runtime. No full-ICP
+        # assessment or label authority follows from this absence exception.
+        unavailable_labels = {'final_judge_unavailable', 'judge_evidence_unverified'}
         if (proof.get('complete') is not False or not isinstance(reasons, list)
                 or any(not isinstance(reason, str) for reason in reasons)
                 or set(dimensions) != set(by_dimension)
@@ -2419,7 +2418,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if isinstance(identity, str) and identity not in (example.get("input_snapshots") or {}))
         partial_outcome = (example.get("score_run_id") is None or
-                           role == 'judge' and training_steps._failed_judge_attempt(example, call))
+                           role == 'judge' and training_steps._unlabeled_judge_attempt(example, call))
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   **({'role': 'judge'} if role == 'judge' else {}),
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,

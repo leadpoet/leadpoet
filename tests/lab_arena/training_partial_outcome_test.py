@@ -225,7 +225,8 @@ def test_real_failed_run_export_keeps_proven_journal_pair_without_final_output_o
 
 
 @pytest.mark.parametrize('failed_execution', [False, True])
-def test_real_partial_judge_export_keeps_exact_journal_reply_without_final_label(failed_execution):
+@pytest.mark.parametrize('judge_status', ['failed', 'accepted'])
+def test_real_partial_judge_export_keeps_exact_journal_reply_without_final_label(failed_execution, judge_status):
     from lab_arena import scoring, training_observations as obs
     from tests.lab_arena.training_export_test import CLAIM_HASH, save_input
     from tests.lab_arena.training_journal_candidates_test import journal_values
@@ -241,7 +242,8 @@ def test_real_partial_judge_export_keeps_exact_journal_reply_without_final_label
     save_input(values['objects'], judge['run_id'], 'score', scoring.build_scoring_input(
         scored_run_id=source['run_id'], icp=old_input['icps'][0], companies=output['companies'],
         policy=configuration['scorer_policy'], evaluation_date=values['round_row']['evaluation_date']))
-    judge.update(status='failed', terminal_cause='judge_timeout')
+    judge.update(status=judge_status, terminal_cause='accepted' if judge_status == 'accepted' else 'judge_timeout')
+    source['per_icp_score'] = None
     judge['result_doc']['resource_summary']['provider_call_count'] = 1
     for row in values['ledger_rows']:
         row['run_id'] = judge['run_id']
@@ -254,12 +256,18 @@ def test_real_partial_judge_export_keeps_exact_journal_reply_without_final_label
         source.update(status='failed', terminal_cause='worker_error', output_ref=None)
     example = training_export.assemble_example(**values)
     records, manifest = built(example, 'judge')
-    assert len(records) == 1, manifest
+    assert len(records) == (0 if failed_execution and judge_status == 'accepted' else 1), manifest
     assert example['companies'] == [] and 'judgment' not in example
-    assert records[0]['source_refs'][0]['outcome'] == {'per_icp_score': None, 'score_run_id': None}
+    assert training_thinking.selected_research_evidence(example, role='judge') is None
+    if judge_status == 'accepted' and not failed_execution:
+        assert 'judge_evidence_unverified' in example['completeness']['incomplete_reasons']
+    if records:
+        assert records[0]['source_refs'][0]['outcome'] == {'per_icp_score': None, 'score_run_id': None}
+        assert records[0]['source_refs'][0]['judge_context']['attempt_status'] == judge_status
     if failed_execution:
         assert 'judge_input_context_mismatch' in example['completeness']['incomplete_reasons']
-        assert records[0]['source_refs'][0]['judge_context']['scored_output_sha256'] is None
+        if records:
+            assert records[0]['source_refs'][0]['judge_context']['scored_output_sha256'] is None
 
 
 @pytest.mark.parametrize('role', ['source', 'judge'])

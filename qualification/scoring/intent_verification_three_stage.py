@@ -1951,12 +1951,18 @@ def _configured_lever_embed(
             self.scripts: list[str] = []
             self.script: Optional[list[str]] = None
             self.invalid = False
+            self.plaintext = False
 
         def handle_starttag(self, tag, attrs):
             values = dict(attrs)
             if tag in {"div", "script"} and len(values) != len(attrs):
                 self.invalid = True
-            hidden = any(inert for _, inert in self.stack) or tag in {"template", "noscript"}
+            # Browser fallback/raw-text elements do not execute nested widgets.
+            # Plaintext consumes the rest of the document, even a literal close.
+            self.plaintext = self.plaintext or tag == "plaintext"
+            hidden = self.plaintext or any(inert for _, inert in self.stack) or tag in {
+                "template", "noscript", "iframe", "xmp", "noembed", "textarea", "title",
+            }
             style = re.sub(r"\s+", "", str(values.get("style") or "")).casefold()
             hidden = hidden or "hidden" in values or str(values.get("aria-hidden") or "").casefold() == "true" \
                 or "display:none" in style or "visibility:hidden" in style

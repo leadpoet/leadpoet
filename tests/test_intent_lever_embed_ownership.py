@@ -116,3 +116,12 @@ async def test_native_careers_fetch_preserves_configured_board_without_extra_cal
 ])
 def test_inert_script_and_ambiguous_html_attributes_do_not_bind(body):
     assert not extract(body)
+
+
+@pytest.mark.parametrize('tag', ['iframe', 'xmp', 'noembed', 'plaintext', 'textarea', 'title'])
+def test_browser_inert_fallback_and_raw_text_do_not_establish_ownership(tag):
+    assert not extract(f'<{tag}>'+HTML+f'</{tag}>')
+
+
+def test_plaintext_cannot_reactivate_a_widget_with_a_literal_closing_tag():
+    assert not extract('<plaintext>example</plaintext>'+HTML)

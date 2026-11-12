@@ -41,52 +41,6 @@ def lead_profile(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def matched_buyer_request_context(
-    request: str, intent_signals: List[Any], matched_index: int,
-) -> str:
-    """Project only a complete, matching canonical intent contract.
-
-    Free-form buyer prose can hold stricter event-state requirements than the
-    normalized signal. Keep it intact unless the generated appendix proves an
-    exact ordered mapping to the current criteria.
-    """
-    marker = "\n\nIntent qualification:\n"
-    closing = (
-        "These intent requirements govern qualification. The primary intent "
-        "is required; an optional bonus cannot replace it."
-    )
-    if request.count(marker) != 1 or not 0 <= matched_index < len(intent_signals):
-        return request
-    prefix, appendix = request.split(marker, 1)
-    company_prefix = "Find companies meeting every company requirement."
-    field_names = (
-        "Industry", "Sub-industry", "Country", "Headquarters geography",
-        "Company stage", "Allowed employee size", "Product/service requirement",
-        "Required attribute",
-    )
-    if not prefix.startswith(company_prefix):
-        return request
-    clauses = prefix[len(company_prefix):].strip()
-    if clauses and any(
-        not any(clause.startswith(name + ": ") for name in field_names)
-        for clause in clauses.split("; ")
-    ):
-        return request
-    lines = appendix.splitlines()
-    if not lines or lines[-1] != closing or len(lines) != len(intent_signals) + 1:
-        return request
-    entries = []
-    for index, (line, signal) in enumerate(zip(lines[:-1], intent_signals)):
-        role = "Required primary" if index == 0 else "Optional bonus"
-        match = re.fullmatch(rf"{role} intent \(([1-9][0-9]*) days\): (.+)", line)
-        text = signal.get("text") if isinstance(signal, dict) else str(signal)
-        if not match or " ".join(match[2].split()) != " ".join((text or "").split()):
-            return request
-        entries.append((match[1], match[2]))
-    days, text = entries[matched_index]
-    return f"Chosen intent criterion ({days} days): {text}"
-
-
 def visible_signal(row: Dict[str, Any]) -> Dict[str, Any]:
     # Surface BOTH the miner's free-text claim AND the buyer's ICP signal so
     # the LLM can check semantic alignment between them.  Without
@@ -320,11 +274,7 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
 
 BUYER_REQUEST_EVENT_BLOCK = """  BUYER ORIGINAL REQUEST — MATCHED EVENT ONLY:
     buyer_original_request is the trusted buyer's natural-language ICP.
-    Apply its event and state requirements to the chosen target_icp_signal.
-    Evaluate only this chosen criterion. Other primary or bonus intent criteria
-    are not conditions for supporting this signal; the caller enforces the
-    required primary separately for overall qualification. Preserve the chosen
-    criterion's event state, time window and evidence source requirements,
+    Apply its event and state requirements to the chosen target_icp_signal,
     including words such as shipped, available, launched, introduced,
     announced, previewed, or planned. Do not turn independent company-fit,
     product-fit, contact-role, or attribute requirements in that broader request into

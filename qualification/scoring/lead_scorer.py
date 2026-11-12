@@ -15264,12 +15264,6 @@ async def _score_single_intent_signal(
             target_evidence_type = getattr(
                 target_signal_raw, "evidence_type", None,
             )
-    from qualification.scoring.prompts._common import matched_buyer_request_context
-    buyer_request_context = (
-        matched_buyer_request_context(
-            icp.prompt or "", icp_signals_for_gate, miner_asserted_idx,
-        ) if integrity_policy else ""
-    )
     import httpx
     try:
         async with httpx.AsyncClient() as http_client:
@@ -15281,7 +15275,7 @@ async def _score_single_intent_signal(
                 source_url=signal.url,
                 miner_claim=signal.description,
                 target_signal_text=target_signal_text,
-                buyer_request_context=buyer_request_context,
+                buyer_request_context=(icp.prompt or "") if integrity_policy else "",
                 miner_signal_date=(str(signal.date) if signal.date else None),
                 evidence_type=target_evidence_type,
                 declared_source=(source_lower if integrity_policy else None),

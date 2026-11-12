@@ -1929,6 +1929,94 @@ def _is_recognized_ats_posting(source_url: str) -> bool:
     )
 
 
+def _configured_lever_embed(
+    body: str, source_url: str, identity: Mapping[str, Any],
+) -> list[Dict[str, str]]:
+    """Read one supported static recruiting widget; never execute its scripts.
+
+    This proves a configured board on an official careers property, not an
+    observed job link or that the selected posting remains open.
+    """
+    if not (_url_on_verified_company_identity(source_url, identity)
+            and _is_careers_index_url(source_url)):
+        return []
+    loader = "https://andreasmb.github.io/lever-jobs-embed/index.js"
+
+    class EmbedParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack: list[tuple[str, bool]] = []
+            self.container = False
+            self.loader = False
+            self.scripts: list[str] = []
+            self.script: Optional[list[str]] = None
+            self.invalid = False
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag in {"div", "script"} and len(values) != len(attrs):
+                self.invalid = True
+            hidden = any(inert for _, inert in self.stack) or tag in {"template", "noscript"}
+            style = re.sub(r"\s+", "", str(values.get("style") or "")).casefold()
+            hidden = hidden or "hidden" in values or str(values.get("aria-hidden") or "").casefold() == "true" \
+                or "display:none" in style or "visibility:hidden" in style
+            if not hidden and tag == "div" and values.get("id") == "lever-jobs-container":
+                self.container = True
+            if tag == "script":
+                executable = str(values.get("type") or "").casefold() in {
+                    "", "text/javascript", "application/javascript",
+                }
+                if not hidden and executable and values.get("src") == loader:
+                    self.loader = True
+                self.script = [] if not hidden and executable and not values.get("src") else None
+            if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+                self.stack.append((tag, bool(hidden)))
+
+        def handle_data(self, data):
+            if self.script is not None:
+                self.script.append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "script":
+                if self.script is not None:
+                    text = "".join(self.script)
+                    if "leverJobsOptions" in text:
+                        self.scripts.append(text)
+                self.script = None
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    break
+
+    parser = EmbedParser()
+    try:
+        parser.feed(body)
+        parser.close()
+    except (TypeError, ValueError):
+        return []
+    if parser.invalid or not parser.container or not parser.loader or len(parser.scripts) != 1:
+        return []
+    config = re.fullmatch(
+        r"\s*window\.leverJobsOptions\s*=\s*\{([^{}]*)\}\s*;?\s*",
+        parser.scripts[0],
+    )
+    if not config:
+        return []
+    fields = {}
+    for field in config[1].split(","):
+        entry = re.fullmatch(r"\s*(accountName|includeCss)\s*:\s*(.*?)\s*", field)
+        if not entry or entry[1] in fields:
+            return []
+        fields[entry[1]] = entry[2]
+    account = re.fullmatch(r"(['\"])([A-Za-z0-9_-]{1,100})\1", fields.get("accountName", ""))
+    if not account or fields.get("includeCss", "true") not in {"true", "false"}:
+        return []
+    tenant = account[2].casefold()
+    return [{"kind": "configured_lever_board", "source_url": source_url,
+             "board_url": "https://jobs.lever.co/" + tenant,
+             "account_name": tenant, "loader_url": loader}]
+
+
 def _observed_ownership_links(
     body: str, source_url: str, *, archive_url: str = ""
 ) -> list[Dict[str, str]]:
@@ -2093,6 +2181,30 @@ def _ats_ownership_anchors(
     for result in results:
         source = str(result.get("url") or "")
         official = _url_on_verified_company_identity(source, identity)
+        configured_receipts = (result.get("meta") or {}).get("configured_ats_boards")
+        if (official and _is_careers_index_url(source)
+                and isinstance(configured_receipts, list) and len(configured_receipts) == 1):
+            for configured in configured_receipts:
+                if not isinstance(configured, Mapping) or set(configured) != {
+                    "kind", "source_url", "board_url", "account_name", "loader_url",
+                }:
+                    continue
+                account = configured.get("account_name")
+                if not (
+                    configured.get("kind") == "configured_lever_board"
+                    and configured.get("source_url") == source
+                    and configured.get("loader_url") == "https://andreasmb.github.io/lever-jobs-embed/index.js"
+                    and isinstance(account, str) and re.fullmatch(r"[a-z0-9_-]{1,100}", account)
+                    and configured.get("board_url") == "https://jobs.lever.co/" + account
+                ):
+                    continue
+                for target in target_urls:
+                    if (_ats_board_identity(configured["board_url"]) is not None
+                            and _ats_board_identity(configured["board_url"]) == _ats_board_identity(target)):
+                        anchors.append({"source_url": source, "posting_url": target,
+                                        "kind": "official_configured_board",
+                                        "configured_board_url": configured["board_url"],
+                                        "loader_url": configured["loader_url"]})
         for link in _ownership_links_for_result(result):
             if not isinstance(link, Mapping):
                 continue
@@ -2739,7 +2851,10 @@ async def _scrape_sd_hardened(
                                 listing_count = int(
                                     board.get("observed_job_link_count") or 0
                                 )
-                        observed_board_link = any(
+                        configured_boards = _configured_lever_embed(
+                            body, url, {"observed_domain": trusted_company_domain},
+                        )
+                        observed_board_link = bool(configured_boards) or any(
                             _ats_board_identity(link["url"]) is not None
                             for link in _observed_ownership_links(body, url)
                         )
@@ -2788,6 +2903,8 @@ async def _scrape_sd_hardened(
                             break
                     result_meta: Dict[str, Any] = dict(listing_receipt or {})
                     result_meta["observed_ownership_links"] = _observed_ownership_links(raw_body, url)
+                    if prefer_dynamic_job_index and listing_receipt is None and configured_boards:
+                        result_meta["configured_ats_boards"] = configured_boards
                     if prefer_dynamic_job_index and not listing_count and not observed_board_link:
                         # The body is usable; the careers-link lookup is not
                         # complete. Preserve the body if exact-source Exa fails.
@@ -3524,13 +3641,7 @@ _SYS_MESSAGE = (
     "A true claim alone is not enough. Bind each required attribute to the "
     "actor, event, or object it qualifies; another participant's attributes "
     "cannot substitute. Preserve every condition within the chosen alternative "
-    "without adding requirements from other alternatives. Reconcile contrary "
-    "source-body statements before approving; a headline or isolated supporting "
-    "quote cannot override them. For a launched, released, shipped or available "
-    "capability, future availability of that same capability at the claimed "
-    "event date prevents support unless the source explicitly establishes "
-    "current access at the scope the buyer requests. An announcement criterion "
-    "can instead be met by an announcement of a future release. Return JSON matching "
+    "without adding requirements from other alternatives. Return JSON matching "
     "the required schema."
 )
 

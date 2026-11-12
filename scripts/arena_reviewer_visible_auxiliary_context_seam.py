@@ -76,3 +76,102 @@ def convert_visible_auxiliary_context_seam(source: bytes) -> bytes:
     if hashlib.sha256(result).hexdigest() != REPAIRED_SHA256:
         raise VisibleAuxiliaryContextSeamError("visible auxiliary context postimage differs")
     return result
+
+
+# The submitted-attribute auxiliary uses the same unchanged visible-body
+# validator. Both independently verified image bases contain identical source.
+SUBMITTED_CORRECTION_ID = "visible_submitted_company_context_v1"
+SUBMITTED_FROZEN_IMAGE_DIGEST = "sha256:d6574b368e228b08f2136322e4eaf52f5d8bc9ab7b02f979d0195e60e51a8bc0"
+SUBMITTED_FROZEN_IMAGE_DIGESTS = frozenset({
+    SUBMITTED_FROZEN_IMAGE_DIGEST,
+    "sha256:50deca7b8bf5129816abaeb59fd5bc1aabb554c529cc4151b8175f9edd0b8144",
+})
+SUBMITTED_ORIGINAL_SHA256 = "f783730a48ea0196fce6983dfa75f42b068662219bfb965cd216ec5c0efc8c3a"
+SUBMITTED_REPAIRED_SHA256 = "d1dbdd48d89ec52218c0e82270771f88924d40b4a4216fab98ba444a174cd08c"
+_SUBMITTED_BEFORE = '''    submitted_name = (
+        _compact_company_name(company.company_name)
+        if company is not None else ""
+    )
+    identity = verified_identity_receipt([company_fit.receipt("company_fit")])
+    source_entry = (
+        matched_company_source_cache.get(submitted_url)
+        if isinstance(matched_company_source_cache, Mapping)
+        and len(matched_company_source_cache)
+        <= _max_retained_investigator_contexts()
+        else None
+    )
+    if (
+        company is not None
+        and company_fit.decision == COMPANY_FIT_MATCH
+        and submitted_name
+        and isinstance(identity, Mapping)
+        and submitted_url.startswith("https://")
+        and _registrable_domain(submitted_url)
+        == str(identity.get("observed_domain") or "").casefold()
+        and isinstance(submitted_quote, str)
+        and isinstance(source_entry, Mapping)
+        and set(source_entry) == {"final_url", "text"}
+        and isinstance(source_entry["final_url"], str)
+        and source_entry["final_url"].startswith("https://")
+        and _valid_web_evidence_url(source_entry["final_url"])
+        == source_entry["final_url"]
+        and _registrable_domain(source_entry.get("final_url"))
+        == _registrable_domain(submitted_url)
+        and isinstance(source_entry.get("text"), str)
+        and 0 < len(source_entry["text"]) <= MAX_PAGE_CHARACTERS
+        and _quote_occurs(submitted_quote, source_entry["text"])
+        and submitted_name in _compact_company_name(source_entry["text"])
+    ):
+        contexts.append({
+            "dimension": "first_party_company",
+            "url": submitted_url,
+            "text": source_entry["text"],
+        })
+'''
+_SUBMITTED_AFTER = '''    identity = verified_identity_receipt([company_fit.receipt("company_fit")])
+    source_entry = (
+        matched_company_source_cache.get(submitted_url)
+        if isinstance(matched_company_source_cache, Mapping)
+        and len(matched_company_source_cache)
+        <= _max_retained_investigator_contexts()
+        else None
+    )
+    # Use the paragraph consumer's visible body and identity binding. Locator
+    # metadata can contain the company name but cannot admit an optional page.
+    submitted_context = (
+        _validated_first_party_source_context(
+            submitted_url, source_entry, identity,
+            company_name=company.company_name,
+        )
+        if company is not None else None
+    )
+    if (
+        company is not None
+        and company_fit.decision == COMPANY_FIT_MATCH
+        and submitted_context is not None
+        and isinstance(submitted_quote, str)
+        and _quote_occurs(submitted_quote, submitted_context["text"])
+    ):
+        contexts.append({
+            "dimension": "first_party_company",
+            "url": submitted_url,
+            "text": submitted_context["text"],
+        })
+'''
+
+
+def convert_submitted_company_context_seam(source: bytes) -> bytes:
+    """Correct only the exact frozen submitted-context producer."""
+    digest = hashlib.sha256(source).hexdigest()
+    if digest == SUBMITTED_REPAIRED_SHA256:
+        return source
+    if digest != SUBMITTED_ORIGINAL_SHA256:
+        raise VisibleAuxiliaryContextSeamError("unrecognized submitted company context source")
+    text = source.decode("utf-8")
+    if text.count(_SUBMITTED_BEFORE) != 1:
+        raise VisibleAuxiliaryContextSeamError("frozen submitted company context differs")
+    result = text.replace(_SUBMITTED_BEFORE, _SUBMITTED_AFTER, 1).encode("utf-8")
+    compile(result, "frozen_submitted_company_context.py", "exec")
+    if hashlib.sha256(result).hexdigest() != SUBMITTED_REPAIRED_SHA256:
+        raise VisibleAuxiliaryContextSeamError("submitted company context postimage differs")
+    return result

@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyRoutineOperatorProductionKeyDestruction",
+      "Effect": "Deny",
+      "Action": ["kms:DisableKey", "kms:ScheduleKeyDeletion"],
+      "Resource": [
+        "arn:aws:kms:us-east-1:493765492819:key/c5412928-093e-4bf5-aafc-7b27c02f1445",
+        "arn:aws:kms:us-east-1:493765492819:key/6822c852-4bf2-4b2a-be0b-91a61057f92d",
+        "arn:aws:kms:us-east-1:493765492819:key/864c6f6d-fbff-44c4-9001-e8adc0e0a75a",
+        "arn:aws:kms:us-east-1:493765492819:key/55cfc1fb-70e9-4c68-b2f8-a76fc2ba033d",
+        "arn:aws:kms:us-east-1:493765492819:key/ef29d954-deb5-4f3e-89fe-a193338624d1"
+      ]
+    }
+  ]
+}

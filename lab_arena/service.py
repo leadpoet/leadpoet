@@ -5373,20 +5373,25 @@ class ArenaService:
             configuration.get("execution_sequence_policy")
             == contracts.BASELINE_SCORED_FIRST_POLICY
         )
-        publication_reads = _PublicationReads(
-            self, round_row, self._store.list_runs(round_id, kind="execute")
-        )
-        try:
-            infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
-        except ArenaStoreUnavailable:
-            # A failed read cannot prove that saved evaluation is incomplete.
-            # Keep the ordinary store-unavailable path, even after the deadline.
-            raise
-        except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
-                TypeError, ValueError, UnicodeDecodeError):
-            return self._hold_incomplete_evaluation(
-                round_row, reason="execution_evidence_unavailable",
+        # Gathering evidence reads the object store and holds no database lock;
+        # the closing transition below takes claim control for its whole
+        # transaction. Time them apart, so a long publication can be attributed
+        # to one or the other instead of being reported as a single opaque step.
+        with telemetry.stage("advance_publish_evidence"):
+            publication_reads = _PublicationReads(
+                self, round_row, self._store.list_runs(round_id, kind="execute")
             )
+            try:
+                infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
+            except ArenaStoreUnavailable:
+                # A failed read cannot prove that saved evaluation is incomplete.
+                # Keep the ordinary store-unavailable path, even after the deadline.
+                raise
+            except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
+                    TypeError, ValueError, UnicodeDecodeError):
+                return self._hold_incomplete_evaluation(
+                    round_row, reason="execution_evidence_unavailable",
+                )
         baseline_ids = {str(p["submission_id"]) for p in round_row.get("participants") or [] if p.get("is_king")}
         if any(str(run.get("submission_id")) in baseline_ids and str(run.get("run_id")) in infrastructure_failures
                for run in publication_reads.runs):
@@ -5533,10 +5538,11 @@ class ArenaService:
             "published_at": published_at,
         }
         contracts.check_strict_document(publication, contracts.PUBLICATION_LIMITS)
-        transition = self._store.transition_round(round_id, "scored", "published", {
-            "publication_doc": publication,
-            "published_at": published_at,
-        })
+        with telemetry.stage("advance_publish_transition"):
+            transition = self._store.transition_round(round_id, "scored", "published", {
+                "publication_doc": publication,
+                "published_at": published_at,
+            })
         if transition.get("status") == "promotion_pending":
             raise ServiceError("baseline_promotion_pending", 503)
         return {

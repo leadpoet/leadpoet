@@ -133,6 +133,72 @@ def test_exact_variant_can_use_existing_completion_without_paraphrase_receipt():
     assert len(_signal_authority_evidence(**args)) == 1
 
 
+def transitive_runtime_fixture(*, fit=False, source_index=0):
+    args, inputs = fixture(fit=fit)
+    from lab_arena import company_judgments, reviewer_runtime
+    judge = args["judge"]
+    config = args["round_row"]["configuration_doc"]
+    accepted = deepcopy(judge)
+    accepted["run_id"] = "judge:company-source"
+    args["runs"][accepted["run_id"]] = accepted
+    inputs[accepted["run_id"]] = deepcopy(args["scoring_input"])
+    ref = company_judgments.build_company_scopes(
+        scoring_input=args["scoring_input"], round_id=judge["round_id"],
+        network_name="finney", netuid=71,
+        scorer_image_digest=config["scorer_image_digest"],
+        scorer_image_reference=config["scorer_image_reference"],
+        integrity_policy="arena_integrity_v1", company_judgment_policy=company_judgments.POLICY,
+    )[0]
+    judge["company_judgment_refs"] = [ref]
+    accepted["company_judgment_refs"] = [{**ref, "company_index": source_index}]
+    if source_index:
+        inputs[accepted["run_id"]]["companies"].insert(0, deepcopy(args["scoring_input"]["companies"][0]))
+    judge["claim_response"] = {"company_judgment_cache": {"hits": [{
+        **{key: ref[key] for key in ("company_index", "cache_key", "company_input_hash")},
+        "authority_slot": 0,
+    }]}}
+    args["company_rows"] = [{"cache_key": ref["cache_key"], "authority_slot": 0,
+                             "source_score_run_id": accepted["run_id"]}]
+    args["uses"][0]["run_id"] = accepted["run_id"]
+    args["uses"][0]["company_index"] = source_index
+    judge["reviewer_runtime_doc"] = {
+        "schema_version": reviewer_runtime.SCHEMA_VERSION,
+        "run_id": judge["run_id"], "lease_generation": judge["lease_generation"],
+        "grading_image_digest": config["scorer_image_digest"],
+        "grading_image_reference": config["scorer_image_reference"],
+        "runtime_image_digest": "sha256:" + "d" * 64,
+        "runtime_image_reference": "registry.example/runtime@sha256:" + "d" * 64,
+    }
+    return args
+
+
+@pytest.mark.parametrize("fit", [False, True])
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_transitive_company_use_keeps_original_runtime_after_reviewer_repair(fit, source_index):
+    args = transitive_runtime_fixture(fit=fit, source_index=source_index)
+    result = _signal_authority_evidence(**args)
+    assert result[0]["authority"] == args["authority_rows"][0]
+    assert result[0]["use"] == args["uses"][0]
+    assert result[0]["authority"]["scope_doc"]["runtime_image_digest"] != args["judge"]["reviewer_runtime_doc"]["runtime_image_digest"]
+
+
+@pytest.mark.parametrize("fault", ["evidence", "requirements", "receipt", "source_identity", "direct_use"])
+def test_transitive_runtime_repair_keeps_content_and_authority_checks(fault):
+    args = transitive_runtime_fixture()
+    if fault == "evidence":
+        args["scoring_input"]["companies"][0]["intent_signals"][0]["snippet"] = "Different evidence"
+    elif fault == "requirements":
+        args["scoring_input"]["icp"]["industry"] = "Different buyer requirements"
+    elif fault == "receipt":
+        args["uses"][0]["acceptance_doc"]["equivalence_receipt"]["decision"] = "different"
+    elif fault == "source_identity":
+        args["authority_rows"][0]["source_runner_hotkey"] = "other-validator"
+    else:
+        args["uses"][0]["run_id"] = args["judge"]["run_id"]
+    with pytest.raises(ExportError):
+        _signal_authority_evidence(**args)
+
+
 @pytest.mark.parametrize("earlier_candidate", ["company", "signal"])
 @pytest.mark.parametrize("source_status", ["accepted", "failed"])
 def test_source_search_reaches_exact_signal_after_unrelated_evidence(

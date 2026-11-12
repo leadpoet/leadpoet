@@ -2199,6 +2199,12 @@ def _partial_research_evidence(example, *, role='source'):
         dimensions = proof.get('dimensions') or {}
         by_dimension = proof.get('reasons_by_dimension') or {}
         reasons = proof.get('incomplete_reasons') or []
+        unavailable_labels = {'final_judge_unavailable'}
+        if role == 'source':
+            # A saved accepted judge can still have unverified label evidence.
+            # Source pairs retain no label and prove their own exact bytes;
+            # judge targets and full-ICP assessment keep their existing gates.
+            unavailable_labels.add('judge_evidence_unverified')
         if (proof.get('complete') is not False or not isinstance(reasons, list)
                 or any(not isinstance(reason, str) for reason in reasons)
                 or set(dimensions) != set(by_dimension)
@@ -2207,11 +2213,11 @@ def _partial_research_evidence(example, *, role='source'):
                 or set(reasons) != set().union(*(set(value) for value in by_dimension.values()))
                 or any(dimensions[name] is not (not value) for name, value in by_dimension.items())
                 or not _source_context_verified(proof)
-                or 'final_judge_unavailable' not in by_dimension.get('input_output_label', [])
-                or not set(by_dimension['input_output_label']) <= {
-                    'final_judge_unavailable', 'failed_execution_output_unavailable', 'execution_not_accepted',
-                    # Signal-policy rounds also report this when no final
-                    # judge exists. It remains a label gap, never authority
+                or not unavailable_labels.intersection(by_dimension.get('input_output_label', []))
+                or not set(by_dimension['input_output_label']) <= unavailable_labels | {
+                    'failed_execution_output_unavailable', 'execution_not_accepted',
+                    # Signal-policy rounds also report this without verified
+                    # final labels. It remains a label gap, never authority
                     # for a signal verdict or a full execution trajectory.
                     'signal_authority_unverified'}):
             return None

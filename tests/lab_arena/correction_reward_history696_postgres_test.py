@@ -201,3 +201,23 @@ def test_rpc_is_service_only_and_migration_replay_preserves_rows(database, state
         q.execute("SELECT has_function_privilege('lab_arena_service','public.lab_arena_correction_reward_history_v1(text,text,integer,integer,integer,boolean)','EXECUTE')")
         assert q.fetchone()[0] is True
     assert read(store, chain) == before
+
+
+def test_archived_first_v2_basis_still_prevents_v1_downgrade(state):
+    store, c, chain = state
+    rid, _, old = seed(state)
+    archive(c, old)
+    signer = signing.LocalSigner.generate()
+    legacy = signing.sign_document(signer, rewards.reward_basis_document(
+        round_id=rid, published_at=old['publication_doc']['published_at'],
+        finalized_epoch=499, king_outcome='no_king', king_hotkey=''),
+        hash_field='reward_basis_hash')
+    with c.cursor() as q:
+        q.execute('SET session_replication_role=replica')
+        q.execute("UPDATE lab_arena_rounds SET status='published',published_at=%s::timestamptz,publication_doc=%s::jsonb,king_outcome='no_king' WHERE round_id=%s", (old['published_at'],json.dumps(old['publication_doc']),rid))
+        q.execute('SET session_replication_role=origin')
+        q.execute("SELECT count(*)FROM lab_arena_rounds WHERE arena_netuid=%s AND reward_activated_at IS NOT NULL AND reward_basis_doc->>'schema_version'='leadpoet.lab_arena.reward_basis.v2'", (chain,))
+        assert q.fetchone()[0] == 0
+    with pytest.raises(ArenaStoreError, match='lab_arena_reward_basis_downgrade'):
+        store.activate_reward(rid, legacy, signing.signing_key_document(signer.public_key_der))
+    assert read(store, chain)[0]['reward_basis_doc'] == old['reward_basis_doc']

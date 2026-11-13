@@ -297,10 +297,14 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
                 migration = (SCRIPTS / '517-lab-arena-model-policy-supersession.sql').read_text()
                 cursor.execute("SELECT to_regclass('public.lab_arena_scoring_supersessions')")
                 if cursor.fetchone()[0] is None:
-                    cursor.execute(migration[
+                    table_schema = migration[
                         migration.index('CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions'):
                         migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_supersede_role_model_v1')
-                    ])
+                    ]
+                    cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='leadpoet_parity_reader')")
+                    if not cursor.fetchone()[0]:
+                        table_schema = table_schema.replace(',leadpoet_parity_reader;', ';')
+                    cursor.execute(table_schema)
                 cursor.execute('ALTER TABLE public.lab_arena_scoring_supersessions ADD COLUMN IF NOT EXISTS recovery_doc JSONB')
                 cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
                 migration = (SCRIPTS / '696-lab-arena-correction-reward-history.sql').read_text()

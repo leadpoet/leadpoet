@@ -117,6 +117,14 @@ GRANT EXECUTE ON FUNCTION public.lab_arena_correction_reward_history_v1(TEXT,TEX
 DO $activation696$
 DECLARE target OID:='public.lab_arena_activate_reward(text,jsonb,jsonb)'::regprocedure;
  definition TEXT;metadata JSONB;source_hash TEXT;updated TEXT;
+ old_downgrade TEXT:=$old696$         AND prior.reward_basis_doc ->> 'schema_version' = 'leadpoet.lab_arena.reward_basis.v2'
+     ) THEN$old696$;
+ new_downgrade TEXT:=$new696$         AND prior.reward_basis_doc ->> 'schema_version' = 'leadpoet.lab_arena.reward_basis.v2'
+       UNION ALL
+       SELECT 1 FROM jsonb_array_elements(public.lab_arena_correction_reward_history_v1(
+        NULL,v_round.arena_network_name,v_round.arena_netuid::INTEGER,200,0,FALSE))history(value)
+       WHERE value#>>'{reward_basis_doc,schema_version}'='leadpoet.lab_arena.reward_basis.v2'
+     ) THEN$new696$;
  old_previous TEXT:=$old696$    FROM public.lab_arena_rounds
     WHERE reward_activated_at IS NOT NULL$old696$;
  new_previous TEXT:=$new696$    FROM (
@@ -151,15 +159,22 @@ BEGIN
   OR metadata->>'proacl'IS DISTINCT FROM '["lab_arena_owner=X/lab_arena_owner", "lab_arena_service=X/lab_arena_owner"]'
   OR(metadata->>'prosecdef')::BOOLEAN IS DISTINCT FROM TRUE THEN
   RAISE EXCEPTION 'correction696 activation security differs';END IF;
- IF source_hash='1c24e7386dd132068d8f9f1bc75d37f117f1377e869b3407475ab9af2f5a03ed' THEN RETURN;END IF;
+ IF source_hash='c1e3c1aa7d848c06bf9f49fcef03d99e642af8dd6ec1530447387fb1bbc398c1' THEN RETURN;END IF;
+ IF length(definition)-length(replace(definition,old_downgrade,''))<>length(old_downgrade)THEN
+  RAISE EXCEPTION 'correction696 downgrade preimage differs';END IF;
+ IF source_hash='1c24e7386dd132068d8f9f1bc75d37f117f1377e869b3407475ab9af2f5a03ed' THEN
+  updated:=definition;
+ ELSE
  IF source_hash<>'03a0274b66a4ec6d83901e4a0765bb59d193fdb459a96c5842e5ee2def5f70d1'
   OR length(definition)-length(replace(definition,old_previous,''))<>length(old_previous)
   OR length(definition)-length(replace(definition,old_max,''))<>length(old_max) THEN
   RAISE EXCEPTION 'correction696 activation preimage differs';END IF;
  updated:=replace(replace(definition,old_previous,new_previous),old_max,new_max);
+ END IF;
+ updated:=replace(updated,old_downgrade,new_downgrade);
  EXECUTE updated;
  IF(SELECT to_jsonb(p)-'prosrc'FROM pg_proc p WHERE p.oid=target)IS DISTINCT FROM metadata
-  OR(SELECT encode(extensions.digest(p.prosrc,'sha256'),'hex')FROM pg_proc p WHERE p.oid=target)<>'1c24e7386dd132068d8f9f1bc75d37f117f1377e869b3407475ab9af2f5a03ed' THEN
+  OR(SELECT encode(extensions.digest(p.prosrc,'sha256'),'hex')FROM pg_proc p WHERE p.oid=target)<>'c1e3c1aa7d848c06bf9f49fcef03d99e642af8dd6ec1530447387fb1bbc398c1' THEN
   RAISE EXCEPTION 'correction696 activation metadata differs';END IF;
 END;
 $activation696$;

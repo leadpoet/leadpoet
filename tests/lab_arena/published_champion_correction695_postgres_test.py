@@ -1,10 +1,12 @@
 """Published correction uses finite native children and preserves old authority."""
 import copy
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from lab_arena import rewards, signing
 
 from tests.lab_arena import finite_child_scorer_correction679_postgres_test as child
 from tests.lab_arena import postpublication_judgments678_postgres_test as postpub
@@ -17,7 +19,6 @@ old, base, prior = child.old, child.base, child.prior
 # Reuse the native finite-budget lineage. Its local ``before`` fixture is the
 # unpublished compatible fixture; publication is constructed only AFTER the
 # failed budget child, not by using the historical678 published-round grant.
-database = child.database
 prepared = child.prepared
 prepared_company = child.prepared_company
 case = child.case
@@ -32,12 +33,38 @@ budget_parent = child.budget_parent
 corrected = child.corrected
 
 
+@pytest.fixture(scope='module')
+def database():
+    generator = child.database.__wrapped__()
+    db = next(generator)
+    try:
+        with db[0].connect(**db[1]) as connection, connection.cursor() as q:
+            # Match current_total_emissions_service_database: apply only592's
+            # exact function patch, without its dated production data changes.
+            patch = re.search(r'DO \$oct29_snapshot592\$.*?\$oct29_snapshot592\$;',
+                              SQL.with_name('592-arena-2026-10-29-authorized-champion.sql').read_text(), re.S)
+            assert patch is not None
+            q.execute(patch.group())
+            q.execute(SQL.with_name('681-lab-arena-total-emissions-reward-slots.sql').read_text())
+            q.execute(SQL.with_name('696-lab-arena-correction-reward-history.sql').read_text())
+        yield db
+    finally:
+        generator.close()
+
+
 @pytest.fixture
 def published(corrected):
     p = postpub.before.__wrapped__(corrected)
     with p.c.cursor() as q:
+        timestamp = old.scalar(q, 'SELECT published_at FROM lab_arena_rounds WHERE round_id=%s', (old.ROUND,)).replace(microsecond=0)
+        signer = signing.LocalSigner.generate()
+        basis = signing.sign_document(signer, rewards.reward_basis_document(
+            round_id=old.ROUND, published_at=timestamp.strftime('%Y-%m-%dT%H:%M:%SZ'), finalized_epoch=0,
+            king_outcome='no_king', king_hotkey=''), hash_field='reward_basis_hash')
+        key = signing.signing_key_document(signer.public_key_der)
         q.execute('SET LOCAL session_replication_role=replica')
-        q.execute('UPDATE lab_arena_rounds SET promotion_doc=NULL,baseline_promoted_at=NULL WHERE round_id=%s', (old.ROUND,))
+        q.execute('UPDATE lab_arena_rounds SET promotion_doc=NULL,baseline_promoted_at=NULL,published_at=%s,reward_basis_doc=%s::jsonb,reward_basis_hash=%s,signing_key_doc=%s::jsonb WHERE round_id=%s',
+                  (timestamp, json.dumps(basis), basis['reward_basis_hash'], json.dumps(key), old.ROUND))
         q.execute('SET LOCAL session_replication_role=origin')
         p.round_hash = 'sha256:' + old.scalar(q, "SELECT encode(extensions.digest((to_jsonb(r)-'updated_at')::text,'sha256'),'hex') FROM lab_arena_rounds r WHERE round_id=%s", (old.ROUND,))
         q.execute('SELECT to_regprocedure(%s)', (SIGNATURE,))
@@ -146,7 +173,7 @@ def test_native_terminal_children_have_no_automatic_successor(published, outcome
 
 @pytest.mark.parametrize('fault', ['round_hash', 'runtime', 'parent_hash', 'checkpoints', 'signals',
                                   'deadline', 'duplicate', 'active', 'guard', 'winner', 'not_activated',
-                                  'newer_frozen', 'promotion_done', 'frozen_source'])
+                                  'newer_frozen', 'null_date_frozen', 'promotion_done', 'frozen_source'])
 def test_invalid_authority_is_atomic_without_reopening(published, fault):
     p = published
     values = args(p)
@@ -179,13 +206,16 @@ def test_invalid_authority_is_atomic_without_reopening(published, fault):
                 q.execute('UPDATE lab_arena_rounds SET reward_activated_at=NULL WHERE round_id=%s', (old.ROUND,))
             elif fault == 'promotion_done':
                 q.execute("UPDATE lab_arena_rounds SET promotion_doc='{}'::jsonb WHERE round_id=%s", (old.ROUND,))
-            elif fault == 'newer_frozen':
+            elif fault in {'newer_frozen', 'null_date_frozen'}:
                 row = old.scalar(q, 'SELECT to_jsonb(r) FROM lab_arena_rounds r WHERE round_id=%s', (old.ROUND,))
                 day = datetime.fromisoformat(row['evaluation_date']) + timedelta(days=1)
                 cfg = copy.deepcopy(row['configuration_doc'])
                 cfg['round_id'] = rid = 'arena-' + day.strftime('%Y-%m-%d') + '-frozen'
-                old.insert(q, 'lab_arena_rounds', dict(round_id=rid, status='committed', configuration_doc=cfg,
-                           rewards_enabled=True, evaluation_date=day.strftime('%Y-%m-%d'), participants=[]))
+                inserted = dict(round_id=rid, status='committed', configuration_doc=cfg,
+                                rewards_enabled=True, evaluation_date=day.strftime('%Y-%m-%d'), participants=[])
+                if fault == 'null_date_frozen':
+                    inserted.update(evaluation_date=None, created_at=old.scalar(q, "SELECT created_at+interval '1 minute' FROM lab_arena_rounds WHERE round_id=%s", (old.ROUND,)))
+                old.insert(q, 'lab_arena_rounds', inserted)
             elif fault == 'frozen_source':
                 q.execute('ALTER TABLE lab_arena_runs DISABLE TRIGGER lab_arena_runs_terminal')
                 q.execute("UPDATE lab_arena_runs SET judgment_input_hash='sha256:'||repeat('0',64) WHERE run_id=%s", (p.parent['run_id'],))
@@ -212,6 +242,18 @@ def test_service_role_cannot_open_correction_and_migration_replays(published):
     with p.c.cursor() as q:
         q.execute(SQL.read_text())
     p.c.commit()
+    assert base.snapshot(p) == rows
+
+
+@pytest.mark.parametrize('dry', [True, False])
+def test_missing_history_reader_refuses_without_clearing_authority(published, dry):
+    p = published
+    rows = base.snapshot(p)
+    with p.c.cursor() as q:
+        q.execute('DROP FUNCTION public.lab_arena_correction_reward_history_v1(text,text,integer,integer,integer,boolean)')
+    with pytest.raises(p.pg.Error):
+        recover(p, args(p, dry=dry))
+    p.c.rollback()
     assert base.snapshot(p) == rows
 
 

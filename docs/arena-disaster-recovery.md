@@ -14,6 +14,10 @@ validator restart was needed. Recheck live state before recovery. Private
 receipts are in
 `/Users/pranav/Downloads/Arena_Backup_Access_Audit_20261112/`; do not commit their
 contents or source object bodies.
+Metadata-only restore receipts are also saved under
+`private/arena-recovery-audits/2026-11-13/` in the existing primary corpus bucket.
+Their exact versions were read back by hash and have COMPLIANCE retention.
+These receipts contain checksums and outcomes, not credentials or model bodies.
 
 | Area | Verified result | Limit |
 |---|---|---|

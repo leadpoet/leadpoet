@@ -13,6 +13,7 @@ from scripts import arena_reviewer_active_acquisition_seam as seam
 from scripts import arena_reviewer_visible_auxiliary_context_seam as visible
 from scripts import build_arena_reviewer_runtime as composer
 from tests import test_active_acquisition_target as controls
+from tests import test_complete_equity_acquisition_target as equity_controls
 from tests import test_submitted_company_context_visible_binding as context_controls
 from tests.lab_arena.reviewer_runtime_composition_test import layer
 from tests.reviewer_frozen_sources import frozen_source
@@ -72,6 +73,9 @@ def test_exact_frozen_source_reproduces_then_repairs_saved_quote(monkeypatch):
     assert not before._acquired_stage_quote_supports_names(
         (controls.SAVED_COMPANY,), controls.SAVED_QUOTE,
     )
+    assert not before._acquired_stage_quote_supports_names(
+        (equity_controls.COMPANY,), equity_controls.QUOTE,
+    )
     monkeypatch.setattr(controls, "lead_scorer", after)
     monkeypatch.setitem(sys.modules, "qualification.scoring.lead_scorer", after)
     controls.test_saved_active_acquisition_quote_binds_exact_target()
@@ -85,6 +89,33 @@ def test_exact_frozen_source_reproduces_then_repairs_saved_quote(monkeypatch):
         controls.test_saved_active_acquisition_survives_native_and_saved_stage_validation(
             requested, status, decision,
         )
+    monkeypatch.setattr(equity_controls, "lead_scorer", after)
+    equity_controls.test_exact_complete_equity_quote_binds_target_not_buyer()
+    for requested, status, decision in (
+        ("public", "CONTRADICTED", after.COMPANY_FIT_MISMATCH),
+        ("acquired", "VERIFIED", after.COMPANY_FIT_MATCH),
+    ):
+        equity_controls.test_complete_equity_finding_survives_native_and_saved_stage(
+            requested, status, decision,
+        )
+    equity_controls.test_unused_missing_support_quote_never_enters_validated_or_saved_evidence()
+    equity_controls.test_absent_paraphrase_cannot_be_used_as_primary_evidence()
+
+
+@pytest.mark.parametrize("quote", [
+    "Parent acquired 100% of Acme Analytics assets.",
+    "Parent acquired all assets of Acme Analytics.",
+    "Parent acquired all shares of Acme Analytics Systems.",
+    "Parent acquired 49% of Acme Analytics.",
+    "Acme Analytics acquired 100% of Other Company.",
+    "Parent has not acquired 100% of Acme Analytics.",
+    "Parent plans to have acquired all shares of Acme Analytics by June.",
+    "Parent acquired 100% of Acme Analytics, subject to approval.",
+    "Parent acquired all shares of Acme Analytics, but the deal was canceled.",
+])
+def test_frozen_complete_equity_keeps_partial_and_other_entity_rejections(monkeypatch, quote):
+    after = _install(monkeypatch, CORRECTED, "equity_control")
+    assert not after._acquired_stage_quote_supports_names(("Acme Analytics",), quote)
 
 
 @pytest.mark.parametrize("quote", [

@@ -172,21 +172,23 @@ Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
 remain redacted.
 
-Future rounds can opt in to `full_generated_thinking_v1`. This policy uses the
-reviewed, exact model/provider/API registry in `lab_arena/reasoning_models.json`.
+New rounds at or after the configured `reasoning_capture_from` cutoff use
+`full_generated_thinking_v1`. This policy uses the reviewed, exact
+model/provider/API registry in `lab_arena/reasoning_models.json`.
 It requests full provider-generated thinking, preserves tool history, and records
 what the provider actually returned. Summaries and encrypted state do not meet
 this policy. The gateway applies it to miner and baseline execution calls,
 including subagents; judges and already-created rounds keep their existing rules.
 
-The future policy sets both execution admission and competition cost eligibility
+This policy sets both execution admission and competition cost eligibility
 to $6 per ICP. Admission counts confirmed charges only. Pending charges do not
 create monetary admission holds; recovery records them when confirmed.
 Active provider calls still block final publication.
 Scoring keeps its existing successful-call and infrastructure-failure distinctions.
 No capture failure or empty thinking response stops scoring or publication.
-If activation prerequisites are missing, round creation continues with its old
-policy and a visible frozen `not_ready` reason. Activation is off by default.
+After the configured activation cutoff, missing prerequisites reject round
+creation with retryable HTTP 503 before a round is stored. An unset cutoff
+leaves activation off; existing rounds retain their frozen policy.
 
 The [full-thinking policy](arena-full-thinking-policy.md) lists tested routes,
 protocol boundaries, export rules, and the remaining activation checks. Provider
@@ -663,12 +665,12 @@ Identical observed context/target pairs are deduplicated with their source
 references retained. Related episodes, companies and ICP requirements stay in
 one split. Candidate quality remains explicitly unreviewed.
 
-The company exporter keeps its existing default split and dataset identity.
-Optional `--eval-mode company_and_icp` holds out both company clusters and exact
-ICP requirements. Optional `--eval-after YYYY-MM-DD` puts only later examples in
-evaluation; earlier examples sharing evaluation groups move to analysis instead
-of leaking into training. Missing/invalid dates move to analysis. All manifests
-report actual date ranges, group overlap, source families and empty splits.
+Dataset preparation defaults to `--eval-mode company_and_icp`, which holds out
+both company clusters and exact ICP requirements. Optional
+`--eval-after YYYY-MM-DD` puts only later examples in evaluation; earlier examples
+sharing evaluation groups move to analysis instead of leaking into training.
+Missing/invalid dates move to analysis. All manifests report actual date ranges,
+group overlap, source families and empty splits.
 These are evaluation safeguards, not a measurement of model accuracy.
 
 Optional `--review-sample-size` writes `review.jsonl`, a deterministic sample

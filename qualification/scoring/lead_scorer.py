@@ -1222,8 +1222,17 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
     # Keep the full object so assets, products and longer names cannot become
     # aliases for the investigated company. Shared completion guards still run.
     re.compile(
-        r"\bacquired\s+(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
-        r"(?=\s+(?:on|for|after|from|in)\b|[,;.!?\n]|$)"
+        r"\bacquired\s+(?:"
+        r"(?:100\s*%\s+of(?:\s+(?:the\s+)?(?:issued\s+and\s+)?"
+        r"(?:outstanding\s+)?(?:equity|shares?|stock|ownership\s+interests?)"
+        r"\s+(?:of|in))?|all\s+(?:of\s+)?(?:the\s+)?"
+        r"(?:issued\s+and\s+)?(?:outstanding\s+)?"
+        r"(?:equity|shares?|stock|ownership\s+interests?)\s+(?:of|in))"
+        r"\s+(?:(?:[a-z][a-z.'’ -]{0,40},\s+)?"
+        r"[a-z][a-z.'’ -]{0,40}-based\s+)?)?"
+        r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r"(?=\s+(?:on|for|after|from|in)\b|"
+        r"\s+and\s+an?\s+affiliated\s+entity\b|[,;.!?\n]|$)"
         r"(?!\s*,\s*(?:an?|the)\s+(?:[\w-]+\s+){0,3}"
         r"(?:product|assets?|brands?)\s+of\b)",
         re.I,

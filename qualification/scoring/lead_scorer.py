@@ -1218,6 +1218,16 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
     # its wholly owned subsidiary result. A buyer or another named party does
     # not inherit that target's stage. The shared uncertainty guards still run.
     _COMPLETED_MERGER_SURVIVOR_RE,
+    # Active past-tense proof binds the acquired object, never the buyer.
+    # Keep the full object so assets, products and longer names cannot become
+    # aliases for the investigated company. Shared completion guards still run.
+    re.compile(
+        r"\bacquired\s+(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r"(?=\s+(?:on|for|after|from|in)\b|[,;.!?\n]|$)"
+        r"(?!\s*,\s*(?:an?|the)\s+(?:[\w-]+\s+){0,3}"
+        r"(?:product|assets?|brands?)\s+of\b)",
+        re.I,
+    ),
     re.compile(
         r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
         r"(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",

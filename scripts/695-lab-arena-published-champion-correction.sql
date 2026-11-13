@@ -134,7 +134,7 @@ BEGIN
   old_round_doc,new_round_doc,old_score_projections,recovery_doc)
  VALUES(r.round_id,revision,p_request_id,digest,p_actor_ref,txid_current(),pg_backend_pid(),to_jsonb(r)-'updated_at',to_jsonb(n)-'updated_at','{}',proof);
  IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(public.lab_arena_correction_reward_history_v1(
-   'live',r.arena_network_name,r.arena_netuid,200,0,FALSE)) archived
+   'live',r.arena_network_name,r.arena_netuid::INTEGER,200,0,FALSE)) archived
   WHERE archived->>'round_id'=r.round_id AND archived->>'reward_basis_hash'=r.reward_basis_hash
    AND (archived->>'effective_reward_epoch')::BIGINT=r.effective_reward_epoch
    AND archived->'reward_basis_doc'=r.reward_basis_doc AND archived->'signing_key_doc'=r.signing_key_doc)THEN

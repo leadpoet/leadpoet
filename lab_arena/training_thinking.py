@@ -2189,8 +2189,7 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
 def _partial_research_evidence(example, *, role='source'):
     """Individual request/result proof is independent of an absent final outcome."""
     try:
-        if (example.get('score_run_id') is not None or example.get('judgment') is not None
-                or example.get('companies')):
+        if example.get('judgment') is not None or example.get('companies'):
             return None
         proof = example.get('completeness') or {}
         dimensions = proof.get('dimensions') or {}
@@ -2200,7 +2199,8 @@ def _partial_research_evidence(example, *, role='source'):
         # are unverified. Their attempt binder still requires exact source,
         # output, both input snapshots and reviewer runtime. No full-ICP
         # assessment or label authority follows from this absence exception.
-        unavailable_labels = {'final_judge_unavailable', 'judge_evidence_unverified'}
+        unavailable_labels = {'final_judge_unavailable', 'judge_evidence_unverified',
+                              'signal_authority_unverified'}
         if (proof.get('complete') is not False or not isinstance(reasons, list)
                 or any(not isinstance(reason, str) for reason in reasons)
                 or set(dimensions) != set(by_dimension)
@@ -2211,11 +2211,7 @@ def _partial_research_evidence(example, *, role='source'):
                 or not _source_context_verified(proof)
                 or not unavailable_labels.intersection(by_dimension.get('input_output_label', []))
                 or not set(by_dimension['input_output_label']) <= unavailable_labels | {
-                    'failed_execution_output_unavailable', 'execution_not_accepted',
-                    # Signal-policy rounds also report this without verified
-                    # final labels. It remains a label gap, never authority
-                    # for a signal verdict or a full execution trajectory.
-                    'signal_authority_unverified'}):
+                    'failed_execution_output_unavailable', 'execution_not_accepted'}):
             return None
         configuration = example.get('configuration') or {}
         training_coverage.missing_reasoning_percent_from_configuration(configuration)
@@ -2233,6 +2229,9 @@ def _partial_research_evidence(example, *, role='source'):
                 return None
         elif attempts[0]['status'] != 'failed':
             return None
+        # A retained score reference is diagnostic history after its judgment
+        # is removed. Source pairs do not depend on an unavailable judge input;
+        # judge pairs separately pass _unlabeled_judge_attempt's exact binder.
         return frozenset(reasons)
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -2417,7 +2416,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         diagnostic_gaps = diagnostic_gaps_by_source[source]
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if isinstance(identity, str) and identity not in (example.get("input_snapshots") or {}))
-        partial_outcome = (example.get("score_run_id") is None or
+        partial_outcome = (not example.get("judgment") or
                            role == 'judge' and training_steps._unlabeled_judge_attempt(example, call))
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   **({'role': 'judge'} if role == 'judge' else {}),

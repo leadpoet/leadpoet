@@ -4403,11 +4403,14 @@ def _validated_findings(
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
     classified_industry_mismatch: bool = False,
     rejection_details: Optional[dict[str, list[str]]] = None,
+    attribution_rejection_keys: Optional[dict[str, list[str]]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
     # Host-only authority from _review_industry_sources after packet resolution.
     # Never derive this permission from a research model's finding or receipt.
     if rejection_details is not None:
         rejection_details.clear()
+    if attribution_rejection_keys is not None:
+        attribution_rejection_keys.clear()
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
     raw_findings = arguments.get("findings")
@@ -5114,6 +5117,19 @@ def _validated_findings(
             else:
                 finding["supporting_evidence"] = validated_support
         findings[target] = finding
+        if (
+            attribution_rejection_keys is not None
+            and finding["status"] == "UNPROVEN"
+            and finding["reason"] in {
+                "source quote did not identify the investigated company",
+                REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+            }
+        ):
+            attribution_rejection_keys[target] = sorted(
+                key for key in (
+                    stage_attribution_names if target == "stage" else attribution_names
+                ) if len(key) >= 2
+            )
         if (
             rejection_details is not None
             and target == "stage"
@@ -7101,6 +7117,7 @@ async def investigate_company_evidence(
                                     raw.update(status="UNPROVEN", evidence_url="",
                                                evidence_quote="", activity_role="unresolved")
                     rejection_details: dict[str, list[str]] = {}
+                    attribution_rejection_keys: dict[str, list[str]] = {}
                     claims = _validated_findings(
                         arguments,
                         targets=active_submit_targets,
@@ -7118,6 +7135,7 @@ async def investigate_company_evidence(
                             )
                         ),
                         rejection_details=rejection_details,
+                        attribution_rejection_keys=attribution_rejection_keys,
                     )
                     if claims is None:
                         if (
@@ -7189,6 +7207,8 @@ async def investigate_company_evidence(
                         if not reason:
                             continue
                         rejected_finding = {"target": target, "reason": reason}
+                        if attribution_rejection_keys.get(target):
+                            rejected_finding["company_identity_keys_checked"] = attribution_rejection_keys[target]
                         if target == "stage" and rejection_details.get(target):
                             rejected_finding["ownership_proof_failures"] = rejection_details[target]
                         source_url = _safe_https_url(submitted.get("evidence_url"))
@@ -7266,6 +7286,9 @@ async def investigate_company_evidence(
                                     "source_context": _source_context_for_quote(support_quote, support_text),
                                 }
                                 if support_reason == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON:
+                                    support_rejection["company_identity_keys_checked"] = sorted(
+                                        key for key in identity_names if len(key) >= 2
+                                    )
                                     candidate = _company_bound_quote_candidate(
                                         support_quote, support_text, identity_names,
                                     )

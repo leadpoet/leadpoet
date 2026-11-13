@@ -42,6 +42,8 @@ and ranking with the unchanged paragraph consumer's visible surface.
 The exclusive --submitted-company-context-only mode aligns that same visible
 surface for the submitted-attribute auxiliary in exact d657 and 50de images.
 Both bases must contain the same checksum-bound original source.
+Its --active-acquisition-target option also binds completed active-voice
+acquisition proof to the exact acquired target in that same frozen file.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -510,6 +512,10 @@ def main() -> int:
         help="compose only the reviewed submitted-company visible-context correction on exact d657 or 50de",
     )
     parser.add_argument(
+        "--active-acquisition-target", action="store_true",
+        help="retain submitted-company context and repair active acquired-target proof in the same frozen file",
+    )
+    parser.add_argument(
         "--legacy-company-progress-only", action="store_true",
         help="compose only reviewed two-file legacy company progress on exact frozen51bc; excludes other corrections",
     )
@@ -630,9 +636,11 @@ def main() -> int:
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
     args = parser.parse_args()
+    if args.active_acquisition_target and not args.submitted_company_context_only:
+        raise CompositionError("active-acquisition-target requires submitted-company-context-only")
     if args.submitted_company_context_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"submitted_company_context_only", "push"}
+        if name not in {"submitted_company_context_only", "active_acquisition_target", "push"}
     ):
         raise CompositionError("submitted-company-context-only mode cannot include other corrections")
     if args.legacy_company_progress_only and any(
@@ -724,6 +732,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if set(original) != {FINALITY_FILE}:
                 raise CompositionError("frozen submitted company context source is incomplete")
             files = {FINALITY_FILE: convert_submitted_company_context_seam(original[FINALITY_FILE])}
+            if args.active_acquisition_target:
+                from scripts.arena_reviewer_active_acquisition_seam import convert_active_acquisition_seam
+                files[FINALITY_FILE] = convert_active_acquisition_seam(files[FINALITY_FILE])
         elif args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import convert_legacy_company_progress_files
             original = extract_frozen_sources(
@@ -884,6 +895,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-source-local-refusal" if args.source_local_refusal_finality else "")
             + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
             + ("-submitted-company-context" if args.submitted_company_context_only else "")
+            + ("-active-acquisition-target" if args.active_acquisition_target else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -913,6 +925,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         if args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_CORRECTION_ID
             corrections.append(SUBMITTED_CORRECTION_ID)
+            if args.active_acquisition_target:
+                from scripts.arena_reviewer_active_acquisition_seam import CORRECTION_ID as ACTIVE_ACQUISITION_CORRECTION_ID
+                corrections.append(ACTIVE_ACQUISITION_CORRECTION_ID)
         if args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import CORRECTION_ID as LEGACY_COMPANY_PROGRESS_CORRECTION_ID
             corrections.append(LEGACY_COMPANY_PROGRESS_CORRECTION_ID)

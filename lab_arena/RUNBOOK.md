@@ -604,6 +604,19 @@ pin and every other round setting remain immutable.
 
 ### Frozen grading and repairable reviewer runtime
 
+For the approved active acquisition-target correction on exact frozen d657 or
+50de, use `--submitted-company-context-only --active-acquisition-target` for both
+build and `--verify-image`. Compose from the original frozen grading image.
+The one-file overlay retains the existing submitted-company visible-context
+repair, then adds only the reviewed active acquisition-target pattern. The
+corrected `lead_scorer.py` hash is
+`fdd1e4dc6ea7c147687a0314250a4b94f934b6777e17692b8cd3912bcfa8e591`.
+Unknown source, another base, and mixed correction modes fail closed. Verify
+the exact file bytes, one added layer and unchanged process configuration before
+registration through the existing reviewer-runtime mapping. Keep the round's
+grading/cache identity, accepted judgments, completed company checkpoints,
+costs and deadlines fixed. This option adds no judgment attempt or paid work.
+
 For the approved completed-negative empty-website correction on frozen scorer
 `sha256:79cd4bc932acf572df035d734afc66309a801862e8f080ed797cd11420f6902b`, use
 `--empty-domain-negative-finality-only` for both build and `--verify-image`.

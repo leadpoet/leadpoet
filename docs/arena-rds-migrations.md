@@ -6,6 +6,19 @@ master-login fallback. It requires an existing localhost tunnel to the fixed
 Arena RDS endpoint and the verified regional RDS CA file. Tunnel setup is a
 separate authorized operation. The helper does not start or stop shared tunnels.
 
+## Deployed access
+
+On November 13, 2026, PR #1215 applied migration 692 and provisioned the dedicated
+login/secret for normal Pranav. The production helper passed with `leadpoet-lab`;
+reading the old RDS master secret with that identity was denied. The same role
+passed two exact historical migrations on a real isolated RDS restore, including
+negative controls for role administration, unrelated schemas and legacy owner
+functions. Existing published results, saved weights and Arena function bodies
+were unchanged. Do not repeat the one-time setup on an existing login.
+
+Routine Arena migrations use this channel. Changes to shared platform owners or
+AWS IAM remain separate privileged operations; this does not grant AWS Admin.
+
 ## One-time access setup
 
 A separately authorized administrator creates `arena_migrator` with a generated

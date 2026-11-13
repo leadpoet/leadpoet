@@ -1502,6 +1502,8 @@ def coverage(examples, *, role=None) -> dict:
             maximum_missing = 0
             bad = True
         total_reasoning_tokens = missing_reasoning_tokens = 0
+        source_outcome_unavailable = (training_steps._source_outcome_unavailable(example)
+                                      if role != 'judge' else False)
         for call in example.get("provider_calls") or []:
             call_role = _role(example, call)
             if role == 'judge' and call_role != 'judge':
@@ -1536,7 +1538,8 @@ def coverage(examples, *, role=None) -> dict:
             if new_policy and execution_model and not failed:
                 try:
                     training_steps._candidate(example, call, worker_proofs=worker_proofs,
-                                              role='judge' if role == 'judge' else 'source')
+                                              role='judge' if role == 'judge' else 'source',
+                                              source_outcome_unavailable=source_outcome_unavailable)
                     target_usable = True
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
                     private_truncation = verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs)
@@ -2186,21 +2189,42 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
     return None if result is None else result | diagnostic_gaps
 
 
-def _partial_research_evidence(example, *, role='source'):
+def _partial_research_evidence(example, *, role='source', allow_judge_input_gap=False):
     """Individual request/result proof is independent of an absent final outcome."""
     try:
-        if example.get('judgment') is not None or example.get('companies'):
-            return None
         proof = example.get('completeness') or {}
         dimensions = proof.get('dimensions') or {}
         by_dimension = proof.get('reasons_by_dimension') or {}
         reasons = proof.get('incomplete_reasons') or []
+        judge_input_gap = False
+        if example.get('judgment') is not None or example.get('companies'):
+            # A final result does not repair a malformed/missing capture of
+            # its input. Preserve only independent source pairs, without
+            # borrowing that result's labels or granting judge-turn evidence.
+            exact_gaps = set(by_dimension.get('exact_inputs') or [])
+            judgment, score_id = example.get('judgment'), example.get('score_run_id')
+            scores = [row for row in example.get('attempts') or [] if row.get('run_id') == score_id]
+            if (not allow_judge_input_gap or role != 'source'
+                    or not exact_gaps or not exact_gaps <= {
+                        'runtime_input_snapshot_missing', 'runtime_input_snapshot_invalid'}
+                    or not isinstance(judgment, Mapping)
+                    or type(judgment.get('per_icp_score')) not in (int, float)
+                    or not isinstance(score_id, str) or score_id == example.get('run_id')
+                    or len(scores) != 1 or scores[0].get('kind') != 'score'
+                    or scores[0].get('status') != 'accepted'
+                    or scores[0].get('scored_run_id') != example.get('run_id')
+                    or scores[0].get('terminal_cause', 'accepted') != 'accepted'
+                    or training_steps._individual_run_input_valid(example, score_id, 'score')):
+                return None
+            judge_input_gap = True
         # Accepted judge calls can prove individual pairs when final labels
         # are unverified. Their attempt binder still requires exact source,
         # output, both input snapshots and reviewer runtime. No full-ICP
         # assessment or label authority follows from this absence exception.
         unavailable_labels = {'final_judge_unavailable', 'judge_evidence_unverified',
                               'signal_authority_unverified'}
+        allowed_labels = (unavailable_labels if judge_input_gap else unavailable_labels | {
+            'failed_execution_output_unavailable', 'execution_not_accepted'})
         if (proof.get('complete') is not False or not isinstance(reasons, list)
                 or any(not isinstance(reason, str) for reason in reasons)
                 or set(dimensions) != set(by_dimension)
@@ -2209,9 +2233,9 @@ def _partial_research_evidence(example, *, role='source'):
                 or set(reasons) != set().union(*(set(value) for value in by_dimension.values()))
                 or any(dimensions[name] is not (not value) for name, value in by_dimension.items())
                 or not _source_context_verified(proof)
-                or not unavailable_labels.intersection(by_dimension.get('input_output_label', []))
-                or not set(by_dimension['input_output_label']) <= unavailable_labels | {
-                    'failed_execution_output_unavailable', 'execution_not_accepted'}):
+                or (not judge_input_gap and not unavailable_labels.intersection(
+                    by_dimension.get('input_output_label', [])))
+                or not set(by_dimension['input_output_label']) <= allowed_labels):
             return None
         configuration = example.get('configuration') or {}
         training_coverage.missing_reasoning_percent_from_configuration(configuration)
@@ -2222,7 +2246,9 @@ def _partial_research_evidence(example, *, role='source'):
         attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == run_id]
         if (len(attempts) != 1 or attempts[0].get('kind') != 'execute'
                 or attempts[0].get('status') not in {'accepted', 'failed'}
-                or not training_steps._individual_run_input_valid(example, run_id, 'execute', allow_absent=True)):
+                or (judge_input_gap and attempts[0].get('status') != 'accepted')
+                or not training_steps._individual_run_input_valid(
+                    example, run_id, 'execute', allow_absent=not judge_input_gap)):
             return None
         if 'output' in example:
             if not verified_output_projection(example):
@@ -2242,7 +2268,7 @@ def _individual_research_evidence(example, *, role='source', worker_proofs=None)
     selected = selected_research_evidence(example, role=role, worker_proofs=worker_proofs)
     if selected is not None:
         return selected
-    partial = _partial_research_evidence(example, role=role)
+    partial = _partial_research_evidence(example, role=role, allow_judge_input_gap=True)
     if partial is not None:
         return partial
     try:
@@ -2416,8 +2442,7 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         diagnostic_gaps = diagnostic_gaps_by_source[source]
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if isinstance(identity, str) and identity not in (example.get("input_snapshots") or {}))
-        partial_outcome = (not example.get("judgment") or
-                           role == 'judge' and training_steps._unlabeled_judge_attempt(example, call))
+        partial_outcome = (ref['training_provenance']['label_authority']['origin'] == 'unavailable')
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   **({'role': 'judge'} if role == 'judge' else {}),
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,

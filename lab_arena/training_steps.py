@@ -908,13 +908,25 @@ def _training_provenance(example):
     }
 
 
+def _source_outcome_unavailable(example):
+    if not example.get('judgment'):
+        return False
+    from lab_arena import training_thinking
+    return training_thinking._partial_research_evidence(
+        example, allow_judge_input_gap=True) is not None
+
+
 def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False,
-               role='source'):
+               role='source', source_outcome_unavailable=None):
     # Individual exporters may retain a proven prefix pair. The full-ICP
     # eligibility caller keeps the default final-snapshot requirement.
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
     unlabeled_judge = role == 'judge' and _unlabeled_judge_attempt(example, call)
     unlabeled_outcome = unlabeled_judge or not example.get('judgment')
+    if role == 'source' and example.get('judgment'):
+        if source_outcome_unavailable is None:
+            source_outcome_unavailable = _source_outcome_unavailable(example)
+        unlabeled_outcome |= source_outcome_unavailable
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -1085,6 +1097,7 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
         # assessment does. Calls retain every original validation and byte.
         worker_proofs = training_worker_proof.WorkerProofs()
         example = worker_proofs.prepare(example)
+        source_outcome_unavailable = _source_outcome_unavailable(example) if role == 'source' else False
         for call in example.get('provider_calls') or []:
             if not isinstance(call, dict):
                 counts['malformed_call'] += 1
@@ -1092,9 +1105,11 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 continue
             try:
                 record = (_candidate(example, call, host_observed=True, worker_proofs=worker_proofs,
-                                     allow_journal_prefix=True, role=role) if host_observed
+                                     allow_journal_prefix=True, role=role,
+                                     source_outcome_unavailable=source_outcome_unavailable) if host_observed
                           else _candidate(example, call, worker_proofs=worker_proofs,
-                                          allow_journal_prefix=True, role=role))
+                                          allow_journal_prefix=True, role=role,
+                                          source_outcome_unavailable=source_outcome_unavailable))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])

@@ -1,3 +1,10 @@
+> **Historical migration record only.** The target named below is now the
+> production database. Statements that it is unused or isolated describe the
+> earlier migration stage and are no longer current. Do not execute this plan or
+> its fixed-target commands as a recovery rehearsal. Use the
+> [Arena disaster recovery runbook](arena-disaster-recovery.md) and a new,
+> isolated restore target. This document grants no production restore authority.
+
 # RDS restore plan: review required
 
 The target is only `leadpoet-subnet-arena.cgfmio6maf8s.us-east-1.rds.amazonaws.com`,

@@ -9,11 +9,11 @@ import hashlib
 
 CORRECTION_ID = "investigator_prompt_feedback_v1"
 FROZEN_IMAGE_DIGEST = "sha256:50deca7b8bf5129816abaeb59fd5bc1aabb554c529cc4151b8175f9edd0b8144"
-REVIEWED_SOURCE_COMMIT = "f53e3005a6390382612b2e55d783eff717054e89"
+REVIEWED_SOURCE_COMMIT = "25cc0cc0a6a0a3e2aff349551433bd7421a39891"
 ORIGINAL_SHA256 = "eaa205dfe6a1707199246008f7108c5883e1d298b6c7c682d41b16c55e677483"
-REPAIRED_SHA256 = "a79aed8d30efb3c88f0956aefdc35fd8d8fd223cc33b5958569451869ddf55a9"
+REPAIRED_SHA256 = "9ddfd54dba12069b74d5993df8900145d6211365416614846a4a180a73e57ef9"
 
-# Exactly the reviewed342545-to-f53e investigator diff. Context makes every
+# Exactly the reviewed342545-to-25cc investigator diff. Context makes every
 # replacement unique; whole-file checks reject drift outside these anchors.
 DELTAS = (
     (
@@ -261,11 +261,14 @@ DELTAS = (
             b'    structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,\n'
             b'    classified_industry_mismatch: bool = False,\n'
             b'    rejection_details: Optional[dict[str, list[str]]] = None,\n'
+            b'    attribution_rejection_keys: Optional[dict[str, list[str]]] = None,\n'
             b') -> Optional[dict[str, dict[str, Any]]]:\n'
             b'    # Host-only authority from _review_industry_sources after packet resolution.\n'
             b"    # Never derive this permission from a research model's finding or receipt.\n"
             b'    if rejection_details is not None:\n'
             b'        rejection_details.clear()\n'
+            b'    if attribution_rejection_keys is not None:\n'
+            b'        attribution_rejection_keys.clear()\n'
             b'    if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:\n'
             b'        return None\n'
             b'    raw_findings = arguments.get("findings")\n'
@@ -322,6 +325,19 @@ DELTAS = (
             b'            else:\n'
             b'                finding["supporting_evidence"] = validated_support\n'
             b'        findings[target] = finding\n'
+            b'        if (\n'
+            b'            attribution_rejection_keys is not None\n'
+            b'            and finding["status"] == "UNPROVEN"\n'
+            b'            and finding["reason"] in {\n'
+            b'                "source quote did not identify the investigated company",\n'
+            b'                REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,\n'
+            b'            }\n'
+            b'        ):\n'
+            b'            attribution_rejection_keys[target] = sorted(\n'
+            b'                key for key in (\n'
+            b'                    stage_attribution_names if target == "stage" else attribution_names\n'
+            b'                ) if len(key) >= 2\n'
+            b'            )\n'
             b'        if (\n'
             b'            rejection_details is not None\n'
             b'            and target == "stage"\n'
@@ -405,6 +421,7 @@ DELTAS = (
             b'                                    raw.update(status="UNPROVEN", evidence_url="",\n'
             b'                                               evidence_quote="", activity_role="unresolved")\n'
             b'                    rejection_details: dict[str, list[str]] = {}\n'
+            b'                    attribution_rejection_keys: dict[str, list[str]] = {}\n'
             b'                    claims = _validated_findings(\n'
             b'                        arguments,\n'
             b'                        targets=active_submit_targets,\n'
@@ -424,6 +441,7 @@ DELTAS = (
             b'                            )\n'
             b'                        ),\n'
             b'                        rejection_details=rejection_details,\n'
+            b'                        attribution_rejection_keys=attribution_rejection_keys,\n'
             b'                    )\n'
             b'                    if claims is None:\n'
             b'                        if (\n'
@@ -442,11 +460,34 @@ DELTAS = (
             b'                        if not reason:\n'
             b'                            continue\n'
             b'                        rejected_finding = {"target": target, "reason": reason}\n'
+            b'                        if attribution_rejection_keys.get(target):\n'
+            b'                            rejected_finding["company_identity_keys_checked"] = attribution_rejection_keys[target]\n'
             b'                        if target == "stage" and rejection_details.get(target):\n'
             b'                            rejected_finding["ownership_proof_failures"] = rejection_details[target]\n'
             b'                        source_url = _safe_https_url(submitted.get("evidence_url"))\n'
             b'                        source_quote = str(submitted.get("evidence_quote") or "")\n'
             b'                        if (\n'
+        ),
+    ),
+    (
+        (
+            b'                                    "source_context": _source_context_for_quote(support_quote, support_text),\n'
+            b'                                }\n'
+            b'                                if support_reason == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON:\n'
+            b'                                    candidate = _company_bound_quote_candidate(\n'
+            b'                                        support_quote, support_text, identity_names,\n'
+            b'                                    )\n'
+        ),
+        (
+            b'                                    "source_context": _source_context_for_quote(support_quote, support_text),\n'
+            b'                                }\n'
+            b'                                if support_reason == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON:\n'
+            b'                                    support_rejection["company_identity_keys_checked"] = sorted(\n'
+            b'                                        key for key in identity_names if len(key) >= 2\n'
+            b'                                    )\n'
+            b'                                    candidate = _company_bound_quote_candidate(\n'
+            b'                                        support_quote, support_text, identity_names,\n'
+            b'                                    )\n'
         ),
     ),
 )

@@ -794,7 +794,8 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
                     if row.get('run_id') == example.get('score_run_id')]
         accepted = (call.get('run_id') == example.get('score_run_id')
                     and len(selected) == 1 and selected[0].get('kind') == 'score'
-                    and selected[0].get('status') == 'accepted')
+                    and selected[0].get('status') == 'accepted'
+                    and bool(example.get('judgment')))
         _require(accepted or _unlabeled_judge_attempt(example, call), 'not_selected_judge_call')
     else:
         _require(role == 'source', 'invalid_target_role')
@@ -913,6 +914,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
     # eligibility caller keeps the default final-snapshot requirement.
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
     unlabeled_judge = role == 'judge' and _unlabeled_judge_attempt(example, call)
+    unlabeled_outcome = unlabeled_judge or not example.get('judgment')
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -1005,10 +1007,10 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
             'icp_sha256': contracts.document_hash(example.get('icp') or {}),
             'scored_output_sha256': contracts.document_hash(example['output']) if 'output' in example else None,
             'judgment_sha256': (contracts.document_hash(example.get('judgment') or {})
-                                if call['run_id'] == example.get('score_run_id') else None),
+                                if call['run_id'] == example.get('score_run_id') and not unlabeled_outcome else None),
             **({'attempt_status': next(row['status'] for row in example['attempts']
                                       if row['run_id'] == call['run_id']),
-                'outcome_availability': 'unavailable'} if unlabeled_judge else {}),
+                'outcome_availability': 'unavailable'} if unlabeled_outcome else {}),
             'scorer_policy_sha256': contracts.document_hash(configuration.get('scorer_policy') or {}),
             'scorer_image_digest': configuration.get('scorer_image_digest'),
             'evidence_scope': 'exact_provider_visible_input',
@@ -1017,11 +1019,12 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                 'worker_receipt_ref', {}).get('payload_sha256'),
             'provider_call_sequence': call.get('action_sequence')}}
     provenance = _training_provenance(example)
-    if unlabeled_judge:
+    if unlabeled_outcome:
         # This target has no final label. The raw export still retains any
         # later accepted episode outcome, without assigning it to this reply.
         provenance['label_authority'].update(origin='unavailable', input_output_label_verified=False)
         provenance.update(score_run_id=None, judgment_sha256=None, company_outcomes=[])
+    if unlabeled_judge:
         attempt = next(row for row in example['attempts'] if row['run_id'] == call['run_id'])
         runtime = attempt.get('runtime') or {}
         provenance['dates'].update(judge_started_at=runtime.get('started_at'),
@@ -1044,7 +1047,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
                                                 and example.get('round_status') == 'published'),
                              'outcome': ({'per_icp_score': None, 'score_run_id': None}
-                                         if unlabeled_judge else
+                                         if unlabeled_outcome else
                                          {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'),
                                           'score_run_id': example.get('score_run_id')}),
                              'training_provenance': provenance,

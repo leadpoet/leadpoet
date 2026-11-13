@@ -6,22 +6,35 @@ activation or chain write. The database named `leadpoet-subnet-arena` is
 production. The [old migration restore plan](aws-migration-restore-plan.md) and
 its fixed-target utilities are historical records, not a rehearsal procedure.
 
-## Verified state and remaining gaps
+## Deployment and recovery evidence
 
-Evidence was captured on November 12–13, 2026, in account `493765492819`,
-region `us-east-1`. Recheck live state before recovery. Private receipts are in
+PR #1215 was merged and its infrastructure/access changes were deployed on
+November 13, 2026, in account `493765492819`, region `us-east-1`. No gateway or
+validator restart was needed. Recheck live state before recovery. Private
+receipts are in
 `/Users/pranav/Downloads/Arena_Backup_Access_Audit_20261112/`; do not commit their
 contents or source object bodies.
+Metadata-only restore receipts are also saved under
+`private/arena-recovery-audits/2026-11-13/` in the existing primary corpus bucket.
+Their exact versions were read back by hash and have COMPLIANCE retention.
+These receipts contain checksums and outcomes, not credentials or model bodies.
 
 | Area | Verified result | Limit |
 |---|---|---|
-| Production RDS | Native 14-day PITR is active. Database is private, encrypted and deletion-protected. Automated snapshots exist; no manual snapshots were found. | No current RDS PITR restore rehearsal has been proved. Deletion protection does not prevent bad SQL. |
+| Production RDS | Native 14-day PITR is active. The database is private, encrypted and deletion-protected. An isolated PITR restore matched two published rounds, 1,266 saved weight states, schema/ACL inventories and three retained provider responses. The disposable database was removed. | This was a bounded restore proof, not an application failover or full-corpus reconciliation. Deletion protection does not prevent bad SQL. |
 | Primary corpus bucket, `leadpoet-attested-v2-artifacts-493765492819` | Versioning, default AES256 encryption, all four public access blocks and default 365-day COMPLIANCE Object Lock are enabled. Sampled request, internal-capture and Arena objects have individual COMPLIANCE retention. | Samples do not prove every historical object is locked. No replication configuration or lifecycle configuration was found. |
 | Isolated S3 recovery test | Three actual production object versions were copied to a private, encrypted, versioned test bucket and matched by hash. Overwrite/delete-marker recovery passed. Locked-version deletion and shortened retention were denied. Test resources were cleaned. | Zero production writes. This was a bounded version-recovery proof, not a complete corpus or application restore. |
-| Host storage | One completed encrypted gateway EBS snapshot was found, dated October 28. No snapshots were found for the live validator or dashboard volumes. | Current local journals, configuration and other persistent files are not proved recoverable from a recent host backup. |
-| Supplemental AWS Backup | [Draft template](../deploy/aws/arena-recovery-backups.yml) defines daily periodic RDS snapshots at 11:00 UTC retained 35 days and the three exact EBS volumes at 12:00 UTC retained 14 days. | **NOT DEPLOYED.** Native RDS PITR remains separate. Plan creation is not evidence of a successful backup or restore. |
+| Host storage | The daily plan now selects the exact gateway, validator and dashboard root volumes. First protected backup jobs were started. | Check completed jobs and the separate `ebs-proof-<source-volume>.private.json` receipts before claiming a particular disk restore passed. A configured plan alone is not recovery proof. |
+| Supplemental AWS Backup | The [deployed template](../deploy/aws/arena-recovery-backups.yml) creates daily periodic RDS snapshots at 11:00 UTC retained 35 days and the three exact EBS volumes at 12:00 UTC retained 14 days. The first encrypted RDS recovery point completed with the expected retention and restore metadata. | Native RDS PITR remains separate. Verify each job and recovery point. The backup selections do not automatically follow replacement volume IDs. |
 
-Relevant receipts: `inventory-lab.private.json`,
+Deployment receipts: `backup-deployment.private.json`,
+`protected-rds-backup-proof.private.json`, `isolated-rds-proof.private.json`,
+`restored-migration-authority-proof.private.json` and
+`migration-access-retire-master-receipt.private.json`. The RDS proof matched
+54 relations, 491 function definitions/ACLs, 1,093 columns, 160 indexes,
+719 constraints and 19 RLS policies against the retained reference.
+
+Original inventory receipts: `inventory-lab.private.json`,
 `recovery-inventory.private.json`, `buckets-lab.private.json`,
 `object-retention-samples.private.json`, `host-storage.private.json` and
 `s3-recovery-proof.private.json`. The last receipt records successful cleanup
@@ -31,15 +44,19 @@ at `2026-11-13T07:59:01Z`.
 
 ### Routine operator protection
 
-The proposed `deploy/aws/arena-routine-operator-corpus-deny.json` is an additive
+The deployed `deploy/aws/arena-routine-operator-corpus-deny.json` is an additive
 deny overlay for the existing LabOperator Identity Center inline policy. It
 blocks object/version deletion and bucket retention/versioning changes on the
 two exact corpus buckets. It grants no permissions and preserves capture writes,
-version reads, retention extensions and isolated test-bucket cleanup. **It is not
-deployed yet.** Merge it by Sid with the existing KMS deny; do not replace other
-statements or edit only the generated SSO role. Re-provision the existing
-permission set and verify its status and exact readback, then test denied
-actions on synthetic objects and successful normal capture/version reads.
+version reads, retention extensions and isolated test-bucket cleanup. It was
+merged by Sid with the existing KMS deny in the Identity Center permission set,
+then provisioned and read back. Live synthetic-key deletion attempts were denied
+on both buckets; version reads passed. Nineteen live IAM policy checks preserved
+read/capture permissions and denied corpus deletion, retention changes, role
+administration and normal Pranav access to the old master credential.
+
+For later updates, preserve other inline statements and provision the permission
+set; do not edit only its generated SSO role. Repeat the relevant live checks.
 Admin maintenance stays separate. This does not replace Object Lock or protect
 the currently unlocked private-model bucket from a compromised administrator.
 
@@ -47,7 +64,9 @@ the currently unlocked private-model bucket from a compromised administrator.
 
 1. Verify the AWS principal, account and region through the canonical access
    workflow. Inventory existing plans, vaults and recovery points before applying
-   the draft template. Use exact resource identifiers; do not select broad tags.
+   the template. Use exact resource identifiers; do not select broad tags. After
+   replacing a host volume, update the exact backup selection and role scope,
+   then prove a completed backup of the new volume.
 2. Choose the intended recovery time and record the exact RDS recovery point or
    PITR timestamp, available restore window, source identity and encryption key.
    Record each required S3 key, version ID, checksum and retention date. Keep
@@ -105,7 +124,7 @@ the currently unlocked private-model bucket from a compromised administrator.
 
 ## Limits and completion criteria
 
-Current protection and the draft template are in the same account and region.
+Current protection and the deployed template are in the same account and region.
 They do not prove recovery after loss of that account, region or its access.
 Encrypted RDS and EBS snapshots depend on their source KMS keys and usable key
 permissions. A vault does not remove that dependency. The live validator and
@@ -113,17 +132,26 @@ dashboard volumes are unencrypted; their ordinary EBS snapshots remain
 unencrypted. Do not claim that vault encryption changes this. EBS snapshots are
 crash-consistent; they do not prove application-consistent recovery.
 
-The draft vault uses a seven-day grace period before optional COMPLIANCE lock
-becomes irreversible, with minimum seven-day and maximum 90-day retention.
-Review this before deployment. Its planned finite 14/35-day expiration is not
+The deployed vault has COMPLIANCE lock configured with minimum seven-day and
+maximum 90-day retention. Its seven-day grace period ends on November 20, 2026
+at 09:39:36 UTC. After that, the lock becomes irreversible. Before that deadline,
+an administrator can still remove the lock configuration. Check `LockDate` in
+AWS rather than assuming the grace period has ended. Its planned finite
+14/35-day expiration is not
 permission to delete production data, existing snapshots or corpus objects.
 
 A recovery test is complete only when the selected recovery point restores,
 the declared database/artifact checks pass, production remains unaffected and
 cleanup is verified. Record failures and missing references explicitly. The S3
-proof does **not** establish current RDS/host restore success, complete corpus
-coverage, an end-to-end application failover, or measured recovery-time and
-recovery-point targets. Those remain unproved until their own checks pass.
+proof does not establish RDS or host restore success by itself. Use each
+separate receipt. These bounded tests do not prove complete corpus coverage or
+an end-to-end application failover. The PITR target became query-ready in about
+18 minutes; that is one rehearsal measurement, not a recovery-time guarantee.
+
+RDS is Single-AZ. Snapshot creation can briefly suspend I/O, even though no
+service is stopped. Keep the supplemental window separate from the native
+09:00–09:30 UTC window and inspect query latency and round progress after changes.
+A Multi-AZ conversion is a separate availability/cost decision.
 
 ## Cost basis
 
@@ -140,8 +168,12 @@ database and journal churn can exceed it. Daily incremental backups are not
 35 or 14 full copies. Check actual billed storage after the first backup cycles.
 The dedicated Secrets Manager secret adds about $0.40/month plus API requests.
 Existing S3 Object Lock/versioning costs are not newly introduced by this plan.
-Restore rehearsals also incur temporary database/volume/runner costs. No paid
-restore or new recurring backup plan has yet been deployed by this audit.
+Restore rehearsals also incur temporary database/volume/runner costs. The
+isolated database used `db.t4g.medium` ($0.065/hour for compute); the inspector
+uses `t4g.small` ($0.0168/hour for compute), plus storage and applicable public
+IPv4 charges. Remove only the exact disposable resources after verification.
+The recurring backup plans are deployed; no model-provider calls are needed
+for these recovery checks.
 
 References: [EBS snapshot pricing](https://aws.amazon.com/ebs/pricing/),
 [RDS backup allowance](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.html),

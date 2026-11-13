@@ -251,11 +251,12 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
                 "to_regprocedure('public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'),"
                 "to_regprocedure('public.lab_arena_competition_publication_v1(public.lab_arena_rounds)'),"
                 "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer)'),"
-                "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer,text)')"
+                "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer,text)'),"
+                "to_regprocedure('public.lab_arena_correction_reward_history_v1(text,text,integer,integer,integer,boolean)')"
             )
             (attempt_reader, failure_reader, has_floor, results_view,
              configuration_reader, competition_reader, champion_reader,
-             bounded_champion_reader) = cursor.fetchone()
+             bounded_champion_reader, correction_history_reader) = cursor.fetchone()
             needs_bounded_champion_reader = champion_reader and not bounded_champion_reader
             if not include_run_reads:
                 attempt_reader = failure_reader = True
@@ -269,7 +270,7 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
             else:
                 view_has_floor = True
             if (not needs_bounded_champion_reader and attempt_reader and failure_reader and (not include_round_reads or (
-                    has_floor and results_view and view_has_floor and configuration_reader and competition_reader))):
+                    has_floor and results_view and view_has_floor and configuration_reader and competition_reader and correction_history_reader))):
                 return
 
             cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') "
@@ -288,6 +289,24 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
                 cursor.execute(migration[
                     migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_public_configuration_v1'):
                     migration.index('DO $restore_create$')
+                ])
+            if include_round_reads and not correction_history_reader:
+                # Current reward readers also use the append-only receipt store.
+                # Install only its committed empty schema on pre-517 fixtures;
+                # preserve all historical write RPCs and grading generations.
+                migration = (SCRIPTS / '517-lab-arena-model-policy-supersession.sql').read_text()
+                cursor.execute("SELECT to_regclass('public.lab_arena_scoring_supersessions')")
+                if cursor.fetchone()[0] is None:
+                    cursor.execute(migration[
+                        migration.index('CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions'):
+                        migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_supersede_role_model_v1')
+                    ])
+                cursor.execute('ALTER TABLE public.lab_arena_scoring_supersessions ADD COLUMN IF NOT EXISTS recovery_doc JSONB')
+                cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+                migration = (SCRIPTS / '696-lab-arena-correction-reward-history.sql').read_text()
+                cursor.execute(migration[
+                    migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_correction_reward_history_v1'):
+                    migration.index('DO $activation696$')
                 ])
             if include_round_reads and not competition_reader:
                 cursor.execute((SCRIPTS / '443-lab-arena-competition-publication-projection.sql').read_text())

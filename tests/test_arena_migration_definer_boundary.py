@@ -1,11 +1,14 @@
 """Native ACL regression controls; only disposable PostgreSQL is written."""
 from pathlib import Path
+import os
 import re
+import shutil
 
 import pytest
 
 from scripts.arena_rds_migration import ROLE_QUERY
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.postgres_migration_harness import _database_with_migrations
 
 MIGRATION = Path(__file__).resolve().parents[1] / 'scripts/692-arena-migration-definer-boundary.sql'
 SQL = MIGRATION.read_text()
@@ -14,7 +17,12 @@ SIGNATURES = re.findall(r"'((?:public\.)[a-z_]+\([^']*\))'", SQL)
 
 @pytest.fixture
 def database():
-    for pg, dsn in database_with_lab_arena_migration(migrations=()):
+    # Role membership options are PostgreSQL 17 production semantics. The
+    # repository's older default container is PostgreSQL 15.
+    local = os.environ.get('LAB_ARENA_PG_LOCAL') == '1' or shutil.which('docker') is None
+    generator = (database_with_lab_arena_migration(migrations=()) if local else
+                 _database_with_migrations((), image='postgres:17'))
+    for pg, dsn in generator:
         c = pg.connect(**dsn)
         c.autocommit = True
         with c.cursor() as q:

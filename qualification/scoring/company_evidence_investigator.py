@@ -572,6 +572,8 @@ facts hold for this exact company and same owner. Use null for other targets or
 when unproven.
 Cite PE/private-markets firm proof in primary or support 1; control or
 private-markets allocation activity alone is insufficient.
+Absent accepted direct/linked literal ownership proof, primary or support 1 must
+literally say "private equity" (spaces/hyphens). Generic equity funds do not qualify.
 The primary quote must name the owner and prove current control. It must name
 the company or use a company alias explicitly bound in same-page cited support.
 Supporting quote 1 must classify the owner if the primary does not; bind owner
@@ -844,7 +846,14 @@ def _tools(targets: Sequence[str], *, industry_sources: bool = False) -> list[di
                                         "owner_type": {
                                             "type": "string",
                                             "description": (
-                                                "One of: private_equity, other, unproven."
+                                                "One of: private_equity, other, unproven. "
+                                                "Unless accepted direct or linked literal ownership proof "
+                                                "already qualifies, private_equity requires the literal "
+                                                "words 'private equity' (spaces or hyphens allowed) in the "
+                                                "primary quote or supporting_evidence_quote_1. Investment "
+                                                "firm or dedicated equity/credit funds alone is insufficient. "
+                                                "Existing literal private-markets firm proofs remain valid; "
+                                                "all company, same-owner, control and current-stage checks apply."
                                             ),
                                         },
                                     },
@@ -894,6 +903,20 @@ def _tools(targets: Sequence[str], *, industry_sources: bool = False) -> list[di
         }
         parameters['required'].append('industry_brand_source')
     return tools
+
+
+def _final_submission_feedback(feedback: Mapping[str, Any]) -> dict[str, Any]:
+    """Align stale ordinary-repair advice with this request's submit-only admission."""
+
+    result = dict(feedback)
+    instruction = str(result.get("instruction") or "")
+    result["instruction"] = instruction.replace(
+        "First repair the quote from an already fetched page. Fetch another useful "
+        "source only if no continuous company-bound span on that page proves the fact. ",
+        "This request is now submit-only; do not search or fetch. Use only already "
+        "loaded evidence and preserve all existing evidence rules. ",
+    )
+    return result
 
 
 def _record_failure(diagnostic: Optional[dict[str, str]], reason: str) -> None:
@@ -4227,6 +4250,7 @@ def _semantic_ownership_proof(
     same_page_identity_quotes: Sequence[str] = (),
     classification_quote: str = "",
     literal_ownership_proved: bool = False,
+    failure_details: Optional[list[str]] = None,
 ) -> bool:
     """Bind the investigator's ownership judgment to literal source entities.
 
@@ -4237,15 +4261,28 @@ def _semantic_ownership_proof(
     if not isinstance(raw, Mapping) or set(raw) != {
         "controlling_owner", "control_status", "owner_type",
     }:
+        if failure_details is not None:
+            failure_details.append(
+                "ownership must contain exactly controlling_owner, control_status, and owner_type."
+            )
         return False
     owner = raw.get("controlling_owner")
+    failures: list[str] = []
     if (
         not isinstance(owner, str) or not owner.strip() or len(owner) > 200
         or owner != owner.strip()
-        or raw.get("control_status") != "current_control"
-        or raw.get("owner_type") != "private_equity"
     ):
+        if failure_details is not None:
+            failure_details.append(
+                "ownership.controlling_owner must be a nonempty trimmed name of at most 200 characters."
+            )
         return False
+    if raw.get("control_status") != "current_control":
+        failures.append(
+            "ownership.control_status must be current_control; minority, pending, and former interests do not prove current control."
+        )
+    if raw.get("owner_type") != "private_equity":
+        failures.append("ownership.owner_type must be private_equity.")
     # Retain existing literal ownership proofs; otherwise require quoted PE
     # grounding, which alone does not prove classification or the same owner.
     # Support slot 2 and uncited page text cannot replace classification slot 1.
@@ -4253,7 +4290,12 @@ def _semantic_ownership_proof(
         re.search(r"\bprivate[\s\-\u2010-\u2015]+equity\b", _normalized_span(quote))
         for quote in (control_quote, classification_quote)
     ):
-        return False
+        failures.append(
+            "The primary quote did not qualify under an existing direct or linked literal ownership proof, "
+            "and neither it nor supporting_evidence_quote_1 contains the literal words 'private equity' "
+            "(spaces or hyphens allowed). Investment firm or dedicated equity/credit funds alone does not "
+            "meet this grounding requirement; supporting_evidence_quote_2 cannot replace that slot."
+        )
     # Stage identity keys discard non-ASCII letters as well as punctuation and
     # spaces. Allow those characters inside the same literal identity, while
     # retaining outer word boundaries on the original Unicode quote.
@@ -4261,7 +4303,9 @@ def _semantic_ownership_proof(
     owner_identity_names = {
         _company_name(owner), re.sub(r"[^a-z0-9]+", "", owner.casefold()),
     }
-    if owner_identity_names & company_names or not any(
+    if owner_identity_names & company_names:
+        failures.append("The investigated company cannot be its own controlling owner.")
+    if not any(
         re.search(
             r"(?<!\w)" + r"[^a-z0-9]*".join(re.escape(c) for c in name) + r"(?!\w)",
             quote.casefold(),
@@ -4269,11 +4313,17 @@ def _semantic_ownership_proof(
         for name in company_names if len(name) >= 2
         for quote in (control_quote, *same_page_identity_quotes)
     ):
-        return False
+        failures.append(
+            "The primary quote or same-page cited identity support must name the investigated company under an already established identity."
+        )
 
     owner_words = " ".join(re.findall(r"\w+", owner.casefold()))
     quote_words = " ".join(re.findall(r"\w+", control_quote.casefold()))
-    return bool(owner_words) and f" {owner_words} " in f" {quote_words} "
+    if not (bool(owner_words) and f" {owner_words} " in f" {quote_words} "):
+        failures.append("The primary quote must name ownership.controlling_owner as the controlling owner.")
+    if failure_details is not None:
+        failure_details.extend(failures)
+    return not failures
 
 
 def _retained_requested_source_url(
@@ -4352,9 +4402,15 @@ def _validated_findings(
     priority_headquarters_url: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
     classified_industry_mismatch: bool = False,
+    rejection_details: Optional[dict[str, list[str]]] = None,
+    attribution_rejection_keys: Optional[dict[str, list[str]]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
     # Host-only authority from _review_industry_sources after packet resolution.
     # Never derive this permission from a research model's finding or receipt.
+    if rejection_details is not None:
+        rejection_details.clear()
+    if attribution_rejection_keys is not None:
+        attribution_rejection_keys.clear()
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
     raw_findings = arguments.get("findings")
@@ -4426,6 +4482,7 @@ def _validated_findings(
             if raw.get(f"supporting_evidence_url_{index}")
             or raw.get(f"supporting_evidence_quote_{index}")
         ]
+        ownership_failures: list[str] = []
         if status == "UNPROVEN":
             finding.update(
                 evidence_url="",
@@ -4566,6 +4623,7 @@ def _validated_findings(
                                 identity_names=tuple(stage_attribution_names),
                             )
                         ),
+                        failure_details=ownership_failures,
                         same_page_identity_quotes=tuple(
                             item["quote"] for item in linked_pe_support
                             if item["url"] == evidence_url
@@ -5059,6 +5117,29 @@ def _validated_findings(
             else:
                 finding["supporting_evidence"] = validated_support
         findings[target] = finding
+        if (
+            attribution_rejection_keys is not None
+            and finding["status"] == "UNPROVEN"
+            and finding["reason"] in {
+                "source quote did not identify the investigated company",
+                REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+            }
+        ):
+            attribution_rejection_keys[target] = sorted(
+                key for key in (
+                    stage_attribution_names if target == "stage" else attribution_names
+                ) if len(key) >= 2
+            )
+        if (
+            rejection_details is not None
+            and target == "stage"
+            and finding["status"] == "UNPROVEN"
+            and finding["reason"] == "source quote did not prove current private-equity ownership"
+            and ownership_failures
+        ):
+            # Host-only repair detail from the same predicate that rejected
+            # this proof. Do not add grading fields or trust model diagnostics.
+            rejection_details[target] = ownership_failures
         if target == "rebrand" and finding["status"] == "VERIFIED":
             acquisition_short_identity_names.update(
                 re.sub(r"[^a-z0-9]+", "", _normalized_span(name))
@@ -6705,6 +6786,22 @@ async def investigate_company_evidence(
                     )
                 ):
                     raise ValueError("reasoning_tool_arguments_malformed")
+                controller_messages = messages
+                if force_submit or required_tool == "submit_findings":
+                    last_tool = next(
+                        (item for item in reversed(messages) if item.get("role") == "tool"),
+                        None,
+                    )
+                    if last_tool:
+                        feedback = json.loads(last_tool["content"])
+                        if isinstance(feedback, Mapping) and feedback.get("error") == "deterministic_evidence_validation_failed":
+                            controller_messages = list(messages)
+                            index = next(index for index in range(len(messages) - 1, -1, -1)
+                                         if messages[index].get("role") == "tool")
+                            controller_messages[index] = dict(last_tool)
+                            controller_messages[index]["content"] = _bounded_message_json(
+                                _final_submission_feedback(feedback),
+                            )
                 controller_payload = {
                     # The model assessing capability gaps also selects
                     # the sources and completes the final shared findings.
@@ -6714,7 +6811,7 @@ async def investigate_company_evidence(
                     "model": selected_controller_model,
                     "messages": [
                         *_bounded_system_messages(system_prompt),
-                        *messages,
+                        *controller_messages,
                     ],
                     "tools": [
                         {
@@ -7019,6 +7116,8 @@ async def investigate_company_evidence(
                                 if isinstance(raw, dict) and raw.get("target") == "industry":
                                     raw.update(status="UNPROVEN", evidence_url="",
                                                evidence_quote="", activity_role="unresolved")
+                    rejection_details: dict[str, list[str]] = {}
+                    attribution_rejection_keys: dict[str, list[str]] = {}
                     claims = _validated_findings(
                         arguments,
                         targets=active_submit_targets,
@@ -7035,6 +7134,8 @@ async def investigate_company_evidence(
                                 bounded_homepage_navigation_locators,
                             )
                         ),
+                        rejection_details=rejection_details,
+                        attribution_rejection_keys=attribution_rejection_keys,
                     )
                     if claims is None:
                         if (
@@ -7106,6 +7207,10 @@ async def investigate_company_evidence(
                         if not reason:
                             continue
                         rejected_finding = {"target": target, "reason": reason}
+                        if attribution_rejection_keys.get(target):
+                            rejected_finding["company_identity_keys_checked"] = attribution_rejection_keys[target]
+                        if target == "stage" and rejection_details.get(target):
+                            rejected_finding["ownership_proof_failures"] = rejection_details[target]
                         source_url = _safe_https_url(submitted.get("evidence_url"))
                         source_quote = str(submitted.get("evidence_quote") or "")
                         if (
@@ -7181,6 +7286,9 @@ async def investigate_company_evidence(
                                     "source_context": _source_context_for_quote(support_quote, support_text),
                                 }
                                 if support_reason == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON:
+                                    support_rejection["company_identity_keys_checked"] = sorted(
+                                        key for key in identity_names if len(key) >= 2
+                                    )
                                     candidate = _company_bound_quote_candidate(
                                         support_quote, support_text, identity_names,
                                     )

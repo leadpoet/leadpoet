@@ -896,6 +896,20 @@ def _tools(targets: Sequence[str], *, industry_sources: bool = False) -> list[di
     return tools
 
 
+def _final_submission_feedback(feedback: Mapping[str, Any]) -> dict[str, Any]:
+    """Align stale ordinary-repair advice with this request's submit-only admission."""
+
+    result = dict(feedback)
+    instruction = str(result.get("instruction") or "")
+    result["instruction"] = instruction.replace(
+        "First repair the quote from an already fetched page. Fetch another useful "
+        "source only if no continuous company-bound span on that page proves the fact. ",
+        "This request is now submit-only; do not search or fetch. Use only already "
+        "loaded evidence and preserve all existing evidence rules. ",
+    )
+    return result
+
+
 def _record_failure(diagnostic: Optional[dict[str, str]], reason: str) -> None:
     if diagnostic is not None:
         diagnostic[VERIFIER_FAILURE_REASON_KEY] = reason
@@ -6705,6 +6719,22 @@ async def investigate_company_evidence(
                     )
                 ):
                     raise ValueError("reasoning_tool_arguments_malformed")
+                controller_messages = messages
+                if force_submit or required_tool == "submit_findings":
+                    last_tool = next(
+                        (item for item in reversed(messages) if item.get("role") == "tool"),
+                        None,
+                    )
+                    if last_tool:
+                        feedback = json.loads(last_tool["content"])
+                        if isinstance(feedback, Mapping) and feedback.get("error") == "deterministic_evidence_validation_failed":
+                            controller_messages = list(messages)
+                            index = next(index for index in range(len(messages) - 1, -1, -1)
+                                         if messages[index].get("role") == "tool")
+                            controller_messages[index] = dict(last_tool)
+                            controller_messages[index]["content"] = _bounded_message_json(
+                                _final_submission_feedback(feedback),
+                            )
                 controller_payload = {
                     # The model assessing capability gaps also selects
                     # the sources and completes the final shared findings.
@@ -6714,7 +6744,7 @@ async def investigate_company_evidence(
                     "model": selected_controller_model,
                     "messages": [
                         *_bounded_system_messages(system_prompt),
-                        *messages,
+                        *controller_messages,
                     ],
                     "tools": [
                         {

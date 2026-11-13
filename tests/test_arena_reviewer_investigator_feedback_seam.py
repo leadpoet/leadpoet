@@ -64,9 +64,7 @@ def test_feedback_cannot_import_unreviewed_corrections(monkeypatch, flag):
 @pytest.mark.parametrize("verify_existing", [False, True])
 def test_composer_preserves_frozen_layers_process_and_acquisition(monkeypatch, capsys, verify_existing):
     frozen = original_investigator()
-    # Isolate the builder contract from the semantic transform tests below.
-    corrected = frozen + b"\n# reviewed test transform\n"
-    monkeypatch.setattr(seam, "convert_investigator_feedback_seam", lambda source: corrected if source == frozen else pytest.fail("wrong frozen investigator"))
+    corrected = seam.convert_investigator_feedback_seam(frozen)
     base_ref = "registry.example/reviewer@" + seam.FROZEN_IMAGE_DIGEST
     tag = composer.bounded_build_tag("registry.example/reviewer:reviewer-" + seam.FROZEN_IMAGE_DIGEST[7:19] + "-" + "c" * 12 + "-submitted-company-context-active-acquisition-target-investigator-feedback")
     candidate_ref = "registry.example/reviewer@sha256:" + "b" * 64 if verify_existing else tag
@@ -100,3 +98,121 @@ def test_composer_preserves_frozen_layers_process_and_acquisition(monkeypatch, c
     assert proof["overlay_files"][FINALITY] == "7994f7574b5e955d56c86d8a3a73a41f30d4dda302e7e0fcfa4a0e197f3d7bcd"
     assert proof["base_layers_unchanged"] is proof["process_configuration_unchanged"] is True
     assert len(builds) == (0 if verify_existing else 1)
+
+
+def test_exact_reviewed_delta_hashes_idempotence_and_other_source_bytes():
+    import ast
+    original = original_investigator()
+    corrected = seam.convert_investigator_feedback_seam(original)
+    assert hashlib.sha256(corrected).hexdigest() == seam.REPAIRED_SHA256
+    assert corrected == (composer.ROOT / INVESTIGATOR).read_bytes()
+    assert seam.convert_investigator_feedback_seam(corrected) == corrected
+    restored = corrected
+    for old, new in reversed(seam.DELTAS):
+        assert restored.count(new) == 1
+        restored = restored.replace(new, old, 1)
+    assert restored == original
+    allowed = {"_SYSTEM_PROMPT", "_tools", "_final_submission_feedback", "_semantic_ownership_proof", "_validated_findings", "investigate_company_evidence"}
+    def unchanged(source):
+        tree = ast.parse(source)
+        tree.body = [node for node in tree.body if not (
+            getattr(node, "name", "") in allowed
+            or (isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in allowed for target in node.targets))
+        )]
+        return ast.dump(tree)
+    # Models, caps, security/evidence helpers, imports, and other runtime paths.
+    assert unchanged(original) == unchanged(corrected)
+
+
+@pytest.mark.parametrize("change", ["empty", "encoding", "newline", "crlf", "model", "partial", "postimage_drift"])
+def test_unknown_or_unreviewed_investigator_source_fails_closed(change):
+    original = original_investigator()
+    corrected = seam.convert_investigator_feedback_seam(original)
+    candidates = {
+        "empty": b"", "encoding": b"\xff", "newline": original + b"\n",
+        "crlf": original.replace(b"\n", b"\r\n"),
+        "model": original.replace(b"INVESTIGATOR_MODEL", b"UNREVIEWED_MODEL", 1),
+        "partial": original.replace(*seam.DELTAS[0], 1),
+        "postimage_drift": corrected + b"\n",
+    }
+    with pytest.raises(ValueError, match="unrecognized"):
+        seam.convert_investigator_feedback_seam(candidates[change])
+
+
+def test_unreviewed_transform_cannot_pass_approved_postimage(monkeypatch):
+    original = original_investigator()
+    old, new = seam.DELTAS[0]
+    monkeypatch.setattr(seam, "DELTAS", ((old, new + b"\n"), *seam.DELTAS[1:]))
+    with pytest.raises(ValueError, match="postimage differs"):
+        seam.convert_investigator_feedback_seam(original)
+
+
+def _install(monkeypatch, source, name):
+    import sys
+    from types import ModuleType
+    module = ModuleType(name)
+    monkeypatch.setitem(sys.modules, name, module)
+    exec(compile(source, name + ".py", "exec"), vars(module))
+    return module
+
+
+def test_exact_frozen_overlay_repairs_native_feedback_and_keeps_verdicts(monkeypatch):
+    from tests import test_company_evidence_final_target_guidance as final_controls
+    from tests import test_investigator_ownership_contract as ownership_controls
+    from tests import test_private_equity_rejection_feedback as feedback_controls
+    from tests import test_private_equity_prompt_contract as prompt_controls
+    original = original_investigator()
+    before = _install(monkeypatch, original, "_frozen_feedback_before")
+    after = _install(monkeypatch, seam.convert_investigator_feedback_seam(original), "_frozen_feedback_after")
+    # Reproduce the actual forced-final request defect with all I/O mocked.
+    with monkeypatch.context() as scope:
+        scope.setattr(final_controls, "investigator", before)
+        with pytest.raises(AssertionError):
+            final_controls.test_ordinary_rejection_becomes_submit_only_on_next_admission(scope)
+    cases = [
+        ownership_controls.finding(),
+        ownership_controls.finding(ownership={**ownership_controls.OWNERSHIP, "control_status": "minority"}),
+        ownership_controls.finding(ownership={**ownership_controls.OWNERSHIP, "controlling_owner": "Clear Capital"}),
+        ownership_controls.finding(evidence_quote=ownership_controls.CONTROL.replace("Clear Capital", "Other Company")),
+        ownership_controls.finding(supporting_evidence_quote_1="Pinecrest Capital invests through equity funds."),
+        ownership_controls.finding(evidence_quote="Clear Capital is controlled by Pinecrest Capital, a private-markets firm."),
+    ]
+    for raw in cases:
+        outputs = []
+        for module in (before, after):
+            monkeypatch.setattr(ownership_controls, "investigator", module)
+            outputs.append(ownership_controls.validate(raw, requested_stage="Private Equity"))
+        assert outputs[0] == outputs[1]
+    monkeypatch.setattr(ownership_controls, "investigator", after)
+    monkeypatch.setattr(final_controls, "investigator", after)
+    monkeypatch.setattr(feedback_controls, "investigator", after)
+    monkeypatch.setattr(prompt_controls, "inv", after)
+    final_controls.test_ordinary_rejection_becomes_submit_only_on_next_admission(monkeypatch)
+    final_controls.test_captured76_final_admission_removes_stale_fetch_instruction()
+    prompt_controls.test_system_and_schema_explain_conditional_literal_grounding()
+    prompt_controls.test_literal_private_markets_direct_and_linked_proofs_remain_valid()
+    for portfolio_primary in (False, True):
+        feedback_controls.test_retained_public_635_quotes_keep_decision_and_explain_failed_links(portfolio_primary)
+    for repair_to_positive in (False, True):
+        feedback_controls.test_controller_receives_detail_and_can_repair_or_submit_honest_negative(monkeypatch, repair_to_positive)
+
+
+@pytest.mark.parametrize("change", [None, "unpatched_investigator", "unpatched_grader", "extra", "missing"])
+def test_actual_two_file_overlay_rejects_changed_unreviewed_or_missing_source(change):
+    original = original_investigator()
+    expected = {FINALITY: CORRECTED_FINALITY, INVESTIGATOR: seam.convert_investigator_feedback_seam(original)}
+    files = dict(expected)
+    if change == "unpatched_investigator":
+        files[INVESTIGATOR] = original
+    elif change == "unpatched_grader":
+        files[FINALITY] = FROZEN_FINALITY
+    elif change == "extra":
+        files["lab_arena/scorer_entrypoint.py"] = b"unreviewed entrypoint\n"
+    elif change == "missing":
+        files.pop(FINALITY)
+    data = layer([("model/" + path, source) for path, source in files.items()])
+    if change is None:
+        composer.verify_overlay(data, expected)
+    else:
+        with pytest.raises(composer.CompositionError):
+            composer.verify_overlay(data, expected)

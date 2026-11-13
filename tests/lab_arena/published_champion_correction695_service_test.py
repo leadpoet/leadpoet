@@ -253,6 +253,8 @@ def test_seven_corrections_republish_and_activate_prospectively(published, tmp_p
             k: v for k, v in original.items() if k not in projected}
         if original['qualification_doc'] is not None:
             assert latest[rid]['qualification_doc'] == original['qualification_doc']
+        elif latest[rid]['qualification_doc'] is not None:
+            assert rid in {parent['scored_run_id'] for parent in parents}
     for row in original_runs:
         assert latest[row['run_id']]['status'] == row['status']
         if row['per_icp_score'] is not None:

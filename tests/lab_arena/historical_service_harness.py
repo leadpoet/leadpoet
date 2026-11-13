@@ -124,6 +124,8 @@ class HistoricalArenaStore(ArenaStore):
 
 class HistoricalStoreHarnessMixin:
     def make_store(self):
+        from tests.lab_arena.lab_arena_pg_harness import prepare_correction_reward_history_reads
+        prepare_correction_reward_history_reads(self.connect)
         return HistoricalArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
 
 

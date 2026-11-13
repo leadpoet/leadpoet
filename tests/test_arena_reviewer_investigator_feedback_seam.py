@@ -1,4 +1,4 @@
-"""The frozen50de feedback overlay retains exact acquisition grading bytes."""
+"""Frozen50de retains private failure sources and exact acquisition grading."""
 import copy
 import hashlib
 import json
@@ -124,7 +124,63 @@ def test_exact_reviewed_delta_hashes_idempotence_and_other_source_bytes():
     assert unchanged(original) == unchanged(corrected)
 
 
-@pytest.mark.parametrize("change", ["empty", "encoding", "newline", "crlf", "model", "partial", "postimage_drift"])
+def previous_feedback_investigator():
+    """Recover the deployed v1 source, before only the six private handoffs."""
+    source = original_investigator()
+    for old, new in seam.DELTAS[:-6]:
+        assert source.count(old) == 1
+        source = source.replace(old, new, 1)
+    assert hashlib.sha256(source).hexdigest() == "9ddfd54dba12069b74d5993df8900145d6211365416614846a4a180a73e57ef9"
+    return source
+
+
+@pytest.mark.parametrize("positive", [False, True])
+@pytest.mark.parametrize("fault,reason", [
+    ("http", "provider_error"), ("timeout", "provider_error"),
+    ("connection", "provider_error"), ("json", "malformed_response"),
+    ("unexpected", "unexpected_verifier_error"),
+])
+def test_exact_frozen_overlay_preserves_fresh_sources_without_finishing_judgment(
+    monkeypatch, positive, fault, reason,
+):
+    from tests import test_company_evidence_failure_source_handoff as controls
+    before = _install(monkeypatch, previous_feedback_investigator(), "_frozen_source_handoff_before")
+    after = _install(monkeypatch, seam.convert_investigator_feedback_seam(original_investigator()), "_frozen_source_handoff_after")
+    for module, fails in ((before, True), (after, False)):
+        with monkeypatch.context() as scope:
+            scope.setattr(controls, "investigator", module)
+            # The shared helper patches its module; use that same exact frozen
+            # module for all fetch, clock, model and capture substitutions.
+            scope.setitem(controls._investigate.__globals__, "investigator", module)
+            if fails:
+                with pytest.raises(KeyError, match="_server_fetched_pages"):
+                    controls.test_fresh_exact_page_survives_later_failure(scope, positive, fault, reason)
+            else:
+                controls.test_fresh_exact_page_survives_later_failure(scope, positive, fault, reason)
+
+
+def test_exact_frozen_overlay_keeps_all_source_handoff_controls(monkeypatch):
+    from tests import test_company_evidence_failure_source_handoff as controls
+    after = _install(monkeypatch, seam.convert_investigator_feedback_seam(original_investigator()), "_frozen_source_handoff_controls")
+    cases = [
+        (controls.test_native_industry_advisory_failure_retains_loaded_pages, (False,)),
+        (controls.test_native_industry_advisory_failure_retains_loaded_pages, (True,)),
+        (controls.test_reasoning_fallthrough_retains_loaded_pages, ()),
+        (controls.test_failed_page_cannot_become_a_retained_success, ()),
+        (controls.test_failure_handoff_does_not_swallow_cancellation, ()),
+        (controls.test_completed_submission_handoff_is_unchanged, ()),
+        (controls.test_missing_credentials_still_returns_before_source_initialization, ()),
+        *((controls.test_failure_handoff_keeps_existing_prefetch_bounds, (excess,))
+          for excess in ("none", "count", "text")),
+    ]
+    for control, arguments in cases:
+        with monkeypatch.context() as scope:
+            scope.setattr(controls, "investigator", after)
+            scope.setitem(controls._investigate.__globals__, "investigator", after)
+            control(scope, *arguments)
+
+
+@pytest.mark.parametrize("change", ["empty", "encoding", "newline", "crlf", "model", "partial", "old_feedback", "postimage_drift"])
 def test_unknown_or_unreviewed_investigator_source_fails_closed(change):
     original = original_investigator()
     corrected = seam.convert_investigator_feedback_seam(original)
@@ -133,6 +189,7 @@ def test_unknown_or_unreviewed_investigator_source_fails_closed(change):
         "crlf": original.replace(b"\n", b"\r\n"),
         "model": original.replace(b"INVESTIGATOR_MODEL", b"UNREVIEWED_MODEL", 1),
         "partial": original.replace(*seam.DELTAS[0], 1),
+        "old_feedback": previous_feedback_investigator(),
         "postimage_drift": corrected + b"\n",
     }
     with pytest.raises(ValueError, match="unrecognized"):

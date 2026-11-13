@@ -572,6 +572,8 @@ facts hold for this exact company and same owner. Use null for other targets or
 when unproven.
 Cite PE/private-markets firm proof in primary or support 1; control or
 private-markets allocation activity alone is insufficient.
+Absent accepted direct/linked literal ownership proof, primary or support 1 must
+literally say "private equity" (spaces/hyphens). Generic equity funds do not qualify.
 The primary quote must name the owner and prove current control. It must name
 the company or use a company alias explicitly bound in same-page cited support.
 Supporting quote 1 must classify the owner if the primary does not; bind owner
@@ -844,7 +846,14 @@ def _tools(targets: Sequence[str], *, industry_sources: bool = False) -> list[di
                                         "owner_type": {
                                             "type": "string",
                                             "description": (
-                                                "One of: private_equity, other, unproven."
+                                                "One of: private_equity, other, unproven. "
+                                                "Unless accepted direct or linked literal ownership proof "
+                                                "already qualifies, private_equity requires the literal "
+                                                "words 'private equity' (spaces or hyphens allowed) in the "
+                                                "primary quote or supporting_evidence_quote_1. Investment "
+                                                "firm or dedicated equity/credit funds alone is insufficient. "
+                                                "Existing literal private-markets firm proofs remain valid; "
+                                                "all company, same-owner, control and current-stage checks apply."
                                             ),
                                         },
                                     },
@@ -4282,7 +4291,10 @@ def _semantic_ownership_proof(
         for quote in (control_quote, classification_quote)
     ):
         failures.append(
-            "No accepted private-equity classification grounding was supplied in the primary quote or supporting_evidence_quote_1; supporting_evidence_quote_2 cannot replace that slot."
+            "The primary quote did not qualify under an existing direct or linked literal ownership proof, "
+            "and neither it nor supporting_evidence_quote_1 contains the literal words 'private equity' "
+            "(spaces or hyphens allowed). Investment firm or dedicated equity/credit funds alone does not "
+            "meet this grounding requirement; supporting_evidence_quote_2 cannot replace that slot."
         )
     # Stage identity keys discard non-ASCII letters as well as punctuation and
     # spaces. Allow those characters inside the same literal identity, while

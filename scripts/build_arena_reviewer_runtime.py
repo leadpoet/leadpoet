@@ -46,6 +46,8 @@ Its --active-acquisition-target option also binds completed active-voice
 acquisition proof to the exact acquired target in that same frozen file.
 Its --investigator-feedback option retains both repairs and applies only the
 reviewed prompt/feedback delta to the exact frozen50de investigator.
+Its --ordered-company-retry-passes option retains those corrections and moves
+the same three company attempts into ordered passes on the exact frozen50de pair.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -282,6 +284,7 @@ def extract_frozen_sources(
     legacy_company_progress_only: bool = False,
     submitted_company_context_only: bool = False,
     investigator_feedback: bool = False,
+    ordered_company_retry_passes: bool = False,
     intent_target_denial: bool = False,
     homepage_profile_alias: bool = False,
     verified_display_brand: bool = False,
@@ -342,6 +345,9 @@ def extract_frozen_sources(
             names = (FINALITY_FILE,)
         if investigator_feedback:
             names += (GRADER_FILE,)
+        if ordered_company_retry_passes:
+            from scripts.arena_reviewer_legacy_company_progress_seam import FILES
+            names += FILES
         if source_local_refusal_finality:
             names += (VERIFICATION_FILE, "lab_arena/shim.py")
         for name in dict.fromkeys(names):
@@ -525,6 +531,10 @@ def main() -> int:
         help="apply only reviewed investigator feedback on frozen50de; requires submitted-company context and active-acquisition target",
     )
     parser.add_argument(
+        "--ordered-company-retry-passes", action="store_true",
+        help="move existing company attempts into ordered passes on frozen50de; requires investigator-feedback",
+    )
+    parser.add_argument(
         "--legacy-company-progress-only", action="store_true",
         help="compose only reviewed two-file legacy company progress on exact frozen51bc; excludes other corrections",
     )
@@ -645,13 +655,15 @@ def main() -> int:
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
     args = parser.parse_args()
+    if args.ordered_company_retry_passes and not args.investigator_feedback:
+        raise CompositionError("ordered-company-retry-passes requires investigator-feedback")
     if args.investigator_feedback and not (args.submitted_company_context_only and args.active_acquisition_target):
         raise CompositionError("investigator-feedback requires submitted-company-context-only and active-acquisition-target")
     if args.active_acquisition_target and not args.submitted_company_context_only:
         raise CompositionError("active-acquisition-target requires submitted-company-context-only")
     if args.submitted_company_context_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"submitted_company_context_only", "active_acquisition_target", "investigator_feedback", "push"}
+        if name not in {"submitted_company_context_only", "active_acquisition_target", "investigator_feedback", "ordered_company_retry_passes", "push"}
     ):
         raise CompositionError("submitted-company-context-only mode cannot include other corrections")
     if args.legacy_company_progress_only and any(
@@ -746,6 +758,10 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.investigator_feedback:
                 flags["investigator_feedback"] = True
                 expected.add(GRADER_FILE)
+            if args.ordered_company_retry_passes:
+                from scripts.arena_reviewer_legacy_company_progress_seam import FILES
+                flags["ordered_company_retry_passes"] = True
+                expected.update(FILES)
             original = extract_frozen_sources(
                 args.grading_image, root / "original", **flags,
             )
@@ -758,6 +774,12 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.investigator_feedback:
                 from scripts.arena_reviewer_investigator_feedback_seam import convert_investigator_feedback_seam
                 files[GRADER_FILE] = convert_investigator_feedback_seam(original[GRADER_FILE])
+            if args.ordered_company_retry_passes:
+                from scripts.arena_reviewer_legacy_company_progress_seam import (
+                    FILES, SCORING_FILE, convert_ordered_company_retry_passes,
+                )
+                corrected = convert_ordered_company_retry_passes({name: original[name] for name in FILES})
+                files[SCORING_FILE] = corrected[SCORING_FILE]
         elif args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import convert_legacy_company_progress_files
             original = extract_frozen_sources(
@@ -920,6 +942,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-submitted-company-context" if args.submitted_company_context_only else "")
             + ("-active-acquisition-target" if args.active_acquisition_target else "")
             + ("-investigator-feedback" if args.investigator_feedback else "")
+            + ("-ordered-company-retry-passes" if args.ordered_company_retry_passes else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -955,6 +978,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.investigator_feedback:
                 from scripts.arena_reviewer_investigator_feedback_seam import CORRECTION_ID as INVESTIGATOR_FEEDBACK_CORRECTION_ID
                 corrections.append(INVESTIGATOR_FEEDBACK_CORRECTION_ID)
+            if args.ordered_company_retry_passes:
+                from scripts.arena_reviewer_legacy_company_progress_seam import ORDERED_RETRY_CORRECTION_ID
+                corrections.append(ORDERED_RETRY_CORRECTION_ID)
         if args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import CORRECTION_ID as LEGACY_COMPANY_PROGRESS_CORRECTION_ID
             corrections.append(LEGACY_COMPANY_PROGRESS_CORRECTION_ID)

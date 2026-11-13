@@ -176,6 +176,9 @@ _DEEPLINE_BILLING_ABANDONED_SLOTS = 4
 _DEEPLINE_BILLING_EXECUTE_SLOTS = 1
 _DEEPLINE_BILLING_SCORE_SLOTS = 88
 _DEEPLINE_BILLING_GENERAL_SLOTS = 3
+_OPENROUTER_BILLING_BATCH_LIMIT = 20  # Candidate RPC contract.
+_OPENROUTER_BILLING_WORKERS = 8
+_OPENROUTER_BILLING_RUN_PROBES = 20
 
 # Provider error codes that mean "the call was declined before or instead of
 # doing upstream work" versus "the call may have happened and we cannot tell"
@@ -1160,6 +1163,8 @@ class ArenaService:
         self._scorer_policy = scoring.build_scorer_policy()
         self._brokers: Dict[Tuple[str, str], broker_module.Broker] = {}
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
+        self._openrouter_billing_run_after: Dict[str, str] = {}
+        self._active_openrouter_reconciliations: set[str] = set()
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_priority_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_score_reconciliation_after: Dict[Tuple[str, str], int] = {}
@@ -7414,6 +7419,113 @@ class ArenaService:
             str(candidate["round_id"]), run_id=str(candidate["run_id"]),
         )
 
+    def _reconcile_active_openrouter_cost(self, round_id: str) -> Dict[str, Any]:
+        """Check at most twenty exact bills in three waves of five-second GETs.
+
+        One slot rotates through leased score runs. The independent global
+        cursor covers all remaining liabilities, including expired runs.
+        """
+        with self._lock:
+            if round_id in self._active_openrouter_reconciliations:
+                return {"status": "in_progress"}
+            self._active_openrouter_reconciliations.add(round_id)
+            after_run = self._openrouter_billing_run_after.get(round_id, "")
+        try:
+            unique: Dict[str, Dict[str, Any]] = {}
+            logger = logging.getLogger(__name__)
+
+            def select(target: int, *, run_id: str = "") -> Optional[Exception]:
+                cursor_key = (round_id, run_id)
+                with self._lock:
+                    after_entry_id = self._openrouter_reconciliation_after.get(cursor_key, 0)
+                try:
+                    items = self._store.list_openrouter_cost_reconciliations(
+                        round_id, run_id=run_id, after_entry_id=after_entry_id,
+                        limit=1 if run_id else _OPENROUTER_BILLING_BATCH_LIMIT,
+                    )
+                except Exception as exc:
+                    logger.warning("Arena OpenRouter billing lookup failed: %s", type(exc).__name__)
+                    return exc
+                # SQL's JSON aggregate sorts by entry ID even on wrap. Reserve
+                # only consumed entries so a spare global row is never skipped.
+                items = sorted(items, key=lambda item: (
+                    int(item.get("uncertain_entry_id") or 0) <= after_entry_id,
+                    int(item.get("uncertain_entry_id") or 0),
+                ))
+                for item in items:
+                    if len(unique) >= target:
+                        break
+                    unique.setdefault(str(item["call_identity"]), item)
+                    after_entry_id = int(item.get("uncertain_entry_id") or 0)
+                if items:
+                    with self._lock:
+                        self._openrouter_reconciliation_after[cursor_key] = after_entry_id
+
+            try:
+                runs = sorted({str(row["run_id"]) for row in self._store.list_runs(
+                    round_id, status="leased", kind="score", columns="run_id",
+                )})
+            except Exception as exc:
+                logger.warning("Arena OpenRouter leased-run lookup failed: %s", type(exc).__name__)
+                runs = []
+            ordered = [run for run in runs if run > after_run]
+            ordered += [run for run in runs if run <= after_run]
+            for run_id in ordered[:_OPENROUTER_BILLING_RUN_PROBES]:
+                select(1, run_id=run_id)
+                with self._lock:
+                    self._openrouter_billing_run_after[round_id] = run_id
+                if unique:
+                    break
+            global_error = select(_OPENROUTER_BILLING_BATCH_LIMIT)
+            if not unique:
+                if global_error is not None:
+                    raise global_error
+                return {"status": "none"}
+            broker = self._broker_for(round_id)
+
+            def reconcile(candidate: Mapping[str, Any]) -> Dict[str, Any]:
+                try:
+                    return broker.reconcile_openrouter_cost(candidate)
+                except Exception as exc:
+                    # Retain the original liability and keep other reads moving.
+                    logger.warning("Arena delayed OpenRouter billing check failed: %s",
+                                   type(exc).__name__)
+                    return {"status": "unavailable"}
+
+            with telemetry.stage("reconcile_active_openrouter_costs") as observed:
+                with ThreadPoolExecutor(max_workers=_OPENROUTER_BILLING_WORKERS,
+                                        thread_name_prefix="arena-openrouter-billing") as pool:
+                    results = list(pool.map(reconcile, unique.values()))
+                settled = sum(result.get("status") == "settled" for result in results)
+                observed.count = settled
+                observed.idle = settled == 0
+            # Preserve the old global lookup failure gate after any selected
+            # priority read: unseen live liabilities must not permit advance.
+            if global_error is not None:
+                raise global_error
+            summary: Dict[str, Any] = {
+                "status": "settled" if settled else str(results[0].get("status") or "unavailable"),
+                "checked": len(results), "settled": settled,
+            }
+            # A settlement must not mask any other unresolved live lease. Pass
+            # the latest valid expiry to the existing advance/expiry gate.
+            latest_expiry = None
+            for item, result in zip(unique.values(), results):
+                if result.get("status") in ("none", "settled") or item.get("run_status") != "leased":
+                    continue
+                try:
+                    expiry = _parse_iso(item.get("lease_expires_at"))
+                except (TypeError, ValueError):
+                    continue
+                if latest_expiry is None or expiry > latest_expiry:
+                    latest_expiry = expiry
+                    summary.update(status=str(result.get("status") or "unavailable"),
+                                   run_status="leased", lease_expires_at=item["lease_expires_at"])
+            return summary
+        finally:
+            with self._lock:
+                self._active_openrouter_reconciliations.discard(round_id)
+
     def _reconcile_deepline_cost(
         self,
         round_id: str,
@@ -8141,13 +8253,14 @@ class ArenaService:
                 # for other submissions stay available while charges post.
                 with telemetry.stage("advance_billing_read") as observed:
                     deepline_billing = self._reconcile_active_deepline_cost(round_id)
-                    billing = self._reconcile_openrouter_cost(round_id)
+                    billing = self._reconcile_active_openrouter_cost(round_id)
                     observed.count = int(deepline_billing.get("checked") or 0) + int(
-                        billing.get("status") != "none"
+                        billing.get("checked") or (billing.get("status") not in ("none", "in_progress"))
                     )
+                billing_pending = billing["status"] == "in_progress"
                 if (
                     billing["status"] not in ("none", "settled")
-                    and billing["run_status"] == "leased"
+                    and billing.get("run_status") == "leased"
                 ):
                     try:
                         lease_active = self.now() < _parse_iso(
@@ -8155,7 +8268,7 @@ class ArenaService:
                         )
                     except (TypeError, ValueError):
                         lease_active = False
-                    if lease_active and not (
+                    billing_pending = lease_active and not (
                         row["status"] in ("stage1", "stage2")
                         and row.get("configuration_doc", {}).get("execution_sequence_policy")
                             == contracts.BASELINE_SCORED_FIRST_POLICY
@@ -8164,27 +8277,28 @@ class ArenaService:
                                 "stage_%s_close" % row["status"][-1]
                             ]
                         )
+                    )
+                if billing_pending:
+                    # At the execution cutoff, normal SQL closure owns the
+                    # fixed drain bound even if billing renews this lease.
+                    # A concurrent billing pass must also finish before this
+                    # driver can decide whether any live bill is unresolved.
+                    # Expiry preserves live cost-bearing leases and still
+                    # recovers unrelated overdue work, unless the operator held.
+                    if (
+                        row["status"] in (
+                            "stage1", "stage2",
+                            "stage1_scoring", "stage2_scoring",
+                        )
+                        and not self._store.operator_hold_active()
                     ):
-                        # At the execution cutoff, normal SQL closure owns the
-                        # fixed drain bound even if billing renews this lease.
-                        # Keep this live billing lease open without starving
-                        # unrelated overdue attempts of their normal retry.
-                        # The expiry RPC preserves live cost-bearing leases;
-                        # an operator hold must still stop round mutations.
-                        if (
-                            row["status"] in (
-                                "stage1", "stage2",
-                                "stage1_scoring", "stage2_scoring",
-                            )
-                            and not self._store.operator_hold_active()
-                        ):
-                            with telemetry.stage("advance_expire_leases"):
-                                self._store.expire_leases(round_id)
-                        return {
-                            "status": "retry",
-                            "round_status": row["status"],
-                            "reason": "provider_billing_pending",
-                        }
+                        with telemetry.stage("advance_expire_leases"):
+                            self._store.expire_leases(round_id)
+                    return {
+                        "status": "retry",
+                        "round_status": row["status"],
+                        "reason": "provider_billing_pending",
+                    }
             if row["status"] == "open":
                 # At cutoff, reject source uploads that were not finalized
                 # before participant freeze.

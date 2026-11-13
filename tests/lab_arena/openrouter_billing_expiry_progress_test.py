@@ -32,7 +32,7 @@ def _unit_service(status, *, paused=False, expired=False):
     service._invalidate_hot_round = lambda: None
     service._round = lambda _round_id: {"status": status}
     service._reconcile_active_deepline_cost = lambda _round_id: {"status": "none"}
-    service._reconcile_openrouter_cost = lambda _round_id: {
+    service._reconcile_active_openrouter_cost = lambda _round_id: {
         "status": "pending",
         "run_status": "leased",
         "lease_expires_at": (NOW + timedelta(minutes=-1 if expired else 30)).isoformat().replace("+00:00", "Z"),
@@ -98,7 +98,7 @@ def test_live_billing_lease_still_defers_a_passed_close_deadline(status):
     service.close_scoring = service.close_stage
     assert service.advance_round("round")["reason"] == "provider_billing_pending"
     assert calls == [("expire", "round")]
-    service._reconcile_openrouter_cost = lambda _: {
+    service._reconcile_active_openrouter_cost = lambda _: {
         "status": "pending", "run_status": "leased",
         "lease_expires_at": (NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
     }
@@ -114,6 +114,8 @@ def _database_service(store, round_id, *, paused):
     service._clock = lambda: datetime.now(timezone.utc)
     service._invalidate_hot_round = lambda: None
     service._openrouter_reconciliation_after = {}
+    service._openrouter_billing_run_after = {}
+    service._active_openrouter_reconciliations = set()
     service._reconcile_active_deepline_cost = lambda _: {"status": "none"}
     service._broker_for = lambda _: SimpleNamespace(
         reconcile_openrouter_cost=lambda _candidate: {"status": "pending"},

@@ -470,7 +470,7 @@ def test_pending_deepline_accounting_does_not_stop_other_round_progress():
         "status": "pending",
         "run_status": "leased",
     }
-    service._reconcile_openrouter_cost = lambda _round_id: {"status": "none"}
+    service._reconcile_active_openrouter_cost = lambda _round_id: {"status": "none"}
     progressed = []
     service._advance_round_locked = lambda round_id: (
         progressed.append(round_id) or {"status": "advanced"}

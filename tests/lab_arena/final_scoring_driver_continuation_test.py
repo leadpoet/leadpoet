@@ -23,7 +23,7 @@ class FinalScoringService(ArenaService):
         self._round = lambda _: dict(self.row)
         self._invalidate_hot_round = lambda: None
         self._reconcile_active_deepline_cost = lambda _: {"status": "none"}
-        self._reconcile_openrouter_cost = self.billing
+        self._reconcile_active_openrouter_cost = self.billing
         self._store = SimpleNamespace(operator_hold_active=self.held,
                                       expire_leases=lambda _: self.calls.append("expire"))
         self._recover_baseline = lambda _: None

@@ -6390,7 +6390,8 @@ async def investigate_company_evidence(
                 initial_industry, initial_failure, industry_review_calls = initial_result
                 if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
                     _record_failure(diagnostic, initial_failure)
-                    return {'claims': {}, 'failure_reason': initial_failure}
+                    return {'claims': {}, 'failure_reason': initial_failure,
+                            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}
                 industry_research_brief = industry_brief(initial_industry, initial_failure)
                 input_document['industry_source_research_brief'] = industry_research_brief
                 input_document['investigation_limits']['industry_search_exchange'] = (
@@ -6478,7 +6479,8 @@ async def investigate_company_evidence(
                 input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
                 if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
                     _record_failure(diagnostic, initial_failure)
-                    return {'claims': {}, 'failure_reason': initial_failure}
+                    return {'claims': {}, 'failure_reason': initial_failure,
+                            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}
                 industry_research_brief = industry_brief(initial_industry, initial_failure)
                 input_document['industry_source_research_brief'] = industry_research_brief
 
@@ -8264,21 +8266,23 @@ async def investigate_company_evidence(
         if local_tools.pending is not None:
             local_tools.emit(local_tools.pending, result,
                              "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
-        return result
+        # Retain source facts privately without adding them to tool capture.
+        return {**result, PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}
     except (TypeError, ValueError, KeyError, IndexError):
         _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         result = {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
         if local_tools.pending is not None:
             local_tools.emit(local_tools.pending, result,
                              "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
-        return result
+        return {**result, PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}
     except Exception:  # noqa: BLE001
         _record_failure(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
         result = {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}
         if local_tools.pending is not None:
             local_tools.emit(local_tools.pending, result,
                              "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)
-        return result
+        return {**result, PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}
 
     _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
-    return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+    return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON,
+            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}

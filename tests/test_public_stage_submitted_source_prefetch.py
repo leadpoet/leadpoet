@@ -227,6 +227,7 @@ def test_public_stage_prefetch_transport_failure_stays_provider_failure(monkeypa
     assert result == {
         "claims": {},
         "failure_reason": investigator.PROVIDER_ERROR_FAILURE_REASON,
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {},
     }
     assert diagnostic == {
         investigator.VERIFIER_FAILURE_REASON_KEY:

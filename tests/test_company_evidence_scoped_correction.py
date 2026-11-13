@@ -357,6 +357,11 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
         assert result == {
             "claims": {},
             "failure_reason": investigator.MALFORMED_RESPONSE_FAILURE_REASON,
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+                SEC_URL: {"final_url": SEC_URL, "text": SEC_PAGE},
+                PRODUCT_URL: {"final_url": PRODUCT_URL, "text": PRODUCT_QUOTE},
+            },
         }
 
 
@@ -551,6 +556,14 @@ def test_scoped_correction_rejects_unrelated_extra_target(monkeypatch):
     assert result == {
         "claims": {},
         "failure_reason": investigator.MALFORMED_RESPONSE_FAILURE_REASON,
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {
+            NASDAQ_URL: {
+                "final_url": NASDAQ_URL,
+                "text": f"{NASDAQ_QUOTE} OtherCo, Inc. (NASDAQ: OTHR).",
+            },
+            SEC_URL: {"final_url": SEC_URL, "text": f"{SEC_PAGE} {ACQUIRED_QUOTE}"},
+            PRODUCT_URL: {"final_url": PRODUCT_URL, "text": PRODUCT_QUOTE},
+        },
     }
 
 

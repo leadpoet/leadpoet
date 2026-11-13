@@ -8818,7 +8818,7 @@ class ArenaService:
         self, basis: Mapping[str, Any], epoch_scope: Mapping[str, Any], *,
         network: str, netuid: int, previous_state: Optional[Mapping[str, Any]],
     ) -> Dict[str, Any]:
-        """Bind signed decay tenure to verified source bytes and promotion epochs."""
+        """Bind each signed slot clock to its qualifying award and verified source."""
         signer = self._reward_signer()
         epoch = int(epoch_scope["epoch"])
         try:
@@ -8835,6 +8835,11 @@ class ArenaService:
                     prior_clocks[index] is not None and prior_slots[index] is not None
                     and all(prior_slots[index][key] == achievement[key]
                             for key in ("round_id", "submission_id", "miner_hotkey"))
+                    and prior_clocks[index]["start_epoch"] == (
+                        achievement.get("start_epoch") if achievement.get("start_epoch") is not None
+                        else basis["effective_reward_epoch"]
+                        if achievement["round_id"] == basis["round_id"] else None
+                    )
                 ) for index, achievement in enumerate(basis["reward_slots"])
             )
             history = []

@@ -101,6 +101,24 @@ def test_verified_final_input_keeps_existing_outcome_and_pairs():
     assert after == original
 
 
+@pytest.mark.parametrize('damage', ['valid', 'missing', 'gzip', 'hash', 'schema'])
+def test_historical_provenance_projection_preserves_outcome_scope(damage):
+    from tests.lab_arena.training_thinking_reuse_test import historical_provenance_projection
+
+    _, example, _ = transition(damage)
+    current, _ = records(example)
+    with historical_provenance_projection():
+        historical, _ = records(example)
+    projected = deepcopy(current)
+    for record in projected:
+        for ref in record['source_refs']:
+            ref.pop('training_provenance')
+    assert len(historical) == 2
+    assert historical == projected
+    assert all(record['source_refs'][0]['selected_research_evidence']['complete']
+               is (damage == 'valid') for record in historical)
+
+
 @pytest.mark.parametrize('damage', ['request_hash', 'response_body', 'request_privacy',
     'response_privacy', 'delivery', 'source_input_hash', 'source_input_privacy',
     'source_identity', 'output', 'foreign_judge', 'unknown_label_gap'])

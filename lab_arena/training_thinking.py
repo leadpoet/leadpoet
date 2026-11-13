@@ -2442,7 +2442,9 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         diagnostic_gaps = diagnostic_gaps_by_source[source]
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if isinstance(identity, str) and identity not in (example.get("input_snapshots") or {}))
-        partial_outcome = (ref['training_provenance']['label_authority']['origin'] == 'unavailable')
+        # Use the candidate's existing outcome projection. Supplemental
+        # provenance may be omitted by historical export projections.
+        partial_outcome = ref['outcome'] == {'per_icp_score': None, 'score_run_id': None}
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   **({'role': 'judge'} if role == 'judge' else {}),
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,

@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyRoutineOperatorCorpusDeletion",
+      "Effect": "Deny",
+      "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion"],
+      "Resource": [
+        "arn:aws:s3:::leadpoet-attested-v2-artifacts-493765492819/*",
+        "arn:aws:s3:::leadpoet-private-model-artifacts-493765492819/*"
+      ]
+    },
+    {
+      "Sid": "DenyRoutineOperatorCorpusRetentionChanges",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketObjectLockConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::leadpoet-attested-v2-artifacts-493765492819",
+        "arn:aws:s3:::leadpoet-private-model-artifacts-493765492819"
+      ]
+    }
+  ]
+}

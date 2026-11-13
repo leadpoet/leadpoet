@@ -269,4 +269,4 @@ def test_same_hotkey_new_promotion_uses_projected_history_without_resetting_othe
             "weekly_slot_decay": {"epochs_per_halving": 140, "slots": prior_clocks}},
     )
     assert clock["slots"][:2] == prior_clocks[:2]
-    assert clock["slots"][2]["start_epoch"] == (epoch if changed else prior_clocks[2]["start_epoch"])
+    assert clock["slots"][2]["start_epoch"] == epoch

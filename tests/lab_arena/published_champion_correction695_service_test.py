@@ -246,8 +246,13 @@ def test_seven_corrections_republish_and_activate_prospectively(published, tmp_p
                and row['effective_reward_epoch'] == historical['effective_reward_epoch'] for row in archive)
     latest = {r['run_id']: r for r in harness.service.store.list_runs(round_id)}
     for rid, original in original_executions.items():
-        assert {k: v for k, v in latest[rid].items() if k not in {'per_icp_score', 'updated_at'}} == {
-            k: v for k, v in original.items() if k not in {'per_icp_score', 'updated_at'}}
+        # A newly completed judgment fills these derived execution projections.
+        # The accepted source, output, lease and terminal work remain exact.
+        projected = {'per_icp_score', 'qualification_doc', 'updated_at'}
+        assert {k: v for k, v in latest[rid].items() if k not in projected} == {
+            k: v for k, v in original.items() if k not in projected}
+        if original['qualification_doc'] is not None:
+            assert latest[rid]['qualification_doc'] == original['qualification_doc']
     for row in original_runs:
         assert latest[row['run_id']]['status'] == row['status']
         if row['per_icp_score'] is not None:

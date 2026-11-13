@@ -45,7 +45,7 @@ Both bases must contain the same checksum-bound original source.
 Its --active-acquisition-target option also binds completed active-voice
 acquisition proof to the exact acquired target in that same frozen file.
 Its --investigator-feedback option retains both repairs and applies only the
-reviewed prompt/feedback delta to the exact frozen50de investigator.
+reviewed prompt/feedback and private failure-source handoffs to the exact frozen50de investigator.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -522,7 +522,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--investigator-feedback", action="store_true",
-        help="apply only reviewed investigator feedback on frozen50de; requires submitted-company context and active-acquisition target",
+        help="apply reviewed investigator feedback and private failure-source handoffs on frozen50de; requires submitted-company context and active-acquisition target",
     )
     parser.add_argument(
         "--legacy-company-progress-only", action="store_true",

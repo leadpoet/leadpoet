@@ -13195,6 +13195,7 @@ def test_local_message_bound_failure_is_malformed_not_provider_error(monkeypatch
     assert result == {
         "claims": {},
         "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON,
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {},
     }
     assert diagnostic[VERIFIER_FAILURE_REASON_KEY] == MALFORMED_RESPONSE_FAILURE_REASON
 

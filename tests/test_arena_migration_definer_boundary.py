@@ -27,12 +27,13 @@ def database():
         c.autocommit = True
         with c.cursor() as q:
             q.execute('CREATE ROLE lab_arena_owner NOLOGIN NOINHERIT; '
-                      'CREATE ROLE arena_admin LOGIN INHERIT NOSUPERUSER; '
+                      'CREATE ROLE arena_admin LOGIN INHERIT NOSUPERUSER PASSWORD %s; '
                       'GRANT postgres TO arena_admin WITH ADMIN FALSE, INHERIT TRUE, SET TRUE; '
-                      'CREATE ROLE arena_migrator LOGIN NOINHERIT; '
+                      'CREATE ROLE arena_migrator LOGIN NOINHERIT PASSWORD %s; '
                       'GRANT lab_arena_owner TO arena_migrator '
                       'WITH ADMIN FALSE, INHERIT TRUE, SET TRUE; '
-                      'GRANT CREATE ON SCHEMA public TO arena_migrator WITH GRANT OPTION')
+                      'GRANT CREATE ON SCHEMA public TO arena_migrator WITH GRANT OPTION',
+                      (dsn.get('password', 'postgres'),) * 2)
             for signature in SIGNATURES:
                 # Harmless owner functions model the real ACL boundary.
                 q.execute(f'CREATE FUNCTION {signature} RETURNS integer LANGUAGE sql '

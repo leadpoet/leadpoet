@@ -380,7 +380,11 @@ def test_typed_provider_or_guard_failure_is_not_turned_into_cached_success(monke
     result, reads, _, _, _, _ = loop(monkeypatch, search_text=FACT, refresh_exception=exception)
     assert reads == [WRAPPER]
     assert result['claims'] == {} and result['failure_reason'] == 'provider_error'
-    assert c.PRIVATE_FETCHED_PAGES_KEY not in result
+    assert result[c.PRIVATE_FETCHED_PAGES_KEY] == {
+        WRAPPER: {'final_url': WRAPPER, 'text': FACT},
+    }
+    assert not result.get('_completed_submit')
+    assert '_validated_stage_finding' not in result
 
 
 @pytest.mark.parametrize('exchange', [False, True])

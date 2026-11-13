@@ -44,6 +44,8 @@ surface for the submitted-attribute auxiliary in exact d657 and 50de images.
 Both bases must contain the same checksum-bound original source.
 Its --active-acquisition-target option also binds completed active-voice
 acquisition proof to the exact acquired target in that same frozen file.
+Its --investigator-feedback option retains both repairs and applies only the
+reviewed prompt/feedback delta to the exact frozen50de investigator.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -279,6 +281,7 @@ def extract_frozen_sources(
     shim_only: bool = False,
     legacy_company_progress_only: bool = False,
     submitted_company_context_only: bool = False,
+    investigator_feedback: bool = False,
     intent_target_denial: bool = False,
     homepage_profile_alias: bool = False,
     verified_display_brand: bool = False,
@@ -337,6 +340,8 @@ def extract_frozen_sources(
                 or identity_repair_finality_only or completed_merger_survivor_only
                 or submitted_company_context_only):
             names = (FINALITY_FILE,)
+        if investigator_feedback:
+            names += (GRADER_FILE,)
         if source_local_refusal_finality:
             names += (VERIFICATION_FILE, "lab_arena/shim.py")
         for name in dict.fromkeys(names):
@@ -516,6 +521,10 @@ def main() -> int:
         help="retain submitted-company context and repair active acquired-target proof in the same frozen file",
     )
     parser.add_argument(
+        "--investigator-feedback", action="store_true",
+        help="apply only reviewed investigator feedback on frozen50de; requires submitted-company context and active-acquisition target",
+    )
+    parser.add_argument(
         "--legacy-company-progress-only", action="store_true",
         help="compose only reviewed two-file legacy company progress on exact frozen51bc; excludes other corrections",
     )
@@ -636,11 +645,13 @@ def main() -> int:
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
     args = parser.parse_args()
+    if args.investigator_feedback and not (args.submitted_company_context_only and args.active_acquisition_target):
+        raise CompositionError("investigator-feedback requires submitted-company-context-only and active-acquisition-target")
     if args.active_acquisition_target and not args.submitted_company_context_only:
         raise CompositionError("active-acquisition-target requires submitted-company-context-only")
     if args.submitted_company_context_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"submitted_company_context_only", "active_acquisition_target", "push"}
+        if name not in {"submitted_company_context_only", "active_acquisition_target", "investigator_feedback", "push"}
     ):
         raise CompositionError("submitted-company-context-only mode cannot include other corrections")
     if args.legacy_company_progress_only and any(
@@ -689,6 +700,10 @@ def main() -> int:
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
+    if args.investigator_feedback:
+        from scripts.arena_reviewer_investigator_feedback_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("investigator feedback requires exact frozen50de")
     if args.submitted_company_context_only:
         from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_FROZEN_IMAGE_DIGESTS
         if match[2] not in SUBMITTED_FROZEN_IMAGE_DIGESTS:
@@ -726,15 +741,23 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         root = Path(directory)
         if args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_submitted_company_context_seam
+            flags = {"submitted_company_context_only": True}
+            expected = {FINALITY_FILE}
+            if args.investigator_feedback:
+                flags["investigator_feedback"] = True
+                expected.add(GRADER_FILE)
             original = extract_frozen_sources(
-                args.grading_image, root / "original", submitted_company_context_only=True,
+                args.grading_image, root / "original", **flags,
             )
-            if set(original) != {FINALITY_FILE}:
+            if set(original) != expected:
                 raise CompositionError("frozen submitted company context source is incomplete")
             files = {FINALITY_FILE: convert_submitted_company_context_seam(original[FINALITY_FILE])}
             if args.active_acquisition_target:
                 from scripts.arena_reviewer_active_acquisition_seam import convert_active_acquisition_seam
                 files[FINALITY_FILE] = convert_active_acquisition_seam(files[FINALITY_FILE])
+            if args.investigator_feedback:
+                from scripts.arena_reviewer_investigator_feedback_seam import convert_investigator_feedback_seam
+                files[GRADER_FILE] = convert_investigator_feedback_seam(original[GRADER_FILE])
         elif args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import convert_legacy_company_progress_files
             original = extract_frozen_sources(
@@ -896,6 +919,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
             + ("-submitted-company-context" if args.submitted_company_context_only else "")
             + ("-active-acquisition-target" if args.active_acquisition_target else "")
+            + ("-investigator-feedback" if args.investigator_feedback else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -928,6 +952,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.active_acquisition_target:
                 from scripts.arena_reviewer_active_acquisition_seam import CORRECTION_ID as ACTIVE_ACQUISITION_CORRECTION_ID
                 corrections.append(ACTIVE_ACQUISITION_CORRECTION_ID)
+            if args.investigator_feedback:
+                from scripts.arena_reviewer_investigator_feedback_seam import CORRECTION_ID as INVESTIGATOR_FEEDBACK_CORRECTION_ID
+                corrections.append(INVESTIGATOR_FEEDBACK_CORRECTION_ID)
         if args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import CORRECTION_ID as LEGACY_COMPANY_PROGRESS_CORRECTION_ID
             corrections.append(LEGACY_COMPANY_PROGRESS_CORRECTION_ID)

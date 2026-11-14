@@ -132,3 +132,55 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+def test_benchmark_freeze_that_waits_on_a_pending_baseline_reads_idle(observed_service):
+    """A round the driver cannot open must not record like a healthy tick."""
+    service, exporter, row = observed_service
+    row["status"] = "open"
+    service.admit_uploaded_submissions = lambda *_args, **_kwargs: {"remaining": 0}
+    service.commit_benchmark = lambda _: {
+        "status": "retry", "round_status": "open",
+        "reason": "baseline_promotion_pending",
+    }
+
+    assert service.advance_round("round")["status"] == "retry"
+
+    freeze = [s for s in exporter.get_finished_spans()
+              if s.attributes["arena.stage"] == "advance_commit_benchmark"]
+    assert len(freeze) == 1
+    assert freeze[0].attributes["arena.outcome"] == "idle"
+
+
+def test_benchmark_freeze_that_commits_still_reads_ok(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "open"
+    service.admit_uploaded_submissions = lambda *_args, **_kwargs: {"remaining": 0}
+    service.commit_benchmark = lambda _: {"status": "committed", "participants": 4}
+
+    assert service.advance_round("round")["status"] == "committed"
+
+    freeze = [s for s in exporter.get_finished_spans()
+              if s.attributes["arena.stage"] == "advance_commit_benchmark"]
+    assert len(freeze) == 1
+    assert freeze[0].attributes["arena.outcome"] == "ok"
+
+
+def test_a_stage_held_on_unfinished_judging_reads_idle_with_its_remaining_count(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "stage2_judged"
+    row["configuration_doc"]["schedule"]["final_scoring_close"] = (
+        service.now() + timedelta(hours=2)
+    ).isoformat().replace("+00:00", "Z")
+    service.score_stage = lambda *_args, **_kwargs: {
+        "status": "retry", "round_status": "stage2_judged",
+        "reason": "judge_incomplete", "remaining": 7,
+    }
+
+    assert service.advance_round("round")["reason"] == "judge_incomplete"
+
+    scored = [s for s in exporter.get_finished_spans()
+              if s.attributes["arena.stage"] == "advance_score_stage"]
+    assert len(scored) == 1
+    assert scored[0].attributes["arena.outcome"] == "idle"
+    assert scored[0].attributes["arena.count"] == 7

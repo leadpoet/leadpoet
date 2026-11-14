@@ -96,16 +96,16 @@ def _run_final_correction(monkeypatch, guard, *, source_fault=""):
 def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
     result, turn, submitted = _run_final_correction(monkeypatch, guard)
     fault = guard in {"401", "403", "429", "502", "503", "timeout"}
-    completed = guard in {"negative", "positive", "contradicted", "ordinary"}
+    completed = guard in {"negative", "positive", "contradicted", "ordinary", "deadline"}
     assert (result.get("_completed_submit") is True) is completed, result
     if completed:
         assert result["failure_reason"] == ""
         assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
         assert result["claims"]["required_attribute"]["evidence_quote"] == ATTRIBUTE
         assert result["claims"]["industry"]["status"] == (
-            "UNPROVEN" if guard == "negative" else "CONTRADICTED" if guard == "contradicted" else "VERIFIED"
+            "UNPROVEN" if guard in {"negative", "deadline"} else "CONTRADICTED" if guard == "contradicted" else "VERIFIED"
         )
-        if guard == "negative":
+        if guard in {"negative", "deadline"}:
             assert result["claims"]["industry"]["evidence_url"] == result["claims"]["industry"]["evidence_quote"] == ""
             assert result["claims"]["industry"]["reason"] == submitted[-1]["findings"][0]["reason"]
     elif fault:
@@ -119,7 +119,7 @@ def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
         assert URL in result[c.PRIVATE_FETCHED_PAGES_KEY]
     if guard == "ordinary":
         assert turn == 4  # Ordinary cited UNPROVEN still receives repair and can verify.
-    elif not fault and guard != "deadline":
+    elif not fault:
         # Unchanged baseline also uses four packets for rejected final proof;
         # its erroneous completion previously hid this incidental assertion.
         assert turn == (4 if guard in {"missing_target", "duplicate_target", "unexpected_target", "wrong_status", "malformed_submit",

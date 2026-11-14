@@ -1255,6 +1255,58 @@ class ProviderResponse:
     deepline_completed_execution: bool = False
 
 
+def _without_private_search_navigation(
+    response: ProviderResponse, operation_id: str, secret: str,
+) -> ProviderResponse:
+    """Remove credential-bearing provider navigation, never search evidence.
+
+    ScrapingDog includes its API key in search click/pagination URLs. These
+    are account navigation, not the result's source URL or research content.
+    The unchanged credential guard still checks the complete projected reply.
+    """
+    if (operation_id not in {"scrapingdog.google", "scrapingdog.google_news",
+                             "scrapingdog.google_jobs"}
+            or not 200 <= response.status < 300 or response.internal_provenance):
+        return response
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate response member")
+            result[key] = value
+        return result
+
+    try:
+        document = json.loads(response.body, object_pairs_hook=unique_object)
+        if not isinstance(document, dict):
+            return response
+        changed = False
+
+        def remove_private_field(parent, name):
+            nonlocal changed
+            if name in parent and _response_contains_credential(
+                ProviderResponse(200, {}, json.dumps(parent[name], allow_nan=False).encode()),
+                secret,
+            ):
+                del parent[name]
+                changed = True
+
+        remove_private_field(document, "scrapingdog_pagination")
+        results = document.get("organic_results")
+        if isinstance(results, list):
+            for result in results:
+                if isinstance(result, dict):
+                    remove_private_field(result, "google_goto_link")
+        if changed:
+            return replace(response, body=json.dumps(
+                document, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+            ).encode())
+    except (ValueError, TypeError, RecursionError):
+        pass  # Malformed/ambiguous replies still face the original strict guard.
+    return response
+
+
 def _response_contains_credential(response: ProviderResponse, secret: str) -> bool:
     """Catch literal, URL-encoded, and JSON-escaped echoes before persistence."""
 
@@ -6637,6 +6689,9 @@ class Broker:
                         str(transport_error) if str(transport_error) in _TRANSPORT_ERROR_CLASSES
                         else "ProviderTransportError"
                     )
+                response = _without_private_search_navigation(
+                    response, effective_operation_id, secret,
+                )
                 # A provider must not echo its authorization secret into a
                 # stored response or back to untrusted submitted code.
                 if _response_contains_credential(response, secret):

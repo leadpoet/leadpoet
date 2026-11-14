@@ -393,6 +393,25 @@ def _warn_observation_segment_failure(
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+
+# A driver step can return without moving the round on: the benchmark freeze
+# waits for a pending baseline promotion, a stage hold waits for judging that
+# never finished. Those returns are not failures, so `telemetry.stage` records
+# them `ok` with count 0 -- identical to a healthy quiet tick, which is how a
+# round held shut for hours reads as green on every sensor. Name them.
+NON_PROGRESSING_STEP_STATUSES = frozenset(
+    {"retry", "waiting", "stale", "existing", "paused"}
+)
+
+
+def _observe_step(observed: Any, result: Any) -> Any:
+    """Mark a driver step idle when its result left the round where it was."""
+    if isinstance(result, Mapping):
+        observed.idle = str(result.get("status") or "") in NON_PROGRESSING_STEP_STATUSES
+        remaining = result.get("remaining")
+        if not observed.count and isinstance(remaining, int):
+            observed.count = int(remaining)
+    return result
 JUDGE_CONTINUATION_EVALUATION_DATE = "2026-10-14"
 JUDGE_CONTINUATION_SHADOW_CREATED_AT = datetime(2026, 10, 13, 16, 30, tzinfo=timezone.utc)
 
@@ -8348,8 +8367,8 @@ class ArenaService:
             ):
                 return {"status": "waiting", "round_status": status}
             if status == "open":
-                with telemetry.stage("advance_commit_benchmark"):
-                    return self.commit_benchmark(round_id)
+                with telemetry.stage("advance_commit_benchmark") as observed:
+                    return _observe_step(observed, self.commit_benchmark(round_id))
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)
@@ -8417,8 +8436,10 @@ class ArenaService:
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
                 try:
-                    with telemetry.stage("advance_score_stage"):
-                        return self.score_stage(round_id, stage)
+                    with telemetry.stage("advance_score_stage") as observed:
+                        return _observe_step(
+                            observed, self.score_stage(round_id, stage)
+                        )
                 except scoring.ScoringError:
                     if now >= _parse_iso(window) + timedelta(hours=2):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])

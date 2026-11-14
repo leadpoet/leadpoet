@@ -56,12 +56,12 @@ def test_uncited_support_does_not_accept_malformed_evidence(tmp_path, damage):
     assert raw['sft_exclusions'] == ['target_shape_or_completion_unsupported']
 
 
-def test_default_miner_input_and_target_contracts_are_unchanged():
+def test_provider_output_support_does_not_change_miner_input_contract():
     body, provider = request(), cited_response()
     body['max_tool_calls'] = 1
     body['tools'][0]['parameters'] = {'engine': 'exa', 'max_uses': 1, 'max_total_results': 5}
-    with pytest.raises(ValueError, match='assistant_shape_unsupported'):
-        training_steps._target(body, provider, 'openrouter.responses', allow_reasoning_history=True)
+    target, _ = training_steps._target(body, provider, 'openrouter.responses', allow_reasoning_history=True)
+    assert target == provider['output']
     with pytest.raises(operations.OperationRequestError):
         operations.validate_operation_request('openrouter.responses',
             {'model': body['model'], 'input': [provider['output'][-1]]}, allow_full_thinking=True)

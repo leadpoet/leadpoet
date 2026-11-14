@@ -518,8 +518,7 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
             target, _ = training_steps._target(request, target_response, first["api"], allow_reasoning_history=True,
                                                allow_tool_error_history=True,
                                                responses_input_validator=_internal_responses_input,
-                                               chat_annotations_validator=_internal_chat_annotations,
-                                               allow_uncited_annotations=True)
+                                               chat_annotations_validator=_internal_chat_annotations)
             if first["api"] == "openrouter.responses":
                 training_steps._validate_target_tools(request, target, first["api"])
             elif target.get("tool_calls"):

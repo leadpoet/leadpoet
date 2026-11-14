@@ -661,7 +661,7 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
 
 
 @pytest.mark.parametrize("case", ["other_tool", "semantic_correction", "transient"])
-def test_late_grace_does_not_admit_other_work(monkeypatch, case):
+def test_late_grace_allows_one_submit_correction_but_no_research(monkeypatch, case):
     clock = _Clock()
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
@@ -692,7 +692,10 @@ def test_late_grace_does_not_admit_other_work(monkeypatch, case):
         )
 
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == (2 if case == "other_tool" else 1)
+    assert len(requests) == (1 if case == "transient" else 2)
+    if case == "semantic_correction":
+        assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
+        assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
     assert result["claims"].get("industry", {}).get("status") != "VERIFIED"
 
 

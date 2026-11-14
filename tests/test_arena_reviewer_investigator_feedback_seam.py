@@ -127,11 +127,30 @@ def test_exact_reviewed_delta_hashes_idempotence_and_other_source_bytes():
 def previous_feedback_investigator():
     """Recover the deployed v1 source, before only the six private handoffs."""
     source = original_investigator()
-    for old, new in seam.DELTAS[:-6]:
+    for old, new in seam.DELTAS[:-7]:
         assert source.count(old) == 1
         source = source.replace(old, new, 1)
     assert hashlib.sha256(source).hexdigest() == "9ddfd54dba12069b74d5993df8900145d6211365416614846a4a180a73e57ef9"
     return source
+
+
+@pytest.mark.parametrize("final", ["verified", "unproven", "bad_quote", "provider", "research"])
+def test_exact_frozen_overlay_keeps_late_correction_bounded(monkeypatch, final):
+    from tests import test_company_evidence_late_submission as controls
+    corrected = seam.convert_investigator_feedback_seam(original_investigator())
+    old, new = seam.DELTAS[-1]
+    previous = corrected.replace(new, old, 1)
+    assert hashlib.sha256(previous).hexdigest() == "14f2bf1fbe3dbcf384c9fb5760afb04c0c412028226fdca62b94b1ad37e9a37d"
+    for source, repaired in ((previous, False), (corrected, True)):
+        module = _install(monkeypatch, source, "_frozen_late_correction_" + str(repaired))
+        with monkeypatch.context() as scope:
+            scope.setattr(controls, "investigator", module)
+            scope.setitem(controls._run_industry.__globals__, "investigator", module)
+            if repaired:
+                controls.test_late_ordinary_submission_gets_only_one_submit_correction(scope, 180.0, final)
+            else:
+                with pytest.raises(AssertionError):
+                    controls.test_late_ordinary_submission_gets_only_one_submit_correction(scope, 180.0, final)
 
 
 @pytest.mark.parametrize("positive", [False, True])

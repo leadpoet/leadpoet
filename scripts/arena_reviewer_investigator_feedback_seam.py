@@ -7,15 +7,16 @@ from __future__ import annotations
 
 import hashlib
 
-CORRECTION_ID = "investigator_prompt_feedback_v2"
+CORRECTION_ID = "investigator_prompt_feedback_v3"
 FROZEN_IMAGE_DIGEST = "sha256:50deca7b8bf5129816abaeb59fd5bc1aabb554c529cc4151b8175f9edd0b8144"
-REVIEWED_SOURCE_COMMIT = "b383dd1815cc5b64ee3fcaf3a781d21d5f44761b"
+REVIEWED_SOURCE_COMMIT = "00fc74958f15aab7f4728e611e93bf76eb17705b"
 ORIGINAL_SHA256 = "eaa205dfe6a1707199246008f7108c5883e1d298b6c7c682d41b16c55e677483"
-REPAIRED_SHA256 = "14f2bf1fbe3dbcf384c9fb5760afb04c0c412028226fdca62b94b1ad37e9a37d"
+REPAIRED_SHA256 = "ca66a71b55b43f02d083d6cd24a3c6f0ebad1b06d8d57f16896717037a7f80d6"
 
 # Preserve the reviewed342545-to-25cc feedback delta, then apply only the six
 # reviewed private source handoffs from b383dd181. Context makes each replacement
-# unique; whole-file checks reject all other drift. No verdict changes.
+# unique; whole-file checks reject all other drift. The final delta gives a
+# late admitted reply one existing submit-only correction. No verdict changes.
 DELTAS = (
     (
         (
@@ -593,6 +594,32 @@ DELTAS = (
             b'    _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)\n'
             b'    return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON,\n'
             b'            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    # Preserve the same one submit-only correction for a late admitted reply.
+    (
+        (
+            b'                    ) and not correction_turn:\n'
+            b'                        final_correction_pending = bool(\n'
+        ),
+        (
+            b'                    ) and not correction_turn:\n'
+            b'                        # An already admitted submission may settle after the\n'
+            b'                        # research window closes. Give its validation feedback\n'
+            b'                        # the same single submit-only correction as a judgment\n'
+            b'                        # admitted during the reserve. Do not admit new research\n'
+            b'                        # or change any evidence decision or turn limit.\n'
+            b'                        if (\n'
+            b'                            rejected\n'
+            b'                            and not (\n'
+            b'                                force_stage_search\n'
+            b'                                or force_industry_followup\n'
+            b'                                or force_quote_recovery_search\n'
+            b'                            )\n'
+            b'                            and time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS\n'
+            b'                        ):\n'
+            b'                            force_submit = True\n'
+            b'                        final_correction_pending = bool(\n'
         ),
     ),
 )

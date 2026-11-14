@@ -78,7 +78,8 @@ def test_full_baseline_miner_scoring_and_publication_with_native_unknown_fee(dat
     terminal.test_full_partial_publication_preserves_baseline_and_peer_authority(database,tmp_path,monkeypatch)
 
 
-def test_native_http_refusal_persists_bound_reason_without_duplicate_spend(database,tmp_path):
+@pytest.mark.parametrize('operation', ['openrouter.chat', 'openrouter.responses'])
+def test_native_http_refusal_persists_bound_reason_without_duplicate_spend(database,tmp_path,operation):
     from dataclasses import replace
     from fastapi.testclient import TestClient
     from lab_arena import broker as br,runner
@@ -102,7 +103,8 @@ def test_native_http_refusal_persists_bound_reason_without_duplicate_spend(datab
     client=TestClient(create_app(h.service))
     try:
         api=runner.HttpArenaApiClient('http://127.0.0.1',client=client)
-        frame={'operation_id':'openrouter.chat','parameters':CHAT,'action_sequence':0,'timeout_ms':5000}
+        parameters = CHAT if operation == 'openrouter.chat' else {'model': CHAT['model'], 'input': 'research'}
+        frame={'operation_id':operation,'parameters':parameters,'action_sequence':0,'timeout_ms':5000}
         first=api.provider(lease['run_id'],token,frame)
         assert first['status']==402 and first['call']['outcome']=='uncertain'
         assert br.provider_credit_failure_reason(first['call'])=='provider_credit_exhausted'

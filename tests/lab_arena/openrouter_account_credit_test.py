@@ -13,17 +13,19 @@ REFUSAL={'error':{'code':402,'message':'This request requires more credits, or f
 def response(doc=None,status=402,provenance=None):
     return br.ProviderResponse(status,{},json.dumps(REFUSAL if doc is None else doc).encode(),provenance)
 
-def invoke(*,kind='score',funding='miner_key',doc=None,status=402):
+def invoke(*,kind='score',funding='miner_key',doc=None,status=402,operation='openrouter.chat'):
     transport=FakeTransport([(status,dict(deepcopy(REFUSAL if doc is None else doc),id='gen-credit-diagnostic'))])
     instance,store,_=make_broker(store=DiagnosticReplayStore(),transport=transport,judge_models=(CHAT["model"],),
         funding_source_for=lambda _:funding,credential_for=lambda _,provider:HOST_KEYS[provider])
     context=replace(CONTEXT,kind=kind)
-    args=dict(operation_id='openrouter.chat',parameters=CHAT,action_sequence=0,timeout_ms=5000)
+    parameters = CHAT if operation == 'openrouter.chat' else {'model': CHAT['model'], 'input': 'research'}
+    args=dict(operation_id=operation,parameters=parameters,action_sequence=0,timeout_ms=5000)
     return instance.execute(context,**args),instance,store,transport,context,args
 
 @pytest.mark.parametrize('kind',['execute','score'])
-def test_native_affordability_reason_is_bound_and_replay_never_dispatches(kind):
-    first,instance,store,transport,context,args=invoke(kind=kind)
+@pytest.mark.parametrize('operation',['openrouter.chat','openrouter.responses'])
+def test_native_affordability_reason_is_bound_and_replay_never_dispatches(kind, operation):
+    first,instance,store,transport,context,args=invoke(kind=kind,operation=operation)
     assert first.status==402 and first.call['outcome']=='uncertain'
     assert first.call['error_code']=='miner_credentials_unavailable'
     assert br.provider_credit_failure_reason(first.call)=='provider_credit_exhausted'

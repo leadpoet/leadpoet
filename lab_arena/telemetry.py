@@ -46,6 +46,7 @@ candidate query. They never carry a run ID or provider payload.
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Optional
@@ -287,11 +288,20 @@ def record_gate(
 class StageResult:
     """Mutable handle a stage body uses to report magnitude and idleness."""
 
-    __slots__ = ("count", "idle")
+    __slots__ = ("count", "held_reason", "idle")
 
     def __init__(self) -> None:
         self.count = 0
         self.idle = False
+        # A stage that declines to proceed for an expected reason is not a
+        # failure and has nothing to report, so it used to be indistinguishable
+        # from a stage with no work waiting. Naming the reason here keeps a
+        # round that is held back from reading as a healthy no-op.
+        self.held_reason = ""
+
+
+# A held reason is a bounded refusal code, never free text or a message.
+_HELD_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 
 
 @contextmanager
@@ -318,9 +328,11 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
             billing_lookup=billing_lookup,
         )
         raise
+    held = str(result.held_reason or "")
     record(
         name,
-        "idle" if result.idle else "ok",
+        "idle" if (result.idle or held) else "ok",
+        error_type=held if _HELD_REASON_RE.fullmatch(held) else NO_ERROR,
         count=int(result.count or 0),
         duration_ms=(time.monotonic() - start_mono) * 1000.0,
         start_ns=start_ns,

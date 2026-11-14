@@ -8348,8 +8348,16 @@ class ArenaService:
             ):
                 return {"status": "waiting", "round_status": status}
             if status == "open":
-                with telemetry.stage("advance_commit_benchmark"):
-                    return self.commit_benchmark(round_id)
+                with telemetry.stage("advance_commit_benchmark") as observed:
+                    # A benchmark that cannot be frozen yet returns a retry
+                    # rather than raising, so the round can sit unopened for
+                    # hours with every attempt reporting a clean success.
+                    # Carry the reason it is waiting on.
+                    committed = self.commit_benchmark(round_id)
+                    if committed.get("status") == "retry":
+                        observed.idle = True
+                        observed.held_reason = str(committed.get("reason") or "")
+                    return committed
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)

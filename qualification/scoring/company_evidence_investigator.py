@@ -7531,6 +7531,21 @@ async def investigate_company_evidence(
                     if (
                         rejected or force_industry_followup
                     ) and not correction_turn:
+                        # An already admitted submission may settle after the
+                        # research window closes. Give its validation feedback
+                        # the same single submit-only correction as a judgment
+                        # admitted during the reserve. Do not admit new research
+                        # or change any evidence decision or turn limit.
+                        if (
+                            rejected
+                            and not (
+                                force_stage_search
+                                or force_industry_followup
+                                or force_quote_recovery_search
+                            )
+                            and time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS
+                        ):
+                            force_submit = True
                         final_correction_pending = bool(
                             scoped_correction_active
                             or (force_submit and not force_stage_search)

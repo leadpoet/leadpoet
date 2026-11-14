@@ -203,7 +203,8 @@ def test_repeated_invalid_support_never_extends_turn_or_deadline_bounds(monkeypa
     result = _run(monkeypatch, post, clock=clock)
     assert 1 <= len(requests) <= investigator.MAX_REASONING_TURNS + 1
     if expired:
-        assert len(requests) == 1
+        assert len(requests) == 2
+        assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
     assert result["usage"]["search_calls"] == result["usage"]["fetch_calls"] == 0
     assert len(investigator._SYSTEM_PROMPT) <= OPENROUTER_MAX_CONTENT_CHARS

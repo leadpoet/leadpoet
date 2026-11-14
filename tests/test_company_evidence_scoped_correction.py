@@ -382,7 +382,7 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
         ),
     ],
 )
-def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
+def test_late_correction_preserves_valid_finding_when_other_target_stays_invalid(
     monkeypatch, invalid_stage,
 ):
     requests = []
@@ -399,7 +399,8 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
             "function": {
                 "name": "submit_findings",
                 "arguments": json.dumps({
-                    "findings": [invalid_stage, _industry_finding()]
+                    "findings": ([invalid_stage, _industry_finding()]
+                                 if len(requests) == 1 else [invalid_stage])
                 }),
             },
         }]}}]}
@@ -450,22 +451,21 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
         },
     ))
 
-    assert len(requests) == 1
+    assert len(requests) == 2
+    assert requests[1]["tool_choice"]["function"]["name"] == "submit_findings"
     assert requests[0]["tool_choice"] == "required"
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["claims"]["stage"]["reason"] == (
-        "investigation admission budget exhausted"
-    )
+    assert result["claims"]["stage"]["evidence_quote"] == ""
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
     assert result["_validated_stage_finding"] == {}
     assert result["_completed_submit"] is False
     assert result["failure_reason"] == (
-        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        investigator.MALFORMED_RESPONSE_FAILURE_REASON
     )
 
 
-def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
+def test_late_correction_preserves_only_server_validated_stage_metadata(monkeypatch):
     requests = []
     clock = {"now": 0.0}
     invalid_industry = _industry_finding(
@@ -483,7 +483,8 @@ def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
             "function": {
                 "name": "submit_findings",
                 "arguments": json.dumps({
-                    "findings": [_finding("stage"), invalid_industry]
+                    "findings": ([_finding("stage"), invalid_industry]
+                                 if len(requests) == 1 else [invalid_industry])
                 }),
             },
         }]}}]}
@@ -533,16 +534,15 @@ def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
         },
     ))
 
-    assert len(requests) == 1
+    assert len(requests) == 2
+    assert requests[1]["tool_choice"]["function"]["name"] == "submit_findings"
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result["claims"]["industry"]["reason"] == (
-        "investigation admission budget exhausted"
-    )
+    assert result["claims"]["industry"]["evidence_quote"] == ""
     assert result["_validated_stage_finding"] == result["claims"]["stage"]
     assert result["_completed_submit"] is False
     assert result["failure_reason"] == (
-        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        investigator.MALFORMED_RESPONSE_FAILURE_REASON
     )
 
 

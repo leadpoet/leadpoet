@@ -858,4 +858,12 @@ def test_provider_failure_cannot_create_ownership_receipt(monkeypatch, fail_turn
         },
     ))
     assert len(requests) == fail_turn
-    assert result == {"claims": {}, "failure_reason": "provider_error"}
+    assert result == {
+        "claims": {}, "failure_reason": "provider_error",
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {
+            CONTROL_URL: {"final_url": CONTROL_URL, "text": CONTROL},
+            CLASSIFICATION_URL: {"final_url": CLASSIFICATION_URL, "text": CLASSIFICATION},
+        },
+    }
+    assert not result.get("_completed_submit")
+    assert not result.get("_validated_stage_finding")

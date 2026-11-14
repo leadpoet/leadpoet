@@ -1,4 +1,4 @@
-"""Apply only the reviewed investigator prompt and feedback correction on50de.
+"""Apply reviewed feedback and private failure-source preservation on50de.
 
 The complete preimage and postimage are checksum-bound. All other frozen
 source bytes, grader policy and process configuration stay unchanged.
@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import hashlib
 
-CORRECTION_ID = "investigator_prompt_feedback_v1"
+CORRECTION_ID = "investigator_prompt_feedback_v3"
 FROZEN_IMAGE_DIGEST = "sha256:50deca7b8bf5129816abaeb59fd5bc1aabb554c529cc4151b8175f9edd0b8144"
-REVIEWED_SOURCE_COMMIT = "25cc0cc0a6a0a3e2aff349551433bd7421a39891"
+REVIEWED_SOURCE_COMMIT = "00fc74958f15aab7f4728e611e93bf76eb17705b"
 ORIGINAL_SHA256 = "eaa205dfe6a1707199246008f7108c5883e1d298b6c7c682d41b16c55e677483"
-REPAIRED_SHA256 = "9ddfd54dba12069b74d5993df8900145d6211365416614846a4a180a73e57ef9"
+REPAIRED_SHA256 = "ca66a71b55b43f02d083d6cd24a3c6f0ebad1b06d8d57f16896717037a7f80d6"
 
-# Exactly the reviewed342545-to-25cc investigator diff. Context makes every
-# replacement unique; whole-file checks reject drift outside these anchors.
+# Preserve the reviewed342545-to-25cc feedback delta, then apply only the six
+# reviewed private source handoffs from b383dd181. Context makes each replacement
+# unique; whole-file checks reject all other drift. The final delta gives a
+# late admitted reply one existing submit-only correction. No verdict changes.
 DELTAS = (
     (
         (
@@ -488,6 +490,136 @@ DELTAS = (
             b'                                    candidate = _company_bound_quote_candidate(\n'
             b'                                        support_quote, support_text, identity_names,\n'
             b'                                    )\n'
+        ),
+    ),
+    (
+        (
+            b'                initial_industry, initial_failure, industry_review_calls = initial_result\n'
+            b'                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:\n'
+            b'                    _record_failure(diagnostic, initial_failure)\n'
+            b"                    return {'claims': {}, 'failure_reason': initial_failure}\n"
+        ),
+        (
+            b'                initial_industry, initial_failure, industry_review_calls = initial_result\n'
+            b'                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:\n'
+            b'                    _record_failure(diagnostic, initial_failure)\n'
+            b"                    return {'claims': {}, 'failure_reason': initial_failure,\n"
+            b'                            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    (
+        (
+            b'                reasoning_turn_limit -= deferred_calls\n'
+            b"                input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit\n"
+            b'                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:\n'
+            b'                    _record_failure(diagnostic, initial_failure)\n'
+            b"                    return {'claims': {}, 'failure_reason': initial_failure}\n"
+        ),
+        (
+            b'                reasoning_turn_limit -= deferred_calls\n'
+            b"                input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit\n"
+            b'                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:\n'
+            b'                    _record_failure(diagnostic, initial_failure)\n'
+            b"                    return {'claims': {}, 'failure_reason': initial_failure,\n"
+            b'                            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    (
+        (
+            b'    except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):\n'
+            b'        _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)\n'
+            b'        result = {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}\n'
+            b'        if local_tools.pending is not None:\n'
+            b'            local_tools.emit(local_tools.pending, result,\n'
+            b'                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)\n'
+            b'        return result\n'
+        ),
+        (
+            b'    except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):\n'
+            b'        _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)\n'
+            b'        result = {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}\n'
+            b'        if local_tools.pending is not None:\n'
+            b'            local_tools.emit(local_tools.pending, result,\n'
+            b'                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)\n'
+            b'        # Retain source facts privately without adding them to tool capture.\n'
+            b'        return {**result, PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    (
+        (
+            b'    except (TypeError, ValueError, KeyError, IndexError):\n'
+            b'        _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)\n'
+            b'        result = {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}\n'
+            b'        if local_tools.pending is not None:\n'
+            b'            local_tools.emit(local_tools.pending, result,\n'
+            b'                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)\n'
+            b'        return result\n'
+        ),
+        (
+            b'    except (TypeError, ValueError, KeyError, IndexError):\n'
+            b'        _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)\n'
+            b'        result = {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}\n'
+            b'        if local_tools.pending is not None:\n'
+            b'            local_tools.emit(local_tools.pending, result,\n'
+            b'                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)\n'
+            b'        return {**result, PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    (
+        (
+            b'    except Exception:  # noqa: BLE001\n'
+            b'        _record_failure(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)\n'
+            b'        result = {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}\n'
+            b'        if local_tools.pending is not None:\n'
+            b'            local_tools.emit(local_tools.pending, result,\n'
+            b'                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)\n'
+            b'        return result\n'
+        ),
+        (
+            b'    except Exception:  # noqa: BLE001\n'
+            b'        _record_failure(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)\n'
+            b'        result = {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}\n'
+            b'        if local_tools.pending is not None:\n'
+            b'            local_tools.emit(local_tools.pending, result,\n'
+            b'                             "executed" if local_tools.pending_executed else "rejected_not_executed", terminal=True)\n'
+            b'        return {**result, PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    (
+        (
+            b'    _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)\n'
+            b'    return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}\n'
+        ),
+        (
+            b'    _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)\n'
+            b'    return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON,\n'
+            b'            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages()}\n'
+        ),
+    ),
+    # Preserve the same one submit-only correction for a late admitted reply.
+    (
+        (
+            b'                    ) and not correction_turn:\n'
+            b'                        final_correction_pending = bool(\n'
+        ),
+        (
+            b'                    ) and not correction_turn:\n'
+            b'                        # An already admitted submission may settle after the\n'
+            b'                        # research window closes. Give its validation feedback\n'
+            b'                        # the same single submit-only correction as a judgment\n'
+            b'                        # admitted during the reserve. Do not admit new research\n'
+            b'                        # or change any evidence decision or turn limit.\n'
+            b'                        if (\n'
+            b'                            rejected\n'
+            b'                            and not (\n'
+            b'                                force_stage_search\n'
+            b'                                or force_industry_followup\n'
+            b'                                or force_quote_recovery_search\n'
+            b'                            )\n'
+            b'                            and time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS\n'
+            b'                        ):\n'
+            b'                            force_submit = True\n'
+            b'                        final_correction_pending = bool(\n'
         ),
     ),
 )

@@ -51,6 +51,8 @@ def database():
 @pytest.fixture()
 def store(database):
     psycopg, dsn = database
+    from tests.lab_arena.lab_arena_pg_harness import prepare_correction_reward_history_reads
+    prepare_correction_reward_history_reads(lambda: psycopg.connect(**dsn))
     return ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
 
 

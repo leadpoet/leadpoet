@@ -115,11 +115,12 @@ def test_final_correction_fault_does_not_create_a_tenth_turn(monkeypatch, final,
     assert result["failure_reason"] == reason
 
 
-def test_pending_correction_does_not_revive_an_unadmitted_ordinary_turn(monkeypatch):
-    # Seven ordinary turns cannot claim the ninth-turn allowance. The next
-    # ordinary turn remains subject to the unchanged admission deadline.
+def test_late_seventh_submission_uses_one_correction_not_a_ninth_attempt(monkeypatch):
+    # The seventh admitted submission settles late. Its single correction
+    # is still invalid; it cannot then claim another correction on turn nine.
     result, requests = _run_correction(monkeypatch, final="verified", cross_after=7)
-    assert len(requests) == 7
+    assert len(requests) == 8
     assert result["_completed_submit"] is False
-    assert result["failure_reason"] == "admission_budget_interrupted"
-    assert result["usage"]["reasoning_turns"] == 7
+    assert result["failure_reason"] == "malformed_response"
+    assert result["usage"]["reasoning_turns"] == 8
+    assert [tool["function"]["name"] for tool in requests[-1]["tools"]] == ["submit_findings"]

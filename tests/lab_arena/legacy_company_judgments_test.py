@@ -167,7 +167,7 @@ def test_failure_keeps_prior_completed_intrinsic_and_retry_uses_it(monkeypatch):
 
 
 @pytest.mark.parametrize("later_verdict", ["match", "mismatch", "inconclusive"])
-def test_failed_first_company_keeps_later_completed_judgments(monkeypatch, later_verdict):
+def test_failed_first_company_keeps_later_completed_judgments(monkeypatch, later_verdict, ordered_passes=True):
     calls, checkpoints = [], []
     failed = True
 
@@ -190,7 +190,8 @@ def test_failed_first_company_keeps_later_completed_judgments(monkeypatch, later
     output = _score(_input(), on_company_judgments=lambda rows: checkpoints.append(copy.deepcopy(rows)))
     assert output["failure"] == "judge_error"
     assert "breakdowns" not in output
-    assert calls == ["A", "A", "A", "B"]
+    expected = ["A", "B", "A", "A"] if ordered_passes else ["A", "A", "A", "B"]
+    assert calls == expected
     assert [row["company_index"] for row in output["company_judgments"]] == [1]
     assert [len(rows) for rows in checkpoints] == [1]
     assert output["company_judgments"][0]["raw_judgment"]["final_score"] == (60 if later_verdict == "match" else 0)
@@ -199,10 +200,10 @@ def test_failed_first_company_keeps_later_completed_judgments(monkeypatch, later
     failed = False
     retry = _score(_input(), saved)
     assert "failure" not in retry
-    assert calls == ["A", "A", "A", "B", "A"]
+    assert calls == expected + ["A"]
 
 
-def test_failed_cache_key_is_not_retried_at_later_duplicate_index(monkeypatch):
+def test_failed_cache_key_is_not_retried_at_later_duplicate_index(monkeypatch, ordered_passes=True):
     calls = []
 
     async def transient(**kwargs):
@@ -215,7 +216,7 @@ def test_failed_cache_key_is_not_retried_at_later_duplicate_index(monkeypatch):
     monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
     output = _score(_input(("A", "A", "B")))
     assert output["failure"] == "judge_error" and "breakdowns" not in output
-    assert calls == ["A", "A", "A", "B"]
+    assert calls == (["A", "B", "A", "A"] if ordered_passes else ["A", "A", "A", "B"])
     assert [row["company_index"] for row in output["company_judgments"]] == [2]
 
 
@@ -236,7 +237,7 @@ def test_deferred_failure_preserves_cached_verified_duplicate_gate(judge, monkey
     monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
     output = _score(document, saved)
     assert output["failure"] == "judge_error"
-    assert judge == ["A", "A", "A", "C"]
+    assert judge == ["A", "C", "A", "A"]
     assert [row["company_index"] for row in output["company_judgments"]] == [3]
 
 
@@ -268,16 +269,16 @@ def test_later_company_uses_original_signal_and_fit_exchange_index(judge, monkey
     monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
     output = _score(_input(("A", "B", "C", "D", "E"), policy=policy), saved)
     assert output["failure"] == "judge_error" and "breakdowns" not in output
-    assert judge == ["D", "D", "D", "E"]
+    assert judge == ["D", "E", "D", "D"]
     assert [(row["company_index"], row["signal_index"]) for row in exchanges] == [
-        (3, 0), (3, -1), (3, 0), (3, -1), (3, 0), (3, -1), (4, 0), (4, -1),
+        (3, 0), (3, -1), (4, 0), (4, -1), (3, 0), (3, -1), (3, 0), (3, -1),
     ]
     assert [row["company_index"] for row in output["company_judgments"]] == [4]
     assert signal_judgment_cache.current_exchange() is None
     assert company_fit_evidence_reuse.current_exchange() is None
 
 
-def test_deferred_failure_preserves_schema_bucket_and_max_gates(monkeypatch):
+def test_deferred_failure_preserves_schema_bucket_and_max_gates(monkeypatch, ordered_passes=True):
     calls = []
     document = _input(("A", "B", "C", "D", "E"))
     document["companies"][1]["employee_count"] = "1-10"
@@ -294,11 +295,11 @@ def test_deferred_failure_preserves_schema_bucket_and_max_gates(monkeypatch):
     monkeypatch.setattr(lead_scorer, "score_company_competition_intent", transient)
     output = _score(document)
     assert output["failure"] == "judge_error"
-    assert calls == ["A", "A", "A", "D"]
+    assert calls == (["A", "D", "A", "A"] if ordered_passes else ["A", "A", "A", "D"])
     assert [row["company_index"] for row in output["company_judgments"]] == [3]
 
 
-def test_first_native_exhaustion_is_raised_unchanged_after_independent_progress(monkeypatch):
+def test_first_native_exhaustion_is_raised_unchanged_after_independent_progress(monkeypatch, ordered_passes=True):
     document = _input(("A", "B", "C"))
     first = scoring._JudgeExhausted("first private diagnostic", failure_reason="provider_error")
     second = scoring._JudgeExhausted("second private diagnostic", failure_reason="malformed_response")
@@ -319,7 +320,9 @@ def test_first_native_exhaustion_is_raised_unchanged_after_independent_progress(
         scoring.score_quality_work_item({}, icp=document["icp"], companies=document["companies"],
             scorer=scorer, cache_context=_lease(document), on_company_judgments=checkpoints.append)
     assert caught.value is first
-    assert calls == [("A", [0]), ("B", [1]), ("C", [2])]
+    assert calls == [("A", [0]), ("B", [1]), ("C", [2])] + (
+        [("A", [0]), ("B", [1])] * 2 if ordered_passes else []
+    )
     assert [row["company_index"] for row in checkpoints[-1]] == [2]
 
 

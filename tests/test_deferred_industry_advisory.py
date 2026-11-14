@@ -127,7 +127,11 @@ def test_admitted_slow_advisory_does_not_extend_research_deadline(monkeypatch):
 def test_deferred_provider_failure_keeps_initial_failure_policy(monkeypatch):
     run, _, researchers, _, times, _ = setup(monkeypatch, fault='provider')
     result = run()
-    assert result == {'claims': {}, 'failure_reason': c.PROVIDER_ERROR_FAILURE_REASON}
+    assert result == {
+        'claims': {},
+        'failure_reason': c.PROVIDER_ERROR_FAILURE_REASON,
+        c.PRIVATE_FETCHED_PAGES_KEY: {URL: {'final_url': URL, 'text': FEATURES}},
+    }
     assert times == [(True, 0)] and not researchers
 
 

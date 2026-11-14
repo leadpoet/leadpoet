@@ -38,6 +38,8 @@ def database():
 @pytest.fixture()
 def state(database):
     pg, dsn = database
+    from tests.lab_arena.lab_arena_pg_harness import prepare_correction_reward_history_reads
+    prepare_correction_reward_history_reads(lambda: pg.connect(**dsn))
     control = pg.connect(**dsn)
     control.autocommit = True
     store = ArenaStore(PsycopgTransport(lambda: pg.connect(**dsn)))

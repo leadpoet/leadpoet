@@ -597,6 +597,8 @@ def score_work_item(
     _original_company_indexes: Optional[Sequence[int]] = None,
     prior_terminal_breakdowns: Optional[Sequence[Mapping[str, Any]]] = None,
     on_terminal_breakdowns: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    _retry_evidence_scope: Optional[Dict[str, Any]] = None,
+    _single_attempt_index: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Score one distinct output once: the first-N slice in model order.
 
@@ -670,12 +672,17 @@ def score_work_item(
         checkpoint()
     last_failure_reason = ""
     last_private_diagnostic = "origin=exception"
-    # This private dictionary is the complete lifetime boundary for source text
-    # retained between retries. A later score_work_item call always gets a new
-    # scope, even when its caller reuses the same scorer object.
-    retry_evidence_scope: Dict[str, Any] = {}
+    # The intrinsic-company caller shares this same private scope across its
+    # ordered passes. Every new scoring work item still starts with a new map.
+    retry_evidence_scope = {} if _retry_evidence_scope is None else _retry_evidence_scope
     attempts = max(1, int(max_retries))
-    for attempt in range(attempts):
+    if _single_attempt_index is not None and (
+        type(_single_attempt_index) is not int or not 0 <= _single_attempt_index < attempts
+    ):
+        raise ScoringError("single company attempt index is invalid")
+    attempt_indexes = (range(attempts) if _single_attempt_index is None
+                       else (_single_attempt_index,))
+    for attempt in attempt_indexes:
         if retain_terminal and attempt > 0 and not checkpoint_mode:
             invoked_positions = list(unresolved)
             invoked_companies = [
@@ -793,7 +800,7 @@ def score_work_item(
             continue
     raise _JudgeExhausted(
         ("judge_exhausted attempts=%d reason=%s %s"
-         % (attempts, last_failure_reason or "unknown", last_private_diagnostic))[
+         % (attempt + 1, last_failure_reason or "unknown", last_private_diagnostic))[
              :MAX_FAILURE_DETAIL_CHARS
          ],
         failure_reason=last_failure_reason,
@@ -827,6 +834,8 @@ def _score_legacy_company_work_item(
     new_judgments = []
     failures_by_key = {}
     deferred_indexes = set()
+    retry_evidence_scope: Dict[str, Any] = {}
+    attempts = max(1, int(MAX_JUDGE_RETRIES))
     def resolve(index):
         ref = refs[index]
         key = ref["cache_key"]
@@ -845,10 +854,12 @@ def _score_legacy_company_work_item(
                   if signal_exchange is not None and enabled() else nullcontext()):
                 try:
                     rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
-                                           _original_company_indexes=[index])
+                                           _original_company_indexes=[index],
+                                           max_retries=attempts,
+                                           _retry_evidence_scope=retry_evidence_scope,
+                                           _single_attempt_index=attempt)
                 except _JudgeExhausted as exc:
-                    # Keep the ordered pre-provider gates, while allowing later
-                    # independent companies to checkpoint their real judgments.
+                    # Finish this ordered pass before the next existing attempt.
                     failures_by_key[key] = exc
                     deferred_indexes.add(index)
                     return None
@@ -866,10 +877,18 @@ def _score_legacy_company_work_item(
                 on_company_judgments(validated)
         return raw_by_key[key]
     scored, _ = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
-    full = apply_company_judgment_context(sliced, [None] * len(sliced), company_quality=False,
-                                        scored_indexes=scored, resolve_raw=resolve,
-                                        deferred_indexes=deferred_indexes,
-                                        company_input_contract=getattr(scorer, "company_input_contract", ""))
+    for attempt in range(attempts):
+        failures_by_key.clear()
+        deferred_indexes.clear()
+        # Rebuild aliases in original order from intrinsic judgments. A newly
+        # recovered earlier company can make a completed later row a duplicate;
+        # its saved raw authority must keep its original substantive verdict.
+        full = apply_company_judgment_context(sliced, [None] * len(sliced), company_quality=False,
+                                            scored_indexes=scored, resolve_raw=resolve,
+                                            deferred_indexes=deferred_indexes,
+                                            company_input_contract=getattr(scorer, "company_input_contract", ""))
+        if not failures_by_key:
+            break
     if failures_by_key:
         raise next(iter(failures_by_key.values()))
     validate_breakdowns_for_item(full, icp=icp, companies=sliced,

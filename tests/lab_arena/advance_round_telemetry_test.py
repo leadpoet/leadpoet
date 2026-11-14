@@ -132,3 +132,42 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("baseline_promotion_pending", "baseline_promotion_pending"),
+    ("code_review_pending", "code_review_pending"),
+    # Free text or a message is never exported; the span falls back to the
+    # fixed no-error mark rather than carrying it.
+    ("private-detail: https://private.invalid/token", "-"),
+    ("", "-"),
+])
+def test_a_round_held_back_at_the_benchmark_does_not_report_a_clean_success(
+    observed_service, reason, expected
+):
+    service, exporter, row = observed_service
+    row["status"] = "open"
+    service.admit_uploaded_submissions = lambda *_, **__: {"status": "ok"}
+    service.commit_benchmark = lambda _: {"status": "retry", "reason": reason}
+
+    assert service.advance_round("private-round")["status"] == "retry"
+
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_commit_benchmark"]
+    assert span.attributes["arena.outcome"] == "idle"
+    assert span.attributes["arena.error_type"] == expected
+    assert "private.invalid" not in repr(dict(span.attributes))
+
+
+def test_a_benchmark_that_commits_still_reports_an_ordinary_success(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "open"
+    service.admit_uploaded_submissions = lambda *_, **__: {"status": "ok"}
+    service.commit_benchmark = lambda _: {"status": "committed", "participants": 3}
+
+    assert service.advance_round("private-round")["status"] == "committed"
+
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_commit_benchmark"]
+    assert span.attributes["arena.outcome"] == "ok"
+    assert span.attributes["arena.error_type"] == "-"

@@ -862,6 +862,7 @@ def test_run_span_names_the_kind_and_the_terminal_cause():
         "arena.outcome": "failed",
         "arena.failure_stage": "-",
         "arena.failure_error_class": "-",
+        "arena.failure_reason": "-",
     }
 
 
@@ -873,6 +874,7 @@ def test_run_span_carries_the_runner_failure_diagnostic():
         "score", "judge_error",
         failure_stage="provider_call",
         failure_error_class="provider_unavailable",
+        failure_reason="provider_credit_exhausted",
     )
 
     (span,) = exp.get_finished_spans()
@@ -882,7 +884,62 @@ def test_run_span_carries_the_runner_failure_diagnostic():
         "arena.outcome": "failed",
         "arena.failure_stage": "provider_call",
         "arena.failure_error_class": "provider_unavailable",
+        "arena.failure_reason": "provider_credit_exhausted",
     }
+
+
+def test_run_span_reason_separates_the_two_scorer_judge_error_paths():
+    """scorer/judge_error is emitted by both the scorer and the fallback."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="scorer", failure_error_class="judge_error",
+        failure_reason="malformed_response",
+    )
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="scorer", failure_error_class="judge_error",
+    )
+
+    scorer_reported, fallback = exp.get_finished_spans()
+    assert scorer_reported.attributes["arena.failure_reason"] == "malformed_response"
+    assert fallback.attributes["arena.failure_reason"] == "-"
+
+
+def test_a_reason_outside_the_vocabulary_costs_the_field_not_the_run_span():
+    """The export is fail-closed; a run outcome must never be lost to drift."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run(
+        "score", "judge_error",
+        failure_stage="scorer", failure_error_class="judge_error",
+        failure_reason="openrouter returned 429",
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.terminal_cause"] == "judge_error"
+    assert span.attributes["arena.failure_reason"] == "-"
+
+
+def test_every_contract_failure_reason_is_admitted():
+    """A reason the contract can persist must be one the validator admits."""
+    from lab_arena import contracts
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    for reason in contracts.FAILURE_DIAGNOSTIC_REASONS:
+        recorder.record_run(
+            "score", "judge_error",
+            failure_stage="scorer", failure_error_class="judge_error",
+            failure_reason=reason,
+        )
+    assert len(exp.get_finished_spans()) == len(
+        contracts.FAILURE_DIAGNOSTIC_REASONS
+    )
+    assert {s.attributes["arena.failure_reason"] for s in exp.get_finished_spans()} == set(
+        contracts.FAILURE_DIAGNOSTIC_REASONS
+    )
 
 
 def test_run_span_with_a_diagnostic_outside_the_vocabulary_is_dropped_whole():

@@ -183,15 +183,18 @@ def record_run(
     *, run_identity: Optional[Mapping[str, Any]] = None,
     failure_stage: str = "-",
     failure_error_class: str = "-",
+    failure_reason: str = "-",
 ) -> None:
     """Record one finished evaluation run. Never raises.
 
     No duration: the run row carries no start time, so the sidecar can only
     honestly report that a run ended and which cause ended it.
 
-    ``failure_stage`` / ``failure_error_class`` carry the runner's
-    ``failure_diagnostic`` when the completion reported one, so a repeated
-    failure says which stage raised and why. "-" when there is none.
+    ``failure_stage`` / ``failure_error_class`` / ``failure_reason`` carry the
+    runner's ``failure_diagnostic`` when the completion reported one, so a
+    repeated failure says which stage raised and why. The reason is the only
+    one of the three that separates a scorer-reported failure from the
+    unclassified fallback; both report scorer/judge_error. "-" when absent.
     """
     recorder = _recorder
     if recorder is None:
@@ -201,6 +204,7 @@ def record_run(
             run_kind, terminal_cause, run_identity=run_identity,
             failure_stage=failure_stage,
             failure_error_class=failure_error_class,
+            failure_reason=failure_reason,
         )
     except BaseException:
         pass

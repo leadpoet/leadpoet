@@ -405,9 +405,12 @@ NON_PROGRESSING_STEP_STATUSES = frozenset(
 
 
 def _observe_step(observed: Any, result: Any) -> Any:
-    """Mark a driver step idle when its result left the round where it was."""
+    """Mark a driver step idle when its result left the round where it was,
+    and carry the reason it did when the result names one."""
     if isinstance(result, Mapping):
         observed.idle = str(result.get("status") or "") in NON_PROGRESSING_STEP_STATUSES
+        if observed.idle:
+            observed.held_reason = str(result.get("reason") or "")
         remaining = result.get("remaining")
         if not observed.count and isinstance(remaining, int):
             observed.count = int(remaining)
@@ -8388,6 +8391,10 @@ class ArenaService:
                 return {"status": "waiting", "round_status": status}
             if status == "open":
                 with telemetry.stage("advance_commit_benchmark") as observed:
+                    # A benchmark that cannot be frozen yet returns a retry
+                    # rather than raising, so the round can sit unopened for
+                    # hours with every attempt reporting a clean success.
+                    # Carry the reason it is waiting on.
                     return _observe_step(observed, self.commit_benchmark(round_id))
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):

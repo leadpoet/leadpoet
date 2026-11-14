@@ -185,6 +185,37 @@ def test_prompt_keeps_hiring_intents_provable_from_one_posting(monkeypatch):
     assert "Actively hiring for platform, integration, or revenue-operations roles" in prompt
 
 
+def test_prompt_keeps_stage_pinned_and_international_icps_country_wide(monkeypatch):
+    """Across the 2026-11-01 to 2026-11-13 rounds (130 ICPs, miner rows only),
+    stage-pinned ICPs with a US region, state or city drew a median 33% of
+    the rows of the best-filled ICP in their round and 0.53 approved companies
+    per submission. Stage-pinned country-wide ICPs drew 60% and 1.34, and
+    unpinned country-wide ICPs 84% and 2.15. International ICPs limited to a
+    city drew 0.46 approved companies per submission against 1.80 for whole
+    countries. The prompt must tell the author not to stack these choices."""
+    monkeypatch.setattr(ig, "OPENROUTER_API_KEY", "")
+    prepared = asyncio.run(ig.prepare_icp_probe_request(
+        "icp_generation", set_id=20261114, total_icps=10,
+    ))
+    prompt = "\n".join(
+        message["content"] for message in prepared["request"]["messages"]
+        if isinstance(message.get("content"), str)
+    )
+    assert "POOL SIZE — DO NOT STACK NARROW CHOICES" in prompt
+    assert "{company_goal}" not in prompt
+    assert (
+        f"Each submission must find up to {ig.COMPANY_GOAL_AVERAGE} different "
+        "qualifying companies for every ICP"
+    ) in prompt
+    assert "A stage-pinned ICP must use a whole-country geography" in prompt
+    assert "Never pair a pinned stage with a US region, a state or a city." in prompt
+    assert "An international ICP should use the whole country rather than a city" in prompt
+    assert "12. Does every stage-pinned ICP use a whole-country geography" in prompt
+    # The rule must not reintroduce the per-ICP research step that the
+    # five-company viability heuristic replaced.
+    assert "This is a heuristic, not a request to research, verify, or list five companies." in prompt
+
+
 def test_generated_brief_states_structured_required_and_bonus_intents():
     primary = "Announced a strategic partnership in the last 12 months."
     bonus = "Announced a leadership change in the last 12 months."

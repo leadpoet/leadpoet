@@ -304,8 +304,7 @@ def _chat_citation_annotations(body, message):
 
 
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
-            allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None,
-            allow_uncited_annotations=False):
+            allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -395,20 +394,20 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
                               or _hosted_search_history(body.get('input')))
                          for part in item['content']), 'assistant_shape_unsupported')
             validation_item = item
-            if allow_uncited_annotations:
-                # Trusted internal exports retain provider-only citation metadata.
-                # Validate it separately, then use the existing shared validator
-                # on a temporary view. The exported target remains exact; miner
-                # request and continuation contracts are not changed.
-                validation_item = copy.deepcopy(item)
-                for part in validation_item['content']:
-                    annotations = part.get('annotations', [])
-                    _require(isinstance(annotations, list), 'assistant_shape_unsupported')
-                    for citation in annotations:
-                        _require(isinstance(citation, dict), 'assistant_shape_unsupported')
-                        if 'uncited' in citation:
-                            _require(type(citation['uncited']) is bool, 'assistant_shape_unsupported')
-                            citation.pop('uncited')
+            # Provider output can include boolean citation metadata that is not
+            # part of the inbound operation schema. Validate that field here,
+            # then check all remaining fields through the unchanged schema.
+            # Copy only when needed; the original item remains the exact target.
+            for pi, part in enumerate(item['content']):
+                annotations = part.get('annotations', [])
+                _require(isinstance(annotations, list), 'assistant_shape_unsupported')
+                for ai, citation in enumerate(annotations):
+                    _require(isinstance(citation, dict), 'assistant_shape_unsupported')
+                    if 'uncited' in citation:
+                        _require(type(citation['uncited']) is bool, 'assistant_shape_unsupported')
+                        if validation_item is item:
+                            validation_item = copy.deepcopy(item)
+                        validation_item['content'][pi]['annotations'][ai].pop('uncited', None)
             try:
                 operations.validate_operation_request('openrouter.responses', {
                     'model': body['model'], 'input': [validation_item],

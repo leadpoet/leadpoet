@@ -665,11 +665,14 @@ Identical observed context/target pairs are deduplicated with their source
 references retained. Related episodes, companies and ICP requirements stay in
 one split. Candidate quality remains explicitly unreviewed.
 
-Internal Responses exports also retain provider citation excerpts and the boolean
-`uncited` marker. Their evidence summary points to the original annotations in
-response order. A consulted source is distinct from a cited source; neither an
-excerpt nor its URL proves complete page capture or independent verification.
-This export support does not change miner request validation or privacy checks.
+Responses exports retain provider citation excerpts and the boolean `uncited`
+marker in exact targets, including miner and baseline outputs. The marker is
+checked on a temporary output validation view; inbound request and continuation
+schemas are unchanged. Unknown fields and nonboolean markers remain invalid.
+Internal evidence summaries point to original annotations in response order.
+A consulted source is distinct from a cited source; neither an excerpt nor its
+URL proves complete page capture or independent verification. This output
+support does not bypass privacy, delivery, reasoning or whole-ICP checks.
 
 Dataset preparation defaults to `--eval-mode company_and_icp`, which holds out
 both company clusters and exact ICP requirements. Optional

@@ -1410,6 +1410,16 @@ The remaining {domestic_count} ICPs are United States:
 - "United States, West Coast" / "Northeast" / "Midwest" / "South" / "Southwest" (~40%)
 - "United States, <State>" only when the industry has a known concentration there (~10%)
 
+POOL SIZE — DO NOT STACK NARROW CHOICES:
+Each submission must find up to {company_goal} different qualifying companies for every ICP,
+and each of them must also show the required event inside its window. Every filter shrinks
+that pool and the filters multiply, so an ICP that stacks narrow choices leaves most
+submissions with no valid answer. A pinned stage already removes most companies:
+- A stage-pinned ICP must use a whole-country geography, such as "United States" or
+  "United Kingdom". Never pair a pinned stage with a US region, a state or a city.
+- An international ICP should use the whole country rather than a city when the list
+  allows both.
+
 INDUSTRY × INTENT PAIRING (Sonar should naturally honor these):
 - Service industries (Consulting, Legal, Accounting, Recruiting) → leadership change, hiring, expansion, acquisition, partnership — NOT product launch
 - Real Estate / Commercial Real Estate / PropTech → acquisition, expansion, leadership change, funding, facility opening — NOT product launch
@@ -1462,7 +1472,8 @@ FINAL CHECK before output (for every ICP):
 8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
 9. No job titles, no seniority, no contact-level descriptors in the prompts?
 10. Is the exact stage quota met, with no implicit funding/ownership-stage restrictions in the remaining ICPs?
-11. Are mandatory combinations explicit with "must", "both" or "all", true alternatives joined with "or", and shared conditions consistent between `product_service` and `required_attribute`? Preserve each intended mandatory requirement; do not turn it into an alternative merely to broaden the ICP."""
+11. Are mandatory combinations explicit with "must", "both" or "all", true alternatives joined with "or", and shared conditions consistent between `product_service` and `required_attribute`? Preserve each intended mandatory requirement; do not turn it into an alternative merely to broaden the ICP.
+12. Does every stage-pinned ICP use a whole-country geography, and does every international ICP use the whole country where the list allows both?"""
 
     international_target = international_icp_target(total_icps)
     stage_target = generated_stage_target(total_icps)
@@ -1478,6 +1489,7 @@ FINAL CHECK before output (for every ICP):
         .replace("{domestic_count}", str(total_icps - international_target))
         .replace("{selected_industries}", ", ".join(selected_industries))
         .replace("{stage_distribution}", stage_distribution)
+        .replace("{company_goal}", str(COMPANY_GOAL_AVERAGE))
     )
     if contacts_required:
         system_prompt += """

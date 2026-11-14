@@ -13,7 +13,7 @@ from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     LAB_ARENA_NETWORK_SCOPE_MIGRATION,
-    database_with_lab_arena_migration,
+    database_with_lab_arena_migration, prepare_current_service_reads,
 )
 from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     MINER_A,
@@ -93,6 +93,7 @@ def test_reward_activation_history_and_epochs_are_chain_scoped(other_network, ot
     psycopg2, dsn = next(generator)
     control = psycopg2.connect(**dsn)
     control.autocommit = True
+    prepare_current_service_reads(lambda: psycopg2.connect(**dsn), include_run_reads=False)
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
     store = ArenaStore(transport)
     signer = signing.LocalSigner.generate()

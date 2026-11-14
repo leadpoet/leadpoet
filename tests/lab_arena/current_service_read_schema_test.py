@@ -85,7 +85,9 @@ def test_bounded_champion_reader_preserves_historical_functions_and_schema_acl()
             after = _functions(cursor)
             assert {signature: after[signature] for signature in before} == before
             assert set(after) - set(before) == {
-                'lab_arena_latest_promoted_champion_v1(text,integer,text)'}
+                'lab_arena_latest_promoted_champion_v1(text,integer,text)',
+                'lab_arena_correction_reward_history_v1(text,text,integer,integer,integer,boolean)',
+            }
             cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
             assert cursor.fetchone() == schema_acl
             cursor.execute("SELECT public.lab_arena_latest_promoted_champion_v1('finney',71,'2099-01-01')")

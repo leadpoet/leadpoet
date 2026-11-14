@@ -211,6 +211,10 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
     "lab_arena_reward_slot_snapshot": (("p_round_id", "text"), ("p_slot_policy", "jsonb")),
+    "lab_arena_correction_reward_history_v1": (
+        ("p_mode", "text"), ("p_network_name", "text"), ("p_netuid", "integer"),
+        ("p_limit", "integer"), ("p_offset", "integer"), ("p_public_only", "boolean"),
+    ),
     "lab_arena_prepare_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_complete_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
@@ -2018,7 +2022,33 @@ class ArenaStore:
             if len(rows) < page_size:
                 break
             offset += page_size
-        return activated[:limit]
+        # The owner correction archives the original signed authority before
+        # clearing activation. Read it after current rows so an atomic reopen
+        # cannot leave this lookup between an old row and its durable receipt.
+        archived = []
+        offset = 0
+        while len(archived) < limit:
+            rows = self._transport.rpc("lab_arena_correction_reward_history_v1", {
+                "p_mode": mode, "p_network_name": network_name, "p_netuid": netuid,
+                "p_limit": page_size, "p_offset": offset, "p_public_only": public_only,
+            })
+            if not isinstance(rows, list):
+                raise ArenaStoreError("correction reward history is not an array")
+            archived.extend(_require_mapping(row, "correction reward history") for row in rows)
+            if len(rows) < page_size:
+                break
+            offset += page_size
+        # A receipt can overlap its still-activated source during preparation.
+        # Keep distinct epochs of one corrected round; collapse only the same
+        # signed authority. Conflicting authorities at one epoch remain visible
+        # to the canonical duplicate-epoch validator.
+        unique = {}
+        for row in activated + archived:
+            key = (row.get("reward_basis_hash"), row.get("effective_reward_epoch"))
+            if key == (None, None):
+                key = (row.get("round_id"), None)
+            unique.setdefault(key, row)
+        return sorted(unique.values(), key=lambda row: int(row.get("effective_reward_epoch") or 0), reverse=True)[:limit]
 
     # -- submissions ------------------------------------------------------
 

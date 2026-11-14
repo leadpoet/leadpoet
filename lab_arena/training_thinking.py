@@ -1730,6 +1730,16 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
 
         if isinstance(call.get("response"), Mapping):
             response_events(call["response"], prefix + ["response"], "selected_terminal")
+        def nonexact_analysis(receipt, path):
+            rendering = receipt.get("nonexact_response_rendering")
+            if isinstance(rendering, Mapping):
+                add("nonexact_response_analysis", path + ["nonexact_response_rendering"],
+                    rendering, delivery="not_proved")
+
+        for ri, receipt in enumerate(call.get("upstream_response_receipts") or []):
+            nonexact_analysis(receipt, prefix + ["upstream_response_receipts", ri])
+        if isinstance(call.get("nonexact_recovered_response"), Mapping):
+            nonexact_analysis(call["nonexact_recovered_response"], prefix + ["nonexact_recovered_response"])
         receipts = []
         for ri, receipt in enumerate(call.get("response_receipts") or []):
             record = {"entry_id": receipt.get("entry_id"), "entry_kind": receipt.get("entry_kind"),
@@ -1743,6 +1753,9 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                 response_events(receipt["response"], record["source_path"] + ["response"], "terminal_receipt")
             else:
                 record["response_ref"] = copy.deepcopy(receipt.get("response_ref"))
+            if receipt.get("response_unavailable") is True:
+                record["response_unavailable"] = True
+            nonexact_analysis(receipt, record["source_path"])
             receipts.append(record)
         calls.append({"call_identity": call.get("call_identity"), "run_id": call.get("run_id"),
                       "operation_id": call.get("operation_id"), "provider": call.get("provider"),
@@ -1753,6 +1766,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
                       **({"recovered_response_ref": copy.deepcopy(call["recovered_response_ref"])}
                          if call.get("recovered_response_ref") is not None else {}),
+                      **({"nonexact_recovered_response": copy.deepcopy(call["nonexact_recovered_response"])}
+                         if call.get("nonexact_recovered_response") is not None else {}),
                       "reasoning_coverage": _call_coverage(example, call, registry, worker_proofs=worker_proofs),
                       **({"target_omission_reason": "explicit_output_cap_private_response"}
                          if verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs) else {}),

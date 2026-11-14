@@ -369,6 +369,22 @@ def _search_evidence(response: Any) -> dict:
                        "source_references": len(sources), "results_with_text": len(text_results),
                        "result_text_status": text_status})
     citations = []
+    responses_citations = []
+    for output_index, item in enumerate(output if isinstance(output, list) else []):
+        content = item.get("content") if isinstance(item, Mapping) and item.get("type") == "message" else None
+        for content_index, part in enumerate(content if isinstance(content, list) else []):
+            annotations = part.get("annotations") if isinstance(part, Mapping) and part.get("type") == "output_text" else None
+            for index, citation in enumerate(annotations if isinstance(annotations, list) else []):
+                if (not isinstance(citation, Mapping) or citation.get("type") != "url_citation"
+                        or not isinstance(citation.get("url"), str) or not citation["url"].strip()):
+                    continue
+                path = f"/output/{output_index}/content/{content_index}/annotations/{index}"
+                text = citation.get("content")
+                exposed = _has_retained_search_text(text)
+                responses_citations.append({"annotation_path": path, "url_path": path + "/url",
+                    "content_path": path + "/content" if exposed else None,
+                    "content_characters": len(text) if exposed else 0,
+                    "uncited": citation.get("uncited") if type(citation.get("uncited")) is bool else None})
     choices = response.get("choices") if isinstance(response, Mapping) else None
     for choice_index, choice in enumerate(choices if isinstance(choices, list) else []):
         message = choice.get("message") if isinstance(choice, Mapping) else None
@@ -394,6 +410,11 @@ def _search_evidence(response: Any) -> dict:
             "all_search_events_have_result_text": bool(events) and all(row["results_with_text"] for row in events),
             "underlying_page_contents_verified": False, "all_internal_provider_turns_verified": False,
             "events": events,
+            "responses_url_citations": {"scope": "provider_exposed_responses_annotations_only",
+                "references": len(responses_citations),
+                "annotations_with_content": sum(row["content_path"] is not None for row in responses_citations),
+                "content_characters": sum(row["content_characters"] for row in responses_citations),
+                "items": responses_citations},
             "chat_url_citations": {"scope": "provider_exposed_chat_annotations_only",
                 "references": len(citations),
                 "annotations_with_content": sum(row["content_path"] is not None for row in citations),
@@ -497,7 +518,8 @@ def read_call(objects: Any, ref: str, *, registry: Any = None) -> tuple[dict, di
             target, _ = training_steps._target(request, target_response, first["api"], allow_reasoning_history=True,
                                                allow_tool_error_history=True,
                                                responses_input_validator=_internal_responses_input,
-                                               chat_annotations_validator=_internal_chat_annotations)
+                                               chat_annotations_validator=_internal_chat_annotations,
+                                               allow_uncited_annotations=True)
             if first["api"] == "openrouter.responses":
                 training_steps._validate_target_tools(request, target, first["api"])
             elif target.get("tool_calls"):

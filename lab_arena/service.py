@@ -8836,6 +8836,9 @@ class ArenaService:
             "epoch_eligible": eligibility,
             "reward_slot_policy": governing.get("slot_policy") if governing else None,
             "reward_slots": governing.get("reward_slots") if governing else None,
+            # The weight kernel applies this signed factor to the king's seats.
+            # Historical bases omit it and keep the full share.
+            "champion_reward_factor_ppm": governing.get("champion_reward_factor_ppm") if governing else None,
             "current_epoch": epoch,
             **({"weekly_slot_decay": weekly_clock} if weekly_clock is not None else {}),
         }

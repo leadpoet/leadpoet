@@ -16,11 +16,11 @@ from tests.lab_arena.slot_decay_postgres_test import database, state
 import json
 
 
-def _held_basis(*, old_rates=False):
+def _held_basis(*, old_rates=False, factor=1_000_000):
     day = date(2026, 10, 21) if old_rates else date(2026, 10, 22)
     policy = rewards.reward_slot_policy_document(day)
     winner = _win(ALICE, delta=11, start=25865)
-    return _basis([deepcopy(winner) for _ in range(3)], epoch=25865, policy=policy)
+    return _basis([deepcopy(winner) for _ in range(3)], epoch=25865, policy=policy, factor=factor)
 
 
 @pytest.mark.parametrize("age,old_rates,share", [
@@ -176,6 +176,24 @@ def test_public_status_uses_existing_signed_rule_and_refuses_basis_conflict():
     different = dict(governing, reward_basis_hash="sha256:" + "f" * 64)
     with pytest.raises(ServiceError, match="accepted_weight_state_reward_conflict"):
         _public_service(different, 25913, {"state_doc": legacy}, signer).public_current()
+
+
+@pytest.mark.parametrize("factor", [500_000, 1_000_000])
+def test_public_status_reports_the_signed_champion_reward_factor(factor):
+    marked, signer = _state(_held_basis(factor=factor), 25913)
+    governing = marked["reward_basis"]
+    accepted = _public_service(governing, 25913, {"state_doc": marked}, signer).public_current()
+    not_yet_accepted = _public_service(governing, 25913, None, signer).public_current()
+    assert accepted["champion_reward_factor_ppm"] == factor
+    assert not_yet_accepted["champion_reward_factor_ppm"] == factor
+
+
+def test_public_status_leaves_the_factor_unset_when_no_signed_basis_carries_it():
+    marked, signer = _state(_held_basis(), 25913)
+    historical = {key: value for key, value in marked["reward_basis"].items()
+                  if key != "champion_reward_factor_ppm"}
+    assert _public_service(historical, 25913, None, signer).public_current()["champion_reward_factor_ppm"] is None
+    assert _public_service(None, 25913, None, signer).public_current()["champion_reward_factor_ppm"] is None
 
 
 def test_v1_basis_rejects_slot_policy_marker():

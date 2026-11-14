@@ -304,7 +304,8 @@ def _chat_citation_annotations(body, message):
 
 
 def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
-            allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None):
+            allow_empty_messages=False, responses_input_validator=None, chat_annotations_validator=None,
+            allow_uncited_annotations=False):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -393,9 +394,24 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
                          and (not part.get('annotations') or _hosted_search_declared(body)
                               or _hosted_search_history(body.get('input')))
                          for part in item['content']), 'assistant_shape_unsupported')
+            validation_item = item
+            if allow_uncited_annotations:
+                # Trusted internal exports retain provider-only citation metadata.
+                # Validate it separately, then use the existing shared validator
+                # on a temporary view. The exported target remains exact; miner
+                # request and continuation contracts are not changed.
+                validation_item = copy.deepcopy(item)
+                for part in validation_item['content']:
+                    annotations = part.get('annotations', [])
+                    _require(isinstance(annotations, list), 'assistant_shape_unsupported')
+                    for citation in annotations:
+                        _require(isinstance(citation, dict), 'assistant_shape_unsupported')
+                        if 'uncited' in citation:
+                            _require(type(citation['uncited']) is bool, 'assistant_shape_unsupported')
+                            citation.pop('uncited')
             try:
                 operations.validate_operation_request('openrouter.responses', {
-                    'model': body['model'], 'input': [item],
+                    'model': body['model'], 'input': [validation_item],
                 }, allow_full_thinking=allow_reasoning_history)
             except operations.OperationError as exc:
                 raise ValueError('assistant_shape_unsupported') from exc

@@ -763,6 +763,36 @@ def _response_value(terminal, provider):
     return response, sorted(set(redactions) | ({"hidden_reasoning"} if removed else set()))
 
 
+def _response_evidence(terminal, provider):
+    """Keep invalid Unicode readable without granting normalized response authority.
+
+    Privacy filtering must precede this fallback. Canonical hashes still reject
+    non-scalar strings; the separate display text is not a response or target.
+    """
+    response, redactions = _response_value(terminal, provider)
+    try:
+        return response, redactions, contracts.document_hash(response), None
+    except UnicodeEncodeError:
+        rendering = {"exact_response": False, "format": "json_escaped_invalid_unicode"}
+        chunks, size, invalid = [], 0, 0
+        encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, allow_nan=False)
+        for chunk in encoder.iterencode(response):
+            invalid += sum(1 for _ in re.finditer("[\ud800-\udfff]", chunk))
+            encoded = chunk.encode("utf-8", "backslashreplace")
+            size += len(encoded)
+            if size > MAX_RECEIPT_BYTES:
+                return None, redactions, None, {**rendering, "unavailable_reason": "size_limit"}
+            chunks.append(encoded)
+        rendering.update(text=b"".join(chunks).decode("utf-8"), invalid_unicode_codepoints=invalid)
+        # The display wrapper, including JSON string escaping, has the same cap
+        # as a stored receipt. Never clip evidence or raise the capture limit.
+        if len(contracts.canonical_json(rendering).encode("utf-8")) > MAX_RECEIPT_BYTES:
+            rendering = {key: rendering[key] for key in ("exact_response", "format")}
+            rendering["unavailable_reason"] = "size_limit"
+        return None, redactions, None, rendering
+
+
 def _call_order(call, run_order):
     def numeric(value):
         return value if type(value) is int and value >= 0 else 2 ** 63
@@ -1135,21 +1165,26 @@ def _calls(rows, run_ids, objects, run_order):
                     raise ExportError("upstream_response_hash_invalid")
                 # Failed model replies may be malformed JSON. Retain their
                 # privacy-filtered text without treating it as a model answer.
-                response, removed = _response_value(captured, "upstream")
+                response, removed, digest, rendering = _response_evidence(captured, "upstream")
                 redactions = sorted(set(privacy["redactions"]) | set(removed))
-                upstream_receipts.append({
+                receipt = {
                     "entry_id": row["entry_id"], "status": captured["status"],
                     **({key: captured[key] for key in ("call_identity", "operation_id", "request_hash", "call_succeeded")
                         if key in captured}
                        if transport_accounting(saved_call) or transport_accounting(row.get("entry_doc") or {}) else {}),
-                    "response": response, "privacy_redactions": redactions,
+                    "privacy_redactions": redactions,
                     "body_sha256": captured["body_sha256"], "body_bytes": len(raw),
                     "wire_body_sha256": captured["wire_body_sha256"],
                     "wire_body_bytes": captured["wire_body_bytes"],
                     "provenance": "private_upstream_response_receipt",
                     "delivery_to_worker": "not_proved",
-                    "response_sha256": contracts.document_hash(response),
-                })
+                }
+                if digest is not None:
+                    receipt.update(response=response, response_sha256=digest)
+                else:
+                    receipt.update(response_unavailable=True, nonexact_response_rendering=rendering)
+                    call_reasons.add("upstream_response_capture_unavailable")
+                upstream_receipts.append(receipt)
                 if redactions:
                     call_reasons.add("upstream_response_privacy_nonexact")
             except Exception:
@@ -1195,17 +1230,30 @@ def _calls(rows, run_ids, objects, run_order):
             response_terminals = []
         latest_id = max((int(row["entry_id"]) for row in response_terminals), default=None)
         latest_terminal = next((row.get("terminal_response") or {} for row in response_terminals if row["entry_id"] == latest_id), {})
-        latest_response, latest_redactions, latest_digest = None, [], None
+        latest_response, latest_redactions, latest_digest, latest_rendering = None, [], None, None
         try:
-            latest_response, latest_redactions = _response_value(latest_terminal, reserve.get("provider"))
-            latest_digest = contracts.document_hash(latest_response)
+            latest_response, latest_redactions, latest_digest, latest_rendering = _response_evidence(
+                latest_terminal, reserve.get("provider"))
         except Exception:
             pass  # Missing receipt is recorded below; no failed proof is hidden.
         recovered_value, recovered_redactions, recovered_digest = None, [], None
         if recovered is not None:
             recovered_terminal = recovered["terminal_response"]
-            recovered_value, recovered_redactions = _response_value(recovered_terminal, reserve.get("provider"))
-            recovered_digest = contracts.document_hash(recovered_value)
+            recovered_value, recovered_redactions, recovered_digest, recovered_rendering = _response_evidence(
+                recovered_terminal, reserve.get("provider"))
+            if recovered_digest is None:
+                wire = base64.b64decode(recovered_terminal["body_b64"], validate=True)
+                call["nonexact_recovered_response"] = {
+                    **{key: copy.deepcopy(value) for key, value in recovered.items() if key != "terminal_response"},
+                    "metadata": {key: copy.deepcopy(value) for key, value in recovered_terminal.items()
+                                 if key not in {"body_b64", "upstream_response_receipt"}},
+                    "wire_body_sha256": contracts.hash_bytes(wire), "wire_body_bytes": len(wire),
+                    "privacy_redactions": recovered_redactions, "response_unavailable": True,
+                    "nonexact_response_rendering": recovered_rendering}
+                call_reasons.add("full_response_unavailable")
+                if "credential" in recovered_redactions:
+                    call_reasons.add("response_privacy_nonexact")
+                recovered = None  # No recovered response hash or delivery authority.
         saved_bodies = {}
         for row in sorted(response_terminals, key=lambda row: int(row["entry_id"])):
             terminal = row.get("terminal_response") or {}
@@ -1219,23 +1267,26 @@ def _calls(rows, run_ids, objects, run_order):
             try:
                 # The latest receipt references the response already validated
                 # above. Keep wire proof and every other receipt's checks.
-                reuse_latest = terminal is latest_terminal and latest_digest is not None
+                reuse_latest = terminal is latest_terminal and (latest_digest is not None or latest_rendering is not None)
                 if reuse_latest:
-                    response, redactions = latest_response, latest_redactions
+                    response, redactions, digest, rendering = latest_response, latest_redactions, latest_digest, latest_rendering
                 else:
-                    response, redactions = _response_value(terminal, reserve.get("provider"))
+                    response, redactions, digest, rendering = _response_evidence(terminal, reserve.get("provider"))
                 wire_body = base64.b64decode(terminal["body_b64"], validate=True)
                 receipt["wire_body_sha256"] = contracts.hash_bytes(wire_body)
                 receipt["wire_body_bytes"] = len(wire_body)
-                digest = latest_digest if reuse_latest else contracts.document_hash(response)
-                receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
-                if digest == (recovered_digest if recovered is not None else latest_digest):
+                receipt["privacy_redactions"] = redactions
+                if digest is None:
+                    receipt.update(response_unavailable=True, nonexact_response_rendering=rendering)
+                elif digest == (recovered_digest if recovered is not None else latest_digest):
                     receipt["response_ref"] = {"field": "response", "entry_id": latest_id}
                 elif digest in saved_bodies:
                     receipt["response_ref"] = {"entry_id": saved_bodies[digest]}
                 else:
                     receipt["response"] = response
                     saved_bodies[digest] = row["entry_id"]
+                if digest is not None:
+                    receipt["response_sha256"] = digest
                 if "credential" in redactions:
                     call_reasons.add("response_privacy_nonexact")
             except Exception:
@@ -2377,6 +2428,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              for reason in item["privacy"]["redactions"]}
     hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(
         call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", [])
+        or "hidden_reasoning" in (call.get("nonexact_recovered_response") or {}).get("privacy_redactions", [])
         or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", []))
         or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("upstream_response_receipts", [])) for call in calls)
     clean["privacy"] = {"hidden_reasoning_removed": hidden_removed, "hidden_reasoning_excluded": True,
@@ -2384,6 +2436,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     privacy_filtered = bool(privacy_redactions | observation_redactions) or hidden_removed or any(
         (snapshot.get("privacy") or {}).get("redacted") for snapshot in snapshots.values()) or any(
         (call.get("request_capture") or {}).get("redacted") or call.get("response_privacy_redactions")
+        or (call.get("nonexact_recovered_response") or {}).get("privacy_redactions")
         or any(receipt.get("privacy_redactions") for receipt in call.get("upstream_response_receipts", []))
         or any(receipt.get("privacy_redactions") for receipt in call.get("response_receipts", [])) for call in calls)
     if "credential" in privacy_redactions:

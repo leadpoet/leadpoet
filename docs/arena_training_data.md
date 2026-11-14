@@ -172,6 +172,16 @@ Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
 remain redacted.
 
+If a stored JSON response contains an invalid Unicode scalar, its normalized
+response remains unavailable. After privacy and opaque-content filtering, the
+export can retain a separate `nonexact_response_rendering` with escaped invalid
+code points, `exact_response: false`, and the original receipt's wire hash and
+byte count. Readable traces label it `nonexact_response_analysis`; it is never an
+exact response, training target, delivery proof, or full-thinking evidence.
+The rendering has the existing receipt byte limit and is omitted with an
+explicit size-limit reason if it would exceed that limit. Canonical hashes,
+capture limits, scoring and whole-ICP eligibility rules are unchanged.
+
 New rounds at or after the configured `reasoning_capture_from` cutoff use
 `full_generated_thinking_v1`. This policy uses the reviewed, exact
 model/provider/API registry in `lab_arena/reasoning_models.json`.

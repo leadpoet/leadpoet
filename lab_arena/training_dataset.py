@@ -860,6 +860,30 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
     return splits, manifest
 
 
+def _retained_evidence_keys(record: Mapping[str, Any]) -> Dict[str, set[str]]:
+    """Exact decision-input content and source, independent of verdict metadata.
+
+    A quote and a page excerpt can contain the same evidence. Do not let their
+    kind, criterion, retrieval date or provenance hide that reuse. Entity
+    handles, source URLs alone and other incidental metadata are not content.
+    """
+    keys: Dict[str, set[str]] = {"text_source": set(), "provider_fact_source": set()}
+    for item in record["input"].get("source_evidence") or ():
+        if not isinstance(item, Mapping):
+            continue
+        kind = item.get("content_kind")
+        if kind in {"verifier_source_quote", "retained_page_excerpt"}:
+            text, url = item.get("text"), item.get("url")
+            if _source_url(url) and isinstance(text, str) and text.strip():
+                keys["text_source"].add(_hash({"url": url, "text": text}))
+        elif kind == "structured_provider_fact":
+            fields = ("provider", "source_field", "employee_count", "url", "website")
+            if (all(isinstance(item.get(key), str) and item[key].strip() for key in fields)
+                    and _source_url(item["url"]) and _source_url(item["website"])):
+                keys["provider_fact_source"].add(_hash({key: item[key] for key in fields}))
+    return keys
+
+
 def evaluation_checks(splits, rules):
     """Observed coverage only; this does not approve training or label quality."""
     def values(name, key):
@@ -870,6 +894,14 @@ def evaluation_checks(splits, rules):
     episodes = {name: {_episode_key(record) for record in splits[name]} - {None}
                 for name in ("train", "eval")}
     overlaps["episode"] = len(episodes["train"] & episodes["eval"])
+    evidence = {name: {"text_source": set(), "provider_fact_source": set()}
+                for name in ("train", "eval")}
+    for name in evidence:
+        for record in splits[name]:
+            for kind, keys in _retained_evidence_keys(record).items():
+                evidence[name][kind].update(keys)
+    evidence_overlaps = {kind: len(evidence["train"][kind] & evidence["eval"][kind])
+                         for kind in evidence["train"]}
     ranges = {}
     for name, records in splits.items():
         dates = sorted(filter(None, (_date(record["input"]["evaluation_date"]) for record in records)))
@@ -881,8 +913,11 @@ def evaluation_checks(splits, rules):
     if overlaps["company_cluster"] or overlaps["episode"] or (
             rules.eval_mode == "company_and_icp" and overlaps["icp_fingerprint"]):
         reasons.append("group_overlap")
+    if any(evidence_overlaps.values()):
+        reasons.append("retained_evidence_overlap")
     return {"split_viable": not reasons, "insufficient_split_reasons": reasons,
             "date_ranges": ranges, "train_eval_group_overlap_counts": overlaps,
+            "train_eval_retained_evidence_overlap_counts": evidence_overlaps,
             "source_family_counts": {name: len(values(name, "source_family")) for name in splits}}
 
 

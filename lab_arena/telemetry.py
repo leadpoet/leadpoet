@@ -183,11 +183,15 @@ def record_run(
     *, run_identity: Optional[Mapping[str, Any]] = None,
     failure_stage: str = "-",
     failure_error_class: str = "-",
+    run_seconds: float = -1.0,
 ) -> None:
     """Record one finished evaluation run. Never raises.
 
-    No duration: the run row carries no start time, so the sidecar can only
-    honestly report that a run ended and which cause ended it.
+    The emitted span is a zero-duration outcome marker, so reading its own
+    duration tells you nothing about the run. ``run_seconds`` carries the run's
+    measured wall clock, taken from the completion's own ``started_at`` and
+    ``finished_at`` anchors, and is -1 when the completion did not report a
+    usable pair.
 
     ``failure_stage`` / ``failure_error_class`` carry the runner's
     ``failure_diagnostic`` when the completion reported one, so a repeated
@@ -201,6 +205,7 @@ def record_run(
             run_kind, terminal_cause, run_identity=run_identity,
             failure_stage=failure_stage,
             failure_error_class=failure_error_class,
+            run_seconds=run_seconds,
         )
     except BaseException:
         pass

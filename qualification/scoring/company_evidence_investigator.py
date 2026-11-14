@@ -1783,6 +1783,23 @@ def _company_bound_quote_candidate(
     return min(candidates, key=lambda value: (len(value), value), default="")
 
 
+def _source_lacks_admitted_company_name(
+    fetched_text: str, identity_names: set[str],
+) -> bool:
+    """Flag a loaded page with no currently admitted company spelling.
+
+    This is repair guidance only. It cannot approve a source, an alias, or a
+    finding, and an empty or absent page supplies no such guidance.
+    """
+
+    return bool(
+        fetched_text and identity_names
+        and not _quote_names_company(
+            _surface_span(_visible_quote_surface(fetched_text)), identity_names,
+        )
+    )
+
+
 def _registrable_domain(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         return ""
@@ -7256,6 +7273,16 @@ async def investigate_company_evidence(
                             )
                             if candidate:
                                 rejected_finding["company_bound_quote_candidate"] = candidate
+                        if (
+                            target in {"industry", "required_attribute", "headcount"}
+                            and reason == "source quote did not identify the investigated company"
+                            and source_url
+                            and (claims.get("rebrand") or {}).get("status") != "VERIFIED"
+                            and _source_lacks_admitted_company_name(
+                                fetched_pages.get(source_url, ""), identity_names,
+                            )
+                        ):
+                            rejected_finding["source_lacks_admitted_company_name"] = True
                         if target == "required_attribute":
                             # Report both failed support slots in this same repair
                             # turn. Discovering them one at a time consumes the
@@ -7296,6 +7323,13 @@ async def investigate_company_evidence(
                                     )
                                     if candidate:
                                         support_rejection["company_bound_quote_candidate"] = candidate
+                                    if (
+                                        (claims.get("rebrand") or {}).get("status") != "VERIFIED"
+                                        and _source_lacks_admitted_company_name(
+                                            support_text, identity_names,
+                                        )
+                                    ):
+                                        support_rejection["source_lacks_admitted_company_name"] = True
                                 support_rejections.append(support_rejection)
                             if support_rejections:
                                 rejected_finding["rejected_supporting_evidence"] = support_rejections
@@ -7774,6 +7808,26 @@ async def investigate_company_evidence(
                                     "a count in the quote or reason does not replace this field. "
                                     "Use null only for UNPROVEN headcount. "
                                     if any(item.get("target") == "headcount" for item in rejected)
+                                    else ""
+                                )
+                                + (
+                                    "For a rejected source marked "
+                                    "source_lacks_admitted_company_name, the fetched page "
+                                    "has no currently admitted investigated-company name. "
+                                    "Do not repeat that URL for this target without a "
+                                    "separately validated identity binding. Use a different "
+                                    "already fetched source only if its exact quote identifies "
+                                    "this company and proves every required fact; otherwise "
+                                    "submit explicit complete UNPROVEN with empty citation. "
+                                    "The rejected positive is not a negative finding. "
+                                    if any(
+                                        item.get("source_lacks_admitted_company_name")
+                                        or any(
+                                            support.get("source_lacks_admitted_company_name")
+                                            for support in item.get("rejected_supporting_evidence", [])
+                                        )
+                                        for item in rejected
+                                    )
                                     else ""
                                 )
                                 + (

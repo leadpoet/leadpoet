@@ -616,6 +616,14 @@ def test_temporal_boundary_and_company_purge_and_missing_dates():
                     evaluation_date=None, submission_id="missing-episode"),
             example("invalid", [row(0, claim("I", "i.com", "i"), "qualified")],
                     evaluation_date="2026-02-30", submission_id="invalid-episode")]
+    # This independent company needs its own evidence, rather than the generic
+    # fixture's shared Acme quotes and intent page.
+    boundary_judgment = docs[2]["companies"][0]["judgment"]
+    boundary_judgment["intent_signals_detail"] = None
+    for detail in boundary_judgment["verifier_gate_receipts"][0]["dimension_evidence"].values():
+        detail["web_evidence"] = {"url": "https://b.com/products",
+                                  "quote": "B sells industrial robots, not software."}
+    seal(docs[2])
     splits, manifest = dataset.build(docs, dataset.Rules(eval_after="2026-10-18"))
     assert [r["meta"]["run_id"] for r in splits["train"]] == ["boundary"]
     assert [r["meta"]["run_id"] for r in splits["eval"]] == ["future-shared"]

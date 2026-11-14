@@ -689,6 +689,21 @@ Missing/invalid dates move to analysis. All manifests report actual date ranges,
 group overlap, source families and empty splits.
 These are evaluation safeguards, not a measurement of model accuracy.
 
+Company-record manifests also count exact retained-evidence overlap between
+train and eval. A shared quote or page excerpt uses its source URL and exact
+text as its identity; a structured provider fact uses the provider, source
+field, value and source URLs. Verdicts, criterion names, retrieval dates and
+provenance markers do not change that identity. URLs alone, entity handles
+and other shared metadata do not count as retained content.
+An overlap makes `split_viable` false with `retained_evidence_overlap`; it does
+not move or remove records, change their labels, or alter automatic splitting.
+The check conservatively treats text supplied as decision evidence as potential
+leakage. It does not distinguish boilerplate inside that text. Exact matching is
+incomplete protection against paraphrases, near-duplicates or equivalent URLs;
+nonoverlapping evidence is not thereby proved independent or correct. Temporal
+separation does not by itself prevent reuse of the same evidence. Dataset CLI
+success and candidate counts are not evaluation approval.
+
 Optional `--review-sample-size` writes `review.jsonl`, a deterministic sample
 across split, label and evidence type. Each row references the original record
 file, ID and hash, preserves the original label and provenance, and leaves the

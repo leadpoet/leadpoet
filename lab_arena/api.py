@@ -144,6 +144,24 @@ def create_app(service: ArenaService) -> FastAPI:
             )
         return public_object_read_limiter
 
+    def _public(call: Any) -> Any:
+        """Run a public read on the store pool reserved for public pages.
+
+        Independent of the worker-count limiters above: this switches which
+        httpx connection pool the call's DB reads use, not how many threads
+        may run it concurrently. Both bulkheads apply together.
+        """
+
+        reserve = getattr(service, "public_reads", None)
+        if reserve is None:
+            return call
+
+        def run(*args: Any, **kwargs: Any) -> Any:
+            with reserve():
+                return call(*args, **kwargs)
+
+        return run
+
     async def no_store_public_call(
         call: Any, *args: Any, _worker_limiter: Optional[anyio.CapacityLimiter] = None,
         **kwargs: Any,
@@ -154,10 +172,10 @@ def create_app(service: ArenaService) -> FastAPI:
         }
         try:
             if _worker_limiter is None:
-                content = await run_in_threadpool(call, *args, **kwargs)
+                content = await run_in_threadpool(_public(call), *args, **kwargs)
             else:
                 content = await to_thread.run_sync(
-                    partial(call, *args, **kwargs), limiter=_worker_limiter,
+                    partial(_public(call), *args, **kwargs), limiter=_worker_limiter,
                 )
         except ServiceError as exc:
             telemetry.note_denial(exc.code)
@@ -323,7 +341,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/chain-outcomes")
     async def chain_outcomes(epoch: int) -> Any:
-        return await run_in_threadpool(service.public_chain_outcomes, int(epoch))
+        return await run_in_threadpool(_public(service.public_chain_outcomes), int(epoch))
 
     @app.get("/arena/v1/rounds/{round_id}")
     async def round_view(round_id: str) -> Any:
@@ -335,7 +353,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/rounds/{round_id}/submissions")
     async def round_submissions(round_id: str) -> Any:
-        return await run_in_threadpool(service.public_submissions, round_id)
+        return await run_in_threadpool(_public(service.public_submissions), round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/results/{submission_id}")
     async def round_results(round_id: str, submission_id: str) -> JSONResponse:

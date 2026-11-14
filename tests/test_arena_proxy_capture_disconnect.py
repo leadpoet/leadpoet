@@ -133,6 +133,9 @@ def test_tcp_gateway_disconnect_removes_actual_sidecar_queue(monkeypatch,kind):
                         assert active()==CAPTURE_LIMIT
                         calls=[r[0]for r in service.input_calls]if kind=='training-input'else service.observation_calls
                         assert 'queued'not in calls
+                        # Only the intentional disconnect needs a 250 ms deadline.
+                        # Give healthy requests the same allowance as the direct client.
+                        client.timeout=httpx.Timeout(3)
                         # These routes retain their ordinary behavior while storage is full.
                         responses=await asyncio.gather(client.post('/arena/v1/runs/claim',json={}),
                             client.post('/arena/v1/runs/done/complete',json={'body':{'run_id':'done'}}),post_provider(client,'provider'))

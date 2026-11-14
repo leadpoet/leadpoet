@@ -129,21 +129,24 @@ class WorkerProofs:
 
     def prepare(self, example):
         view = dict(example)
-        artifacts = example.get("worker_observation_artifacts")
-        if not isinstance(artifacts, dict):
-            return view
-        view["worker_observation_artifacts"] = dict(artifacts)
-        for run_id, artifact in artifacts.items():
-            if not isinstance(artifact, dict) or type(artifact.get("payload")) is not dict:
+        # A proven journal prefix can supply individual pairs without becoming
+        # a final snapshot. Own its bytes under the same per-assessment rules.
+        for field in ("worker_observation_artifacts", "partial_worker_observation_artifacts"):
+            artifacts = example.get(field)
+            if not isinstance(artifacts, dict):
                 continue
-            try:
-                payload = _freeze(artifact["payload"])
-            except _NotPlainJSON:
-                # Unknown Python values retain the original stateless checks.
-                continue
-            proof = _PayloadProof(payload, contracts.document_hash(payload))
-            self._proofs[id(payload)] = proof
-            view["worker_observation_artifacts"][run_id] = dict(artifact, payload=payload)
+            view[field] = dict(artifacts)
+            for run_id, artifact in artifacts.items():
+                if not isinstance(artifact, dict) or type(artifact.get("payload")) is not dict:
+                    continue
+                try:
+                    payload = _freeze(artifact["payload"])
+                except _NotPlainJSON:
+                    # Unknown Python values retain the original stateless checks.
+                    continue
+                proof = _PayloadProof(payload, contracts.document_hash(payload))
+                self._proofs[id(payload)] = proof
+                view[field][run_id] = dict(artifact, payload=payload)
         return view
 
     def payload_hash(self, payload):

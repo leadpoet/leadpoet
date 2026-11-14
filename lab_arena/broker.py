@@ -2675,7 +2675,7 @@ def _validated_credit_failure_proof(value: Any) -> Optional[Mapping[str, Any]]:
 def provider_credit_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
     """Expose a bound miner-credit refusal independently of its charge.
 
-    Typed Deepline payment refusals can have unknown fees. Their diagnostic
+    Bound account payment refusals can have unknown fees. Their diagnostic
     evidence does not grant the settled-zero proof used for paid retries.
     """
     try:
@@ -2688,7 +2688,7 @@ def provider_credit_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
     if (
         account_failure is not None
         and account_failure.get("reason") == "out_of_credit"
-        and call.get("provider") == "deepline"
+        and call.get("provider") in {"deepline", "openrouter"}
         and call.get("funding_source") == "miner_key"
         and call.get("outcome") in ("uncertain", "settled")
         and type(call.get("provider_attempt")) is int
@@ -3445,6 +3445,56 @@ def _openrouter_in_flight_budget_response(response: ProviderResponse) -> bool:
     return (
         isinstance(metadata, Mapping)
         and metadata.get("limit_source") == "openrouter_in_flight_budget"
+    )
+
+
+def _openrouter_account_credit_response(
+    response: ProviderResponse, *, original_http_status: Optional[int] = None,
+) -> bool:
+    """Recognize a native router credit refusal, independently of its bill.
+
+    OpenRouter documents matching HTTP/error.code 402 as insufficient account
+    or key credits. A typed in-flight budget, an upstream/BYOK error, or an
+    ambiguous envelope supplies no account-credit authority. A generation ID
+    still requires billing reconciliation and never proves a zero charge.
+    """
+    if response.status != 402 or response.internal_provenance is not None:
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    error = document.get("error")
+    if (not isinstance(error, Mapping)
+        or set(error) - {"code", "message", "metadata"}
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()):
+        return False
+    metadata = error.get("metadata", {})
+    if (not isinstance(metadata, Mapping)
+        or set(metadata) - {"provider_name", "limit_source", "error_type"}
+        or metadata.get("provider_name") is not None
+        or metadata.get("limit_source") not in (None, "openrouter_credits")):
+        return False
+    router = document.get("openrouter_metadata")
+    if router is not None:
+        if not isinstance(router, Mapping) or router.get("is_byok") is not False:
+            return False
+        endpoints = router.get("endpoints")
+        if endpoints is not None:
+            available = endpoints.get("available") if isinstance(endpoints, Mapping) else None
+            if (not isinstance(available, list)
+                or any(not isinstance(item, Mapping) or item.get("selected") is not False
+                       for item in available)):
+                return False
+    raw_status = response.status if original_http_status is None else original_http_status
+    return bool(
+        raw_status == 402
+        and set(document) <= {"error", "user_id", "openrouter_metadata", "id"}
+        and type(error.get("code")) is int and error["code"] == 402
+        and "error_type" not in metadata
     )
 
 
@@ -7251,9 +7301,16 @@ class Broker:
             # A known miner-account refusal may finish later score jobs via
             # the existing no-dispatch refusal path even while billing is
             # unknown. Keep its call binding separate from cost evidence.
+            openrouter_account_credit = bool(
+                effective_operation.provider == "openrouter"
+                and _openrouter_account_credit_response(
+                    response, original_http_status=observed_provider_http_status,
+                )
+            )
             retain_account_failure_evidence = miner_credential_failure and (
                 champion_credential_retry
                 or response.status == 401
+                or openrouter_account_credit
                 or (
                     effective_operation.provider == "deepline"
                     and response.status in (401, 402, 403)
@@ -7268,8 +7325,10 @@ class Broker:
                     "provider_attempt": provider_attempt,
                     "action_sequence": action_sequence,
                 }
-                if (effective_operation.provider == "deepline"
-                    and _deepline_insufficient_credit_response(response, raw_document)):
+                if (openrouter_account_credit or (
+                    effective_operation.provider == "deepline"
+                    and _deepline_insufficient_credit_response(response, raw_document)
+                )):
                     account_failure_evidence["reason"] = "out_of_credit"
                 if _submitted_account_authentication(
                     effective_operation.provider, response,

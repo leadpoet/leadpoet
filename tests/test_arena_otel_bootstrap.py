@@ -862,7 +862,33 @@ def test_run_span_names_the_kind_and_the_terminal_cause():
         "arena.outcome": "failed",
         "arena.failure_stage": "-",
         "arena.failure_error_class": "-",
+        "arena.run_seconds": -1.0,
     }
+
+
+def test_run_span_carries_the_measured_wall_clock():
+    """The span is ended the instant it starts, so the run's own duration
+    has to travel as an attribute or it is lost."""
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run("score", "accepted", run_seconds=1193.5)
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.run_seconds"] == 1193.5
+    # the marker itself measures nothing
+    assert span.end_time - span.start_time < 1_000_000
+
+
+def test_run_span_reports_minus_one_when_the_run_has_no_anchors():
+    """The attribute set is checked by equality, so it is always present."""
+
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_run("score", "judge_timeout")
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.run_seconds"] == -1.0
 
 
 def test_run_span_carries_the_runner_failure_diagnostic():
@@ -882,6 +908,7 @@ def test_run_span_carries_the_runner_failure_diagnostic():
         "arena.outcome": "failed",
         "arena.failure_stage": "provider_call",
         "arena.failure_error_class": "provider_unavailable",
+        "arena.run_seconds": -1.0,
     }
 
 

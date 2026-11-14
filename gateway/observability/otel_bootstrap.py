@@ -815,15 +815,19 @@ STORE_ERROR_SPAN_FIELDS = frozenset({
 
 PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(PROVIDER_SPAN_ATTRIBUTE_TYPES)
 
-# The ONLY attributes a run-outcome span may carry. There is deliberately no
-# duration here: the sidecar records when a run ENDS, and the run row carries
-# no start time, so any duration would be invented rather than measured.
+# The ONLY attributes a run-outcome span may carry. The span itself is emitted
+# and ended in the same instant, so its own duration is meaningless; the run's
+# wall clock travels as arena.run_seconds, measured from the started_at and
+# finished_at anchors the run result contract already requires. The attribute
+# set must stay invariant (the conformance check is set equality), so it is
+# ALWAYS present and carries -1 when those anchors were unreadable.
 RUN_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.run_kind": (str,),
     "arena.terminal_cause": (str,),
     "arena.outcome": (str,),
     "arena.failure_stage": (str,),
     "arena.failure_error_class": (str,),
+    "arena.run_seconds": (float, int),
 }
 
 RUN_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(RUN_SPAN_ATTRIBUTE_TYPES)
@@ -1834,6 +1838,7 @@ class ArenaTelemetry:
         *, run_identity: Optional[Mapping[str, Any]] = None,
         failure_stage: str = ARENA_NO_ERROR,
         failure_error_class: str = ARENA_NO_ERROR,
+        run_seconds: float = -1.0,
     ) -> None:
         try:
             if self._run_tracer is None:
@@ -1855,6 +1860,10 @@ class ArenaTelemetry:
             span.set_attribute(
                 "arena.failure_error_class", str(failure_error_class)
             )
+            # Always set: the attribute set must stay invariant for the
+            # conformance check. -1 means the completion reported no usable
+            # started_at/finished_at pair.
+            span.set_attribute("arena.run_seconds", float(run_seconds))
             if run_identity is not None:
                 for key, value in run_identity.items():
                     span.set_attribute(key, value)

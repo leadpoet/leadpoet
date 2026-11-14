@@ -325,6 +325,23 @@ def _provider_telemetry_fields(
     }
 
 
+def _run_wall_clock_seconds(run_result: Mapping[str, Any]) -> float:
+    """How long the completed run actually took, or -1 when unreadable.
+
+    ``started_at`` and ``finished_at`` are required iso8601 fields of the run
+    result contract, so this is normally exact. Telemetry must never be able to
+    fail a completion, hence the broad guard and the -1 sentinel.
+    """
+
+    try:
+        started = _parse_iso(str(run_result["started_at"]))
+        finished = _parse_iso(str(run_result["finished_at"]))
+    except BaseException:
+        return -1.0
+    elapsed = (finished - started).total_seconds()
+    return elapsed if elapsed >= 0 else -1.0
+
+
 def _telemetry_run_identity(run: Mapping[str, Any]) -> Dict[str, Any]:
     """Project only database-owned run identity into private host telemetry."""
 
@@ -8229,6 +8246,7 @@ class ArenaService:
                 kind, terminal_status, run_identity=_telemetry_run_identity(run),
                 failure_stage=str(diagnostic.get("stage") or "-"),
                 failure_error_class=str(diagnostic.get("error_class") or "-"),
+                run_seconds=_run_wall_clock_seconds(run_result),
             )
         return result
 

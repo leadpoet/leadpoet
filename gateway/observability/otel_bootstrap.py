@@ -416,6 +416,7 @@ ARENA_DENIAL_CODES = frozenset(
         "accepted_weight_state_reward_clock_unavailable",
         "accepted_weight_state_scope_conflict",
         "arena_schema_version_invalid",
+        "arena_store_error",
         "arena_store_unavailable",
         "baseline_cost_eligibility_schema_invalid",
         "baseline_cost_eligibility_schema_unavailable",
@@ -725,8 +726,8 @@ LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 # reason is the difference between "a runner was denied a claim" and "a runner
 # is broken". Its vocabulary is the literal prefix of a ``ServiceError`` code.
 # A matched public round route may add an optional canonical round id.
-# Temporary store failures may also carry the existing bounded machine fields;
-# the final exporter admits those only for the matching 503 denial.
+# Store failures may also carry the existing bounded machine fields; the final
+# exporter admits those only for the matching store denial and status.
 ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "http.request.method": (str,),
     "http.route": (str,),
@@ -811,6 +812,13 @@ PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 STORE_ERROR_SPAN_FIELDS = frozenset({
     "arena.store_operation", "arena.store_resource", "arena.store_http_status",
     "arena.store_code", "arena.store_transport_error",
+})
+
+# The (status, denial) pairs whose spans may carry the bounded store fields:
+# the retryable 503 and the unclassified 500 its parent class produces.
+_ARENA_STORE_ERROR_STATUSES = frozenset({
+    (503, "arena_store_unavailable"),
+    (500, "arena_store_error"),
 })
 
 PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(PROVIDER_SPAN_ATTRIBUTE_TYPES)
@@ -1148,8 +1156,8 @@ def _validating_exporter(
 
     def _arena_http_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
         attributes = _without_store_error_fields(attributes, allowed=(
-            attributes.get("http.response.status_code") == 503
-            and attributes.get("arena.denial") == "arena_store_unavailable"
+            (attributes.get("http.response.status_code"), attributes.get("arena.denial"))
+            in _ARENA_STORE_ERROR_STATUSES
         ))
         if attributes is None:
             return "store_error"
@@ -2148,7 +2156,7 @@ def configure_arena_otel(
                     span.set_attribute("arena.round_id", round_id)
                 denial = telemetry.take_denial()
                 span.set_attribute("arena.denial", denial)
-                if int(status_code) == 503 and denial == "arena_store_unavailable":
+                if (int(status_code), denial) in _ARENA_STORE_ERROR_STATUSES:
                     for key, value in telemetry.take_store_error().items():
                         span.set_attribute("arena.store_" + key, value)
                 span.set_attribute(

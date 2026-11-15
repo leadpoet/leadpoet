@@ -2391,20 +2391,20 @@ def _validated_industry_bindings(value: Any, pages: Mapping[str, str], final_url
 
 
 def _reversed_parenthetical_identity_names(identity: Mapping[str, Any]) -> bool:
-    """Keep an exact verified legal/initialism pair when its label is reversed."""
+    """Retain an exact legal name, with or without its verified initialism."""
     submitted = str(identity.get("submitted_name") or "").strip()
     verified = str(identity.get("verified_name") or "").strip()
     observed = str(identity.get("observed_name") or "").strip()
     forward = _INITIALISM_LEGAL_NAME_RE.fullmatch(submitted)
     reverse = _PARENTHETICAL_INITIALISM_RE.fullmatch(observed)
-    if (not forward or not reverse
+    if (not forward
             or _normalized_span(submitted) != _normalized_span(verified)
-            or forward["initialism"] != reverse["initialism"]):
+            or (reverse and forward["initialism"] != reverse["initialism"])):
         return False
     # Reuse the identity gate's exact legal-name and real-initials parser.
     # The caller still requires the complete homepage/domain/profile binding.
     return _verified_parenthetical_name_alignment(
-        submitted, reverse["legal_name"].strip(),
+        submitted, reverse["legal_name"].strip() if reverse else observed,
         observed_linkedin_slug=str(identity.get("observed_linkedin_slug") or "").strip().casefold(),
         submitted_linkedin_slug=str(identity.get("submitted_linkedin_slug") or "").strip().casefold(),
         evidence_source="company_homepage",

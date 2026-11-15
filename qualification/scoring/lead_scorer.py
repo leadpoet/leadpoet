@@ -63,6 +63,7 @@ from qualification.scoring.company_verification import (
     verify_company_exists,
 )
 from qualification.scoring.company_fit_decision import (
+    company_quality_receipt_matches_claim,
     verified_homepage_brand_name,
     observed_linkedin_ampersand_slug,
     COMPANY_FIT_MATCH,
@@ -4116,14 +4117,25 @@ def _complete_verified_attribute_recovery_identity(
     verified_domain = str(
         recovery_identity.get("registrable_dns_domain") or ""
     ).strip()
+    legal_name = receipt.get("verified_parenthetical_legal_name")
+    if legal_name is not None and not company_quality_receipt_matches_claim(
+        receipt, {
+            "company_name": company.company_name,
+            "company_website": company.company_website,
+            "company_linkedin": company.company_linkedin,
+        },
+    ):
+        return False
     return _complete_verified_first_party_identity(
         evidence_url,
         {verified_domain} if verified_domain else set(),
         {
-            "submitted_name": receipt.get("submitted_name") or company.company_name,
+            "submitted_name": company.company_name if legal_name else (
+                receipt.get("submitted_name") or company.company_name
+            ),
             "submitted_domain": receipt.get("submitted_domain"),
             "submitted_linkedin_slug": submitted_slug,
-            "observed_name": receipt.get("observed_name"),
+            "observed_name": legal_name or receipt.get("observed_name"),
             "observed_domain": receipt.get("observed_domain"),
             "observed_linkedin_slug": receipt.get("observed_linkedin_slug"),
             "verified_name": recovery_identity.get("normalized_name"),
@@ -9840,6 +9852,16 @@ async def _run_targeted_company_evidence_investigation(
         )
     )
     investigation_observed_linkedin = verdict.get("observed_company_linkedin")
+    investigation_legal_name = investigation_web_identity.get("verified_parenthetical_legal_name")
+    if not (
+        investigation_legal_name == verdict.get("observed_company_name")
+        and company_quality_receipt_matches_claim(investigation_web_identity, {
+            "company_name": company.company_name,
+            "company_website": company.company_website,
+            "company_linkedin": company.company_linkedin,
+        })
+    ):
+        investigation_legal_name = None
     if investigation_web_identity.get("reason_code") == "structured_exact_profile_identity_verified":
         # Carry the fetched profile into research without rewriting the raw
         # model observation retained with the identity receipt.
@@ -9859,10 +9881,16 @@ async def _run_targeted_company_evidence_investigation(
                 **{
                     key: investigation_web_identity.get(key)
                     for key in (
-                        "submitted_name", "submitted_domain", "submitted_linkedin_slug",
-                        "observed_name", "observed_domain", "observed_linkedin_slug",
+                        "submitted_domain", "submitted_linkedin_slug",
+                        "observed_domain", "observed_linkedin_slug",
                     )
                 },
+                # The accepted receipt canonicalizes names. Preserve the raw
+                # legal-name relation needed by the existing attribution gate.
+                "submitted_name": company.company_name if investigation_legal_name else (
+                    investigation_web_identity.get("submitted_name")
+                ),
+                "observed_name": investigation_legal_name or investigation_web_identity.get("observed_name"),
                 "verified_name": investigation_verified_identity.get("normalized_name"),
                 **{
                     key: investigation_verified_identity.get(key)

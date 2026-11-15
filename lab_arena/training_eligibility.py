@@ -251,8 +251,6 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                                   and isinstance(source.get("sha256"), str)
                                   and contracts.SHA256_RE.fullmatch(source["sha256"]) is not None)
             if (example.get("schema_version") != training_export.SCHEMA_VERSION
-                    or example.get("example_hash") != contracts.document_hash({
-                        key: value for key, value in example.items() if key != "example_hash"})
                     or example.get("run_id") != run_id
                     or example.get("submission_id") != submission.get("submission_id")
                     or example.get("role") != ("baseline" if baseline else "miner")
@@ -276,7 +274,16 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     or run_id not in example["input_snapshots"]):
                 run_reasons.append("input_or_output_unavailable")
                 continue
-            report = training_thinking.readable_trace(example, worker_proofs=worker_proofs)
+            # readable_trace verifies the entire current export before indexing
+            # any reasoning. Do not serialize and hash that large graph twice.
+            # No eligible path can skip this check, and no hash is cached.
+            try:
+                report = training_thinking.readable_trace(example, worker_proofs=worker_proofs)
+            except ValueError as exc:
+                if str(exc) != "example_hash_mismatch":
+                    raise
+                run_reasons.append("selected_run_identity_unverified")
+                continue
             if (report.get("projection_truncated") is not False
                     or not set(report.get("capture_gaps") or []) <= ancillary_gaps):
                 run_reasons.append("readable_trace_incomplete")

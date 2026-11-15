@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from lab_arena import capture_retention, runner, training_observations as obs
-from lab_arena.api import create_app
+from lab_arena.api import TRAINING_OBSERVATION_WORKER_LIMIT, create_app
 from lab_arena.service import ServiceError
 from tests.lab_arena.input_retention_test import local, finish_poll
 from tests.lab_arena.training_input_grace_test import terminal_service
@@ -117,7 +117,7 @@ def test_queued_final_after_completion_has_exact_180_second_boundary(tmp_path, d
         handle = service.handle_training_observations
         def blocked(*args):
             entered.append(True)
-            if len(entered) <= 2:
+            if len(entered) <= TRAINING_OBSERVATION_WORKER_LIMIT:
                 assert release.wait(5)
             return handle(*args)
         service.handle_training_observations = blocked
@@ -126,26 +126,27 @@ def test_queued_final_after_completion_has_exact_180_second_boundary(tmp_path, d
             requests = []
             try:
                 requests = [asyncio.create_task(client.post('/arena/v1/runs/r1/training-observations',
-                    headers={'x-lab-arena-lease': TOKEN}, json=payload(observation()))) for _ in range(2)]
+                    headers={'x-lab-arena-lease': TOKEN}, json=payload(observation()))) for _ in range(TRAINING_OBSERVATION_WORKER_LIMIT)]
                 for _ in range(200):
-                    if len(entered) == 2:
+                    if len(entered) == TRAINING_OBSERVATION_WORKER_LIMIT:
                         break
                     await asyncio.sleep(.005)
-                assert len(entered) == 2
+                assert len(entered) == TRAINING_OBSERVATION_WORKER_LIMIT
                 requests.append(asyncio.create_task(client.post('/arena/v1/runs/r1/training-observations',
                     headers={'x-lab-arena-lease': TOKEN}, json=payload(observation()))))
                 for _ in range(200):
-                    if len(preauthorized) >= 3:
+                    if len(preauthorized) >= TRAINING_OBSERVATION_WORKER_LIMIT + 1:
                         break
                     await asyncio.sleep(.005)
-                assert preauthorized[:3] == ['leased'] * 3 and len(entered) == 2
+                assert preauthorized[:TRAINING_OBSERVATION_WORKER_LIMIT + 1] == ['leased'] * (TRAINING_OBSERVATION_WORKER_LIMIT + 1)
+                assert len(entered) == TRAINING_OBSERVATION_WORKER_LIMIT
                 row.update(terminal)
                 current[0] = NOW + timedelta(seconds=delay)
             finally:
                 release.set()
                 responses = await asyncio.wait_for(asyncio.gather(*requests), 5)
             assert responses[-1].status_code == expected
-            assert len(entered) == 3
+            assert len(entered) == TRAINING_OBSERVATION_WORKER_LIMIT + 1
             assert bool(list((tmp_path / 'objects').rglob('*.gz'))) is (expected == 200)
     asyncio.run(scenario())
 

@@ -48,6 +48,9 @@ Its --investigator-feedback option retains both repairs and applies only the
 reviewed prompt/feedback and private failure-source handoffs to the exact frozen50de investigator.
 Its --ordered-company-retry-passes option retains those corrections and moves
 the same three company attempts into ordered passes on the exact frozen50de pair.
+Its --identity-handoff option retains all four corrections and applies only the
+reviewed homepage child lookup and verified legal-name handoff delta to the
+checksum-bound lead scorer and investigator. It imports no current grading files.
 
 The exclusive --empty-domain-negative-finality-only mode changes only the
 reviewed completed-negative predicate in the exact frozen79cd lead scorer.
@@ -535,6 +538,10 @@ def main() -> int:
         help="move existing company attempts into ordered passes on frozen50de; requires investigator-feedback",
     )
     parser.add_argument(
+        "--identity-handoff", action="store_true",
+        help="retain reviewed homepage child lookup and verified legal-name handoffs on frozen50de; requires ordered-company-retry-passes",
+    )
+    parser.add_argument(
         "--legacy-company-progress-only", action="store_true",
         help="compose only reviewed two-file legacy company progress on exact frozen51bc; excludes other corrections",
     )
@@ -655,6 +662,8 @@ def main() -> int:
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
     args = parser.parse_args()
+    if args.identity_handoff and not args.ordered_company_retry_passes:
+        raise CompositionError("identity-handoff requires ordered-company-retry-passes")
     if args.ordered_company_retry_passes and not args.investigator_feedback:
         raise CompositionError("ordered-company-retry-passes requires investigator-feedback")
     if args.investigator_feedback and not (args.submitted_company_context_only and args.active_acquisition_target):
@@ -663,7 +672,7 @@ def main() -> int:
         raise CompositionError("active-acquisition-target requires submitted-company-context-only")
     if args.submitted_company_context_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"submitted_company_context_only", "active_acquisition_target", "investigator_feedback", "ordered_company_retry_passes", "push"}
+        if name not in {"submitted_company_context_only", "active_acquisition_target", "investigator_feedback", "ordered_company_retry_passes", "identity_handoff", "push"}
     ):
         raise CompositionError("submitted-company-context-only mode cannot include other corrections")
     if args.legacy_company_progress_only and any(
@@ -780,6 +789,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
                 )
                 corrected = convert_ordered_company_retry_passes({name: original[name] for name in FILES})
                 files[SCORING_FILE] = corrected[SCORING_FILE]
+            if args.identity_handoff:
+                from scripts.arena_reviewer_identity_handoff_seam import FILES, convert_identity_handoff_files
+                files.update(convert_identity_handoff_files({name: files[name] for name in FILES}))
         elif args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import convert_legacy_company_progress_files
             original = extract_frozen_sources(
@@ -943,6 +955,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-active-acquisition-target" if args.active_acquisition_target else "")
             + ("-investigator-feedback" if args.investigator_feedback else "")
             + ("-ordered-company-retry-passes" if args.ordered_company_retry_passes else "")
+            + ("-identity-handoff" if args.identity_handoff else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -981,6 +994,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.ordered_company_retry_passes:
                 from scripts.arena_reviewer_legacy_company_progress_seam import ORDERED_RETRY_CORRECTION_ID
                 corrections.append(ORDERED_RETRY_CORRECTION_ID)
+            if args.identity_handoff:
+                from scripts.arena_reviewer_identity_handoff_seam import CORRECTION_ID as IDENTITY_HANDOFF_CORRECTION_ID
+                corrections.append(IDENTITY_HANDOFF_CORRECTION_ID)
         if args.legacy_company_progress_only:
             from scripts.arena_reviewer_legacy_company_progress_seam import CORRECTION_ID as LEGACY_COMPANY_PROGRESS_CORRECTION_ID
             corrections.append(LEGACY_COMPANY_PROGRESS_CORRECTION_ID)

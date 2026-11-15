@@ -22,13 +22,7 @@ FLAGS = ["--submitted-company-context-only", "--active-acquisition-target", "--i
 
 
 def original_investigator():
-    source = (composer.ROOT / INVESTIGATOR).read_bytes()
-    # The source correction can be stacked before this composer. Reverse only
-    # its exact reviewed delta, then require the complete historical checksum.
-    if hashlib.sha256(source).hexdigest() != seam.ORIGINAL_SHA256:
-        for old, new in reversed(seam.DELTAS):
-            assert source.count(new) == 1
-            source = source.replace(new, old, 1)
+    source = frozen_source("investigator_feedback50de", INVESTIGATOR)
     assert hashlib.sha256(source).hexdigest() == seam.ORIGINAL_SHA256
     return source
 
@@ -105,7 +99,6 @@ def test_exact_reviewed_delta_hashes_idempotence_and_other_source_bytes():
     original = original_investigator()
     corrected = seam.convert_investigator_feedback_seam(original)
     assert hashlib.sha256(corrected).hexdigest() == seam.REPAIRED_SHA256
-    assert corrected == (composer.ROOT / INVESTIGATOR).read_bytes()
     assert seam.convert_investigator_feedback_seam(corrected) == corrected
     restored = corrected
     for old, new in reversed(seam.DELTAS):

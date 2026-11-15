@@ -1737,7 +1737,12 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                     rendering, delivery="not_proved")
 
         for ri, receipt in enumerate(call.get("upstream_response_receipts") or []):
-            nonexact_analysis(receipt, prefix + ["upstream_response_receipts", ri])
+            path = prefix + ["upstream_response_receipts", ri]
+            # Failed/adapted provider output can contain useful reasoning and
+            # tool events. Index the sanitized evidence without claiming that
+            # the worker received it or promoting it to a successful target.
+            response_events(receipt.get("response"), path + ["response"], "not_proved")
+            nonexact_analysis(receipt, path)
         if isinstance(call.get("nonexact_recovered_response"), Mapping):
             nonexact_analysis(call["nonexact_recovered_response"], prefix + ["nonexact_recovered_response"])
         receipts = []

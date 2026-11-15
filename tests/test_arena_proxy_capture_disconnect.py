@@ -14,7 +14,7 @@ import uvicorn
 
 from gateway.api import arena_proxy as proxy
 from gateway.middleware.body_size import BodySizeLimitMiddleware
-from lab_arena.api import create_app
+from lab_arena.api import TRAINING_OBSERVATION_WORKER_LIMIT, create_app
 from lab_arena.service import LocalObjectStore
 from tests.lab_arena.api_provider_capacity_test import wait_until
 from tests.lab_arena.api_training_input_capacity_test import (
@@ -111,6 +111,7 @@ def test_tcp_gateway_disconnect_removes_actual_sidecar_queue(monkeypatch,kind):
         from tests.lab_arena.api_training_observation_capacity_test import ObservationService,request
         from tests.lab_arena.api_provider_capacity_test import post_provider
         service=(CaptureService if kind=='training-input'else ObservationService)(anyio.to_thread.current_default_thread_limiter())
+        capacity = CAPTURE_LIMIT if kind == 'training-input' else TRAINING_OBSERVATION_WORKER_LIMIT
         service.release.set()
         app,finished,watching=observed_sidecar(create_app(service))
         def post(client,run):
@@ -121,16 +122,16 @@ def test_tcp_gateway_disconnect_removes_actual_sidecar_queue(monkeypatch,kind):
                 monkeypatch.setattr(proxy,'_SIDECAR_URL',sidecar)
                 async with serve(gateway())as public:
                     async with httpx.AsyncClient(base_url=sidecar,timeout=3)as direct,httpx.AsyncClient(base_url=public,timeout=.25)as client:
-                        blockers=[post(direct,'active-'+str(i))for i in range(CAPTURE_LIMIT)]
+                        blockers=[post(direct,'active-'+str(i))for i in range(capacity)]
                         active=lambda:service.capture_active if kind=='training-input'else service.observation_active
-                        await wait_until(lambda:active()==CAPTURE_LIMIT)
+                        await wait_until(lambda:active()==capacity)
                         queued=post(client,'queued')
                         await wait_until(lambda:'queued'in watching and watching['queued'].is_set())
                         with pytest.raises(httpx.ReadTimeout):await queued
                         timed_out=time.monotonic()
                         await wait_until(lambda:'queued'in finished and finished['queued'].is_set())
                         elapsed=time.monotonic()-timed_out
-                        assert active()==CAPTURE_LIMIT
+                        assert active()==capacity
                         calls=[r[0]for r in service.input_calls]if kind=='training-input'else service.observation_calls
                         assert 'queued'not in calls
                         # Only the intentional disconnect needs a 250 ms deadline.

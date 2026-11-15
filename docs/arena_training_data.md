@@ -377,6 +377,9 @@ or oversized bodies remain explicit gaps. This adds no storage request.
 Training exports keep that upstream evidence separate from the response shown
 to the agent. Retaining an error does not prove delivery or resolve its cost;
 missing provider billing remains unknown.
+The readable timeline indexes any retained upstream reasoning, tool events and
+usage as delivery `not_proved`. These partial provider outputs remain separate
+from successful agent targets and do not improve champion eligibility.
 
 For the exact generic `provider_unavailable` response, a validated host observation
 can also retain the broker's `not_dispatched` disposition and a known admission,

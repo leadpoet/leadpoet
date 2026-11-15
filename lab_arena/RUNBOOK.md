@@ -604,6 +604,26 @@ pin and every other round setting remain immutable.
 
 ### Frozen grading and repairable reviewer runtime
 
+For the reviewed identity handoff correction on exact frozen50de, use
+`--submitted-company-context-only --active-acquisition-target --investigator-feedback --ordered-company-retry-passes --identity-handoff`
+for both build and `--verify-image`. The last option requires all four existing
+options. It applies only the committed `c3a1c17c6` to `c7d56e3ca` delta to the
+selected runtime's two identity files. Complete preimage and postimage hashes
+are pinned in `scripts/arena_reviewer_identity_handoff_seam.py`; unknown or
+partial pairs fail closed. The final `lead_scorer.py` hash is
+`c5a0495b38cb45038ee2afb3bd001e1779d13e383a6f2f9a77948d64bf2c874a`, and
+`company_evidence_investigator.py` is
+`ec74bdfb2cc4b657afc301cb183c799985915b25a8151ea056786c933c6113c5`.
+The homepage child redirect permits the existing single profile lookup only;
+the returned profile must independently bind the exact root, name and profile.
+The legal-name handoff preserves an already accepted identity receipt through
+attribution. Neither path grants an identity match from a child host or a bare
+acronym. Exact quotes, headcounts, tenant boundaries and all other evidence
+rules remain fixed. The overlay retains the existing ordered retry file,
+changes no other frozen bytes or process configuration, and adds no attempts.
+Keep the round's frozen grading/cache identity, completed judgments, checkpoints,
+costs and deadlines unchanged.
+
 For the approved active acquisition-target correction on exact frozen d657 or
 50de, use `--submitted-company-context-only --active-acquisition-target` for both
 build and `--verify-image`. Compose from the original frozen grading image.

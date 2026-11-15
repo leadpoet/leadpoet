@@ -63,6 +63,7 @@ from qualification.scoring.company_verification import (
     verify_company_exists,
 )
 from qualification.scoring.company_fit_decision import (
+    company_quality_receipt_matches_claim,
     verified_homepage_brand_name,
     observed_linkedin_ampersand_slug,
     COMPANY_FIT_MATCH,
@@ -4116,14 +4117,25 @@ def _complete_verified_attribute_recovery_identity(
     verified_domain = str(
         recovery_identity.get("registrable_dns_domain") or ""
     ).strip()
+    legal_name = receipt.get("verified_parenthetical_legal_name")
+    if legal_name is not None and not company_quality_receipt_matches_claim(
+        receipt, {
+            "company_name": company.company_name,
+            "company_website": company.company_website,
+            "company_linkedin": company.company_linkedin,
+        },
+    ):
+        return False
     return _complete_verified_first_party_identity(
         evidence_url,
         {verified_domain} if verified_domain else set(),
         {
-            "submitted_name": receipt.get("submitted_name") or company.company_name,
+            "submitted_name": company.company_name if legal_name else (
+                receipt.get("submitted_name") or company.company_name
+            ),
             "submitted_domain": receipt.get("submitted_domain"),
             "submitted_linkedin_slug": submitted_slug,
-            "observed_name": receipt.get("observed_name"),
+            "observed_name": legal_name or receipt.get("observed_name"),
             "observed_domain": receipt.get("observed_domain"),
             "observed_linkedin_slug": receipt.get("observed_linkedin_slug"),
             "verified_name": recovery_identity.get("normalized_name"),
@@ -7302,8 +7314,10 @@ def _official_child_structured_profile_lookup(
     web_identity: Mapping[str, Any],
     transport_domain: str,
     homepage_navigation_locators: Sequence[Mapping[str, Any]],
+    *,
+    server_verified_homepage_receipt: bool = False,
 ) -> Mapping[str, str]:
-    """Allow a lookup, never a match, from a fetched root's company-page link."""
+    """Locate a profile from a fetched root's company link or child redirect."""
 
     submitted = str(web_identity.get("submitted_domain") or "")
     observed = str(web_identity.get("observed_domain") or "")
@@ -7311,13 +7325,19 @@ def _official_child_structured_profile_lookup(
     slug = str(web_identity.get("observed_linkedin_slug") or "")
     submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "")
     if (
-        web_identity.get("evidence_source") != "company_web_reverification"
+        web_identity.get("evidence_source") != (
+            "company_homepage" if server_verified_homepage_receipt
+            else "company_web_reverification"
+        )
         or web_identity.get("decision")
-        not in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+        not in ({COMPANY_FIT_UNAVAILABLE} if server_verified_homepage_receipt
+                else {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE})
         or web_identity.get("reason_code")
-        not in {"identity_mismatch", "rebrand_continuity_unproven"}
+        not in ({"identity_not_proven"} if server_verified_homepage_receipt
+                else {"identity_mismatch", "rebrand_continuity_unproven"})
         or not name or name != web_identity.get("submitted_name")
         or not slug or (submitted_slug and submitted_slug != slug)
+        or (server_verified_homepage_receipt and not submitted_slug)
         or not transport_domain or submitted != transport_domain
     ):
         return {}
@@ -7338,6 +7358,12 @@ def _official_child_structured_profile_lookup(
         "registrable_dns_domain": transport_domain,
         "linkedin_company_slug": slug,
     }
+    if server_verified_homepage_receipt:
+        # The homepage verifier observed this exact name/profile at the child
+        # reached from the submitted root. This permits only the existing
+        # profile lookup; its returned raw website must independently bind the
+        # root before any identity or employee-size evidence is admitted.
+        return anchor
     for locator in _validated_homepage_navigation_locators(
         homepage_navigation_locators,
         # This enables bounded locator validation, not a qualification verdict.
@@ -7393,11 +7419,12 @@ def _alias_unresolved_structured_profile_lookup(
         )
         if missing_link_lookup:
             return missing_link_lookup
-        child_lookup = _official_child_structured_profile_lookup(
-            web_identity, transport_domain, homepage_navigation_locators,
-        )
-        if child_lookup:
-            return child_lookup
+    child_lookup = _official_child_structured_profile_lookup(
+        web_identity, transport_domain, homepage_navigation_locators,
+        server_verified_homepage_receipt=server_verified_homepage_receipt,
+    )
+    if child_lookup:
+        return child_lookup
     observed_slug = str(web_identity.get("observed_linkedin_slug") or "").strip()
     submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "").strip()
     expected_source = (
@@ -7527,9 +7554,9 @@ def _structured_profile_alias_identity_receipt(
                          raw_observed_linkedin_slug=web_identity.get("observed_linkedin_slug", ""))
             return bound
     official_child = bool(
-        not server_verified_homepage_receipt
-        and _official_child_structured_profile_lookup(
+        _official_child_structured_profile_lookup(
             web_identity, transport_domain, homepage_navigation_locators,
+            server_verified_homepage_receipt=server_verified_homepage_receipt,
         )
     )
     expected_source = (
@@ -9853,6 +9880,16 @@ async def _run_targeted_company_evidence_investigation(
         )
     )
     investigation_observed_linkedin = verdict.get("observed_company_linkedin")
+    investigation_legal_name = investigation_web_identity.get("verified_parenthetical_legal_name")
+    if not (
+        investigation_legal_name == verdict.get("observed_company_name")
+        and company_quality_receipt_matches_claim(investigation_web_identity, {
+            "company_name": company.company_name,
+            "company_website": company.company_website,
+            "company_linkedin": company.company_linkedin,
+        })
+    ):
+        investigation_legal_name = None
     if investigation_web_identity.get("reason_code") == "structured_exact_profile_identity_verified":
         # Carry the fetched profile into research without rewriting the raw
         # model observation retained with the identity receipt.
@@ -9872,10 +9909,16 @@ async def _run_targeted_company_evidence_investigation(
                 **{
                     key: investigation_web_identity.get(key)
                     for key in (
-                        "submitted_name", "submitted_domain", "submitted_linkedin_slug",
-                        "observed_name", "observed_domain", "observed_linkedin_slug",
+                        "submitted_domain", "submitted_linkedin_slug",
+                        "observed_domain", "observed_linkedin_slug",
                     )
                 },
+                # The accepted receipt canonicalizes names. Preserve the raw
+                # legal-name relation needed by the existing attribution gate.
+                "submitted_name": company.company_name if investigation_legal_name else (
+                    investigation_web_identity.get("submitted_name")
+                ),
+                "observed_name": investigation_legal_name or investigation_web_identity.get("observed_name"),
                 "verified_name": investigation_verified_identity.get("normalized_name"),
                 **{
                     key: investigation_verified_identity.get(key)
@@ -11286,15 +11329,17 @@ async def _llm_reverify_company(
                 collect_employee_size=False,
                 collect_identity=True,
                 preserve_identity_website=bool(
-                    not server_verified_homepage_receipt
-                    and (
+                    (
+                        not server_verified_homepage_receipt
+                        and
                         _missing_link_structured_profile_lookup(
                             lookup_receipt, verified_transport_domain,
                         )
-                        or _official_child_structured_profile_lookup(
-                            lookup_receipt, verified_transport_domain,
-                            verified_homepage_navigation_locators,
-                        )
+                    )
+                    or _official_child_structured_profile_lookup(
+                        lookup_receipt, verified_transport_domain,
+                        verified_homepage_navigation_locators,
+                        server_verified_homepage_receipt=server_verified_homepage_receipt,
                     )
                 ),
             )

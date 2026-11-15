@@ -918,11 +918,12 @@ def legacy_postjudgment_context(
 def apply_legacy_company_judgment_context(
     companies: Sequence[Mapping[str, Any]], raw_breakdowns: Sequence[Mapping[str, Any] | None],
     *, scored_indexes: Sequence[int] | None = None,
-    resolve_raw: Callable[[int], Mapping[str, Any]] | None = None,
+    resolve_raw: Callable[[int], Mapping[str, Any] | None] | None = None,
     consumed_indexes: set[int] | None = None,
+    deferred_indexes: set[int] | None = None,
     company_input_contract: str = "",
 ) -> list[dict[str, Any]]:
-    """Replay the historical gates; omitted intrinsic rows must be proved skips."""
+    """Replay historical gates, with optional explicit unresolved-company deferral."""
     if len(companies) != len(raw_breakdowns):
         raise CompetitionScorerInputError("company judgments must cover every company")
     from qualification.company_input_contract import validation_context
@@ -952,6 +953,8 @@ def apply_legacy_company_judgment_context(
             result.append(incompatible)
             continue
         raw = resolve_raw(index) if resolve_raw is not None else raw_breakdowns[index]
+        if raw is None and deferred_indexes is not None and index in deferred_indexes:
+            continue
         if raw is None or raw.get("bucket_skipped"):
             raise CompetitionScorerInputError("company judgment is missing for an unskipped row")
         if consumed_indexes is not None:
@@ -999,8 +1002,9 @@ def apply_company_judgment_context(
     raw_breakdowns: Sequence[Mapping[str, Any]],
     *, contacts_required: bool = False, company_quality: bool = True,
     scored_indexes: Sequence[int] | None = None,
-    resolve_raw: Callable[[int], Mapping[str, Any]] | None = None,
+    resolve_raw: Callable[[int], Mapping[str, Any] | None] | None = None,
     consumed_indexes: set[int] | None = None,
+    deferred_indexes: set[int] | None = None,
     company_input_contract: str = "",
 ) -> list[dict[str, Any]]:
     """Bind immutable single-company decisions to this list's verified identities.
@@ -1011,7 +1015,7 @@ def apply_company_judgment_context(
     if not company_quality:
         return apply_legacy_company_judgment_context(
             companies, raw_breakdowns, scored_indexes=scored_indexes, resolve_raw=resolve_raw,
-            consumed_indexes=consumed_indexes,
+            consumed_indexes=consumed_indexes, deferred_indexes=deferred_indexes,
             company_input_contract=company_input_contract,
         )
     from qualification.company_quality import normalize_company_claim

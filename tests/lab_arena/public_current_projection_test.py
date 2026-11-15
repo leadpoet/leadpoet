@@ -22,6 +22,10 @@ ALICE, BASELINE = ["5" + letter * 47 for letter in "AB"]
 
 
 class CurrentTransport:
+    def rpc(self, name, params):
+        assert name == "lab_arena_correction_reward_history_v1"
+        return []
+
     def __init__(self, rows, *, full=False):
         self.rows, self.full, self.calls, self.returned = rows, full, [], []
 
@@ -272,8 +276,10 @@ def test_compact_postgrest_select_and_fixed_psycopg_aliases():
         service, _ = _service([])
         service._store = ArenaStore(PostgrestTransport("https://example.test", service_key="sb_secret_test", http_client=http))
         service.public_current()
-    assert len(requests) == 3
-    for request in requests:
+    assert len(requests) == 4
+    assert requests[-1].url.path.endswith("/rpc/lab_arena_correction_reward_history_v1")
+    assert json.loads(requests[-1].content)["p_public_only"] is True
+    for request in requests[:3]:
         params = request.url.params
         assert "configuration_doc" not in params["select"].split(",")
         assert params["select"].split(",").count(PUBLIC_CONFIGURATION_COLUMN) == 1
@@ -289,13 +295,15 @@ def test_compact_postgrest_select_and_fixed_psycopg_aliases():
         def __exit__(self, *_args): pass
         def execute(self, sql, values): queries.append((sql, values))
         def fetchall(self): return []
+        def fetchone(self): return ([],)
 
     direct = object.__new__(PsycopgTransport)
     direct._acquire = lambda: SimpleNamespace(cursor=lambda: Cursor())
     direct._release = lambda _connection: None
     service._store = ArenaStore(direct)
     service.public_current()
-    for sql, values in queries:
+    assert queries[-1][0].startswith("SELECT public.lab_arena_correction_reward_history_v1(")
+    for sql, values in queries[:-1]:
         assert "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc" in sql
         assert ":configuration_doc" not in sql
         assert "finney" in values and 71 in values and "live" in values

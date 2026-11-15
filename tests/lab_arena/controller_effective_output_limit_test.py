@@ -16,17 +16,18 @@ SOL = 'openai/gpt-6.1-sol'
 GLM = 'z-ai/glm-5.3-flash'
 
 # Complete explicit-length requests with the reviewed industry evidence rules.
-# The November 10 feedback adds required-channel and headcount instructions.
-# Only composed system-message text changes; tools, budgets, repair allowances
-# and provider routing are unchanged. Stage descriptions have separate controls.
+# Includes November 13's reviewed conditional private-equity instructions in
+# the system message and ownership field description. Removing only those two
+# text additions reproduces all six prior payload hashes. Budgets, repair
+# allowances, tool schemas and provider routing are otherwise unchanged.
 # Budget-only repairs must still match explicit-length requests byte for byte.
 REQUEST_GOLDENS = {
-    ('glm', 'empty'): 'sha256:e4a0cfdf8fa1456f8ea6e1d2b6afdc8efd9845f27a9e71a692eddef3e2321b24',
-    ('glm', 'malformed_submit'): 'sha256:4ea05cfebef7820e0133c5ec789a27b7e5e1a9cc1b0f939e4c3d7df8b2452193',
-    ('sol_legacy', 'empty'): 'sha256:95ff114908b1c3becdf2dde29fbf92ff40dcf090ee8ad898b0f4980e125a54d8',
-    ('sol_legacy', 'malformed_submit'): 'sha256:c9eb0cd7c4b32ee747eae912e49b5c804152ff601d364d5cb0698f8ebbd99f54',
-    ('historical_open', 'empty'): 'sha256:0ce10050fd2871a8d6a2f5b0c54d6219ca8fb13dce531999d8147c13e683394f',
-    ('historical_open', 'malformed_submit'): 'sha256:ea1377f219b609e03dee67848ede6dee6fd7e165f8c615c26be8e321eb57797a',
+    ('glm', 'empty'): 'sha256:f342431b831df61969b2abbc0f6ba1d03cddc270e0e5b188832783f6145da072',
+    ('glm', 'malformed_submit'): 'sha256:e398ebb7a1bd91295b128c0d704a04e96e970b37bd096f9b368e242cf2d37d18',
+    ('sol_legacy', 'empty'): 'sha256:97760a041648647234ff506a187b68b9d8332ed7dea1653ccc3d3dbe8349e366',
+    ('sol_legacy', 'malformed_submit'): 'sha256:1e971a2045d3f941713166d59866e45739c266afdf4e8b3fde54748fdd97bde8',
+    ('historical_open', 'empty'): 'sha256:203dce4493e6a52be7e46291c6238441bafb7605a69981ff37bcc734413a538c',
+    ('historical_open', 'malformed_submit'): 'sha256:f0307ee6e33ddea0a5bc9e4aab4c8c34b431738ebcd92d5bb6a0a2907d515dbe',
 }
 
 

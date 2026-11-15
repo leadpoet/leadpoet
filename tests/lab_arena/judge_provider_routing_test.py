@@ -340,6 +340,79 @@ def test_training_export_requires_transport_authority_and_keeps_actual_provider(
     assert not records(example, role='judge')[0]
 
 
+def test_historical_judge_export_preserves_recorded_order_after_priority_reorder():
+    from tests.lab_arena.judge_thinking_export_test import records
+    example = export_example()
+    call = example['provider_calls'][-1]
+    request = deepcopy(call['request'])
+    source_before, _ = records(example)
+    judges_before, _ = records(example, role='judge')
+    assert len(source_before) == len(judges_before) == 1
+
+    example['configuration']['judge_provider_routing']['test/model'].reverse()
+    judges_after, manifest = records(example, role='judge')
+    source_after, _ = records(example)
+    assert len(judges_after) == 1
+    assert not training_thinking._judge_frozen_route_error(example, call)
+    for field in ('input', 'target', 'generated_thinking'):
+        assert judges_after[0][field] == judges_before[0][field]
+        assert source_after[0][field] == source_before[0][field]
+    assert call['request'] == request
+    assert call['request']['outbound']['body']['provider']['order'] == [PRIMARY, SECONDARY]
+    assert manifest['coverage']['attempts'][-1]['selected_provider_route'] == SECONDARY
+
+
+def test_historical_lineage_route_keeps_its_recorded_order_and_failed_status():
+    example = export_example()
+    call = example['provider_calls'][-1]
+    attempt = next(row for row in example['attempts'] if row['run_id'] == call['run_id'])
+    attempt['status'] = 'failed'
+    example['score_run_id'] = 'later-accepted-judge'
+    example['configuration']['judge_provider_routing']['test/model'].reverse()
+    assert not training_thinking._judge_frozen_route_error(example, call, individual=True)
+    assert attempt['status'] == 'failed'
+
+
+@pytest.mark.parametrize('damage', [
+    'missing_provider', 'extra_approved_provider', 'duplicate_provider', 'descriptor',
+    'model', 'registry', 'privacy', 'wire_order', 'wire_only',
+])
+def test_historical_priority_reorder_preserves_exact_authority_and_request_checks(damage):
+    from tests.lab_arena.judge_thinking_export_test import records
+    example = export_example()
+    call = example['provider_calls'][-1]
+    config = example['configuration']
+    config['judge_provider_routing']['test/model'].reverse()
+    if damage == 'missing_provider':
+        config['judge_provider_routing']['test/model'] = [SECONDARY]
+    elif damage == 'extra_approved_provider':
+        registry = config['judge_reasoning_route_registry']
+        for route in list(registry['approved_routes']):
+            if route['provider'] == PRIMARY:
+                third = deepcopy(route)
+                third.update(provider='route-c', provider_name='Route C')
+                registry['approved_routes'].append(third)
+        config['judge_provider_routing']['test/model'] = [SECONDARY, 'route-c']
+        call['reasoning_capture']['registry_sha256'] = contracts.document_hash(registry).split(':')[1]
+    elif damage == 'duplicate_provider':
+        candidates = call['reasoning_capture']['judge_provider_routing']
+        candidates[1] = deepcopy(candidates[0])
+    elif damage == 'descriptor':
+        call['reasoning_capture']['judge_provider_routing'][0]['price_ceiling']['prompt'] = '0.000002'
+    elif damage == 'model':
+        call['reasoning_capture']['model_id'] = 'different/model'
+    elif damage == 'registry':
+        config['judge_reasoning_route_registry']['approved_routes'][0]['evidence']['probe_id'] = 'changed-probe'
+    elif damage == 'privacy':
+        call['request_capture'] = {'redacted': True}
+    else:
+        field = 'order' if damage == 'wire_order' else 'only'
+        body = call['request']['outbound']['body']
+        body['provider'][field].reverse()
+        call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    assert not records(example, role='judge')[0]
+
+
 @pytest.mark.parametrize('fault', ['summary', 'opaque', 'response_privacy', 'request_privacy',
                                    'wrong_provider', 'wrong_version', 'forged_candidate', 'wrong_authority',
                                    'missing_selectors', 'wire_privacy'])

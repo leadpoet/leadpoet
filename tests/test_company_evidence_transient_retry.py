@@ -262,5 +262,9 @@ def test_exhausted_transient_retry_keeps_provider_error(monkeypatch):
     ))
 
     assert len(requests) == 2
-    assert result == {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
+    assert result == {
+        "claims": {},
+        "failure_reason": PROVIDER_ERROR_FAILURE_REASON,
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {},
+    }
     assert diagnostic[VERIFIER_FAILURE_REASON_KEY] == PROVIDER_ERROR_FAILURE_REASON

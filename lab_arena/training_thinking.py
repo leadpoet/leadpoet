@@ -1449,12 +1449,9 @@ def _judge_frozen_route_error(example, call, *, individual=False):
     candidates = annotation.get('judge_provider_routing')
     if candidates is not None:
         try:
-            plan = reasoning_capture.validate_judge_provider_routing(
-                configuration.get('judge_provider_routing'),
-                configuration.get('reasoning_route_registry'), policy)
-            if candidates != reasoning_capture.judge_transport_candidates(
-                    annotation, configuration.get('reasoning_route_registry'), plan.get(model)):
-                return 'judge_frozen_provider_route_mismatch'
+            reasoning_capture.recorded_judge_transport_routes(
+                annotation, configuration.get('reasoning_route_registry'),
+                configuration.get('judge_provider_routing'), policy)
         except (ValueError, TypeError, KeyError, AttributeError):
             return 'judge_frozen_provider_route_mismatch'
     return ''
@@ -1505,6 +1502,8 @@ def coverage(examples, *, role=None) -> dict:
             maximum_missing = 0
             bad = True
         total_reasoning_tokens = missing_reasoning_tokens = 0
+        source_outcome_unavailable = (training_steps._source_outcome_unavailable(example)
+                                      if role != 'judge' else False)
         for call in example.get("provider_calls") or []:
             call_role = _role(example, call)
             if role == 'judge' and call_role != 'judge':
@@ -1539,7 +1538,8 @@ def coverage(examples, *, role=None) -> dict:
             if new_policy and execution_model and not failed:
                 try:
                     training_steps._candidate(example, call, worker_proofs=worker_proofs,
-                                              role='judge' if role == 'judge' else 'source')
+                                              role='judge' if role == 'judge' else 'source',
+                                              source_outcome_unavailable=source_outcome_unavailable)
                     target_usable = True
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
                     private_truncation = verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs)
@@ -1730,6 +1730,16 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
 
         if isinstance(call.get("response"), Mapping):
             response_events(call["response"], prefix + ["response"], "selected_terminal")
+        def nonexact_analysis(receipt, path):
+            rendering = receipt.get("nonexact_response_rendering")
+            if isinstance(rendering, Mapping):
+                add("nonexact_response_analysis", path + ["nonexact_response_rendering"],
+                    rendering, delivery="not_proved")
+
+        for ri, receipt in enumerate(call.get("upstream_response_receipts") or []):
+            nonexact_analysis(receipt, prefix + ["upstream_response_receipts", ri])
+        if isinstance(call.get("nonexact_recovered_response"), Mapping):
+            nonexact_analysis(call["nonexact_recovered_response"], prefix + ["nonexact_recovered_response"])
         receipts = []
         for ri, receipt in enumerate(call.get("response_receipts") or []):
             record = {"entry_id": receipt.get("entry_id"), "entry_kind": receipt.get("entry_kind"),
@@ -1743,6 +1753,9 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                 response_events(receipt["response"], record["source_path"] + ["response"], "terminal_receipt")
             else:
                 record["response_ref"] = copy.deepcopy(receipt.get("response_ref"))
+            if receipt.get("response_unavailable") is True:
+                record["response_unavailable"] = True
+            nonexact_analysis(receipt, record["source_path"])
             receipts.append(record)
         calls.append({"call_identity": call.get("call_identity"), "run_id": call.get("run_id"),
                       "operation_id": call.get("operation_id"), "provider": call.get("provider"),
@@ -1753,6 +1766,8 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
                       **({"recovered_response_ref": copy.deepcopy(call["recovered_response_ref"])}
                          if call.get("recovered_response_ref") is not None else {}),
+                      **({"nonexact_recovered_response": copy.deepcopy(call["nonexact_recovered_response"])}
+                         if call.get("nonexact_recovered_response") is not None else {}),
                       "reasoning_coverage": _call_coverage(example, call, registry, worker_proofs=worker_proofs),
                       **({"target_omission_reason": "explicit_output_cap_private_response"}
                          if verified_private_explicit_truncation(example, call, worker_proofs=worker_proofs) else {}),
@@ -2189,16 +2204,42 @@ def selected_research_evidence(example: Mapping[str, Any], *, worker_proofs=None
     return None if result is None else result | diagnostic_gaps
 
 
-def _partial_research_evidence(example, *, role='source'):
+def _partial_research_evidence(example, *, role='source', allow_judge_input_gap=False):
     """Individual request/result proof is independent of an absent final outcome."""
     try:
-        if (example.get('score_run_id') is not None or example.get('judgment') is not None
-                or example.get('companies')):
-            return None
         proof = example.get('completeness') or {}
         dimensions = proof.get('dimensions') or {}
         by_dimension = proof.get('reasons_by_dimension') or {}
         reasons = proof.get('incomplete_reasons') or []
+        judge_input_gap = False
+        if example.get('judgment') is not None or example.get('companies'):
+            # A final result does not repair a malformed/missing capture of
+            # its input. Preserve only independent source pairs, without
+            # borrowing that result's labels or granting judge-turn evidence.
+            exact_gaps = set(by_dimension.get('exact_inputs') or [])
+            judgment, score_id = example.get('judgment'), example.get('score_run_id')
+            scores = [row for row in example.get('attempts') or [] if row.get('run_id') == score_id]
+            if (not allow_judge_input_gap or role != 'source'
+                    or not exact_gaps or not exact_gaps <= {
+                        'runtime_input_snapshot_missing', 'runtime_input_snapshot_invalid'}
+                    or not isinstance(judgment, Mapping)
+                    or type(judgment.get('per_icp_score')) not in (int, float)
+                    or not isinstance(score_id, str) or score_id == example.get('run_id')
+                    or len(scores) != 1 or scores[0].get('kind') != 'score'
+                    or scores[0].get('status') != 'accepted'
+                    or scores[0].get('scored_run_id') != example.get('run_id')
+                    or scores[0].get('terminal_cause', 'accepted') != 'accepted'
+                    or training_steps._individual_run_input_valid(example, score_id, 'score')):
+                return None
+            judge_input_gap = True
+        # Accepted judge calls can prove individual pairs when final labels
+        # are unverified. Their attempt binder still requires exact source,
+        # output, both input snapshots and reviewer runtime. No full-ICP
+        # assessment or label authority follows from this absence exception.
+        unavailable_labels = {'final_judge_unavailable', 'judge_evidence_unverified',
+                              'signal_authority_unverified'}
+        allowed_labels = (unavailable_labels if judge_input_gap else unavailable_labels | {
+            'failed_execution_output_unavailable', 'execution_not_accepted'})
         if (proof.get('complete') is not False or not isinstance(reasons, list)
                 or any(not isinstance(reason, str) for reason in reasons)
                 or set(dimensions) != set(by_dimension)
@@ -2207,13 +2248,9 @@ def _partial_research_evidence(example, *, role='source'):
                 or set(reasons) != set().union(*(set(value) for value in by_dimension.values()))
                 or any(dimensions[name] is not (not value) for name, value in by_dimension.items())
                 or not _source_context_verified(proof)
-                or 'final_judge_unavailable' not in by_dimension.get('input_output_label', [])
-                or not set(by_dimension['input_output_label']) <= {
-                    'final_judge_unavailable', 'failed_execution_output_unavailable', 'execution_not_accepted',
-                    # Signal-policy rounds also report this when no final
-                    # judge exists. It remains a label gap, never authority
-                    # for a signal verdict or a full execution trajectory.
-                    'signal_authority_unverified'}):
+                or (not judge_input_gap and not unavailable_labels.intersection(
+                    by_dimension.get('input_output_label', [])))
+                or not set(by_dimension['input_output_label']) <= allowed_labels):
             return None
         configuration = example.get('configuration') or {}
         training_coverage.missing_reasoning_percent_from_configuration(configuration)
@@ -2224,13 +2261,18 @@ def _partial_research_evidence(example, *, role='source'):
         attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == run_id]
         if (len(attempts) != 1 or attempts[0].get('kind') != 'execute'
                 or attempts[0].get('status') not in {'accepted', 'failed'}
-                or not training_steps._individual_run_input_valid(example, run_id, 'execute', allow_absent=True)):
+                or (judge_input_gap and attempts[0].get('status') != 'accepted')
+                or not training_steps._individual_run_input_valid(
+                    example, run_id, 'execute', allow_absent=not judge_input_gap)):
             return None
         if 'output' in example:
             if not verified_output_projection(example):
                 return None
         elif attempts[0]['status'] != 'failed':
             return None
+        # A retained score reference is diagnostic history after its judgment
+        # is removed. Source pairs do not depend on an unavailable judge input;
+        # judge pairs separately pass _unlabeled_judge_attempt's exact binder.
         return frozenset(reasons)
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -2241,7 +2283,7 @@ def _individual_research_evidence(example, *, role='source', worker_proofs=None)
     selected = selected_research_evidence(example, role=role, worker_proofs=worker_proofs)
     if selected is not None:
         return selected
-    partial = _partial_research_evidence(example, role=role)
+    partial = _partial_research_evidence(example, role=role, allow_judge_input_gap=True)
     if partial is not None:
         return partial
     try:
@@ -2415,8 +2457,9 @@ def build(examples, rules: training_steps.Rules | None = None, *, role='source')
         diagnostic_gaps = diagnostic_gaps_by_source[source]
         missing_inputs = sorted(identity for identity in (example.get("run_id"), example.get("score_run_id"))
                                 if isinstance(identity, str) and identity not in (example.get("input_snapshots") or {}))
-        partial_outcome = (example.get("score_run_id") is None or
-                           role == 'judge' and training_steps._failed_judge_attempt(example, call))
+        # Use the candidate's existing outcome projection. Supplemental
+        # provenance may be omitted by historical export projections.
+        partial_outcome = ref['outcome'] == {'per_icp_score': None, 'score_run_id': None}
         record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                   **({'role': 'judge'} if role == 'judge' else {}),
                   "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,

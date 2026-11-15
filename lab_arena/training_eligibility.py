@@ -294,7 +294,10 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     reasoning_counts["verified_failed_model_attempts"] += 1
                     continue
                 try:
-                    candidate = training_steps._candidate(example, call, worker_proofs=worker_proofs)
+                    # Selected research evidence above already bound both
+                    # runtime inputs; no per-call outcome revalidation is needed.
+                    candidate = training_steps._candidate(
+                        example, call, worker_proofs=worker_proofs, source_outcome_unavailable=False)
                 except ValueError as exc:
                     if (new_policy and str(exc) == "response_privacy_nonexact"
                             and training_thinking.verified_private_explicit_truncation(

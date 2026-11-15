@@ -107,5 +107,14 @@
         "sha256": "27a667f715effdb06852cd3fd84b8ca382ddad4051b8e0db145dd29fd84bc610"
       }
     }
+  },
+  "submitted_company_context_d657": {
+    "commit": "06e45d0bfc9220cb7e49816de803746dc0375da5",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "submitted_company_context_d657-lead_scorer.py.gz",
+        "sha256": "f783730a48ea0196fce6983dfa75f42b068662219bfb965cd216ec5c0efc8c3a"
+      }
+    }
   }
 }

@@ -19,6 +19,17 @@ URL = 'https://acme.example/'
 INDUSTRY = 'Acme supplies management consulting services to corporate clients.'
 HQ = 'Acme is headquartered in London, United Kingdom.'
 IDENTITY = {'normalized_name':'Acme','registrable_dns_domain':'acme.example','linkedin_company_slug':'acme'}
+PE_GUIDANCE = (
+    'Absent accepted direct/linked literal ownership proof, primary or support 1 must\n'
+    'literally say "private equity" (spaces/hyphens). Generic equity funds do not qualify.\n'
+)
+
+
+def before_private_equity_guidance(prompt):
+    # Retain the historical HQ fixture; only the reviewed PE clarification may
+    # differ from its original prompt. HQ scope and all other bytes stay exact.
+    assert prompt.count(PE_GUIDANCE) == 1
+    return prompt.replace(PE_GUIDANCE, '', 1)
 
 
 @pytest.fixture(autouse=True)
@@ -64,11 +75,12 @@ def invoke(monkeypatch,targets,post,**kwargs):
     return asyncio.run(inv.investigate_company_evidence(**options))
 
 
-def test_generic_system_prompt_remains_exact_main_snapshot():
-    assert len(inv._SYSTEM_PROMPT)==SNAPSHOT['main_system_characters']
-    assert len(inv._SYSTEM_PROMPT)<=31920
+def test_generic_system_prompt_preserves_snapshot_except_reviewed_pe_guidance():
+    original = before_private_equity_guidance(inv._SYSTEM_PROMPT)
+    assert len(original)==SNAPSHOT['main_system_characters']
+    assert len(inv._SYSTEM_PROMPT)<=31920+len(PE_GUIDANCE)
     assert SNAPSHOT['five_ac_system_characters']<=32212
-    assert hashlib.sha256(inv._SYSTEM_PROMPT.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
+    assert hashlib.sha256(original.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
     assert inv._SYSTEM_PROMPT.count(SNAPSHOT['old_paragraph'])==1
     assert inv._LITERAL_HEADQUARTERS_INSTRUCTION==SNAPSHOT['new_paragraph']
 
@@ -93,7 +105,7 @@ def test_98_original_target_sets_without_literal_hq_keep_exact_main_system_bytes
         actual=requests[0]['messages'][0]['content']
         counts['main']+=1
         assert actual==inv._SYSTEM_PROMPT
-        assert hashlib.sha256(actual.encode()).hexdigest()==SNAPSHOT['main_system_sha256']
+        assert hashlib.sha256(before_private_equity_guidance(actual).encode()).hexdigest()==SNAPSHOT['main_system_sha256']
     assert counts=={'main':98}
 
 
@@ -180,8 +192,8 @@ def test_literal_instruction_requires_the_actual_bound_quotable_provider_record(
     expected=inv._SYSTEM_PROMPT
     if fault is None:
         expected=expected.replace(SNAPSHOT['old_paragraph'],SNAPSHOT['new_paragraph'],1)
-        assert hashlib.sha256(expected.encode()).hexdigest()==SNAPSHOT['five_ac_system_sha256']
-        assert len(expected)==SNAPSHOT['five_ac_system_characters']
+        assert hashlib.sha256(before_private_equity_guidance(expected).encode()).hexdigest()==SNAPSHOT['five_ac_system_sha256']
+        assert len(expected)==SNAPSHOT['five_ac_system_characters']+len(PE_GUIDANCE)
     assert all(system_text(request)==expected for request in requests),fault
 
 

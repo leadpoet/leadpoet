@@ -24,9 +24,10 @@ The transition carries the current signed holders into the corresponding
 slot positions: +20 becomes +15, +15 becomes +10, and +8 becomes +5. It keeps
 their source scores, submitted models and tenure clocks. The November 3
 incumbent keeps its original 20%/15%/15% slot allocations, before decay,
-until a different owner or genuinely new promoted model replaces each slot.
+until a new qualifying promoted award replaces each slot, even when the
+winning hotkey and normalized source are unchanged.
 This exception is bound to the verified owner, normalized source and original
-epoch 26183; repackaging the same model does not remove it. Each replaced slot
+epoch 26183; repackaging alone is not a qualifying award. Each replaced slot
 uses the new allocation independently. Unused allocation goes to burn.
 Lower thresholds do
 not revive old displaced winners or fill empty slots from historical results.
@@ -58,11 +59,12 @@ goes to burn; it is not shared among other holders.
 
 Each clock starts at the source winning round's original effective reward
 epoch. A daily baseline, restart or new daily reward
-document does not reset it. A genuinely new promoted model resets only the
-slots that it replaces, including when the same miner wins again. Repackaging
-the same normalized source does not reset its age. Signed promotion history
-establishes uninterrupted occupation; an intervening different owner or model
-starts a new tenure. Different slots held by one miner can have different ages.
+document does not reset it. A new qualifying promoted award resets only the
+slots it wins, including when the hotkey and normalized source are unchanged.
+Retaining or replaying the same award preserves its original start epoch.
+An incorrect inherited clock can be corrected in a future accepted state only
+after verifying that award and its frozen source; past states stay unchanged.
+Different slots held by one miner can have different ages.
 Unregistered owners do not pause their clocks.
 
 All validators use the same chain epoch and immutable accepted state, without

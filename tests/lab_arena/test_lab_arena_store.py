@@ -937,6 +937,11 @@ def test_round_store_pushes_mode_and_scope_filters_into_activated_basis_read():
 
     class Transport:
         @staticmethod
+        def rpc(name, params):
+            assert name == "lab_arena_correction_reward_history_v1"
+            return []
+
+        @staticmethod
         def select(table, **kwargs):
             calls.append((table, kwargs))
             return []
@@ -982,6 +987,11 @@ def test_reward_basis_read_keeps_activated_basis_during_same_round_replay():
     ]
 
     class Transport:
+        @staticmethod
+        def rpc(name, params):
+            assert name == "lab_arena_correction_reward_history_v1"
+            return []
+
         @staticmethod
         def select(_table, **kwargs):
             offset = kwargs.get("offset", 0)

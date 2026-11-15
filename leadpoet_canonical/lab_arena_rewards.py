@@ -639,12 +639,13 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
 def validate_weekly_slot_decay(
     value: Any, basis: Any, *, epoch_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Validate signed per-model epoch starts without changing the source basis.
+    """Validate signed slot epoch starts without changing the source basis.
 
     Source identity and promotion provenance are established by the issuing
     gateway. Every consumer checks these positional and epoch
-    bindings before deriving rewards from the signed state. The clock can
-    predate a source achievement when an unchanged model retained its age.
+    bindings before deriving rewards from the signed state. Historical clocks
+    may predate an achievement under the former same-model continuity rule;
+    those already accepted states must remain valid.
     """
 
     document = validate_reward_basis(basis)

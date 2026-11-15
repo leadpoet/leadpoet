@@ -5,7 +5,7 @@ import copy
 
 import pytest
 
-from lab_arena import broker, contracts, training_capture, training_export, training_observations, training_steps, training_thinking
+from lab_arena import broker, contracts, operations, training_capture, training_export, training_observations, training_steps, training_thinking
 from lab_arena.training_export import ExportError, assemble_example
 from lab_arena.training_reader import _ledger
 from lab_arena.store import ArenaStore
@@ -184,3 +184,149 @@ def test_only_training_reads_opt_in_to_the_private_computed_projection():
     assert "columns" not in transport.calls[-1][1]
     assert _ledger(store, "run") == []
     assert transport.calls[-1][1]["columns"] == "*,training_recovered_response:lab_arena_training_deepline_response_v1"
+
+
+def recovered_compat_values(*, failed_write=True, operation="scrapingdog.scrape", parameters=None):
+    """Match the retained 189,033-byte legacy judge recovery without private text."""
+    values = recovered_values(kind="score")
+    from lab_arena import scoring_provider_compat
+    requested = parameters or {"url": "https://example.com/source", "dynamic": False}
+    selected = scoring_provider_compat.route_for(
+        kind="score", funding_source="miner_key", round_id="arena-2026-11-12",
+        operation_id=operation, parameters=requested)
+    effective, route = selected.effective_parameters, selected.summary()
+    request_hash = contracts.document_hash(requested)
+    outbound = {"provider": operations.DEEPLINE_TOOL_PROVIDERS[effective["tool"]], "operation": effective["tool"],
+                "payload": effective["payload"]}
+    pointer = training_capture.RequestCapture(values["objects"])(
+        {"operation_id": operation, "effective_operation_id": "deepline.execute",
+         "route": route, "request_hash": request_hash, "hashed_parameters": requested,
+         "admitted_parameters": requested, "effective_parameters": effective,
+         "outbound": {"method": "POST", "host": "code.deepline.com",
+                      "path": "/api/v2/integrations/" + effective["tool"] + "/execute",
+                      "body": outbound, "body_sha256": contracts.document_hash(outbound)}})
+    for row in values["ledger_rows"]:
+        row["operation_id"] = operation
+        row["entry_doc"].update(request_hash=request_hash, request_capture=pointer,
+                                tool=effective["tool"], **route)
+    terminal = values["ledger_rows"][-1]
+    raw = b"<html>" + b"x" * (189_033 - len(b"<html></html>")) + b"</html>"
+    success = broker._terminal_response_document(
+        200, {"content-type": "text/html"}, raw, call_succeeded=True,
+        provider_cost={"request_id": "native-recovered", "operation": effective["tool"]})
+    terminal["terminal_response"]["provider_cost"]["operation"] = effective["tool"]
+    terminal["training_recovered_response"].update(
+        request_hash=request_hash, tool=effective["tool"], terminal_response=success)
+    buffer = training_observations.Buffer()
+    buffer.append_response_receipt({
+        "ordinal": 0, "action_sequence": 0, "operation_id": operation,
+        "call_identity": terminal["call_identity"], "protocol": "http", "status": 200,
+        "body_sha256": contracts.hash_bytes(raw), "body_bytes": len(raw),
+        "write_state": "socket_write_failed" if failed_write else "socket_written",
+        "socket_written_at": None if failed_write else "2026-11-02T01:00:01Z"})
+    _, raw = training_observations.build_snapshot(
+        "judge:1", "score", buffer.document(), lease_generation=1, claim_request_hash=CLAIM_HASH)
+    values["objects"].put(training_observations.object_ref("judge:1", 1, CLAIM_HASH), raw)
+    return values
+
+
+@pytest.mark.parametrize("failed_write", [True, False])
+def test_recovered_compatibility_keeps_original_operation_and_exact_native_response(failed_write):
+    values = recovered_compat_values(failed_write=failed_write)
+    original = copy.deepcopy(values["ledger_rows"])
+    exported = assemble_example(**values)
+    call = exported["provider_calls"][0]
+    assert call["operation_id"] == "scrapingdog.scrape" and call["provider"] == "deepline"
+    assert call["recovered_response_ref"]["wire_body_bytes"] == 189_033
+    assert call["request"]["effective_operation_id"] == "deepline.execute"
+    expected = "socket_write_failed" if failed_write else "socket_written"
+    assert call["response_provenance"]["delivery_to_worker"] == expected
+    evidence = (training_steps._failed_host_result(exported, call) if failed_write else
+                training_steps._host_response(exported, call, write_state=expected, require_client_ack=False))
+    assert evidence["response"] == call["response"]
+    trace = training_thinking.readable_trace(exported)
+    assert trace["calls"][0]["response_provenance"]["delivery_to_worker"] == expected
+    assert trace["calls"][0]["recovered_response_ref"] == call["recovered_response_ref"]
+    assert trace["projection_truncated"] is False
+    assert values["ledger_rows"] == original
+
+
+@pytest.mark.parametrize("damage", [
+    lambda c: c.update(provider="scrapingdog"),
+    lambda c: c.update(operation_id="openrouter.responses"),
+    lambda c: c["request"].update(operation_id="exa.contents"),
+    lambda c: c["request"].update(effective_operation_id="openrouter.responses"),
+    lambda c: c["request"]["route"].update(effective_operation_id="exa.contents"),
+    lambda c: c["request"]["route"].update(adapter="different-adapter"),
+    lambda c: c["request"]["route"].update(compatibility_version="unapproved-version"),
+    lambda c: c["lifecycle"][0]["accounting"].pop("effective_operation_id"),
+    lambda c: c["lifecycle"][0]["accounting"].update(tool="exa_contents"),
+    lambda c: c["request"]["effective_parameters"].update(tool="exa_contents"),
+    lambda c: c["request"]["outbound"]["body"].update(provider="exa"),
+    lambda c: c["request"]["outbound"].update(body_sha256="sha256:" + "0" * 64),
+    lambda c: c["request"]["outbound"].update(host="example.com"),
+    lambda c: c["request"]["outbound"].update(path="/other"),
+    lambda c: c["request"]["outbound"].update(method="GET"),
+    lambda c: c["recovered_response_ref"].update(call_identity="sha256:" + "0" * 64),
+    lambda c: c["recovered_response_ref"].update(reservation_entry_id=2),
+    lambda c: c["recovered_response_ref"].update(run_id="other-attempt"),
+    lambda c: c["recovered_response_ref"].update(request_hash="sha256:" + "0" * 64),
+    lambda c: c["recovered_response_ref"].update(response_sha256="sha256:" + "0" * 64),
+])
+def test_compatibility_recovery_rejects_changed_recorded_binding(damage):
+    call = assemble_example(**recovered_compat_values())["provider_calls"][0]
+    damage(call)
+    with pytest.raises(ExportError, match="recovered_deepline_response_identity_invalid"):
+        training_export.recovered_response_ref(call)
+
+
+def test_compatibility_recovery_preserves_privacy_exclusion_and_no_worker_read():
+    exported = assemble_example(**recovered_compat_values())
+    call = exported["provider_calls"][0]
+    call["request_capture"]["redacted"] = True
+    with pytest.raises(ValueError, match="request_privacy_nonexact"):
+        training_steps._failed_host_result(exported, call)
+    call["request_capture"]["redacted"] = False
+    call["response_privacy_redactions"] = ["credential"]
+    call["recovered_response_ref"]["privacy_redactions"] = ["credential"]
+    with pytest.raises(ValueError, match="response_privacy_nonexact"):
+        training_steps._failed_host_result(exported, call)
+    call["response_privacy_redactions"] = []
+    call["recovered_response_ref"]["privacy_redactions"] = []
+    with pytest.raises(ValueError, match="worker_write_unverified"):
+        training_steps._host_result(exported, call)
+
+
+def test_ordinary_scrapingdog_receipt_needs_no_deepline_recovery():
+    values = recovered_compat_values()
+    source = values["ledger_rows"][-1].pop("training_recovered_response")["terminal_response"]
+    requested = {"url": "https://example.com/source", "dynamic": False}
+    pointer = training_capture.RequestCapture(values["objects"])(
+        {"operation_id": "scrapingdog.scrape", "effective_operation_id": "scrapingdog.scrape",
+         "route": {}, "request_hash": contracts.document_hash(requested),
+         "hashed_parameters": requested, "admitted_parameters": requested,
+         "effective_parameters": requested, "outbound": {"body": None}})
+    for row in values["ledger_rows"]:
+        row["provider"] = "scrapingdog"
+        row["entry_doc"]["request_capture"] = pointer
+        for key in ("adapter", "compatibility_version", "effective_operation_id", "tool"):
+            row["entry_doc"].pop(key, None)
+    values["ledger_rows"][-1]["terminal_response"] = source
+    exported = assemble_example(**values)
+    call = exported["provider_calls"][0]
+    assert call["provider"] == "scrapingdog" and "recovered_response_ref" not in call
+    assert training_steps._failed_host_result(exported, call)["response"] == call["response"]
+    assert training_thinking.readable_trace(exported)["projection_truncated"] is False
+
+
+@pytest.mark.parametrize("operation,parameters", [
+    ("scrapingdog.x_post", {"tweetId": "1234567890123456789"}),
+    ("scrapingdog.linkedinjobs", {"job_id": "1234567890"}),
+    ("scrapingdog.profile_post", {"id": "1234567890123456789"}),
+])
+def test_other_recorded_compatibility_operations_keep_their_original_identity(operation, parameters):
+    exported = assemble_example(**recovered_compat_values(operation=operation, parameters=parameters))
+    call = exported["provider_calls"][0]
+    assert call["operation_id"] == operation
+    assert training_steps._failed_host_result(exported, call)["response"] == call["response"]
+    assert training_thinking.readable_trace(exported)["projection_truncated"] is False

@@ -1,4 +1,4 @@
-"""The November 3 model keeps its old award until a new model replaces it."""
+"""Retained legacy awards keep old shares; qualifying re-wins get new shares."""
 
 from copy import deepcopy
 from datetime import date
@@ -6,9 +6,10 @@ from fractions import Fraction
 
 import pytest
 
-from lab_arena import rewards
-from leadpoet_canonical import lab_arena_rewards as kernel
+from lab_arena import reward_decay, rewards
+from leadpoet_canonical import arena_weights, lab_arena_rewards as kernel
 from tests.lab_arena.slot_decay_kernel_test import BOB, BURN, _basis, _win
+from tests.lab_arena.weekly_slot_decay_kernel_test import _signed_state
 
 
 LEGACY = "5HDmNaBQNVQoyApQbFQdSx6pD4ajcJdaYDJePufpWvoxCsrq"
@@ -82,7 +83,7 @@ def test_only_replaced_slots_get_new_award(legacy, expected):
     assert projected["reward_slots"] == source["reward_slots"]
 
 
-def test_same_normalized_model_with_new_submission_keeps_old_award():
+def test_historical_signed_same_model_clock_still_validates_its_old_award():
     source, clock = _source(same_model_new_submission=True)
     projected = rewards.legacy_slot_allocation_projection_document(source, clock)
     assert projected["slot_policy"]["pool_percent"] == 50
@@ -125,3 +126,39 @@ def test_legacy_owner_requires_a_valid_clock():
 def test_no_legacy_owner_needs_no_clock_or_projection():
     source, _ = _source((False, False, False))
     assert rewards.legacy_slot_allocation_projection_document(source, None) == source
+
+
+@pytest.mark.parametrize("delta,replaced", [(5, [False, False, True]),
+                                         (10, [False, True, True]),
+                                         (15, [True, True, True])])
+@pytest.mark.parametrize("age", [0, 139, 140, 279, 280, 700])
+def test_same_hotkey_same_source_qualifying_rewin_gets_full_new_tiers(delta, replaced, age):
+    original, old_clock = _source()
+    previous = {"reward_basis": original, "weekly_slot_decay": old_clock}
+    before = deepcopy(previous)
+    fresh = _win(LEGACY, delta=delta, start=None, name="qualifying-rewin",
+                 round_id=original["round_id"])
+    slots = [deepcopy(fresh if won else old)
+             for won, old in zip(replaced, original["reward_slots"])]
+    current = _basis(slots, epoch=EFFECTIVE, policy=rewards.REWARD_SLOT_POLICY_NOV11,
+                     king=LEGACY, round_id=original["round_id"])
+    epoch = EFFECTIVE + age
+    clock = reward_decay.weekly_slot_decay(
+        current, epoch=epoch, source_identity=lambda _: MODEL, history=[original],
+        previous_state=previous,
+    )
+    assert [item["start_epoch"] for item in clock["slots"]] == [
+        EFFECTIVE if won else START for won in replaced]
+    projected = rewards.legacy_slot_allocation_projection_document(current, clock)
+    expected_shares = [new if won else old for won, new, old in
+                       zip(replaced, [35, 25, 15], [20, 15, 15])]
+    assert [tier["allocation_percent"] for tier in projected["slot_policy"]["tiers"]] == expected_shares
+    expected = sum((Fraction(share, 100 * 2 ** ((epoch - slot["start_epoch"]) // 140))
+                    for share, slot in zip(expected_shares, clock["slots"])), Fraction(0))
+    assert kernel.slot_allocations(projected, epoch, HOTKEYS, until_replaced=True,
+                                   weekly_slot_decay=clock) == {LEGACY: expected}
+    state, _ = _signed_state(projected, clock, epoch=epoch)
+    vector = arena_weights.derive_arena_weights(state, HOTKEYS)
+    assert vector["champion_share_ppb"] == int(expected * 1_000_000_000)
+    assert vector["burned_residual_ppb"] == int((1 - expected) * 1_000_000_000)
+    assert previous == before

@@ -280,7 +280,7 @@ def test_service_billing_return_only_yields_at_execution_cutoff(case):
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)
     service._reconcile_active_deepline_cost=lambda _:{"status":"none", "checked":0}
-    service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(now+timedelta(days=1))}
+    service._reconcile_active_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(now+timedelta(days=1))}
     service._store=SimpleNamespace(operator_hold_active=lambda:case=="held",expire_leases=lambda _:calls.append("expire"))
     service._advance_round_locked=lambda _:calls.append("advance") or {"status":"draining"}
     result=service.advance_round(ROUND)
@@ -419,7 +419,7 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(c
         service._round=lambda _:store.get_round(ROUND)
         service._reconcile_deepline_cost=lambda _:{"status":"none"}
         service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
-        service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(datetime.now(timezone.utc)+timedelta(days=1))}
+        service._reconcile_active_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(datetime.now(timezone.utc)+timedelta(days=1))}
         with connect() as conn: before=_state(conn)
         assert service.advance_round(ROUND)["status"]=="draining"
         with connect() as conn:
@@ -638,13 +638,13 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
         deadline=datetime.fromisoformat(projected["schedule"]["stage_2_close"].replace("Z","+00:00"))
         time.sleep(max(0,(deadline-datetime.now(timezone.utc)).total_seconds())+.03)
         h.clock.now=datetime.now(timezone.utc)
-        h.service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":leases[0]["lease_expires_at"]}
+        h.service._reconcile_active_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":leases[0]["lease_expires_at"]}
         with connect() as conn: before=_state(conn)
         assert h.service.advance_round(ROUND)["status"]=="draining"
         with connect() as conn: assert _state(conn)==before
         assert runner.claim_one()["status"]=="no_free_slot"
         assert _settle(store,leases[0],leases[0]["lease_token"],identity,1234)["status"]=="settled"
-        h.service._reconcile_openrouter_cost=lambda _:{"status":"none"}
+        h.service._reconcile_active_openrouter_cost=lambda _:{"status":"none"}
         for lease in leases:
             assert runner._slots.acquire(blocking=False)
             runner._run_lease(lease)

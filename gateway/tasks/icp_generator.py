@@ -1363,6 +1363,12 @@ narrow it to a single tool, a single named event, or a niche so tight that fewer
 handful of companies qualify. Specificity belongs in the phrasing, not in shrinking the
 candidate pool.
 
+HIRING INTENTS — ONE JOB POSTING MUST BE ENOUGH PROOF: a hiring intent is verified from a
+current job posting for one role. Name the role families only, joined with "or". Do not add
+a count or spread condition such as "multiple openings", "several roles", or "in multiple
+locations": one posting proves one opening in one place, so a company that is really
+hiring would still fail.
+
 PRODUCT/SERVICE AND REQUIRED ATTRIBUTE — MAKE REQUIREMENTS AND ALTERNATIVES EXPLICIT:
 Each candidate company is verified against `product_service` and `required_attribute` as
 written. Join alternatives with "or", and keep every alternative as specific as the rest

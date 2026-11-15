@@ -201,6 +201,7 @@ def current_service_database():
             cursor.execute((SCRIPTS / "668-lab-arena-content-addressed-score-checkpoint.sql").read_text(encoding="utf-8"))
             # Only the disposable authority fixture's unrelated seed is removed.
             cursor.execute("TRUNCATE public.lab_arena_rounds CASCADE")
+        prepare_correction_reward_history_reads(lambda: psycopg2.connect(**dsn))
         yield psycopg2, dsn
     finally:
         database.close()
@@ -228,6 +229,45 @@ def current_total_emissions_service_database():
         database.close()
 
 
+def prepare_correction_reward_history_reads(connect):
+    """Supply the exact additive696 reader to dated service fixtures.
+
+    Install its empty receipt dependency when needed, without installing any
+    correction capability or changing the historical activation/write RPCs.
+    """
+    connection = connect()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regprocedure('public.lab_arena_correction_reward_history_v1(text,text,integer,integer,integer,boolean)')")
+            if cursor.fetchone()[0]:
+                return
+            cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') FROM pg_namespace WHERE nspname='public'")
+            schema_acl, had_create = cursor.fetchone()
+            cursor.execute("SELECT to_regclass('public.lab_arena_scoring_supersessions')")
+            if cursor.fetchone()[0] is None:
+                migration = (SCRIPTS / '517-lab-arena-model-policy-supersession.sql').read_text()
+                table_schema = migration[
+                    migration.index('CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions'):
+                    migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_supersede_role_model_v1')]
+                cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='leadpoet_parity_reader')")
+                if not cursor.fetchone()[0]:
+                    table_schema = table_schema.replace(',leadpoet_parity_reader;', ';')
+                cursor.execute(table_schema)
+            cursor.execute('ALTER TABLE public.lab_arena_scoring_supersessions ADD COLUMN IF NOT EXISTS recovery_doc JSONB')
+            cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+            migration = (SCRIPTS / '696-lab-arena-correction-reward-history.sql').read_text()
+            cursor.execute(migration[
+                migration.index('CREATE OR REPLACE FUNCTION public.lab_arena_correction_reward_history_v1'):
+                migration.index('DO $activation696$')])
+            if not had_create:
+                cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
+            cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
+            assert cursor.fetchone()[0] == schema_acl, 'history reader fixture changed schema ACL'
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def prepare_current_service_reads(connect, *, include_run_reads=True, include_round_reads=True):
     """Install additive read dependencies for current code on old test schemas.
 
@@ -239,6 +279,9 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
     Existing readers, including later upgraded definitions, stay unchanged.
     Round-only projection tests can omit run readers on pre-227 schemas.
     """
+    # Reward reads are mandatory even when the harness opts out of compact
+    # round projections. Keep production's missing-capability failure intact.
+    prepare_correction_reward_history_reads(connect)
     connection = connect()
     try:
         with connection.cursor() as cursor:
@@ -251,11 +294,12 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
                 "to_regprocedure('public.lab_arena_public_configuration_v1(public.lab_arena_rounds)'),"
                 "to_regprocedure('public.lab_arena_competition_publication_v1(public.lab_arena_rounds)'),"
                 "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer)'),"
-                "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer,text)')"
+                "to_regprocedure('public.lab_arena_latest_promoted_champion_v1(text,integer,text)'),"
+                "to_regprocedure('public.lab_arena_correction_reward_history_v1(text,text,integer,integer,integer,boolean)')"
             )
             (attempt_reader, failure_reader, has_floor, results_view,
              configuration_reader, competition_reader, champion_reader,
-             bounded_champion_reader) = cursor.fetchone()
+             bounded_champion_reader, correction_history_reader) = cursor.fetchone()
             needs_bounded_champion_reader = champion_reader and not bounded_champion_reader
             if not include_run_reads:
                 attempt_reader = failure_reader = True
@@ -269,7 +313,7 @@ def prepare_current_service_reads(connect, *, include_run_reads=True, include_ro
             else:
                 view_has_floor = True
             if (not needs_bounded_champion_reader and attempt_reader and failure_reader and (not include_round_reads or (
-                    has_floor and results_view and view_has_floor and configuration_reader and competition_reader))):
+                    has_floor and results_view and view_has_floor and configuration_reader and competition_reader and correction_history_reader))):
                 return
 
             cursor.execute("SELECT nspacl::text,has_schema_privilege('lab_arena_owner',oid,'CREATE') "

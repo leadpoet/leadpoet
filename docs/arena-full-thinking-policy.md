@@ -19,9 +19,9 @@ behavior does. Catalog capability flags alone do not grant approval.
 
 ## Reviewed route registry
 
-The runtime source is `lab_arena/reasoning_models.json`. It contains 63 exact
-model/API/provider routes. The October 27 GLM/Kimi extension adds 38 routes across
-17 models, while preserving all original 25 rows, provider defaults and baseline.
+The runtime source is `lab_arena/reasoning_models.json`. Read its
+`approved_routes` for the current exact model/API/provider list. Historical
+rounds retain their frozen registry, provider defaults and baseline.
 All use ZDR, no provider fallback, and a route price bound. Chat calls use
 `exclude: false`; Responses uses typed `reasoning_text`. Gemma uses
 `enabled: true`; other route probes use `effort: high`. These are defaults when
@@ -107,8 +107,8 @@ exposes full thinking. New routes require the same evidence and tests.
 | Dataset quality | Reuse secret removal, failure distinctions, deduplication, held-out companies, source references, dataset versions, and existing training-permission status. Labels still require evaluation before training. |
 | Honest counts | Separate miner/baseline/judge calls, saved text, and complete trajectories. Report empty, summary-only, opaque, truncated, unavailable, failed capture, and unproved routes separately. No invented historical backfill. |
 | $6 cap | Set future execution admission and cost eligibility to $6 per ICP for both miners and baseline. Current-policy admission uses confirmed competition cost, without pending or uncertain monetary holds. Historical $4 behavior stays unchanged. |
-| Round continuity | No capture failure or missing text cancels a round or stops publication. Missing activation prerequisites create an ordinary round with a visible `not_ready` reason. No live catalog request is needed to create the round. |
-| Safe activation | Default off. Require a compatible baseline route and a tested immutable baseline source plus digest before activation. Apply only to future unopened rounds. |
+| Round continuity | No capture failure or missing text cancels a round or stops publication. After the configured activation cutoff, missing prerequisites reject round creation with retryable HTTP 503. No live catalog request is needed to create the round. |
+| Safe activation | Activation is selected by `reasoning_capture_from` (unset by default). Require a compatible baseline route and a tested immutable baseline source plus digest. Existing rounds retain their frozen configuration. |
 
 ## Frozen token and ICP rules
 
@@ -304,11 +304,11 @@ The public round/submission view shows reasons and counts without exposing sourc
 review prose or private traces. Training dataset permissions, splits, deduplication,
 and label checks remain separate; they are not new champion score rules.
 
-Only future opted-in rounds use these requirements. This PR stays default off.
-The final PR migrations are 565 through 570. They were applied in production
-on October 25 with the existing mainline schema preserved. The initial gateway and
+At the initial October 25 rollout, activation was off. Migrations 565 through
+570 were applied with the existing mainline schema preserved; the gateway and
 validator deployment used merge commit `b967993769e17b50789f0f285ced156dfde9c890`.
-The policy remains off; deployment does not activate future full-thinking rounds.
+This is a historical rollout record. Current activation follows the configured
+cutoff and each round's frozen policy.
 
 ## Review fixes — 2026-10-24
 

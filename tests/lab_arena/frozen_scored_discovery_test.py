@@ -112,7 +112,7 @@ def _service(row, runs, *, billing=False, deepline_billing=False,
         state["billing"] = False
         return {"status": "settled" if billing else "none", "run_status": "failed"}
 
-    service._reconcile_openrouter_cost = reconcile_openrouter
+    service._reconcile_active_openrouter_cost = reconcile_openrouter
     service.publish = lambda round_id: events.append("publish") or {"status": "retry"}
     service.promote_pending_baselines = lambda: {"promoted": 0}
     service.ensure_daily_round = lambda: {"status": "existing"}

@@ -191,13 +191,21 @@ def test_ordinary_negative_still_performs_targeted_search_before_terminal_repair
     assert result["_completed_submit"] is True
 
 
-@pytest.mark.parametrize("failure", ["stage_failure", "source_failure", "admission_timeout"])
-def test_negative_citation_cleanup_keeps_discovery_transport_and_admission_failures(monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["stage_failure", "source_failure"])
+def test_negative_citation_cleanup_keeps_discovery_and_transport_failures(monkeypatch, failure):
     result, *_ = _run(monkeypatch, **{failure: True})
     assert result.get("_completed_submit") is not True
-    assert result["failure_reason"] == (
-        "admission_budget_interrupted" if failure == "admission_timeout" else "provider_error"
-    )
+    assert result["failure_reason"] == "provider_error"
+
+
+def test_late_admitted_negative_has_one_terminal_correction(monkeypatch):
+    result, requests, searches, fetches = _run(monkeypatch, admission_timeout=True)
+    assert len(requests) == 2
+    assert searches == fetches == []
+    assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+    assert all(f["status"] == "UNPROVEN" for f in result["claims"].values())
 
 
 def test_final_provider_failure_remains_incomplete(monkeypatch):

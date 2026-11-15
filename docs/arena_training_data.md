@@ -172,21 +172,33 @@ Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
 remain redacted.
 
-Future rounds can opt in to `full_generated_thinking_v1`. This policy uses the
-reviewed, exact model/provider/API registry in `lab_arena/reasoning_models.json`.
+If a stored JSON response contains an invalid Unicode scalar, its normalized
+response remains unavailable. After privacy and opaque-content filtering, the
+export can retain a separate `nonexact_response_rendering` with escaped invalid
+code points, `exact_response: false`, and the original receipt's wire hash and
+byte count. Readable traces label it `nonexact_response_analysis`; it is never an
+exact response, training target, delivery proof, or full-thinking evidence.
+The rendering has the existing receipt byte limit and is omitted with an
+explicit size-limit reason if it would exceed that limit. Canonical hashes,
+capture limits, scoring and whole-ICP eligibility rules are unchanged.
+
+New rounds at or after the configured `reasoning_capture_from` cutoff use
+`full_generated_thinking_v1`. This policy uses the reviewed, exact
+model/provider/API registry in `lab_arena/reasoning_models.json`.
 It requests full provider-generated thinking, preserves tool history, and records
 what the provider actually returned. Summaries and encrypted state do not meet
 this policy. The gateway applies it to miner and baseline execution calls,
 including subagents; judges and already-created rounds keep their existing rules.
 
-The future policy sets both execution admission and competition cost eligibility
+This policy sets both execution admission and competition cost eligibility
 to $6 per ICP. Admission counts confirmed charges only. Pending charges do not
 create monetary admission holds; recovery records them when confirmed.
 Active provider calls still block final publication.
 Scoring keeps its existing successful-call and infrastructure-failure distinctions.
 No capture failure or empty thinking response stops scoring or publication.
-If activation prerequisites are missing, round creation continues with its old
-policy and a visible frozen `not_ready` reason. Activation is off by default.
+After the configured activation cutoff, missing prerequisites reject round
+creation with retryable HTTP 503 before a round is stored. An unset cutoff
+leaves activation off; existing rounds retain their frozen policy.
 
 The [full-thinking policy](arena-full-thinking-policy.md) lists tested routes,
 protocol boundaries, export rules, and the remaining activation checks. Provider
@@ -663,13 +675,37 @@ Identical observed context/target pairs are deduplicated with their source
 references retained. Related episodes, companies and ICP requirements stay in
 one split. Candidate quality remains explicitly unreviewed.
 
-The company exporter keeps its existing default split and dataset identity.
-Optional `--eval-mode company_and_icp` holds out both company clusters and exact
-ICP requirements. Optional `--eval-after YYYY-MM-DD` puts only later examples in
-evaluation; earlier examples sharing evaluation groups move to analysis instead
-of leaking into training. Missing/invalid dates move to analysis. All manifests
-report actual date ranges, group overlap, source families and empty splits.
+Responses exports retain provider citation excerpts and the boolean `uncited`
+marker in exact targets, including miner and baseline outputs. The marker is
+checked on a temporary output validation view; inbound request and continuation
+schemas are unchanged. Unknown fields and nonboolean markers remain invalid.
+Internal evidence summaries point to original annotations in response order.
+A consulted source is distinct from a cited source; neither an excerpt nor its
+URL proves complete page capture or independent verification. This output
+support does not bypass privacy, delivery, reasoning or whole-ICP checks.
+
+Dataset preparation defaults to `--eval-mode company_and_icp`, which holds out
+both company clusters and exact ICP requirements. Optional
+`--eval-after YYYY-MM-DD` puts only later examples in evaluation; earlier examples
+sharing evaluation groups move to analysis instead of leaking into training.
+Missing/invalid dates move to analysis. All manifests report actual date ranges,
+group overlap, source families and empty splits.
 These are evaluation safeguards, not a measurement of model accuracy.
+
+Company-record manifests also count exact retained-evidence overlap between
+train and eval. A shared quote or page excerpt uses its source URL and exact
+text as its identity; a structured provider fact uses the provider, source
+field, value and source URLs. Verdicts, criterion names, retrieval dates and
+provenance markers do not change that identity. URLs alone, entity handles
+and other shared metadata do not count as retained content.
+An overlap makes `split_viable` false with `retained_evidence_overlap`; it does
+not move or remove records, change their labels, or alter automatic splitting.
+The check conservatively treats text supplied as decision evidence as potential
+leakage. It does not distinguish boilerplate inside that text. Exact matching is
+incomplete protection against paraphrases, near-duplicates or equivalent URLs;
+nonoverlapping evidence is not thereby proved independent or correct. Temporal
+separation does not by itself prevent reuse of the same evidence. Dataset CLI
+success and candidate counts are not evaluation approval.
 
 Optional `--review-sample-size` writes `review.jsonl`, a deterministic sample
 across split, label and evidence type. Each row references the original record

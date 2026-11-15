@@ -154,20 +154,20 @@ async def _verify(
 ):
     judge = AsyncMock(side_effect=[_envelope(answer) for answer in answers])
     monkeypatch.setattr(verifier, "_call_openrouter", judge)
-    monkeypatch.setattr(
-        verifier,
-        "_fetch_sd_then_exa",
-        AsyncMock(return_value={
-            "results": [{
-                "url": url,
-                "title": "Software Engineer II - Chat Systems",
-                "text": source_text,
-                "source_publication_date": "2026-04-21",
-                "meta": {},
-            }],
-            "statuses": [{"url": url, "source": "scrapingdog", "stage": "ok"}],
-        }),
-    )
+    async def fetch(urls, **_kwargs):
+        if urls == [url]:
+            return {
+                "results": [{
+                    "url": url,
+                    "title": "Software Engineer II - Chat Systems",
+                    "text": source_text,
+                    "source_publication_date": "2026-04-21",
+                    "meta": {},
+                }],
+                "statuses": [{"url": url, "source": "scrapingdog", "stage": "ok"}],
+            }
+        return {"results": [], "statuses": []}
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
     result = await verifier.verify_three_stage(
         object(),
         company_name="Unibuddy",
@@ -268,3 +268,17 @@ async def test_hiring_semantic_review_never_opens_a_third_call(monkeypatch) -> N
     assert result["decision"] == "review"
     assert result["client_ready"] is False
     assert result["rejection_reason"] == "stage3_review"
+
+
+@pytest.mark.asyncio
+async def test_hiring_semantic_pass_cannot_replace_missing_employer_binding(monkeypatch):
+    url = "https://jobs.ashbyhq.com/unibuddy/aac35219-c38c-4490-8050-cee52e7dcf6b"
+    supported = _answer(
+        url=url, status="supported", overall="qualified",
+        supporting_quotes=[FOCUS_QUOTE, DUTY_QUOTE], unsupported_parts=[],
+    )
+    result, judge = await _verify(monkeypatch, _answer(url=url), supported, url=url)
+    assert judge.await_count == 2
+    assert result["client_ready"] is False
+    assert result["decision"] == "review"
+    assert result["rejection_reason"] == "stage3_identity_unresolved"

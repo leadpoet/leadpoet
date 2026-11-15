@@ -22,7 +22,7 @@ from tests.lab_arena.test_lab_arena_promotion_migration_postgres import (
     connections,
     database as historical_promotion_database,
 )
-from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.lab_arena_pg_harness import current_service_database, prepare_correction_reward_history_reads
 from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     BASELINE,
     MINER_A,
@@ -128,6 +128,7 @@ def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
 
 def _new_store(database, request) -> ArenaStore:
     psycopg2, dsn = database
+    prepare_correction_reward_history_reads(lambda: psycopg2.connect(**dsn))
     store = ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
     request.addfinalizer(store.close)
     return store

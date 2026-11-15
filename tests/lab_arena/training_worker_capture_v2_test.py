@@ -34,6 +34,7 @@ def test_worker_socket_receipt_web_text_state_and_lease_bound_snapshot(tmp_path,
                                 "messages": [{"role": "user", "content": "check this"}], "max_tokens": 20}, 1000,
         )
         assert (status, returned) == (200, body)
+        assert server.wait_for_handlers()
         receipt = state.worker_observations.response_receipts[0]
         assert receipt["write_state"] == "socket_written" and receipt["socket_written_at"]
         assert receipt["body_sha256"] == "sha256:" + hashlib.sha256(body).hexdigest()
@@ -97,6 +98,7 @@ def test_uncertain_provider_error_keeps_observation_and_exact_read_receipt(tmp_p
             "openrouter.chat", {"model": "openai/gpt-4o-mini",
                                 "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000)
         assert status == 503
+        assert server.wait_for_handlers()
         receipt = state.worker_observations.response_receipts[0]
         assert headers[shim.CALL_IDENTITY_HEADER] == receipt["call_identity"]
         assert receipt["write_state"] == "socket_written"

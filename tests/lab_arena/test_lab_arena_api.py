@@ -204,8 +204,17 @@ def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError, 520, 521, 522, 523, 524])
 @pytest.mark.parametrize("recovers", [True, False])
 def test_current_handles_failed_reward_basis_read(error_type, recovers):
+    _current_read_case(error_type, recovers)
+
+
+def test_current_fails_closed_when_correction_reward_history_is_unavailable():
+    _current_read_case(httpx.ReadError, True, archive_available=False)
+
+
+def _current_read_case(error_type, recovers, *, archive_available=True):
     """Exercise the production /current -> reward-basis SELECT failure path."""
     reward_reads = []
+    archive_reads = []
     configuration = {"mode": "live", "network_name": "finney", "netuid": 71,
                      "schedule": {"submission_open": "2026-09-10T00:00:00Z",
                                   "submission_cutoff": "2026-09-11T00:00:00Z"}}
@@ -213,6 +222,16 @@ def test_current_handles_failed_reward_basis_read(error_type, recovers):
     published = {"round_id": "arena-2026-09-10", "status": "published", "configuration_doc": configuration, "published_at": "2026-09-10T11:15:32Z"}
 
     def handler(request):
+        if request.method == 'POST':
+            assert request.url.path == '/rest/v1/rpc/lab_arena_correction_reward_history_v1'
+            assert json.loads(request.content) == {
+                'p_mode': 'live', 'p_network_name': 'finney', 'p_netuid': 71,
+                'p_limit': 200, 'p_offset': 0, 'p_public_only': True,
+            }
+            archive_reads.append(request)
+            if not archive_available:
+                raise httpx.ReadError('private database diagnostic', request=request)
+            return httpx.Response(200, json=[])
         assert request.method == "GET"
         assert request.url.path == "/rest/v1/lab_arena_rounds"
         assert request.url.params["configuration_doc->>mode"] == "eq.live"
@@ -244,7 +263,8 @@ def test_current_handles_failed_reward_basis_read(error_type, recovers):
         with TestClient(create_app(service)) as http:
             response = http.get("/arena/v1/current")
     assert len(reward_reads) == 2
-    if recovers:
+    assert len(archive_reads) == (1 if recovers else 0)
+    if recovers and archive_available:
         assert response.status_code == 200
         body = response.json()
         assert body["open_round"]["round_id"] == active["round_id"]

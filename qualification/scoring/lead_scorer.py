@@ -1218,6 +1218,25 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
     # its wholly owned subsidiary result. A buyer or another named party does
     # not inherit that target's stage. The shared uncertainty guards still run.
     _COMPLETED_MERGER_SURVIVOR_RE,
+    # Active past-tense proof binds the acquired object, never the buyer.
+    # Keep the full object so assets, products and longer names cannot become
+    # aliases for the investigated company. Shared completion guards still run.
+    re.compile(
+        r"\bacquired\s+(?:"
+        r"(?:100\s*%\s+of(?:\s+(?:the\s+)?(?:issued\s+and\s+)?"
+        r"(?:outstanding\s+)?(?:equity|shares?|stock|ownership\s+interests?)"
+        r"\s+(?:of|in))?|all\s+(?:of\s+)?(?:the\s+)?"
+        r"(?:issued\s+and\s+)?(?:outstanding\s+)?"
+        r"(?:equity|shares?|stock|ownership\s+interests?)\s+(?:of|in))"
+        r"\s+(?:(?:[a-z][a-z.'’ -]{0,40},\s+)?"
+        r"[a-z][a-z.'’ -]{0,40}-based\s+)?)?"
+        r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r"(?=\s+(?:on|for|after|from|in)\b|"
+        r"\s+and\s+an?\s+affiliated\s+entity\b|[,;.!?\n]|$)"
+        r"(?!\s*,\s*(?:an?|the)\s+(?:[\w-]+\s+){0,3}"
+        r"(?:product|assets?|brands?)\s+of\b)",
+        re.I,
+    ),
     re.compile(
         r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
         r"(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",
@@ -13293,10 +13312,6 @@ def _matched_company_source_contexts(
         getattr(submitted_attribute, "evidence_url", None)
     )
     submitted_quote = getattr(submitted_attribute, "evidence_quote", None)
-    submitted_name = (
-        _compact_company_name(company.company_name)
-        if company is not None else ""
-    )
     identity = verified_identity_receipt([company_fit.receipt("company_fit")])
     source_entry = (
         matched_company_source_cache.get(submitted_url)
@@ -13305,32 +13320,26 @@ def _matched_company_source_contexts(
         <= _max_retained_investigator_contexts()
         else None
     )
+    # Use the paragraph consumer's visible body and identity binding. Locator
+    # metadata can contain the company name but cannot admit an optional page.
+    submitted_context = (
+        _validated_first_party_source_context(
+            submitted_url, source_entry, identity,
+            company_name=company.company_name,
+        )
+        if company is not None else None
+    )
     if (
         company is not None
         and company_fit.decision == COMPANY_FIT_MATCH
-        and submitted_name
-        and isinstance(identity, Mapping)
-        and submitted_url.startswith("https://")
-        and _registrable_domain(submitted_url)
-        == str(identity.get("observed_domain") or "").casefold()
+        and submitted_context is not None
         and isinstance(submitted_quote, str)
-        and isinstance(source_entry, Mapping)
-        and set(source_entry) == {"final_url", "text"}
-        and isinstance(source_entry["final_url"], str)
-        and source_entry["final_url"].startswith("https://")
-        and _valid_web_evidence_url(source_entry["final_url"])
-        == source_entry["final_url"]
-        and _registrable_domain(source_entry.get("final_url"))
-        == _registrable_domain(submitted_url)
-        and isinstance(source_entry.get("text"), str)
-        and 0 < len(source_entry["text"]) <= MAX_PAGE_CHARACTERS
-        and _quote_occurs(submitted_quote, source_entry["text"])
-        and submitted_name in _compact_company_name(source_entry["text"])
+        and _quote_occurs(submitted_quote, submitted_context["text"])
     ):
         contexts.append({
             "dimension": "first_party_company",
             "url": submitted_url,
-            "text": source_entry["text"],
+            "text": submitted_context["text"],
         })
     auxiliary = _matched_first_party_source_context(
         company_fit, matched_company_source_cache, company, paragraph=paragraph,

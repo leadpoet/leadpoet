@@ -210,11 +210,11 @@ def reward_basis_policy_projection_document(
 def legacy_slot_allocation_projection_document(
     source: Mapping[str, Any], weekly_slot_decay: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Keep one verified legacy model's slot shares in an otherwise new basis.
+    """Keep one verified legacy award's slot shares in an otherwise new basis.
 
     The issuer verifies the signed source and the model bytes before calling
-    this builder. The signed per-model clock is the proof of uninterrupted
-    tenure, including when the model is submitted again under a new ID.
+    this builder. The signed slot clock proves retained historical tenure. A newly
+    qualifying award receives a fresh clock even if its model bytes match.
     """
     source = validate_reward_basis(source)
     if source.get("slot_policy") != REWARD_SLOT_POLICY_NOV11:

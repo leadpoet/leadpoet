@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Supplemental Arena recovery backups in account 493765492819, us-east-1.
+  Creates backup resources only; does not change source databases, volumes,
+  clients or native 14-day RDS PITR. Inspect existing plans before deployment.
+
+# AWS references:
+# https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AWSBackupServiceRolePolicyForBackup.html
+# https://docs.aws.amazon.com/aws-backup/latest/devguide/encryption.html
+# https://docs.aws.amazon.com/aws-backup/latest/devguide/vault-lock.html
+# RDS and EBS snapshots inherit source encryption. In particular, validator
+# and dashboard volumes are unencrypted; this vault does not encrypt them.
+# EBS snapshots are crash-consistent, not proof of application-level recovery.
+# This is same-account, same-region protection, not regional disaster recovery.
+Parameters:
+  EnableComplianceVaultLock:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      When true, compliance lock becomes irreversible after seven days.
+      Recovery points expire after their finite 14-day or 35-day retention.
+
+Conditions:
+  UseComplianceVaultLock: !Equals [!Ref EnableComplianceVaultLock, 'true']
+
+Resources:
+  RecoveryVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: leadpoet-arena-recovery
+      # Omit EncryptionKeyArn to use the default AWS-managed aws/backup key.
+      # It does not override RDS/EBS source encryption or create a customer key.
+      LockConfiguration: !If
+        - UseComplianceVaultLock
+        - ChangeableForDays: 7
+          MinRetentionDays: 7
+          MaxRetentionDays: 90
+        - !Ref AWS::NoValue
+      BackupVaultTags:
+        Purpose: arena-recovery
+      AccessPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyCrossAccountCopyIntoVault
+            Effect: Deny
+            Principal: '*'
+            Action: backup:CopyIntoBackupVault
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                aws:PrincipalAccount: '493765492819'
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Back up only the Arena database and three inventoried volumes.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: '493765492819'
+              ArnLike:
+                aws:SourceArn: arn:aws:backup:us-east-1:493765492819:*
+      Policies:
+        - PolicyName: ExactArenaBackupSources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Describe APIs require wildcard resources; all writes are below.
+              - Sid: ReadBackupSourceMetadata
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBSnapshots
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeTags
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
+              - Sid: CreateArenaDatabaseSnapshots
+                Effect: Allow
+                Action: rds:CreateDBSnapshot
+                Resource:
+                  - arn:aws:rds:us-east-1:493765492819:db:leadpoet-subnet-arena
+                  - arn:aws:rds:us-east-1:493765492819:snapshot:awsbackup:*
+              - Sid: ReadArenaDatabaseTags
+                Effect: Allow
+                Action: rds:ListTagsForResource
+                Resource:
+                  - arn:aws:rds:us-east-1:493765492819:db:leadpoet-subnet-arena
+                  - arn:aws:rds:us-east-1:493765492819:snapshot:awsbackup:*
+              - Sid: TagBackupDatabaseSnapshots
+                Effect: Allow
+                Action: rds:AddTagsToResource
+                Resource: arn:aws:rds:us-east-1:493765492819:snapshot:awsbackup:*
+              - Sid: ExpireOwnDatabaseSnapshots
+                Effect: Allow
+                Action: rds:DeleteDBSnapshot
+                Resource: arn:aws:rds:us-east-1:493765492819:snapshot:awsbackup:*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/leadpoet:backup-scope: arena-recovery
+              - Sid: SnapshotExactVolumes
+                Effect: Allow
+                Action: ec2:CreateSnapshot
+                Resource:
+                  - arn:aws:ec2:us-east-1:493765492819:volume/vol-0606194d5d5ed165d
+                  - arn:aws:ec2:us-east-1:493765492819:volume/vol-0062edbcc50396de8
+                  - arn:aws:ec2:us-east-1:493765492819:volume/vol-0bf023922624c5f40
+              # Snapshot ARNs omit the account ID (AWS Backup ARN format).
+              # CreateSnapshot also authorizes the exact source volume above.
+              - Sid: CreateVolumeSnapshotResources
+                Effect: Allow
+                Action: ec2:CreateSnapshot
+                Resource: arn:aws:ec2:us-east-1::snapshot/*
+              - Sid: TagNewVolumeSnapshots
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: arn:aws:ec2:us-east-1::snapshot/*
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: CreateSnapshot
+              - Sid: TagBackupVolumeSnapshots
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: arn:aws:ec2:us-east-1::snapshot/*
+                Condition:
+                  'Null':
+                    aws:ResourceTag/aws:backup:source-resource: 'false'
+                  StringEquals:
+                    ec2:Owner: '493765492819'
+              - Sid: ExpireOwnVolumeSnapshots
+                Effect: Allow
+                Action: ec2:DeleteSnapshot
+                Resource: arn:aws:ec2:us-east-1::snapshot/*
+                Condition:
+                  'Null':
+                    aws:ResourceTag/aws:backup:source-resource: 'false'
+                  StringEquals:
+                    ec2:Owner: '493765492819'
+                    aws:ResourceTag/leadpoet:backup-scope: arena-recovery
+              - Sid: ReadDestinationVault
+                Effect: Allow
+                Action: backup:DescribeBackupVault
+                Resource: !GetAtt RecoveryVault.BackupVaultArn
+              - Sid: TagAccountRecoveryPoints
+                Effect: Allow
+                Action: backup:TagResource
+                Resource: arn:aws:backup:us-east-1:493765492819:recovery-point:*
+              - Sid: DescribeExactSourceKeys
+                Effect: Allow
+                Action: kms:DescribeKey
+                Resource:
+                  - arn:aws:kms:us-east-1:493765492819:key/89c50b1b-cb4e-463b-a4f1-b6025276f332
+                  - arn:aws:kms:us-east-1:493765492819:key/5cba544d-bb01-4dca-849a-559ca365434d
+              - Sid: GrantExactSourceKeysToAwsResources
+                Effect: Allow
+                Action: kms:CreateGrant
+                Resource:
+                  - arn:aws:kms:us-east-1:493765492819:key/89c50b1b-cb4e-463b-a4f1-b6025276f332
+                  - arn:aws:kms:us-east-1:493765492819:key/5cba544d-bb01-4dca-849a-559ca365434d
+                Condition:
+                  Bool:
+                    kms:GrantIsForAWSResource: 'true'
+              - Sid: UseGatewayVolumeKeyThroughEc2
+                Effect: Allow
+                Action:
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:ReEncryptFrom
+                  - kms:ReEncryptTo
+                Resource: arn:aws:kms:us-east-1:493765492819:key/5cba544d-bb01-4dca-849a-559ca365434d
+                Condition:
+                  StringEquals:
+                    kms:ViaService: ec2.us-east-1.amazonaws.com
+                  ForAnyValue:StringEquals:
+                    kms:EncryptionContextKeys: aws:ebs:id
+
+  DatabaseBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: leadpoet-arena-database-daily
+        BackupPlanRule:
+          - RuleName: DatabaseDaily35Days
+            TargetBackupVault: !Ref RecoveryVault
+            # UTC; outside the native 09:00-09:30 RDS backup window.
+            ScheduleExpression: cron(0 11 * * ? *)
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 360
+            EnableContinuousBackup: false
+            Lifecycle:
+              DeleteAfterDays: 35
+            RecoveryPointTags:
+              leadpoet:backup-scope: arena-recovery
+      BackupPlanTags:
+        Purpose: arena-recovery
+  DatabaseBackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref DatabaseBackupPlan
+      BackupSelection:
+        SelectionName: ExactArenaDatabase
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - arn:aws:rds:us-east-1:493765492819:db:leadpoet-subnet-arena
+
+  VolumeBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: leadpoet-arena-volumes-daily
+        BackupPlanRule:
+          - RuleName: VolumesDaily14Days
+            TargetBackupVault: !Ref RecoveryVault
+            ScheduleExpression: cron(0 12 * * ? *)
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            EnableContinuousBackup: false
+            Lifecycle:
+              DeleteAfterDays: 14
+            RecoveryPointTags:
+              leadpoet:backup-scope: arena-recovery
+      BackupPlanTags:
+        Purpose: arena-recovery
+  VolumeBackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref VolumeBackupPlan
+      BackupSelection:
+        SelectionName: ExactGatewayValidatorDashboardVolumes
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - arn:aws:ec2:us-east-1:493765492819:volume/vol-0606194d5d5ed165d
+          - arn:aws:ec2:us-east-1:493765492819:volume/vol-0062edbcc50396de8
+          - arn:aws:ec2:us-east-1:493765492819:volume/vol-0bf023922624c5f40
+
+Outputs:
+  RecoveryVaultName:
+    Value: !Ref RecoveryVault
+  RecoveryVaultArn:
+    Value: !GetAtt RecoveryVault.BackupVaultArn
+  BackupRoleArn:
+    Value: !GetAtt BackupRole.Arn
+  DatabaseBackupPlanId:
+    Value: !Ref DatabaseBackupPlan
+  VolumeBackupPlanId:
+    Value: !Ref VolumeBackupPlan

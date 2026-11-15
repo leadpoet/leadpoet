@@ -133,7 +133,12 @@ def test_weight_state_postgrest_and_psycopg_query_contracts():
             "https://example.test", service_key="sb_secret_test", http_client=http,
         ))
         assert service.public_weight_state(101) == {"state": None, "lookup_ok": True}
-    assert len(requests) == 1
+    assert len(requests) == 2
+    assert requests[1].url.path == '/rest/v1/rpc/lab_arena_correction_reward_history_v1'
+    assert json.loads(requests[1].content) == {
+        'p_mode': 'live', 'p_network_name': 'finney', 'p_netuid': 71,
+        'p_limit': 200, 'p_offset': 0, 'p_public_only': True,
+    }
     params = requests[0].url.params
     assert requests[0].url.path == "/rest/v1/lab_arena_rounds"
     assert params["select"] == (
@@ -152,13 +157,16 @@ def test_weight_state_postgrest_and_psycopg_query_contracts():
         def __exit__(self, *_args): pass
         def execute(self, sql, values): queries.append((sql, values))
         def fetchall(self): return []
+        def fetchone(self): return ([],)
 
     direct = object.__new__(PsycopgTransport)
     direct._acquire = lambda: SimpleNamespace(cursor=lambda: Cursor())
     direct._release = lambda _connection: None
     service._store = ArenaStore(direct)
     assert service.public_weight_state(101) == {"state": None, "lookup_ok": True}
-    assert len(queries) == 1
+    assert len(queries) == 2
+    assert 'public.lab_arena_correction_reward_history_v1(' in queries[1][0]
+    assert queries[1][1] == ['live', 'finney', 71, 200, 0, True]
     sql, values = queries[0]
     assert "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc" in sql
     assert "\"configuration_doc\"," not in sql

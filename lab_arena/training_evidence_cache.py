@@ -69,7 +69,10 @@ def validate_use(*, use, row, judge, scoring_input, company_index, signal_index,
     if not found:
         raise ValueError("evidence_original_input_mismatch")
 
-    current = scope(judge, scoring_input, company_index, signal_index)
+    # A whole-company cache hit carries the originating judge's accepted use.
+    # Check the selected company's content under that use's runtime identity;
+    # a later reviewer runtime does not relabel the original evidence.
+    current = scope(use_judge, scoring_input, company_index, signal_index)
     accepted = scope(use_judge, frozen(use_judge), use["company_index"], use["signal_index"])
     if current != accepted or any(current.get(key) != original.get(key) for key in (
             "family_doc", "family_hash", "evidence_input", "evidence_hash")):

@@ -393,9 +393,24 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
                          and (not part.get('annotations') or _hosted_search_declared(body)
                               or _hosted_search_history(body.get('input')))
                          for part in item['content']), 'assistant_shape_unsupported')
+            validation_item = item
+            # Provider output can include boolean citation metadata that is not
+            # part of the inbound operation schema. Validate that field here,
+            # then check all remaining fields through the unchanged schema.
+            # Copy only when needed; the original item remains the exact target.
+            for pi, part in enumerate(item['content']):
+                annotations = part.get('annotations', [])
+                _require(isinstance(annotations, list), 'assistant_shape_unsupported')
+                for ai, citation in enumerate(annotations):
+                    _require(isinstance(citation, dict), 'assistant_shape_unsupported')
+                    if 'uncited' in citation:
+                        _require(type(citation['uncited']) is bool, 'assistant_shape_unsupported')
+                        if validation_item is item:
+                            validation_item = copy.deepcopy(item)
+                        validation_item['content'][pi]['annotations'][ai].pop('uncited', None)
             try:
                 operations.validate_operation_request('openrouter.responses', {
-                    'model': body['model'], 'input': [item],
+                    'model': body['model'], 'input': [validation_item],
                 }, allow_full_thinking=allow_reasoning_history)
             except operations.OperationError as exc:
                 raise ValueError('assistant_shape_unsupported') from exc
@@ -483,7 +498,7 @@ def _worker_artifact(example, call, *, allow_journal_prefix=False):
     if field is None:
         return (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
     kind = ('execute' if run_id == example.get('run_id') else
-            'score' if run_id == example.get('score_run_id') or _failed_judge_attempt(example, call) else None)
+            'score' if run_id == example.get('score_run_id') or _unlabeled_judge_attempt(example, call) else None)
     _require(field == 'partial_worker_observation_artifacts' and allow_journal_prefix
              and training_coverage.uses_host_result_evidence(example.get('configuration') or {})
              and kind is not None, 'worker_journal_prefix_unavailable')
@@ -739,17 +754,31 @@ def _individual_run_input_valid(example, identity, kind, *, allow_absent=False):
     return True
 
 
-def _failed_judge_attempt(example, call):
-    """A failed attempt can prove an individual reply, never a final judgment."""
+def _unlabeled_judge_attempt(example, call):
+    """Bind an individual judge reply without assigning final-label authority."""
     try:
         identity = call.get('run_id')
         attempts = [row for row in example.get('attempts') or [] if row.get('run_id') == identity]
         if (len(attempts) != 1 or attempts[0].get('kind') != 'score'
-                or attempts[0].get('status') != 'failed'
+                or attempts[0].get('status') not in {'failed', 'accepted'}
                 or attempts[0].get('scored_run_id') != example.get('run_id')
                 or not _individual_run_input_valid(example, identity, 'score')):
             return False
         attempt = attempts[0]
+        if attempt['status'] == 'accepted':
+            # Native export can retain an accepted judge whose final label
+            # could not be verified. Prove its source/output and both inputs;
+            # an unavailable label never supplies evidence for these bytes.
+            from lab_arena import training_thinking
+            source = [row for row in example.get('attempts') or []
+                      if row.get('run_id') == example.get('run_id')]
+            if (attempt.get('terminal_cause') != 'accepted'
+                    or len(source) != 1 or source[0].get('status') != 'accepted'
+                    or 'icp' not in example['input_snapshots'][identity]['input']
+                    or not _individual_run_input_valid(example, example.get('run_id'), 'execute')
+                    or not training_thinking.verified_output_projection(example)
+                    or training_thinking._partial_research_evidence(example, role='judge') is None):
+                return False
         gaps = ((example.get('related_run_gap_attribution') or {}).get(identity) or {}).get(
             'research_process_gaps') or []
         if 'prior_attempt_reviewer_runtime_identity_unverified' in gaps:
@@ -780,8 +809,9 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
                     if row.get('run_id') == example.get('score_run_id')]
         accepted = (call.get('run_id') == example.get('score_run_id')
                     and len(selected) == 1 and selected[0].get('kind') == 'score'
-                    and selected[0].get('status') == 'accepted')
-        _require(accepted or _failed_judge_attempt(example, call), 'not_selected_judge_call')
+                    and selected[0].get('status') == 'accepted'
+                    and bool(example.get('judgment')))
+        _require(accepted or _unlabeled_judge_attempt(example, call), 'not_selected_judge_call')
     else:
         _require(role == 'source', 'invalid_target_role')
         _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
@@ -796,14 +826,11 @@ def _model_request(example, call, *, worker_proofs=None, role='source'):
             configuration = training_dataset.label_scorer_configuration(example)
             policy = contracts.validate_scorer_policy(configuration.get('scorer_policy'))
             registry = configuration.get('judge_reasoning_route_registry', configuration.get('reasoning_route_registry'))
-            plan = reasoning_capture.validate_judge_provider_routing(
-                configuration.get('judge_provider_routing'), registry, policy)
-            model = annotation.get('model_id')
-            primary = json.loads(policy['env_bindings'][contracts.JUDGE_PROVIDER_ROUTES_BINDING]).get(model)
-            transport_routes = plan.get(model)
-            _require(primary == annotation.get('provider_route') and annotation['judge_provider_routing'] ==
-                     reasoning_capture.judge_transport_candidates(annotation, registry, transport_routes),
-                     'request_provider_route_mismatch')
+            try:
+                transport_routes = reasoning_capture.recorded_judge_transport_routes(
+                    annotation, registry, configuration.get('judge_provider_routing'), policy)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                _require(False, 'request_provider_route_mismatch')
         _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route'),
                                                              transport_routes=transport_routes),
                  'request_provider_route_mismatch')
@@ -896,12 +923,25 @@ def _training_provenance(example):
     }
 
 
+def _source_outcome_unavailable(example):
+    if not example.get('judgment'):
+        return False
+    from lab_arena import training_thinking
+    return training_thinking._partial_research_evidence(
+        example, allow_judge_input_gap=True) is not None
+
+
 def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_journal_prefix=False,
-               role='source'):
+               role='source', source_outcome_unavailable=None):
     # Individual exporters may retain a proven prefix pair. The full-ICP
     # eligibility caller keeps the default final-snapshot requirement.
     op, body, tools = _model_request(example, call, worker_proofs=worker_proofs, role=role)
-    failed_judge = role == 'judge' and _failed_judge_attempt(example, call)
+    unlabeled_judge = role == 'judge' and _unlabeled_judge_attempt(example, call)
+    unlabeled_outcome = unlabeled_judge or not example.get('judgment')
+    if role == 'source' and example.get('judgment'):
+        if source_outcome_unavailable is None:
+            source_outcome_unavailable = _source_outcome_unavailable(example)
+        unlabeled_outcome |= source_outcome_unavailable
     request = call.get('request') or {}
     _require(set(call.get('response_privacy_redactions') or []) <= {'hidden_reasoning'}
              and 'response_privacy_nonexact' not in (call.get('evidence_gaps') or []),
@@ -994,9 +1034,10 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
             'icp_sha256': contracts.document_hash(example.get('icp') or {}),
             'scored_output_sha256': contracts.document_hash(example['output']) if 'output' in example else None,
             'judgment_sha256': (contracts.document_hash(example.get('judgment') or {})
-                                if call['run_id'] == example.get('score_run_id') else None),
-            **({'attempt_status': 'failed', 'outcome_availability': 'unavailable'}
-               if failed_judge else {}),
+                                if call['run_id'] == example.get('score_run_id') and not unlabeled_outcome else None),
+            **({'attempt_status': next(row['status'] for row in example['attempts']
+                                      if row['run_id'] == call['run_id']),
+                'outcome_availability': 'unavailable'} if unlabeled_outcome else {}),
             'scorer_policy_sha256': contracts.document_hash(configuration.get('scorer_policy') or {}),
             'scorer_image_digest': configuration.get('scorer_image_digest'),
             'evidence_scope': 'exact_provider_visible_input',
@@ -1005,11 +1046,12 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                 'worker_receipt_ref', {}).get('payload_sha256'),
             'provider_call_sequence': call.get('action_sequence')}}
     provenance = _training_provenance(example)
-    if failed_judge:
+    if unlabeled_outcome:
         # This target has no final label. The raw export still retains any
         # later accepted episode outcome, without assigning it to this reply.
         provenance['label_authority'].update(origin='unavailable', input_output_label_verified=False)
         provenance.update(score_run_id=None, judgment_sha256=None, company_outcomes=[])
+    if unlabeled_judge:
         attempt = next(row for row in example['attempts'] if row['run_id'] == call['run_id'])
         runtime = attempt.get('runtime') or {}
         provenance['dates'].update(judge_started_at=runtime.get('started_at'),
@@ -1032,7 +1074,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None, allow_
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
                                                 and example.get('round_status') == 'published'),
                              'outcome': ({'per_icp_score': None, 'score_run_id': None}
-                                         if failed_judge else
+                                         if unlabeled_outcome else
                                          {'per_icp_score': (example.get('judgment') or {}).get('per_icp_score'),
                                           'score_run_id': example.get('score_run_id')}),
                              'training_provenance': provenance,
@@ -1070,6 +1112,7 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
         # assessment does. Calls retain every original validation and byte.
         worker_proofs = training_worker_proof.WorkerProofs()
         example = worker_proofs.prepare(example)
+        source_outcome_unavailable = _source_outcome_unavailable(example) if role == 'source' else False
         for call in example.get('provider_calls') or []:
             if not isinstance(call, dict):
                 counts['malformed_call'] += 1
@@ -1077,9 +1120,11 @@ def _build(examples, rules=None, *, host_observed=False, full_thinking_candidate
                 continue
             try:
                 record = (_candidate(example, call, host_observed=True, worker_proofs=worker_proofs,
-                                     allow_journal_prefix=True, role=role) if host_observed
+                                     allow_journal_prefix=True, role=role,
+                                     source_outcome_unavailable=source_outcome_unavailable) if host_observed
                           else _candidate(example, call, worker_proofs=worker_proofs,
-                                          allow_journal_prefix=True, role=role))
+                                          allow_journal_prefix=True, role=role,
+                                          source_outcome_unavailable=source_outcome_unavailable))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])

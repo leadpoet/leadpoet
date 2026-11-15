@@ -29,7 +29,7 @@ def observed_service():
     service._round = lambda _: row
     service._invalidate_hot_round = lambda: None
     service._reconcile_active_deepline_cost = lambda _: {"status": "none"}
-    service._reconcile_openrouter_cost = lambda _: {"status": "none"}
+    service._reconcile_active_openrouter_cost = lambda _: {"status": "none"}
     service._store = SimpleNamespace(
         operator_hold_active=lambda: False,
         expire_leases=lambda _: None,
@@ -51,7 +51,7 @@ def test_expiry_failure_names_the_step_without_swallowing_or_leaking(observed_se
 
     service._store.expire_leases = fail
     if billing_pending:
-        service._reconcile_openrouter_cost = lambda _: {
+        service._reconcile_active_openrouter_cost = lambda _: {
             "status": "pending", "run_status": "leased",
             "lease_expires_at": (service.now() + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         }

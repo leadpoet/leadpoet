@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import date, datetime, timezone
+from fractions import Fraction
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,8 @@ import pytest
 from lab_arena import rewards, signing, submission_similarity, weight_state, wiring
 from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
 from lab_arena.service import ArenaService, ServiceError
-from leadpoet_canonical import arena_weights
-from tests.lab_arena.slot_decay_kernel_test import ALICE, BURN, HOTKEYS, _basis, _win
+from leadpoet_canonical import arena_weights, lab_arena_rewards as kernel
+from tests.lab_arena.slot_decay_kernel_test import ALICE, BOB, BURN, HOTKEYS, _basis, _win
 from tests.lab_arena.submission_similarity_runtime_test import archive
 
 
@@ -326,7 +327,11 @@ def test_unrecognized_archived_row_alias_cannot_establish_tenure(suffix):
         service.public_weight_state(EPOCH)
     assert data.publish_calls == []
 @pytest.mark.parametrize("changed", [False, True])
-def test_new_promoted_model_identity_controls_same_hotkey_reset(changed):
+@pytest.mark.parametrize("owner", [ALICE, BOB])
+@pytest.mark.parametrize("incorrect_checkpoint", [False, True])
+def test_new_qualifying_award_resets_even_with_same_source_or_old_wrong_checkpoint(
+    changed, owner, incorrect_checkpoint,
+):
     service, data, signer = _harness()
     previous = _previous(data, signer, epoch=29949)
     old_digest = data.submission["source_normalized_sha256"]
@@ -334,7 +339,7 @@ def test_new_promoted_model_identity_controls_same_hotkey_reset(changed):
               "# Repackaged source with identical safe Python structure.\ndef run(icp):\n    return icp.industry\n")
     payload = archive(source)
     inspected = submission_similarity.inspect_archive(payload)
-    fresh = _win(delta=20, start=None, name="new-source", round_id="arena-2026-11-08")
+    fresh = _win(owner, delta=20, start=None, name="new-source", round_id="arena-2026-11-08")
     data.current = signing.sign_document(signer, _basis(
         [deepcopy(fresh) for _ in range(3)], epoch=29950,
         policy=rewards.reward_slot_policy_document(date(2026, 11, 1)),
@@ -346,30 +351,33 @@ def test_new_promoted_model_identity_controls_same_hotkey_reset(changed):
     data.history.insert(0, row)
     data.submission.update(
         round_id=fresh["round_id"], submission_id=fresh["submission_id"],
-        source_size_bytes=len(payload), source_archive_sha256=inspected.archive_sha256,
+        miner_hotkey=owner, source_size_bytes=len(payload), source_archive_sha256=inspected.archive_sha256,
         source_normalized_sha256=inspected.normalized_sha256,
     )
     data.payload = payload
+    if incorrect_checkpoint:
+        previous = _previous(data, signer, epoch=EPOCH - 1)
+    before = deepcopy(previous)
     state = service.public_weight_state(EPOCH)["state"]
     clocks = state["weekly_slot_decay"]["slots"]
-    assert len(data.object_calls) == 1
+    assert len(data.object_calls) == len(data.submission_calls) == 1
     assert len(data.history_calls) == 1
-    if changed:
-        assert inspected.normalized_sha256 != old_digest
-        assert [item["start_epoch"] for item in clocks] == [29950] * 3
-        assert arena_weights.derive_arena_weights(state, HOTKEYS)["champion_share_ppb"] == 500_000_000
-    else:
-        assert inspected.normalized_sha256 == old_digest
-        assert clocks == previous["weekly_slot_decay"]["slots"]
-        assert arena_weights.derive_arena_weights(state, HOTKEYS)["champion_share_ppb"] == 15_625_000
+    assert (inspected.normalized_sha256 != old_digest) == changed
+    assert [item["start_epoch"] for item in clocks] == [29950] * 3
+    assert arena_weights.derive_arena_weights(state, HOTKEYS)["champion_share_ppb"] == 500_000_000
+    assert previous["weekly_slot_decay"]["slots"][0]["start_epoch"] == SOURCE_EPOCH
+    assert previous == before
+    arena_weights.verify_accepted_weight_state_signature(
+        state, public_key_der=signer.public_key_der,
+        expected_public_key_hash=signer.public_key_hash,
+    )
 
 
-def test_truncated_history_cannot_claim_an_older_unproved_start():
+def test_truncated_history_preserves_the_signed_award_epoch():
     service, data, _ = _harness()
     data.history = [deepcopy(data.history[0]) for _ in range(201)]
-    with pytest.raises(ServiceError, match="reward_clock_unavailable"):
-        service.public_weight_state(EPOCH)
-    assert data.publish_calls == []
+    state = service.public_weight_state(EPOCH)["state"]
+    assert [item["start_epoch"] for item in state["weekly_slot_decay"]["slots"]] == [SOURCE_EPOCH] * 3
 
 
 @pytest.mark.parametrize("mode", ["weekly", "legacy", "missing", "unknown_epoch"])
@@ -395,3 +403,89 @@ def test_public_current_reports_only_an_existing_accepted_decay_clock(mode):
         assert "weekly_slot_decay" not in public
     assert data.current == before
     assert data.publish_calls == data.object_calls == data.submission_calls == []
+
+
+@pytest.mark.parametrize("fault", ["archive", "signature"])
+def test_wrong_checkpoint_repair_still_requires_frozen_source_and_signed_history(fault):
+    service, data, signer = _harness()
+    # A previous issuer attached an older model clock to this exact award.
+    bad = {"epochs_per_halving": WEEK, "slots": [
+        {"start_epoch": SOURCE_EPOCH - WEEK,
+         "source_normalized_sha256": data.submission["source_normalized_sha256"]}
+        for _ in range(3)]}
+    previous = weight_state.build_accepted_weight_state(
+        signer, network="finney", genesis_hash="1" * 64, netuid=71, epoch=EPOCH - 1,
+        valid_from_block=BLOCK - 10, valid_until_block=BLOCK, reward_basis=data.current,
+        burn_hotkey=BURN, issued_at=data.current["published_at"], weekly_slot_decay=bad,
+    )
+    data.previous = {key: previous[key] for key in ("network", "netuid", "epoch", "state_hash")}
+    data.previous["state_doc"] = previous
+    if fault == "archive":
+        data.payload = b"invalid frozen archive"
+    else:
+        data.history[-1]["reward_basis_doc"]["signature"]["signature_b64"] = "AAAA"
+    with pytest.raises(ServiceError, match="reward_clock_unavailable"):
+        service.public_weight_state(EPOCH)
+    assert data.publish_calls == []
+
+
+@pytest.mark.parametrize("delta,replaced", [(5, [False, False, True]),
+                                         (10, [False, True, True]),
+                                         (15, [True, True, True])])
+@pytest.mark.parametrize("owner", [ALICE, BOB])
+def test_total_emissions_service_resets_only_qualifying_tiers_for_same_source(
+    monkeypatch, delta, replaced, owner,
+):
+    service, data, signer = _harness()
+    previous = _previous(data, signer, epoch=EPOCH - 51)
+    before = deepcopy(previous)
+    fresh = _win(owner, delta=delta, start=None, name="same-source-rewin",
+                 round_id="arena-2026-11-12")
+    policy = deepcopy(rewards.REWARD_SLOT_POLICY_NOV11)
+    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_, **__: deepcopy(policy))
+    current = _basis([
+        deepcopy(fresh if won else slot)
+        for won, slot in zip(replaced, data.current["reward_slots"])
+    ], epoch=EPOCH - 50, policy=policy, king=owner, round_id=fresh["round_id"])
+    data.current = signing.sign_document(signer, current, hash_field="reward_basis_hash")
+    row = deepcopy(data.history[0])
+    row.update(round_id=fresh["round_id"], effective_reward_epoch=EPOCH - 50,
+               reward_basis_doc=data.current)
+    data.history.insert(0, row)
+    # All new award IDs refer to the exact same frozen source bytes as before.
+    data.submission.update(round_id=fresh["round_id"], submission_id=fresh["submission_id"],
+                           miner_hotkey=owner)
+    state = service.public_weight_state(EPOCH)["state"]
+    clocks = state["weekly_slot_decay"]["slots"]
+    assert [clock["start_epoch"] for clock in clocks] == [
+        EPOCH - 50 if won else SOURCE_EPOCH for won in replaced]
+    assert state["reward_basis"]["slot_policy"] == policy
+    expected = {}
+    for won, share in zip(replaced, [35, 25, 15]):
+        hotkey = owner if won else ALICE
+        share = Fraction(share, 100 * (1 if won else 32))
+        expected[hotkey] = expected.get(hotkey, Fraction(0)) + share
+    assert kernel.slot_allocations(state["reward_basis"], EPOCH, HOTKEYS,
+                                   until_replaced=True, weekly_slot_decay=state["weekly_slot_decay"]) == expected
+    assert arena_weights.derive_arena_weights(state, HOTKEYS)["champion_share_ppb"] == int(
+        sum(expected.values(), Fraction(0)) * 1_000_000_000)
+    assert len(data.object_calls) == len(data.submission_calls) == 1
+    assert previous == before
+
+
+
+def test_already_accepted_epoch_keeps_its_old_wrong_clock_bytes_unchanged():
+    service, data, signer = _harness()
+    clock = {"epochs_per_halving": WEEK, "slots": [
+        {"start_epoch": SOURCE_EPOCH - WEEK,
+         "source_normalized_sha256": data.submission["source_normalized_sha256"]}
+        for _ in range(3)]}
+    accepted = weight_state.build_accepted_weight_state(
+        signer, network="finney", genesis_hash="1" * 64, netuid=71, epoch=EPOCH,
+        valid_from_block=BLOCK, valid_until_block=BLOCK + 100, reward_basis=data.current,
+        burn_hotkey=BURN, issued_at=data.current["published_at"], weekly_slot_decay=clock,
+    )
+    data.existing = {"state_doc": accepted}
+    before = deepcopy(accepted)
+    assert service.public_weight_state(EPOCH)["state"] == before
+    assert data.object_calls == data.submission_calls == data.history_calls == data.publish_calls == []

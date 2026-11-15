@@ -7301,8 +7301,10 @@ def _official_child_structured_profile_lookup(
     web_identity: Mapping[str, Any],
     transport_domain: str,
     homepage_navigation_locators: Sequence[Mapping[str, Any]],
+    *,
+    server_verified_homepage_receipt: bool = False,
 ) -> Mapping[str, str]:
-    """Allow a lookup, never a match, from a fetched root's company-page link."""
+    """Locate a profile from a fetched root's company link or child redirect."""
 
     submitted = str(web_identity.get("submitted_domain") or "")
     observed = str(web_identity.get("observed_domain") or "")
@@ -7310,13 +7312,19 @@ def _official_child_structured_profile_lookup(
     slug = str(web_identity.get("observed_linkedin_slug") or "")
     submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "")
     if (
-        web_identity.get("evidence_source") != "company_web_reverification"
+        web_identity.get("evidence_source") != (
+            "company_homepage" if server_verified_homepage_receipt
+            else "company_web_reverification"
+        )
         or web_identity.get("decision")
-        not in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+        not in ({COMPANY_FIT_UNAVAILABLE} if server_verified_homepage_receipt
+                else {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE})
         or web_identity.get("reason_code")
-        not in {"identity_mismatch", "rebrand_continuity_unproven"}
+        not in ({"identity_not_proven"} if server_verified_homepage_receipt
+                else {"identity_mismatch", "rebrand_continuity_unproven"})
         or not name or name != web_identity.get("submitted_name")
         or not slug or (submitted_slug and submitted_slug != slug)
+        or (server_verified_homepage_receipt and not submitted_slug)
         or not transport_domain or submitted != transport_domain
     ):
         return {}
@@ -7337,6 +7345,12 @@ def _official_child_structured_profile_lookup(
         "registrable_dns_domain": transport_domain,
         "linkedin_company_slug": slug,
     }
+    if server_verified_homepage_receipt:
+        # The homepage verifier observed this exact name/profile at the child
+        # reached from the submitted root. This permits only the existing
+        # profile lookup; its returned raw website must independently bind the
+        # root before any identity or employee-size evidence is admitted.
+        return anchor
     for locator in _validated_homepage_navigation_locators(
         homepage_navigation_locators,
         # This enables bounded locator validation, not a qualification verdict.
@@ -7392,11 +7406,12 @@ def _alias_unresolved_structured_profile_lookup(
         )
         if missing_link_lookup:
             return missing_link_lookup
-        child_lookup = _official_child_structured_profile_lookup(
-            web_identity, transport_domain, homepage_navigation_locators,
-        )
-        if child_lookup:
-            return child_lookup
+    child_lookup = _official_child_structured_profile_lookup(
+        web_identity, transport_domain, homepage_navigation_locators,
+        server_verified_homepage_receipt=server_verified_homepage_receipt,
+    )
+    if child_lookup:
+        return child_lookup
     observed_slug = str(web_identity.get("observed_linkedin_slug") or "").strip()
     submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "").strip()
     expected_source = (
@@ -7526,9 +7541,9 @@ def _structured_profile_alias_identity_receipt(
                          raw_observed_linkedin_slug=web_identity.get("observed_linkedin_slug", ""))
             return bound
     official_child = bool(
-        not server_verified_homepage_receipt
-        and _official_child_structured_profile_lookup(
+        _official_child_structured_profile_lookup(
             web_identity, transport_domain, homepage_navigation_locators,
+            server_verified_homepage_receipt=server_verified_homepage_receipt,
         )
     )
     expected_source = (
@@ -11301,15 +11316,17 @@ async def _llm_reverify_company(
                 collect_employee_size=False,
                 collect_identity=True,
                 preserve_identity_website=bool(
-                    not server_verified_homepage_receipt
-                    and (
+                    (
+                        not server_verified_homepage_receipt
+                        and
                         _missing_link_structured_profile_lookup(
                             lookup_receipt, verified_transport_domain,
                         )
-                        or _official_child_structured_profile_lookup(
-                            lookup_receipt, verified_transport_domain,
-                            verified_homepage_navigation_locators,
-                        )
+                    )
+                    or _official_child_structured_profile_lookup(
+                        lookup_receipt, verified_transport_domain,
+                        verified_homepage_navigation_locators,
+                        server_verified_homepage_receipt=server_verified_homepage_receipt,
                     )
                 ),
             )

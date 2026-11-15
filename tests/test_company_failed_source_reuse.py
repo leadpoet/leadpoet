@@ -125,6 +125,89 @@ def test_recovered_native_source_still_rejects_approximate_count(monkeypatch):
     assert result["observed_employee_count"] is None
 
 
+def test_schema_repair_keeps_successful_headcount_cache_after_attribute_fetch_failure(monkeypatch):
+    headcount_url = "https://acme.example/headcount"
+    attribute_url = "https://acme.example/products"
+    activity = "Acme supplies SaaS software to customers."
+    observation = _complete_verdict(
+        observed_company_linkedin="", observed_employee_count=76,
+        employee_size_evidence_url=headcount_url,
+        employee_size_evidence_quote="Founded 202376 employees",
+        attribute_satisfied=True, required_attribute_evidence_url=attribute_url,
+        required_attribute_evidence_quote=activity,
+    )
+    requests, reads, grounding_inputs = [], [], []
+    original_ground = scorer._ground_employee_size_observation
+
+    async def provider(**kwargs):
+        requests.append(kwargs["telemetry_purpose"])
+        if len(requests) == 1:
+            return {**observation, "observed_hq_country": "", "observed_hq_state": "",
+                    "geography_matches": None, "geography_evidence_quote": ""}, ""
+        return {**observation, "required_attribute_evidence_url": headcount_url}, ""
+
+    async def fetch(_session, url):
+        reads.append(url)
+        if url == headcount_url:
+            if reads.count(url) == 1:
+                return 200, url, "<div>Founded 2023</div><div>76 employees</div>"
+            return 503, url, ""
+        assert url == attribute_url
+        return 200, url, activity
+
+    async def ground(*args, **kwargs):
+        grounding_inputs.append(deepcopy(kwargs))
+        return await original_ground(*args, **kwargs)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(scorer, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(scorer, "_ground_employee_size_observation", ground)
+    result = asyncio.run(scorer._llm_reverify_company(
+        _company(linkedin=""),
+        _icp(employee_count="51-200", required_attribute="Supplies SaaS software to customers."),
+        require_company_fit_dimensions=True,
+    ))
+    assert requests == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair"]
+    assert reads == [attribute_url, headcount_url, headcount_url]
+    assert len(grounding_inputs) == 2
+    repair = grounding_inputs[1]
+    assert repair["source_pages"][headcount_url]["status"] == "source_unavailable"
+    assert repair["invocation_cache"]["employee_size_sources"][headcount_url]["text"]
+    assert result.details["dimension_decisions"]["employee_size"] == "match"
+    assert result.decision == "unavailable"
+    assert result.details["required_attribute_decision"] == "unavailable"
+    assert scorer_breakdown_has_retryable_infrastructure_failure(
+        {"verifier_gate_receipts": [result.receipt("company_fit")]}, integrity_policy=True,
+    )
+
+
+@pytest.mark.parametrize("control", ["valid", "wrong_domain", "approximate"])
+def test_cached_headcount_success_keeps_transport_and_exact_quote_checks(monkeypatch, control):
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("Both existing source records must prevent a new read.")
+
+    monkeypatch.setattr(scorer, "_fetch_bounded_html", forbidden)
+    observation = {**EMERSON_OBSERVATION, "observed_employee_count": 76,
+                   "employee_size_evidence_quote": "Founded 202376 employees"}
+    text = "Founded 2023\n76 employees"
+    if control == "approximate":
+        observation = EMERSON_OBSERVATION
+        text = observation["employee_size_evidence_quote"]
+    cache = {"employee_size_sources": {EMERSON_PDF: {
+        "final_url": "https://other.example/headcount" if control == "wrong_domain" else EMERSON_PDF,
+        "text": text,
+    }}}
+    before = deepcopy(cache)
+    result = asyncio.run(scorer._ground_employee_size_observation(
+        observation, invocation_cache=cache, source_pages={EMERSON_PDF: {
+            "status": "source_unavailable", "text": "", "failure_reason_code": "provider_error",
+        }},
+    ))
+    assert result["observed_employee_count"] == (76 if control == "valid" else None)
+    assert cache == before
+
+
 @pytest.mark.parametrize("recovered", [False, True])
 def test_reverify_still_runs_native_investigation_and_exa(monkeypatch, recovered):
     url = "https://acme.example/brochure.pdf"

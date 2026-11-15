@@ -6175,6 +6175,15 @@ async def _ground_employee_size_observation(
     if not url or not quote or observed is None or token not in compact_quote:
         return _without_employee_size_observation(verdict)
     entry = (source_pages or {}).get(url)
+    if isinstance(entry, Mapping) and entry.get("status") == "source_unavailable":
+        # Attribute grounding already attempted this exact source. Preserve its
+        # transient failure for the existing investigation instead of spending
+        # the headcount read on the same failed source.
+        invocation_cache["refresh_outcome"] = "retryable_failure"
+        invocation_cache[VERIFIER_FAILURE_DETAIL_KEY] = (
+            entry.get(VERIFIER_FAILURE_DETAIL_KEY) or SOURCE_BLOCKED_FAILURE_REASON
+        )
+        return _without_employee_size_observation(verdict)
     if not isinstance(entry, Mapping) or not entry.get("text"):
         sources = invocation_cache.setdefault("employee_size_sources", {})
         entry = sources.get(url)

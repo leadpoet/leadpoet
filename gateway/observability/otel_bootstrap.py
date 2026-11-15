@@ -150,6 +150,7 @@ ARENA_TASK_STAGES = frozenset(
         "advance_open_scoring",
         "advance_close_scoring",
         "advance_score_stage",
+        "advance_frozen_judgment",
         "advance_publish",
     }
 )

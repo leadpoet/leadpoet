@@ -23,6 +23,8 @@ def profile(location):
     ("Montreal, Quebec", "Canada"),
     ("Montréal, Québec", "Canada"),
     ("Toronto, Ontario", "Canada"),
+    ("Washington, Ontario", "Canada"),
+    ("Georgia, Ontario", "Canada"),
     ("London, England", "United Kingdom"),
 ])
 def test_bound_hq_subdivision_reaches_final_validation_and_native_projection(location, country):
@@ -58,6 +60,7 @@ def test_bound_hq_subdivision_reaches_final_validation_and_native_projection(loc
     ("Montreal, Quebec, Australia", "Canada"),
     ("Brisbane, Queensland / Canada", "Australia"),
     ("Brisbane, Queensland", "Canada"),
+    ("Toronto, New York, Quebec", "Canada"),
 ])
 def test_ambiguous_abbreviated_or_conflicting_hq_does_not_supply_country(location, country):
     body, quote = profile(location)
@@ -69,6 +72,7 @@ def test_ambiguous_abbreviated_or_conflicting_hq_does_not_supply_country(locatio
     "London, London", "Seattle", "Melbourne, Victoria", "Darwin, Northern Territory",
     "Brisbane, QLD", "Montreal, QC", "Quebec", "Brisbane, Queensland, Canada",
     "Montreal, Quebec, Australia", "Montreal, Quebec, Unknown",
+    "Toronto, New York, Quebec",
 ])
 def test_native_projection_does_not_select_a_country_from_ambiguous_or_conflicting_hq(location):
     body, _quote = profile(location)

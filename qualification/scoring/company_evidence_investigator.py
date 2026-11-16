@@ -3044,7 +3044,8 @@ def _headquarters_field_subdivision_country(quote: str) -> Optional[str]:
     if not subdivisions:
         return None
     countries = {country for _index, country in subdivisions}
-    for part in parts:
+    # The first component is the city, which may share a state/country name.
+    for part in parts[1:]:
         explicit = _resolve_country(part)
         if explicit:
             countries.add(explicit)

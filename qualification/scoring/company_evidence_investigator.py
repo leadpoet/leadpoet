@@ -7259,6 +7259,25 @@ async def investigate_company_evidence(
                                 source_url=source_url,
                                 source_context=source_context,
                             )
+                        if reason == BOUND_LINKEDIN_HEADQUARTERS_PROOF_REASON:
+                            # The quote excerpt can omit the actual About field.
+                            # Show the existing validator's exact proof, not a
+                            # generic page prefix or an inferred location.
+                            headquarters_field = _linkedin_about_headquarters_field(
+                                fetched_pages.get(source_url, ""),
+                            )
+                            rejected_finding["headquarters_proof"] = {
+                                "about_headquarters_field": headquarters_field,
+                                "submitted_country": submitted.get("observed_country", ""),
+                                "submitted_state": submitted.get("observed_state", ""),
+                                "field_supports_submitted_location": bool(
+                                    headquarters_field and _quote_supports_headquarters(
+                                        headquarters_field,
+                                        observed_country=submitted.get("observed_country", ""),
+                                        observed_state=submitted.get("observed_state", ""),
+                                    )
+                                ),
+                            }
                         if target in {"industry", "required_attribute", "headcount"} and reason in {
                             "source quote did not identify the investigated company",
                             REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
@@ -7702,7 +7721,11 @@ async def investigate_company_evidence(
                                     "headquarters proof did not. Quote its exact About "
                                     "Headquarters field only if that field proves the observed "
                                     "country and required state. Do not infer the country from a city "
-                                    "or substitute generic office locations. Otherwise use qualifying "
+                                    "or substitute generic office locations or mailing addresses. "
+                                    "headquarters_proof contains the exact loaded field and whether "
+                                    "it supports your submitted location. A false result means that "
+                                    "field cannot establish that location; repeating it or combining "
+                                    "it with generic locations does not repair the proof. Otherwise use qualifying "
                                     "already fetched first-party headquarters evidence, or submit "
                                     "explicit UNPROVEN with empty citations when the bounded research "
                                     "does not establish the location. Keep unrelated validated findings. "

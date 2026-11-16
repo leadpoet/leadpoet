@@ -81,6 +81,12 @@ def test_existing_final_repair_preserves_completed_finding(monkeypatch, explicit
             feedback = next(json.loads(m['content']) for m in reversed(payload['messages'])
                             if m.get('role') == 'tool' and 'rejected_findings' in json.loads(m['content']))
             assert feedback['rejected_findings'][0]['reason'] == REASON
+            assert feedback['rejected_findings'][0]['headquarters_proof'] == {
+                'about_headquarters_field': FINDING['evidence_quote'],
+                'submitted_country': 'United Kingdom',
+                'submitted_state': 'London',
+                'field_supports_submitted_location': False,
+            }
             assert 'profile identity passed' in feedback['instruction']
             assert 'Do not infer the country from a city' in feedback['instruction']
             assert 'UNPROVEN' in feedback['instruction']

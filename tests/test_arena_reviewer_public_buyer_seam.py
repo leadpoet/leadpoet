@@ -209,4 +209,3 @@ def test_mode_extracts_only_the_exact_frozen_lead_scorer(monkeypatch, tmp_path):
         reference, tmp_path, public_issuer_buyer_only=True,
     ) == {seam.FINALITY_FILE: ORIGINAL}
     assert [command[:2] for command in commands] == [["docker", "cp"], ["docker", "rm"]]
-

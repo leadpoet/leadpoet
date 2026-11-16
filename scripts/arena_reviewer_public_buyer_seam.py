@@ -9,7 +9,7 @@ REPAIRED_SHA256 = "15275b9a300a24ee6026f89df39597228a6573dfec97ccda2d56c412bd1a4
 HEADQUARTERS_FILE = "qualification/scoring/company_evidence_investigator.py"
 HEADQUARTERS_CORRECTION_ID = "bound_linkedin_headquarters_feedback_v1"
 HEADQUARTERS_ORIGINAL_SHA256 = "ec74bdfb2cc4b657afc301cb183c799985915b25a8151ea056786c933c6113c5"
-HEADQUARTERS_REPAIRED_SHA256 = "e42dce49d117ad95156225cebd1fed1e41d0917f9682198681d3babc5d8a228c"
+HEADQUARTERS_REPAIRED_SHA256 = "36ba690c61c12fa55eb4a679c7fe27b14141eaee1474c9792a7114b896d7f8d5"
 
 _OLD_0 = r'''def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
 '''

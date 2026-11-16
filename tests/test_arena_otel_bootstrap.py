@@ -1199,3 +1199,71 @@ def test_a_broken_recorder_never_breaks_a_provider_call():
         telemetry.note_denial("lease_token_invalid")
     finally:
         telemetry.install_recorder(None)
+
+
+def test_claim_outcome_names_why_a_claim_granted_nothing():
+    """A 200 that leased nothing must say which of the quiet reasons it was."""
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    recorder = configure_arena_otel(app, span_exporter=exp)
+
+    @app.post("/arena/v1/runs/claim")
+    def _claim(status: str):
+        recorder.note_claim_outcome(status)
+        return JSONResponse(status_code=200, content={"status": status})
+
+    with TestClient(app) as client:
+        for status in ("leased", "no_free_slot", "stage_closed", "invented_later"):
+            assert client.post(
+                "/arena/v1/runs/claim", params={"status": status}
+            ).status_code == 200
+
+    spans = exp.get_finished_spans()
+    assert [span.attributes["arena.claim_outcome"] for span in spans] == [
+        "leased", "no_free_slot", "stage_closed", "other",
+    ]
+    # The refusal field keeps its own meaning: none of these is a refusal.
+    assert {span.attributes["arena.denial"] for span in spans} == {"-"}
+
+
+def test_claim_outcome_does_not_leak_onto_another_route():
+    from gateway.observability.otel_bootstrap import _validating_exporter
+    from opentelemetry.context import Context
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.trace import SpanKind
+
+    claim = "/arena/v1/runs/claim"
+    other = "/arena/v1/runs/{run_id}/complete"
+    exp = InMemorySpanExporter()
+    resource = {"service.name": ARENA_SERVICE_NAME}
+    validator = _validating_exporter(
+        exp, allowed_routes=lambda: {claim, other}, expected_resource=resource,
+        scopes={ARENA_HTTP_SCOPE: "arena_http"},
+    )
+    provider = TracerProvider(resource=Resource(resource))
+    provider.add_span_processor(SimpleSpanProcessor(validator))
+    tracer = provider.get_tracer(ARENA_HTTP_SCOPE)
+
+    def emit(route, outcome):
+        span = tracer.start_span("POST " + route, kind=SpanKind.SERVER, context=Context())
+        for key, value in {
+            "http.request.method": "POST", "http.route": route,
+            "http.response.status_code": 200, "arena.denial": "-",
+            "duration_ms": 1.0,
+        }.items():
+            span.set_attribute(key, value)
+        if outcome is not None:
+            span.set_attribute("arena.claim_outcome", outcome)
+        span.end()
+
+    emit(claim, "no_free_slot")
+    emit(other, "no_free_slot")          # not the claim route
+    emit(claim, "a_status_we_never_wrote")  # outside the vocabulary
+    emit(claim, None)
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 2
+    assert spans[0].attributes["arena.claim_outcome"] == "no_free_slot"
+    assert "arena.claim_outcome" not in spans[1].attributes

@@ -610,7 +610,8 @@ ARENA_INTEGRITY_DATE_BLOCK = """ARENA INTEGRITY DATE POLICY (applies to this eva
 - Judge claim support and dates independently. signal_status describes only
   whether the exact source supports the claim and target ICP signal. A harmless
   mismatch with miner_signal_date must not change a supported signal_status.
-- Missing dates alone do not make a supported event unable_to_verify. Return
+- Missing dates alone do not make a supported event partially_supported or
+  unable_to_verify, and do not belong in unsupported_parts. Return
   supported for proven content and no_date_in_content when no date is known;
   the caller separately enforces freshness after bounded evidence recovery.
 - claim_matches_miner_date records consistency only; it is never itself a

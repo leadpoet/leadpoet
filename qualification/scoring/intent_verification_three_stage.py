@@ -4933,6 +4933,58 @@ def _supplied_url_for_miscopied_citation(
     ) else ""
 
 
+def _apply_missing_date_policy(
+    row: Mapping[str, Any], verdict: Dict[str, Any],
+    contents: Mapping[str, Any] | None,
+) -> None:
+    """Keep an explicit date-only gap out of the content-support verdict.
+
+    Integrity rounds already judge missing dates separately. Apply that rule
+    only to a qualified, high-confidence source-grounded verdict whose sole
+    unsupported field is the date; never infer claim support from a URL.
+    """
+    evaluations = verdict.get("signal_evaluations")
+    if not (row.get("_integrity_policy") is True
+            and not row.get("_same_event_resolution")
+            and isinstance(evaluations, list) and len(evaluations) == 1):
+        return
+    item = evaluations[0]
+    missing_date_fields = {"event_date", "date_claim", "event date", "date claim"}
+    missing_date_notes = {
+        "missing_event_date", "no_date_in_content", "no_event_date_in_content",
+        "unsupported_parts:date_claim", "unsupported_parts:event_date",
+    }
+    parts = item.get("unsupported_parts")
+    quotes = item.get("supporting_quotes")
+    used = item.get("evidence_urls_used")
+    pages = (contents or {}).get("results") or []
+    cited_texts = [
+        str(page.get("text") or "") for page in pages
+        if isinstance(page, Mapping) and page.get("url") in (used or [])
+    ]
+    if not (verdict.get("overall_verdict") == "qualified"
+            and verdict.get("overall_confidence") == "high"
+            and not verdict.get("missing_or_risks")
+            and item.get("signal_status") == "partially_supported"
+            and item.get("verification_mode") == "source_grounded"
+            and item.get("same_entity_check") == "pass"
+            and item.get("confidence") == "high"
+            and item.get("claim_matches_miner_date") == "no_date_in_content"
+            and isinstance(parts, list) and parts
+            and all(isinstance(part, str) and part in missing_date_fields for part in parts)
+            and all(note in missing_date_notes for note in item.get("risk_notes") or [])
+            and not item.get("contradicting_quotes")
+            and isinstance(used, list) and used
+            and isinstance(quotes, list) and quotes
+            and all(isinstance(quote, str) and any(
+                _grounded_exact_text(text, quote, min_words=5) for text in cited_texts
+            ) for quote in quotes)):
+        return
+    item["signal_status"] = "supported"
+    item["unsupported_parts"] = []
+    item.setdefault("risk_notes", []).append("Missing date kept separate from claim support.")
+
+
 def _apply_guardrails(
     row: Dict[str, Any], verdict: Dict[str, Any],
     *, restore_miscopied_citations: bool = False,
@@ -4997,6 +5049,7 @@ def _apply_guardrails(
                     "Provider used non-supplied evidence URL or omitted submitted evidence."
                     if stage_urls else "Provider used non-supplied evidence URL."
                 )
+    _apply_missing_date_policy(row, verdict, contents)
     return verdict
 
 

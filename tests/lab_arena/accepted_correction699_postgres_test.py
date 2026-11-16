@@ -187,6 +187,72 @@ def test_invalid_correction_is_atomic(installed,fault):
         p.c.rollback();assert base.snapshot(p)==before
 
 
+def seed_other_cache_consumer(p, status, *, mismatch=None, include_hash=True):
+    """Seed an independent historical claim using the real immutable hit shape."""
+    with p.c.cursor() as q:
+        consumer=old.scalar(q,"SELECT to_jsonb(r) FROM lab_arena_runs r WHERE round_id=%s AND kind='score' AND assignment_id<>%s ORDER BY attempt DESC LIMIT 1",(old.ROUND,p.parent['assignment_id']))
+        hit=old.scalar(q,"SELECT jsonb_build_object('company_index',0,'cache_key',cache_key,'company_input_hash',company_input_hash,'authority_slot',authority_slot,'evidence_hash',evidence_hash,'evidence_doc',evidence_doc) FROM lab_arena_company_judgments WHERE cache_key=%s AND authority_slot=%s",(p.affected[0]['cache_key'],p.affected[0]['authority_slot']))
+        if not include_hash:hit.pop('evidence_hash')
+        if mismatch is not None:hit[mismatch]=99 if mismatch=='authority_slot' else 'sha256:'+'0'*64
+        context={'schema_version':'leadpoet.lab_arena.company_judgment_lease.v1','hits':[hit],'misses':[]}
+        response=None if status=='pending' else {'company_judgment_cache':context}
+        q.execute('ALTER TABLE lab_arena_runs DISABLE TRIGGER lab_arena_runs_terminal')
+        q.execute('SET LOCAL session_replication_role=replica')
+        q.execute("UPDATE lab_arena_runs SET status=%s,terminal_cause=%s,company_judgment_refs=%s::jsonb,claim_response=%s::jsonb,lease_expires_at=clock_timestamp()+interval '1 hour' WHERE run_id=%s",(status,'judge_error' if status=='failed' else None,json.dumps(p.parent['company_judgment_refs']),json.dumps(response),consumer['run_id']))
+        q.execute('SET LOCAL session_replication_role=origin')
+        q.execute('ALTER TABLE lab_arena_runs ENABLE ALWAYS TRIGGER lab_arena_runs_terminal')
+    p.c.commit()
+    return consumer
+
+
+@pytest.mark.parametrize('status',['leased','submitted'])
+@pytest.mark.parametrize('include_hash',[True,False])
+def test_active_other_assignment_holding_affected_hit_blocks_correction(installed,status,include_hash):
+    p=installed
+    seed_other_cache_consumer(p,status,include_hash=include_hash)
+    before=base.snapshot(p)
+    for dry in (True,False):
+        with pytest.raises(p.pg.Error,match='active company consumer'):grant(p,dry=dry)
+        p.c.rollback()
+        assert base.snapshot(p)==before
+
+
+@pytest.mark.parametrize('mismatch',['cache_key','company_input_hash','authority_slot'])
+def test_active_other_assignment_with_different_authority_does_not_block(installed,mismatch):
+    p=installed
+    consumer=seed_other_cache_consumer(p,'leased',mismatch=mismatch)
+    with p.c.cursor() as q:before=old.scalar(q,'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s',(consumer['run_id'],))
+    p.c.commit()
+    assert grant(p)['status']=='granted'
+    with p.c.cursor() as q:assert old.scalar(q,'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s',(consumer['run_id'],))==before
+    p.c.commit()
+
+
+def test_terminal_other_assignment_with_affected_hit_does_not_block(installed):
+    p=installed
+    consumer=seed_other_cache_consumer(p,'failed')
+    with p.c.cursor() as q:before=old.scalar(q,'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s',(consumer['run_id'],))
+    p.c.commit()
+    assert grant(p)['status']=='granted'
+    with p.c.cursor() as q:assert old.scalar(q,'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s',(consumer['run_id'],))==before
+    p.c.commit()
+
+
+def test_pending_unclaimed_other_assignment_uses_corrected_authority_filter(installed):
+    p=installed
+    consumer=seed_other_cache_consumer(p,'pending')
+    with p.c.cursor() as q:before=old.scalar(q,'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s',(consumer['run_id'],))
+    p.c.commit()
+    assert grant(p)['status']=='granted'
+    with p.c.cursor() as q:
+        assert old.scalar(q,'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s',(consumer['run_id'],))==before
+        cache=old.scalar(q,"SELECT lab_arena__prepare_company_judgment_claim_v1(%s,%s,%s,clock_timestamp()+interval '1 hour')",(consumer['run_id'],p.parent['runner_hotkey'],int(consumer['lease_generation'])+1))
+    p.c.commit()
+    assert len(cache['hits'])==1 and cache['hits'][0]['company_index']==1
+    assert len(cache['misses'])==1 and cache['misses'][0]['company_index']==0
+    assert cache['misses'][0]['authority_slot']==1
+
+
 @pytest.mark.parametrize('outcome',['judge_error','expired'])
 def test_finite_child_cannot_loop_or_be_corrected_twice(installed,outcome):
     p=installed;child=grant(p)['child_identity']['run_id'];claim_child(p,child)

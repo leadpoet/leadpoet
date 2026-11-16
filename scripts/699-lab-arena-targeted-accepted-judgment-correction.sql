@@ -11,7 +11,7 @@ DO $installed699$
 DECLARE target RECORD; p RECORD;
 BEGIN
  FOR target IN SELECT * FROM(VALUES
- ('public.lab_arena_correct_accepted_judgment_v1(text,text,text,text,jsonb,jsonb,jsonb,text,text,text,boolean)','6cd05936880a1549b909e8fffd8aeb1897a8aa6e2f607210f1fffd115f3f50c2','v','plpgsql','{lab_arena_owner=X/lab_arena_owner}'),
+ ('public.lab_arena_correct_accepted_judgment_v1(text,text,text,text,jsonb,jsonb,jsonb,text,text,text,boolean)','f07407a9e38a510494b572373357ab78cf425597ac4712d0d0513ec50d20cd76','v','plpgsql','{lab_arena_owner=X/lab_arena_owner}'),
  ('public.lab_arena_retired_accepted_judgment_v1(text)','1f2b3468d4d2b50a69553dc379402b71fb0c60b1b03105e387caaa31034187a8','s','sql','{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}')
  )f(signature,source_sha,volatility,language,acl) LOOP
   SELECT * INTO p FROM pg_proc WHERE oid=to_regprocedure(target.signature);
@@ -235,6 +235,16 @@ BEGIN
    OR company_entry.evidence_hash IS DISTINCT FROM item->>'evidence_hash'
    OR company_entry.scope_doc->>'round_id' IS DISTINCT FROM r.round_id THEN
    RAISE EXCEPTION 'accepted correction immutable company differs'; END IF;
+  -- A leased consumer already holds its hit. Future-claim filtering cannot
+  -- retract it; wait for that native attempt to finish before retiring it.
+  IF EXISTS(SELECT 1 FROM public.lab_arena_runs consumer,
+    jsonb_array_elements(coalesce(consumer.claim_response#>'{company_judgment_cache,hits}','[]')) hit
+    WHERE consumer.round_id=r.round_id AND consumer.kind='score'
+      AND consumer.run_id<>parent.run_id AND consumer.status IN('leased','submitted')
+      AND hit->>'cache_key'=company_entry.cache_key
+      AND hit->>'company_input_hash'=company_entry.company_input_hash
+      AND hit->'authority_slot'=to_jsonb(company_entry.authority_slot)) THEN
+   RAISE EXCEPTION 'accepted correction active company consumer'; END IF;
  END LOOP;
  SELECT coalesce(jsonb_object_agg(j.cache_key||':'||j.authority_slot::TEXT,encode(extensions.digest(to_jsonb(j)::TEXT,'sha256'),'hex')),'{}')
   INTO checkpoints FROM public.lab_arena_company_judgments j

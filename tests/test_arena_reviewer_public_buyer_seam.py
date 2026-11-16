@@ -95,7 +95,7 @@ def test_exclusive_composer_build_and_verification_are_exact_files(monkeypatch, 
     if hq_feedback:
         args += ["--linkedin-headquarters-feedback"]
         expected_original[seam.HEADQUARTERS_FILE] = frozen_source("linkedin_hq_feedback2ec", seam.HEADQUARTERS_FILE)
-        expected_files[seam.HEADQUARTERS_FILE] = (composer.ROOT / seam.HEADQUARTERS_FILE).read_bytes()
+        expected_files[seam.HEADQUARTERS_FILE] = seam.convert_headquarters_feedback(frozen_source("linkedin_hq_feedback2ec", seam.HEADQUARTERS_FILE))
     if verify_existing:
         args += ["--verify-image", candidate_ref]
     monkeypatch.setattr(composer.sys, "argv", args)
@@ -131,7 +131,7 @@ def test_exclusive_composer_build_and_verification_are_exact_files(monkeypatch, 
 
 def test_headquarters_feedback_only_changes_reviewed_diagnostics_and_guidance():
     original = frozen_source("linkedin_hq_feedback2ec", seam.HEADQUARTERS_FILE)
-    corrected = (composer.ROOT / seam.HEADQUARTERS_FILE).read_bytes()
+    corrected = seam.convert_headquarters_feedback(frozen_source("linkedin_hq_feedback2ec", seam.HEADQUARTERS_FILE))
     assert seam.verified_headquarters_feedback(original, corrected) == corrected
     def preserved(source):
         return [ast.dump(node) for node in ast.parse(source).body

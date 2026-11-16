@@ -182,6 +182,9 @@ def stack(tmp_path_factory):
                     ("605-arena-2026-11-03-admission-review-recovery.sql",
                      "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_review605_v1",
                      "DO $patch605_0$"),
+                    ("699-lab-arena-targeted-accepted-judgment-correction.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena_retired_accepted_judgment_v1",
+                     "DO $restore699$"),
                 ):
                     source = (Path(__file__).resolve().parents[2] / "scripts" / migration).read_text()
                     cursor.execute(source[source.index(start):source.index(end)])

@@ -753,7 +753,9 @@ def _has_affirmed_stage_proof(
     return False
 
 
-def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
+def _stage_quote_supports_observation(
+    observed: str, quote: str, *, identity_names: Sequence[str] = (),
+) -> bool:
     """Sanity-check that a quote names evidence specific to the reported stage.
 
     This guard rejects bare category keywords and obvious uncertainty. It does
@@ -799,6 +801,33 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         _ACQUIRED_STAGE_PROOF_PATTERNS,
         reject_historical=True,
     )
+    if public and acquired and identity_names:
+        # Ignore only a completed acquisition of an explicitly different named
+        # target. Keep passive/parent/ambiguous claims and all listing guards.
+        acquisition_text = text
+        for match in reversed(list(_BOUND_ACQUISITION_SUBJECT_PATTERNS[3].finditer(text))):
+            target = match.group("subject")
+            acquisition_clause = _compact_company_name(
+                re.split(r"[.!?;\n]", text[match.start():], maxsplit=1)[0]
+            )
+            if (
+                not re.match(r"(?:the|its|our|their|this|that|it|us|them)\b", target, re.I)
+                and _compact_company_name(target) not in {
+                    "company", "issuer", "registrant", "business", "target",
+                }
+                and _acquired_stage_quote_supports_names((target,), match.group(0))
+                and not any(
+                    _compact_company_name(name) in acquisition_clause
+                    for name in identity_names if _compact_company_name(name)
+                )
+            ):
+                acquisition_text = (
+                    acquisition_text[:match.start()] + " " * (match.end() - match.start())
+                    + acquisition_text[match.end():]
+                )
+        acquired = _has_affirmed_stage_proof(
+            acquisition_text, _ACQUIRED_STAGE_PROOF_PATTERNS, reject_historical=True,
+        )
     proven_ownership_states = [
         state
         for state, proven in (
@@ -1090,7 +1119,9 @@ def _stage_evidence_supports_observation(
     """Apply source and entity guards that require more than quote text."""
 
     normalized_stage = _normalize_company_stage(observed)
-    lexical_support = _stage_quote_supports_observation(normalized_stage, quote)
+    lexical_support = _stage_quote_supports_observation(
+        normalized_stage, quote, identity_names=identity_names,
+    )
     if normalized_stage == "private equity":
         candidate_support = lexical_support or semantic_private_control
         if _ACTIVE_MAJORITY_INVESTMENT_RE.search(quote):

@@ -6,6 +6,10 @@ FINALITY_FILE = "qualification/scoring/lead_scorer.py"
 FROZEN_IMAGE_DIGEST = "sha256:2ec6357b4517b0af50cbece24a2d130afd5f8352e548b0a77f0fa02b33ef0c63"
 ORIGINAL_SHA256 = "f1874c0f8554a92d955067c7833569eb285ca63b425359df3d0c679c97e6b49c"
 REPAIRED_SHA256 = "15275b9a300a24ee6026f89df39597228a6573dfec97ccda2d56c412bd1a4d82"
+HEADQUARTERS_FILE = "qualification/scoring/company_evidence_investigator.py"
+HEADQUARTERS_CORRECTION_ID = "bound_linkedin_headquarters_feedback_v1"
+HEADQUARTERS_ORIGINAL_SHA256 = "ec74bdfb2cc4b657afc301cb183c799985915b25a8151ea056786c933c6113c5"
+HEADQUARTERS_REPAIRED_SHA256 = "e42dce49d117ad95156225cebd1fed1e41d0917f9682198681d3babc5d8a228c"
 
 _OLD_0 = r'''def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
 '''
@@ -59,6 +63,16 @@ DELTAS = ((_OLD_0, _NEW_0), (_OLD_1, _NEW_1), (_OLD_2, _NEW_2),)
 
 class PublicBuyerSeamError(ValueError):
     """The source differs from the independently verified grading file."""
+
+
+def verified_headquarters_feedback(source: bytes, reviewed_source: bytes) -> bytes:
+    """Accept only the reviewed before/after pair; never copy other source drift."""
+    if hashlib.sha256(source).hexdigest() != HEADQUARTERS_ORIGINAL_SHA256:
+        raise PublicBuyerSeamError("unrecognized headquarters feedback source")
+    if hashlib.sha256(reviewed_source).hexdigest() != HEADQUARTERS_REPAIRED_SHA256:
+        raise PublicBuyerSeamError("headquarters feedback differs from reviewed source")
+    compile(reviewed_source, HEADQUARTERS_FILE, "exec")
+    return reviewed_source
 
 
 def convert_public_buyer_seam(source: bytes) -> bytes:

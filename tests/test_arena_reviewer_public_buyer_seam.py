@@ -81,12 +81,21 @@ def test_unknown_or_partial_sources_fail_closed(source):
 
 
 @pytest.mark.parametrize("verify_existing", [False, True])
-def test_exclusive_composer_build_and_verification_are_one_file(monkeypatch, capsys, verify_existing):
+@pytest.mark.parametrize("hq_feedback", [False, True])
+def test_exclusive_composer_build_and_verification_are_exact_files(monkeypatch, capsys, verify_existing, hq_feedback):
     base_ref = "registry.example/reviewer@" + seam.FROZEN_IMAGE_DIGEST
     tag = "registry.example/reviewer:reviewer-" + seam.FROZEN_IMAGE_DIGEST[7:19] + "-" + "c" * 12 + "-public-issuer-buyer"
+    if hq_feedback:
+        tag += "-hq-feedback"
     candidate_ref = "registry.example/reviewer@sha256:" + "b" * 64 if verify_existing else tag
     args = ["build_arena_reviewer_runtime.py", "--grading-image", base_ref,
             "--public-issuer-buyer-only"]
+    expected_original = {seam.FINALITY_FILE: ORIGINAL}
+    expected_files = {seam.FINALITY_FILE: CORRECTED}
+    if hq_feedback:
+        args += ["--linkedin-headquarters-feedback"]
+        expected_original[seam.HEADQUARTERS_FILE] = frozen_source("linkedin_hq_feedback2ec", seam.HEADQUARTERS_FILE)
+        expected_files[seam.HEADQUARTERS_FILE] = (composer.ROOT / seam.HEADQUARTERS_FILE).read_bytes()
     if verify_existing:
         args += ["--verify-image", candidate_ref]
     monkeypatch.setattr(composer.sys, "argv", args)
@@ -99,12 +108,12 @@ def test_exclusive_composer_build_and_verification_are_one_file(monkeypatch, cap
 
     def extract(ref, _destination, **flags):
         assert ref == base_ref
-        assert flags == {"public_issuer_buyer_only": True}
-        return {seam.FINALITY_FILE: ORIGINAL}
+        assert flags == {"public_issuer_buyer_only": True, **({"linkedin_headquarters_feedback": True} if hq_feedback else {})}
+        return expected_original
 
     def verify(ref, digest, files):
         assert ref == candidate_ref and digest == "sha256:overlay"
-        assert files == {seam.FINALITY_FILE: CORRECTED}
+        assert files == expected_files
 
     monkeypatch.setattr(composer, "extract_frozen_sources", extract)
     monkeypatch.setattr(composer, "verify_saved_overlay", verify)
@@ -113,11 +122,32 @@ def test_exclusive_composer_build_and_verification_are_one_file(monkeypatch, cap
     assert composer.main() == 0
     proof = json.loads(capsys.readouterr().out)
     assert proof["grading_image"] == base_ref
-    assert proof["grading_corrections"] == [seam.CORRECTION_ID]
-    assert proof["original_files"] == {seam.FINALITY_FILE: seam.ORIGINAL_SHA256}
-    assert proof["overlay_files"] == {seam.FINALITY_FILE: seam.REPAIRED_SHA256}
+    assert proof["grading_corrections"] == ([seam.HEADQUARTERS_CORRECTION_ID] if hq_feedback else []) + [seam.CORRECTION_ID]
+    assert proof["original_files"] == {name: hashlib.sha256(data).hexdigest() for name, data in expected_original.items()}
+    assert proof["overlay_files"] == {name: hashlib.sha256(data).hexdigest() for name, data in expected_files.items()}
     assert proof["base_layers_unchanged"] is proof["process_configuration_unchanged"] is True
     assert len(builds) == (0 if verify_existing else 1)
+
+
+def test_headquarters_feedback_only_changes_reviewed_diagnostics_and_guidance():
+    original = frozen_source("linkedin_hq_feedback2ec", seam.HEADQUARTERS_FILE)
+    corrected = (composer.ROOT / seam.HEADQUARTERS_FILE).read_bytes()
+    assert seam.verified_headquarters_feedback(original, corrected) == corrected
+    def preserved(source):
+        return [ast.dump(node) for node in ast.parse(source).body
+                if getattr(node, 'name', '') not in {'_validated_findings', 'investigate_company_evidence'}
+                and not (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BOUND_LINKEDIN_HEADQUARTERS_PROOF_REASON' for t in node.targets))]
+    assert preserved(original) == preserved(corrected)
+    for before, after in ((original + b'\n', corrected), (original, corrected + b'\n'), (corrected, corrected)):
+        with pytest.raises(seam.PublicBuyerSeamError):
+            seam.verified_headquarters_feedback(before, after)
+
+
+def test_headquarters_feedback_requires_exact_composition_before_docker(monkeypatch):
+    monkeypatch.setattr(composer.sys, 'argv', ['builder', '--grading-image',
+        'registry.example/base@' + seam.FROZEN_IMAGE_DIGEST, '--linkedin-headquarters-feedback'])
+    with pytest.raises(composer.CompositionError, match='requires the frozen public-buyer repair'):
+        composer.main()
 
 
 @pytest.mark.parametrize("other", [

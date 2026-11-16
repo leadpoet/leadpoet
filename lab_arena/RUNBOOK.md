@@ -604,6 +604,19 @@ pin and every other round setting remain immutable.
 
 ### Frozen grading and repairable reviewer runtime
 
+For the reviewed public-issuer acquisition correction, build and verify with
+`--public-issuer-buyer-only` on the exact checked grading image. This exclusive
+mode applies only PR1249's two predicate changes in `lead_scorer.py`. Both full
+file hashes are pinned in `arena_reviewer_public_buyer_seam.py`; unknown or
+partially changed sources fail closed. The buyer's own current public listing
+must still pass identity, exact-quote, source, uncertainty and supersession
+checks. Acquiring an explicitly different named company does not by itself
+make the buyer private. No prompt, model, dependency, retry limit or other
+source file changes. Register through the existing runtime command only after
+image-layer and positive/negative checks pass. Existing leases, accepted work,
+frozen grading/cache identity, costs and deadlines remain unchanged.
+
+
 For the reviewed identity handoff correction on exact frozen50de, use
 `--submitted-company-context-only --active-acquisition-target --investigator-feedback --ordered-company-retry-passes --identity-handoff`
 for both build and `--verify-image`. The last option requires all four existing

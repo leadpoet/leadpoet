@@ -308,6 +308,7 @@ def extract_frozen_sources(
     identity_repair_before_investigation_only: bool = False,
     identity_repair_finality_only: bool = False,
     completed_merger_survivor_only: bool = False,
+    public_issuer_buyer_only: bool = False,
     source_local_refusal_finality: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
@@ -344,7 +345,7 @@ def extract_frozen_sources(
             names = FILES
         if (empty_domain_negative_finality_only or identity_repair_before_investigation_only
                 or identity_repair_finality_only or completed_merger_survivor_only
-                or submitted_company_context_only):
+                or submitted_company_context_only or public_issuer_buyer_only):
             names = (FINALITY_FILE,)
         if investigator_feedback:
             names += (GRADER_FILE,)
@@ -661,7 +662,16 @@ def main() -> int:
         "--source-local-refusal-finality", action="store_true",
         help="preserve host-proved source refusal on exact frozen810; requires completed-merger-survivor-only",
     )
+    parser.add_argument(
+        "--public-issuer-buyer-only", action="store_true",
+        help="compose only PR1249's verified public buyer/target distinction in one frozen file",
+    )
     args = parser.parse_args()
+    if args.public_issuer_buyer_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"public_issuer_buyer_only", "push"}
+    ):
+        raise CompositionError("public-issuer-buyer-only mode cannot include other corrections")
     if args.identity_handoff and not args.ordered_company_retry_passes:
         raise CompositionError("identity-handoff requires ordered-company-retry-passes")
     if args.ordered_company_retry_passes and not args.investigator_feedback:
@@ -745,6 +755,10 @@ def main() -> int:
         from scripts.arena_reviewer_identity_repair_order_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
             raise CompositionError("identity repair ordering requires the exact frozen b699 image")
+    if args.public_issuer_buyer_only:
+        from scripts.arena_reviewer_public_buyer_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("public buyer correction requires the exact verified grading image")
     if args.push and args.verify_image:
         raise CompositionError("verify does not publish")
     revision = checked_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
@@ -760,7 +774,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.submitted_company_context_only:
+        if args.public_issuer_buyer_only:
+            from scripts.arena_reviewer_public_buyer_seam import convert_public_buyer_seam
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", public_issuer_buyer_only=True,
+            )
+            if set(original) != {FINALITY_FILE}:
+                raise CompositionError("frozen public buyer source is incomplete")
+            files = {FINALITY_FILE: convert_public_buyer_seam(original[FINALITY_FILE])}
+        elif args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_submitted_company_context_seam
             flags = {"submitted_company_context_only": True}
             expected = {FINALITY_FILE}
@@ -949,6 +971,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-identity-repair-finality" if args.identity_repair_finality_only else "")
             + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
+            + ("-public-issuer-buyer" if args.public_issuer_buyer_only else "")
             + ("-source-local-refusal" if args.source_local_refusal_finality else "")
             + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
             + ("-submitted-company-context" if args.submitted_company_context_only else "")
@@ -982,6 +1005,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.public_issuer_buyer_only:
+            from scripts.arena_reviewer_public_buyer_seam import CORRECTION_ID as PUBLIC_BUYER_CORRECTION_ID
+            corrections.append(PUBLIC_BUYER_CORRECTION_ID)
         if args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_CORRECTION_ID
             corrections.append(SUBMITTED_CORRECTION_ID)

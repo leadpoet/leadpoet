@@ -33,6 +33,57 @@ def test_captured_whatnot_date_only_partial_obeys_existing_integrity_policy():
     assert item["unsupported_parts"] == []
 
 
+def test_grounded_citation_repair_composes_with_date_only_policy():
+    row, verdict, contents = _inputs()
+    item = verdict["signal_evaluations"][0]
+    item["evidence_urls_used"] = [URL + "s"]
+    original_quotes = list(item["supporting_quotes"])
+    result = verifier._apply_guardrails(
+        row, verdict, restore_miscopied_citations=True, contents=contents,
+    )
+    assert verifier._decision(result, company_quality=True) == "approve"
+    assert item["evidence_urls_used"] == [URL]
+    assert item["supporting_quotes"] == original_quotes
+    assert item["signal_status"] == "supported"
+    assert item["unsupported_parts"] == []
+    assert item["claim_matches_miner_date"] == "no_date_in_content"
+    assert "Restored a miscopied supplied evidence URL." in item["risk_notes"]
+    assert not any(note.startswith("source_event_date:") for note in item["risk_notes"])
+
+
+@pytest.mark.parametrize("defect", [
+    "substantive_gap", "contradiction", "date_contradiction", "source_mismatch",
+    "other_risk", "old_source_date", "unvalidated_repair_note", "repair_note_with_extra_risk",
+])
+def test_combined_citation_and_date_policy_preserves_other_failures(defect):
+    row, verdict, contents = _inputs()
+    item = verdict["signal_evaluations"][0]
+    item["evidence_urls_used"] = [URL + "s"]
+    if defect == "substantive_gap":
+        item["unsupported_parts"].append("integration availability")
+    elif defect == "contradiction":
+        item["contradicting_quotes"] = ["This integration is planned, not launched."]
+    elif defect == "date_contradiction":
+        item["claim_matches_miner_date"] = "contradicted"
+    elif defect == "source_mismatch":
+        contents["results"][0]["url"] = "https://unrelated.example/integration"
+    elif defect == "other_risk":
+        item["risk_notes"].append("integration_not_available")
+    elif defect == "old_source_date":
+        item["risk_notes"].append("source_event_date:2024-01-01")
+    elif defect == "unvalidated_repair_note":
+        item["evidence_urls_used"] = [URL]
+        item["risk_notes"].append("Restored a miscopied supplied evidence URL.")
+    elif defect == "repair_note_with_extra_risk":
+        item["risk_notes"].append("Restored a miscopied supplied evidence URL. Claim is unproven.")
+    result = verifier._apply_guardrails(
+        row, verdict, restore_miscopied_citations=True, contents=contents,
+    )
+    assert verifier._decision(result, company_quality=True) != "approve"
+    if defect not in {"source_mismatch", "unvalidated_repair_note"}:
+        assert item["evidence_urls_used"] == [URL]
+
+
 @pytest.mark.parametrize("risk_notes", [None, "missing_event_date", [{"event_date": "missing"}]])
 def test_malformed_date_risk_notes_remain_unresolved_without_raising(risk_notes):
     row, verdict, contents = _inputs()
@@ -98,12 +149,15 @@ async def test_full_source_judge_reuses_content_without_a_paid_date_retry(monkey
 
 
 @pytest.mark.asyncio
-async def test_captured_date_only_failure_reaches_normal_scorer_with_uncertain_date(monkeypatch):
+@pytest.mark.parametrize("miscopied_citation", [False, True])
+async def test_captured_date_only_failure_reaches_normal_scorer_with_uncertain_date(monkeypatch, miscopied_citation):
     from qualification.scoring import lead_scorer
     from qualification.scoring.evaluation_clock import use_evaluation_date
     from tests.test_arena_score_integrity import _company_model, _icp_model
 
     _, verdict, contents = _inputs()
+    if miscopied_citation:
+        verdict["signal_evaluations"][0]["evidence_urls_used"] = [URL + "s"]
     call = AsyncMock(return_value={"answer": verdict, "model": "test", "usage": {}})
     monkeypatch.setattr(verifier, "_call_openrouter", call)
     monkeypatch.setattr(verifier, "_fetch_sd_then_exa", AsyncMock(return_value=contents))

@@ -4954,6 +4954,7 @@ def _supplied_url_for_miscopied_citation(
 def _apply_missing_date_policy(
     row: Mapping[str, Any], verdict: Dict[str, Any],
     contents: Mapping[str, Any] | None,
+    *, restored_citation: bool = False,
 ) -> None:
     """Keep an explicit date-only gap out of the content-support verdict.
 
@@ -4972,6 +4973,9 @@ def _apply_missing_date_policy(
         "missing_event_date", "no_date_in_content", "no_event_date_in_content",
         "unsupported_parts:date_claim", "unsupported_parts:event_date",
     }
+    if restored_citation:
+        # Only this guardrail call can authorize its own grounded repair note.
+        missing_date_notes.add("Restored a miscopied supplied evidence URL.")
     parts = item.get("unsupported_parts")
     notes = item.get("risk_notes")
     quotes = item.get("supporting_quotes")
@@ -5030,6 +5034,7 @@ def _apply_guardrails(
     supplied_urls.extend(stage_urls)
     supplied_by_key = {_normalize_url(url): url for url in supplied_urls}
     supplied = set(supplied_by_key)
+    restored_citation = False
     for item in (verdict.get("signal_evaluations") or []):
         item["source_urls_supplied"] = list(supplied_urls)
         if (
@@ -5051,6 +5056,7 @@ def _apply_guardrails(
                     for url in evidence
                 ]
                 if any(restored):
+                    restored_citation = True
                     evidence = list(dict.fromkeys(
                         new or old for old, new in zip(evidence, restored)
                     ))
@@ -5069,7 +5075,9 @@ def _apply_guardrails(
                     "Provider used non-supplied evidence URL or omitted submitted evidence."
                     if stage_urls else "Provider used non-supplied evidence URL."
                 )
-    _apply_missing_date_policy(row, verdict, contents)
+    _apply_missing_date_policy(
+        row, verdict, contents, restored_citation=restored_citation,
+    )
     return verdict
 
 

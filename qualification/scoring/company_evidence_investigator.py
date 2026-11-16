@@ -2956,6 +2956,13 @@ def _quote_supports_headquarters(
     state = _normalized_span(observed_state)
     if not country:
         return False
+    field_country = _headquarters_field_subdivision_country(quote)
+    if field_country is not None:
+        return bool(
+            field_country
+            and field_country == _resolve_country(observed_country)
+            and (not state or re.search(rf"(?<!\w){re.escape(state)}(?!\w)", normalized))
+        )
     country_is_us = country in {
         "united states", "united states of america", "us", "usa",
     }
@@ -2998,6 +3005,57 @@ def _quote_supports_headquarters(
         re.search(rf"(?<!\w){re.escape(token)}(?!\w)", normalized)
         for token in location_tokens
     )
+
+
+# Full administrative names only. Ambiguous Victoria/Northern Territory and
+# abbreviations deliberately require explicit country proof. Sources:
+# https://www.ga.gov.au/scientific-topics/national-location-information/geography/areas-of-australia
+# https://www.canada.ca/en/intergovernmental-affairs/services/provinces-territories.html
+# UK constituent-country names already have authority in _resolve_country.
+_HEADQUARTERS_SUBDIVISION_COUNTRIES = {
+    **dict.fromkeys(("new south wales", "queensland", "south australia",
+                     "western australia", "tasmania", "australian capital territory"), "australia"),
+    **dict.fromkeys(("alberta", "british columbia", "manitoba", "new brunswick",
+                     "newfoundland and labrador", "nova scotia", "ontario", "prince edward island",
+                     "quebec", "québec", "saskatchewan", "northwest territories", "nunavut", "yukon"), "canada"),
+    **dict.fromkeys(("england", "scotland", "wales", "northern ireland"), "united kingdom"),
+}
+
+
+def _headquarters_field_subdivision_country(quote: str) -> Optional[str]:
+    """Resolve a full subdivision in an explicit HQ field, never a city/address.
+
+    None leaves existing literal-country validation unchanged. An empty result
+    rejects contradictory/unsupported suffixes instead of selecting one country.
+    Source identity and the exact About-field binding remain the caller's gates.
+    """
+    field = _linkedin_about_headquarters_field(quote) or quote
+    match = re.fullmatch(
+        r"\s*\*{0,2}Headquarters\*{0,2}\s+([^\r\n]+?)\s*",
+        html.unescape(field), re.I,
+    )
+    if not match:
+        return None
+    parts = [part.strip() for part in match[1].split(",")]
+    subdivisions = [
+        (index, _HEADQUARTERS_SUBDIVISION_COUNTRIES[part.casefold()])
+        for index, part in enumerate(parts) if index and part.casefold() in _HEADQUARTERS_SUBDIVISION_COUNTRIES
+    ]
+    if not subdivisions:
+        return None
+    countries = {country for _index, country in subdivisions}
+    for part in parts:
+        explicit = _resolve_country(part)
+        if explicit:
+            countries.add(explicit)
+        if part.casefold() in US_STATES or part.upper() in US_STATES:
+            countries.add("united states")
+    if len(countries) != 1 or not all(parts):
+        return ""
+    country = countries.pop()
+    if any(_resolve_country(part) != country for part in parts[subdivisions[-1][0] + 1:]):
+        return ""
+    return country
 
 
 async def _post_json(
@@ -5007,6 +5065,11 @@ def _validated_findings(
                     finding["evidence_quote"],
                     observed_country=finding["observed_country"],
                     observed_state=finding["observed_state"],
+                )
+                or _bound_linkedin_headquarters_finding(
+                    finding, fetched_text,
+                    (fetched_final_urls or {}).get(evidence_url, ""),
+                    identity_anchor or {},
                 )
                 or _bound_structured_headquarters_finding(
                     finding, structured_headquarters_evidence, identity_anchor,

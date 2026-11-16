@@ -95,6 +95,7 @@ from qualification.scoring.company_evidence_investigator import (
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
     _bound_linkedin_headquarters_source,
+    _headquarters_field_subdivision_country,
     _bound_linkedin_headquarters_finding,
     _bound_structured_headquarters_finding,
     _linkedin_about_headquarters_field,
@@ -6923,10 +6924,14 @@ def _project_verified_linkedin_headquarters(
         # tables. Ambiguous or unknown text supplies no authoritative HQ.
         candidates = []
         state_names = {value.casefold() for value in US_STATES.values()}
+        field_country = _headquarters_field_subdivision_country(field)
         for country, _alpha2, _alpha3, _continent in COUNTRIES:
+            if field_country is not None and country.casefold() != field_country:
+                continue
             if country != "United States" and (
                 country.casefold() in state_names
-                or not re.search(r"(?<!\w)" + re.escape(country) + r"(?!\w)", field, re.I)
+                or (country.casefold() != field_country
+                    and not re.search(r"(?<!\w)" + re.escape(country) + r"(?!\w)", field, re.I))
             ):
                 continue
             states = set(US_STATES.values()) if country == "United States" else {""}

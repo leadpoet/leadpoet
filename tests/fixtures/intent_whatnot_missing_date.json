@@ -1,0 +1,90 @@
+[
+  {
+    "label": "supported",
+    "verdict": {
+      "missing_or_risks": [],
+      "overall_confidence": "high",
+      "overall_verdict": "qualified",
+      "signal_evaluations": [
+        {
+          "author_employer_matches_lead": "n/a",
+          "author_role_matches_spec": "n/a",
+          "author_satisfies_role_spec": "n/a",
+          "author_type": "n/a",
+          "claim": "Whatnot launched its Shopify integration on April 29, 2026, syncing products, inventory, and orders for Shopify merchants and Whatnot sellers.",
+          "claim_matches_miner_date": "no_date_in_content",
+          "confidence": "high",
+          "contradicting_quotes": [],
+          "entity_match_reason": "URL hostname matches lead website domain (whatnot.com).",
+          "evidence_urls_used": [
+            "https://blog.teamwhatnot.com/unitedstates/shopify-integration"
+          ],
+          "risk_notes": [
+            "source_event_date:2026-04-29"
+          ],
+          "same_entity_check": "pass",
+          "signal_id": "signal-1",
+          "signal_status": "supported",
+          "source_accessibility": "available",
+          "source_quality": "high",
+          "source_urls_supplied": [
+            "https://blog.teamwhatnot.com/unitedstates/shopify-integration"
+          ],
+          "supporting_quotes": [
+            "Whatnot now integrates with Shopify, bringing live commerce into the workflows you already rely on.",
+            "Products, inventory, and orders sync automatically."
+          ],
+          "unsupported_parts": [],
+          "verification_mode": "source_grounded"
+        }
+      ],
+      "summary": "The source page from Whatnot\u2019s own blog confirms the launch of a Shopify integration, satisfying the buyer\u2019s requirement for a new product or major platform capability launched within the last 12 months."
+    },
+    "source_text": "0 Skip to Content Open Menu Close Menu Open Menu Close Menu\nTL;DR:\n- What\u2019s new: Whatnot now integrates with Shopify.\n- How it works: Products, inventory, and orders sync automatically.\n- Who it\u2019s for: Shopify merchants and Whatnot sellers looking to grow their businesses with live commerce.\n- Available now: In the Shopify App Store across the U.S., Canada, France, the UK, Germany, Belgium, the Netherlands, Austria, and Australia.\nLive commerce has quickly become the most powerful growth channel in e-commerce.\nAs e-commerce has matured, businesses are looking beyond static storefronts \u2013 not only to drive more sales, but to build stronger relationships with buyers. With live selling, buyers see products handled live, ask questions, and decide in the moment. That interaction builds trust, increases conversion, and moves inventory faster. On Whatnot, sellers sell about 10\u00d7 more volume than on other major marketplaces, and U.S.-based sellers who go live daily earn an average of $69K per month. It\u2019s no surprise that nearly [90% of sellers believe companies](https://blog.teamwhatnot.com/unitedstates/2026livesellingreport) that ignore live commerce risk falling behind.\nThe opportunity is clear. But for many businesses, the barrier isn\u2019t going live, it\u2019s everything that happens behind the scenes. More than 70% of Whatnot sellers who use Shopify cite the need to address difficulty keeping products, inventory, and orders in sync across platforms. As sellers expand into new channels, staying connected becomes essential to operating efficiently and scaling with confidence.\nThat\u2019s exactly why we built this integration.\nIntroducing the Whatnot x Shopify integration\nWhatnot now integrates directly with Shopify, bringing live commerce into the workflows you already rely on. [Install Whatnot as a Shopify Sales Channel](https://apps.shopify.com/whatnot), connect your store, and select the products you want to sell.\nFrom there, you manage everything within your Shopify Admin. Product details, pricing, condition, variants, and inventory automatically sync to Whatnot, keeping your listings accurate and your stock aligned across both platforms.\nYou can sell those products in live auctions or as [Buy It Now listings](https://help.whatnot.com/hc/en-us/articles/37446074410381-New-seller-guide-to-listings-on-Whatnot) on Whatnot, combining the energy of live selling with the infrastructure you already rely on. When a customer makes a purchase, the order flows back into Shopify, where you continue managing fulfillment just as you always have.\u00a0\nFor Shopify merchants running inventory-driven businesses, this means you can add live commerce without duplicating your catalog or manually reconciling inventory across platforms. Your products, inventory, and orders remain connected as you grow, while you continue to manage your live shows directly within Whatnot.\nSince launching beta, businesses using the integration have driven more than $10 million in sales across nearly 20 categories, from Collectibles and Pets to Fashion and Food.\nThis includes [Gaines Pet](https://www.whatnot.com/s/mjwrQkLZ), a brand specializing in all-natural dog treats. Like many businesses, inventory management was a major barrier to scaling. Now, with a fully integrated setup, everything is streamlined \u2013 and they\u2019ve been able to grow quickly.\u00a0\n\u201cThis Shopify integration is an absolute game changer for us. Previously, we were manually managing inventory, which capped our streaming time at about 10\u201312 hours a week. We are now going live nearly 30 hours a week, and by next month, we expect to increase another 30%. Because of this integration, I can now confidently say that Whatnot is our fastest-growing (and arguably most powerful) sales channel.\u201d\nAnd this is feedback we\u2019re hearing across the board, including the ease of setup. Whatnot luxury reseller [Glow Luxury](https://www.whatnot.com/user/glowluxury), said: \u201cI have installed the integration and wow, what an incredibly smooth and intuitive setup. Truly impressed with how seamless the transition is. We are thrilled to be early adopters of this and can already see how impactful this will be for our business.\u201d\n[FashioNica](https://www.whatnot.com/user/fashionica?srsltid=AfmBOoqqqJYn-51FnfMsddWSLlBp2RpMOeL_7Loyyqbt4TQJhE8jdkPp), a luxury handbag reseller, shared a similar experience: \u201cWhatnot\u2019s Shopify integration enabled us to unlock a new sales channel without compromising efficiency or quality. The integration allows us to execute drops quickly through bulk product management while seamlessly syncing orders directly into our fulfillment workflows.\u201d\nWhat this means for you\nEvery seller\u2019s business is different, but the growing pains are familiar.\nIf you\u2019re already selling on Whatnot and using Shopify to manage the rest of your business, you can now connect the two and eliminate manual reconciliation, just like GainesPet, FashioNica, and GlowLuxury. Add products in bulk, keep inventory automatically aligned, and let orders flow directly into your existing fulfillment workflow.\nIf you sell across multiple channels but haven\u2019t tried live commerce because it felt like one more system to manage, this changes that. Live selling becomes an extension of the operation you already have, not a parallel process.\nFor sellers using third-party logistics integrated with Shopify, you can manage fulfillment outside of Whatnot's Seller Hub. That means no disruptions, just a seamless plug-in to your existing fulfillment operations. While we can't guarantee every third-party logistics provider can support this, many can. We suggest reaching out to your provider to see if it's possible.\nAnd if your Whatnot business is growing quickly and starting to strain your operations, setting up [Shopify](http://shopify.com/) can give you a single, centralized place to manage products and fulfillment as you scale.\nThe hard part of selling online isn\u2019t usually going live, it\u2019s everything around it. Listing products, tracking inventory, routing orders, keeping fulfillment on track. Every new channel adds more moving pieces. Now, they move together.\nGetting started\nThe Whatnot Shopify integration is available through the Shopify App Store everywhere Whatnot operates, including the U.S., Canada, France, the UK, Germany, Belgium, the Netherlands, Austria, and Australia.\nSetup is quick, and your systems stay seamlessly connected, making live commerce a true engine for long-term growth. It\u2019s where passion meets performance, turning energy into real earnings. We\u2019ll keep evolving the experience alongside seller feedback, and we\u2019re excited to see what you build.\nDownload Whatnot in the [Shopify App Store](https://apps.shopify.com/whatnot) today."
+  },
+  {
+    "label": "date_only_partial",
+    "verdict": {
+      "missing_or_risks": [],
+      "overall_confidence": "high",
+      "overall_verdict": "qualified",
+      "signal_evaluations": [
+        {
+          "author_employer_matches_lead": "n/a",
+          "author_role_matches_spec": "n/a",
+          "author_satisfies_role_spec": "n/a",
+          "author_type": "n/a",
+          "claim": "Whatnot launched its Shopify integration on April 29, 2026, letting Shopify merchants sync products, inventory and orders to sell on Whatnot.",
+          "claim_matches_miner_date": "no_date_in_content",
+          "confidence": "high",
+          "contradicting_quotes": [],
+          "entity_match_reason": "URL hostname matches lead website domain (whatnot.com).",
+          "evidence_urls_used": [
+            "https://blog.teamwhatnot.com/unitedstates/shopify-integration"
+          ],
+          "risk_notes": [
+            "missing_event_date"
+          ],
+          "same_entity_check": "pass",
+          "signal_id": "signal-1",
+          "signal_status": "partially_supported",
+          "source_accessibility": "accessible",
+          "source_quality": "high",
+          "source_urls_supplied": [
+            "https://blog.teamwhatnot.com/unitedstates/shopify-integration"
+          ],
+          "supporting_quotes": [
+            "What\u2019s new: Whatnot now integrates with Shopify.",
+            "Whatnot now integrates directly with Shopify, bringing live commerce into the workflows you already rely on."
+          ],
+          "unsupported_parts": [
+            "event_date"
+          ],
+          "verification_mode": "source_grounded"
+        }
+      ],
+      "summary": "The source confirms the launch of Whatnot\u2019s Shopify integration, satisfying the buyer\u2019s intent requirement, but does not provide the specific launch date claimed."
+    },
+    "source_text": "0 Skip to Content Open Menu Close Menu Open Menu Close Menu\nTL;DR:\n- What\u2019s new: Whatnot now integrates with Shopify.\n- How it works: Products, inventory, and orders sync automatically.\n- Who it\u2019s for: Shopify merchants and Whatnot sellers looking to grow their businesses with live commerce.\n- Available now: In the Shopify App Store across the U.S., Canada, France, the UK, Germany, Belgium, the Netherlands, Austria, and Australia.\nLive commerce has quickly become the most powerful growth channel in e-commerce.\nAs e-commerce has matured, businesses are looking beyond static storefronts \u2013 not only to drive more sales, but to build stronger relationships with buyers. With live selling, buyers see products handled live, ask questions, and decide in the moment. That interaction builds trust, increases conversion, and moves inventory faster. On Whatnot, sellers sell about 10\u00d7 more volume than on other major marketplaces, and U.S.-based sellers who go live daily earn an average of $69K per month. It\u2019s no surprise that nearly [90% of sellers believe companies](https://blog.teamwhatnot.com/unitedstates/2026livesellingreport) that ignore live commerce risk falling behind.\nThe opportunity is clear. But for many businesses, the barrier isn\u2019t going live, it\u2019s everything that happens behind the scenes. More than 70% of Whatnot sellers who use Shopify cite the need to address difficulty keeping products, inventory, and orders in sync across platforms. As sellers expand into new channels, staying connected becomes essential to operating efficiently and scaling with confidence.\nThat\u2019s exactly why we built this integration.\nIntroducing the Whatnot x Shopify integration\nWhatnot now integrates directly with Shopify, bringing live commerce into the workflows you already rely on. [Install Whatnot as a Shopify Sales Channel](https://apps.shopify.com/whatnot), connect your store, and select the products you want to sell.\nFrom there, you manage everything within your Shopify Admin. Product details, pricing, condition, variants, and inventory automatically sync to Whatnot, keeping your listings accurate and your stock aligned across both platforms.\nYou can sell those products in live auctions or as [Buy It Now listings](https://help.whatnot.com/hc/en-us/articles/37446074410381-New-seller-guide-to-listings-on-Whatnot) on Whatnot, combining the energy of live selling with the infrastructure you already rely on. When a customer makes a purchase, the order flows back into Shopify, where you continue managing fulfillment just as you always have.\u00a0\nFor Shopify merchants running inventory-driven businesses, this means you can add live commerce without duplicating your catalog or manually reconciling inventory across platforms. Your products, inventory, and orders remain connected as you grow, while you continue to manage your live shows directly within Whatnot.\nSince launching beta, businesses using the integration have driven more than $10 million in sales across nearly 20 categories, from Collectibles and Pets to Fashion and Food.\nThis includes [Gaines Pet](https://www.whatnot.com/s/mjwrQkLZ), a brand specializing in all-natural dog treats. Like many businesses, inventory management was a major barrier to scaling. Now, with a fully integrated setup, everything is streamlined \u2013 and they\u2019ve been able to grow quickly.\u00a0\n\u201cThis Shopify integration is an absolute game changer for us. Previously, we were manually managing inventory, which capped our streaming time at about 10\u201312 hours a week. We are now going live nearly 30 hours a week, and by next month, we expect to increase another 30%. Because of this integration, I can now confidently say that Whatnot is our fastest-growing (and arguably most powerful) sales channel.\u201d\nAnd this is feedback we\u2019re hearing across the board, including the ease of setup. Whatnot luxury reseller [Glow Luxury](https://www.whatnot.com/user/glowluxury), said: \u201cI have installed the integration and wow, what an incredibly smooth and intuitive setup. Truly impressed with how seamless the transition is. We are thrilled to be early adopters of this and can already see how impactful this will be for our business.\u201d\n[FashioNica](https://www.whatnot.com/user/fashionica?srsltid=AfmBOoqqqJYn-51FnfMsddWSLlBp2RpMOeL_7Loyyqbt4TQJhE8jdkPp), a luxury handbag reseller, shared a similar experience: \u201cWhatnot\u2019s Shopify integration enabled us to unlock a new sales channel without compromising efficiency or quality. The integration allows us to execute drops quickly through bulk product management while seamlessly syncing orders directly into our fulfillment workflows.\u201d\nWhat this means for you\nEvery seller\u2019s business is different, but the growing pains are familiar.\nIf you\u2019re already selling on Whatnot and using Shopify to manage the rest of your business, you can now connect the two and eliminate manual reconciliation, just like GainesPet, FashioNica, and GlowLuxury. Add products in bulk, keep inventory automatically aligned, and let orders flow directly into your existing fulfillment workflow.\nIf you sell across multiple channels but haven\u2019t tried live commerce because it felt like one more system to manage, this changes that. Live selling becomes an extension of the operation you already have, not a parallel process.\nFor sellers using third-party logistics integrated with Shopify, you can manage fulfillment outside of Whatnot's Seller Hub. That means no disruptions, just a seamless plug-in to your existing fulfillment operations. While we can't guarantee every third-party logistics provider can support this, many can. We suggest reaching out to your provider to see if it's possible.\nAnd if your Whatnot business is growing quickly and starting to strain your operations, setting up [Shopify](http://shopify.com/) can give you a single, centralized place to manage products and fulfillment as you scale.\nThe hard part of selling online isn\u2019t usually going live, it\u2019s everything around it. Listing products, tracking inventory, routing orders, keeping fulfillment on track. Every new channel adds more moving pieces. Now, they move together.\nGetting started\nThe Whatnot Shopify integration is available through the Shopify App Store everywhere Whatnot operates, including the U.S., Canada, France, the UK, Germany, Belgium, the Netherlands, Austria, and Australia.\nSetup is quick, and your systems stay seamlessly connected, making live commerce a true engine for long-term growth. It\u2019s where passion meets performance, turning energy into real earnings. We\u2019ll keep evolving the experience alongside seller feedback, and we\u2019re excited to see what you build.\nDownload Whatnot in the [Shopify App Store](https://apps.shopify.com/whatnot) today."
+  }
+]

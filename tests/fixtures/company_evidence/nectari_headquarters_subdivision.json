@@ -1,0 +1,62 @@
+{
+  "provenance": {
+    "run_id": "arena-2026-11-16:sub-ca202efe875d27b099490124d0325f3a:2:4:score:1",
+    "entry_id": 10431096,
+    "source": "retained admitted investigator request; profile text and findings unchanged"
+  },
+  "identity": {
+    "linkedin_company_slug": "nectarisoftware",
+    "normalized_name": "nectari",
+    "registrable_dns_domain": "nectari.com"
+  },
+  "source": {
+    "text": "Nectari Software Inc. | LinkedIn\n\n \n\n# Nectari Software Inc. \n\n## Software Development \n\n### Montreal, Quebec 4,698 followers \n\n## About us \n\n At Nectari Software Inc., our mission is to empower businesses with the insights they need to cut through the noise and make better-informed decisions quickly. Nectari (also known and sold as Sage Enterprise Intelligence) is a fully Cloud enabled business intelligence and data management solution that helps organizations make informed decisions based on real-time data. It empowers all users with a simple interface to access and analyze data in a self-sufficient manner and eliminates the need for disparate tools and specialized skills. Discover our showcase page dedicated to Quebec, Nectari Software Inc - Québec. \n\n Website \n\n https://www.nectari.com/ \n\nExternal link for Nectari Software Inc.\n\n Industry \n\n Software Development \n\n Company size \n\n 51-200 employees \n\n Headquarters \n\n Montreal, Quebec \n\n Type \n\n Privately Held \n\n Specialties \n\n Business Intelligence, BI, Nectari, Sage Enterprise Intelligence, Sage, Acumatica, Software, Reporting, Data Management, Data Analysis, and AI \n\n## Locations \n\n- Primary \n\n 400 Avenue Sainte-Croix \n\n Suite 1120 \n\n Montreal, Quebec H4N 3L4, CA \n\n Get directions \n\n## Employees at Nectari Software Inc. \n\n- ### Greg Brown \n- ### Nima Massih \n- ### Sergey Yun \n- ### Guy Girouard \n\n## Updates \n\n- \n\n Nectari Software Inc. \n\n 4,698 followers \n\n 3d \n\n- Report this post \n\nWhat a great few weeks for the Nectari team at Sage Future for Partners in Atlanta and Amsterdam! From reconnecting with longtime partners to meeting new people across the Sage ecosystem, these events were a great opportunity to exchange ideas, strengthen relationships, and build new connections. We’re grateful to everyone who took the time to meet with our team, share their perspectives, and talk about what’s ahead. We’re looking forward to continuing these conversations and building even more opportunities together. Thank you to the Sage team for bringing the partner community together in both Atlanta and Amsterdam. We’re already looking forward to what’s next. Sage Partners\n\n 64 3 Comments \n\n Like \n\n Comment \n\n Share \n- \n\n Nectari Software Inc. \n\n 4,698 followers \n\n 1w Edited \n\n- Report this post \n\nNext stop: Amsterdam! We’re pleased to be attending Sage Future for Partners, taking place November 9–11. We’re excited to meet with partners, share ideas, and connect with the Sage community to explore what’s next. Planning to attend? Get in touch with our team to book a meeting during the event: https://lnkd.in/evzbjhiH We look forward to connecting with you in Amsterdam! Gareth Marks Nima Massih\n\n 38 2 Comments \n\n Like \n\n Comment \n\n Share \n- \n\n Nectari Software Inc. \n\n 4,698 followers \n\n 2w Edited \n\n- Report this post \n\nWe’re excited to attend Sage Future for Partners in Atlanta, November 4–6! We’re looking forward to connecting with the Sage community, meeting with partners, and exploring new opportunities to collaborate. Will you be there? Contact us to schedule a meeting with our team during the event: https://lnkd.in/evzbjhiH We look forward to seeing you in Atlanta! Gareth Marks Olivia Brown Delaney Brown\n\n 36 1 Comment \n\n Like \n\n Comment \n\n Share \n- \n\n Nectari Software Inc. \n\n 4,698 followers \n\n 1mo \n\n- Report this post \n\nWe officially opened our new Nectari office lounge! A spacious, welcoming environment designed to step away from the day-to-day, connect with colleagues, exchange ideas, or simply take a moment to recharge. For us, it’s more than just a new space. It reflects the culture we’re building at Nectari; one where people feel valued, collaboration comes naturally, and there’s always room to connect beyond the work itself. And our doors are always open. Whether you’re a customer, partner, or friend of Nectari, if you’re ever in Montreal, come visit us! We’d love to welcome you into our new space.\n\n 76 2 Comments \n\n Like \n\n Comment \n\n Share \n- \n\n Nectari Software Inc. \n\n 4,698 f",
+    "url": "https://www.linkedin.com/company/nectarisoftware"
+  },
+  "findings": [
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "Headquarters \n\n Montreal, Quebec",
+      "evidence_url": "https://www.linkedin.com/company/nectarisoftware",
+      "new_domain": "nectari.com",
+      "new_name": "Nectari Software Inc.",
+      "observed_country": "Canada",
+      "observed_industry": "Business Intelligence and Data Management software",
+      "observed_state": "Quebec",
+      "observed_subindustry": "Business Intelligence and Data Platforms",
+      "observed_value": "Canada",
+      "old_domain": "nectari.com",
+      "old_name": "Nectari Software Inc.",
+      "reason": "The exact LinkedIn profile for Nectari Software Inc. lists Headquarters Montreal, Quebec with primary location 400 Avenue Sainte-Croix, Suite 1120, Montreal, Quebec H4N 3L4, CA — a current Canadian headquarters matching requested Canada.",
+      "shared_linkedin_slug": "nectarisoftware",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "Nectari Software Inc. \n\n## Software Development \n\n### Montreal, Quebec 4,698 followers",
+      "supporting_evidence_quote_2": "Primary \n\n 400 Avenue Sainte-Croix \n\n Suite 1120 \n\n Montreal, Quebec H4N 3L4, CA",
+      "supporting_evidence_url_1": "https://www.linkedin.com/company/nectarisoftware",
+      "supporting_evidence_url_2": "https://www.linkedin.com/company/nectarisoftware",
+      "target": "geography"
+    },
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "Website \n\n https://www.nectari.com/ \n\nExternal link for Nectari Software Inc.\n\n Industry \n\n Software Development \n\n Company size \n\n 51-200 employees \n\n Headquarters \n\n Montreal, Quebec",
+      "evidence_url": "https://www.linkedin.com/company/nectarisoftware",
+      "new_domain": "nectari.com",
+      "new_name": "Nectari Software Inc.",
+      "observed_country": "Canada",
+      "observed_industry": "Business Intelligence and Data Management software",
+      "observed_state": "Quebec",
+      "observed_subindustry": "Business Intelligence and Data Platforms",
+      "observed_value": "Canada",
+      "old_domain": "nectari.com",
+      "old_name": "Nectari Software Inc.",
+      "reason": "The exact LinkedIn profile for Nectari Software Inc. (website nectari.com) lists Headquarters Montreal, Quebec, with primary location 400 Avenue Sainte-Croix, Suite 1120, Montreal, Quebec H4N 3L4, CA — a current Canadian headquarters matching requested Canada.",
+      "shared_linkedin_slug": "nectarisoftware",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "Nectari Software Inc. \n\n## Software Development \n\n### Montreal, Quebec 4,698 followers",
+      "supporting_evidence_quote_2": "Primary \n\n 400 Avenue Sainte-Croix \n\n Suite 1120 \n\n Montreal, Quebec H4N 3L4, CA",
+      "supporting_evidence_url_1": "https://www.linkedin.com/company/nectarisoftware",
+      "supporting_evidence_url_2": "https://www.linkedin.com/company/nectarisoftware",
+      "target": "geography"
+    }
+  ]
+}

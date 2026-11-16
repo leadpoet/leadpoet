@@ -1,0 +1,62 @@
+{
+  "provenance": {
+    "run_id": "arena-2026-11-15:sub-547a446fad6da0582515f7df63348837:2:5:score:2",
+    "entry_id": 10341106,
+    "source": "retained admitted investigator request; profile text and findings unchanged"
+  },
+  "identity": {
+    "linkedin_company_slug": "stanwell-corporation-limited",
+    "normalized_name": "stanwell",
+    "registrable_dns_domain": "stanwell.com"
+  },
+  "source": {
+    "text": "Stanwell Corporation Limited | LinkedIn\n\n \n\n \n\n# Stanwell Corporation Limited \n\n## Utilities \n\n### Brisbane City, Queensland 32,865 followers \n\n## About us \n\n Stanwell is Queensland’s leading provider of electricity and energy solutions to the National Electricity Market and large energy users along the eastern seaboard of Australia. With over 40 years of continuous operations, Stanwell maintains a reliable supply of power from two of the most efficient coal-fired power stations in Australia – the Tarong power stations near Kingaroy and Stanwell Power Station near Rockhampton. Stanwell’s experience working with communities to build, operate and maintain reliable coal-fired power stations is also being applied through partnerships with the private sector to build the new energy, storage and firming solutions Queensland needs for the future. Stanwell is an energy employer for everyone. We foster an inclusive and diverse environment where everyone is embraced and respected. Our values - We care, We adapt and We deliver - are the foundation of our culture and underpin our success. Stanwell welcomes respectful and constructive engagement on our social media channels. We reserve the right to remove comments that are offensive, defamatory, spam, or otherwise inappropriate. Our channels are not monitored 24/7, and we may not respond to all comments or messages. For enquiries or feedback, please contact us directly via info@stanwell.com. Thank you for being part of our online community. \n\n Website \n\n https://www.stanwell.com \n\nExternal link for Stanwell Corporation Limited\n\n Industry \n\n Utilities \n\n Company size \n\n 501-1,000 employees \n\n Headquarters \n\n Brisbane City, Queensland \n\n Type \n\n Government Agency \n\n Founded \n\n 1997 \n\n## Locations \n\n- Primary \n\n 180 Ann St \n\n Level 2 \n\n Brisbane City, Queensland 4000, AU \n\n Get directions \n- Get directions \n- Rockhampton, Queensland 4700, AU \n\n Get directions \n- Kingaroy, Queensland 4610, AU \n\n Get directions \n\n## Employees at Stanwell Corporation Limited \n\n- ### William Shanahan \n- ### Ravi Malik RPEQ, MIEAus \n- ### Jonathan B. \n- ### Peter Goggin \n\n## Updates \n\n- \n\n Stanwell Corporation Limited \n\n 32,865 followers \n\n 4d \n\n- Report this post \n\nToday, we joined our communities in remembering and honouring the Australians who have served and sacrificed for our country. Stanwell team members attended Remembrance Day services across our regions to pause, reflect and pay their respects. Lest we forget.\n\n 25 \n\n Like \n\n Comment \n\n Share \n- \n\n Stanwell Corporation Limited \n\n 32,865 followers \n\n 4d \n\n- Report this post \n\nToday, we pause to remember and honour those who have served and sacrificed for our country. Lest we forget.\n\n 37 \n\n Like \n\n Comment \n\n Share \n- \n\n Stanwell Corporation Limited \n\n 32,865 followers \n\n 5d \n\n- Report this post \n\nSeven years in the making, a special new space for culture, connection and community has officially opened at Kingaroy State High School. The school’s new yarning circle, surrounded by bush tucker plants, native trees and a vibrant mural, was brought to life through the hard work of students, volunteers and the wider school community. A smoking ceremony marked the official opening of the space, which will give students, families and community members a welcoming place to gather and strengthen connections to Country and community. We’re proud to have supported this meaningful project through Stanwell’s Tarong Community Sponsorship Program. #Stanwell #Tarong #Community #Kingaroy #SouthBurnett\n\n 28 2 Comments \n\n Like \n\n Comment \n\n Share \n- \n\n Stanwell Corporation Limited \n\n 32,865 followers \n\n 1w \n\n- Report this post \n\nPowering up young minds ⚡️ Did you know? The original engines that first powered Nanango in 1933 are still there to see today. Cherbourg State School students saw them up close during a recent energy industry tour of the South Burnett which included a visit to the South Burnett Energy Centre before heading to Stanwell's Tarong power stations. At the ",
+    "url": "https://www.linkedin.com/company/stanwell-corporation-limited"
+  },
+  "findings": [
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "Headquarters \n\n Brisbane City, Queensland",
+      "evidence_url": "https://www.linkedin.com/company/stanwell-corporation-limited",
+      "new_domain": "stanwell.com",
+      "new_name": "Stanwell Corporation Limited",
+      "observed_country": "Australia",
+      "observed_industry": "Energy",
+      "observed_state": "Queensland",
+      "observed_subindustry": "Electricity generation and retail",
+      "observed_value": "Australia",
+      "old_domain": "stanwell.com",
+      "old_name": "Stanwell Corporation Limited",
+      "reason": "Exact-company LinkedIn profile lists Headquarters as Brisbane City, Queensland, corroborated by the first-party contact page address 'Stanwell Corporation Levels 2-4 180 Ann Street Brisbane, QLD 4000'. Headquarters is in Australia.",
+      "shared_linkedin_slug": "stanwell-corporation-limited",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "ADDRESS: Stanwell Corporation Levels 2-4 180 Ann Street Brisbane, QLD 4000",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "https://www.stanwell.com/contact-us",
+      "supporting_evidence_url_2": "",
+      "target": "geography"
+    },
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "Headquarters Brisbane City, Queensland",
+      "evidence_url": "https://www.linkedin.com/company/stanwell-corporation-limited",
+      "new_domain": "stanwell.com",
+      "new_name": "Stanwell Corporation Limited",
+      "observed_country": "Australia",
+      "observed_industry": "Energy",
+      "observed_state": "Queensland",
+      "observed_subindustry": "Electricity generation and retail",
+      "observed_value": "Australia",
+      "old_domain": "stanwell.com",
+      "old_name": "Stanwell Corporation Limited",
+      "reason": "Exact-company LinkedIn profile lists Headquarters as Brisbane City, Queensland (Australia), corroborated by the first-party contact page address 'Stanwell Corporation Levels 2-4 180 Ann Street Brisbane, QLD 4000'. Headquarters is in Australia.",
+      "shared_linkedin_slug": "stanwell-corporation-limited",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "ADDRESS: Stanwell Corporation Levels 2-4 180 Ann Street Brisbane, QLD 4000",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "https://www.stanwell.com/contact-us",
+      "supporting_evidence_url_2": "",
+      "target": "geography"
+    }
+  ]
+}

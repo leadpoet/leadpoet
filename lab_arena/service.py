@@ -3721,7 +3721,7 @@ class ArenaService:
             for item in plan["work_items"]}
         scores = scoring.build_stage_scores(plan=plan, policy=policy, icps_by_position=dict(enumerate(icps)),
             outputs_by_run=outputs, breakdowns_by_item=breakdowns, configuration=row["configuration_doc"])
-        recorded = self._record_current_run_scores(row, 1, scoring.run_scores_for_store(scores, runs))
+        recorded = self._record_current_run_scores(row, 1, scoring.run_scores_for_store(scores, runs), judgments=chosen)
         if recorded.get("status") != "ok":
             raise ServiceError("baseline_recovery_scores_not_recorded", 500)
 
@@ -3760,8 +3760,11 @@ class ArenaService:
         return [run for run in runs
                 if int(run.get("scoring_generation_floor") or 0) == floor]
 
-    def _record_current_run_scores(self, row, stage, scores):
+    def _record_current_run_scores(self, row, stage, scores, *, judgments=None):
         """Bind score writes to the source round's exact policy revision."""
+        if judgments is not None:
+            scores = [{**score, "score_run_id": judgments.get(score["run_id"], {}).get("run_id")}
+                      for score in scores]
         return self._store.record_run_scores(str(row["round_id"]), stage, scores,
             scoring_generation_floor=self._score_generation_floor(row))
 
@@ -3905,7 +3908,13 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment source output is invalid"
             ) from exc
-        if source.get("status") == "failed":
+        retired_accepted = (
+            source.get("status") == "failed"
+            and source.get("terminal_cause") == "stage_closed"
+            and (source.get("terminal_doc") or {}).get("operation") == "operator_accepted_judge_correction_v1"
+            and self._store.retired_accepted_judgment(str(source["run_id"]))
+        )
+        if source.get("status") == "failed" and not retired_accepted:
             result = source.get("result_doc") or {}
             terminal = result.get("terminal_status")
             if (terminal not in ("judge_error", "judge_timeout", "credential_error")
@@ -4439,7 +4448,7 @@ class ArenaService:
             breakdowns_by_item=breakdowns_by_item,
             configuration=round_row.get("configuration_doc"),
         )
-        recorded = self._record_current_run_scores(round_row, stage, scoring.run_scores_for_store(stage_scores, runs))
+        recorded = self._record_current_run_scores(round_row, stage, scoring.run_scores_for_store(stage_scores, runs), judgments=chosen)
         if recorded.get("status") != "ok":
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
@@ -5148,7 +5157,7 @@ class ArenaService:
                 **({"integrity_policy": "arena_integrity_v1"}
                     if configuration.get("integrity_policy") == "arena_integrity_v1" else {}),
             }, ready)
-            result = self._record_current_run_scores(row, stage, records)
+            result = self._record_current_run_scores(row, stage, records, judgments=judges)
             if result.get("status") != "ok":
                 raise ServiceError("recovered_judgment_scores_not_recorded", 500)
 

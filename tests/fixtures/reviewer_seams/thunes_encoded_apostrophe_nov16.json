@@ -1,0 +1,56 @@
+{
+  "provenance": {
+    "run_id": "arena-2026-11-16:sub-ca202efe875d27b099490124d0325f3a:2:7:score:1",
+    "call_identity": "sha256:733fdb640e948ef56c9fe6ac2aca25c48a0f1aed8a6e3fe7351d8b504f1dfc34"
+  },
+  "source": {
+    "url": "https://www.thunes.com/news/thunes-expands-real-time-payouts-to-bhutan-unlocking-the-nations-remittance-market/",
+    "title": "Thunes Expands Real-Time Payouts to Bhutan, Unlocking the Nation’s Remittance Market Thunes.com",
+    "text": "Solutions Pay-to-Mobile-Wallets Accept Mobile Wallets Pay-to-Banks Accept Bank Payments Pay-to-Cards Accept Digital Vouchers Pay-to-Stablecoin-Wallets Accept BNPL Industries Banks and Neobanks Digital Asset Companies Money Transfer Operators Payment Service Providers Mobile Wallets E-commerce Gig Economy Platforms Payroll & EOR Company About Us Careers ESG Programme Partner Programme Press Centre Events Resources Newsroom Insights Knowledge Base Case Studies API documentation Get in touch\nThunes Expands Real-Time Payouts to Bhutan, Unlocking the Nation’s Remittance Market\nThunes’ Direct Global Network enables instant, 24/7 payments to all bank accounts in Bhutan, empowering Members to support the nation’s rapidly expanding remittance corridor.\nSingapore and Thimphu, Bhutan, November 16, 2026 — [Thunes](https://www.thunes.com/), the Smart Superhighway to move money around the world, today announced the expansion of its Direct Global Network into the Kingdom of Bhutan, enabling its Network Members, including digital banks, money transfer operators (MTOs), and remittance service providers, to send real-time Consumer-to-Consumer (C2C) payouts to all licensed bank accounts in the country. \nThe direct integration allows Non-Resident Bhutanese and expatriates across Australia, the Middle East, Southeast Asia, and North America to send funds home in Bhutanese Ngultrum (BTN) in seconds, avoiding multi-day clearing cycles and unpredictable intermediary markups.\nFor Thunes’ Members, the new connection unlocks three key benefits:\n- Immediate market reach: Tap into the majority of Bhutan’s remittance volume by enabling person-to-person transfers.\n- 24/7 real-time deposits: Send funds to local bank accounts any time of day, eliminating batching delays.\n- Higher payment success rates: Automated account verification and standardized sender data reduce failed transfers and return fees.\nWith over [70,000 Bhutanese nationals](https://asianews.network/the-quiet-exodus-why-young-skilled-and-educated-bhutanese-leave/) – nearly 10% of the population – living abroad, personal remittances account for [3% to 4% of national GDP](https://www.theglobaleconomy.com/Bhutan/remittances_percent_GDP/) and grew [69% from 2024 to 2025](https://www.rma.org.bt/media/Publication/Macro-economic%20Data/Annual%20Report%202025.pdf). Historically, these flows have relied on complex correspondent banking networks, incurring costs and delays.\nWith banks as the primary channel to send money home, Thunes clears these payments in seconds, supporting recurring salary transfers, personal savings, and family support for living expenses, healthcare, and education. Every transaction is backed by Thunes’ Fortress Compliance engine for strict AML and regulatory adherence, alongside its SmartX Treasury System for advanced liquidity management.\n“Bhutan represents a vital corridor where cross-border remittances serve as an indispensable financial lifeline for families. By connecting Bhutan’s entire banking sector directly into our Direct Global Network, we have established an effective, transparent way to ensure hard-earned funds arrive safely, securely, and in real time.”\nAlex Young, Chief Network Officer at Thunes\n“At Thunes, we are dismantling the friction that creates barriers to the global digital economy. Bhutan’s diaspora has grown significantly, especially across markets like Australia and Southeast Asia. Enabling instant consumer account deposits ensures expatriates have access to a reliable, transparent, and direct payment rail to send money back home.”\nEugene Chua, Head of Network, APAC at Thunes\nFor interviews and more information contact:\nThunes:\nWe. Communications, [thunes@wecommunications.com](mailto:thunes@wecommunications.com)\nAnna Birdsall-Strong, Director of Communications, [anna.birdsall@thunes.com](mailto:anna.birdsall@thunes.com)\nAbout Thunes:\nThunes is the Smart Superhighway to move money around the world. Thunes’ proprietary Direct Global Network allows Members to make payments in real-time in over 140 countries and more than 90 currencies. Thunes’ Network connects directly to over 12 billion mobile wallets and bank accounts worldwide, as well as 15 billion cards via more than 220 different payment methods, such as GCash, M-Pesa, Airtel, MTN, Orange, JazzCash, Easypaisa, AliPay, WeChat Pay HK and many more. Thunes’ Direct Global Network differentiates itself through its worldwide reach, in-house SmartX Treasury System and Fortress Compliance Platform, ensuring Members of the Network receive unrivaled speed, control, visibility, protection, and cost efficiencies when making real-time payments, globally. Members of Thunes’ Direct Global Network include gig economy giants like Uber and Deliveroo, super-apps like Grab and WeChat, MTOs, fintechs, PSPs and banks. Headquartered in Singapore, Thunes has offices in 14 locations, including Barcelona, Beijing, Dubai, Hong Kong, Johannesburg, London, New York, Manila, Nairobi, Paris, Riyadh, San Francisco and Shanghai. For more information, visit: [https://www.thunes.com/](https://www.thunes.com/)",
+    "publishedDate": "2026-11-16"
+  },
+  "miner_claim": "Thunes expanded its Direct Global Network into Bhutan on November 16, 2026.",
+  "miner_signal_date": "2026-11-16",
+  "target_icp_signal": "Expanded into a new country or region in the last 12 months, per a press release or company announcement",
+  "raw_verdict": {
+    "missing_or_risks": [],
+    "overall_confidence": "high",
+    "overall_verdict": "qualified",
+    "signal_evaluations": [
+      {
+        "author_employer_matches_lead": "n/a",
+        "author_role_matches_spec": "n/a",
+        "author_satisfies_role_spec": "n/a",
+        "author_type": "n/a",
+        "claim": "Thunes expanded its Direct Global Network into Bhutan on November 16, 2026.",
+        "claim_matches_miner_date": "consistent",
+        "confidence": "high",
+        "contradicting_quotes": [],
+        "entity_match_reason": "URL hostname matches lead website domain and article explicitly names Thunes (canonical name matches verified identity).",
+        "evidence_urls_used": [
+          "https://www.thunes.com/news/thunes-expands-real-time-payouts-to-bhutan-unlocking-the-nation%E2%80%99s-remittance-market/"
+        ],
+        "risk_notes": [
+          "source_event_date:2026-11-16"
+        ],
+        "same_entity_check": "pass",
+        "signal_id": "signal-1",
+        "signal_status": "supported",
+        "source_accessibility": "accessible",
+        "source_quality": "high",
+        "source_urls_supplied": [
+          "https://www.thunes.com/news/thunes-expands-real-time-payouts-to-bhutan-unlocking-the-nation%E2%80%99s-remittance-market/"
+        ],
+        "supporting_quotes": [
+          "Thunes’ Direct Global Network enables instant, 24/7 payments to all bank accounts in Bhutan, empowering Members to support the nation’s rapidly expanding remittance corridor.",
+          "Singapore and Thimphu, Bhutan, November 16, 2026 — [Thunes](https://www.thunes.com/), the Smart Superhighway to move money around the world, today announced the expansion of its Direct Global Network into the Kingdom of Bhutan, enabling its Network Members, including digital banks, money transfer operators (MTOs), and remittance service providers, to send real-time Consumer-to-Consumer (C2C) payouts to all licensed bank accounts in the country."
+        ],
+        "unsupported_parts": [],
+        "verification_mode": "source_grounded"
+      }
+    ],
+    "summary": "The source article from Thunes' own news site confirms the expansion into Bhutan on the claimed date, matching the buyer's intent of a new market expansion within the last 12 months."
+  },
+  "source_text_sha256": "0671bc0f36d295063cf5f4df79a1cf8157c0e69e2584d521329d0e104cae61b9",
+  "raw_verdict_sha256": "cb649dd741ead739c32590e2830c69c5cbeec0ec10e7872999ca48d6a735ece9"
+}

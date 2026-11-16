@@ -310,6 +310,7 @@ def extract_frozen_sources(
     completed_merger_survivor_only: bool = False,
     public_issuer_buyer_only: bool = False,
     linkedin_headquarters_feedback: bool = False,
+    evidence_consistency_only: bool = False,
     source_local_refusal_finality: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
@@ -352,6 +353,9 @@ def extract_frozen_sources(
             names += (GRADER_FILE,)
         if linkedin_headquarters_feedback:
             names += (GRADER_FILE,)
+        if evidence_consistency_only:
+            from scripts.arena_reviewer_evidence_consistency_seam import FILES
+            names = FILES
         if ordered_company_retry_passes:
             from scripts.arena_reviewer_legacy_company_progress_seam import FILES
             names += FILES
@@ -673,7 +677,16 @@ def main() -> int:
         "--linkedin-headquarters-feedback", action="store_true",
         help="include only verified LinkedIn headquarters feedback with the frozen public-buyer repair",
     )
+    parser.add_argument(
+        "--evidence-consistency-only", action="store_true",
+        help="apply the exact reviewed citation, missing-date and HQ corrections to frozen2ec",
+    )
     args = parser.parse_args()
+    if args.evidence_consistency_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"evidence_consistency_only", "push"}
+    ):
+        raise CompositionError("evidence-consistency-only mode cannot include other corrections")
     if args.public_issuer_buyer_only and any(
         value is True for name, value in vars(args).items()
         if name not in {"public_issuer_buyer_only", "linkedin_headquarters_feedback", "push"}
@@ -768,6 +781,10 @@ def main() -> int:
         from scripts.arena_reviewer_public_buyer_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
             raise CompositionError("public buyer correction requires the exact verified grading image")
+    if args.evidence_consistency_only:
+        from scripts.arena_reviewer_evidence_consistency_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("evidence consistency requires the exact verified grading image")
     if args.push and args.verify_image:
         raise CompositionError("verify does not publish")
     revision = checked_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
@@ -783,7 +800,15 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        if args.public_issuer_buyer_only:
+        if args.evidence_consistency_only:
+            from scripts.arena_reviewer_evidence_consistency_seam import FILES, verified_consistency_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", evidence_consistency_only=True,
+            )
+            files = verified_consistency_files(
+                original, {name: (ROOT / name).read_bytes() for name in FILES},
+            )
+        elif args.public_issuer_buyer_only:
             from scripts.arena_reviewer_public_buyer_seam import convert_public_buyer_seam
             flags = {"public_issuer_buyer_only": True}
             if args.linkedin_headquarters_feedback:
@@ -796,10 +821,8 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
                 raise CompositionError("frozen public buyer source is incomplete")
             files = {FINALITY_FILE: convert_public_buyer_seam(original[FINALITY_FILE])}
             if args.linkedin_headquarters_feedback:
-                from scripts.arena_reviewer_public_buyer_seam import verified_headquarters_feedback
-                files[GRADER_FILE] = verified_headquarters_feedback(
-                    original[GRADER_FILE], (ROOT / GRADER_FILE).read_bytes(),
-                )
+                from scripts.arena_reviewer_public_buyer_seam import convert_headquarters_feedback
+                files[GRADER_FILE] = convert_headquarters_feedback(original[GRADER_FILE])
         elif args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_submitted_company_context_seam
             flags = {"submitted_company_context_only": True}
@@ -991,6 +1014,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
             + ("-public-issuer-buyer" if args.public_issuer_buyer_only else "")
             + ("-hq-feedback" if args.linkedin_headquarters_feedback else "")
+            + ("-evidence-consistency" if args.evidence_consistency_only else "")
             + ("-source-local-refusal" if args.source_local_refusal_finality else "")
             + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
             + ("-submitted-company-context" if args.submitted_company_context_only else "")
@@ -1024,6 +1048,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.evidence_consistency_only:
+            from scripts.arena_reviewer_evidence_consistency_seam import CORRECTIONS
+            corrections.extend(CORRECTIONS)
         if args.public_issuer_buyer_only:
             from scripts.arena_reviewer_public_buyer_seam import CORRECTION_ID as PUBLIC_BUYER_CORRECTION_ID
             if args.linkedin_headquarters_feedback:

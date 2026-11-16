@@ -2342,7 +2342,7 @@ async def _resolve_ats_employer_ownership(
 def _grounded_exact_text(
     source_text: str, quote: Any, *, whole_words: bool = False, min_words: int = 0,
 ) -> bool:
-    """Match source text, ignoring whitespace and optional quotation wrappers.
+    """Match source text, ignoring whitespace and typographic word hyphens.
 
     Do not accept paraphrases, omitted words, or reordered fragments. Quotation
     marks around a copied sentence are formatting, not part of its evidence.
@@ -2353,6 +2353,13 @@ def _grounded_exact_text(
     link_markup = r"(?<!!)\[([^\]\n]+)\]\(https?://[^\s()]+\)"
     visible_source = re.sub(link_markup, r"\1", str(source_text or ""))
     visible_quote = re.sub(link_markup, r"\1", str(quote or ""))
+    # Reviewers can render an ASCII word hyphen as a Unicode hyphen or
+    # nonbreaking hyphen. Compare that visible formatting consistently for
+    # citation repair and signal-cache admission, without rewriting either
+    # retained value. Keep numeric ranges, minus signs and en/em dashes exact.
+    word_hyphen = r"(?<=[A-Za-z])[\u2010\u2011](?=[A-Za-z])"
+    visible_source = re.sub(word_hyphen, "-", visible_source)
+    visible_quote = re.sub(word_hyphen, "-", visible_quote)
     normalized_source = " ".join(visible_source.casefold().split())
     normalized_quote = " ".join(visible_quote.casefold().split())
     wrappers = {'"': '"', "'": "'", "“": "”", "‘": "’"}
@@ -4881,19 +4888,44 @@ def _supplied_url_for_miscopied_citation(
     """Return the one supplied URL that an off-list citation miscopies.
 
     Judges retype long URLs and can change a word. Accept only a near-identical
-    address with the same numbers and the same query, so a different posting
-    number, date or query is not a copy, and leave the citation unresolved
-    when two supplied URLs are that close.
+    address with the same numbers and query. Encoded word punctuation may
+    explain a numeric mismatch only on the same origin. Leave the citation
+    unresolved when two supplied URLs are that close.
     """
-    numbers = re.findall(r"\d+", cited)
-    address, _, query = cited.partition("?")
+    def comparison_address(parts):
+        # Encoded apostrophes inside path words are punctuation, not numeric
+        # IDs. Decode only these sequences for comparison; never decode digits,
+        # separators, query values or the actual supplied/cited URL.
+        path = re.sub(r"(?<=[A-Za-z])(?:%27|%e2%80%(?:98|99))(?=[A-Za-z])",
+                      "'", parts.path, flags=re.IGNORECASE)
+        return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+    try:
+        cited_parts = urlsplit(cited)
+    except ValueError:
+        return ""
+    address = urlunsplit((cited_parts.scheme, cited_parts.netloc, cited_parts.path, "", ""))
+    numbers = re.findall(r"\d+", address)
     matches = []
     for key, url in supplied.items():
-        key_address, _, key_query = key.partition("?")
-        if not key or key_query != query or re.findall(r"\d+", key) != numbers:
+        try:
+            key_parts = urlsplit(key)
+        except ValueError:
             continue
+        key_address = urlunsplit((key_parts.scheme, key_parts.netloc, key_parts.path, "", ""))
+        if not key or key_parts.query != cited_parts.query:
+            continue
+        candidate_address = address
+        if re.findall(r"\d+", key_address) != numbers:
+            # Preserve existing grounded typo repair. The new punctuation
+            # exception must not also change the source's origin or real IDs.
+            if (key_parts.scheme, key_parts.netloc) != (cited_parts.scheme, cited_parts.netloc):
+                continue
+            candidate_address, key_address = comparison_address(cited_parts), comparison_address(key_parts)
+            if re.findall(r"\d+", key_address) != re.findall(r"\d+", candidate_address):
+                continue
         similarity = difflib.SequenceMatcher(
-            None, address, key_address, autojunk=False,
+            None, candidate_address, key_address, autojunk=False,
         )
         if (
             similarity.quick_ratio() >= _MISCOPIED_URL_MIN_SIMILARITY
@@ -4926,6 +4958,64 @@ def _supplied_url_for_miscopied_citation(
     ) else ""
 
 
+def _apply_missing_date_policy(
+    row: Mapping[str, Any], verdict: Dict[str, Any],
+    contents: Mapping[str, Any] | None,
+    *, restored_citation: bool = False,
+) -> None:
+    """Keep an explicit date-only gap out of the content-support verdict.
+
+    Integrity rounds already judge missing dates separately. Apply that rule
+    only to a qualified, high-confidence source-grounded verdict whose sole
+    unsupported field is the date; never infer claim support from a URL.
+    """
+    evaluations = verdict.get("signal_evaluations")
+    if not (row.get("_integrity_policy") is True
+            and not row.get("_same_event_resolution")
+            and isinstance(evaluations, list) and len(evaluations) == 1):
+        return
+    item = evaluations[0]
+    missing_date_fields = {"event_date", "date_claim", "event date", "date claim"}
+    missing_date_notes = {
+        "missing_event_date", "no_date_in_content", "no_event_date_in_content",
+        "unsupported_parts:date_claim", "unsupported_parts:event_date",
+    }
+    if restored_citation:
+        # Only this guardrail call can authorize its own grounded repair note.
+        missing_date_notes.add("Restored a miscopied supplied evidence URL.")
+    parts = item.get("unsupported_parts")
+    notes = item.get("risk_notes")
+    quotes = item.get("supporting_quotes")
+    used = item.get("evidence_urls_used")
+    pages = (contents or {}).get("results") or []
+    cited_texts = [
+        str(page.get("text") or "") for page in pages
+        if isinstance(page, Mapping) and page.get("url") in (used or [])
+    ]
+    if not (verdict.get("overall_verdict") == "qualified"
+            and verdict.get("overall_confidence") == "high"
+            and not verdict.get("missing_or_risks")
+            and item.get("signal_status") == "partially_supported"
+            and item.get("verification_mode") == "source_grounded"
+            and item.get("same_entity_check") == "pass"
+            and item.get("confidence") == "high"
+            and item.get("claim_matches_miner_date") == "no_date_in_content"
+            and isinstance(parts, list) and parts
+            and all(isinstance(part, str) and part in missing_date_fields for part in parts)
+            and isinstance(notes, list)
+            and all(isinstance(note, str) and note in missing_date_notes for note in notes)
+            and not item.get("contradicting_quotes")
+            and isinstance(used, list) and used
+            and isinstance(quotes, list) and quotes
+            and all(isinstance(quote, str) and any(
+                _grounded_exact_text(text, quote, min_words=5) for text in cited_texts
+            ) for quote in quotes)):
+        return
+    item["signal_status"] = "supported"
+    item["unsupported_parts"] = []
+    item.setdefault("risk_notes", []).append("Missing date kept separate from claim support.")
+
+
 def _apply_guardrails(
     row: Dict[str, Any], verdict: Dict[str, Any],
     *, restore_miscopied_citations: bool = False,
@@ -4951,6 +5041,7 @@ def _apply_guardrails(
     supplied_urls.extend(stage_urls)
     supplied_by_key = {_normalize_url(url): url for url in supplied_urls}
     supplied = set(supplied_by_key)
+    restored_citation = False
     for item in (verdict.get("signal_evaluations") or []):
         item["source_urls_supplied"] = list(supplied_urls)
         if (
@@ -4972,6 +5063,7 @@ def _apply_guardrails(
                     for url in evidence
                 ]
                 if any(restored):
+                    restored_citation = True
                     evidence = list(dict.fromkeys(
                         new or old for old, new in zip(evidence, restored)
                     ))
@@ -4990,6 +5082,9 @@ def _apply_guardrails(
                     "Provider used non-supplied evidence URL or omitted submitted evidence."
                     if stage_urls else "Provider used non-supplied evidence URL."
                 )
+    _apply_missing_date_policy(
+        row, verdict, contents, restored_citation=restored_citation,
+    )
     return verdict
 
 

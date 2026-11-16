@@ -1,0 +1,192 @@
+{
+  "provenance": "Held November 15, 2026 public PKF source text and native intent reply. No provider reasoning, credentials or private contact data.",
+  "source": {
+    "url": "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/",
+    "title": "PKF O’Connor Davies Welcomes Topping Kessler & Company | PKF O'Connor Davies",
+    "text": "PKF O’Connor Davies Welcomes Topping Kessler & Company | PKF O'Connor Davies Skip to main content Search for: PKF O’Connor Davies Welcomes Topping Kessler & Company Contact Us Home » Insights » PKF O’Connor Davies Welcomes Topping Kessler & Company Florida-based firm enhances PKF O’Connor Davies’ national reach and depth of services PKF O’Connor Davies, one of the nation’s largest accounting, tax and advisory practices, today announced that Hollywood, Florida-based, Topping Kessler & Company has joined the Firm. The addition reflects PKF O’Connor Davies’ continued focus on aligning with firms that share its commitment to quality, collaboration and exceptional client service. “We’re excited to welcome the talented professionals at Topping Kessler to the PKF O’Connor Davies team,” said Kevin J. Keane, Chief Executive Officer at PKF O’Connor Davies. “Their deep expertise and longstanding client relationships complement our Firm’s strengths and reinforce our ability to meet the evolving needs of clients across Florida and beyond.” Founded in 1981, Topping Kessler is a respected firm known for its deep expertise in tax research, planning and preparation, accounting , bookkeeping, consulting, auditing and advisory services. Topping Kessler’s four partners and more than 30 team members will join PKF O’Connor Davies. As part of the integration, Topping Kessler will operate its South Florida practice out of two locations, Hollywood and PKF O’Connor Davies’ preexisting Fort Lauderdale office — uniting teams and creating new opportunities for collaboration and client support. “Joining PKF O’Connor Davies is an exciting opportunity for both our team and clients,” said Elliot S. Kessler, Partner at Topping Kessler. “By working together, we’ll enhance the resources and expertise available to our clients while continuing to deliver the personalized service they rely on.” Building on the strategic growth investment from Investcorp and PSP Investments announced in November 2024, PKF O’Connor Davies continues to expand strategically through partnerships that deepen client relationships, enhance specialized expertise and strengthen its presence in Florida and other key markets. Media Contact Posted In: News and Press Releases Posted On: January 13, 2026 « Newer Entry Older Entry » Contact Us",
+    "source_publication_date": "2026-01-13"
+  },
+  "miner_claim": "PKF O'Connor Davies announced that Topping Kessler & Company joined the firm on January 13, 2026.",
+  "target_icp_signal": "Completed an acquisition or merger with another firm in the last 12 months, per a press release or industry news coverage",
+  "miner_signal_date": "2026-01-13",
+  "raw_verdict": {
+    "missing_or_risks": [],
+    "overall_confidence": "high",
+    "overall_verdict": "qualified",
+    "signal_evaluations": [
+      {
+        "author_employer_matches_lead": "n/a",
+        "author_role_matches_spec": "n/a",
+        "author_satisfies_role_spec": "n/a",
+        "author_type": "n/a",
+        "claim": "PKF O'Connor Davies completed an acquisition of Topping Kessler & Company, which joined the firm on January 13, 2026.",
+        "claim_matches_miner_date": "no_date_in_content",
+        "confidence": "high",
+        "contradicting_quotes": [],
+        "entity_match_reason": "URL hostname pkfod.com matches lead website domain; article title and body explicitly reference PKF O’Connor Davies.",
+        "evidence_urls_used": [
+          "https://www.pkfod.com/insights/pkf-oconnor-davis-welcomes-topping-kessler-company/"
+        ],
+        "risk_notes": [
+          "source_event_date:2026-01-13"
+        ],
+        "same_entity_check": "pass",
+        "signal_id": "signal-1",
+        "signal_status": "supported",
+        "source_accessibility": "available",
+        "source_quality": "press_release",
+        "source_urls_supplied": [
+          "https://www.pkfod.com/insights/pkf-oconnor-davis-welcomes-topping-kessler-company/"
+        ],
+        "supporting_quotes": [
+          "PKF O’Connor Davies, one of the nation’s largest accounting, tax and advisory practices, today announced that Hollywood, Florida‑based, Topping Kessler & Company has joined the Firm."
+        ],
+        "unsupported_parts": [],
+        "verification_mode": "source_grounded"
+      }
+    ],
+    "summary": "The source press release from PKF O'Connor Davies confirms that Topping Kessler & Company joined the firm on 2026-01-13, satisfying the buyer's requirement for a completed acquisition/merger within the last 12 months."
+  },
+  "accepted_signal": {
+    "after_decay": 51.0,
+    "claim_support_verdict": "supported",
+    "confidence": 90,
+    "counted_in_aggregate": true,
+    "date_status": "in_window",
+    "date_verdict": "in_window",
+    "decay": 1.0,
+    "evidence_type": "ACQUISITION",
+    "evidence_urls": [
+      "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/"
+    ],
+    "judge_verdict": {
+      "authoritative_date": "2026-01-13",
+      "authoritative_date_basis": "event_date",
+      "claim_support_verdict": "supported",
+      "client_ready": true,
+      "date_verdict": "in_window",
+      "decision": "verified",
+      "job_publisher_relationship": "not_applicable",
+      "miner_date_match": "consistent",
+      "pipeline_decision": "approve",
+      "scrape_result_count": 1,
+      "source_multiplier": 0.85,
+      "stage1_status": "skipped_source_grounded",
+      "stage3_status": "supported",
+      "verification_trace": {
+        "ats_employer_ownership": null,
+        "company_identity_determination": true,
+        "evidence_clarification": null,
+        "evidence_source": "company_website",
+        "evidence_url": "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/",
+        "evidence_urls": [
+          "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/"
+        ],
+        "extracted_signal_date": "2026-01-13",
+        "final_disposition": "approve",
+        "identity_clarification": null,
+        "intent_verdict": {
+          "missing_or_risks": [],
+          "overall_confidence": "high",
+          "overall_verdict": "qualified",
+          "signal_evaluations": [
+            {
+              "author_employer_matches_lead": "n/a",
+              "author_role_matches_spec": "n/a",
+              "author_satisfies_role_spec": "n/a",
+              "author_type": "n/a",
+              "claim": "PKF O'Connor Davies added Topping Kessler & Company to the firm on January 13, 2026.",
+              "claim_matches_miner_date": "consistent",
+              "confidence": "high",
+              "contradicting_quotes": [],
+              "entity_match_reason": "URL hostname matches lead website domain and article explicitly names PKF O’Connor Davies.",
+              "evidence_urls_used": [
+                "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/"
+              ],
+              "risk_notes": [
+                "source_event_date:2026-01-13"
+              ],
+              "same_entity_check": "pass",
+              "signal_id": "signal-1",
+              "signal_status": "supported",
+              "source_accessibility": "available",
+              "source_quality": "high",
+              "source_urls_supplied": [
+                "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/"
+              ],
+              "supporting_quotes": [
+                "PKF O’Connor Davies, one of the nation’s largest accounting, tax and advisory practices, today announced that Hollywood, Florida‑based, Topping Kessler & Company has joined the Firm."
+              ],
+              "unsupported_parts": [],
+              "verification_mode": "source_grounded"
+            }
+          ],
+          "summary": "The source confirms that PKF O'Connor Davies added Topping Kessler & Company on 2026‑01‑13, satisfying the buyer’s requirement for a completed acquisition/merger within the last 12 months."
+        },
+        "provider_attempts": [
+          {
+            "source": "scrapingdog",
+            "stage": "sd:baseline",
+            "url": "https://pkfod.com"
+          }
+        ],
+        "scrape_result_count": 1,
+        "stage1": {
+          "confidence": null,
+          "decision": "review",
+          "model": null,
+          "same_entity_check": null,
+          "status": "skipped_source_grounded",
+          "usage": {}
+        },
+        "stage3": {
+          "author_employer_matches_lead": "n/a",
+          "author_role_matches_spec": "n/a",
+          "author_satisfies_role_spec": "n/a",
+          "author_type": "n/a",
+          "claim_matches_miner_date": "consistent",
+          "confidence": "high",
+          "decision": "approve",
+          "model": "openai/gpt-oss-120b",
+          "same_entity_check": "pass",
+          "status": "supported",
+          "usage": {
+            "completion_tokens": 738,
+            "completion_tokens_details": {
+              "audio_tokens": 0,
+              "image_tokens": 0,
+              "reasoning_tokens": 268
+            },
+            "cost": 0.00033342,
+            "cost_details": {
+              "upstream_inference_completions_cost": 0.0001107,
+              "upstream_inference_cost": 0.00033342,
+              "upstream_inference_prompt_cost": 0.00022272
+            },
+            "is_byok": false,
+            "prompt_tokens": 7576,
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 304,
+              "video_tokens": 0
+            },
+            "total_tokens": 8314
+          }
+        },
+        "verified_source_context": [
+          {
+            "source_publication_date": "2026-01-13",
+            "source_title": "PKF O’Connor Davies Welcomes Topping Kessler & Company | PKF O'Connor Davies",
+            "text": "PKF O’Connor Davies Welcomes Topping Kessler & Company | PKF O'Connor Davies Skip to main content Search for: PKF O’Connor Davies Welcomes Topping Kessler & Company Contact Us Home » Insights » PKF O’Connor Davies Welcomes Topping Kessler & Company Florida-based firm enhances PKF O’Connor Davies’ national reach and depth of services PKF O’Connor Davies, one of the nation’s largest accounting, tax and advisory practices, today announced that Hollywood, Florida-based, Topping Kessler & Company has joined the Firm. The addition reflects PKF O’Connor Davies’ continued focus on aligning with firms that share its commitment to quality, collaboration and exceptional client service. “We’re excited to welcome the talented professionals at Topping Kessler to the PKF O’Connor Davies team,” said Kevin J. Keane, Chief Executive Officer at PKF O’Connor Davies. “Their deep expertise and longstanding client relationships complement our Firm’s strengths and reinforce our ability to meet the evolving needs of clients across Florida and beyond.” Founded in 1981, Topping Kessler is a respected firm known for its deep expertise in tax research, planning and preparation, accounting , bookkeeping, consulting, auditing and advisory services. Topping Kessler’s four partners and more than 30 team members will join PKF O’Connor Davies. As part of the integration, Topping Kessler will operate its South Florida practice out of two locations, Hollywood and PKF O’Connor Davies’ preexisting Fort Lauderdale office — uniting teams and creating new opportunities for collaboration and client support. “Joining PKF O’Connor Davies is an exciting opportunity for both our team and clients,” said Elliot S. Kessler, Partner at Topping Kessler. “By working together, we’ll enhance the resources and expertise available to our clients while continuing to deliver the personalized service they rely on.” Building on the strategic growth investment from Investcorp and PSP Investments announced in November 2024, PKF O’Connor Davies continues to expand strategically through partnerships that deepen client relationships, enhance specialized expertise and strengthen its presence in Florida and other key markets. Media Contact Posted In: News and Press Releases Posted On: January 13, 2026 « Newer Entry Older Entry » Contact Us",
+            "url": "https://www.pkfod.com/insights/pkf-oconnor-davies-welcomes-topping-kessler-company/"
+          }
+        ]
+      }
+    },
+    "matched_icp_signal": 0,
+    "raw": 51.0
+  },
+  "source_text_sha256": "77b4b326e0341c994a7599ca05e47b5c1041b93da6404f98baf64ecb2c462488",
+  "raw_verdict_sha256": "e8059ed3b0c381dd39af9132c6c77728a99e565c42c454d1ec0628132de91bfc"
+}

@@ -2342,7 +2342,7 @@ async def _resolve_ats_employer_ownership(
 def _grounded_exact_text(
     source_text: str, quote: Any, *, whole_words: bool = False, min_words: int = 0,
 ) -> bool:
-    """Match source text, ignoring whitespace and optional quotation wrappers.
+    """Match source text, ignoring whitespace and typographic word hyphens.
 
     Do not accept paraphrases, omitted words, or reordered fragments. Quotation
     marks around a copied sentence are formatting, not part of its evidence.
@@ -2353,6 +2353,13 @@ def _grounded_exact_text(
     link_markup = r"(?<!!)\[([^\]\n]+)\]\(https?://[^\s()]+\)"
     visible_source = re.sub(link_markup, r"\1", str(source_text or ""))
     visible_quote = re.sub(link_markup, r"\1", str(quote or ""))
+    # Reviewers can render an ASCII word hyphen as a Unicode hyphen or
+    # nonbreaking hyphen. Compare that visible formatting consistently for
+    # citation repair and signal-cache admission, without rewriting either
+    # retained value. Keep numeric ranges, minus signs and en/em dashes exact.
+    word_hyphen = r"(?<=[A-Za-z])[\u2010\u2011](?=[A-Za-z])"
+    visible_source = re.sub(word_hyphen, "-", visible_source)
+    visible_quote = re.sub(word_hyphen, "-", visible_quote)
     normalized_source = " ".join(visible_source.casefold().split())
     normalized_quote = " ".join(visible_quote.casefold().split())
     wrappers = {'"': '"', "'": "'", "“": "”", "‘": "’"}

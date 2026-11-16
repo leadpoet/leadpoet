@@ -4888,9 +4888,9 @@ def _supplied_url_for_miscopied_citation(
     """Return the one supplied URL that an off-list citation miscopies.
 
     Judges retype long URLs and can change a word. Accept only a near-identical
-    address with the same origin, numbers and query, so a different host,
-    posting number, date or query is not a copy, and leave the citation unresolved
-    when two supplied URLs are that close.
+    address with the same numbers and query. Encoded word punctuation may
+    explain a numeric mismatch only on the same origin. Leave the citation
+    unresolved when two supplied URLs are that close.
     """
     def comparison_address(parts):
         # Encoded apostrophes inside path words are punctuation, not numeric
@@ -4904,7 +4904,7 @@ def _supplied_url_for_miscopied_citation(
         cited_parts = urlsplit(cited)
     except ValueError:
         return ""
-    address = comparison_address(cited_parts)
+    address = urlunsplit((cited_parts.scheme, cited_parts.netloc, cited_parts.path, "", ""))
     numbers = re.findall(r"\d+", address)
     matches = []
     for key, url in supplied.items():
@@ -4912,13 +4912,20 @@ def _supplied_url_for_miscopied_citation(
             key_parts = urlsplit(key)
         except ValueError:
             continue
-        key_address = comparison_address(key_parts)
-        if (not key or (key_parts.scheme, key_parts.netloc, key_parts.query) !=
-                (cited_parts.scheme, cited_parts.netloc, cited_parts.query)
-                or re.findall(r"\d+", key_address) != numbers):
+        key_address = urlunsplit((key_parts.scheme, key_parts.netloc, key_parts.path, "", ""))
+        if not key or key_parts.query != cited_parts.query:
             continue
+        candidate_address = address
+        if re.findall(r"\d+", key_address) != numbers:
+            # Preserve existing grounded typo repair. The new punctuation
+            # exception must not also change the source's origin or real IDs.
+            if (key_parts.scheme, key_parts.netloc) != (cited_parts.scheme, cited_parts.netloc):
+                continue
+            candidate_address, key_address = comparison_address(cited_parts), comparison_address(key_parts)
+            if re.findall(r"\d+", key_address) != re.findall(r"\d+", candidate_address):
+                continue
         similarity = difflib.SequenceMatcher(
-            None, address, key_address, autojunk=False,
+            None, candidate_address, key_address, autojunk=False,
         )
         if (
             similarity.quick_ratio() >= _MISCOPIED_URL_MIN_SIMILARITY

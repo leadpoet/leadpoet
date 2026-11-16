@@ -125,5 +125,13 @@
         "sha256": "eaa205dfe6a1707199246008f7108c5883e1d298b6c7c682d41b16c55e677483"
       }
     }
+  },
+  "public_buyer2ec": {
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "public_buyer_lead_scorer.py.gz",
+        "sha256": "f1874c0f8554a92d955067c7833569eb285ca63b425359df3d0c679c97e6b49c"
+      }
+    }
   }
 }

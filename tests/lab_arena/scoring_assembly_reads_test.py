@@ -124,6 +124,9 @@ def test_shared_company_authority_is_read_once_and_scores_match_stateless(entry)
     expected_records = scoring.run_scores_for_store(
         {'rows': expected_rows, 'integrity_policy': 'arena_integrity_v1'},
         [service._store.rows[rid] for rid in expected])
+    judgment_ids = {'execute-current': 'score-current', 'execute-next': 'score-next'}
+    for record in expected_records:
+        record['score_run_id'] = judgment_ids[record['run_id']]
     assert reads['source-output'] == 4
     reads.clear()
     if entry == 'stage': assert service.score_stage(ROUND_ID, 2)['status'] == 'ok'

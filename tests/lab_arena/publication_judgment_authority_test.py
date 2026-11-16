@@ -159,7 +159,8 @@ def test_recovered_score_writer_uses_the_same_authority(format, monkeypatch):
     monkeypatch.setattr(scoring, "run_scores_for_store", lambda result, _: result["rows"])
     instance._record_recovered_judgment_scores(row)
     assert len(writes) == 1
-    assert writes[0][0][2] == [{"run_id": sources[0]["run_id"]}]
+    assert writes[0][0][2] == [{"run_id": sources[0]["run_id"],
+                              "score_run_id": judges[0]["run_id"]}]
     assert writes[0][1] == {"scoring_generation_floor": 0}
     assert verified == [judges[0]["run_id"]]
     assert all(source["per_icp_score"] == 0.0 for source in sources[1:])
@@ -211,7 +212,8 @@ def test_recovered_score_writer_keeps_admitted_recovery_with_excluded_ready_peer
     monkeypatch.setattr(service.verify, "scored_row", lambda *args: {"run_id": args[2]})
     monkeypatch.setattr(scoring, "run_scores_for_store", lambda result, _: result["rows"])
     instance._record_recovered_judgment_scores(row)
-    assert len(writes) == 1 and writes[0][0][2] == [{"run_id": sources[0]["run_id"]}]
+    assert len(writes) == 1 and writes[0][0][2] == [{
+        "run_id": sources[0]["run_id"], "score_run_id": judges[0]["run_id"]}]
     assert writes[0][1] == {"scoring_generation_floor": 0}
     assert verified == [judges[0]["run_id"]]
     assert excluded["per_icp_score"] is None

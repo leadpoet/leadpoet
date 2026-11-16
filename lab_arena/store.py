@@ -73,6 +73,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_round_id", "text"), ("p_judge_run_id", "text"),
         ("p_source_run_id", "text"), ("p_refs", "jsonb"),
     ),
+    "lab_arena_retired_accepted_judgment_v1": (("p_run_id", "text"),),
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
     "lab_arena_evidence_judgment_v2": (
@@ -1405,6 +1406,13 @@ class ArenaStore:
         return _require_mapping(self._transport.rpc(
             "lab_arena_scoring_policy_history_v1", {"p_round_id": round_id}
         ), "scoring_policy_history")
+
+    def retired_accepted_judgment(self, run_id: str) -> bool:
+        """A targeted correction preserves the old accepted source for audit/cache reads."""
+        result = self._transport.rpc("lab_arena_retired_accepted_judgment_v1", {"p_run_id": run_id})
+        if type(result) is not bool:
+            raise ArenaStoreError("retired accepted judgment proof is invalid")
+        return result
 
     def preserved_judgment_policy(self, round_id, judge_run_id, source_run_id, refs):
         """Read the exact November 3 completed-judgment preservation proof."""

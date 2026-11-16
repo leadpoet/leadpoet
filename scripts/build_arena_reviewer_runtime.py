@@ -309,6 +309,7 @@ def extract_frozen_sources(
     identity_repair_finality_only: bool = False,
     completed_merger_survivor_only: bool = False,
     public_issuer_buyer_only: bool = False,
+    linkedin_headquarters_feedback: bool = False,
     source_local_refusal_finality: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
@@ -348,6 +349,8 @@ def extract_frozen_sources(
                 or submitted_company_context_only or public_issuer_buyer_only):
             names = (FINALITY_FILE,)
         if investigator_feedback:
+            names += (GRADER_FILE,)
+        if linkedin_headquarters_feedback:
             names += (GRADER_FILE,)
         if ordered_company_retry_passes:
             from scripts.arena_reviewer_legacy_company_progress_seam import FILES
@@ -666,12 +669,18 @@ def main() -> int:
         "--public-issuer-buyer-only", action="store_true",
         help="compose only PR1249's verified public buyer/target distinction in one frozen file",
     )
+    parser.add_argument(
+        "--linkedin-headquarters-feedback", action="store_true",
+        help="include only verified LinkedIn headquarters feedback with the frozen public-buyer repair",
+    )
     args = parser.parse_args()
     if args.public_issuer_buyer_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"public_issuer_buyer_only", "push"}
+        if name not in {"public_issuer_buyer_only", "linkedin_headquarters_feedback", "push"}
     ):
         raise CompositionError("public-issuer-buyer-only mode cannot include other corrections")
+    if args.linkedin_headquarters_feedback and not args.public_issuer_buyer_only:
+        raise CompositionError("linkedin-headquarters-feedback requires the frozen public-buyer repair")
     if args.identity_handoff and not args.ordered_company_retry_passes:
         raise CompositionError("identity-handoff requires ordered-company-retry-passes")
     if args.ordered_company_retry_passes and not args.investigator_feedback:
@@ -776,12 +785,21 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         root = Path(directory)
         if args.public_issuer_buyer_only:
             from scripts.arena_reviewer_public_buyer_seam import convert_public_buyer_seam
+            flags = {"public_issuer_buyer_only": True}
+            if args.linkedin_headquarters_feedback:
+                flags["linkedin_headquarters_feedback"] = True
             original = extract_frozen_sources(
-                args.grading_image, root / "original", public_issuer_buyer_only=True,
+                args.grading_image, root / "original", **flags,
             )
-            if set(original) != {FINALITY_FILE}:
+            expected = {FINALITY_FILE, GRADER_FILE} if args.linkedin_headquarters_feedback else {FINALITY_FILE}
+            if set(original) != expected:
                 raise CompositionError("frozen public buyer source is incomplete")
             files = {FINALITY_FILE: convert_public_buyer_seam(original[FINALITY_FILE])}
+            if args.linkedin_headquarters_feedback:
+                from scripts.arena_reviewer_public_buyer_seam import verified_headquarters_feedback
+                files[GRADER_FILE] = verified_headquarters_feedback(
+                    original[GRADER_FILE], (ROOT / GRADER_FILE).read_bytes(),
+                )
         elif args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_submitted_company_context_seam
             flags = {"submitted_company_context_only": True}
@@ -972,6 +990,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
             + ("-public-issuer-buyer" if args.public_issuer_buyer_only else "")
+            + ("-hq-feedback" if args.linkedin_headquarters_feedback else "")
             + ("-source-local-refusal" if args.source_local_refusal_finality else "")
             + ("-legacy-company-progress" if args.legacy_company_progress_only else "")
             + ("-submitted-company-context" if args.submitted_company_context_only else "")
@@ -1007,6 +1026,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         corrections = [CORRECTION_ID] if args.complete_negative_finality else []
         if args.public_issuer_buyer_only:
             from scripts.arena_reviewer_public_buyer_seam import CORRECTION_ID as PUBLIC_BUYER_CORRECTION_ID
+            if args.linkedin_headquarters_feedback:
+                from scripts.arena_reviewer_public_buyer_seam import HEADQUARTERS_CORRECTION_ID
+                corrections.append(HEADQUARTERS_CORRECTION_ID)
             corrections.append(PUBLIC_BUYER_CORRECTION_ID)
         if args.submitted_company_context_only:
             from scripts.arena_reviewer_visible_auxiliary_context_seam import SUBMITTED_CORRECTION_ID

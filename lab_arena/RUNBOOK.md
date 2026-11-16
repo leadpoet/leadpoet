@@ -616,6 +616,14 @@ source file changes. Register through the existing runtime command only after
 image-layer and positive/negative checks pass. Existing leases, accepted work,
 frozen grading/cache identity, costs and deadlines remain unchanged.
 
+For the reviewed LinkedIn headquarters feedback correction, add
+`--linkedin-headquarters-feedback` to that same build and verification command.
+This includes only the exact reviewed investigator file alongside the public
+buyer repair. Both its original and corrected hashes are required. It changes
+the diagnostic and existing repair guidance for an identity-bound profile with
+insufficient headquarters proof; no validation requirement or attempt limit
+changes. Do not substitute the entire latest scorer for a frozen round.
+
 
 For the reviewed identity handoff correction on exact frozen50de, use
 `--submitted-company-context-only --active-acquisition-target --investigator-feedback --ordered-company-retry-passes --identity-handoff`

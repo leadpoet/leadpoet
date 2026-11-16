@@ -133,5 +133,13 @@
         "sha256": "f1874c0f8554a92d955067c7833569eb285ca63b425359df3d0c679c97e6b49c"
       }
     }
+  },
+  "linkedin_hq_feedback2ec": {
+    "files": {
+      "qualification/scoring/company_evidence_investigator.py": {
+        "fixture": "linkedin_hq_feedback2ec-company_evidence_investigator.py.gz",
+        "sha256": "ec74bdfb2cc4b657afc301cb183c799985915b25a8151ea056786c933c6113c5"
+      }
+    }
   }
 }

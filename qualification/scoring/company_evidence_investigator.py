@@ -229,6 +229,10 @@ MISSING_INDUSTRY_OBSERVATION_REASON = (
     "industry finding requires a nonempty source-grounded observed_industry; "
     "the exact quote and company binding were not rejected"
 )
+BOUND_LINKEDIN_HEADQUARTERS_PROOF_REASON = (
+    "Bound LinkedIn headquarters evidence must quote its exact About "
+    "Headquarters field and prove the observed country and required state"
+)
 REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON = (
     "supporting quote did not identify the investigated company"
 )
@@ -4703,7 +4707,15 @@ def _validated_findings(
                     evidence_url="",
                     evidence_quote="",
                     reason=(
-                        "headquarters evidence must use independently bound "
+                        BOUND_LINKEDIN_HEADQUARTERS_PROOF_REASON
+                        if (
+                            target == "geography"
+                            and _bound_linkedin_headquarters_source(
+                                evidence_url,
+                                str((fetched_final_urls or {}).get(evidence_url) or ""),
+                                fetched_text, identity_anchor or {},
+                            )
+                        ) else "headquarters evidence must use independently bound "
                         "first-party requested and fetched final URLs"
                         if target == "geography" else
                         "activity and headquarters evidence must use an "
@@ -7681,6 +7693,21 @@ async def investigate_company_evidence(
                                     "missing fields do not establish that the fact is absent. "
                                     if any(
                                         item.get("reason") == MISSING_CITATION_REASON
+                                        for item in rejected
+                                    )
+                                    else ""
+                                )
+                                + (
+                                    "The LinkedIn profile identity passed, but its submitted "
+                                    "headquarters proof did not. Quote its exact About "
+                                    "Headquarters field only if that field proves the observed "
+                                    "country and required state. Do not infer the country from a city "
+                                    "or substitute generic office locations. Otherwise use qualifying "
+                                    "already fetched first-party headquarters evidence, or submit "
+                                    "explicit UNPROVEN with empty citations when the bounded research "
+                                    "does not establish the location. Keep unrelated validated findings. "
+                                    if any(
+                                        item.get("reason") == BOUND_LINKEDIN_HEADQUARTERS_PROOF_REASON
                                         for item in rejected
                                     )
                                     else ""

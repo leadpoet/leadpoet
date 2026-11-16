@@ -2182,13 +2182,16 @@ class ArenaService:
             cached = self._hot_rounds.get(round_id)
             if cached is not None and now - cached[0] < HOT_ROUND_TTL_SECONDS:
                 return cached[1]
-        row = self._store.get_round(round_id)
-        if row is None:
-            return None
-        row = self._require_round_mode(row)
-        with self._hot_round_lock:
+            # Share one refresh of the large frozen row. Otherwise concurrent
+            # misses all fetch/decode it, and an in-flight read can refill the
+            # cache after explicit invalidation. Keep request-start TTL checks
+            # so callers already waiting share even a slow refresh.
+            row = self._store.get_round(round_id)
+            if row is None:
+                return None
+            row = self._require_round_mode(row)
             self._hot_rounds[round_id] = (now, row)
-        return row
+            return row
 
     def _request_round(self, envelope: Any, *, scope: str, hot: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Validate a signed request and resolve the round its envelope names.

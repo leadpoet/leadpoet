@@ -4955,6 +4955,7 @@ def _apply_missing_date_policy(
         "unsupported_parts:date_claim", "unsupported_parts:event_date",
     }
     parts = item.get("unsupported_parts")
+    notes = item.get("risk_notes")
     quotes = item.get("supporting_quotes")
     used = item.get("evidence_urls_used")
     pages = (contents or {}).get("results") or []
@@ -4972,7 +4973,8 @@ def _apply_missing_date_policy(
             and item.get("claim_matches_miner_date") == "no_date_in_content"
             and isinstance(parts, list) and parts
             and all(isinstance(part, str) and part in missing_date_fields for part in parts)
-            and all(note in missing_date_notes for note in item.get("risk_notes") or [])
+            and isinstance(notes, list)
+            and all(isinstance(note, str) and note in missing_date_notes for note in notes)
             and not item.get("contradicting_quotes")
             and isinstance(used, list) and used
             and isinstance(quotes, list) and quotes

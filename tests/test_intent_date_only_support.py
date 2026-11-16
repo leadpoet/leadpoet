@@ -33,6 +33,14 @@ def test_captured_whatnot_date_only_partial_obeys_existing_integrity_policy():
     assert item["unsupported_parts"] == []
 
 
+@pytest.mark.parametrize("risk_notes", [None, "missing_event_date", [{"event_date": "missing"}]])
+def test_malformed_date_risk_notes_remain_unresolved_without_raising(risk_notes):
+    row, verdict, contents = _inputs()
+    verdict["signal_evaluations"][0]["risk_notes"] = risk_notes
+    result = verifier._apply_guardrails(row, verdict, contents=contents)
+    assert verifier._decision(result, company_quality=True) == "review"
+
+
 @pytest.mark.parametrize("defect", [
     "policy_off", "wrong_entity", "low_confidence", "overall_unqualified",
     "contradiction", "other_missing_fact", "date_and_quantity", "source_changed",

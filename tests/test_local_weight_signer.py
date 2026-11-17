@@ -164,8 +164,8 @@ def test_https_transport_retries_transient_http_within_original_deadline():
             error_responses.append(response)
             raise urllib.error.HTTPError(
                 request.full_url,
-                429,
-                "rate limited",
+                503,
+                "unavailable",
                 {"Retry-After": "Thu, 01 Jan 1970 00:01:43 GMT"},
                 response,
             )

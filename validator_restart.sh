@@ -265,7 +265,7 @@ done
 # Local key access, public signing-key pin and finalized chain identity must
 # pass before the old service is touched. Scoring/runsc setup does not gate this.
 ( cd "$RELEASE" && sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE" \
-  "$PYTHON" scripts/run_arena_validator.py --environment-file "$CANDIDATE_SERVICE_ENV" --check-only )
+  timeout "$READY_TIMEOUT" "$PYTHON" scripts/run_arena_validator.py --environment-file "$CANDIDATE_SERVICE_ENV" --check-only )
 
 if [ -e "$CURRENT_LINK" ] || [ -L "$CURRENT_LINK" ]; then
   [ -L "$CURRENT_LINK" ] || fail "current release path is not a symlink"
@@ -309,10 +309,10 @@ sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$CURRENT_LINK|" \
 sudo install -m 0644 "$ROLLBACK/candidate.unit" "$UNIT_PATH"
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE" >/dev/null
-if ! sudo systemctl start "$SERVICE"; then
+deadline=$((SECONDS + READY_TIMEOUT))
+if ! timeout "$READY_TIMEOUT" sudo systemctl start "$SERVICE"; then
   echo "Initial Arena validator start failed; waiting for supervised systemd retries" >&2
 fi
-deadline=$((SECONDS + READY_TIMEOUT))
 stable_pid=""
 stable_since=$SECONDS
 while [ "$SECONDS" -lt "$deadline" ]; do

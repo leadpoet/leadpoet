@@ -25,6 +25,7 @@ from Leadpoet.utils.subnet_epoch import (
 )
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_MAX_RPC_RESPONSE_BYTES,
+    CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS,
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     ChainSourceV2Error,
     json_rpc_request,
@@ -123,7 +124,8 @@ class HttpsJsonRpcTransport:
                 seconds = int(value)
             except (OverflowError, ValueError):
                 return float("inf")
-            return float(seconds) if seconds <= self.timeout_seconds else float("inf")
+            maximum = self.timeout_seconds + sum(CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS)
+            return float(seconds) if seconds <= maximum else float("inf")
         try:
             retry_at = parsedate_to_datetime(value)
             if retry_at.tzinfo is None:
@@ -148,6 +150,7 @@ class HttpsJsonRpcTransport:
                 method="POST",
             )
             deadline = float(self._clock()) + self.timeout_seconds
+            rate_limit_budget_added = False
             last_error = None
             for attempt_number in range(len(CHAIN_RPC_RETRY_BACKOFF_SECONDS) + 1):
                 self._require_open()
@@ -185,7 +188,8 @@ class HttpsJsonRpcTransport:
                         return parse_json_rpc_response(response_body, int(request_id))
                 except urllib.error.HTTPError as exc:
                     try:
-                        if int(exc.code) not in _TRANSIENT_RPC_HTTP_STATUSES:
+                        status = int(exc.code)
+                        if status not in _TRANSIENT_RPC_HTTP_STATUSES:
                             raise ValidatorChainSourceV2Error(
                                 "host chain RPC returned an HTTP error"
                             ) from exc
@@ -198,12 +202,19 @@ class HttpsJsonRpcTransport:
                             raise ValidatorChainSourceV2Error(
                                 "host chain RPC HTTP response cleanup failed"
                             ) from close_exc
+                if status == 429 and not rate_limit_budget_added:
+                    # Canonical rate-limit recovery has a separate, fixed wait
+                    # allowance. Do not renew it on later attempts or increase
+                    # any individual HTTP request timeout.
+                    deadline += sum(CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS)
+                    rate_limit_budget_added = True
                 if attempt_number == len(CHAIN_RPC_RETRY_BACKOFF_SECONDS):
                     raise ValidatorChainSourceV2Error(
                         "host chain RPC exhausted transient HTTP retries"
                     ) from last_error
                 delay = max(
-                    float(CHAIN_RPC_RETRY_BACKOFF_SECONDS[attempt_number]),
+                    float((CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS if status == 429
+                           else CHAIN_RPC_RETRY_BACKOFF_SECONDS)[attempt_number]),
                     float(retry_after or 0.0),
                 )
                 if delay >= deadline - float(self._clock()):

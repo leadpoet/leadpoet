@@ -537,6 +537,16 @@ service. It then switches the service and retains the old release and private
 configuration for rollback. It does not export an enclave key or create a new
 hotkey. Use an existing owner-held wallet for the transition.
 
+Host chain HTTP 429 retries use the canonical 60-second cooldowns. The default
+30-second HTTP timeout stays unchanged; one logical call has at most 150 seconds
+including both cooldowns. Other transient HTTP errors retain the shorter retry
+schedule. Readiness contains multiple chain calls, so this allowance is not a
+promise that every rate-limited proof will finish. Candidate preflight and
+service activation each use the controller's default 300-second budget; the
+activation budget includes the blocking start command and PID stability check.
+The supplied unit also bounds its startup preflight to 300 seconds. Paired
+restart still requires the separate bounded, same-process readiness proof.
+
 Set `VALIDATOR_PYTHON_BIN` to select an already prepared compatible environment.
 Without that override, the controller preserves the installed service unit's
 explicit interpreter. It requires matching canonical start/preflight commands,

@@ -43,6 +43,7 @@ def test_preflight_failure_cannot_reach_service_stop(tmp_path):
 RELEASE={shlex.quote(str(ROOT))}
 CANDIDATE_SERVICE_ENV=/tmp/candidate.env
 PYTHON=/usr/bin/python3
+READY_TIMEOUT=300
 {preflight}
 echo STOP_REACHED
 """
@@ -52,7 +53,7 @@ echo STOP_REACHED
         text=True,
         capture_output=True,
     )
-    assert result.returncode != 0
+    assert result.returncode == 17
     assert "STOP_REACHED" not in result.stdout
 
 
@@ -76,7 +77,7 @@ def test_restart_uses_no_hardware_signer_or_manual_weight_call():
 def test_restart_requires_local_wallet_preflight_and_stable_supervision():
     text = SCRIPT.read_text()
     assert 'scripts/run_arena_validator.py --environment-file "$CANDIDATE_SERVICE_ENV" --check-only' in text
-    assert 'if ! sudo systemctl start "$SERVICE"; then' in text
+    assert 'if ! timeout "$READY_TIMEOUT" sudo systemctl start "$SERVICE"; then' in text
     assert 'systemctl show -p MainPID --value "$SERVICE"' in text
     assert 'stable_since=$SECONDS' in text
     assert '"$((SECONDS - stable_since))" -ge 10' in text
@@ -305,6 +306,7 @@ SERVICE=validator.service
 SECONDS=0
 ACTIVATED=0
 fail() {{ echo "$*" >&2; exit 1; }}
+timeout() {{ shift; "$@"; }}
 sudo() {{
   if [ "$1" = systemctl ] && [ "$2" = show ]; then echo 314; fi
   return 0
@@ -319,7 +321,7 @@ printf '%s' "$ACTIVATED"
 
 def test_initial_start_failure_waits_for_supervised_retry():
     text = SCRIPT.read_text()
-    start = text.index('if ! sudo systemctl start "$SERVICE"; then')
+    start = text.index('deadline=$((SECONDS + READY_TIMEOUT))')
     end = text.index('\necho "SUCCESS:', start)
     startup = text[start:end]
     program = f"""set -euo pipefail
@@ -328,6 +330,7 @@ SERVICE=validator.service
 SECONDS=0
 ACTIVATED=0
 fail() {{ echo "$*" >&2; exit 1; }}
+timeout() {{ shift; "$@"; }}
 sudo() {{
   if [ "$1" = systemctl ] && [ "$2" = start ]; then return 1; fi
   if [ "$1" = systemctl ] && [ "$2" = show ]; then
@@ -362,7 +365,7 @@ def test_default_startup_window_covers_rate_limited_retries(
     timeout_setting = next(
         line for line in text.splitlines() if line.startswith("READY_TIMEOUT=")
     )
-    start = text.index('if ! sudo systemctl start "$SERVICE"; then')
+    start = text.index('deadline=$((SECONDS + READY_TIMEOUT))')
     end = text.index('\necho "SUCCESS:', start)
     program = f"""set -euo pipefail
 unset VALIDATOR_READY_TIMEOUT_SECONDS
@@ -371,6 +374,7 @@ SERVICE=validator.service
 SECONDS=0
 ACTIVATED=0
 fail() {{ echo "$*" >&2; exit 1; }}
+timeout() {{ shift; "$@"; }}
 sudo() {{
   if [ "$2" = start ]; then return 1; fi
   if [ "$2" = show ]; then
@@ -396,7 +400,7 @@ printf '%s' "$ACTIVATED"
 
 def test_failed_start_and_exhausted_readiness_window_remains_fail_closed():
     text = SCRIPT.read_text()
-    start = text.index('if ! sudo systemctl start "$SERVICE"; then')
+    start = text.index('deadline=$((SECONDS + READY_TIMEOUT))')
     end = text.index('\necho "SUCCESS:', start)
     startup = text[start:end]
     program = f"""set -euo pipefail
@@ -405,6 +409,7 @@ SERVICE=validator.service
 SECONDS=0
 ACTIVATED=0
 fail() {{ echo "ERROR: $*" >&2; exit 1; }}
+timeout() {{ shift; "$@"; }}
 sudo() {{
   if [ "$1" = systemctl ] && [ "$2" = show ]; then echo 0; return 0; fi
   return 1

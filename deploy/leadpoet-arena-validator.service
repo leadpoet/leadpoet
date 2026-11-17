@@ -10,6 +10,8 @@ WorkingDirectory=/home/ec2-user/leadpoet/validator-current
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator-service.env --check-only
 ExecStart=/usr/bin/python3 scripts/run_arena_validator.py --environment-file /home/ec2-user/.config/leadpoet/arena-validator-service.env
+# Bound all readiness RPCs together, including canonical rate-limit cooldowns.
+TimeoutStartSec=300
 Restart=on-failure
 RestartSec=15
 KillSignal=SIGTERM

@@ -70,14 +70,15 @@ def _broker(seeded, replies):
         "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
         "scorer_policy": POLICY}
 
-    def call(label, action, operation, *, name=None):
+    def call(label, action, operation, *, name=None, parameters=None):
         context = br.RunContext(run_id="cache-run-" + label, assignment_id="cache-assignment-" + label,
             icp_position=0, lease_token_hash=_sha("lease-" + label),
             miner_hotkey=hotkey("cache-baseline" if label == "baseline" else "cache-" + label),
             submission_id=("baseline-" + ROUND.removeprefix("arena-") if label == "baseline"
                            else "cache-submission-" + label), stage=1, kind="score", attempt=1,
             round_id=ROUND, judgment_cache_scope=frozen)
-        parameters = request(operation) if name is None else request(operation, name=name)
+        if parameters is None:
+            parameters = request(operation) if name is None else request(operation, name=name)
         return instance.execute(context, operation_id=operation, parameters=parameters,
                                 action_sequence=action, timeout_ms=5000)
     return sql, provider, call
@@ -95,12 +96,12 @@ def _rows(seeded, identity):
 @pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
 @pytest.mark.parametrize("source_label,destination", [("baseline", "miner_a"), ("miner_a", "baseline")])
 @pytest.mark.parametrize("valid_aggregate,valid_status", [(True, "VERIFIED"), (False, "UNPROVEN")])
-def test_invalid_paid_response_does_not_block_fresh_call_and_valid_reply_reuses_across_payers(
+def test_raw_paragraph_replies_keep_exact_paid_replay_but_not_cross_call_authority(
     seeded, operation, source_label, destination, valid_aggregate, valid_status,
 ):
     invalid = answer(verdict(), operation)
     valid = answer(verdict(aggregate=valid_aggregate, status=valid_status), operation)
-    sql, provider, call = _broker(seeded, [(200, invalid), (200, valid)])
+    sql, provider, call = _broker(seeded, [(200, invalid), (200, valid), (200, valid)])
     try:
         first = call(source_label, 1, operation)
         assert first.status == 200 and first.call["outcome"] == "settled"
@@ -117,17 +118,16 @@ def test_invalid_paid_response_does_not_block_fresh_call_and_valid_reply_reuses_
         assert fresh.status == 200 and not fresh.call.get("cached") and len(provider.sent) == 2
         assert fresh.call["actual_microusd"] == 120 and fresh.body != first.body
         hit = call(destination, 1, operation)
-        assert hit.status == 200 and hit.call["cached"] is True and hit.body == fresh.body
-        assert hit.call["actual_microusd"] == 0 and len(provider.sent) == 2
-        assert hit.call["source_call_identity"] == fresh.call["call_identity"]
-        assert call(destination, 1, operation).body == hit.body and len(provider.sent) == 2
+        assert hit.status == 200 and not hit.call.get("cached") and hit.body == fresh.body
+        assert hit.call["actual_microusd"] == 120 and len(provider.sent) == 3
+        assert call(destination, 1, operation).body == hit.body and len(provider.sent) == 3
         # The original paid invalid answer stays the exact-call authority even
         # after a newer valid answer becomes available for distinct calls.
         assert call(source_label, 1, operation).body == first.body
-        assert len(provider.sent) == 2 and _rows(seeded, first.call["call_identity"]) == original
+        assert len(provider.sent) == 3 and _rows(seeded, first.call["call_identity"]) == original
         assert sum(row["amount_microusd"] for result in [first, fresh, hit]
                    for row in _rows(seeded, result.call["call_identity"])
-                   if row["entry_kind"] == "settlement") == 240
+                   if row["entry_kind"] == "settlement") == 360
     finally:
         sql.close()
 
@@ -196,38 +196,119 @@ def test_invalid_pending_reply_keeps_own_body_and_exact_financial_recovery(seede
 
 
 @pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
-def test_old_bad_namespace_remains_replayable_but_cannot_supply_new_protocol(seeded, operation):
+def test_old_bad_namespace_remains_replayable_but_cannot_supply_new_call(seeded, monkeypatch, operation):
     invalid, valid = answer(verdict(), operation), answer(verdict(aggregate=True), operation)
     sql, provider, call = _broker(seeded, [(200, invalid), (200, valid)])
     try:
-        old = call("baseline", 1, operation, name=OLD_NAME)
+        with monkeypatch.context() as historical:
+            historical.setattr(br, "_judgment_requires_own_call", lambda _: False)
+            old = call("baseline", 1, operation, name=OLD_NAME)
+            legacy_hit = call("miner_a", 1, operation, name=OLD_NAME)
         old_rows = _rows(seeded, old.call["call_identity"])
-        legacy_hit = call("miner_a", 1, operation, name=OLD_NAME)
         assert legacy_hit.call["cached"] is True and legacy_hit.body == old.body
-        fresh = call("miner_b", 1, operation)
+        fresh = call("miner_b", 1, operation, name=OLD_NAME)
         assert fresh.status == 200 and not fresh.call.get("cached") and len(provider.sent) == 2
         assert fresh.body != old.body
         assert call("baseline", 1, operation, name=OLD_NAME).body == old.body
+        assert call("miner_a", 1, operation, name=OLD_NAME).body == legacy_hit.body
+        assert len(provider.sent) == 2
         assert _rows(seeded, old.call["call_identity"]) == old_rows
     finally:
         sql.close()
 
 
 @pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
-def test_bad_shared_source_cannot_bypass_new_protocol_readback(seeded, monkeypatch, operation):
+def test_bad_shared_source_is_skipped_without_blocking_a_new_paragraph_call(seeded, monkeypatch, operation):
     invalid = answer(verdict(), operation)
-    sql, provider, call = _broker(seeded, [(200, invalid)])
+    valid = answer(verdict(aggregate=True), operation)
+    sql, provider, call = _broker(seeded, [(200, invalid), (200, valid)])
     try:
         # Create an append-only bad source using the exact old eligibility
         # behavior; do not rewrite any ledger or invent a paid settlement.
         with monkeypatch.context() as historical:
+            historical.setattr(br, "_judgment_requires_own_call", lambda _: False)
             historical.setattr(br, "_complete_judgment_response", lambda *a, **kw: True)
             old = call("baseline", 1, operation)
         original = _rows(seeded, old.call["call_identity"])
-        blocked = call("miner_a", 1, operation)
-        assert blocked.status != 200 and blocked.call["error_code"] == "broker_unavailable"
-        assert len(provider.sent) == 1
-        assert call("baseline", 1, operation).body == old.body and len(provider.sent) == 1
+        fresh = call("miner_a", 1, operation)
+        assert fresh.status == 200 and not fresh.call.get("cached") and fresh.body != old.body
+        assert len(provider.sent) == 2
+        assert call("baseline", 1, operation).body == old.body and len(provider.sent) == 2
         assert _rows(seeded, old.call["call_identity"]) == original
+    finally:
+        sql.close()
+
+
+@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("source_label,destination", [("baseline", "miner_a"), ("miner_a", "baseline")])
+def test_retained_invalid_repair_cannot_poison_paid_recovery(seeded, monkeypatch, operation, source_label, destination):
+    from qualification.scoring import intent_details as review
+    from tests.lab_arena.paragraph_own_call_recovery_test import (
+        retained_document, retained_initial, retained_bad_repair, native_repair,
+    )
+
+    initial, bad = retained_initial(), retained_bad_repair()
+    valid = {"repairs": [{"unit_id": 0, "status": "UNPROVEN", "evidence": []}]}
+    parameters = request(operation)
+    schema = copy.deepcopy(review._SEMANTIC_REPAIR_RESPONSE_FORMAT)
+    if operation == "openrouter.chat":
+        parameters["response_format"] = schema
+    else:
+        parameters["text"]["format"] = {"type": "json_schema", **schema["json_schema"]}
+    sql, provider, call = _broker(seeded, [(200, answer(bad, operation)), (200, answer(valid, operation))])
+    try:
+        # A pre-fix source exists, so the existing SQL own-call policy must skip
+        # it atomically. It must still return that same reply to its paid owner.
+        with monkeypatch.context() as historical:
+            historical.setattr(br, "_judgment_requires_own_call", lambda _: False)
+            first = call(source_label, 1, operation, parameters=parameters)
+        saved = _rows(seeded, first.call["call_identity"])
+        assert saved[-1]["terminal_response"]["judgment_cache_eligible"] is True
+        with pytest.raises(review._BoundedReviewRepairNeeded) as failure:
+            native_repair(initial, bad, retained_document())
+        assert failure.value.issues == {0: ("nonexact_quote",)}
+        second = call(destination, 1, operation, parameters=parameters)
+        assert second.status == 200 and not second.call.get("cached")
+        assert len(provider.sent) == 2
+        checks = native_repair(initial, valid, retained_document())
+        assert checks["facts_supported"] is False
+        own = call(source_label, 1, operation, parameters=parameters)
+        assert own.body == first.body and own.call["idempotent"] is True
+        assert len(provider.sent) == 2 and _rows(seeded, first.call["call_identity"]) == saved
+        fresh_rows = _rows(seeded, second.call["call_identity"])
+        assert fresh_rows[0]["entry_doc"]["judgment_cache_own_call_only"] is True
+        assert sum(row["entry_kind"] == "dispatch" for row in fresh_rows) == 1
+        assert first.call["actual_microusd"] == second.call["actual_microusd"] == 120
+    finally:
+        sql.close()
+
+
+@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
+def test_pending_repair_keeps_body_and_unknown_charge_without_resending(seeded, monkeypatch, operation):
+    from qualification.scoring import intent_details as review
+    from tests.lab_arena.paragraph_own_call_recovery_test import retained_bad_repair
+
+    parameters = request(operation)
+    schema = copy.deepcopy(review._SEMANTIC_REPAIR_RESPONSE_FORMAT)
+    if operation == "openrouter.chat":
+        parameters["response_format"] = schema
+    else:
+        parameters["text"]["format"] = {"type": "json_schema", **schema["json_schema"]}
+    pending = answer(retained_bad_repair(), operation, cost=None)
+    pending["id"] = "gen-paragraph-repair-pending"
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_: None)
+    sql, provider, call = _broker(seeded, [(200, pending)])
+    try:
+        first = call("miner_a", 1, operation, parameters=parameters)
+        assert first.status == 200 and first.call["outcome"] == "uncertain"
+        assert "actual_microusd" not in first.call
+        saved = _rows(seeded, first.call["call_identity"])
+        assert saved[0]["entry_doc"]["judgment_cache_own_call_only"] is True
+        assert [row["entry_kind"] for row in saved] == ["reservation", "dispatch", "uncertain"]
+        own = call("miner_a", 1, operation, parameters=parameters)
+        assert own.status == 200 and own.body == first.body
+        assert own.call["idempotent"] is True and own.call["outcome"] == "uncertain"
+        assert "actual_microusd" not in own.call and len(provider.sent) == 1
+        assert _rows(seeded, first.call["call_identity"]) == saved
     finally:
         sql.close()

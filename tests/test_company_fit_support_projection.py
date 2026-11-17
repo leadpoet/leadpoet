@@ -25,7 +25,9 @@ def supported_fit():
     fit.details["dimension_evidence"]["required_attribute"] = {"decision": "match"}
     for dimension, target in TARGETS.items():
         finding = review["claims"][target]
-        finding["supporting_evidence"] = [{"url": SUPPORT, "quote": SUPPORT_TEXT}]
+        finding["supporting_evidence"] = (
+            [{"url": SUPPORT, "quote": SUPPORT_TEXT}]
+            if dimension in {"required_attribute", "stage", "industry"} else [])
         project(fit, dimension)
     return fit
 
@@ -70,11 +72,57 @@ def test_complete_snapshot_preserves_full_finding_and_source_hashes():
     assert contracts.document_hash(changed) != contracts.document_hash(snapshot)
 
 
-@pytest.mark.parametrize("dimension,limit", [("stage", 2), ("industry", 8)])
+@pytest.mark.parametrize("dimension,limit", [("required_attribute", 2), ("stage", 2), ("industry", 8)])
 def test_native_support_limit_remains_admissible(dimension, limit):
     fit = supported_fit()
     fit.details["supporting_receipts"][0]["claims"][dimension]["supporting_evidence"] *= limit
     project(fit, dimension)
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured_sources()) is not None
+
+
+@pytest.mark.parametrize("dimension", ["required_attribute", "geography", "employee_size"])
+@pytest.mark.parametrize("invalid", ["too_many", "extra_field", "long_quote", "invalid_url"])
+def test_unprojected_support_must_have_native_shape_and_bounds(dimension, invalid):
+    fit = supported_fit()
+    finding = fit.details["supporting_receipts"][0]["claims"][TARGETS[dimension]]
+    support = [{"url": SUPPORT, "quote": SUPPORT_TEXT}]
+    if invalid == "too_many":
+        support *= 3 if dimension == "required_attribute" else 1
+    elif invalid == "extra_field":
+        support[0]["unexpected"] = "unvalidated metadata"
+    elif invalid == "long_quote":
+        support[0]["quote"] = "Acme" + " " * 2001 + "provides verified supporting evidence."
+    else:
+        support[0]["url"] = "http://acme.example/about/support"
+    finding["supporting_evidence"] = support
+    project(fit, dimension)
+    with reuse.capture_fit_evidence() as captured:
+        record_sources()
+        reuse.record_source("investigator_page", {
+            "url": support[0]["url"], "stealth_mode": False,
+            "archive_targets": [], "archive_company_names": [],
+        }, {"result": {"ok": True, "url": support[0]["url"],
+                       "final_url": support[0]["url"], "text": SUPPORT_TEXT}, "contexts": {}})
+    receipt = fit.receipt("company_fit")
+    assert not reuse._grounded_finding(receipt, dimension,
+        receipt["dimension_evidence"][dimension]["web_evidence"],
+        {PAGE: TEXT, support[0]["url"]: SUPPORT_TEXT})
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured) is None
+
+
+@pytest.mark.parametrize("source", [None, {}, {"url": SUPPORT}, {"quote": SUPPORT_TEXT},
+    {"url": 7, "quote": SUPPORT_TEXT}, {"url": SUPPORT, "quote": None},
+    {"url": SUPPORT, "quote": 7}])
+def test_required_attribute_support_entries_keep_native_types_and_fields(source):
+    fit = supported_fit()
+    fit.details["supporting_receipts"][0]["claims"]["required_attribute"]["supporting_evidence"] = [source]
+    assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured_sources()) is None
+
+
+def test_required_attribute_support_accepts_native_raw_quote_limit():
+    fit = supported_fit()
+    support = fit.details["supporting_receipts"][0]["claims"]["required_attribute"]["supporting_evidence"]
+    support[0]["quote"] = SUPPORT_TEXT.ljust(2000)
     assert reuse.build_fit_snapshot(fit, {}, {}, {}, captured_sources()) is not None
 
 

@@ -4029,7 +4029,9 @@ def _proved_source_unavailable(
         and document.get("failure_origin") == "provider"
         and document.get("error_category") == "provider_auth"
         and document["tool_error"].get("origin") == "provider"
-        and document["tool_error"].get("category") == "provider_auth"
+        # Deepline's typed tool error uses authentication even when its
+        # enclosing failure envelope uses provider_auth.
+        and document["tool_error"].get("category") in ("provider_auth", "authentication")
         and document["tool_error"].get("retryable") is False
     )
 

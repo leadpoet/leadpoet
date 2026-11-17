@@ -2619,7 +2619,7 @@ def _quote_names_company(quote: str, identity_names: set[str]) -> bool:
         not identity_names
         or any(
             len(name) >= 2 and re.search(
-                r"(?<!\w)" + r"[\W_]*".join(map(re.escape, name)) + r"(?!\w)",
+                r"(?<!\w)" + r"[^a-z0-9]*".join(map(re.escape, name)) + r"(?!\w)",
                 normalized_quote,
             )
             for name in identity_names

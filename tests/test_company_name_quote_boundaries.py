@@ -35,6 +35,7 @@ def test_name_fragment_in_another_word_does_not_bind_company(quote, names):
     ("ＥＮＧＩＥ ＡＵ supplies electricity.", {"engieau"}),
     ("AT&T supplies telecommunications services.", {"att"}),
     ("O’Reilly supplies automotive parts.", {"oreilly"}),
+    ("São Paulo Systems supplies software.", {"sopaulosystems"}),
     ("ENGIE Australia supplies electricity.", {"engieau", "engieaustralia"}),
 ])
 def test_complete_names_preserve_case_typography_and_admitted_aliases(quote, names):

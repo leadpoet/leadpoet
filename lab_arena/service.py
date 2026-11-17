@@ -5733,7 +5733,15 @@ class ArenaService:
                         status="published", mode="live",
                         network_name=network_name,
                         netuid=netuid,
-                        limit=200
+                        limit=200,
+                        # Only these three fields are read below, and
+                        # activate_reward() re-reads the round it is given.
+                        # Selecting "*" pulled reward_basis_doc,
+                        # signing_key_doc and the publication documents for
+                        # every published round on every driver pass, so the
+                        # step's cost grew with round history: ~1.6s on
+                        # 2026-10-16 to ~3.2s on 2026-11-16, +~92ms per round.
+                        columns="round_id,configuration_doc,reward_activated_at",
                     )
                 )
             )

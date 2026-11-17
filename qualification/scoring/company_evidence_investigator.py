@@ -2612,11 +2612,16 @@ def _quote_proves_rebrand_continuity(
 
 
 def _quote_names_company(quote: str, identity_names: set[str]) -> bool:
-    normalized_quote = re.sub(r"[^a-z0-9]+", "", _normalized_span(quote))
+    normalized_quote = _normalized_span(quote)
+    # Keep typography-insensitive names, but not a fragment of another word:
+    # ENGIE AU must not bind ENGIE Austria, nor Ada a mention of Canada.
     return bool(
         not identity_names
         or any(
-            len(name) >= 2 and name in normalized_quote
+            len(name) >= 2 and re.search(
+                r"(?<!\w)" + r"[\W_]*".join(map(re.escape, name)) + r"(?!\w)",
+                normalized_quote,
+            )
             for name in identity_names
         )
     )

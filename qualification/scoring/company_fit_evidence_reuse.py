@@ -209,8 +209,24 @@ def _grounded_finding(receipt, dimension, web, pages):
         if (not isinstance(finding, Mapping) or finding.get("target") != target
             or finding.get("status") != status
             or finding.get("evidence_url") != web.get("url")
-            or finding.get("evidence_quote") != web.get("quote")
-            or (finding.get("supporting_evidence") or []) != (web.get("supporting_evidence") or [])):
+            or finding.get("evidence_quote") != web.get("quote")):
+            continue
+        support = finding.get("supporting_evidence", [])
+        if not isinstance(support, list):
+            continue
+        projected = lead_scorer._dimension_web_evidence(
+            {"dimension_evidence": {dimension: finding}}, dimension)
+        projected_support = projected.get("supporting_evidence", [])
+        # Match the native projection without losing the original proof. Stage
+        # and industry must also retain their native support bounds and shape.
+        if (projected_support != web.get("supporting_evidence", [])
+            or (dimension in {"stage", "industry"} and support != projected_support)
+            or any(not isinstance(source, Mapping)
+                   or not isinstance(source.get("url"), str)
+                   or not isinstance(source.get("quote"), str)
+                   or not source["quote"].strip()
+                   or not _quote_occurs(source["quote"], pages.get(source["url"], ""))
+                   for source in support)):
             continue
         if dimension == "industry":
             industry = finding.get("_industry_review")

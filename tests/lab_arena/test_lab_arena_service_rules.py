@@ -1277,6 +1277,7 @@ def test_reward_activation_processes_only_enabled_live_rounds_oldest_first():
     assert queries == [{
         "status": "published", "mode": "live", "network_name": "test",
         "netuid": 401, "limit": 200,
+        "columns": "round_id,configuration_doc,reward_activated_at",
     }]
 
     service._config = SimpleNamespace(mode="shadow", network_name="test", netuid=401)

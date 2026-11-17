@@ -2800,13 +2800,28 @@ def provider_authentication_failure_reason(call: Mapping[str, Any]) -> Optional[
 
 
 def _judgment_requires_own_call(request: Mapping[str, Any]) -> bool:
-    """Tool packets require scorer validation before they can be shared.
+    """Tool and paragraph packets need native validation before sharing.
 
     The gateway can check JSON shape, but cannot validate the conversation's
-    company/evidence binding. Keep their paid replies only for exact-call
+    company/evidence binding or a paragraph's source-bound quotations.
+    Keep these paid replies only for exact-call
     retries; validated company and signal verdict caches remain independent.
     """
 
+    text = request.get("text")
+    formats = (
+        request.get("response_format"),
+        text.get("format") if isinstance(text, Mapping) else None,
+    )
+    for format_doc in formats:
+        if not isinstance(format_doc, Mapping) or format_doc.get("type") != "json_schema":
+            continue
+        schema = format_doc.get("json_schema", format_doc)
+        if isinstance(schema, Mapping) and schema.get("name") in (
+            "arena_intent_details_review", "arena_intent_details_review_v3",
+            "arena_intent_details_citation_repair", "arena_intent_details_semantic_repair",
+        ):
+            return True
     if request.get("tools"):
         return True
     messages = request.get("messages")

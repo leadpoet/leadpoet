@@ -202,3 +202,43 @@ def test_only_typed_native_source_refusal_changes_the_shared_predicate(scorer, r
 ])
 def test_source_proof_requires_exact_host_envelope(proof, body, identity, expected):
     assert refusal_reason(verification, proof=proof, body=body, identity=identity) == expected
+
+
+@pytest.mark.parametrize("funding", ["host", "miner_key"])
+def test_observed_authentication_receipt_reaches_existing_missing_fit_finality(monkeypatch, funding):
+    from tests.lab_arena.source_unavailable_provenance_test import typed_authentication_broker_result
+
+    result, *_ = typed_authentication_broker_result(funding)
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return shim._AiohttpResponse(
+                request_url="https://www.chegg.com/", response_url="", status=result.status,
+                headers={**result.headers, shim.CALL_IDENTITY_HEADER: result.call["call_identity"]},
+                body=result.body,
+            )
+
+    with pytest.raises(verification._ArenaProviderFetchError) as error:
+        asyncio.run(verification._fetch_bounded_html(Session(), "https://www.chegg.com/"))
+    assert str(error.value) == SOURCE_UNAVAILABLE
+    fit, events = exercise(monkeypatch, lead_scorer, reason=str(error.value))
+    assert events == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair"]
+    assert fit.decision == fit.details["identity_decision"] == "unavailable"
+    assert fit.details["failure_class"] == "insufficient_fit_evidence"
+    assert fit.details["_completed_investigation_settled"] is True
+
+
+def test_source_marker_does_not_change_quality_when_web_identity_is_established(monkeypatch):
+    import sys
+
+    # Positive identity control; the independently unproven attribute must
+    # retain exactly the same quality decision with or without the marker.
+    case = copy.deepcopy(CASE)
+    for verdict in case["verdicts"]:
+        verdict["observed_company_website"] = case["company"]["company_website"]
+        verdict["observed_company_linkedin"] = case["company"]["company_linkedin"]
+    monkeypatch.setattr(sys.modules[__name__], "CASE", case)
+    before, _ = exercise(monkeypatch, lead_scorer, proof=False)
+    after, _ = exercise(monkeypatch, lead_scorer, proof=True)
+    assert before.details["identity_decision"] == after.details["identity_decision"] == "match"
+    assert (after.decision, after.reason, after.details) == (before.decision, before.reason, before.details)

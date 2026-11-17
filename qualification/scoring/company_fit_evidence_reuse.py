@@ -192,7 +192,7 @@ def _text_pages(captured):
 
 def _grounded_finding(receipt, dimension, web, pages):
     """Find an existing completed review that produced this exact final fact."""
-    from qualification.scoring.company_evidence_investigator import _quote_occurs
+    from qualification.scoring.company_evidence_investigator import _quote_occurs, _safe_https_url
     from qualification.scoring import lead_scorer
     target = {"employee_size": "headcount"}.get(dimension, dimension)
     observed = receipt["dimension_evidence"].get("web_observations") or {}
@@ -209,8 +209,28 @@ def _grounded_finding(receipt, dimension, web, pages):
         if (not isinstance(finding, Mapping) or finding.get("target") != target
             or finding.get("status") != status
             or finding.get("evidence_url") != web.get("url")
-            or finding.get("evidence_quote") != web.get("quote")
-            or (finding.get("supporting_evidence") or []) != (web.get("supporting_evidence") or [])):
+            or finding.get("evidence_quote") != web.get("quote")):
+            continue
+        support = finding.get("supporting_evidence", [])
+        if (not isinstance(support, list)
+            or len(support) > {"required_attribute": 2, "stage": 2, "industry": 8}.get(dimension, 0)):
+            continue
+        projected = lead_scorer._dimension_web_evidence(
+            {"dimension_evidence": {dimension: finding}}, dimension)
+        projected_support = projected.get("supporting_evidence", [])
+        # Match the native projection without losing the original proof. Stage
+        # and industry must also retain their native support bounds and shape.
+        if (projected_support != web.get("supporting_evidence", [])
+            or (dimension in {"stage", "industry"} and support != projected_support)
+            or any(not isinstance(source, Mapping)
+                   or set(source) != {"url", "quote"}
+                   or not isinstance(source.get("url"), str)
+                   or not _safe_https_url(source["url"])
+                   or not isinstance(source.get("quote"), str)
+                   or not 0 < len(source["quote"]) <= 2000
+                   or not source["quote"].strip()
+                   or not _quote_occurs(source["quote"], pages.get(source["url"], ""))
+                   for source in support)):
             continue
         if dimension == "industry":
             industry = finding.get("_industry_review")

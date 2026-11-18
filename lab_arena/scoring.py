@@ -43,7 +43,15 @@ DEFAULT_JUDGE_PROVIDER_ROUTES = {
 }
 # Host transport only. The grading policy and scorer's original selector stay
 # unchanged; new rounds freeze this separately from all judgment cache keys.
-DEFAULT_JUDGE_PROVIDER_ROUTING = {"z-ai/glm-5.3-flash": ["near-ai/fp8", "fireworks"]}
+DEFAULT_JUDGE_PROVIDER_ROUTING = {
+    "z-ai/glm-5.3-flash": ["near-ai/fp8", "fireworks"],
+    # A judge call names one supplier and forbids substitutes, so a model
+    # whose supplier stops serving it fails every scoring attempt. On
+    # 2026-11-18 Nebius dropped this model mid-round and six of nine
+    # submissions lost their stage-2 score. Fireworks is already an
+    # approved route for both judge APIs at the same price ceiling.
+    "deepseek/deepseek-v4.1-flash-1017": ["nebius/fp8", "fireworks"],
+}
 DEFAULT_JUDGE_REQUEST_OPTIONS = {
     "deepseek/deepseek-v4.1-flash-1017": {
         "reasoning": {"effort": "low"}, "max_output_tokens": 8192,

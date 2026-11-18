@@ -212,7 +212,10 @@ def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical
     future = app.create_round(NOW + timedelta(days=1), round_id="arena-2026-11-06-open")
     assert future["scorer_policy"]["judge_models"] == MODELS
     assert future["judge_reasoning_route_registry"] == reasoning_capture.load_registry()
-    assert future["judge_provider_routing"] == {GLM: ["near-ai/fp8", "fireworks"]}
+    assert future["judge_provider_routing"] == {
+        GLM: ["near-ai/fp8", "fireworks"],
+        DEEPSEEK: ["nebius/fp8", "fireworks"],
+    }
     assert future["scorer_policy"] == scoring.build_scorer_policy()
     assert "judge_provider_routing" not in old
     assert contracts.validate_round_configuration(json.loads(json.dumps(future))) == future
@@ -228,6 +231,8 @@ def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical
     (GPT_OSS, "near-ai/fp4", "openrouter.chat"),
     (GLM, "near-ai/fp8", "openrouter.chat"),
     (GLM, "fireworks", "openrouter.chat"),
+    (DEEPSEEK, "fireworks", "openrouter.chat"),
+    (DEEPSEEK, "fireworks", "openrouter.responses"),
 ])
 def test_new_default_round_fails_closed_before_persistence_if_exact_route_is_missing(model, provider, api):
     registry = reasoning_capture.load_registry()

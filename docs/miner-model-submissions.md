@@ -348,3 +348,11 @@ ScrapingDog requests from miner code are refused; there is no organizer-key
 fallback. In a fork of the public baseline, change its Arena transport's
 search and page-fetch tools to Deepline before submission. Do not change the
 public baseline just to run a miner test.
+
+## Terms
+
+Leadpoet, Inc. operates Subnet 71 and its gateway, which brokers, captures and
+stores every run. Leadpoet, Inc. owns all data those runs produce, including
+reasoning traces, outputs and scores, for every past and future run. By
+submitting, you agree to this and that Leadpoet may use that data to train and
+sell models.

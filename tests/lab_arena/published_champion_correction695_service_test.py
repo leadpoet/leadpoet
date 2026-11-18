@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -35,6 +36,25 @@ published = native.published
 RUNTIME = 'sha256:' + '6' * 64
 
 
+@pytest.fixture(params=[False, True], ids=['changed-scorer', 'same-scorer'])
+def same_runtime(published, request):
+    if not request.param:
+        yield False
+        return
+    p = published
+    with p.c.cursor() as q:
+        original = native.old.scalar(q, 'SELECT pg_get_functiondef(%s::regprocedure)', (native.SIGNATURE,))
+        q.execute((Path(__file__).parents[2] / 'scripts/700-lab-arena-published-same-policy-recovery.sql').read_text())
+    p.c.commit()
+    try:
+        yield True
+    finally:
+        p.c.rollback()
+        with p.c.cursor() as q:
+            q.execute(original)
+        p.c.commit()
+
+
 def parent_request(p, parent, request_id):
     with p.c.cursor() as q:
         row = native.old.scalar(q, 'SELECT to_jsonb(r) FROM lab_arena_runs r WHERE run_id=%s', (parent['run_id'],))
@@ -47,7 +67,7 @@ def parent_request(p, parent, request_id):
 
 
 @pytest.mark.parametrize('winner', [True, False], ids=['new-champion', 'no-winner'])
-def test_seven_corrections_republish_and_activate_prospectively(published, tmp_path, winner):
+def test_seven_corrections_republish_and_activate_prospectively(published, tmp_path, winner, same_runtime):
     p = published
     if p.organizer or p.parent_category != 'ordinary':
         pytest.skip('payer/provider lineages are covered by the native correction controls')
@@ -167,7 +187,7 @@ def test_seven_corrections_republish_and_activate_prospectively(published, tmp_p
     parents = [r for r in harness.service.store.list_runs(round_id, kind='score')
                if r['status'] == 'failed' and r['terminal_cause'] == 'judge_error' and int(r['attempt']) == 5]
     assert len(parents) == 7 and {r['submission_id'] for r in parents} == set(miners)
-    for index, parent in enumerate(parents):
+    for index, parent in enumerate(parents if not same_runtime else []):
         item = parent_request(p, parent, 'native-final-budget-' + str(index))
         with p.c.cursor() as q:
             native.old.scalar(q, 'SELECT public.lab_arena_grant_judge_budget_exception_v1(%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,FALSE)', (
@@ -175,10 +195,11 @@ def test_seven_corrections_republish_and_activate_prospectively(published, tmp_p
                 item['request_id'], 'native-owner', 'native-earlier-approval',
                 json.dumps(item['checkpoints']), json.dumps(item['signal_checkpoints'])))
         p.c.commit()
-    age_pending()
-    harness.run_stage_with_runners(2)
-    parents = [r for r in harness.service.store.list_runs(round_id, kind='score')
-               if r['status'] == 'failed' and r['terminal_cause'] == 'judge_error' and int(r['attempt']) == 6]
+    if not same_runtime:
+        age_pending()
+        harness.run_stage_with_runners(2)
+        parents = [r for r in harness.service.store.list_runs(round_id, kind='score')
+                   if r['status'] == 'failed' and r['terminal_cause'] == 'judge_error' and int(r['attempt']) == 6]
     assert len(parents) == 7
     # Only the disposable test clock closes the old publication window.
     with p.c.cursor() as q:
@@ -194,15 +215,16 @@ def test_seven_corrections_republish_and_activate_prospectively(published, tmp_p
     assert historical['promotion_required'] is True
     frozen_configuration = copy.deepcopy(historical['configuration_doc'])
     requests = [parent_request(p, parent, 'native-corrected-' + str(index)) for index, parent in enumerate(parents)]
+    recovery_runtime = configuration['scorer_image_digest'] if same_runtime else RUNTIME
     with p.c.cursor() as q:
         q.execute('SELECT public.lab_arena_register_reviewer_runtime_v1(%s,%s,%s,%s)', (
-            configuration['scorer_image_digest'], configuration['scorer_image_reference'], RUNTIME,
-            'registry.example/scorer@' + RUNTIME))
+            configuration['scorer_image_digest'], configuration['scorer_image_reference'], recovery_runtime,
+            configuration['scorer_image_reference'] if same_runtime else 'registry.example/scorer@' + RUNTIME))
         round_sha = 'sha256:' + native.old.scalar(q, "SELECT encode(extensions.digest((to_jsonb(r)-'updated_at')::text,'sha256'),'hex') FROM lab_arena_rounds r WHERE round_id=%s", (round_id,))
     p.c.commit()
     now = datetime.now(timezone.utc).replace(microsecond=0)
     close, publication = now + timedelta(seconds=8), now + timedelta(seconds=12)
-    values = dict(round=round_id, sha=round_sha, runtime=RUNTIME, final=close.isoformat(),
+    values = dict(round=round_id, sha=round_sha, runtime=recovery_runtime, final=close.isoformat(),
                   publication=publication.isoformat(), requests=requests, request='native-seven-corrections',
                   actor='native-owner', approval='native-reviewed-fix', dry=False)
     original_runs = harness.service.store.list_runs(round_id)
@@ -215,7 +237,7 @@ def test_seven_corrections_republish_and_activate_prospectively(published, tmp_p
     assert set(corrected_inputs) == {parent['scored_run_id'] for parent in parents}
     for grant in response['grants']:
         result = harness.service.store.get_run(grant['child_identity']['run_id'])
-        assert result['status'] == 'accepted' and result['reviewer_runtime_doc']['runtime_image_digest'] == RUNTIME
+        assert result['status'] == 'accepted' and result['reviewer_runtime_doc']['runtime_image_digest'] == recovery_runtime
     time.sleep(max(0, (publication - datetime.now(timezone.utc)).total_seconds()) + 0.1)
     harness.clock.now = datetime.now(timezone.utc)
     amended = harness.advance_until('published', runners=2, max_steps=10)

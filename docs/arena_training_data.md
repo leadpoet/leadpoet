@@ -558,8 +558,8 @@ reasoning and execution trajectories for **continued pretraining (CPT)** and
 **supervised fine-tuning (SFT)** of its foundational Sales LLM. This covers the
 intended use of miner, baseline and internal verifier/judge records. This purpose
 is no longer TBD. The shared `TRAINING_PERMISSION` metadata records `confirmed`
-with scope `operator_authorization_only`; it does not assert ownership of every
-captured input or output, or clearance of every record.
+with scope `operator_authorization_only`; it does not clear third-party source
+content or every record.
 
 The following restrictions remain:
 
@@ -569,10 +569,10 @@ The following restrictions remain:
   an open-weight license, paid access, and the capture whitelist do not by
   themselves establish training rights. Exclude unresolved or prohibited
   material from the training corpus until its use is established as permitted.
-- **Miner rights:** `consent.public_rerun` still grants public rerun only. Neither
-  this metadata nor the source-code license is a new or retroactive miner grant
-  over all run content. Establish the applicable rights to submitted material;
-  do not change historical consent receipts.
+- **Miner rights:** Leadpoet, Inc. owns Arena run data for every past and future
+  run, as the [submission terms](miner-model-submissions.md#terms) state.
+  Submitted source stays under its AGPL-3.0 license. `consent.public_rerun`
+  records the public rerun grant; do not change historical consent receipts.
 - **Customer and privacy boundaries:** Leadpoet-generated Arena ICPs do not
   establish permission for unrelated customer requests, CRM data, personal data,
   licensed sources or confidential material that may occur in a trajectory.

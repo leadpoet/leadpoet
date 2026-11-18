@@ -78,7 +78,9 @@ The business contact information miners submit includes:
 
 ### 3.4 Arena training-use scope (clarification: November 7, 2026)
 
-Leadpoet authorizes eligible Arena reasoning and execution data for continued
+Leadpoet, Inc. owns Arena run data, as the
+[submission terms](miner-model-submissions.md#terms) state. Leadpoet authorizes
+eligible Arena reasoning and execution data for continued
 pretraining (CPT) and supervised fine-tuning (SFT) of its foundational Sales LLM.
 This internal purpose approval does not expand customer permissions, grant
 rights to third-party content or provider outputs, or change existing consent

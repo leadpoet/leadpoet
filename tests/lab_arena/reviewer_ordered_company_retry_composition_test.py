@@ -29,7 +29,21 @@ def test_exact_frozen_pair_changes_only_two_existing_retry_functions():
     corrected = seam.convert_ordered_company_retry_passes(original)
     assert {name: hashlib.sha256(data).hexdigest() for name, data in original.items()} == seam.ORDERED_RETRY_REFERENCE_SHA256
     assert {name: hashlib.sha256(data).hexdigest() for name, data in corrected.items()} == seam.ORDERED_RETRY_REPAIRED_SHA256
-    assert corrected == {name: (builder.ROOT / name).read_bytes() for name in seam.FILES}
+    # This composition preserves historical policy bytes. Prospective routing
+    # defaults can advance independently and have their own activation tests.
+    # Compare every other statement, including all scoring/retry functions.
+    for name in seam.FILES:
+        expected = ast.parse(corrected[name])
+        current = ast.parse((builder.ROOT / name).read_bytes())
+        if name == seam.SCORING_FILE:
+            for tree in (expected, current):
+                matches = [node for node in tree.body if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name)
+                                   and target.id == "DEFAULT_JUDGE_PROVIDER_ROUTING"
+                                   for target in node.targets)]
+                assert len(matches) == 1
+                tree.body.remove(matches[0])
+        assert ast.dump(expected) == ast.dump(current)
     assert corrected[seam.COMPETITION_FILE] == original[seam.COMPETITION_FILE]
     assert seam.convert_ordered_company_retry_passes(corrected) == corrected
     restored = corrected[seam.SCORING_FILE]

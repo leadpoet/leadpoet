@@ -43,7 +43,10 @@ DEFAULT_JUDGE_PROVIDER_ROUTES = {
 }
 # Host transport only. The grading policy and scorer's original selector stay
 # unchanged; new rounds freeze this separately from all judgment cache keys.
-DEFAULT_JUDGE_PROVIDER_ROUTING = {"z-ai/glm-5.3-flash": ["near-ai/fp8", "fireworks"]}
+DEFAULT_JUDGE_PROVIDER_ROUTING = {
+    "z-ai/glm-5.3-flash": ["near-ai/fp8", "fireworks"],
+    "openai/gpt-oss-120b": ["near-ai/fp4", "deepinfra/bf16"],
+}
 DEFAULT_JUDGE_REQUEST_OPTIONS = {
     "deepseek/deepseek-v4.1-flash-1017": {
         "reasoning": {"effort": "low"}, "max_output_tokens": 8192,

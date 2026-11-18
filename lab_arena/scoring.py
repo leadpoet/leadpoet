@@ -46,6 +46,7 @@ DEFAULT_JUDGE_PROVIDER_ROUTES = {
 DEFAULT_JUDGE_PROVIDER_ROUTING = {
     "z-ai/glm-5.3-flash": ["near-ai/fp8", "fireworks"],
     "deepseek/deepseek-v4.1-flash-1017": ["nebius/fp8", "together"],
+    "openai/gpt-oss-120b": ["near-ai/fp4", "deepinfra/bf16"],
 }
 DEFAULT_JUDGE_REQUEST_OPTIONS = {
     "deepseek/deepseek-v4.1-flash-1017": {

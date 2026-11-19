@@ -25,13 +25,16 @@ def test_all_test_partitions_gate_the_stable_required_check_without_push_coverag
     env = workflow['env']
     shared, per_job, exclusive = int(env['SHARED_JOBS']), int(env['PARTITIONS_PER_JOB']), int(env['EXCLUSIVE_JOBS'])
     assert int(env['SHARD_COUNT']) == shared * per_job + exclusive
-    assert shards['strategy']['matrix']['shard'] == [str(i) for i in range(shared + exclusive)]
-    assert shards['strategy']['max-parallel'] == str(shared + exclusive)
+    # One job more than partitions: the reference collection.
+    assert shards['strategy']['matrix']['shard'] == [str(i) for i in range(shared + exclusive + 1)]
+    assert shards['strategy']['max-parallel'] == str(shared + exclusive + 1)
     assert shards['strategy']['fail-fast'] == 'false'
     partition = next(step['run'] for step in shards['steps']
                      if step['name'] == 'Run complete pytest partition')
     assert 'if [ "${{ github.event_name }}" = schedule ]; then' in partition
     assert 'python -m scripts.run_pytest_partitions $partitions --' in partition
+    assert '[ "$job" -eq "$((SHARED_JOBS + EXCLUSIVE_JOBS))" ]' in partition
+    assert '--ci-shard-reference=ci-results/collection.json' in partition
     assert '--ci-shard-count="$SHARD_COUNT" --ci-shard-exclusive="$EXCLUSIVE_JOBS"' in partition
     assert '"${coverage_args[@]}"' in partition
     assert jobs['test']['name'] == 'Unit and Workflow Tests'

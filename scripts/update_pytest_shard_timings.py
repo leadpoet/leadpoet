@@ -7,7 +7,8 @@ skipping nightly runs because coverage slows them:
     python -m scripts.update_pytest_shard_timings runs/*
 
 Each module gets its median duration across the runs that include it,
-summing the parts of a module split across shards. Every run
+summing the parts of a module split across shards. Run it from the
+repository root of the same commit. Every run
 must have used the timing file in this checkout: verification rejects any other,
 so after a refresh merges, wait for new runs before refreshing again.
 """
@@ -27,7 +28,7 @@ def run_durations(run: Path) -> dict[str, int]:
     durations = {}
     with tempfile.TemporaryDirectory() as directory:
         reports = list(run.rglob("shard-*.json"))
-        for report in reports:
+        for report in reports + list(run.rglob("collection.json")):
             shutil.copy(report, directory)
         exclusive = json.loads(reports[0].read_text(encoding="utf-8")).get("exclusive", 0) if reports else 0
         verify_manifests(Path(directory), len(reports), exclusive)

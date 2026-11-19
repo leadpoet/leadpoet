@@ -21,15 +21,14 @@ import tempfile
 
 from scripts.pytest_shard import TIMINGS_PATH, verify_manifests
 
-SHARD_COUNT = 8
-
 
 def run_durations(run: Path) -> dict[str, int]:
     durations = {}
     with tempfile.TemporaryDirectory() as directory:
-        for report in run.rglob("shard-*.json"):
+        reports = list(run.rglob("shard-*.json"))
+        for report in reports:
             shutil.copy(report, directory)
-        verify_manifests(Path(directory), SHARD_COUNT)
+        verify_manifests(Path(directory), len(reports))
         for report in Path(directory).glob("shard-*.json"):
             durations.update(json.loads(report.read_text(encoding="utf-8"))["module_durations_ms"])
     return durations

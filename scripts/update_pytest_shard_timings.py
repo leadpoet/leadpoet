@@ -6,7 +6,9 @@ skipping nightly runs because coverage slows them:
     gh run download RUN_ID -R leadpoet/leadpoet -p 'pytest-shard-*' -D runs/RUN_ID
     python -m scripts.update_pytest_shard_timings runs/*
 
-Each module gets its median duration across the runs that include it.
+Each module gets its median duration across the runs that include it. Every run
+must have used the timing file in this checkout: verification rejects any other,
+so after a refresh merges, wait for new runs before refreshing again.
 """
 from __future__ import annotations
 

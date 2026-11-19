@@ -99,8 +99,9 @@ def install_deterministic_company_judges(harness):
     harness.sandbox.run_icp = run_icp
 
 
-def test_combined_recovery_executes_judges_republishes_and_preserves_next_round(db, tmp_path):
+def test_combined_recovery_executes_judges_republishes_and_preserves_next_round(db, recovery_database, tmp_path):
     pg, connection, _ = db
+    _, dsn = recovery_database
     # The review fixture deliberately omits unrelated reward-write upgrades.
     # Install their exact deployed function patches for this lifecycle proof.
     with connection.cursor() as cursor:
@@ -113,7 +114,7 @@ def test_combined_recovery_executes_judges_republishes_and_preserves_next_round(
             assert patch is not None
             cursor.execute(patch.group())
         cursor.execute((recovery.SCRIPTS / '681-lab-arena-total-emissions-reward-slots.sql').read_text())
-    harness = QualityHarness(lambda: pg.connect(**connection.get_dsn_parameters()), tmp_path,
+    harness = QualityHarness(lambda: pg.connect(**dsn), tmp_path,
                              challengers=['ReviewRecovered'], runners=['alpha', 'beta'])
     store = harness.service.store
     harness.service.config.defaults = replace(

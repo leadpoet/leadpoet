@@ -2412,7 +2412,7 @@ class ArenaService:
         provider endpoint is reported before the replacement cutoff starts
         paid reviews. It never changes routing, admission or retries.
         """
-        preflight = self._config.review_route_preflight
+        preflight = getattr(getattr(self, "_config", None), "review_route_preflight", None)
         if preflight is None:
             return {"status": "disabled"}
         if not any(row.get("status") == "open" for row in self.active_rounds()):

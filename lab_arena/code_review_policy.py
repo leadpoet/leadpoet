@@ -102,7 +102,7 @@ REVIEW_CONTEXT_REASONS = frozenset({
     "endpoints_total", "endpoint_shape", "selected_count", "selected_model", "selected_provider",
     "usage_missing", "prompt_tokens", "context_budget",
 })
-REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure", "Nebius", "Together", "Moonshot AI"})
+REVIEW_PROVIDER_NAMES = frozenset({"Anthropic", "Amazon Bedrock", "Google", "Google Vertex", "Azure", "Nebius", "Moonshot AI"})
 _GENERATION_ID = re.compile(r"gen-[0-9]{1,20}-[A-Za-z0-9_-]{1,128}\Z")
 
 

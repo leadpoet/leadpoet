@@ -218,6 +218,7 @@ def record_review(
     submission_id: str,
     miner_hotkey: str,
     attempt: int,
+    review_model: str = NO_ERROR,
 ) -> None:
     """Record one committed review decision. Never raises."""
     recorder = _recorder
@@ -235,6 +236,7 @@ def record_review(
             submission_id=submission_id,
             miner_hotkey=miner_hotkey,
             attempt=attempt,
+            review_model=review_model,
         )
     except BaseException:
         pass

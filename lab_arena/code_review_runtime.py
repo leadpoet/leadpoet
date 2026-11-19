@@ -109,6 +109,16 @@ class SubmissionCodeReviewer:
                 )
                 else telemetry.NO_ERROR
             )
+            # Which reviewer model served this attempt. code_review_policy
+            # branches on it (ALTERNATE_REVIEW_MODELS gates the recovery retry
+            # budget), so without it a retry that stopped early cannot be told
+            # apart from one that exhausted a transient-failure budget.
+            raw_review_model = document.get("model")
+            review_model = (
+                raw_review_model
+                if isinstance(raw_review_model, str) and raw_review_model
+                else telemetry.NO_ERROR
+            )
             telemetry.record_review(
                 committed,
                 error_code=error_code,
@@ -120,6 +130,7 @@ class SubmissionCodeReviewer:
                 submission_id=str(row["submission_id"]),
                 miner_hotkey=str(row["miner_hotkey"]),
                 attempt=committed_attempt,
+                review_model=review_model,
             )
         except BaseException:
             # Observability cannot turn a persisted review into a worker error.

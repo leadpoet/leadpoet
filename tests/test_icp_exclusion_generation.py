@@ -1,7 +1,10 @@
 """Generator-side lab exclusion lists: real matching companies per ICP,
 fail-open everywhere, hash-covered in the set."""
 
+from decimal import Decimal
+import json
 import os
+from pathlib import Path
 from unittest import mock
 import httpx
 
@@ -50,7 +53,7 @@ def test_default_exclusions_use_only_approved_deepseek_responses_route():
     body = request["json"]
     assert body["model"] == "deepseek/deepseek-v4.1-flash-1017"
     assert body["provider"] == {
-        "only": ["nebius/fp8"], "allow_fallbacks": False, "require_parameters": True,
+        "only": ["together"], "allow_fallbacks": False, "require_parameters": True,
         "data_collection": "deny", "zdr": True,
         "max_price": {"prompt": 0.30, "completion": 1.20},
     }
@@ -67,6 +70,24 @@ def test_default_exclusions_use_only_approved_deepseek_responses_route():
     assert body["store"] is body["stream"] is False
     assert "temperature" not in body and "messages" not in body
     assert request["timeout"] == 45.0
+
+
+def test_default_exclusion_route_is_approved_within_its_price_ceiling():
+    route = gen.OPENROUTER_EXCLUSION_ROUTE
+    registry_path = Path(__file__).parents[1] / "lab_arena/reasoning_models.json"
+    registry = json.loads(registry_path.read_text())
+    approved = [
+        entry for entry in registry["approved_routes"]
+        if entry["model_id"] == route["model"]
+        and entry["provider"] == route["provider"]
+        and entry["api"] == "openrouter.responses"
+        and entry["status"] == "approved"
+    ]
+    assert len(approved) == 1
+    ceiling = approved[0]["price_ceiling"]
+    for kind in ("prompt", "completion"):
+        per_million = Decimal(str(route["max_price"][kind]))
+        assert per_million == Decimal(ceiling[kind]) * 1_000_000
 
 
 def test_default_exclusion_failure_has_no_sonar_or_chat_fallback():

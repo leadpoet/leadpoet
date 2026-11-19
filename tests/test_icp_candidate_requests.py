@@ -76,7 +76,7 @@ def test_offline_requests_keep_generation_default_and_candidates_pin_route(monke
     # the prior Sonar benchmark is historical evidence, not a runtime fallback.
     assert exclusion["api"] == "openrouter.responses"
     assert exclusion["request"]["model"] == "deepseek/deepseek-v4.1-flash-1017"
-    assert exclusion["request"]["provider"]["only"] == ["nebius/fp8"]
+    assert exclusion["request"]["provider"]["only"] == ["together"]
     assert exclusion["request"]["tools"][0]["parameters"]["max_uses"] == 3
     selected = asyncio.run(generator.prepare_icp_probe_request(
         "icp_exclusion", icp={"industry": "Software"}, candidate=CANDIDATE,

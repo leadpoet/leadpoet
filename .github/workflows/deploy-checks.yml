@@ -134,9 +134,11 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 26
+      max-parallel: 27
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+        # The last job collects the whole suite once; the aggregate checks
+        # that the partitions ran exactly that collection.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
 
     steps:
       - name: Check out repository
@@ -185,7 +187,7 @@ jobs:
         # job runs PARTITIONS_PER_JOB partitions side by side on its 4 vCPUs.
         # The last EXCLUSIVE_JOBS jobs run one partition alone: it holds the
         # modules in scripts/pytest_shard_exclusive.txt, whose tests assert
-        # time budgets.
+        # time budgets. Each partition imports only its own test files.
         run: |
           coverage_args=()
           if [ "${{ github.event_name }}" = schedule ]; then
@@ -193,6 +195,11 @@ jobs:
                            --cov=leadpoet_verifier --cov=qualification --cov-report=term-missing)
           fi
           job=${{ matrix.shard }}
+          if [ "$job" -eq "$((SHARED_JOBS + EXCLUSIVE_JOBS))" ]; then
+            python -m pytest --collect-only -qq -p scripts.pytest_shard \
+              --ci-shard-reference=ci-results/collection.json
+            exit
+          fi
           if [ "$job" -lt "$SHARED_JOBS" ]; then
             partitions=$(for k in $(seq 0 $((PARTITIONS_PER_JOB - 1))); do echo $((k * SHARED_JOBS + job)); done)
           else

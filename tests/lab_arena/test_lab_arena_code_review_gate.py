@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from lab_arena import code_review_policy
 from lab_arena.service import ArenaService, ServiceError
 
 
@@ -78,10 +79,12 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     service._clock = lambda: now
     service._round = lambda _: round_row
     service._initial_baseline = lambda _: baseline
+    hold = {"status": "held", "review_deadline": "2026-09-11T01:30:01Z", "released_at": None}
     service._store = SimpleNamespace(
         freeze_champion_funding=lambda _round_id: {"status": "existing"},
         list_submissions=lambda _, status: [baseline, miner] if status == "accepted" else [],
         update_submission=lambda *args: updates.append(args) or {"status": "ok"},
+        hold_round_review=lambda _round_id: dict(hold),
     )
     with pytest.raises(ServiceError, match="code_review_pending"):
         service.freeze_participants("arena-test")
@@ -92,6 +95,12 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     updates.clear()
     miner["code_review_status"] = "reviewing"
     now += timedelta(minutes=30)
+    # An unfinished review is ours to finish: the round holds, it never
+    # rejects the miner, until an operator releases the hold.
+    with pytest.raises(ServiceError, match="code_review_infrastructure_hold"):
+        service.freeze_participants("arena-test")
+    assert not updates
+    hold["released_at"] = "2026-09-11T01:00:00Z"
     assert len(service.freeze_participants("arena-test")) == 1
     assert any(call[1] == "miner" and call[4] == {"rejection_rule": "code_review_incomplete"} for call in updates)
 
@@ -140,6 +149,8 @@ def test_freeze_waits_only_for_available_review_attempts(
                  'configuration_doc': {'baseline_hotkey': 'host',
                  'schedule': {'benchmark_deadline': '2026-09-11T00:30:00Z'}}}
     updates = []
+    holds = []
+    hold = {'status': 'held', 'review_deadline': '2026-09-11T01:30:01Z', 'released_at': None}
     service = object.__new__(ArenaService)
     service._clock = lambda: now
     service._round = lambda _: round_row
@@ -148,14 +159,24 @@ def test_freeze_waits_only_for_available_review_attempts(
         freeze_champion_funding=lambda _: {'status': 'existing'},
         list_submissions=lambda _, status: [baseline, miner] if status == 'accepted' else [],
         update_submission=lambda *args: updates.append(args) or {'status': 'ok'},
+        hold_round_review=lambda round_id: holds.append(round_id) or dict(hold),
     )
+    infrastructure = error_code in code_review_policy.INFRASTRUCTURE_ERROR_CODES
     if pending:
         with pytest.raises(ServiceError, match='code_review_pending'):
             service.freeze_participants('arena-test')
         assert not updates
-        # The deadline remains an absolute bound, even for a classified
-        # transient after many attempts and despite a stale retry flag.
+        # Reviews blocked on our side arm the hold before the deadline.
+        assert bool(holds) == infrastructure
+        # The deadline remains an absolute bound for the miner's own review
+        # failures, even after many attempts and despite a stale retry flag.
         now += timedelta(minutes=30)
+    if infrastructure:
+        # Our provider failing is never the miner's failure: hold, not reject.
+        with pytest.raises(ServiceError, match='code_review_infrastructure_hold'):
+            service.freeze_participants('arena-test')
+        assert not updates
+        hold['released_at'] = '2026-09-11T01:00:00Z'
     assert service.freeze_participants('arena-test') == [{
         key: baseline[key] for key in (
             'submission_id', 'miner_hotkey', 'source_ref', 'source_size_bytes', 'is_king'

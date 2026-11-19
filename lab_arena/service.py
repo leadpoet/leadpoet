@@ -847,6 +847,9 @@ class ServiceConfig:
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
     code_reviewer: Optional[Any] = None
+    # Throttled pre-cutoff check that each pinned reviewer route still exists
+    # (``review_route_preflight.ReviewRoutePreflight``). Off when unset.
+    review_route_preflight: Optional[Any] = None
     # Only the host publishes accepted source. Miner code never gets GitHub access.
     baseline_promoter_factory: Optional[Callable[[], Any]] = None
     # Supplies plain accepted economic inputs. It must not return receipts,
@@ -2402,6 +2405,97 @@ class ArenaService:
             )["eligible"]:
                 raise ServiceError("code_review_required", 409)
 
+    def check_review_routes(self) -> Dict[str, Any]:
+        """Driver step: before reviews can start, confirm each pinned route exists.
+
+        It runs only while some active round is still open, so a withdrawn
+        provider endpoint is reported before the replacement cutoff starts
+        paid reviews. It never changes routing, admission or retries.
+        """
+        preflight = self._config.review_route_preflight
+        if preflight is None:
+            return {"status": "disabled"}
+        if not any(row.get("status") == "open" for row in self.active_rounds()):
+            return {"status": "idle"}
+        results = preflight.run()
+        if results is None:
+            return {"status": "throttled"}
+        missing = [row for row in results if row["status"] == "missing"]
+        return {
+            "status": "missing" if missing else "ok",
+            "missing": [{"model": row["model"], "route": row["route"]} for row in missing],
+            "unavailable": sum(row["status"] == "unavailable" for row in results),
+        }
+
+    def decide_review_hold(self, round_id: str, action: str) -> Dict[str, Any]:
+        """Owner decision for a round whose reviews failed on our side.
+
+        ``rerun`` re-queues those reviews: it records the hold if missing and
+        reopens the bounded SQL review window, so the review worker retries
+        them and the driver continues the round's normal stages once they
+        finish. It refuses a round that is not ``open`` (committed, scored or
+        published rounds are never reopened) and a round with no review
+        blocked by our infrastructure. Repeating it changes nothing further.
+        ``release`` lets the round proceed without the still-blocked entries,
+        which are then recorded as ``code_review_incomplete`` as before.
+        """
+        if action not in ("rerun", "release"):
+            raise ServiceError("review_hold_action_invalid", 400)
+        round_row = self._round(round_id)
+        try:
+            if action == "release":
+                return self._store.decide_review_hold(round_id, "release")
+            if round_row.get("status") != "open":
+                raise ServiceError("review_rerun_round_not_open", 409)
+            schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
+            cutoff = schedule.get("submission_cutoff")
+            if not cutoff or self.now() < _parse_iso(cutoff):
+                raise ServiceError("review_rerun_not_due", 409)
+            blocked = [
+                row for status in ("accepted", "frozen")
+                for row in self._store.list_submissions(round_id, status=status)
+                if not self._is_daily_baseline(row, round_row)
+                and code_review_policy.infrastructure_blocked(row)
+            ]
+            if not blocked:
+                # Nothing failed on our side: miners' own failures keep their outcome.
+                raise ServiceError("review_rerun_nothing_blocked", 409)
+            hold = self._review_hold(round_id)
+            if hold.get("released_at") is not None:
+                raise ServiceError("review_hold_released", 409)
+            decision = self._store.decide_review_hold(round_id, "extend")
+            if decision.get("status") != "extended":
+                raise ServiceError("review_rerun_round_not_open", 409)
+            return {**decision, "status": "requeued", "blocked": len(blocked)}
+        finally:
+            self._invalidate_hot_round()
+
+    def _review_hold(self, round_id: str) -> Dict[str, Any]:
+        try:
+            hold = self._store.hold_round_review(round_id)
+        except Exception as exc:
+            # Without the hold record SQL refuses reviews after the deadline.
+            # Stay unfrozen rather than fall back to rejecting the miners.
+            self._alert_hold_unavailable(round_id, type(exc).__name__)
+            raise ServiceError("code_review_hold_unavailable", 503) from exc
+        if hold.get("status") not in ("held", "existing"):
+            self._alert_hold_unavailable(round_id, str(hold.get("status")))
+            raise ServiceError("code_review_hold_unavailable", 503)
+        return hold
+
+    @staticmethod
+    def _alert_hold_unavailable(round_id: str, reason: str) -> None:
+        logger.error("Arena round %s cannot record its review hold (%s); round stays open", round_id, reason)
+        try:
+            from leadpoet_observability import capture_failure
+            capture_failure(
+                "arena.review_infrastructure_hold", component="arena-service", stage="freeze_participants",
+                terminal=True, retryable=True, fail_closed=True,
+                correlation_id="%s:hold_unavailable" % round_id, decision_code="hold_unavailable",
+            )
+        except Exception:
+            pass
+
     def review_pending_submissions(
         self, *, should_continue: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
@@ -3074,10 +3168,32 @@ class ArenaService:
                 or code_review_policy.review_retry_available(row)
             )
         ]
-        if unresolved:
+        # Our reviewer or provider failing is never the miner's failure. Such
+        # entries keep the round unfrozen past the benchmark deadline: SQL
+        # extends their review window while a hold is recorded, and the round
+        # waits for an operator rather than scoring the baseline alone.
+        blocked = [
+            row for row in accepted
+            if not self._is_daily_baseline(row, round_row)
+            and code_review_policy.infrastructure_blocked(row)
+        ]
+        if unresolved or blocked:
             deadline = (round_row["configuration_doc"].get("schedule") or {}).get("benchmark_deadline")
             if not deadline or self.now() < _parse_iso(deadline):
+                if blocked:
+                    # Record the hold before the deadline, so a claim that
+                    # expires then is retried, not made terminal. It extends
+                    # nothing unless the round is still open at the deadline.
+                    try:
+                        self._store.hold_round_review(round_id)
+                    except Exception:  # Best effort; the deadline path below is authoritative.
+                        logger.warning("Arena round %s review hold not armed", round_id, exc_info=True)
                 raise ServiceError("code_review_pending", 409)
+            if blocked:
+                hold = self._review_hold(round_id)
+                if hold.get("released_at") is None:
+                    self._alert_review_hold(round_row, hold, blocked)
+                    raise ServiceError("code_review_infrastructure_hold", 409)
         frozen_kings = [row for row in frozen if row.get("is_king")]
         if len(frozen_kings) > 1:
             raise ServiceError("baseline_submission_invalid", 500)
@@ -3130,6 +3246,43 @@ class ArenaService:
         if sum(1 for participant in participants if participant.get("is_king")) != 1:
             raise ServiceError("baseline_submission_invalid", 500)
         return participants
+
+    def _alert_review_hold(
+        self, round_row: Mapping[str, Any], hold: Mapping[str, Any], blocked: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Alert once per round, and again once its review window has closed."""
+        review_deadline = hold.get("review_deadline")
+        try:
+            window_closed = review_deadline is not None and self.now() >= _parse_iso(str(review_deadline))
+        except (TypeError, ValueError):
+            window_closed = True
+        codes = sorted({
+            str((row.get("code_review_doc") or {}).get("error_code") or row.get("code_review_status"))
+            for row in blocked
+        })
+        telemetry.record("review_infrastructure_hold", "failed", count=len(blocked))
+        logger.warning(
+            "Arena round %s held: %d submissions blocked by review infrastructure (%s); %s",
+            round_row["round_id"], len(blocked), ",".join(codes),
+            "review window closed, operator must extend or release" if window_closed
+            else "reviews retry until %s" % review_deadline,
+        )
+        try:
+            from leadpoet_observability import capture_failure
+            capture_failure(
+                "arena.review_infrastructure_hold",
+                component="arena-service",
+                stage="freeze_participants",
+                terminal=True,
+                retryable=not window_closed,
+                fail_closed=True,
+                correlation_id="%s:%s" % (round_row["round_id"], "window_closed" if window_closed else "held"),
+                backlog_count=len(blocked),
+                error_code=codes[0] if len(codes) == 1 else "mixed",
+                decision_code="operator_required" if window_closed else "retrying",
+            )
+        except Exception:
+            pass
 
     def _activate_company_judgments(self, document: Dict[str, Any]) -> bool:
         """Add only cache semantics to a future, not-yet-committed round."""
@@ -3236,7 +3389,8 @@ class ArenaService:
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
-            if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending", "code_review_pending"):
+            if exc.code in ("baseline_source_not_ready", "baseline_promotion_pending", "code_review_pending",
+                            "code_review_infrastructure_hold", "code_review_hold_unavailable"):
                 return {"status": "retry", "reason": exc.code, "set_id": set_id}
             raise
         evaluation_date = _parse_iso(

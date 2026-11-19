@@ -35,6 +35,7 @@ from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
+from lab_arena.review_route_preflight import ReviewRoutePreflight
 from lab_arena.runtime_host import parallel_memory_capacity, prepare_scoring_host
 from lab_arena.scoring_startup import prepare_validator_scoring
 
@@ -698,6 +699,7 @@ def build_service_from_environment(mode: str):
             prospective_primary_model=code_review.PROSPECTIVE_REVIEW_MODEL,
             prospective_alternate_model=code_review.PROSPECTIVE_ALTERNATE_MODEL,
         ),
+        review_route_preflight=ReviewRoutePreflight(),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
         weekly_slot_decay_enabled=_weekly_slot_decay_enabled_from_environment(),

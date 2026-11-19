@@ -46,6 +46,8 @@ INCIDENT_FAILURE_CODES = frozenset(
         "weight.finalization_missing",
         "release.pcr0_mismatch",
         "weight.bundle_divergence",
+        "arena.review_route_missing",
+        "arena.review_infrastructure_hold",
         "restart.terminal_failure",
     }
 )

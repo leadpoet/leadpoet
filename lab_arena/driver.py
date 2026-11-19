@@ -30,6 +30,9 @@ def drive_once(service) -> str:
         promoted = int(promotion.get("promoted") or 0)
         if promoted:
             parts.append("promoted baselines %d" % promoted)
+    outcome = _check_review_routes(service)
+    if outcome != "idle":
+        parts.append(outcome)
     outcome = _advance_active(service)
     if outcome != "idle":
         parts.append(outcome)
@@ -112,6 +115,27 @@ def _advance_one(service, row, outcomes):
         if "advanced %s" % row["round_id"] not in outcomes:
             outcomes.append("advanced %s" % row["round_id"])
         return result
+
+
+def _check_review_routes(service) -> str:
+    """Report a withdrawn reviewer route while submissions can still be reviewed."""
+
+    check = getattr(service, "check_review_routes", None)
+    if check is None:
+        return "idle"
+    try:
+        with telemetry.stage("review_route_preflight") as observed:
+            result = check()
+            missing = result.get("missing") or []
+            observed.count = len(missing)
+            observed.idle = result.get("status") != "missing"
+    except Exception as exc:
+        return "failed review_route_preflight: %s" % type(exc).__name__
+    if missing:
+        return "review routes missing %s" % ",".join(
+            "%s@%s" % (row["model"], row["route"]) for row in missing
+        )
+    return "idle"
 
 
 def _ensure_daily_round(service) -> str:

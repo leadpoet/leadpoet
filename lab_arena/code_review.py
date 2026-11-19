@@ -52,6 +52,23 @@ _REVIEW_MODEL_CANONICAL_SLUGS = {
     # Preserve validation for prepared reviews that selected the old model.
     "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
+# The one OpenRouter provider route each pinned reviewer may use. Requests
+# and the pre-cutoff route preflight both read this table, so a withdrawn
+# endpoint is detected for exactly the route that reviews would request.
+REVIEW_PROVIDER_ROUTES = {
+    DEFAULT_REVIEW_MODEL: "google-vertex",
+    FALLBACK_REVIEW_MODEL: "azure",
+    PROSPECTIVE_REVIEW_MODEL: "together",
+    PROSPECTIVE_ALTERNATE_MODEL: "moonshotai/mxfp4",
+}
+_LEGACY_REVIEW_PROVIDER_ROUTE = "google-vertex"
+
+
+def review_provider_only(model: str) -> list:
+    """Return the single-entry provider ``only`` list for one review request."""
+    return [REVIEW_PROVIDER_ROUTES.get(model, _LEGACY_REVIEW_PROVIDER_ROUTE)]
+
+
 DEFAULT_MAX_OUTPUT_TOKENS = 32_768
 RETRY_MAX_OUTPUT_TOKENS = 65_536
 DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
@@ -542,10 +559,7 @@ def prepare_request(
             # ONE route may be listed: reasoning_capture._apply_full refuses a
             # provider preference whose "only" is not a single entry, which
             # would silently empty the captured reasoning.
-            "only": (["together"] if model == PROSPECTIVE_REVIEW_MODEL else
-                     ["azure"] if model == FALLBACK_REVIEW_MODEL else
-                     ["moonshotai/mxfp4"] if model == PROSPECTIVE_ALTERNATE_MODEL else
-                     ["google-vertex"]),
+            "only": review_provider_only(model),
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",

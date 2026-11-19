@@ -194,6 +194,9 @@ def test_review_telemetry_tracks_only_committed_outcome(
             "arena.review_status": expected_status,
             "arena.error_code": error_code,
             "arena.review_categories": "-",
+            # Recorded on failures as well as successes — which model served a
+            # failed attempt is what makes the retry budget readable.
+            "arena.review_model": code_review.DEFAULT_REVIEW_MODEL,
             "arena.provider_http_status": http_status,
             "arena.retryable": retryable,
             "arena.funding_route": "miner_key",

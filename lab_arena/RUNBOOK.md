@@ -1186,58 +1186,62 @@ weight-state availability and is a service shutdown, not a scoring-only pause.
 
 ### Reopen a round published after a reviewer outage
 
-Use this when a round already published `no_king` with only the baseline
-because every challenger review failed with `code_review_provider_unavailable`
-(our route, not the miner). The review-outage hold (migration 701) covers open
-rounds; this covers a round that already published. Migration
-`702-lab-arena-review-outage-reopen.sql` adds two owner-only functions. Both
-default to a dry run and are idempotent per `request_id`.
-
-`lab_arena_reopen_review_outage_v1` refuses unless the round is exactly as
-published: live, rewards on, `no_king`, no king or promotion, participants only
-the frozen baseline, no stage-2 or non-baseline runs, claim control not paused,
-and the next round still open with no benchmark, runs or frozen funding. The
-listed submissions must be every provider-unavailable rejection, with each row
-unchanged. Applying it archives the published round in a
-`lab_arena_scoring_supersessions` receipt, clears the publication and reward
-fields, sets status `stage1_scored`, and returns the listed rows to `accepted`.
-The baseline row and its stage-1 scores are kept; the baseline never reruns.
-The archived signed `no_king` basis stays the reward authority until the round
-republishes, so new rewards start only from the republication epoch.
-
-The review worker then reviews those rows again on the current routes, with
-the miners' own keys. A hold trigger keeps the round in `stage1_scored` until
-`lab_arena_admit_review_outage_v1` runs or the review deadline passes.
-Admission freezes each passing row in acceptance order (with the full-thinking
-research proof when the round requires it) and rejects the rest with the normal
-rules. The driver then runs stage 2, scoring, judging, the king decision and
-publication. If admission never runs, the round continues with the baseline
-only and republishes `no_king`. `scripts/lab_arena_admin.py cancel` stays the
-emergency exit.
-
-The publication deadline must be no later than the next round's submission
-cutoff: while the reopened round is unpublished, the next round cannot freeze
-champion funding or claim baseline work.
+`review-hold --action rerun` (above) also covers a round that already
+published `no_king` with only the baseline because every challenger review
+failed with `code_review_provider_unavailable`, our route rather than the miner.
+Migration `702-lab-arena-review-outage-reopen.sql` provides the SQL.
 
 ```bash
-# 1. Dry run: prints the round hash, the row hashes and every change.
-psql "$ARENA_OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT jsonb_pretty(public.lab_arena_reopen_review_outage_v1(
-  '<round-id>', NULL, NULL, '<review-deadline>', '<stage-2-close>', '<final-scoring-close>', '<publication-deadline>',
-  '<request-id>', 'operator:<name>', '<approval-ref>', TRUE))"
-# 2. Apply with the round_sha256 and submissions array printed by step 1.
-psql "$ARENA_OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT jsonb_pretty(public.lab_arena_reopen_review_outage_v1(
-  '<round-id>', '<round-sha256>', '<submissions-json>'::jsonb, '<review-deadline>', '<stage-2-close>',
-  '<final-scoring-close>', '<publication-deadline>', '<request-id>', 'operator:<name>', '<approval-ref>', FALSE))"
-# 3. When every listed review has passed or been rejected: preview, then admit.
-psql "$ARENA_OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT jsonb_pretty(public.lab_arena_admit_review_outage_v1(
-  '<round-id>', '<request-id>', '<admit-request-id>', 'operator:<name>', TRUE))"
-psql "$ARENA_OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT jsonb_pretty(public.lab_arena_admit_review_outage_v1(
-  '<round-id>', '<request-id>', '<admit-request-id>', 'operator:<name>', FALSE))"
+python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action rerun --dry-run
+python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action rerun \
+  --approval-ref <who-approved> --expect-round-sha256 <round_sha256 from the dry run>
 ```
 
-Times are whole-second UTC. The review deadline is at most 6 hours away and the
-publication deadline at most 24 hours. The driver logs `failed advance_round`
-for the held round on each tick until admission; that is expected.
+The dry run prints the round hash, each listed row's hash, every field that
+changes, the next round and `republish_by`. It changes nothing. It refuses,
+with its reason, unless all of these hold:
+
+- The round is live with rewards on.
+- It published `no_king`, with no king, promotion or earlier correction.
+- Its participants are only the frozen baseline.
+- It has no stage-2 or non-baseline runs.
+- Claim control is not paused.
+- The listed rows are every provider-unavailable rejection.
+- The next round is known and still open, with no benchmark, runs or frozen
+  champion funding.
+- Republication can land before that round's baseline gate.
+
+The service derives the schedule from the next round's submission cutoff:
+
+- review window: one hour;
+- publication deadline: next cutoff − 2h;
+- `republish_by`: next cutoff − 1h.
+
+Repeating the apply step changes nothing.
+
+Applying it archives the published round in a
+`lab_arena_scoring_supersessions` receipt and clears the publication and
+reward fields. It sets status `stage1_scored` and returns the listed rows to
+`accepted`. The baseline row and its stage-1 scores are kept, and the baseline
+never reruns. The archived signed `no_king` basis stays the reward authority
+until the round republishes, so new rewards start only from the republication
+epoch.
+
+The review worker reviews those rows again on the current routes, with the
+miners' own keys. On each tick, the driver calls
+`lab_arena_advance_review_outage_v1`. Once every listed review has passed or
+been rejected, or the window has ended, it admits the passing rows in
+acceptance order, with the full-thinking research proof when the round needs
+it. It rejects the rest with the normal rules. The driver then runs stage 2,
+scoring, judging, the king decision and publication.
+
+While the reopened round is unpublished, the next round's baseline-freshness
+gate (`lab_arena__baseline_source_current_v1`) blocks its baseline freeze and
+claims. If the round has not republished by `republish_by`, the driver cancels
+it with `review_outage_reopen_expired`. Cancelling unblocks the next round and
+keeps the archived `no_king` basis. A round that republishes crowned still
+needs baseline promotion before the next cutoff, as any crowned round does.
+`scripts/lab_arena_admin.py cancel` stays the emergency exit.
 
 ## Focused checks
 

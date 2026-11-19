@@ -279,7 +279,6 @@ def test_rerun_requeues_reviews_that_failed_on_our_side_idempotently():
 
 
 @pytest.mark.parametrize("rows,status,hold,code", [
-    ([miner(0)], "published", None, "review_rerun_round_not_open"),
     ([miner(0)], "stage1_running", None, "review_rerun_round_not_open"),
     ([miner(0, code="code_review_provider_credit")], "open", None, "review_rerun_nothing_blocked"),
     ([miner(0, status="rejected")], "open", None, "review_rerun_nothing_blocked"),

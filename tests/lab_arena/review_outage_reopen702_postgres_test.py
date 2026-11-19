@@ -94,7 +94,7 @@ def iso(moment):
 
 
 def make_round(store, connection, tag, *, count=2, error='code_review_provider_unavailable', network=None,
-               cutoff_minutes=5):
+               cutoff_minutes=5, next_cutoff_hours=10):
     """A published no-king round whose challengers all failed review."""
     now = datetime.now(timezone.utc)
     network = network or 'review702-' + tag
@@ -158,7 +158,19 @@ def make_round(store, connection, tag, *, count=2, error='code_review_provider_u
              published, json.dumps(basis), basis['reward_basis_hash'], json.dumps(key), published,
              basis['effective_reward_epoch'], basis['effective_reward_epoch'], round_id))
         cursor.execute('COMMIT')
+    if next_cutoff_hours is not None:
+        make_next(store, connection, round_id, network, next_cutoff_hours)
     return round_id, sids, basis
+
+
+def make_next(store, connection, round_id, network, hours):
+    """The next daily round, still open for submissions."""
+    next_id = round_id.replace('2099-04-01', '2099-04-02')
+    config = round_config(next_id, [hotkey('runner702-next-' + network)], rewards_enabled=True)
+    config.update(network_name=network, netuid=71)
+    config['schedule']['submission_cutoff'] = iso(datetime.now(timezone.utc) + timedelta(hours=hours))
+    assert store.create_round(next_id, config)['status'] == 'created'
+    return next_id
 
 
 def round_hash(connection, round_id):
@@ -273,6 +285,8 @@ def test_reopen_review_admit_runs_normal_competition_and_keeps_archived_authorit
     admitted = scalar(connection, ADMIT_CALL, (round_id, 'reopen-1', 'admit-1', 'operator:review702', False))
     assert admitted['admitted'] == [sids[0][0], sids[2][0]]
     assert admitted['excluded'] == {sids[1][0]: 'code_review_rejected'}
+    # Same finalists rule as open_stage under baseline-first (572).
+    assert store.get_round(round_id)['finalists'] == sorted([sids[0][0], sids[2][0]])
     participants = store.get_round(round_id)['participants']
     assert [p['submission_id'] for p in participants[1:]] == [sids[0][0], sids[2][0]]
     assert all(set(p) == {'submission_id', 'miner_hotkey', 'source_ref', 'source_size_bytes', 'is_king'}
@@ -285,6 +299,21 @@ def test_reopen_review_admit_runs_normal_competition_and_keeps_archived_authorit
     assert alternate.begin(store, sids[0][0], sids[0][1], DS)['status'] == 'existing'
     with pytest.raises(Exception, match='submission_missing'):
         alternate.begin(store, sids[1][0], sids[1][1], DS)
+
+
+def test_review_window_does_not_depend_on_the_reopen_session_timezone(db):
+    _, connection, store = db
+    round_id, sids, _ = make_round(store, connection, 'tz', count=1)
+    digest, hashes = round_hash(connection, round_id), row_hashes(connection, round_id)
+    with connection.cursor() as cursor:
+        cursor.execute("SET TimeZone='America/Los_Angeles'")
+    try:
+        assert reopen(connection, round_id, hashes=hashes, digest=digest)['status'] == 'reopened'
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("SET TimeZone='UTC'")
+    sid, miner = sids[0]
+    assert alternate.begin(store, sid, miner, DS, new_lease_token())['status'] == 'claimed'
 
 
 def test_hold_expires_at_review_deadline_and_cancel_is_never_held(db):
@@ -385,33 +414,80 @@ def test_other_rejection_codes_are_not_reopened(db):
         reopen(connection, round_id, hashes=None, digest=None, dry=True)
 
 
-def test_next_round_must_not_be_frozen_and_bounds_publication(db):
+def test_reopen_refuses_up_front_when_it_could_stall_the_next_round(db):
     _, connection, store = db
-    round_id, _, _ = make_round(store, connection, 'next', count=1)
-    later = datetime.now(timezone.utc) + timedelta(hours=2)
-    config = round_config('arena-2099-04-02-next702', [hotkey('runner702-next2')], rewards_enabled=True)
-    config.update(network_name='review702-next', netuid=71)
-    config['schedule']['submission_cutoff'] = iso(later)
-    assert store.create_round('arena-2099-04-02-next702', config)['status'] == 'created'
-    damage(connection, round_id, "UPDATE lab_arena_rounds SET evaluation_date='2099-04-02' WHERE round_id=%s",
-           ('arena-2099-04-02-next702',))
-    with pytest.raises(Exception, match='deadline invalid'):
-        reopen(connection, round_id, dry=True)  # publication 4h later is after the next cutoff
+    round_id, _, _ = make_round(store, connection, 'next', count=1, next_cutoff_hours=None)
+    before = snapshot(connection, round_id)
+    with pytest.raises(Exception, match='next round unknown'):
+        reopen(connection, round_id, dry=True)
+    next_id = make_next(store, connection, round_id, 'review702-next', 3)
+    # Default deadlines publish ~4.5h out, after next cutoff - 2h.
+    with pytest.raises(Exception, match='collide with next round %s baseline gate' % next_id):
+        reopen(connection, round_id, dry=True)
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    times = (now + timedelta(minutes=10), now + timedelta(minutes=40), now + timedelta(minutes=60),
-             now + timedelta(minutes=61))
-    assert reopen(connection, round_id, times=times, dry=True)['next_round_id'] == 'arena-2099-04-02-next702'
-    damage(connection, round_id, 'UPDATE lab_arena_rounds SET champion_funding_frozen=true WHERE round_id=%s',
-           ('arena-2099-04-02-next702',))
-    with pytest.raises(Exception, match='later round has already frozen work'):
-        reopen(connection, round_id, times=times, dry=True)
+    times = (now + timedelta(minutes=10), now + timedelta(minutes=40), now + timedelta(minutes=59),
+             now + timedelta(minutes=60))
+    preview = reopen(connection, round_id, times=times, dry=True)
+    assert preview['next_round_id'] == next_id
+    cutoff = datetime.strptime(store.get_round(next_id)['configuration_doc']['schedule']['submission_cutoff'],
+                               '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    assert preview['republish_by'] == iso(cutoff - timedelta(minutes=60))
+    for column in ('champion_funding_frozen', 'benchmark_ref'):
+        damage(connection, round_id, 'UPDATE lab_arena_rounds SET %s=%s WHERE round_id=%%s'
+               % (column, 'true' if column == 'champion_funding_frozen' else "'x'"), (next_id,))
+        with pytest.raises(Exception, match='later round has already frozen work'):
+            reopen(connection, round_id, times=times, dry=True)
+        damage(connection, round_id, 'UPDATE lab_arena_rounds SET %s=%s WHERE round_id=%%s'
+               % (column, 'false' if column == 'champion_funding_frozen' else 'NULL'), (next_id,))
+    assert snapshot(connection, round_id) == before
+
+
+def test_driver_step_admits_then_cancels_a_rerun_that_misses_republish_by(db):
+    _, connection, store = db
+    round_id, sids, basis = make_round(store, connection, 'driver', count=1)
+    advance = lambda: scalar(connection, 'SELECT public.lab_arena_advance_review_outage_v1(%s)', (round_id,))
+    assert advance() == {'status': 'not_reopened'}
+    reopen(connection, round_id)
+    assert advance()['status'] == 'waiting'
+    sid, miner = sids[0]
+    token = new_lease_token()
+    assert alternate.begin(store, sid, miner, DS, token)['status'] == 'claimed'
+    assert advance() == {'status': 'waiting', 'reason': 'review_pending',
+                         'review_deadline': advance()['review_deadline']}
+    assert store.finish_submission_review(sid, miner, token, 'passed', verdict(DS), 1234)['status'] == 'passed'
+    admitted = advance()
+    assert admitted['status'] == 'admitted' and admitted['admitted'] == [sid]
+    assert store.get_submission(sid)['status'] == 'frozen'
+    assert advance()['status'] == 'running'
+    # Simulate the clock passing republish_by: rewrite the receipt, still exact.
+    past = iso(datetime.now(timezone.utc) - timedelta(seconds=5))
+    earlier = iso(datetime.now(timezone.utc) - timedelta(seconds=10))
+    damage(connection, round_id,
+           "UPDATE lab_arena_scoring_supersessions SET recovery_doc=jsonb_set(recovery_doc,'{republish_by}',to_jsonb(%s::text)),"
+           " new_round_doc=jsonb_set(new_round_doc,'{configuration_doc,schedule,publication_deadline}',to_jsonb(%s::text))"
+           " WHERE round_id=%s AND recovery_doc->>'recovery_kind'='operator_review_outage_reopen_v1'", (past, earlier, round_id))
+    damage(connection, round_id,
+           "UPDATE lab_arena_scoring_supersessions SET request_hash='sha256:'||encode(extensions.digest(recovery_doc::text,'sha256'),'hex')"
+           " WHERE round_id=%s AND recovery_doc->>'recovery_kind'='operator_review_outage_reopen_v1'", (round_id,))
+    expired = advance()
+    assert expired['status'] == 'cancelled' and store.get_round(round_id)['status'] == 'cancelled'
+    assert advance() == {'status': 'settled', 'round_status': 'cancelled'}
+    # The archived no-king basis is still the reward authority.
+    history = scalar(connection, 'SELECT public.lab_arena_correction_reward_history_v1(%s,%s,%s,200,0,false)',
+                     ('live', 'review702-driver', 71))
+    assert [h['reward_basis_hash'] for h in history] == [basis['reward_basis_hash']]
 
 
 def test_service_roles_cannot_call_owner_functions(db):
     _, connection, _ = db
-    for role in ('service_role', 'lab_arena_service'):
-        for signature in (REOPEN, ADMIT):
+    advance = 'public.lab_arena_advance_review_outage_v1(text)'
+    for role in ('service_role', 'anon', 'authenticated'):
+        for signature in (REOPEN, ADMIT, advance):
             assert scalar(connection, 'SELECT has_function_privilege(%s,%s,%s)', (role, signature, 'EXECUTE')) is False
+    # The admin rerun trigger and the driver run as the Arena service; admit stays owner-only.
+    for signature, allowed in ((REOPEN, True), (advance, True), (ADMIT, False)):
+        assert scalar(connection, 'SELECT has_function_privilege(%s,%s,%s)',
+                      ('lab_arena_service', signature, 'EXECUTE')) is allowed
     assert scalar(connection, 'SELECT has_function_privilege(%s,%s,%s)', ('lab_arena_service', READER, 'EXECUTE')) is True
 
 

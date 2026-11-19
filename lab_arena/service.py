@@ -418,6 +418,8 @@ FULL_THINKING_BASELINE_URL_RE = re.compile(
 DEFAULT_EXECUTION_CAP_MICROUSD = 80_000_000
 DEFAULT_COST_PER_COMPANY_MICROUSD = contracts.PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
 DEFAULT_EXECUTION_ICP_CAP_MICROUSD = contracts.PER_ICP_EXECUTION_CAP_MICROUSD
+# A reopened published round reviews its provider-outage rejections for this long.
+REVIEW_REOPEN_WINDOW_SECONDS = 3600
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 240,
@@ -997,6 +999,14 @@ class ServiceConfig:
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _past_iso(now: datetime, value: Any) -> bool:
+    """True when ``value`` is a valid ISO time at or before ``now``."""
+    try:
+        return bool(value) and now >= _parse_iso(value)
+    except (TypeError, ValueError):
+        return False
 
 
 def _parse_iso(value: str) -> datetime:
@@ -2427,7 +2437,10 @@ class ArenaService:
             "unavailable": sum(row["status"] == "unavailable" for row in results),
         }
 
-    def decide_review_hold(self, round_id: str, action: str) -> Dict[str, Any]:
+    def decide_review_hold(
+        self, round_id: str, action: str, *, dry_run: bool = False,
+        expect_round_sha256: Optional[str] = None, approval_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Owner decision for a round whose reviews failed on our side.
 
         ``rerun`` re-queues those reviews: it records the hold if missing and
@@ -2445,6 +2458,12 @@ class ArenaService:
         try:
             if action == "release":
                 return self._store.decide_review_hold(round_id, "release")
+            if round_row.get("status") == "published":
+                # The same trigger, for a round that already published no_king
+                # because every review failed on our side (migration 702).
+                return self._reopen_published_review_outage(
+                    round_row, dry_run=dry_run, expect_round_sha256=expect_round_sha256,
+                    approval_ref=approval_ref)
             if round_row.get("status") != "open":
                 raise ServiceError("review_rerun_round_not_open", 409)
             schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
@@ -2469,6 +2488,72 @@ class ArenaService:
             return {**decision, "status": "requeued", "blocked": len(blocked)}
         finally:
             self._invalidate_hot_round()
+
+    def _reopen_published_review_outage(
+        self, round_row: Mapping[str, Any], *, dry_run: bool,
+        expect_round_sha256: Optional[str], approval_ref: Optional[str],
+    ) -> Dict[str, Any]:
+        """Re-review a published round's provider-outage rejections.
+
+        SQL refuses unless the round is exactly as published (no_king, only
+        the baseline, every listed row a provider-unavailable rejection) and
+        republication can land before the next round's baseline gate. The
+        driver then admits passing rows and runs the normal stages, or
+        cancels the reopened round at ``republish_by``.
+        """
+        round_id = str(round_row["round_id"])
+        cutoff = _parse_iso(round_row["configuration_doc"]["schedule"]["submission_cutoff"])
+        later = [
+            row for row in self.active_rounds()
+            if row.get("round_id") != round_id
+            and _parse_iso(((row.get("configuration_doc") or {}).get("schedule") or {})["submission_cutoff"]) > cutoff
+        ]
+        if not later:
+            raise ServiceError("review_reopen_next_round_unknown", 409)
+        next_cutoff = min(
+            _parse_iso(row["configuration_doc"]["schedule"]["submission_cutoff"]) for row in later)
+        now = self.now().astimezone(timezone.utc).replace(microsecond=0)
+        review = now + timedelta(seconds=REVIEW_REOPEN_WINDOW_SECONDS)
+        # SQL cancels at next cutoff - 60m; publication leaves another 60m.
+        publication = next_cutoff - timedelta(minutes=120)
+        final = publication - timedelta(seconds=1)
+        stage_minutes = self._config.defaults.stage_minutes.get("stage_2", 180)
+        stage_2_close = min(review + timedelta(minutes=stage_minutes), review + (final - review) / 2)
+        stage_2_close = stage_2_close.replace(microsecond=0)
+        if not review < stage_2_close < final:
+            raise ServiceError("review_reopen_window_too_short", 409)
+        arguments = dict(
+            review_deadline=_iso(review), stage_2_close=_iso(stage_2_close),
+            final_scoring_close=_iso(final), publication_deadline=_iso(publication),
+            request_id="review-outage-reopen:%s" % round_id, actor_ref="operator:lab_arena_admin",
+            approval_ref=approval_ref or "dry-run")
+        try:
+            preview = self._store.reopen_review_outage(
+                round_id, round_sha256=None, submissions=None, dry_run=True, **arguments)
+            if dry_run or preview.get("status") != "dry_run":
+                return preview
+            if not approval_ref:
+                raise ServiceError("review_reopen_approval_required", 400)
+            if expect_round_sha256 != preview.get("round_sha256"):
+                # The operator confirms the exact round the dry run printed.
+                raise ServiceError("review_reopen_round_changed", 409)
+            return self._store.reopen_review_outage(
+                round_id, round_sha256=preview["round_sha256"], submissions=preview["submissions"],
+                dry_run=False, **arguments)
+        except ArenaStoreError as exc:
+            # The SQL refusal names its reason; pass it to the operator verbatim.
+            match = re.search(r"review_outage_reopen: [^{\n]*", str(exc))
+            reason = match.group(0).strip() if match else type(exc).__name__
+            raise ServiceError("review_reopen_refused (%s)" % reason, 409) from exc
+
+    def _advance_review_outage(self, round_id: str) -> Dict[str, Any]:
+        """Driver step for a reopened round; ``not_reopened`` everywhere else."""
+        try:
+            return self._store.advance_review_outage(round_id)
+        except ArenaStoreError as exc:
+            if (getattr(exc, "store_error", None) or {}).get("code") in ("42883", "PGRST202"):
+                return {"status": "not_reopened"}  # 702 not applied: nothing can be reopened.
+            raise
 
     def _review_hold(self, round_id: str) -> Dict[str, Any]:
         try:
@@ -8521,6 +8606,16 @@ class ArenaService:
                 and now < _parse_iso(schedule["submission_cutoff"])
             ):
                 return {"status": "waiting", "round_status": status}
+            if status not in TERMINAL_STATUSES and (
+                status == "stage1_scored" or _past_iso(now, schedule.get("publication_deadline"))
+            ):
+                # A round reopened after a reviewer outage (702) is admitted
+                # here, or cancelled before it can stall the next round.
+                with telemetry.stage("advance_review_outage"):
+                    outage = self._advance_review_outage(round_id)
+                if outage.get("status") in ("waiting", "admitted", "cancelled"):
+                    self._invalidate_hot_round()
+                    return {**outage, "round_status": self._round(round_id)["status"]}
             if status == "open":
                 with telemetry.stage("advance_commit_benchmark"):
                     return self.commit_benchmark(round_id)

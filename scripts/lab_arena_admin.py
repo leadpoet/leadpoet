@@ -5,6 +5,8 @@
     python3 scripts/lab_arena_admin.py advance --round <round-id> [--dry-run]
     python3 scripts/lab_arena_admin.py cancel --round <round-id> --reason <rule> [--dry-run]
     python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action rerun|release [--dry-run]
+    python3 scripts/lab_arena_admin.py review-hold --round <published-round-id> --action rerun \
+        --approval-ref <ref> --expect-round-sha256 <sha256 from --dry-run>
 
 Commands print only public operating state. ``LAB_ARENA_MODE=off`` refuses
 every command.
@@ -53,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     hold.add_argument("--action", required=True, choices=("rerun", "release"))
     hold.add_argument("--expect-status", default=None)
     hold.add_argument("--dry-run", action="store_true")
+    # A published round (reopen, migration 702) needs the hash its dry run printed.
+    hold.add_argument("--expect-round-sha256", default=None)
+    hold.add_argument("--approval-ref", default=None)
     return parser
 
 
@@ -132,6 +137,19 @@ def run(args, service) -> int:
             return 4
         print(json.dumps({"result": result, "round": public_view(service.store.get_round(args.round))}, indent=2, sort_keys=True, default=str))
         return 0
+    if args.command == "review-hold" and row.get("status") == "published":
+        if args.action != "rerun":
+            print("a published round only supports --action rerun", file=sys.stderr)
+            return 2
+        try:
+            result = service.decide_review_hold(
+                args.round, "rerun", dry_run=args.dry_run,
+                expect_round_sha256=args.expect_round_sha256, approval_ref=args.approval_ref)
+        except ServiceError as exc:
+            print("review reopen refused: %s" % exc.code, file=sys.stderr)
+            return 4
+        print(json.dumps({"result": result, "round": public_view(service.store.get_round(args.round))}, indent=2, sort_keys=True, default=str))
+        return 0 if result.get("status") in ("dry_run", "reopened") else 4
     if args.command == "review-hold":
         if args.dry_run:
             print(json.dumps({"dry_run": True, "round": public_view(row), "action": args.action}, indent=2, sort_keys=True))

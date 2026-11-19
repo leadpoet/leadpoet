@@ -18,7 +18,7 @@ GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 -- 1. Exact receipt shape. Shared by the reward-history reader, the review
 -- deadline hook and the admission hold, so every reader applies one rule.
 CREATE OR REPLACE FUNCTION public.lab_arena__review_outage_receipt_valid_v1(h public.lab_arena_scoring_supersessions)
-RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $valid702$
+RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $valid702$
 DECLARE o JSONB:=h.old_round_doc;n JSONB:=h.new_round_doc;field TEXT;item RECORD;
  cleared TEXT[]:=ARRAY['status','status_generation','configuration_doc','published_at','publication_doc',
   'reward_basis_doc','reward_basis_hash','signing_key_doc','effective_reward_epoch','reward_activated_at',
@@ -41,7 +41,9 @@ BEGIN
   OR (o-cleared) IS DISTINCT FROM (n-cleared)
   OR ((o->'configuration_doc')-'schedule') IS DISTINCT FROM ((n->'configuration_doc')-'schedule')
   OR ((o#>'{configuration_doc,schedule}')-moved) IS DISTINCT FROM ((n#>'{configuration_doc,schedule}')-moved)
-  OR n#>>'{configuration_doc,schedule,stage_2_start}' IS DISTINCT FROM h.recovery_doc->>'review_deadline' THEN
+  OR n#>>'{configuration_doc,schedule,stage_2_start}' IS DISTINCT FROM h.recovery_doc->>'review_deadline'
+  OR coalesce(h.recovery_doc->>'republish_by','')!~'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+  OR (h.recovery_doc->>'republish_by')::TIMESTAMPTZ<=(n#>>'{configuration_doc,schedule,publication_deadline}')::TIMESTAMPTZ THEN
   RETURN FALSE;
  END IF;
  FOREACH field IN ARRAY cleared[4:17] LOOP
@@ -64,7 +66,7 @@ $valid702$;
 
 -- The latest operational receipt for the round, or NULL.
 CREATE OR REPLACE FUNCTION public.lab_arena__review_outage_open_receipt_v1(p_round_id TEXT)
-RETURNS public.lab_arena_scoring_supersessions LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $open702$
+RETURNS public.lab_arena_scoring_supersessions LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $open702$
  SELECT h.* FROM public.lab_arena_scoring_supersessions h
  WHERE h.round_id=p_round_id AND h.recovery_doc->>'recovery_kind'='operator_review_outage_reopen_v1'
   AND h.generation_floor=(SELECT max(l.generation_floor) FROM public.lab_arena_scoring_supersessions l WHERE l.round_id=p_round_id)
@@ -76,7 +78,7 @@ $open702$;
 -- unchanged and not yet admitted. NULL everywhere else.
 CREATE OR REPLACE FUNCTION public.lab_arena__review_outage_review_deadline_v1(
  p_round public.lab_arena_rounds,p_submission public.lab_arena_submissions)
-RETURNS TIMESTAMPTZ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $deadline702$
+RETURNS TIMESTAMPTZ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $deadline702$
  SELECT (h.recovery_doc->>'review_deadline')::TIMESTAMPTZ
  FROM public.lab_arena__review_outage_open_receipt_v1(p_round.round_id) h
  WHERE h.round_id IS NOT NULL AND p_round.status='stage1_scored'
@@ -170,7 +172,7 @@ $frozen702$;
 -- reviewed rows or the review window ends. Cancel is never held. Other
 -- rounds, including the next day's round, are untouched.
 CREATE OR REPLACE FUNCTION public.lab_arena_review_outage_hold_v1()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $hold702$
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $hold702$
 DECLARE h public.lab_arena_scoring_supersessions;
 BEGIN
  IF OLD.status='stage1_scored' AND NEW.status IS DISTINCT FROM OLD.status AND NEW.status<>'cancelled' THEN
@@ -314,11 +316,11 @@ CREATE OR REPLACE FUNCTION public.lab_arena_reopen_review_outage_v1(
  p_round_id TEXT,p_round_sha256 TEXT,p_submissions JSONB,p_review_deadline TIMESTAMPTZ,p_stage_2_close TIMESTAMPTZ,
  p_final_scoring_close TIMESTAMPTZ,p_publication_deadline TIMESTAMPTZ,p_request_id TEXT,p_actor_ref TEXT,
  p_approval_ref TEXT,p_dry_run BOOLEAN DEFAULT TRUE)
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reopen702$
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $reopen702$
 DECLARE r public.lab_arena_rounds;n public.lab_arena_rounds;s public.lab_arena_submissions;base public.lab_arena_submissions;
  nxt public.lab_arena_rounds;prior public.lab_arena_scoring_supersessions;head public.lab_arena_ledger;
  proof JSONB;rows JSONB:='{}';listed JSONB:='[]';changes JSONB:='{}';schedule JSONB;baseline_id TEXT;round_hash TEXT;
- digest TEXT;revision BIGINT;key TEXT;fmt TEXT:='YYYY-MM-DD"T"HH24:MI:SS"Z"';
+ digest TEXT;revision BIGINT;key TEXT;fmt TEXT:='YYYY-MM-DD"T"HH24:MI:SS"Z"';republish_by TIMESTAMPTZ;
 BEGIN
  IF p_round_id IS NULL OR p_request_id IS NULL OR length(p_request_id) NOT BETWEEN 1 AND 160
   OR p_actor_ref IS NULL OR length(btrim(p_actor_ref)) NOT BETWEEN 1 AND 200
@@ -344,18 +346,15 @@ BEGIN
  SELECT * INTO prior FROM public.lab_arena_scoring_supersessions WHERE round_id=p_round_id AND request_id=p_request_id;
  IF FOUND THEN
   IF prior.recovery_doc->>'recovery_kind' IS DISTINCT FROM 'operator_review_outage_reopen_v1'
-   OR NOT public.lab_arena__review_outage_receipt_valid_v1(prior) OR prior.actor_ref IS DISTINCT FROM p_actor_ref
-   OR prior.recovery_doc->>'round_sha256' IS DISTINCT FROM p_round_sha256
-   OR prior.recovery_doc->>'approval_ref' IS DISTINCT FROM p_approval_ref
-   OR prior.recovery_doc->'submission_hashes' IS DISTINCT FROM p_submissions
-   OR (prior.recovery_doc->>'review_deadline')::TIMESTAMPTZ IS DISTINCT FROM p_review_deadline
-   OR (prior.new_round_doc#>>'{configuration_doc,schedule,stage_2_close}')::TIMESTAMPTZ IS DISTINCT FROM p_stage_2_close
-   OR (prior.new_round_doc#>>'{configuration_doc,schedule,final_scoring_close}')::TIMESTAMPTZ IS DISTINCT FROM p_final_scoring_close
-   OR (prior.new_round_doc#>>'{configuration_doc,schedule,publication_deadline}')::TIMESTAMPTZ IS DISTINCT FROM p_publication_deadline THEN
+   OR NOT public.lab_arena__review_outage_receipt_valid_v1(prior)
+   OR (p_round_sha256 IS NOT NULL AND prior.recovery_doc->>'round_sha256' IS DISTINCT FROM p_round_sha256)
+   OR (p_submissions IS NOT NULL AND prior.recovery_doc->'submission_hashes' IS DISTINCT FROM p_submissions) THEN
    RAISE EXCEPTION 'review_outage_reopen: replay differs';
   END IF;
+  -- A repeat (dry run or apply) reports the first reopen and changes nothing.
   RETURN jsonb_build_object('status','reopened','idempotent',TRUE,'round_id',p_round_id,'request_id',p_request_id,
-   'review_deadline',prior.recovery_doc->'review_deadline','submissions',p_submissions);
+   'round_sha256',prior.recovery_doc->'round_sha256','review_deadline',prior.recovery_doc->'review_deadline',
+   'republish_by',prior.recovery_doc->'republish_by','submissions',prior.recovery_doc->'submission_hashes');
  END IF;
  round_hash:='sha256:'||encode(extensions.digest((to_jsonb(r)-'updated_at')::TEXT,'sha256'),'hex');
  baseline_id:='baseline-'||regexp_replace(r.round_id,'^arena-','');
@@ -396,23 +395,33 @@ BEGIN
  IF EXISTS(SELECT 1 FROM public.lab_arena_rounds newer WHERE newer.round_id<>r.round_id
    AND (newer.evaluation_date>r.evaluation_date OR (newer.evaluation_date IS NULL AND newer.created_at>r.created_at))
    AND newer.arena_network_name=r.arena_network_name AND newer.arena_netuid=r.arena_netuid
-   AND newer.configuration_doc->>'mode'='live' AND (newer.status<>'open' OR newer.benchmark_ref IS NOT NULL
+   AND newer.configuration_doc->>'mode'='live' AND newer.status<>'cancelled' AND (newer.status<>'open' OR newer.benchmark_ref IS NOT NULL
     OR newer.champion_funding_frozen OR newer.reward_activated_at IS NOT NULL
     OR EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE a.round_id=newer.round_id))) THEN
   RAISE EXCEPTION 'review_outage_reopen: a later round has already frozen work';
  END IF;
  SELECT newer.* INTO nxt FROM public.lab_arena_rounds newer WHERE newer.round_id<>r.round_id
   AND (newer.evaluation_date>r.evaluation_date OR (newer.evaluation_date IS NULL AND newer.created_at>r.created_at))
-  AND newer.arena_network_name=r.arena_network_name AND newer.arena_netuid=r.arena_netuid AND newer.configuration_doc->>'mode'='live'
+  AND newer.arena_network_name=r.arena_network_name AND newer.arena_netuid=r.arena_netuid AND newer.configuration_doc->>'mode'='live' AND newer.status<>'cancelled'
  ORDER BY (newer.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ LIMIT 1;
+ -- The next round's baseline-freshness gate (627/640) blocks its baseline
+ -- freeze and claims while this round is unpublished. Republication must
+ -- therefore land, with a promotion margin, before the next cutoff. The
+ -- driver cancels the reopened round at republish_by (advance below), so a
+ -- slow rerun can never stall the next round.
+ IF nxt.round_id IS NULL THEN RAISE EXCEPTION 'review_outage_reopen: next round unknown; cannot bound the baseline gate'; END IF;
+ republish_by:=(nxt.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ-INTERVAL '60 minutes';
+ IF p_publication_deadline IS NOT NULL AND p_publication_deadline>republish_by-INTERVAL '60 minutes' THEN
+  RAISE EXCEPTION 'review_outage_reopen: publication would collide with next round % baseline gate (publication deadline must be at or before %)',
+   nxt.round_id,to_char((republish_by-INTERVAL '60 minutes') AT TIME ZONE 'UTC',fmt);
+ END IF;
  IF NOT(clock_timestamp()<p_review_deadline AND p_review_deadline<=clock_timestamp()+INTERVAL '6 hours'
   AND p_review_deadline<p_stage_2_close AND p_stage_2_close<p_final_scoring_close AND p_final_scoring_close<p_publication_deadline
   AND p_publication_deadline<=clock_timestamp()+INTERVAL '24 hours'
-  AND (nxt.round_id IS NULL OR p_publication_deadline<=(nxt.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ)
   AND date_trunc('second',p_review_deadline)=p_review_deadline AND date_trunc('second',p_stage_2_close)=p_stage_2_close
   AND date_trunc('second',p_final_scoring_close)=p_final_scoring_close
   AND date_trunc('second',p_publication_deadline)=p_publication_deadline) THEN
-  RAISE EXCEPTION 'review_outage_reopen: deadline invalid';
+  RAISE EXCEPTION 'review_outage_reopen: deadline invalid (need now < review <= now+6h < ... strict order, publication <= now+24h, whole seconds)';
  END IF;
  -- Exactly every provider-unavailable rejection, each with an unchanged row.
  FOR s IN SELECT * FROM public.lab_arena_submissions WHERE round_id=r.round_id AND status='rejected'
@@ -453,13 +462,14 @@ BEGIN
  IF p_dry_run THEN
   RETURN jsonb_build_object('status','dry_run','round_id',r.round_id,'round_sha256',round_hash,'request_id',p_request_id,
    'next_round_id',nxt.round_id,'review_deadline',to_char(p_review_deadline AT TIME ZONE 'UTC',fmt),
-   'round_changes',changes,'submissions',listed,'submission_changes',
+   'republish_by',to_char(republish_by AT TIME ZONE 'UTC',fmt),'round_changes',changes,'submissions',listed,'submission_changes',
    (SELECT jsonb_agg(jsonb_build_object('submission_id',x->>'submission_id','miner_hotkey',rows->(x->>'submission_id')->'old'->>'miner_hotkey',
      'status',jsonb_build_object('old','rejected','new','accepted'),
      'rejection_rule',jsonb_build_object('old','code_review_incomplete','new',NULL))) FROM jsonb_array_elements(listed) x));
  END IF;
  proof:=jsonb_build_object('operation','round_operational_update_v1','recovery_kind','operator_review_outage_reopen_v1',
   'round_sha256',round_hash,'approval_ref',p_approval_ref,'review_deadline',to_char(p_review_deadline AT TIME ZONE 'UTC',fmt),
+  'next_round_id',nxt.round_id,'republish_by',to_char(republish_by AT TIME ZONE 'UTC',fmt),
   'submission_hashes',p_submissions,'submissions',rows);
  digest:='sha256:'||encode(extensions.digest(proof::TEXT,'sha256'),'hex');
  SELECT coalesce(max(generation_floor),0)+1 INTO revision FROM public.lab_arena_scoring_supersessions WHERE round_id=r.round_id;
@@ -492,7 +502,8 @@ BEGIN
    RAISE EXCEPTION 'review_outage_reopen: row postcondition differs: %',s.submission_id; END IF;
  END LOOP;
  RETURN jsonb_build_object('status','reopened','idempotent',FALSE,'round_id',r.round_id,'request_id',p_request_id,
-  'next_round_id',nxt.round_id,'review_deadline',proof->'review_deadline','submissions',listed,'round_changes',changes);
+  'next_round_id',nxt.round_id,'review_deadline',proof->'review_deadline','republish_by',proof->'republish_by',
+  'submissions',listed,'round_changes',changes);
 END;
 $reopen702$;
 ALTER FUNCTION public.lab_arena_reopen_review_outage_v1(TEXT,TEXT,JSONB,TIMESTAMPTZ,TIMESTAMPTZ,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,TEXT,TEXT,BOOLEAN) OWNER TO lab_arena_owner;
@@ -504,7 +515,7 @@ REVOKE ALL ON FUNCTION public.lab_arena_reopen_review_outage_v1(TEXT,TEXT,JSONB,
 -- valid outcome: the round then republishes with the baseline only.
 CREATE OR REPLACE FUNCTION public.lab_arena_admit_review_outage_v1(
  p_round_id TEXT,p_reopen_request_id TEXT,p_request_id TEXT,p_actor_ref TEXT,p_dry_run BOOLEAN DEFAULT TRUE)
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $admit702$
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $admit702$
 DECLARE r public.lab_arena_rounds;n public.lab_arena_rounds;s public.lab_arena_submissions;
  h public.lab_arena_scoring_supersessions;prior public.lab_arena_scoring_supersessions;
  admitted JSONB:='[]';excluded JSONB:='{}';proof JSONB;revision BIGINT;deadline TIMESTAMPTZ;cap INTEGER;
@@ -572,6 +583,8 @@ BEGIN
  IF jsonb_array_length(admitted)+(SELECT count(*) FROM jsonb_object_keys(excluded))
    <>(SELECT count(*) FROM jsonb_object_keys(h.recovery_doc->'submissions')) THEN
   RAISE EXCEPTION 'review_outage_admit: reopened rows missing'; END IF;
+ -- Same finalists rule as lab_arena_open_stage under baseline-first (572).
+ n.finalists:=(SELECT coalesce(jsonb_agg(x ORDER BY x),'[]'::JSONB) FROM jsonb_array_elements_text(admitted) x);
  IF p_dry_run THEN
   RETURN jsonb_build_object('status','dry_run','round_id',r.round_id,'admitted',admitted,'excluded',excluded,
    'participants',jsonb_build_object('old',r.participants,'new',n.participants),'review_deadline',h.recovery_doc->'review_deadline');
@@ -587,7 +600,7 @@ BEGIN
   old_round_doc,new_round_doc,old_score_projections,recovery_doc)
  VALUES(r.round_id,revision,p_request_id,'sha256:'||encode(extensions.digest(proof::TEXT,'sha256'),'hex'),p_actor_ref,
   txid_current(),pg_backend_pid(),to_jsonb(r)-'updated_at',to_jsonb(n)-'updated_at','{}',proof);
- UPDATE public.lab_arena_rounds SET participants=n.participants WHERE round_id=r.round_id;
+ UPDATE public.lab_arena_rounds SET participants=n.participants,finalists=n.finalists WHERE round_id=r.round_id;
  FOR key IN SELECT jsonb_array_elements_text(admitted) LOOP
   UPDATE public.lab_arena_submissions SET status='frozen',frozen_at=clock_timestamp(),rejection_rule=NULL
    WHERE submission_id=key AND status='accepted' AND code_review_status='passed';
@@ -605,6 +618,57 @@ $admit702$;
 ALTER FUNCTION public.lab_arena_admit_review_outage_v1(TEXT,TEXT,TEXT,TEXT,BOOLEAN) OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_admit_review_outage_v1(TEXT,TEXT,TEXT,TEXT,BOOLEAN)
  FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
+
+-- 9. Driver step, called each tick for a round at stage1_scored or past its
+-- publication deadline. NULL-safe for every other round (not_reopened).
+-- Admits once every listed review is final (or the review window ends), and
+-- cancels a reopened round that has not republished by republish_by, so the
+-- next round's baseline gate is never left waiting on it. Cancellation keeps
+-- the archived no-king basis as the reward authority (reader above).
+CREATE OR REPLACE FUNCTION public.lab_arena_advance_review_outage_v1(p_round_id TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public SET TimeZone='UTC' AS $advance702$
+DECLARE r public.lab_arena_rounds;h public.lab_arena_scoring_supersessions;open_h public.lab_arena_scoring_supersessions;
+ result JSONB;
+BEGIN
+ SELECT x.* INTO h FROM public.lab_arena_scoring_supersessions x WHERE x.round_id=p_round_id
+  AND x.recovery_doc->>'recovery_kind'='operator_review_outage_reopen_v1' ORDER BY x.generation_floor DESC LIMIT 1;
+ IF h.round_id IS NULL OR NOT public.lab_arena__review_outage_receipt_valid_v1(h) THEN
+  RETURN jsonb_build_object('status','not_reopened');
+ END IF;
+ SELECT * INTO STRICT r FROM public.lab_arena_rounds WHERE round_id=p_round_id FOR UPDATE;
+ IF r.status IN('published','cancelled') THEN
+  RETURN jsonb_build_object('status','settled','round_status',r.status);
+ END IF;
+ IF clock_timestamp()>=(h.recovery_doc->>'republish_by')::TIMESTAMPTZ THEN
+  result:=public.lab_arena_cancel_round(p_round_id,'review_outage_reopen_expired');
+  RETURN jsonb_build_object('status','cancelled','reason','review_outage_reopen_expired',
+   'republish_by',h.recovery_doc->'republish_by','next_round_id',h.recovery_doc->'next_round_id','cancel',result);
+ END IF;
+ open_h:=public.lab_arena__review_outage_open_receipt_v1(p_round_id);
+ IF open_h.round_id IS NULL OR r.status<>'stage1_scored' THEN
+  RETURN jsonb_build_object('status','running','round_status',r.status);
+ END IF;
+ IF clock_timestamp()<(open_h.recovery_doc->>'review_deadline')::TIMESTAMPTZ AND EXISTS(
+   SELECT 1 FROM public.lab_arena_submissions s WHERE s.round_id=p_round_id
+    AND open_h.recovery_doc->'submissions' ? s.submission_id
+    AND (s.code_review_status NOT IN('passed','rejected') OR s.code_review_expires_at IS NOT NULL)) THEN
+  RETURN jsonb_build_object('status','waiting','reason','review_pending','review_deadline',open_h.recovery_doc->'review_deadline');
+ END IF;
+ IF EXISTS(SELECT 1 FROM public.lab_arena_submissions s WHERE s.round_id=p_round_id
+   AND open_h.recovery_doc->'submissions' ? s.submission_id AND s.code_review_status='reviewing') THEN
+  -- An in-flight claim past the window settles before admission.
+  RETURN jsonb_build_object('status','waiting','reason','review_in_flight');
+ END IF;
+ RETURN public.lab_arena_admit_review_outage_v1(p_round_id,open_h.request_id,'admit:'||open_h.request_id,'driver:review_outage',FALSE);
+END;
+$advance702$;
+ALTER FUNCTION public.lab_arena_advance_review_outage_v1(TEXT) OWNER TO lab_arena_owner;
+REVOKE ALL ON FUNCTION public.lab_arena_advance_review_outage_v1(TEXT) FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
+GRANT EXECUTE ON FUNCTION public.lab_arena_advance_review_outage_v1(TEXT) TO lab_arena_service;
+-- The owner rerun trigger (scripts/lab_arena_admin.py review-hold, PR 1272)
+-- runs as the Arena service, as 701's decide function does.
+GRANT EXECUTE ON FUNCTION public.lab_arena_reopen_review_outage_v1(TEXT,TEXT,JSONB,TIMESTAMPTZ,TIMESTAMPTZ,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,TEXT,TEXT,BOOLEAN)
+ TO lab_arena_service;
 
 DO $restore702$
 BEGIN

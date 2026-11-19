@@ -104,6 +104,9 @@ def test_fractional_schedule_advances_completed_stage_one_to_stage_two():
     }
 
     class Store:
+        def advance_review_outage(self, _round_id):
+            return {"status": "not_reopened"}
+
         @staticmethod
         def expire_leases(requested_round_id):
             assert requested_round_id == round_id
@@ -176,6 +179,9 @@ def test_fractional_final_scoring_and_publication_failure_boundaries():
     }
 
     class Store:
+        def advance_review_outage(self, _round_id):
+            return {"status": "not_reopened"}
+
         cancelled = []
 
         @staticmethod

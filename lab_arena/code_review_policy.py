@@ -21,6 +21,16 @@ TRANSIENT_ERROR_CODES = frozenset({
     "code_review_transport_error", "review_response_invalid",
     "code_review_research_unverified",
 })
+# Failures of our reviewer or its provider route, never of the submitted
+# source or the miner's own key. Credit and authentication errors are
+# excluded: reviews are paid with the miner's key. Invalid model output keeps
+# its own bounded episode. ``code_review_deadline_exceeded`` is excluded too:
+# SQL writes it only without a hold, and it can never be retried.
+INFRASTRUCTURE_ERROR_CODES = frozenset({
+    "code_review_preparation_unavailable", "code_review_provider_rate_limited",
+    "code_review_provider_timeout", "code_review_provider_unavailable",
+    "code_review_transport_error",
+})
 OPENROUTER_LIMIT_SOURCES = frozenset({
     "openrouter_credits", "openrouter_key_limit", "openrouter_in_flight_budget",
 })
@@ -311,6 +321,31 @@ def transient_failure(document: Any) -> bool:
 
     code = document.get("error_code") if isinstance(document, Mapping) else None
     return isinstance(code, str) and code in TRANSIENT_ERROR_CODES
+
+
+def infrastructure_blocked(row: Mapping[str, Any]) -> bool:
+    """Whether an unfinished review is blocked only by our infrastructure.
+
+    Such a submission holds the round at the benchmark deadline instead of
+    being rejected as ``code_review_incomplete``. A review never started or
+    still in flight is ours to finish; an error row counts only for the
+    classified infrastructure codes above.
+    """
+    if row.get("status") not in ("accepted", "frozen"):
+        return False
+    status = row.get("code_review_status")
+    if status in ("pending", "reviewing"):
+        return True
+    if status != "error":
+        return False
+    document = row.get("code_review_doc")
+    if not isinstance(document, Mapping):
+        return False
+    # An open invalid-output or refusal episode still counts while it has an
+    # attempt left: the outage, not the miner, stopped it. An exhausted
+    # episode is the miner's own outcome.
+    return (document.get("error_code") in INFRASTRUCTURE_ERROR_CODES
+            and review_retry_available(row))
 
 
 def invalid_review_reservations(document: Any) -> Optional[int]:

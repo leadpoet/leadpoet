@@ -371,6 +371,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_open_scoring_v3": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
     "lab_arena_close_scoring": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
+    "lab_arena_hold_round_review_v1": (("p_round_id", "text"),),
+    "lab_arena_decide_review_hold_v1": (("p_round_id", "text"), ("p_action", "text")),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
     "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),
     "lab_arena_record_chain_outcome_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_validator_hotkey", "text"), ("p_request_id", "text"), ("p_extrinsic_hash", "text"), ("p_outcome_doc", "jsonb")),
@@ -3010,6 +3012,14 @@ class ArenaStore:
 
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_scoring", {"p_round_id": round_id, "p_stage": int(stage)}), "close_scoring")
+
+    def hold_round_review(self, round_id: str) -> Dict[str, Any]:
+        """Record, idempotently, that reviewer infrastructure holds this open round."""
+        return _require_mapping(self._transport.rpc("lab_arena_hold_round_review_v1", {"p_round_id": round_id}), "hold_round_review")
+
+    def decide_review_hold(self, round_id: str, action: str) -> Dict[str, Any]:
+        """Extend a held round's review window or release the round."""
+        return _require_mapping(self._transport.rpc("lab_arena_decide_review_hold_v1", {"p_round_id": round_id, "p_action": action}), "decide_review_hold")
 
     def cancel_round(self, round_id: str, reason: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_cancel_round", {"p_round_id": round_id, "p_reason": reason}), "cancel_round")

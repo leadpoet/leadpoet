@@ -4,6 +4,7 @@
     python3 scripts/lab_arena_admin.py status
     python3 scripts/lab_arena_admin.py advance --round <round-id> [--dry-run]
     python3 scripts/lab_arena_admin.py cancel --round <round-id> --reason <rule> [--dry-run]
+    python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action rerun|release [--dry-run]
 
 Commands print only public operating state. ``LAB_ARENA_MODE=off`` refuses
 every command.
@@ -44,6 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("--reason", required=True)
     cancel.add_argument("--expect-status", default=None)
     cancel.add_argument("--dry-run", action="store_true")
+    hold = commands.add_parser(
+        "review-hold",
+        help="re-queue reviews that failed on our side in an open round, or release its hold",
+    )
+    hold.add_argument("--round", required=True)
+    hold.add_argument("--action", required=True, choices=("rerun", "release"))
+    hold.add_argument("--expect-status", default=None)
+    hold.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -123,6 +132,18 @@ def run(args, service) -> int:
             return 4
         print(json.dumps({"result": result, "round": public_view(service.store.get_round(args.round))}, indent=2, sort_keys=True, default=str))
         return 0
+    if args.command == "review-hold":
+        if args.dry_run:
+            print(json.dumps({"dry_run": True, "round": public_view(row), "action": args.action}, indent=2, sort_keys=True))
+            return 0
+        try:
+            result = service.decide_review_hold(args.round, args.action)
+        except ServiceError as exc:
+            print("review hold refused: %s" % exc.code, file=sys.stderr)
+            return 4
+        print(json.dumps({"result": result, "round": public_view(service.store.get_round(args.round))}, indent=2, sort_keys=True, default=str))
+        # A release of a round that has no hold changed nothing.
+        return 0 if result.get("status") in ("requeued", "released") else 4
     return 2
 
 

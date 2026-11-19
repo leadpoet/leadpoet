@@ -245,6 +245,54 @@ benchmark deadline, submissions without a pass are excluded with
 `code_review_incomplete`; a confirmed rejection uses `code_review_rejected`.
 This does not change the daily evaluation schedule or numerical scoring.
 
+#### Reviewer outage hold
+
+Our reviewer infrastructure failing is not the miner's failure. When an
+accepted review is still pending or in flight, or failed with a provider
+timeout, rate limit, unavailable route, preparation or transport error, the
+round does not exclude it at the benchmark deadline. Migration
+`701-lab-arena-review-infrastructure-hold.sql` records a hold in
+`lab_arena_review_holds`. The round stays `open` (not committed, scored or
+published), and SQL keeps retrying those reviews until `stage_1_start + 60m`.
+When they pass, the next driver tick freezes every miner and the round
+continues on its fixed schedule, with less stage-1 time. Credit and
+authentication errors (the miner's own key), invalid output, refusals and
+source errors keep their outcomes above. Reservations, ledger entries and
+verdict rules do not change. A claim cut off by the hold window is recorded as
+a retryable transport error, not `code_review_deadline_exceeded`.
+
+Sentry reports `arena.review_infrastructure_hold`. `decision_code=retrying`
+means the window is still open. `operator_required` means it has closed and
+the round waits for a decision:
+
+```bash
+python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action rerun --dry-run
+python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action rerun
+python3 scripts/lab_arena_admin.py review-hold --round <round-id> --action release
+```
+
+`rerun` is the supported trigger to rerun reviews that failed on our side. It
+records the hold if missing and moves the review window once, to the cap
+`stage_1_start + 120m`. The review worker then retries those reviews, and the
+driver continues the round's normal stages once they finish. Repeating it
+changes nothing further. It refuses a round that is not `open`, so a
+committed, scored or published round is never reopened. It also refuses a
+round where no review failed on our side, so the miners' own failures keep
+their outcome. `release`
+lets the round continue without the still-blocked entries, which are then
+excluded with `code_review_incomplete`, as before the hold. For a long
+outage, `cancel --reason operator` is the alternative. A held round blocks no
+other round: the next daily round opens on schedule.
+
+The driver also checks each pinned reviewer route
+(`code_review.REVIEW_PROVIDER_ROUTES`) against the free public catalog
+`GET https://openrouter.ai/api/v1/models/<model>/endpoints`. It runs at most
+every ten minutes while a round is `open`. A withdrawn route reports
+`arena.review_route_missing`, before paid reviews start at the replacement
+cutoff. The check only reports: it never changes routing, retries or spend. An
+unreachable catalog is logged as `unavailable` with no alert. Move the route,
+as in PRs 1269 and 1270, before the cutoff.
+
 Review charges use `openrouter.code_review` in `lab_arena_ledger`, with
 `funding_source=miner_key`. They remain separate from sourcing cost eligibility.
 The submission status API exposes review status, file/byte counts, and cost.

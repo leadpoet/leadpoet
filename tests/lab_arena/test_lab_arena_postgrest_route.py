@@ -185,6 +185,11 @@ def stack(tmp_path_factory):
                     ("699-lab-arena-targeted-accepted-judgment-correction.sql",
                      "CREATE OR REPLACE FUNCTION public.lab_arena_retired_accepted_judgment_v1",
                      "DO $restore699$"),
+                    # The review hold table and its two service RPCs only;
+                    # the gate rewrite stays in the native 701 tests.
+                    ("701-lab-arena-review-infrastructure-hold.sql",
+                     "CREATE TABLE IF NOT EXISTS public.lab_arena_review_holds",
+                     "DO $patch701$"),
                 ):
                     source = (Path(__file__).resolve().parents[2] / "scripts" / migration).read_text()
                     cursor.execute(source[source.index(start):source.index(end)])

@@ -635,6 +635,9 @@ BEGIN
  IF h.round_id IS NULL OR NOT public.lab_arena__review_outage_receipt_valid_v1(h) THEN
   RETURN jsonb_build_object('status','not_reopened');
  END IF;
+ -- Admission and cancellation use the same claim-control -> round order
+ -- as ordinary claims. Never hold the round while waiting on claim-control.
+ PERFORM pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
  SELECT * INTO STRICT r FROM public.lab_arena_rounds WHERE round_id=p_round_id FOR UPDATE;
  IF r.status IN('published','cancelled') THEN
   RETURN jsonb_build_object('status','settled','round_status',r.status);

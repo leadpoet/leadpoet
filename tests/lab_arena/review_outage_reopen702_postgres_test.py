@@ -6,6 +6,7 @@ match production (660/669 verified hashes), so 702 applies with its real pins.
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -55,6 +56,12 @@ def recovery_database(request):
         with pg.connect(**dsn) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
+                # Exercise the actual production lineage and both migrations
+                # together, including 701's changed begin/finish review gates.
+                for name in ('670-lab-arena-replacement-schema-review-delegation.sql',
+                             '687-lab-arena-private-owner-review-findings.sql',
+                             '701-lab-arena-review-infrastructure-hold.sql'):
+                    cursor.execute((SCRIPTS / name).read_text())
                 before = definitions(cursor)
                 assert before[REOPEN] is None and before[ADMIT] is None
                 hook_before = before[HOOK][0]
@@ -476,6 +483,60 @@ def test_driver_step_admits_then_cancels_a_rerun_that_misses_republish_by(db):
     history = scalar(connection, 'SELECT public.lab_arena_correction_reward_history_v1(%s,%s,%s,200,0,false)',
                      ('live', 'review702-driver', 71))
     assert [h['reward_basis_hash'] for h in history] == [basis['reward_basis_hash']]
+
+
+@pytest.mark.parametrize('phase', ['admit', 'cancel'])
+def test_driver_takes_claim_control_before_round_lock(db, recovery_database, phase):
+    _, connection, store = db
+    pg, dsn = recovery_database
+    round_id, sids, _ = make_round(store, connection, 'lock-' + phase, count=1)
+    reopen(connection, round_id)
+    if phase == 'admit':
+        sid, miner = sids[0]
+        token = new_lease_token()
+        assert alternate.begin(store, sid, miner, DS, token)['status'] == 'claimed'
+        assert store.finish_submission_review(sid, miner, token, 'passed', verdict(DS), 1234)['status'] == 'passed'
+    else:
+        past = iso(datetime.now(timezone.utc) - timedelta(seconds=5))
+        earlier = iso(datetime.now(timezone.utc) - timedelta(seconds=10))
+        damage(connection, round_id,
+               "UPDATE lab_arena_scoring_supersessions SET recovery_doc=jsonb_set(recovery_doc,'{republish_by}',to_jsonb(%s::text)),"
+               " new_round_doc=jsonb_set(new_round_doc,'{configuration_doc,schedule,publication_deadline}',to_jsonb(%s::text))"
+               " WHERE round_id=%s", (past, earlier, round_id))
+        damage(connection, round_id,
+               "UPDATE lab_arena_scoring_supersessions SET request_hash='sha256:'||encode(extensions.digest(recovery_doc::text,'sha256'),'hex')"
+               " WHERE round_id=%s", (round_id,))
+    contender = pg.connect(**dsn)
+    contender.autocommit = True
+    pid = scalar(contender, 'SELECT pg_backend_pid()')
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with connection.cursor() as cursor:
+            cursor.execute('BEGIN')
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0))")
+        future = executor.submit(scalar, contender,
+                                 'SELECT public.lab_arena_advance_review_outage_v1(%s)', (round_id,))
+        try:
+            until = time.monotonic() + 5
+            while time.monotonic() < until:
+                waiting = scalar(connection, "SELECT wait_event='advisory' FROM pg_stat_activity WHERE pid=%s", (pid,))
+                if waiting:
+                    break
+                time.sleep(0.02)
+            assert waiting, 'driver did not reach the shared claim-control lock'
+            # A normal claim owns claim-control before locking the round. If
+            # advance already owns the round, these operations form a cycle.
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout='250ms'")
+                cursor.execute('SELECT round_id FROM lab_arena_rounds WHERE round_id=%s FOR UPDATE', (round_id,))
+                assert cursor.fetchone()[0] == round_id
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute('ROLLBACK')
+            try:
+                result = future.result(timeout=5)
+            finally:
+                contender.close()
+        assert result['status'] == ('admitted' if phase == 'admit' else 'cancelled')
 
 
 def test_service_roles_cannot_call_owner_functions(db):

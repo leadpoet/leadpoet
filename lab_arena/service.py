@@ -2446,9 +2446,10 @@ class ArenaService:
         ``rerun`` re-queues those reviews: it records the hold if missing and
         reopens the bounded SQL review window, so the review worker retries
         them and the driver continues the round's normal stages once they
-        finish. It refuses a round that is not ``open`` (committed, scored or
-        published rounds are never reopened) and a round with no review
-        blocked by our infrastructure. Repeating it changes nothing further.
+        finish. An eligible published baseline-only round uses migration702's
+        hash-bound correction; other non-open rounds are refused, as are open
+        rounds with no infrastructure-blocked review. Repeating the same
+        applied correction changes nothing further.
         ``release`` lets the round proceed without the still-blocked entries,
         which are then recorded as ``code_review_incomplete`` as before.
         """

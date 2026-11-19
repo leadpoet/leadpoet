@@ -36,7 +36,7 @@ def main(argv: list[str]) -> int:
         log.close()
     for index, _, process in running:
         text = (RESULTS / f"pytest-{index}.log").read_text(encoding="utf-8", errors="replace")
-        print(f"::group::Partition {index} (exit {process.returncode})\n{text}::endgroup::")
+        print(f"::group::Partition {index} (exit {process.returncode})\n{text.rstrip()}\n::endgroup::")
         print("\n".join(text.splitlines()[-3:]), flush=True)
     return 1 if failed else 0
 

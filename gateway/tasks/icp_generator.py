@@ -89,7 +89,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "anthropic/claude-sonnet-5.5"
 OPENROUTER_EXCLUSION_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 OPENROUTER_EXCLUSION_ROUTE = {
-    "model": OPENROUTER_EXCLUSION_MODEL, "provider": "nebius/fp8",
+    "model": OPENROUTER_EXCLUSION_MODEL, "provider": "together",
     "effort": "high", "max_output_tokens": 4096, "max_tool_calls": 3,
     "web_search": {"max_uses": 3, "max_results": 5,
                    "max_total_results": 10, "max_characters": 2000},

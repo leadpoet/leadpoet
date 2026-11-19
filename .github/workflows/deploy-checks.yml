@@ -21,6 +21,11 @@ permissions:
 
 env:
   CI: "true"
+  # 20 shared jobs x 4 partitions + 2 exclusive jobs = 82 partitions.
+  SHARED_JOBS: "20"
+  PARTITIONS_PER_JOB: "4"
+  EXCLUSIVE_JOBS: "2"
+  SHARD_COUNT: "82"
   DISABLE_BACKGROUND_TASKS: "true"
   LANGFUSE_ENABLED: "false"
   SUPABASE_URL: "http://localhost:54321"
@@ -129,9 +134,9 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 16
+      max-parallel: 22
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
 
     steps:
       - name: Check out repository
@@ -176,33 +181,37 @@ jobs:
           python -m pip install psycopg2-binary
 
       - name: Run complete pytest partition
-        # Each runner has 4 vCPUs and the tests mostly wait on PostgreSQL, so
-        # every job runs several partitions side by side. Partition k of job j
-        # is index k*16+j of 16*PARTITIONS_PER_JOB.
-        env:
-          PARTITIONS_PER_JOB: "4"
+        # Tests mostly wait on PostgreSQL and child processes, so each shared
+        # job runs PARTITIONS_PER_JOB partitions side by side on its 4 vCPUs.
+        # The last EXCLUSIVE_JOBS jobs run one partition alone: it holds the
+        # modules in scripts/pytest_shard_exclusive.txt, whose tests assert
+        # time budgets.
         run: |
           coverage_args=()
           if [ "${{ github.event_name }}" = schedule ]; then
             coverage_args=(--cov=Leadpoet --cov=gateway --cov=leadpoet_canonical
                            --cov=leadpoet_verifier --cov=qualification --cov-report=term-missing)
           fi
-          count=$((16 * PARTITIONS_PER_JOB))
+          job=${{ matrix.shard }}
+          if [ "$job" -lt "$SHARED_JOBS" ]; then
+            partitions=$(for k in $(seq 0 $((PARTITIONS_PER_JOB - 1))); do echo $((k * SHARED_JOBS + job)); done)
+          else
+            partitions=$((SHARED_JOBS * PARTITIONS_PER_JOB + job - SHARED_JOBS))
+          fi
           mkdir -p ci-results
           pids=()
-          for k in $(seq 0 $((PARTITIONS_PER_JOB - 1))); do
-            i=$((k * 16 + ${{ matrix.shard }}))
+          for i in $partitions; do
             COVERAGE_FILE=ci-results/.coverage.shard-$i \
               python -m pytest -v -rf --tb=short -p scripts.pytest_shard \
-                --ci-shard-index=$i --ci-shard-count=$count \
+                --ci-shard-index=$i --ci-shard-count=$SHARD_COUNT \
+                --ci-shard-exclusive=$EXCLUSIVE_JOBS \
                 --ci-shard-manifest=ci-results/shard-$i.json \
                 "${coverage_args[@]}" > "ci-results/pytest-$i.log" 2>&1 &
             pids+=($!)
           done
           status=0
           for pid in "${pids[@]}"; do wait "$pid" || status=1; done
-          for k in $(seq 0 $((PARTITIONS_PER_JOB - 1))); do
-            i=$((k * 16 + ${{ matrix.shard }}))
+          for i in $partitions; do
             echo "::group::Partition $i"
             cat "ci-results/pytest-$i.log"
             echo "::endgroup::"
@@ -262,13 +271,13 @@ jobs:
           merge-multiple: true
 
       - name: Verify complete test execution
-        run: python -m scripts.pytest_shard ci-results --count=64
+        run: python -m scripts.pytest_shard ci-results --count="$SHARD_COUNT" --exclusive="$EXCLUSIVE_JOBS"
 
       - name: Combine nightly coverage
         if: github.event_name == 'schedule'
         run: |
           python -m pip install 'coverage>=7.3.0'
-          for shard in $(seq 0 63); do
+          for shard in $(seq 0 $((SHARD_COUNT - 1))); do
             test -s "ci-results/.coverage.shard-$shard"
           done
           python -m coverage combine ci-results

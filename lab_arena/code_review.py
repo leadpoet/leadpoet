@@ -24,6 +24,8 @@ FALLBACK_REVIEW_MODEL = "openai/gpt-6.1-sol"
 # The standalone default and saved Sonnet requests remain historical. Production
 # wiring opts new, unclaimed episodes into this separately bound primary.
 PROSPECTIVE_REVIEW_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+# The provider names serving the two approved prospective routes above.
+PROSPECTIVE_PROVIDER_NAMES = ("Together", "Nebius")
 # Admission-specific route and 65536-token capability, independently screened
 # on 2026-11-08. This does not expand the generic reasoning registry.
 PROSPECTIVE_ALTERNATE_MODEL = "moonshotai/kimi-k3.1-pro"
@@ -532,9 +534,18 @@ def prepare_request(
         "provider": {
             # Admission chooses one approved full-source route per durable
             # claim. Provider-internal fallback must not hide extra attempts.
-            "only": ["azure" if model == FALLBACK_REVIEW_MODEL else
-                     "nebius/fp8" if model == PROSPECTIVE_REVIEW_MODEL else
-                     "moonshotai/mxfp4" if model == PROSPECTIVE_ALTERNATE_MODEL else "google-vertex"],
+            # Nebius withdrew the fp8 endpoint for the prospective model on
+            # 2026-11-18, leaving OpenRouter no allowed endpoint and refusing
+            # every review with 404. Together is the other route approved for
+            # this
+            # model in reasoning_models.json at the same price ceiling. Only
+            # ONE route may be listed: reasoning_capture._apply_full refuses a
+            # provider preference whose "only" is not a single entry, which
+            # would silently empty the captured reasoning.
+            "only": (["together"] if model == PROSPECTIVE_REVIEW_MODEL else
+                     ["azure"] if model == FALLBACK_REVIEW_MODEL else
+                     ["moonshotai/mxfp4"] if model == PROSPECTIVE_ALTERNATE_MODEL else
+                     ["google-vertex"]),
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
@@ -638,9 +649,9 @@ def context_integrity_failure(
         return "selected_model"
     if requested_model == FALLBACK_REVIEW_MODEL and selected[0]["provider"] != "Azure":
         return "selected_provider"
-    if requested_model == PROSPECTIVE_REVIEW_MODEL and selected[0]["provider"] != "Nebius":
+    if requested_model == PROSPECTIVE_REVIEW_MODEL and selected[0]["provider"] not in PROSPECTIVE_PROVIDER_NAMES:
         return "selected_provider"
-    if requested_model == PROSPECTIVE_REVIEW_MODEL and response.get("provider") not in (None, "Nebius"):
+    if requested_model == PROSPECTIVE_REVIEW_MODEL and response.get("provider") not in (None, *PROSPECTIVE_PROVIDER_NAMES):
         return "selected_provider"
     if requested_model == PROSPECTIVE_ALTERNATE_MODEL and (
         selected[0]["provider"] != "Moonshot AI"

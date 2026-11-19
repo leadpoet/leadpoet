@@ -14,7 +14,7 @@ DEEPSEEK = 'deepseek/deepseek-v4.1-flash-1017'
 CANONICAL = 'deepseek/deepseek-v4.1-flash-20261017'
 
 
-def receipt(parameters, *, verdict='pass', cost='0.001234', provider='Nebius'):
+def receipt(parameters, *, verdict='pass', cost='0.001234', provider='Together'):
     body = _review_body(parameters, verdict=verdict, findings=[] if verdict == 'pass' else [{
         'category': 'fabricated_evidence', 'file': 'src/agent.py',
         'evidence': 'def run_icp(icp, tools): return tools.search(icp.industry)',
@@ -53,7 +53,7 @@ def test_new_primary_uses_exact_native_route_and_actual_ledger_identity(verdict,
     assert instance.review(row)['status'] == status
     body = json.loads(transport.sent[0]['body'])
     assert body['model'] == DEEPSEEK
-    assert body['provider']['only'] == ['nebius/fp8']
+    assert body['provider']['only'] == ['together']
     assert body['provider']['allow_fallbacks'] is False
     assert body['provider']['max_price'] == {'prompt': 0.3, 'completion': 1.2, 'request': 0.0}
     assert body['provider']['enforce_distillable_text'] is True
@@ -173,7 +173,7 @@ def test_deepseek_research_format_suffix_repeats_only_existing_native_contract()
     native_prefix = code_review._SYSTEM_PROMPT + code_review._RESEARCH_PROMPT + code_review._RESEARCH_RESPONSE_GUIDANCE
     suffix = code_review._PROSPECTIVE_RESEARCH_RESPONSE_GUIDANCE
     assert prepared.parameters['messages'][0]['content'] == native_prefix + suffix
-    assert contracts.document_hash(prepared.parameters) == 'sha256:54c47c5c77e1e4cf3177d8e91f1315b2576da9cd3753d1b2f6c80abadfa6a8c0'
+    assert contracts.document_hash(prepared.parameters) == 'sha256:9b07ddedbfd29efcc7e445a3cddf6086ce2935c6485d25488051bf9c9ba3f534'
     assert '12 non-whitespace characters' in suffix
     assert 'exact contiguous substring' in suffix
     assert 'adjacent source lines' in suffix
@@ -237,7 +237,7 @@ def test_actual_low_thinking_is_captured_without_changing_the_probe_mode(tmp_pat
         'source_paths': [['choices', 0, 'message', 'reasoning_details', 0, 'text']]}])
     assert candidate['training_permission']['status'] == 'confirmed'
     entry = next(r for r in registry['approved_routes'] if r['model_id'] == DEEPSEEK and
-                 r['provider'] == 'nebius/fp8' and r['api'] == 'openrouter.chat')
+                 r['provider'] == 'together' and r['api'] == 'openrouter.chat')
     assert entry['mode'] == {'effort': 'high'}
 
 

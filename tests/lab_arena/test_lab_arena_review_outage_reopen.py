@@ -22,8 +22,9 @@ def reopen_service(*, next_cutoff="2026-11-20T00:00:00Z", refuse=None):
     calls = []
     published = {"round_id": "arena-2026-11-19", "status": "published",
                  "configuration_doc": {"schedule": {"submission_cutoff": "2026-11-19T00:00:00Z"}}}
+    # The exact shape active_rounds() returns: schedule at the top level.
     later = [] if next_cutoff is None else [{"round_id": "arena-2026-11-20", "status": "open",
-             "configuration_doc": {"schedule": {"submission_cutoff": next_cutoff}}}]
+             "schedule": {"submission_cutoff": next_cutoff}}]
 
     def reopen(round_id, **arguments):
         calls.append(arguments)

@@ -2504,15 +2504,16 @@ class ArenaService:
         """
         round_id = str(round_row["round_id"])
         cutoff = _parse_iso(round_row["configuration_doc"]["schedule"]["submission_cutoff"])
+        # active_rounds() returns each round's schedule at the top level.
         later = [
             row for row in self.active_rounds()
             if row.get("round_id") != round_id
-            and _parse_iso(((row.get("configuration_doc") or {}).get("schedule") or {})["submission_cutoff"]) > cutoff
+            and _parse_iso((row.get("schedule") or {})["submission_cutoff"]) > cutoff
         ]
         if not later:
             raise ServiceError("review_reopen_next_round_unknown", 409)
         next_cutoff = min(
-            _parse_iso(row["configuration_doc"]["schedule"]["submission_cutoff"]) for row in later)
+            _parse_iso(row["schedule"]["submission_cutoff"]) for row in later)
         now = self.now().astimezone(timezone.utc).replace(microsecond=0)
         review = now + timedelta(seconds=REVIEW_REOPEN_WINDOW_SECONDS)
         # SQL cancels at next cutoff - 60m; publication leaves another 60m.

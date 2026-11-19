@@ -31,10 +31,8 @@ def test_all_test_partitions_gate_the_stable_required_check_without_push_coverag
     partition = next(step['run'] for step in shards['steps']
                      if step['name'] == 'Run complete pytest partition')
     assert 'if [ "${{ github.event_name }}" = schedule ]; then' in partition
-    assert '--ci-shard-count=$SHARD_COUNT' in partition
-    assert '--ci-shard-exclusive=$EXCLUSIVE_JOBS' in partition
-    assert 'wait "$pid" || status=1' in partition and 'exit $status' in partition
-    assert '--ci-shard-manifest=' in partition
+    assert 'python -m scripts.run_pytest_partitions $partitions --' in partition
+    assert '--ci-shard-count="$SHARD_COUNT" --ci-shard-exclusive="$EXCLUSIVE_JOBS"' in partition
     assert '"${coverage_args[@]}"' in partition
     assert jobs['test']['name'] == 'Unit and Workflow Tests'
     assert jobs['test']['if'] == 'always()'

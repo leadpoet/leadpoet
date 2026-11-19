@@ -198,26 +198,10 @@ jobs:
           else
             partitions=$((SHARED_JOBS * PARTITIONS_PER_JOB + job - SHARED_JOBS))
           fi
-          mkdir -p ci-results
-          pids=()
-          for i in $partitions; do
-            COVERAGE_FILE=ci-results/.coverage.shard-$i \
-              python -m pytest -v -rf --tb=short -p scripts.pytest_shard \
-                --ci-shard-index=$i --ci-shard-count=$SHARD_COUNT \
-                --ci-shard-exclusive=$EXCLUSIVE_JOBS \
-                --ci-shard-manifest=ci-results/shard-$i.json \
-                "${coverage_args[@]}" > "ci-results/pytest-$i.log" 2>&1 &
-            pids+=($!)
-          done
-          status=0
-          for pid in "${pids[@]}"; do wait "$pid" || status=1; done
-          for i in $partitions; do
-            echo "::group::Partition $i"
-            cat "ci-results/pytest-$i.log"
-            echo "::endgroup::"
-            tail -n 3 "ci-results/pytest-$i.log"
-          done
-          exit $status
+          python -m scripts.run_pytest_partitions $partitions -- \
+            -v -rf --tb=short -p scripts.pytest_shard \
+            --ci-shard-count="$SHARD_COUNT" --ci-shard-exclusive="$EXCLUSIVE_JOBS" \
+            "${coverage_args[@]}"
 
       - name: Upload shard execution reports
         if: always()

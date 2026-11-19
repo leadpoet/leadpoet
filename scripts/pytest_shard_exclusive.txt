@@ -5,3 +5,4 @@ tests/lab_arena/closed_miner_binding_gate590_performance_test.py
 tests/lab_arena/closed_provider_round_membership507_postgres_test.py
 tests/lab_arena/codex_idle_handoff_test.py
 tests/test_gateway_git_restart_wiring.py
+tests/lab_arena/api_training_input_burst_test.py

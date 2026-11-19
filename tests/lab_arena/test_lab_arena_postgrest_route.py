@@ -190,6 +190,15 @@ def stack(tmp_path_factory):
                     ("701-lab-arena-review-infrastructure-hold.sql",
                      "CREATE TABLE IF NOT EXISTS public.lab_arena_review_holds",
                      "DO $patch701$"),
+                    # Exact receipt helpers and service RPCs for routing,
+                    # ACL and domain-refusal probes. Full gate rewrites and
+                    # positive recovery use the combined701+702 native suite.
+                    ("702-lab-arena-review-outage-reopen.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena__review_outage_receipt_valid_v1",
+                     "-- 3. Extend the existing late-review hook"),
+                    ("702-lab-arena-review-outage-reopen.sql",
+                     "-- 7. Reopen.",
+                     "DO $restore702$"),
                 ):
                     source = (Path(__file__).resolve().parents[2] / "scripts" / migration).read_text()
                     cursor.execute(source[source.index(start):source.index(end)])

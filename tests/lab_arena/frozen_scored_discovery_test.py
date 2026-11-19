@@ -51,6 +51,9 @@ def _service(row, runs, *, billing=False, deepline_billing=False,
     original_row, original_runs = deepcopy(row), deepcopy(runs)
 
     class Store:
+        def advance_review_outage(self, _round_id):
+            return {"status": "not_reopened"}
+
         def list_rounds(self, **kwargs):
             assert "evaluation_date,rewards_enabled" in kwargs["columns"]
             return [deepcopy(row)] if kwargs.get("offset") == 0 else []

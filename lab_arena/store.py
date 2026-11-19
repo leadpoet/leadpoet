@@ -373,6 +373,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
     "lab_arena_hold_round_review_v1": (("p_round_id", "text"),),
     "lab_arena_decide_review_hold_v1": (("p_round_id", "text"), ("p_action", "text")),
+    "lab_arena_reopen_review_outage_v1": (("p_round_id", "text"), ("p_round_sha256", "text"), ("p_submissions", "jsonb"), ("p_review_deadline", "timestamptz"), ("p_stage_2_close", "timestamptz"), ("p_final_scoring_close", "timestamptz"), ("p_publication_deadline", "timestamptz"), ("p_request_id", "text"), ("p_actor_ref", "text"), ("p_approval_ref", "text"), ("p_dry_run", "boolean")),
+    "lab_arena_advance_review_outage_v1": (("p_round_id", "text"),),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
     "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),
     "lab_arena_record_chain_outcome_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_validator_hotkey", "text"), ("p_request_id", "text"), ("p_extrinsic_hash", "text"), ("p_outcome_doc", "jsonb")),
@@ -3020,6 +3022,22 @@ class ArenaStore:
     def decide_review_hold(self, round_id: str, action: str) -> Dict[str, Any]:
         """Extend a held round's review window or release the round."""
         return _require_mapping(self._transport.rpc("lab_arena_decide_review_hold_v1", {"p_round_id": round_id, "p_action": action}), "decide_review_hold")
+
+    def reopen_review_outage(self, round_id: str, *, round_sha256: Optional[str], submissions: Optional[Sequence[Mapping[str, Any]]],
+                             review_deadline: str, stage_2_close: str, final_scoring_close: str, publication_deadline: str,
+                             request_id: str, actor_ref: str, approval_ref: str, dry_run: bool) -> Dict[str, Any]:
+        """Reopen a round published while every review failed on our side (702)."""
+        return _require_mapping(self._transport.rpc("lab_arena_reopen_review_outage_v1", {
+            "p_round_id": round_id, "p_round_sha256": round_sha256,
+            "p_submissions": None if submissions is None else list(submissions),
+            "p_review_deadline": review_deadline, "p_stage_2_close": stage_2_close,
+            "p_final_scoring_close": final_scoring_close, "p_publication_deadline": publication_deadline,
+            "p_request_id": request_id, "p_actor_ref": actor_ref, "p_approval_ref": approval_ref,
+            "p_dry_run": bool(dry_run)}), "reopen_review_outage")
+
+    def advance_review_outage(self, round_id: str) -> Dict[str, Any]:
+        """Admit or expire a reopened round; ``not_reopened`` for every other round."""
+        return _require_mapping(self._transport.rpc("lab_arena_advance_review_outage_v1", {"p_round_id": round_id}), "advance_review_outage")
 
     def cancel_round(self, round_id: str, reason: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_cancel_round", {"p_round_id": round_id, "p_reason": reason}), "cancel_round")

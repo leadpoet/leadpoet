@@ -63,7 +63,8 @@ def publication():
     service._require_round_ownership = lambda _: None
     service._require_round_mode = lambda value: value
     service._store = SimpleNamespace(get_round=get_round, list_runs=lambda *_a, **_k: [],
-                                     transition_round=transition)
+                                     transition_round=transition,
+                                     advance_review_outage=lambda _round_id: {"status": "not_reopened"})
     service._baseline_fully_succeeded = lambda _: True
     service._frozen_unfinished_judgment = lambda _: False
     service._execution_infrastructure_failures = lambda _: {}

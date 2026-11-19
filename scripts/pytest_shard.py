@@ -1,17 +1,52 @@
-"""Partition pytest by module and verify that every collected test finished."""
+"""Partition pytest by module and verify that every collected test finished.
+
+Modules in the committed timing file are balanced across shards, slowest first.
+Any other module is placed by a hash of its path, so adding a test file never
+moves an existing module. scripts/update_pytest_shard_timings.py refreshes the file.
+"""
 from __future__ import annotations
 
 import argparse
 from collections import Counter
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+TIMINGS_PATH = Path(__file__).with_name("pytest_shard_timings.json")
+
+
+def module_for(nodeid: str) -> str:
+    return nodeid.split("::", 1)[0]
+
+
+def load_timings(path: Path | None = None) -> dict[str, int]:
+    timings = json.loads((path or TIMINGS_PATH).read_text(encoding="utf-8"))
+    if (not isinstance(timings, dict) or not timings
+            or any(type(value) is not int or value < 0 for value in timings.values())):
+        raise ValueError("pytest shard timings must map modules to milliseconds")
+    return timings
+
+
+@lru_cache(maxsize=None)
+def timed_assignment(count: int) -> dict[str, int]:
+    loads = [0] * count
+    assignment = {}
+    timings = load_timings()
+    for module in sorted(timings, key=lambda name: (-timings[name], name)):
+        index = min(range(count), key=lambda shard: (loads[shard], shard))
+        assignment[module] = index
+        loads[index] += timings[module]
+    return assignment
+
 
 def shard_for(nodeid: str, count: int) -> int:
-    module = nodeid.split("::", 1)[0]
+    module = module_for(nodeid)
+    timed = timed_assignment(count).get(module)
+    if timed is not None:
+        return timed
     return int.from_bytes(hashlib.sha256(module.encode()).digest()[:8], "big") % count
 
 
@@ -43,7 +78,7 @@ def pytest_collection_modifyitems(config, items):
         "schema_version": 1, "index": index, "count": count,
         "collection_count": len(nodeids), "collection_hash": collection_hash(nodeids),
         "selected_nodeids": sorted(item.nodeid for item in selected),
-        "executed_nodeids": [], "outcomes": {},
+        "executed_nodeids": [], "outcomes": {}, "module_seconds": Counter(),
     }
     selected_ids = {item.nodeid for item in selected}
     config.hook.pytest_deselected(items=[item for item in items if item.nodeid not in selected_ids])
@@ -57,6 +92,7 @@ def pytest_runtest_makereport(item, call):
     state = getattr(item.config, "_ci_shard", None)
     if state is None:
         return
+    state["module_seconds"][module_for(item.nodeid)] += report.duration
     if report.failed or report.when == "call" or report.skipped:
         state["outcomes"][item.nodeid] = report.outcome
     if report.when == "teardown":
@@ -75,6 +111,9 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
     state["exitstatus"] = int(session.exitstatus)
     state["results"] = dict(Counter(state.pop("outcomes").values()))
+    state["module_durations_ms"] = {
+        module: round(seconds * 1000) for module, seconds in state.pop("module_seconds").items()
+    }
     path = Path(session.config.getoption("ci_shard_manifest"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")

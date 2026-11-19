@@ -10,7 +10,7 @@ import pytest
 
 from scripts import pytest_shard
 from scripts.pytest_shard import (
-    collection_hash, load_timings, shard_for, timed_assignment, verify_manifests,
+    assign, collection_hash, hashed_shard, load_timings, verify_manifests,
 )
 from scripts.update_pytest_shard_timings import median_timings
 
@@ -23,16 +23,15 @@ def use_timings(tmp_path, monkeypatch):
         path = tmp_path / "timings.json"
         path.write_text(json.dumps(timings))
         monkeypatch.setattr(pytest_shard, "TIMINGS_PATH", path)
-        timed_assignment.cache_clear()
     yield install
-    timed_assignment.cache_clear()
 
 
 def write_manifests(root, count=8, durations=0):
     nodes = [f"tests/test_module_{index}.py::test_case" for index in range(200)]
-    nodes += [f"{module}::test_case" for module in sorted(load_timings())[:100]]
+    nodes += [f"{module}::test_{case}" for module in sorted(load_timings())[:100] for case in range(3)]
+    shards = assign(nodes, count)
     for index in range(count):
-        selected = sorted(node for node in nodes if shard_for(node, count) == index)
+        selected = sorted(node for node in nodes if shards[node] == index)
         assert selected
         (root / f"shard-{index}.json").write_text(json.dumps({
             "schema_version": 1, "index": index, "count": count,
@@ -46,31 +45,66 @@ def write_manifests(root, count=8, durations=0):
 
 def test_timed_modules_are_balanced_slowest_first_and_stay_whole(use_timings):
     use_timings({"a.py": 50, "b.py": 40, "c.py": 30, "d.py": 20, "e.py": 10})
-    assert timed_assignment(2) == {"a.py": 0, "b.py": 1, "c.py": 1, "d.py": 0, "e.py": 0}
-    assert shard_for("c.py::test_one", 2) == shard_for("c.py::Group::test_two", 2) == 1
+    nodes = ["a.py::test_one", "b.py::test_one", "c.py::test_one", "c.py::Group::test_two",
+             "d.py::test_one", "e.py::test_one"]
+    assert assign(nodes, 2) == {
+        "a.py::test_one": 0, "b.py::test_one": 1, "c.py::test_one": 1,
+        "c.py::Group::test_two": 1, "d.py::test_one": 0, "e.py::test_one": 0,
+    }
+
+
+def test_module_slower_than_a_share_is_cut_into_sorted_contiguous_chunks(use_timings):
+    use_timings({"big.py": 90, "small.py": 10})
+    nodes = [f"big.py::test_{case}" for case in "hgfedcba"] + ["small.py::test_one", "small.py::test_two"]
+    shards = assign(nodes, 4)
+    chunks = [shards[f"big.py::test_{case}"] for case in "abcdefgh"]
+    assert chunks == [0, 0, 1, 1, 2, 2, 3, 3]
+    assert shards["small.py::test_one"] == shards["small.py::test_two"]
+    assert assign(list(reversed(nodes)), 4) == shards
+
+
+def test_exclusive_modules_run_only_in_the_last_shards(use_timings, monkeypatch, tmp_path):
+    use_timings({"a.py": 50, "b.py": 40, "slow.py": 300})
+    listed = tmp_path / "exclusive.txt"
+    listed.write_text("# budgets\nslow.py\n")
+    monkeypatch.setattr(pytest_shard, "EXCLUSIVE_PATH", listed)
+    nodes = ["a.py::test_one", "b.py::test_one", "slow.py::test_one", "slow.py::test_two", "new.py::test_one"]
+    shards = assign(nodes, 5, exclusive=2)
+    assert shards["slow.py::test_one"] == shards["slow.py::test_two"] in {3, 4}
+    assert {shards[node] for node in nodes if not node.startswith("slow")} <= {0, 1, 2}
+    with pytest.raises(ValueError):
+        assign(nodes, 1, exclusive=1)
+
+
+def test_committed_exclusive_modules_exist():
+    assert all((ROOT / module).is_file() for module in pytest_shard.load_exclusive())
 
 
 def test_new_module_uses_its_path_hash_and_moves_no_timed_module(use_timings):
     use_timings({"a.py": 50, "b.py": 40})
-    before = timed_assignment(8)
+    timed = ["a.py::test_one", "b.py::test_one"]
+    before = assign(timed, 8)
     digest = hashlib.sha256(b"tests/new_test.py").digest()[:8]
-    assert shard_for("tests/new_test.py::test_case", 8) == int.from_bytes(digest, "big") % 8
-    assert timed_assignment(8) == before
+    after = assign(timed + ["tests/new_test.py::test_case"], 8)
+    assert after["tests/new_test.py::test_case"] == hashed_shard("tests/new_test.py", 8)
+    assert hashed_shard("tests/new_test.py", 8) == int.from_bytes(digest, "big") % 8
+    assert {node: after[node] for node in timed} == before
 
 
 @pytest.mark.parametrize("timings", [{}, [], {"a.py": -1}, {"a.py": 1.5}, {"a.py": True}])
 def test_malformed_timings_fail_closed(use_timings, timings):
     use_timings(timings)
     with pytest.raises(ValueError):
-        shard_for("a.py::test_case", 8)
+        assign(["a.py::test_case"], 8)
 
 
 def test_committed_timings_fill_all_shards_evenly():
     timings = load_timings()
-    loads = [0] * 8
-    for module, index in timed_assignment(8).items():
-        loads[index] += timings[module]
-    assert max(loads) - min(loads) <= 0.02 * max(loads)
+    nodes = [f"{module}::test_{case:02}" for module in timings for case in range(40)]
+    loads = [0.0] * 64
+    for node, index in assign(nodes, 64).items():
+        loads[index] += timings[node.split("::")[0]] / 40
+    assert max(loads) - min(loads) <= 0.05 * max(loads)
 
 
 def test_timing_refresh_takes_medians_of_verified_runs(tmp_path):
@@ -94,7 +128,7 @@ def test_full_union_is_verified_against_collection_and_execution(tmp_path):
 
 
 @pytest.mark.parametrize("fault", [
-    "missing", "extra", "failed", "collect_only", "unfinished", "duplicate",
+    "missing", "extra", "failed", "exclusive", "collect_only", "unfinished", "duplicate",
     "wrong_shard", "different_collection", "missing_result", "invalid_result", "reported_failure",
 ])
 def test_incomplete_or_failed_shards_cannot_pass(tmp_path, fault):
@@ -107,6 +141,7 @@ def test_incomplete_or_failed_shards_cannot_pass(tmp_path, fault):
         (tmp_path / "shard-8.json").write_text(json.dumps(state))
     else:
         if fault == "failed": state["exitstatus"] = 1
+        elif fault == "exclusive": state["exclusive"] = 1
         elif fault == "collect_only": state["collect_only"] = True
         elif fault == "unfinished": state["executed_nodeids"] = state["executed_nodeids"][:-1]
         elif fault == "duplicate": state["selected_nodeids"] += state["selected_nodeids"][:1]
@@ -142,7 +177,7 @@ def test_real_pytest_records_completed_pass_skip_and_failure(tmp_path):
         recorded.update(json.loads((tmp_path / f"shard-{index}.json").read_text())["module_durations_ms"])
     assert set(recorded) == {f"test_module_{index}.py" for index in range(64)}
     (tmp_path / "test_module_0.py").write_text("def test_failure(): assert False\n")
-    index = shard_for("test_module_0.py::test_failure", 8)
+    index = hashed_shard("test_module_0.py", 8)
     result = subprocess.run([
         sys.executable, "-m", "pytest", "-q", "-p", "scripts.pytest_shard",
         "--ci-shard-index", str(index), "--ci-shard-count", "8",

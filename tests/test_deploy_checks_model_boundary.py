@@ -22,14 +22,17 @@ def test_all_test_partitions_gate_the_stable_required_check_without_push_coverag
     jobs = workflow['jobs']
     assert all(job['runs-on'] == 'ubuntu-latest' for job in jobs.values())
     shards = jobs['test-shards']
-    assert shards['strategy']['matrix']['shard'] == [str(i) for i in range(16)]
-    assert shards['strategy']['max-parallel'] == '16'
+    env = workflow['env']
+    shared, per_job, exclusive = int(env['SHARED_JOBS']), int(env['PARTITIONS_PER_JOB']), int(env['EXCLUSIVE_JOBS'])
+    assert int(env['SHARD_COUNT']) == shared * per_job + exclusive
+    assert shards['strategy']['matrix']['shard'] == [str(i) for i in range(shared + exclusive)]
+    assert shards['strategy']['max-parallel'] == str(shared + exclusive)
     assert shards['strategy']['fail-fast'] == 'false'
     partition = next(step['run'] for step in shards['steps']
                      if step['name'] == 'Run complete pytest partition')
     assert 'if [ "${{ github.event_name }}" = schedule ]; then' in partition
-    assert '--ci-shard-count=16' in partition
-    assert '--ci-shard-manifest=' in partition
+    assert 'python -m scripts.run_pytest_partitions $partitions --' in partition
+    assert '--ci-shard-count="$SHARD_COUNT" --ci-shard-exclusive="$EXCLUSIVE_JOBS"' in partition
     assert '"${coverage_args[@]}"' in partition
     assert jobs['test']['name'] == 'Unit and Workflow Tests'
     assert jobs['test']['if'] == 'always()'
@@ -39,7 +42,8 @@ def test_all_test_partitions_gate_the_stable_required_check_without_push_coverag
     gate = aggregate[0]['run']
     assert 'test "$PREFLIGHT_RESULT" = success' in gate
     assert 'test "$SHARD_RESULT" = success' in gate
-    assert any('scripts.pytest_shard ci-results --count=16' in step.get('run', '')
+    assert any('scripts.pytest_shard ci-results --count="$SHARD_COUNT" --exclusive="$EXCLUSIVE_JOBS"'
+               in step.get('run', '')
                for step in aggregate)
     coverage = [step for step in aggregate if 'coverage' in step['name'].lower()]
     assert coverage and all("github.event_name == 'schedule'" in step['if']

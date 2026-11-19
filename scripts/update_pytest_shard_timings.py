@@ -6,7 +6,8 @@ skipping nightly runs because coverage slows them:
     gh run download RUN_ID -R leadpoet/leadpoet -p 'pytest-shard-*' -D runs/RUN_ID
     python -m scripts.update_pytest_shard_timings runs/*
 
-Each module gets its median duration across the runs that include it. Every run
+Each module gets its median duration across the runs that include it,
+summing the parts of a module split across shards. Every run
 must have used the timing file in this checkout: verification rejects any other,
 so after a refresh merges, wait for new runs before refreshing again.
 """
@@ -21,17 +22,19 @@ import tempfile
 
 from scripts.pytest_shard import TIMINGS_PATH, verify_manifests
 
-SHARD_COUNT = 8
-
 
 def run_durations(run: Path) -> dict[str, int]:
     durations = {}
     with tempfile.TemporaryDirectory() as directory:
-        for report in run.rglob("shard-*.json"):
+        reports = list(run.rglob("shard-*.json"))
+        for report in reports:
             shutil.copy(report, directory)
-        verify_manifests(Path(directory), SHARD_COUNT)
+        exclusive = json.loads(reports[0].read_text(encoding="utf-8")).get("exclusive", 0) if reports else 0
+        verify_manifests(Path(directory), len(reports), exclusive)
         for report in Path(directory).glob("shard-*.json"):
-            durations.update(json.loads(report.read_text(encoding="utf-8"))["module_durations_ms"])
+            # A split module reports one part per shard; its cost is their sum.
+            for module, ms in json.loads(report.read_text(encoding="utf-8"))["module_durations_ms"].items():
+                durations[module] = durations.get(module, 0) + ms
     return durations
 
 

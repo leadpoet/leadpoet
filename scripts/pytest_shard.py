@@ -1,21 +1,27 @@
 """Partition pytest by module and verify that every collected test finished.
 
 Modules in the committed timing file are balanced across shards, slowest first.
+A timed module slower than one shard's even share is cut into that many
+contiguous chunks of its sorted node IDs, so no single file sets the floor.
+The verifier repeats the split from the manifests alone.
 Any other module is placed by a hash of its path, so adding a test file never
-moves an existing module. scripts/update_pytest_shard_timings.py refreshes the file.
+moves an existing module. CI runs several shards side by side on one runner;
+modules in the exclusive list hold timing budgets that contention would break,
+so they go only to the last shards, which CI runs alone. scripts/update_pytest_shard_timings.py refreshes the file.
 """
 from __future__ import annotations
 
 import argparse
 from collections import Counter
-from functools import lru_cache
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import pytest
 
 TIMINGS_PATH = Path(__file__).with_name("pytest_shard_timings.json")
+EXCLUSIVE_PATH = Path(__file__).with_name("pytest_shard_exclusive.txt")
 
 
 def module_for(nodeid: str) -> str:
@@ -30,24 +36,50 @@ def load_timings(path: Path | None = None) -> dict[str, int]:
     return timings
 
 
-@lru_cache(maxsize=None)
-def timed_assignment(count: int) -> dict[str, int]:
-    loads = [0] * count
-    assignment = {}
-    timings = load_timings()
-    for module in sorted(timings, key=lambda name: (-timings[name], name)):
+def load_exclusive() -> set[str]:
+    lines = EXCLUSIVE_PATH.read_text(encoding="utf-8").splitlines()
+    return {line.strip() for line in lines if line.strip() and not line.startswith("#")}
+
+
+def hashed_shard(module: str, count: int) -> int:
+    return int.from_bytes(hashlib.sha256(module.encode()).digest()[:8], "big") % count
+
+
+def _balance(modules: dict[str, list[str]], first: int, count: int, timings, split: bool) -> dict[str, int]:
+    share = sum(timings.get(module, 0) for module in modules) / count or 1
+    units, assignment = [], {}
+    for module, nodes in modules.items():
+        if module not in timings:
+            assignment.update(dict.fromkeys(nodes, first + hashed_shard(module, count)))
+            continue
+        pieces = max(1, min(len(nodes), math.ceil(timings[module] / share))) if split else 1
+        for piece in range(pieces):
+            chunk = nodes[piece * len(nodes) // pieces:(piece + 1) * len(nodes) // pieces]
+            units.append((timings[module] / pieces, f"{module}#{piece}", chunk))
+    loads = [0.0] * count
+    for weight, _, chunk in sorted(units, key=lambda unit: (-unit[0], unit[1])):
         index = min(range(count), key=lambda shard: (loads[shard], shard))
-        assignment[module] = index
-        loads[index] += timings[module]
+        assignment.update(dict.fromkeys(chunk, first + index))
+        loads[index] += weight
     return assignment
 
 
-def shard_for(nodeid: str, count: int) -> int:
-    module = module_for(nodeid)
-    timed = timed_assignment(count).get(module)
-    if timed is not None:
-        return timed
-    return int.from_bytes(hashlib.sha256(module.encode()).digest()[:8], "big") % count
+def assign(nodeids, count: int, exclusive: int = 0) -> dict[str, int]:
+    """Map each collected node ID to its shard; the last ``exclusive`` run alone."""
+    if not 0 <= exclusive < count:
+        raise ValueError("exclusive shards must leave at least one shared shard")
+    timings = load_timings()
+    alone = load_exclusive() if exclusive else set()
+    shared: dict[str, list[str]] = {}
+    isolated: dict[str, list[str]] = {}
+    for nodeid in sorted(nodeids):
+        module = module_for(nodeid)
+        (isolated if module in alone else shared).setdefault(module, []).append(nodeid)
+    assignment = _balance(shared, 0, count - exclusive, timings, split=True)
+    if isolated:
+        # Exclusive modules stay whole: each split part would repeat their setup.
+        assignment.update(_balance(isolated, count - exclusive, exclusive, timings, split=False))
+    return assignment
 
 
 def collection_hash(nodeids) -> str:
@@ -59,6 +91,7 @@ def pytest_addoption(parser):
     group.addoption("--ci-shard-index", type=int)
     group.addoption("--ci-shard-count", type=int)
     group.addoption("--ci-shard-manifest")
+    group.addoption("--ci-shard-exclusive", type=int, default=0)
 
 
 @pytest.hookimpl(trylast=True)
@@ -71,11 +104,13 @@ def pytest_collection_modifyitems(config, items):
     nodeids = [item.nodeid for item in items]
     if not nodeids or len(nodeids) != len(set(nodeids)):
         raise pytest.UsageError("CI collection must be nonempty and have unique node IDs")
-    selected = [item for item in items if shard_for(item.nodeid, count) == index]
+    exclusive = config.getoption("ci_shard_exclusive")
+    shards = assign(nodeids, count, exclusive)
+    selected = [item for item in items if shards[item.nodeid] == index]
     if not selected:
         raise pytest.UsageError("CI shard is empty")
     config._ci_shard = {
-        "schema_version": 1, "index": index, "count": count,
+        "schema_version": 1, "index": index, "count": count, "exclusive": exclusive,
         "collection_count": len(nodeids), "collection_hash": collection_hash(nodeids),
         "selected_nodeids": sorted(item.nodeid for item in selected),
         "executed_nodeids": [], "outcomes": {}, "module_seconds": Counter(),
@@ -119,21 +154,23 @@ def pytest_sessionfinish(session, exitstatus):
     path.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def verify_manifests(directory: Path, count: int) -> dict:
+def verify_manifests(directory: Path, count: int, exclusive: int = 0) -> dict:
     paths = sorted(directory.glob("shard-*.json"))
     if {path.name for path in paths} != {f"shard-{index}.json" for index in range(count)}:
         raise ValueError("missing or unexpected shard manifest")
+    states = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    shards = assign([node for state in states for node in state["selected_nodeids"]], count, exclusive)
     all_nodes, totals, hashes, indices, results = [], set(), set(), set(), Counter()
-    for path in paths:
-        state = json.loads(path.read_text(encoding="utf-8"))
+    for path, state in zip(paths, states):
         index = state["index"]
         if (state["schema_version"] != 1 or state["count"] != count
+                or state.get("exclusive", 0) != exclusive
                 or index in indices or path.name != f"shard-{index}.json"
                 or state["collect_only"] or state["exitstatus"] != 0):
             raise ValueError("shard did not complete successfully")
         selected, executed = state["selected_nodeids"], state["executed_nodeids"]
         if (not selected or selected != executed or len(selected) != len(set(selected))
-                or any(shard_for(node, count) != index for node in selected)
+                or any(shards.get(node) != index for node in selected)
                 or not set(state["results"]).issubset({"passed", "failed", "skipped"})
                 or any(type(value) is not int or value < 0 for value in state["results"].values())
                 or sum(state["results"].values()) != len(executed)
@@ -156,5 +193,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--count", type=int, required=True)
+    parser.add_argument("--exclusive", type=int, default=0)
     args = parser.parse_args()
-    print(json.dumps(verify_manifests(args.directory, args.count), sort_keys=True))
+    print(json.dumps(verify_manifests(args.directory, args.count, args.exclusive), sort_keys=True))

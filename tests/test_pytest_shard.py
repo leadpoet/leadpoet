@@ -64,13 +64,13 @@ def test_module_slower_than_a_share_is_cut_into_sorted_contiguous_chunks(use_tim
 
 
 def test_exclusive_modules_run_only_in_the_last_shards(use_timings, monkeypatch, tmp_path):
-    use_timings({"a.py": 50, "b.py": 40, "slow.py": 30})
+    use_timings({"a.py": 50, "b.py": 40, "slow.py": 300})
     listed = tmp_path / "exclusive.txt"
     listed.write_text("# budgets\nslow.py\n")
     monkeypatch.setattr(pytest_shard, "EXCLUSIVE_PATH", listed)
     nodes = ["a.py::test_one", "b.py::test_one", "slow.py::test_one", "slow.py::test_two", "new.py::test_one"]
-    shards = assign(nodes, 4, exclusive=1)
-    assert shards["slow.py::test_one"] == shards["slow.py::test_two"] == 3
+    shards = assign(nodes, 5, exclusive=2)
+    assert shards["slow.py::test_one"] == shards["slow.py::test_two"] in {3, 4}
     assert {shards[node] for node in nodes if not node.startswith("slow")} <= {0, 1, 2}
     with pytest.raises(ValueError):
         assign(nodes, 1, exclusive=1)

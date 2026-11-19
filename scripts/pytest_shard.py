@@ -45,14 +45,14 @@ def hashed_shard(module: str, count: int) -> int:
     return int.from_bytes(hashlib.sha256(module.encode()).digest()[:8], "big") % count
 
 
-def _balance(modules: dict[str, list[str]], first: int, count: int, timings) -> dict[str, int]:
+def _balance(modules: dict[str, list[str]], first: int, count: int, timings, split: bool) -> dict[str, int]:
     share = sum(timings.get(module, 0) for module in modules) / count or 1
     units, assignment = [], {}
     for module, nodes in modules.items():
         if module not in timings:
             assignment.update(dict.fromkeys(nodes, first + hashed_shard(module, count)))
             continue
-        pieces = max(1, min(len(nodes), math.ceil(timings[module] / share)))
+        pieces = max(1, min(len(nodes), math.ceil(timings[module] / share))) if split else 1
         for piece in range(pieces):
             chunk = nodes[piece * len(nodes) // pieces:(piece + 1) * len(nodes) // pieces]
             units.append((timings[module] / pieces, f"{module}#{piece}", chunk))
@@ -75,9 +75,10 @@ def assign(nodeids, count: int, exclusive: int = 0) -> dict[str, int]:
     for nodeid in sorted(nodeids):
         module = module_for(nodeid)
         (isolated if module in alone else shared).setdefault(module, []).append(nodeid)
-    assignment = _balance(shared, 0, count - exclusive, timings)
+    assignment = _balance(shared, 0, count - exclusive, timings, split=True)
     if isolated:
-        assignment.update(_balance(isolated, count - exclusive, exclusive, timings))
+        # Exclusive modules stay whole: each split part would repeat their setup.
+        assignment.update(_balance(isolated, count - exclusive, exclusive, timings, split=False))
     return assignment
 
 

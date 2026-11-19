@@ -8,6 +8,7 @@ import pytest
 import requests
 from opentelemetry.exporter.otlp.proto.http import trace_exporter
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import export as trace_export
 from opentelemetry.sdk.trace.export import SpanExportResult
 
 from gateway.observability import otel_bootstrap as bootstrap
@@ -120,7 +121,8 @@ def test_exhausted_original_deadline_prevents_second_attempt(setup_exporter, mon
 def test_permanent_http_responses_are_not_retried(setup_exporter, status, caplog):
     exporter, clock, calls, outcomes = setup_exporter
     outcomes.append(response(status))
-    with caplog.at_level(logging.ERROR):
+    # Name the logger: a first bittensor import raises existing loggers to CRITICAL.
+    with caplog.at_level(logging.ERROR, logger=trace_exporter._logger.name):
         assert exporter._export_serialized_spans(b"synthetic payload") is SpanExportResult.FAILURE
     assert len(calls) == 1
     assert clock.sleeps == []
@@ -149,7 +151,7 @@ def test_exhausted_failure_is_logged_and_queue_worker_continues(setup_exporter, 
     provider.add_span_processor(processor)
     tracer = provider.get_tracer("synthetic.otlp.retry")
     try:
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.ERROR, logger=trace_export.__name__):
             tracer.start_span("first synthetic span").end()
             assert provider.force_flush(timeout_millis=1000)
         assert len(calls) == 2

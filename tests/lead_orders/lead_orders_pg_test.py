@@ -8,6 +8,7 @@ shared by the module's database.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import uuid
@@ -17,8 +18,8 @@ import pytest
 
 from lab_arena import signing
 from lab_arena.broker import ProviderResponse, ProviderTransportError, price_table_from_models_response
-from lab_arena.lead_orders import money, receipts
-from lab_arena.lead_orders.auth import order_token_hash
+from lab_arena.lead_orders import money, receipts, suppressions
+from lab_arena.lead_orders.auth import BuyerIdentity, order_token_hash
 from lab_arena.lead_orders.broker import BrokerRequest, LeadOrderBroker, LeadOrderBrokerError
 from lab_arena.lead_orders.config import LeadOrdersConfig
 from lab_arena.lead_orders.gamma import GammaReading
@@ -197,7 +198,7 @@ def test_tables_are_append_only_rls_on_and_not_granted(owner, store):
         cur.execute("""SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                        WHERE n.nspname='public' AND c.relkind='r' AND c.relname LIKE 'lead_order%'""")
         tables = dict(cur.fetchall())
-        assert len(tables) == 18 and all(tables.values())
+        assert len(tables) == 20 and all(tables.values())
         for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
             cur.execute("""SELECT count(*) FROM information_schema.role_table_grants
                            WHERE grantee=%s AND table_name LIKE 'lead_order%%'""", (role,))
@@ -452,6 +453,8 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     registrar = FakeRegistrar({})
     epoch = Epoch(2000)
     _, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    accept_terms(service, miner_a)
+    accept_terms(service, miner_b)
     key_a = service.register_key(miner_a, {"provider": "openrouter", "credentials": {}})
     key_b = service.register_key(miner_b, {"provider": "openrouter", "credentials": {}})
     with pytest.raises(LeadOrderServiceError) as twice:
@@ -504,6 +507,21 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     assert order2["status"] == "queued"
 
 
+def sql(owner, query, params):
+    with owner.cursor() as cur:
+        cur.execute(query, params)
+        return [tuple(row) for row in cur.fetchall()] if cur.description else []
+
+
+def signed_identity(miner, body=b'{"terms_version":"miner-terms-placeholder-1"}'):
+    return BuyerIdentity(hotkey=miner, signed_at=1_763_500_000, signature="ab" * 64,
+                         body_sha256=hashlib.sha256(body).hexdigest())
+
+
+def accept_terms(service, miner):
+    return service.accept_miner_terms(signed_identity(miner), {"terms_version": POLICY.miner_terms_version})
+
+
 def revoke_all_keys(store):
     for provider in ("openrouter", "deepline"):
         for row in store.keys(provider):
@@ -520,6 +538,7 @@ def live_order_with_miner_reward(store, owner, *, epoch_value=3000):
         service.register_buyer(buyer, {"email": "b@acme.io", "company": "Acme", "country": "US", "terms_version": "t1"})
     confirm(owner, buyer)
     gamma.units[buyer] = 10 * 10**9
+    accept_terms(service, miner)
     key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
     registrar.secrets = {key["key_id"]: "m" * 40}
     order = service.place_order(buyer, {"leads": 10, **ORDER})
@@ -580,6 +599,7 @@ def test_rewards_and_receipt_use_the_orders_policy_version_not_the_current_one(s
     registrar = FakeRegistrar({})
     epoch = Epoch(6000)
     _, service_v1, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    accept_terms(service_v1, miner)
     key = service_v1.register_key(miner, {"provider": "openrouter", "credentials": {}})
     registrar.secrets = {key["key_id"]: "v" * 40}
     order = service_v1.place_order(staff, {"leads": 10, **ORDER})
@@ -610,6 +630,7 @@ def test_staff_order_spends_only_leadpoet_keys_after_the_gateway_moves_to_shadow
     token, order_id = claim(staff_service)
     # The gateway switches to shadow mid-order and a miner key is registered.
     _, shadow_service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    accept_terms(shadow_service, miner)
     key = shadow_service.register_key(miner, {"provider": "openrouter", "credentials": {}})
     registrar.secrets = {key["key_id"]: "z" * 40}
     transport = FakeTransport([openrouter_ok("0.100000")])
@@ -759,3 +780,107 @@ def test_deepline_raw_v2_headers_are_sent_and_never_reach_receipts_or_the_ledger
     assert public["receipt"]["spend_microusd"] == 2_000  # 0.02 credits x $0.10, read from the raw-v2 billing
     stored = json.dumps([public, store.view(order_id)], default=str)
     assert "raw-v2" not in stored and "x-deepline" not in stored
+
+
+# -- miner data terms and the suppression feed -----------------------------------
+
+
+def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipped(store, owner):
+    revoke_all_keys(store)
+    staff, miner, late = hotkey(), hotkey(), hotkey()
+    registrar = FakeRegistrar({})
+    epoch = Epoch(7000)
+    _, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    with pytest.raises(LeadOrderServiceError) as unsigned:
+        service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    assert (unsigned.value.status, unsigned.value.code) == (403, "miner_terms_not_accepted")
+    with pytest.raises(LeadOrderServiceError) as old:
+        service.accept_miner_terms(signed_identity(miner), {"terms_version": "miner-terms-0"})
+    assert (old.value.status, old.value.code) == (422, "terms_version_not_current")
+    first = accept_terms(service, miner)
+    assert first["status"] == "accepted" and first["terms_version"] == POLICY.miner_terms_version
+    assert accept_terms(service, miner)["status"] == "exists"
+    stored = sql(owner, "SELECT signed_method,signed_path,signed_at,body_sha256,signature "
+                        "FROM public.lead_order_miner_terms WHERE miner_hotkey=%s", (miner,))
+    assert stored == [("POST", "/lead-orders/miner-terms", 1_763_500_000,
+                       hashlib.sha256(b'{"terms_version":"miner-terms-placeholder-1"}').hexdigest(), "ab" * 64)]
+    key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    registrar.secrets = {key["key_id"]: "t" * 40}
+    # The terms move to version 2: the key stays registered but is skipped
+    # until its miner signs again, so the order runs on Leadpoet's key.
+    v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=3, miner_terms_version="miner-terms-2"))
+    v2 = load_policy(v2_doc, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
+    service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    transport = FakeTransport([openrouter_ok("0.100000"), openrouter_ok("0.100000")])
+    broker_v2 = LeadOrderBroker(store=store, policy=v2, transport=transport, registrar=registrar,
+                                leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
+                                price_table=lambda: PRICE_TABLE, current_epoch=epoch)
+    broker_v2.call(token, chat())
+    assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET
+    broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
+    assert transport.sent[1]["headers"]["authorization"] == "Bearer " + "t" * 40  # current terms: ranked
+    service.finish(order_id, {"status": "failed"})
+    with pytest.raises(Exception):
+        sql(owner, "UPDATE public.lead_order_miner_terms SET terms_version='x' WHERE miner_hotkey=%s", (miner,))
+    revoke_all_keys(store)
+
+
+def test_suppression_push_stores_hashes_only_and_the_feed_is_for_buyers_and_signed_miners(store, owner):
+    staff, miner, stranger, buyer = hotkey(), hotkey(), hotkey(), hotkey()
+    _, service, _ = make(store, "staff", staff=[staff])
+    email = suppressions.email_hash("  Ada.One@Northwind.com ")
+    linkedin = suppressions.linkedin_hash("https://de.linkedin.com/in/Ada-One/")
+    assert email == hashlib.sha256(b"ada.one@northwind.com").hexdigest()
+    assert linkedin == hashlib.sha256(b"linkedin.com/in/ada-one").hexdigest()
+    pushed = service.push_suppressions({"suppressions": [
+        {"email_sha256": email, "linkedin_sha256": linkedin, "added_at": "2026-11-19T10:00:00Z"},
+        {"email_sha256": "0" * 64, "added_at": "2026-11-19T10:01:00.123Z"}]})
+    assert pushed == {"received": 2, "added": 3}
+    assert service.push_suppressions({"suppressions": [
+        {"email_sha256": email, "added_at": "2026-11-19T11:00:00Z"}]}) == {"received": 1, "added": 0}
+    good = {"email_sha256": "1" * 64, "added_at": "2026-11-19T10:00:00Z"}
+    for bad, code in (
+        ({"email_sha256": "ada.one@northwind.com", "added_at": "2026-11-19T10:00:00Z"}, "hash_invalid"),
+        ({"linkedin_sha256": "linkedin.com/in/ada-one", "added_at": "2026-11-19T10:00:00Z"}, "hash_invalid"),
+        ({"email_sha256": "A" * 64, "added_at": "2026-11-19T10:00:00Z"}, "hash_invalid"),
+        ({"email": "ada.one@northwind.com", "added_at": "2026-11-19T10:00:00Z"}, "field_not_allowed"),
+        ({"linkedin_url": "https://linkedin.com/in/x", "added_at": "2026-11-19T10:00:00Z"}, "field_not_allowed"),
+        ({"added_at": "2026-11-19T10:00:00Z"}, "hash_required"),
+        ({"email_sha256": "2" * 64, "added_at": "2026-11-19"}, "added_at_invalid"),
+        ({"email_sha256": "2" * 64, "added_at": "2999-01-01T00:00:00Z"}, "added_at_invalid"),
+    ):
+        with pytest.raises(LeadOrderServiceError) as refused:
+            service.push_suppressions({"suppressions": [good, bad]})
+        assert (refused.value.status, refused.value.code) == (422, code)
+        assert "northwind" not in refused.value.code
+    with pytest.raises(LeadOrderServiceError):
+        service.push_suppressions({"suppressions": [good] * 501})
+    rows = sql(owner, "SELECT kind,hash FROM public.lead_order_suppressions", ())
+    assert all(len(h) == 64 for _, h in rows) and ("email_sha256", "1" * 64) not in rows  # whole push refused
+    assert not any("northwind" in h or "linkedin" in h for _, h in rows)
+
+    with pytest.raises(LeadOrderServiceError) as unauthorised:
+        service.read_suppressions(stranger, "0")
+    assert (unauthorised.value.status, unauthorised.value.code) == (403, "suppressions_not_allowed")
+    accept_terms(service, miner)
+    feed = service.read_suppressions(miner, "")
+    mine = [r for r in feed["suppressions"] if r["hash"] in (email, linkedin, "0" * 64)]
+    assert [(r["kind"], r["added_at"]) for r in mine] == [
+        ("email_sha256", "2026-11-19T10:00:00Z"), ("linkedin_sha256", "2026-11-19T10:00:00Z"),
+        ("email_sha256", "2026-11-19T10:01:00Z")]
+    assert feed["next_since"] == feed["suppressions"][-1]["sequence"] and feed["more"] is False
+    later = service.read_suppressions(miner, str(mine[0]["sequence"]))
+    assert [r["hash"] for r in later["suppressions"] if r["hash"] in (email, linkedin, "0" * 64)] == [linkedin, "0" * 64]
+    with pytest.raises(LeadOrderServiceError) as bad_since:
+        service.read_suppressions(miner, "-1")
+    assert bad_since.value.code == "since_invalid"
+    # A confirmed buyer reads it too; a registered but unconfirmed one does not.
+    _, live, _ = make(store, "live", gamma=FakeGamma())
+    with pytest.raises(LeadOrderServiceError):
+        live.register_buyer(buyer, {"email": "b@acme.io", "company": "Acme", "country": "US", "terms_version": "t1"})
+    with pytest.raises(LeadOrderServiceError) as unconfirmed:
+        service.read_suppressions(buyer, "0")
+    assert unconfirmed.value.code == "suppressions_not_allowed"
+    confirm(owner, buyer)
+    assert service.read_suppressions(buyer, "0")["suppressions"]

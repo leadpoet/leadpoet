@@ -52,6 +52,18 @@ class FakeService:
         self.finished = (order_id, payload)
         return {"status": payload["status"]}
 
+    def accept_miner_terms(self, identity, payload):
+        self.terms = (identity, payload)
+        return {"status": "accepted", "terms_version": payload["terms_version"], "accepted_at": "t"}
+
+    def push_suppressions(self, payload):
+        self.pushed = payload
+        return {"received": 1, "added": 1}
+
+    def read_suppressions(self, hotkey, since):
+        self.read = (hotkey, since)
+        return {"suppressions": [], "next_since": 0, "more": False}
+
     def public_receipt(self, order_id):
         return {"receipt": {"order_id": order_id}, "calls": []}
 
@@ -102,7 +114,8 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
                          ("POST", "/internal/lead-orders/claim"), ("POST", "/internal/lead-orders/x/heartbeat"),
                          ("POST", "/internal/lead-orders/x/finish"), ("GET", "/lead-orders/receipts/x"),
                          ("GET", "/lead-orders/buyers/confirm?token=t"), ("GET", "/lead-orders/epochs/abc"),
-                         ("GET", "/lead-orders/epochs/12"),
+                         ("GET", "/lead-orders/epochs/12"), ("POST", "/internal/lead-orders/suppressions"),
+                         ("GET", "/lead-orders/suppressions?since=0"), ("POST", "/lead-orders/miner-terms"),
                          ("POST", "/lead-orders/broker/openrouter/api/v1/chat/completions")):
         response = client.request(method, path)
         assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
@@ -176,3 +189,21 @@ def test_broker_passes_only_the_deepline_response_shape_headers(client):
     _, request = broker.calls[0]
     assert request.headers == {"x-deepline-execute-response-contract": "raw-v2",
                                "x-deepline-execute-response-intent": "raw", "x-deepline-tool-error-schema": "1"}
+
+
+def test_suppression_push_needs_the_runner_secret_and_the_feed_a_signed_hotkey(client):
+    service, _ = enable()
+    body = b'{"suppressions":[{"email_sha256":"%s","added_at":"2026-11-19T10:00:00Z"}]}' % (b"0" * 64)
+    assert client.post("/internal/lead-orders/suppressions", content=body).status_code == 401
+    pushed = client.post("/internal/lead-orders/suppressions", content=body,
+                         headers={"authorization": "Bearer " + SECRET})
+    assert pushed.json() == {"received": 1, "added": 1} and service.pushed == json.loads(body)
+    assert client.get("/lead-orders/suppressions?since=5").status_code == 401
+    feed = client.get("/lead-orders/suppressions?since=5",
+                      headers=signed("/lead-orders/suppressions", b"", method="GET"))
+    assert feed.status_code == 200 and service.read == (ALICE, "5")
+    terms = json.dumps({"terms_version": "v1"}).encode()
+    accepted = client.post("/lead-orders/miner-terms", content=terms, headers=signed("/lead-orders/miner-terms", terms))
+    identity, payload = service.terms
+    assert accepted.status_code == 200 and payload == {"terms_version": "v1"} and identity.hotkey == ALICE
+    assert identity.body_sha256 == __import__("hashlib").sha256(terms).hexdigest() and len(identity.signature) == 130

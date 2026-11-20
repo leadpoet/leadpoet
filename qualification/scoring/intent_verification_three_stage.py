@@ -1536,7 +1536,21 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
     if _has_empty_html_body(body):
         return "html_empty_body"
     if _has_anti_bot_marker(body):
-        return "anti_bot_marker"
+        # A rendered page can carry nonblocking captcha configuration in its
+        # scripts. Require substantial visible text before ignoring markup-only
+        # markers; visible challenges and thin/hidden shells still escalate.
+        document = _parse_html_shell(body) if _HTML_DOCUMENT_RE.search(body) else None
+        from qualification.scoring.verification_helpers import visible_html_text
+        visible = visible_html_text(body) if document is not None else ""
+        if document is not None and document.title:
+            visible = visible.removeprefix(document.title).lstrip()
+        challenge_text = " ".join([document.title, *document.body_parts]) if document is not None else body
+        if (
+            len(visible) < 500
+            or not _looks_textual(visible)
+            or _has_anti_bot_marker(challenge_text)
+        ):
+            return "anti_bot_marker"
     if _looks_like_js_shell(body):
         return "js_shell"
     if not _looks_textual(body):

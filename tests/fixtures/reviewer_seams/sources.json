@@ -158,5 +158,34 @@
       }
     },
     "image_digest": "sha256:2ec6357b4517b0af50cbece24a2d130afd5f8352e548b0a77f0fa02b33ef0c63"
+  },
+  "homepage_identity_conflict_396": {
+    "provenance": "Exact frozen396 ECR qualification layer sha256:7edaa6e49c115da519ceebea6c6d454c234c4de522d8c6c75da56d5495974c33; image revision 26fbd6921d8b44441cf894f305ce412fa6993cce",
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "homepage_identity_conflict_396-lead_scorer.py.gz",
+        "sha256": "24f82207f0ff87e014be56024351e4e2ae87f1612c660591d76bfcafadd60feb"
+      },
+      "qualification/scoring/intent_verification_three_stage.py": {
+        "fixture": "homepage_identity_conflict_396-intent_verification_three_stage.py.gz",
+        "sha256": "043a18a6c22a1b0e4e1ad7e9078bc1b9f4ce0fe001ad406a68f78f7945fd4c7e"
+      }
+    }
+  },
+  "evidence_consistency_repaired": {
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "homepage_identity_conflict_396-lead_scorer.py.gz",
+        "sha256": "24f82207f0ff87e014be56024351e4e2ae87f1612c660591d76bfcafadd60feb"
+      },
+      "qualification/scoring/intent_verification_three_stage.py": {
+        "fixture": "homepage_identity_conflict_396-intent_verification_three_stage.py.gz",
+        "sha256": "043a18a6c22a1b0e4e1ad7e9078bc1b9f4ce0fe001ad406a68f78f7945fd4c7e"
+      },
+      "qualification/scoring/company_evidence_investigator.py": {
+        "fixture": "evidence_consistency_repaired_company.py.gz",
+        "sha256": "823dffe1fde7ef61d66f2847dca249660ecc3446ebd23246d68f5390f608cc1a"
+      }
+    }
   }
 }

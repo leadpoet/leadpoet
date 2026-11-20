@@ -83,4 +83,3 @@ def test_rendered_body_uses_one_existing_fetch_without_escalation():
     assert len(client.calls) == 1
     assert "production data pipelines" in result["content"]
     assert "recaptcha" not in result["content"]
-

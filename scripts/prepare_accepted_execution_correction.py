@@ -19,6 +19,7 @@ ROUND_FIELDS = ('round_id', 'status', 'status_generation', 'stage_generation',
 SOURCE_FIELDS = ('run_id', 'assignment_id', 'round_id', 'submission_id', 'miner_hotkey',
                  'kind', 'stage', 'icp_position', 'attempt', 'status', 'terminal_cause',
                  'stage_generation', 'scoring_generation_floor', 'output_ref')
+MAX_PREPARATION_BYTES = 8 * 1024 * 1024
 
 
 
@@ -75,7 +76,7 @@ def write_preparation(service, run_id: str, path: Path) -> dict:
     """Write one exclusive private artifact; never print its data or credentials."""
     payload = prepare(service, run_id)
     raw = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
-    if len(raw) > 1024 * 1024:
+    if len(raw) > MAX_PREPARATION_BYTES:
         raise ValueError('accepted execution correction preparation exceeds its fixed size bound')
     descriptor = os.open(Path(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'wb') as output:

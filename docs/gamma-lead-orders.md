@@ -441,9 +441,6 @@ validator's weight signer: wiring it in is a separate reviewed change.
 
 ## Known limits
 
-- Deepline key ownership is not proven. A stolen Deepline key could be
-  registered by someone who does not own it; there is no Deepline call that
-  proves the registrant controls the account. Revoking the key stops it.
 - Lead-order keys are encrypted with the Arena credential KMS key, not a
   dedicated key, so the two share access and audit scope.
 - The suppression hashes are unsalted (see the suppression feed).

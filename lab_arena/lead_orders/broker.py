@@ -38,7 +38,29 @@ from lab_arena.lead_orders.store import LeadOrderStore
 OPENROUTER_HOST = "openrouter.ai"
 DEEPLINE_HOST = "code.deepline.com"
 OPENROUTER_CHAT_PATH = "api/v1/chat/completions"
-_DEEPLINE_PATH_RE = re.compile(r"^api/v2/[a-z0-9_][a-z0-9_/-]{0,199}$")
+_DEEPLINE_PATH_RE = re.compile(r"^api/v2/integrations/([a-z0-9_]{1,64})/execute$")
+# The Deepline operations the Lead Search finding core calls (leadpoet-site
+# server/lead-search, Nov 19 2026). Anything else, such as a monitor or a
+# play that bills later, is refused. Extend by reviewed change.
+DEEPLINE_OPERATIONS = frozenset({
+    "harvestapi_search_jobs", "harvestapi_get_job", "harvestapi_get_company", "harvestapi_search_posts",
+    "harvestapi_get_post_reactions", "harvestapi_get_post_comments", "harvestapi_get_profile_posts",
+    "harvestapi_search_leads", "harvestapi_get_profile", "bloomberry_search_job_postings",
+    "parallel_run_task", "parallel_get_task_run_result", "search_contact",
+    "free_company_lookup", "crustdata_v3_company_identify", "crustdata_v3_company_enrich",
+    "crustdata_v3_person_search", "prospeo_enrich_person", "zerobounce_validate", "hunter_email_finder",
+    "dropleads_email_finder", "leadmagic_email_finder", "findymail_find_from_name",
+    "findymail_find_from_business_profile",
+})
+# OpenRouter request fields whose cost the reservation covers: the prompt is
+# priced from the messages and tools, the output from max_tokens. Fields that
+# add cost outside that (models fallback lists, plugins, provider routing,
+# server-side tools, reasoning budgets, web search) are refused.
+OPENROUTER_FIELDS = frozenset({
+    "model", "messages", "max_tokens", "temperature", "top_p", "top_k", "frequency_penalty",
+    "presence_penalty", "repetition_penalty", "seed", "stop", "response_format", "tools", "tool_choice",
+    "parallel_tool_calls", "stream", "usage",
+})
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 TIMEOUT_SECONDS = {"openrouter": 120.0, "deepline": 240.0}
@@ -79,7 +101,6 @@ class LeadOrderBroker:
         transport: ProviderTransport,
         registrar: Optional[lead_keys.MinerKeyRegistrar],
         leadpoet_secrets: Mapping[str, str],
-        use_miner_keys: bool,
         price_table: Callable[[], Mapping[str, Any]],
         current_epoch: Callable[[], int],
     ) -> None:
@@ -91,7 +112,6 @@ class LeadOrderBroker:
         self._leadpoet_keys = lead_keys.leadpoet_keys(
             self._leadpoet_secrets.get("openrouter", ""), self._leadpoet_secrets.get("deepline", "")
         )
-        self._use_miner_keys = bool(use_miner_keys and registrar is not None)
         self._price_table = price_table
         self._current_epoch = current_epoch
 
@@ -110,6 +130,7 @@ class LeadOrderBroker:
                 raise LeadOrderBrokerError(400, "invalid_json") from None
             if not isinstance(params, dict) or not isinstance(params.get("model"), str):
                 raise LeadOrderBrokerError(400, "model_required")
+            self._check_openrouter(params)
             if params.get("stream"):
                 # A streamed body has no final usage object to settle from.
                 raise LeadOrderBrokerError(400, "stream_not_supported")
@@ -136,12 +157,14 @@ class LeadOrderBroker:
             return outbound, max(1, int(reserve)), params["model"]
         if request.provider == "deepline":
             path = request.path
-            if (request.method not in ("GET", "POST") or not _DEEPLINE_PATH_RE.fullmatch(path)
-                    or "//" in path or "/billing" in "/" + path.split("api/v2", 1)[1]):
+            matched = _DEEPLINE_PATH_RE.fullmatch(path)
+            if request.method != "POST" or not matched:
                 raise LeadOrderBrokerError(404, "route_not_allowed")
-            query = {str(k): str(v) for k, v in request.query.items()}
-            if any(name.lower() in ("api_key", "apikey", "key", "token", "authorization") for name in query):
-                raise LeadOrderBrokerError(400, "credential_in_query")
+            if matched.group(1) not in DEEPLINE_OPERATIONS:
+                raise LeadOrderBrokerError(400, "operation_not_allowed")
+            if request.query:
+                raise LeadOrderBrokerError(400, "query_not_allowed")
+            query: Dict[str, str] = {}
             url = "https://%s/%s" % (DEEPLINE_HOST, path)
             if query:
                 url += "?" + urlencode(sorted(query.items()))
@@ -153,6 +176,30 @@ class LeadOrderBroker:
             )
             return outbound, self._policy.deepline_reserve_per_call_microusd, None
         raise LeadOrderBrokerError(404, "provider_not_allowed")
+
+    @staticmethod
+    def _check_openrouter(params: Mapping[str, Any]) -> None:
+        unknown = sorted(set(params) - OPENROUTER_FIELDS)
+        if unknown:
+            raise LeadOrderBrokerError(400, "field_not_allowed:%s" % unknown[0])
+        if ":" in params["model"]:
+            raise LeadOrderBrokerError(400, "model_variant_not_allowed")  # e.g. ":online" adds web search
+        for tool in params.get("tools") or []:
+            if not isinstance(tool, Mapping) or tool.get("type") != "function":
+                raise LeadOrderBrokerError(400, "tool_not_allowed")
+        if "tools" in params and not isinstance(params["tools"], list):
+            raise LeadOrderBrokerError(400, "tool_not_allowed")
+        messages = params.get("messages")
+        if not isinstance(messages, list):
+            raise LeadOrderBrokerError(400, "messages_invalid")
+        for message in messages:
+            if not isinstance(message, Mapping):
+                raise LeadOrderBrokerError(400, "messages_invalid")
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                not isinstance(part, Mapping) or part.get("type") != "text" for part in content
+            ):
+                raise LeadOrderBrokerError(400, "content_not_allowed")  # images and files are priced apart
 
     def _cost(self, provider: str, model: Optional[str], response: ProviderResponse) -> Optional[int]:
         """Provider-reported cost in micro-USD, 0 for a refused call, else None."""
@@ -187,9 +234,13 @@ class LeadOrderBroker:
         outbound, reserve, model = self._prepare(request)
         provider = request.provider
         epoch = int(self._current_epoch())
+        # Decided per order, from the mode it was placed in: a staff order
+        # spends only Leadpoet's keys even after the gateway moves to shadow
+        # or live, since staff orders never repay miners.
+        use_miner_keys = order.get("mode") in ("shadow", "live") and self._registrar is not None
         window_start = max(0, epoch - self._policy.ranking_window_epochs + 1)
         miner_keys = []
-        if self._use_miner_keys:
+        if use_miner_keys:
             for row in self._store.keys(provider):
                 miner_keys.append(lead_keys.ProviderKey(
                     key_id=row["key_id"], provider=row["provider"], miner_hotkey=row["miner_hotkey"],
@@ -199,7 +250,7 @@ class LeadOrderBroker:
         ranked = lead_keys.rank_keys(
             provider, miner_keys, self._leadpoet_keys.get(provider),
             settled_spend_by_key=self._store.key_spend(since_epoch=window_start) if miner_keys else {},
-            use_miner_keys=self._use_miner_keys,
+            use_miner_keys=use_miner_keys,
             exhausted=self._store.exhausted_keys(order_id),
         )
         for key in ranked:

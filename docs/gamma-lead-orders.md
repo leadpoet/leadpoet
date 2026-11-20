@@ -222,7 +222,12 @@ reservation is made or a key is chosen.
   string, for the operations the Lead Search finding core uses
   (`DEEPLINE_OPERATIONS` in `lab_arena/lead_orders/broker.py`). Another
   operation is 400 `operation_not_allowed`, a query 400 `query_not_allowed`,
-  and any other path or method 404 `route_not_allowed`. Each call reserves
+  and any other path or method 404 `route_not_allowed`. Of the caller's headers only
+  the three response-shape headers the site sends are passed on, each with
+  its one value: `x-deepline-execute-response-contract: raw-v2`,
+  `x-deepline-execute-response-intent: raw` and `x-deepline-tool-error-schema:
+  1`. Another value is 400 `header_not_allowed:<name>`. They are not stored in
+  the ledger or receipts. Each call reserves
   `deepline_reserve_per_call_usd` and settles at the cost read from the
   response body. Async job billing that is
   reported only later is a known limit: such calls settle `uncertain`.

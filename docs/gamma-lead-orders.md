@@ -193,17 +193,31 @@ provider's `content-type` header is passed back.
 Anything outside the allowlists below is refused with a 400 before a
 reservation is made or a key is chosen.
 
-- OpenRouter: only `POST api/v1/chat/completions`, no streaming. The model
-  must be in the cached OpenRouter price table; the reservation is the
-  worst-case cost of the prompt plus `max_tokens`. The broker sets `usage:
-  {include: true}` and settles at the reported `usage.cost`. Only the fields
-  that reservation prices are accepted: `model`, `messages`, `max_tokens`,
-  sampling settings, `seed`, `stop`, `response_format`, function `tools`,
-  `tool_choice`, `parallel_tool_calls`, `stream` (false) and `usage`. Any other
-  field (`models`, `plugins`, `provider`, `reasoning`, ...) is 400
-  `field_not_allowed:<name>`. A model variant such as `:online` is 400
-  `model_variant_not_allowed`, a non-function tool 400 `tool_not_allowed`, and
-  non-text message content 400 `content_not_allowed`.
+- OpenRouter: only `POST api/v1/chat/completions`, no streaming. `model`, or
+  a `models` fallback list of up to 4 with `route: "fallback"`; every model
+  must be in the cached OpenRouter price table, and the reservation is the
+  dearest model's worst-case cost of the whole body plus the output cap
+  (`max_tokens` or `max_completion_tokens`, clamped to
+  `openrouter_max_output_tokens`; reasoning counts inside that cap, and
+  `reasoning.max_tokens` is clamped to it). Where `provider.max_price` sets a
+  component, that price is reserved instead of the listed one, since
+  OpenRouter never routes above it. The broker always sends
+  `provider.data_collection: "deny"` and `zdr: true`, so lead data never goes
+  to an endpoint that keeps it; a request asking otherwise is 400
+  `provider_privacy_required`. It sets `usage: {include: true}` and settles
+  at the reported `usage.cost` of the model that answered.
+  Accepted fields: `model`, `models`, `route`, `messages`, `max_tokens`,
+  `max_completion_tokens`, `reasoning` (`enabled`, `effort`, `max_tokens`,
+  `exclude`), `provider` (`data_collection`, `zdr`, `require_parameters`,
+  `max_price` with `prompt`, `completion`, `internal_reasoning`, `request`),
+  `user`, sampling settings, `seed`, `stop`, `response_format`, function
+  `tools`, `tool_choice`, `parallel_tool_calls`, `stream` (false) and `usage`.
+  Any other field, `plugins` included, is 400 `field_not_allowed:<name>`
+  (OpenRouter's docs give response-healing no price and do not say it is
+  free). Other provider preferences (`order`, `only`, `ignore`, `sort`) are
+  400 `provider_field_not_allowed:<name>`. A model variant such as `:online`
+  is 400 `model_variant_not_allowed`, a non-function tool 400
+  `tool_not_allowed`, and non-text message content 400 `content_not_allowed`.
 - Deepline: only `POST api/v2/integrations/{operation}/execute`, with no query
   string, for the operations the Lead Search finding core uses
   (`DEEPLINE_OPERATIONS` in `lab_arena/lead_orders/broker.py`). Another

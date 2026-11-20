@@ -208,8 +208,8 @@ def test_suppression_push_needs_the_runner_secret_and_the_feed_a_signed_hotkey(c
     assert feed.status_code == 200 and service.read == (ALICE, "5")
     served = client.get("/lead-orders/miner-terms")  # public: a miner reads before signing
     assert served.status_code == 200 and served.json()["terms_sha256"] == "a" * 64
-    terms = json.dumps({"terms_version": "v1"}).encode()
+    terms = json.dumps({"terms_sha256": "a" * 64, "terms_version": "v1"}, separators=(",", ":")).encode()
     accepted = client.post("/lead-orders/miner-terms", content=terms, headers=signed("/lead-orders/miner-terms", terms))
     identity, payload = service.terms
-    assert accepted.status_code == 200 and payload == {"terms_version": "v1"} and identity.hotkey == ALICE
+    assert accepted.status_code == 200 and payload == {"terms_sha256": "a" * 64, "terms_version": "v1"} and identity.hotkey == ALICE
     assert identity.body_sha256 == __import__("hashlib").sha256(terms).hexdigest() and len(identity.signature) == 130

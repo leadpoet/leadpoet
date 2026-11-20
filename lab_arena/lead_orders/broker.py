@@ -384,7 +384,7 @@ class LeadOrderBroker:
         miner_keys = []
         if use_miner_keys:
             # Only keys whose miner signed the current miner data terms.
-            for row in self._store.keys(provider, terms_version=self._policy.miner_terms_version):
+            for row in self._store.keys(provider, terms_sha256=self._policy.miner_terms_sha256):
                 miner_keys.append(lead_keys.ProviderKey(
                     key_id=row["key_id"], provider=row["provider"], miner_hotkey=row["miner_hotkey"],
                     registered_sequence=int(row["sequence"]), internal_fingerprint=row["internal_fingerprint"],

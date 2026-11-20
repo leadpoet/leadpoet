@@ -36,10 +36,10 @@ CONFIRMATION_MAX_AGE_SECONDS = 48 * 3600
 MAX_ORDER_BYTES = 16_384
 # The runner's own limit (leadpoet-site server/lead-search/subnet/order.ts).
 MAX_LEADS_PER_ORDER = 1_000
-# (field, items, characters per item) for the optional lists the runner reads.
 # The miner data terms text the gateway serves; its sha256 must equal the
 # policy's ``miner_terms_sha256``.
 MINER_TERMS_PATH = Path(__file__).resolve().parents[2] / "docs" / "gamma-lead-orders-miner-terms.md"
+# (field, items, characters per item) for the optional lists the runner reads.
 _SEARCH_LISTS = (("terms", 8, 120), ("buyer_titles", 12, 120), ("excluded_companies", 500, 253))
 _MARKET_LISTS = (("countries", 20, 60), ("employee_ranges", 20, 60), ("industries", 50, 200))
 
@@ -459,7 +459,7 @@ class LeadOrderService:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
         if not isinstance(payload, Mapping) or set(payload) != {"provider", "credentials"}:
             raise LeadOrderServiceError(422, "key_invalid")
-        if not self._store.has_miner_terms(hotkey, self.policy.miner_terms_version):
+        if not self._store.has_miner_terms(hotkey, self.policy.miner_terms_sha256):
             raise LeadOrderServiceError(403, "miner_terms_not_accepted")
         try:
             row = self._registrar.register(
@@ -477,7 +477,7 @@ class LeadOrderService:
         return {"status": "registered", "key_id": row["key_id"], "public_fingerprint": public}
 
     def revoke_key(self, hotkey: str, key_id: str) -> Dict[str, Any]:
-        owned = [row for provider in lead_keys.PROVIDERS for row in self._store.keys(provider, terms_version=None)
+        owned = [row for provider in lead_keys.PROVIDERS for row in self._store.keys(provider, terms_sha256=None)
                  if row["key_id"] == key_id and row["miner_hotkey"] == hotkey]
         if not owned:
             raise LeadOrderServiceError(404, "key_unknown")
@@ -497,8 +497,15 @@ class LeadOrderService:
             raise LeadOrderServiceError(422, "terms_version_not_current")
         if not identity.signature or not identity.body_sha256:
             raise LeadOrderServiceError(401, "signature_invalid")
+        # The signed bytes must be the canonical body, so the stored body_sha256
+        # alone proves which version and text hash the miner signed.
+        canonical = canonical_json({"terms_sha256": self.policy.miner_terms_sha256,
+                                    "terms_version": self.policy.miner_terms_version})
+        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != identity.body_sha256:
+            raise LeadOrderServiceError(422, "terms_body_not_canonical")
         result = self._store.accept_miner_terms(
-            hotkey=identity.hotkey, version=self.policy.miner_terms_version, signed_at=identity.signed_at,
+            hotkey=identity.hotkey, version=self.policy.miner_terms_version,
+            terms_sha256=self.policy.miner_terms_sha256, signed_at=identity.signed_at,
             body_sha256=identity.body_sha256, signature=identity.signature,
         )
         return {"status": str(result["status"]), "terms_version": self.policy.miner_terms_version,
@@ -531,7 +538,7 @@ class LeadOrderService:
 
         if hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        allowed = (self._store.has_miner_terms(hotkey, self.policy.miner_terms_version)
+        allowed = (self._store.has_miner_terms(hotkey, self.policy.miner_terms_sha256)
                    or bool(self._store.buyer(hotkey).get("confirmed")))
         if not allowed:
             raise LeadOrderServiceError(403, "suppressions_not_allowed")

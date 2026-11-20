@@ -513,8 +513,9 @@ def sql(owner, query, params):
         return [tuple(row) for row in cur.fetchall()] if cur.description else []
 
 
-TERMS_BODY = json.dumps({"terms_version": DEFAULT_POLICY_BODY["miner_terms_version"],
-                         "terms_sha256": DEFAULT_POLICY_BODY["miner_terms_sha256"]}).encode()
+TERMS_BODY = json.dumps({"terms_sha256": DEFAULT_POLICY_BODY["miner_terms_sha256"],
+                         "terms_version": DEFAULT_POLICY_BODY["miner_terms_version"]},
+                        sort_keys=True, separators=(",", ":")).encode()
 
 
 def signed_identity(miner, body=TERMS_BODY):
@@ -817,6 +818,11 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     with pytest.raises(LeadOrderServiceError) as unavailable:
         stale.miner_terms()
     assert (unavailable.value.status, unavailable.value.code) == (503, "terms_unavailable")
+    loose = json.dumps({"terms_version": POLICY.miner_terms_version, "terms_sha256": POLICY.miner_terms_sha256}).encode()
+    with pytest.raises(LeadOrderServiceError) as not_canonical:  # same values, other bytes
+        service.accept_miner_terms(signed_identity(miner, loose), {"terms_version": POLICY.miner_terms_version,
+                                                                   "terms_sha256": POLICY.miner_terms_sha256})
+    assert (not_canonical.value.status, not_canonical.value.code) == (422, "terms_body_not_canonical")
     first = accept_terms(service, miner)
     assert first["status"] == "accepted" and first["terms_version"] == POLICY.miner_terms_version
     assert accept_terms(service, miner)["status"] == "exists"
@@ -826,9 +832,10 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
                        hashlib.sha256(TERMS_BODY).hexdigest(), "ab" * 64)]
     key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
     registrar.secrets = {key["key_id"]: "t" * 40}
-    # The terms move to version 2: the key stays registered but is skipped
-    # until its miner signs again, so the order runs on Leadpoet's key.
-    v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=3, miner_terms_version="miner-terms-2"))
+    # The text changes but the version label does not: the key stays
+    # registered but is skipped until its miner signs the new text, so the
+    # order runs on Leadpoet's key.
+    v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=3, miner_terms_sha256="1" * 64))
     v2 = load_policy(v2_doc, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
     service.place_order(staff, {"leads": 10, **ORDER})
     token, order_id = claim(service)
@@ -842,7 +849,7 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     assert transport.sent[1]["headers"]["authorization"] == "Bearer " + "t" * 40  # current terms: ranked
     service.finish(order_id, {"status": "failed"})
     with pytest.raises(Exception):
-        sql(owner, "UPDATE public.lead_order_miner_terms SET terms_version='x' WHERE miner_hotkey=%s", (miner,))
+        sql(owner, "UPDATE public.lead_order_miner_terms SET terms_sha256=%s WHERE miner_hotkey=%s", ("2" * 64, miner))
     revoke_all_keys(store)
 
 

@@ -119,10 +119,11 @@ limit the broker moves to the next key for the rest of the order.
 
 Miner data terms are required. A miner running an order on their own key can
 see the order's lead data in their provider account, so a key is registered
-only after its miner has signed the current `miner_terms_version`, and the
-broker ranks only keys whose miner accepted exactly that version. When the
-policy moves to a new version, keys signed under the old one stay registered
-but are skipped until their miner signs again. The terms text is in
+only after its miner has signed the current terms text, named by
+`miner_terms_sha256`, and the broker ranks only keys whose miner accepted
+exactly that text. When the text changes, keys signed under the old one stay
+registered but are skipped until their miner signs again, even if the version
+label was not changed. The terms text is in
 `docs/gamma-lead-orders-miner-terms.md`: use the data only to run orders,
 keep no copies, honour the suppression feed, report problems.
 
@@ -131,7 +132,10 @@ keep no copies, honour the suppression feed, report problems.
   `miner_terms_sha256`, else 503 `terms_unavailable`.
 - `POST /lead-orders/miner-terms` `{terms_version, terms_sha256}`
   (hotkey-signed): both must equal the policy's `miner_terms_version` and
-  `miner_terms_sha256` (else 422 `terms_version_not_current`). The acceptance is stored append-only with the
+  `miner_terms_sha256` (else 422 `terms_version_not_current`). The signed
+  bytes must be that object as canonical JSON (sorted keys, no spaces), else
+  422 `terms_body_not_canonical`, so the stored body sha256 alone proves what
+  was signed. The acceptance is stored append-only with the
   hotkey, version, the request's signature, its `X-Timestamp` and the body's
   sha256, so it can be re-verified later. Answers `{status: accepted | exists,
   terms_version, accepted_at}`.

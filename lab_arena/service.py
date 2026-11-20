@@ -4152,7 +4152,10 @@ class ArenaService:
         retired_accepted = (
             source.get("status") == "failed"
             and source.get("terminal_cause") == "stage_closed"
-            and (source.get("terminal_doc") or {}).get("operation") == "operator_accepted_judge_correction_v1"
+            and (source.get("terminal_doc") or {}).get("operation") in {
+                "operator_accepted_judge_correction_v1",
+                "operator_accepted_execution_correction_v1",
+            }
             and self._store.retired_accepted_judgment(str(source["run_id"]))
         )
         if source.get("status") == "failed" and not retired_accepted:
@@ -7081,7 +7084,8 @@ class ArenaService:
         same_lease = (origin is not None and origin.get("run_id") == run["run_id"]
                       and origin.get("status") == "leased" and origin.get("lease_token_hash") == lease_hash)
         if (origin is None or execution is None or execution.get("kind") != "execute"
-            or execution.get("status") != "accepted"
+            or (execution.get("status") != "accepted"
+                and not self._retired_execution_evidence_pair(execution, origin))
             or any(execution.get(key) != origin.get(key) for key in
                    ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))
             or origin.get("kind") != "score" or origin.get("status") not in {"leased", "accepted", "failed"}
@@ -9606,6 +9610,24 @@ class ArenaService:
         }
         return result
 
+    def _retired_execution_evidence_pair(
+        self, execution: Mapping[str, Any], judgment: Mapping[str, Any],
+    ) -> bool:
+        """Keep original evidence usable only under its exact owner receipt."""
+        terminal = execution.get("terminal_doc") or {}
+        return bool(
+            execution.get("kind") == "execute"
+            and judgment.get("kind") == "score"
+            and execution.get("status") == judgment.get("status") == "failed"
+            and execution.get("terminal_cause") == judgment.get("terminal_cause") == "stage_closed"
+            and terminal.get("operation") == "operator_accepted_execution_correction_v1"
+            and terminal == judgment.get("terminal_doc")
+            and judgment.get("scored_run_id") == execution.get("run_id")
+            and all(execution.get(key) == judgment.get(key) for key in
+                    ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))
+            and self._store.retired_accepted_judgment(str(judgment["run_id"]))
+        )
+
     @staticmethod
     def _same_scoring_membership(
         score_run: Mapping[str, Any],
@@ -9614,6 +9636,7 @@ class ArenaService:
         round_id: str,
         completed_company: bool = False,
         completed_signal: bool = False,
+        retired_execution: bool = False,
     ) -> bool:
         """Bind one accepted judgment to its accepted execution without leaking ids."""
 
@@ -9627,7 +9650,8 @@ class ArenaService:
                  or (completed_company and score_run.get("status") == "failed")
                  or (completed_signal and score_run.get("status") in ("leased", "failed")))
             and execution_run.get("kind") == "execute"
-            and execution_run.get("status") == "accepted"
+            and (execution_run.get("status") == "accepted"
+                 or (retired_execution and execution_run.get("status") == "failed"))
             and type(score_stage) is int
             and type(execution_stage) is int
             and type(score_position) is int
@@ -9677,6 +9701,7 @@ class ArenaService:
             or not self._same_scoring_membership(
                 source_score, source_execution, round_id=round_id,
                 completed_company=completed_company,
+                retired_execution=self._retired_execution_evidence_pair(source_execution, source_score),
             )
         ):
             raise scoring.ScoringError("scoring attribution source is invalid")
@@ -9748,7 +9773,8 @@ class ArenaService:
                 or source.get("claim_request_hash") != row.get("source_claim_request_hash")
                 or int(source.get("lease_generation") or 0) != row.get("source_lease_generation")
                 or not self._same_scoring_membership(
-                    source, execution, round_id=round_id, completed_signal=True
+                    source, execution, round_id=round_id, completed_signal=True,
+                    retired_execution=self._retired_execution_evidence_pair(execution, source),
                 )):
                 raise scoring.ScoringError("signal attribution source is invalid")
             hotkey = str(row["source_runner_hotkey"])

@@ -22,9 +22,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 from lab_arena import signing
 from lab_arena.contracts import canonical_json
 from lab_arena.lead_orders import keys as lead_keys
-from lab_arena.lead_orders import receipts, rewards
+from lab_arena.lead_orders import receipts, rewards, suppressions
 from lab_arena.lead_orders import weights as lane_weights
-from lab_arena.lead_orders.auth import order_token_hash
+from lab_arena.lead_orders.auth import BuyerIdentity, order_token_hash
 from lab_arena.lead_orders.config import MODE_LIVE, LeadOrdersConfig
 from lab_arena.lead_orders.gamma import GammaBalanceReader, GammaReadError
 from lab_arena.lead_orders.policy import LeadOrderPolicy, load_policy
@@ -408,6 +408,8 @@ class LeadOrderService:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
         if not isinstance(payload, Mapping) or set(payload) != {"provider", "credentials"}:
             raise LeadOrderServiceError(422, "key_invalid")
+        if not self._store.has_miner_terms(hotkey, self.policy.miner_terms_version):
+            raise LeadOrderServiceError(403, "miner_terms_not_accepted")
         try:
             row = self._registrar.register(
                 miner_hotkey=hotkey, provider=str(payload["provider"]), credentials=payload["credentials"],
@@ -424,12 +426,57 @@ class LeadOrderService:
         return {"status": "registered", "key_id": row["key_id"], "public_fingerprint": public}
 
     def revoke_key(self, hotkey: str, key_id: str) -> Dict[str, Any]:
-        owned = [row for provider in lead_keys.PROVIDERS for row in self._store.keys(provider)
+        owned = [row for provider in lead_keys.PROVIDERS for row in self._store.keys(provider, terms_version=None)
                  if row["key_id"] == key_id and row["miner_hotkey"] == hotkey]
         if not owned:
             raise LeadOrderServiceError(404, "key_unknown")
         self._store.revoke_key(key_id, reason="revoked_by_miner")
         return {"status": "revoked", "key_id": key_id}
+
+    # -- miner data terms and the suppression feed --------------------------------
+    def accept_miner_terms(self, identity: BuyerIdentity, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        """Store a miner's signed acceptance of the current miner data terms."""
+
+        if identity.hotkey in self.config.blocked_hotkeys:
+            raise LeadOrderServiceError(403, "hotkey_not_allowed")
+        if not isinstance(payload, Mapping) or set(payload) != {"terms_version"}:
+            raise LeadOrderServiceError(422, "terms_invalid")
+        if payload["terms_version"] != self.policy.miner_terms_version:
+            raise LeadOrderServiceError(422, "terms_version_not_current")
+        if not identity.signature or not identity.body_sha256:
+            raise LeadOrderServiceError(401, "signature_invalid")
+        result = self._store.accept_miner_terms(
+            hotkey=identity.hotkey, version=self.policy.miner_terms_version, signed_at=identity.signed_at,
+            body_sha256=identity.body_sha256, signature=identity.signature,
+        )
+        return {"status": str(result["status"]), "terms_version": self.policy.miner_terms_version,
+                "accepted_at": result["accepted_at"]}
+
+    def push_suppressions(self, payload: Any) -> Dict[str, Any]:
+        """Runner only: append hashed suppressions. Raw values are refused."""
+
+        try:
+            rows = suppressions.rows_from_push(payload, now=time.time())
+        except suppressions.SuppressionError as exc:
+            raise LeadOrderServiceError(422, exc.code) from None
+        result = self._store.add_suppressions(rows)
+        return {"received": len(payload["suppressions"]), "added": int(result["added"])}
+
+    def read_suppressions(self, hotkey: str, since: Any) -> Dict[str, Any]:
+        """The feed for a confirmed buyer or a miner who accepted the current terms."""
+
+        if hotkey in self.config.blocked_hotkeys:
+            raise LeadOrderServiceError(403, "hotkey_not_allowed")
+        allowed = (self._store.has_miner_terms(hotkey, self.policy.miner_terms_version)
+                   or bool(self._store.buyer(hotkey).get("confirmed")))
+        if not allowed:
+            raise LeadOrderServiceError(403, "suppressions_not_allowed")
+        text = "0" if since in (None, "") else str(since)
+        if not text.isdigit() or len(text) > 18:
+            raise LeadOrderServiceError(422, "since_invalid")
+        rows = self._store.suppressions(since=int(text), limit=suppressions.PAGE_SIZE)
+        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else int(text),
+                "more": len(rows) == suppressions.PAGE_SIZE}
 
     # -- public -------------------------------------------------------------
     def public_epoch(self, epoch: Any) -> Dict[str, Any]:

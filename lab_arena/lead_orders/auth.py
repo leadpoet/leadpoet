@@ -46,6 +46,9 @@ def signed_message(method: str, path: str, timestamp: str, body: bytes) -> str:
 class BuyerIdentity:
     hotkey: str
     signed_at: int
+    # Kept so a signed acceptance (miner terms) can be stored and re-verified.
+    signature: str = ""
+    body_sha256: str = ""
 
 
 def verify_buyer_request(
@@ -82,7 +85,8 @@ def verify_buyer_request(
     # Record only after the signature verifies, so junk cannot fill the table.
     if not use_nonce(hotkey, signature_hash, signed_at):
         raise AuthError(401, "signature_replayed")
-    return BuyerIdentity(hotkey=hotkey, signed_at=signed_at)
+    return BuyerIdentity(hotkey=hotkey, signed_at=signed_at, signature=signature,
+                         body_sha256=hashlib.sha256(body).hexdigest())
 
 
 def verify_runner(config: LeadOrdersConfig, authorization: Optional[str]) -> None:

@@ -361,7 +361,8 @@ class LeadOrderBroker:
         window_start = max(0, epoch - self._policy.ranking_window_epochs + 1)
         miner_keys = []
         if use_miner_keys:
-            for row in self._store.keys(provider):
+            # Only keys whose miner signed the current miner data terms.
+            for row in self._store.keys(provider, terms_version=self._policy.miner_terms_version):
                 miner_keys.append(lead_keys.ProviderKey(
                     key_id=row["key_id"], provider=row["provider"], miner_hotkey=row["miner_hotkey"],
                     registered_sequence=int(row["sequence"]), internal_fingerprint=row["internal_fingerprint"],

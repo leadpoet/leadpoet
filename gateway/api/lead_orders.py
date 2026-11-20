@@ -188,6 +188,16 @@ async def revoke_key(key_id: str, request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.revoke_key(who.hotkey, key_id), auth="buyer")
 
 
+@router.post("/lead-orders/miner-terms")
+async def accept_miner_terms(request: Request) -> Response:
+    return await _handle(request, lambda s, b, who, body: s.accept_miner_terms(who, _json(body)), auth="buyer")
+
+
+@router.get("/lead-orders/suppressions")
+async def read_suppressions(request: Request, since: str = "") -> Response:
+    return await _handle(request, lambda s, b, who, body: s.read_suppressions(who.hotkey, since), auth="buyer")
+
+
 @router.post("/lead-orders")
 async def place_order(request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.place_order(who.hotkey, _json(body)), auth="buyer")
@@ -206,6 +216,11 @@ async def runner_claim(request: Request) -> Response:
         claimed = s.claim()
         return claimed if claimed is not None else Response(status_code=204)
     return await _handle(request, work, auth="runner")
+
+
+@router.post("/internal/lead-orders/suppressions")
+async def runner_suppressions(request: Request) -> Response:
+    return await _handle(request, lambda s, b, who, body: s.push_suppressions(_json(body)), auth="runner")
 
 
 @router.post("/internal/lead-orders/{order_id}/heartbeat")

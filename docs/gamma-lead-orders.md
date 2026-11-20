@@ -22,6 +22,10 @@ rewards, weights, service), `gateway/api/lead_orders.py` (routes) and
 | `shadow` | staff hotkeys, no Gamma | ranked miner keys, then Leadpoet's | computed and published, never weighted |
 | `live` | any hotkey with Gamma balance | ranked miner keys, then Leadpoet's | weighted, under the lane cap |
 
+Keys follow each order's own mode, not the gateway's current mode: an order
+placed in `staff` spends only Leadpoet's keys even after the gateway moves to
+`shadow` or `live`.
+
 ## Policy (one signed, versioned record)
 
 | Field | Start |
@@ -51,6 +55,14 @@ refused:
 - `min_charge_ratio × spend_ceiling_per_lead_usd ≤ price_per_lead_usd`, so the
   minimum charge never exceeds the hold.
 
+Known limit: the first invariant holds only for the assumed discounts. A miner
+whose real provider discount is above `max_provider_discounts` can profit from
+ordering against their own keys. `lane_emission_cap` bounds what that can earn
+per epoch.
+
+Each order records the policy version it was placed under. Its charge, rewards
+and receipt always use that stored version, never the current one.
+
 ## Money
 
 - Balance (USD) = Gamma the hotkey spent to the Leadpoet service on netuid 71
@@ -70,19 +82,31 @@ refused:
   timeout, a transport error) is settled `uncertain`: its reservation keeps
   counting against the ceiling, and it is never charged to the buyer or
   rewarded. A 4xx with no cost settles at 0.
-- An order the runner does not finish by its deadline (plus 60 s grace) is
-  finished as `failed` with reason `deadline_passed` at the next claim, and
-  charged the minimum charge on its settled spend.
+- An order the runner does not finish by its deadline (plus 300 s grace,
+  longer than the broker's 240 s Deepline timeout) is finished as `failed`
+  with reason `deadline_passed` at the next claim, and charged the minimum
+  charge on its settled spend.
+- At finish, the order stops taking reservations and every call still open is
+  settled `uncertain`. A provider answer that arrives after finish is kept in
+  a separate late-settlement table and is never charged, rewarded or
+  published. The receipt's call rows are frozen when the receipt is signed.
+- A finished order with no receipt (for example, signing failed) is settled
+  again by an idempotent reconcile pass that runs on every claim and every
+  epoch pass.
 - Per epoch, rewards owed are paid oldest first up to the lane cap; the rest
   carries forward in USD and converts to alpha at the paying epoch's price.
   The emission price source is not decided yet: until it is, `live` payouts are
   refused and `shadow` publishes what is owed with no payments. Shadow payouts
   are never recorded as paid, so shadow does not simulate the carry-forward.
+- What is owed is counted per mode. A `live` payout counts only `live` orders,
+  so it never pays a shadow backlog; recording a payment against a non-live
+  order is refused. Shadow payouts publish shadow orders only and are never
+  weighted. Staff orders earn nothing.
 - The Gamma service id (`LEADPOET_LEAD_ORDERS_GAMMA_SERVICE`) may be an SS58
   account or a number. The storage item name is configurable
   (`LEADPOET_LEAD_ORDERS_GAMMA_STORAGE`, default `GammaSpent`). A chain without
   it reads as no balance, and `live` orders are refused (`gamma_unavailable`).
-  A counter that goes backwards is refused.
+  A counter that goes backwards is refused with 422 `gamma_counter_backwards`.
 
 ## Key order
 
@@ -147,7 +171,8 @@ Leadpoet's private storage and returns an opaque, expiring download URL; the
 gateway hands that URL to the buyer. `delivery_url` must be `https://`.
 `failed` charges the minimum charge on spend so far. A failed order is never
 retried automatically. Finishing twice changes nothing and returns the first
-result. The response is `{status, charge_microusd, charged_usd,
+result. `leads_delivered` above `leads_requested` is refused with 422
+`leads_delivered_invalid`. The response is `{status, charge_microusd, charged_usd,
 receipt_hash}`.
 
 ## Broker
@@ -165,13 +190,27 @@ order finishes (409 `order_finished`) or its deadline passes (410
 502 `provider_unreachable`, 503 `provider_keys_exhausted`. Only the
 provider's `content-type` header is passed back.
 
+Anything outside the allowlists below is refused with a 400 before a
+reservation is made or a key is chosen.
+
 - OpenRouter: only `POST api/v1/chat/completions`, no streaming. The model
   must be in the cached OpenRouter price table; the reservation is the
   worst-case cost of the prompt plus `max_tokens`. The broker sets `usage:
-  {include: true}` and settles at the reported `usage.cost`.
-- Deepline: `GET`/`POST` under `api/v2/`, never billing paths or credential
-  names in the query. Each call reserves `deepline_reserve_per_call_usd` and
-  settles at the cost read from the response body. Async job billing that is
+  {include: true}` and settles at the reported `usage.cost`. Only the fields
+  that reservation prices are accepted: `model`, `messages`, `max_tokens`,
+  sampling settings, `seed`, `stop`, `response_format`, function `tools`,
+  `tool_choice`, `parallel_tool_calls`, `stream` (false) and `usage`. Any other
+  field (`models`, `plugins`, `provider`, `reasoning`, ...) is 400
+  `field_not_allowed:<name>`. A model variant such as `:online` is 400
+  `model_variant_not_allowed`, a non-function tool 400 `tool_not_allowed`, and
+  non-text message content 400 `content_not_allowed`.
+- Deepline: only `POST api/v2/integrations/{operation}/execute`, with no query
+  string, for the operations the Lead Search finding core uses
+  (`DEEPLINE_OPERATIONS` in `lab_arena/lead_orders/broker.py`). Another
+  operation is 400 `operation_not_allowed`, a query 400 `query_not_allowed`,
+  and any other path or method 404 `route_not_allowed`. Each call reserves
+  `deepline_reserve_per_call_usd` and settles at the cost read from the
+  response body. Async job billing that is
   reported only later is a known limit: such calls settle `uncertain`.
 
 ## Buyer API (hotkey-signed)
@@ -188,7 +227,8 @@ sr25519 signature over `METHOD\nPATH\nTIMESTAMP\nsha256(body)`.
   when delivered, and the receipt.
 
 `POST /lead-orders` may carry its own `order_id` (UUID) to make retries safe;
-the same id from the same hotkey returns the existing order. `seller` and
+the same id from the same hotkey and body returns the existing order; the
+same id with a different hotkey or body is 409 `order_id_taken`. `seller` and
 `search` are objects stored as given and handed to the runner; together they
 may not pass 16 KB. In `live` a buyer also needs a fresh Gamma reading. The
 confirmation link is `GET /lead-orders/buyers/confirm?token=…`. Until a
@@ -210,7 +250,8 @@ prompts, call order and lead data are never published.
 - `GET /lead-orders/receipts/{order_id}` → the signed receipt and its call
   rows (call id, provider, miner hotkey, key fingerprint, reserved, status,
   cost), sorted by random call id. Anyone can recompute the Merkle root.
-- `GET /lead-orders/epochs/{epoch}` → the signed payout document for an epoch.
+- `GET /lead-orders/epochs/{epoch}` → the signed payout document for an epoch
+  (404 when the lane is off, for any input).
 
 ## Weights
 

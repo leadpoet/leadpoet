@@ -351,10 +351,10 @@ def test_transport_failure_settles_uncertain_and_routes_are_closed(store):
         (BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
                        json.dumps({"model": "other/model", "messages": []}).encode(), None), "model_not_allowed"),
         # Cost the reservation does not price is refused before anything is sent.
-        (chat_with(models=[MODEL, "other/model"]), "field_not_allowed:models"),
+        (chat_with(models=[MODEL, "other/model"]), "model_not_allowed"),
         (chat_with(plugins=[{"id": "web"}]), "field_not_allowed:plugins"),
-        (chat_with(provider={"order": ["x"]}), "field_not_allowed:provider"),
-        (chat_with(reasoning={"max_tokens": 9999}), "field_not_allowed:reasoning"),
+        (chat_with(provider={"order": ["x"]}), "provider_field_not_allowed:order"),
+        (chat_with(reasoning={"budget": 9999}), "reasoning_invalid"),
         (chat_with(tools=[{"type": "openrouter:web_search"}]), "tool_not_allowed"),
         (BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
                        json.dumps({"model": MODEL + ":online", "messages": []}).encode(), None), "model_variant_not_allowed"),

@@ -6520,6 +6520,8 @@ async def _fetch_structured_linkedin_profile_once(
     invocation_cache["structured_evidence"] = (
         structured_employee_size_evidence
     )
+    if structured_diagnostic.get("completed_empty_profile") == "true":
+        invocation_cache["structured_completed_empty_profile"] = True
     if public_company_evidence:
         invocation_cache["structured_public_company_evidence"] = (
             public_company_evidence
@@ -12043,7 +12045,16 @@ async def _llm_reverify_company(
         "identity" in incomplete
         and not repair_error
         and not repair_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)
-        and not current_profile_cache.get("structured_failure")
+        and (
+            not current_profile_cache.get("structured_failure")
+            or (
+                current_profile_cache.get("structured_completed_empty_profile") is True
+                and current_profile_cache.get("structured_failure_reason") == MALFORMED_RESPONSE_FAILURE_REASON
+                and current_profile_cache.get("refresh_outcome") != "retryable_failure"
+                and result.details.get("dimension_decisions", {}).get("employee_size")
+                in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+            )
+        )
         and not (
             verified_homepage_identity is not None
             and _homepage_identity_has_retryable_failure(verified_homepage_identity)

@@ -395,3 +395,204 @@ def convert_homepage_identity_source_files(files: dict[str, bytes]) -> dict[str,
     if {name: hashlib.sha256(value).hexdigest() for name, value in result.items()} != REPAIRED_FILE_SHA256:
         raise HomepageIdentityConflictSeamError("identity/source repairs differ from reviewed source")
     return result
+
+
+# Completed empty structured-profile replies do not provide identity proof.
+EMPTY_PROFILE_CORRECTION_ID = "completed_empty_profile_identity_finality_v1"
+PROFILE_FILE = "qualification/scoring/linkedin_company_size.py"
+EMPTY_PROFILE_ORIGINAL_SHA256 = {'qualification/scoring/lead_scorer.py': '31cc9fe8a4cd692a80f27102b245369b8a843160599454c7a62c7d191b1e0416', 'qualification/scoring/linkedin_company_size.py': '6835562e6fd7124f30fb588ae6a2577ebd1e4171d0c66bdc555a7e041a4f32e0'}
+EMPTY_PROFILE_REPAIRED_SHA256 = {'qualification/scoring/lead_scorer.py': '9162e0f38f9dd0ebf216911b239a3f1ee5ba7319df1dc410e1bbf9fc5e69e4b7', 'qualification/scoring/linkedin_company_size.py': '83857c3be2c91335b001cde8e7b9e57adbf94910d04e0be12225912dc272e664'}
+_EMPTY_PROFILE_DELTAS = {'qualification/scoring/lead_scorer.py': [('    invocation_cache["structured_evidence"] = (\n'
+                                           '        structured_employee_size_evidence\n'
+                                           '    )\n'
+                                           '    if public_company_evidence:\n'
+                                           '        '
+                                           'invocation_cache["structured_public_company_evidence"] '
+                                           '= (\n'
+                                           '            public_company_evidence\n',
+                                           '    invocation_cache["structured_evidence"] = (\n'
+                                           '        structured_employee_size_evidence\n'
+                                           '    )\n'
+                                           '    if '
+                                           'structured_diagnostic.get("completed_empty_profile") '
+                                           '== "true":\n'
+                                           '        '
+                                           'invocation_cache["structured_completed_empty_profile"] '
+                                           '= True\n'
+                                           '    if public_company_evidence:\n'
+                                           '        '
+                                           'invocation_cache["structured_public_company_evidence"] '
+                                           '= (\n'
+                                           '            public_company_evidence\n'),
+                                          ('        "identity" in incomplete\n'
+                                           '        and not repair_error\n'
+                                           '        and not '
+                                           'repair_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)\n'
+                                           '        and not '
+                                           'current_profile_cache.get("structured_failure")\n'
+                                           '        and not (\n'
+                                           '            verified_homepage_identity is not None\n'
+                                           '            and '
+                                           '_homepage_identity_has_retryable_failure(verified_homepage_identity)\n',
+                                           '        "identity" in incomplete\n'
+                                           '        and not repair_error\n'
+                                           '        and not '
+                                           'repair_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)\n'
+                                           '        and (\n'
+                                           '            not '
+                                           'current_profile_cache.get("structured_failure")\n'
+                                           '            or (\n'
+                                           '                '
+                                           'current_profile_cache.get("structured_completed_empty_profile") '
+                                           'is True\n'
+                                           '                and '
+                                           'current_profile_cache.get("structured_failure_reason") '
+                                           '== MALFORMED_RESPONSE_FAILURE_REASON\n'
+                                           '                and '
+                                           'current_profile_cache.get("refresh_outcome") != '
+                                           '"retryable_failure"\n'
+                                           '                and '
+                                           'result.details.get("dimension_decisions", '
+                                           '{}).get("employee_size")\n'
+                                           '                in {COMPANY_FIT_MATCH, '
+                                           'COMPANY_FIT_MISMATCH}\n'
+                                           '            )\n'
+                                           '        )\n'
+                                           '        and not (\n'
+                                           '            verified_homepage_identity is not None\n'
+                                           '            and '
+                                           '_homepage_identity_has_retryable_failure(verified_homepage_identity)\n')],
+ 'qualification/scoring/linkedin_company_size.py': [('    )\n'
+                                                     '\n'
+                                                     '\n'
+                                                     'def '
+                                                     '_structured_profile_explicitly_not_found(value: '
+                                                     'Any) -> bool:\n'
+                                                     '    """Recognize the requested profile\'s '
+                                                     'explicit absence, without credit."""\n'
+                                                     '    current = value\n'
+                                                     '    wrappers = ("toolResponse", "rawV2", '
+                                                     '"raw", "result", "data", "output")\n'
+                                                     '    for _ in range(8):\n',
+                                                     '    )\n'
+                                                     '\n'
+                                                     '\n'
+                                                     'def '
+                                                     '_structured_profile_completed_without_result(value: '
+                                                     'Any, *, status_code: int) -> bool:\n'
+                                                     '    """Recognize an exact completed empty '
+                                                     'reply; it supplies no evidence."""\n'
+                                                     '    current = value\n'
+                                                     '    wrappers = ("toolResponse", "rawV2", '
+                                                     '"raw", "result", "data", "output")\n'
+                                                     '    for _ in range(8):\n'),
+                                                    ('            return False\n'
+                                                     '        if (set(current) == {"error", '
+                                                     '"status", "element"}\n'
+                                                     '            and current["error"] is None and '
+                                                     'type(current["status"]) is int\n'
+                                                     '            and current["status"] == 404 and '
+                                                     'current["element"] is None):\n'
+                                                     '            return True\n'
+                                                     '        status = current.get("status")\n'
+                                                     '        if ("status" in current and not (\n',
+                                                     '            return False\n'
+                                                     '        if (set(current) == {"error", '
+                                                     '"status", "element"}\n'
+                                                     '            and current["error"] is None and '
+                                                     'type(current["status"]) is int\n'
+                                                     '            and current["status"] == '
+                                                     'status_code and current["element"] is '
+                                                     'None):\n'
+                                                     '            return True\n'
+                                                     '        status = current.get("status")\n'
+                                                     '        if ("status" in current and not (\n'),
+                                                    ('        )) or ("job_id" in current and '
+                                                     '"status" not in current):\n'
+                                                     '            return False\n'
+                                                     '        # An outer account, request or job '
+                                                     'failure takes precedence over a\n'
+                                                     '        # nested not-found payload. '
+                                                     'Empty/malformed success is not absence.\n'
+                                                     '        if '
+                                                     '_structured_provider_reported_error({\n'
+                                                     '            key: item for key, item in '
+                                                     'current.items() if key not in wrappers\n'
+                                                     '        }):\n',
+                                                     '        )) or ("job_id" in current and '
+                                                     '"status" not in current):\n'
+                                                     '            return False\n'
+                                                     '        # An outer account, request or job '
+                                                     'failure takes precedence over a\n'
+                                                     '        # nested empty payload. Missing '
+                                                     'fields and malformed success still fail.\n'
+                                                     '        if '
+                                                     '_structured_provider_reported_error({\n'
+                                                     '            key: item for key, item in '
+                                                     'current.items() if key not in wrappers\n'
+                                                     '        }):\n'),
+                                                    ('    except Exception:  # noqa: BLE001\n'
+                                                     '        _set_failure_reason(diagnostic, '
+                                                     'UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)\n'
+                                                     '        return None\n'
+                                                     '    if '
+                                                     '_structured_profile_explicitly_not_found(body):\n'
+                                                     '        # A completed exact-profile lookup '
+                                                     'found no profile. Keep the\n'
+                                                     "        # caller's insufficient-evidence "
+                                                     'outcome; supply no identity or size.\n'
+                                                     '        return None\n'
+                                                     '    if '
+                                                     '_structured_provider_reported_error(body):\n'
+                                                     '        _set_failure_reason(diagnostic, '
+                                                     'PROVIDER_ERROR_FAILURE_REASON)\n'
+                                                     '        return None\n',
+                                                     '    except Exception:  # noqa: BLE001\n'
+                                                     '        _set_failure_reason(diagnostic, '
+                                                     'UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)\n'
+                                                     '        return None\n'
+                                                     '    if '
+                                                     '_structured_profile_completed_without_result(body, '
+                                                     'status_code=404):\n'
+                                                     '        # A completed exact-profile lookup '
+                                                     'found no profile. Keep the\n'
+                                                     "        # caller's insufficient-evidence "
+                                                     'outcome; supply no identity or size.\n'
+                                                     '        return None\n'
+                                                     '    if diagnostic is not None and '
+                                                     '_structured_profile_completed_without_result(body, '
+                                                     'status_code=200):\n'
+                                                     '        # Preserve the existing missing-size '
+                                                     'failure. Identity research may\n'
+                                                     '        # separately finish unproven after '
+                                                     'its independent checks complete.\n'
+                                                     '        '
+                                                     'diagnostic["completed_empty_profile"] = '
+                                                     '"true"\n'
+                                                     '    if '
+                                                     '_structured_provider_reported_error(body):\n'
+                                                     '        _set_failure_reason(diagnostic, '
+                                                     'PROVIDER_ERROR_FAILURE_REASON)\n'
+                                                     '        return None\n')]}
+
+
+def convert_completed_empty_profile_files(files: dict[str, bytes]) -> dict[str, bytes]:
+    """Apply two exact source changes after the existing frozen396 repair."""
+    if set(files) != set(FILES) | {PROFILE_FILE}:
+        raise HomepageIdentityConflictSeamError("incomplete empty-profile source set")
+    result = convert_homepage_identity_source_files({name: files[name] for name in FILES})
+    result[PROFILE_FILE] = files[PROFILE_FILE]
+    for name, edits in _EMPTY_PROFILE_DELTAS.items():
+        if hashlib.sha256(result[name]).hexdigest() != EMPTY_PROFILE_ORIGINAL_SHA256[name]:
+            raise HomepageIdentityConflictSeamError("unrecognized empty-profile source")
+        text = result[name].decode("utf-8")
+        for old, new in edits:
+            if text.count(old) != 1:
+                raise HomepageIdentityConflictSeamError("empty-profile source anchor differs")
+            text = text.replace(old, new, 1)
+        candidate = text.encode("utf-8")
+        compile(candidate, name, "exec")
+        if hashlib.sha256(candidate).hexdigest() != EMPTY_PROFILE_REPAIRED_SHA256[name]:
+            raise HomepageIdentityConflictSeamError("empty-profile repair checksum differs")
+        result[name] = candidate
+    return result

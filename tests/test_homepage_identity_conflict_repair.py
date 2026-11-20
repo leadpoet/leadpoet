@@ -11,10 +11,11 @@ from copy import deepcopy
 
 import pytest
 
-from qualification.scoring import competition, lead_scorer as scorer
+from qualification.scoring import competition, lead_scorer as scorer, linkedin_company_size
 from qualification.scoring.company_fit_decision import company_fit_match, company_fit_unavailable
 from lab_arena import company_judgments
 from tests.test_fit_evidence_url_compat import _company, _complete_verdict, _icp
+from tests.test_current_linkedin_company_size import _install_exa_bodies
 
 
 OLD = "https://www.linkedin.com/company/dalfen-america-corp"
@@ -80,6 +81,10 @@ def _exercise(monkeypatch, *, repair="same", profile="empty", homepage_fault=Fal
     async def structured(domain, url, **kwargs):
         events.append("old_profile")
         assert domain == "dalfen.com" and url == OLD
+        if profile == "native_empty":
+            return await linkedin_company_size.fetch_structured_linkedin_company_size(
+                domain, url, **kwargs,
+            )
         if profile == "fault":
             kwargs["diagnostic"][scorer.VERIFIER_FAILURE_REASON_KEY] = "provider_error"
         if profile == "canonical":
@@ -116,6 +121,12 @@ def _exercise(monkeypatch, *, repair="same", profile="empty", homepage_fault=Fal
         pytest.fail("No additional transport or redirect research is authorized by this repair")
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-placeholder")
+    if profile == "native_empty":
+        monkeypatch.setenv("DEEPLINE_API_KEY", "offline-placeholder")
+        _install_exa_bodies(monkeypatch, {
+            "job_id": "offline-execute", "status": "completed",
+            "result": {"data": {"error": None, "status": 200, "element": None}},
+        })
     monkeypatch.setattr(scorer, "_request_company_reverify_json", request)
     monkeypatch.setattr(scorer, "_ground_required_attribute_evidence", attribute)
     monkeypatch.setattr(scorer, "_ground_employee_size_observation", passthrough)
@@ -185,3 +196,30 @@ def test_explicit_empty_identity_after_healthy_review_retains_existing_finality(
     assert events.count("lead_scorer_reverify_schema_repair") == 1
     assert fit.decision == "unavailable"
     assert fit.details["failure_class"] == "insufficient_fit_evidence"
+
+
+@pytest.mark.parametrize("investigation", [False, True])
+def test_completed_empty_profile_through_native_parser_finishes_unproven(monkeypatch, investigation):
+    fit, events, _, _ = _exercise(monkeypatch, profile="native_empty", investigation=investigation)
+    assert events.count("old_profile") == 1
+    assert events.count("lead_scorer_reverify_schema_repair") == 1
+    assert fit.decision == "unavailable"
+    assert fit.details["company_fit_dimensions"]["identity"] == "unavailable"
+    assert fit.details.get("failure_class") == "insufficient_fit_evidence"
+    assert not competition.scorer_breakdown_has_retryable_infrastructure_failure({
+        "final_score": 0.0, "verifier_gate_receipts": [fit.receipt("company_fit")],
+    })
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"repair": "provider_error"}, {"repair": "malformed_response"},
+    {"repair": "null"}, {"homepage_fault": True},
+    {"investigation": True, "source_fault": True},
+])
+def test_completed_empty_profile_does_not_hide_other_failures(monkeypatch, kwargs):
+    fit, _, _, _ = _exercise(monkeypatch, profile="native_empty", **kwargs)
+    assert fit.decision == "unavailable"
+    assert fit.details.get("failure_class") != "insufficient_fit_evidence"
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure({
+        "final_score": 0.0, "verifier_gate_receipts": [fit.receipt("company_fit")],
+    })

@@ -28,6 +28,44 @@ def queued(log):
         return list(log._queue)
 
 
+def test_diagnostic_flood_does_not_evict_startup_readiness():
+    log = logger()
+    log.emit('validator.startup', {'phase': 'startup'})
+    log.emit('validator.ready', {'phase': 'weights'})
+    log.emit('validator.ready', {'phase': 'scoring_setup', 'ready_slots': 12})
+    for _ in range(100):
+        log.emit('validator.error', {'phase': 'weight_recovery'})
+    assert len(queued(log)) == log.QUEUE_LIMIT
+    assert [value['kind'] for value in queued(log)[:3]] == [
+        'validator.startup', 'validator.ready', 'validator.ready']
+
+
+def test_readiness_batches_are_not_poisoned_by_diagnostic_rate_limit():
+    from urllib.error import HTTPError
+
+    clock = [0.0]
+    batches = []
+
+    def monotonic():
+        clock[0] += 30
+        return clock[0]
+
+    def transport(envelope):
+        batch = envelope['body']['events']
+        batches.append([value['kind'] for value in batch])
+        if batch[0]['kind'] == 'validator.error':
+            raise HTTPError('https://gateway.invalid', 429, 'limited', {}, None)
+        log._stop.set()
+
+    log = logger(monotonic=monotonic, transport=transport)
+    log.HEARTBEAT_SECONDS = 1e6
+    log.emit('validator.error', {'phase': 'weight_recovery'})
+    log.emit('validator.startup', {'phase': 'startup'})
+    log.emit('validator.ready', {'phase': 'weights'})
+    log._send_loop()
+    assert batches == [['validator.error'], ['validator.startup', 'validator.ready']]
+
+
 def test_error_suppression_redaction_and_recovery():
     clock = [100.0]
     log = logger(monotonic=lambda: clock[0])

@@ -34,6 +34,16 @@ It then rereads the same process/source before marking validator ready and
 releasing the guard. This proves loop setup, not successful sandbox execution
 or a finalized weight transaction. Those remain separate production checks.
 
+Validator event delivery keeps lifecycle evidence separate from ordinary
+diagnostics. Startup, ready, stopping, and error/recovery events for the four
+readiness phases retain their own 60/minute and 1000/day allowance per hotkey.
+The normal diagnostic allowance is unchanged. The existing bounded sender
+preserves lifecycle events during a diagnostic flood and sends the two classes
+in separate, ordered batches. Authentication, privacy, correlation, and all
+paired readiness checks are unchanged. Apply migration 706 before deploying
+the updated sender. Delivery remains bounded and best-effort; missing required
+readiness evidence still retains the guard for exact-owner investigation.
+
 A failure before gateway destruction keeps the canonical owner's abort
 behavior. After gateway activation, any validator preflight, restart,
 rollback, renewal, readiness or authorization failure leaves the exact guard

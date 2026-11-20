@@ -8683,8 +8683,16 @@ class ArenaService:
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs
                 ):
-                    with telemetry.stage("advance_close_scoring"):
-                        return self.close_scoring(round_id, stage)
+                    with telemetry.stage("advance_close_scoring") as observed:
+                        closed = self.close_scoring(round_id, stage)
+                        # `closed` is the only status that transitions the
+                        # round; `draining`, `existing` and `stale` all leave
+                        # it exactly where it was and the driver re-enters
+                        # this branch next tick. Reporting those as `ok` made
+                        # an endless deferral indistinguishable from the one
+                        # successful close of the day.
+                        observed.idle = closed.get("status") != "closed"
+                        return closed
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])

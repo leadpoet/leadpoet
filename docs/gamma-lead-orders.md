@@ -19,12 +19,15 @@ rewards, weights, service), `gateway/api/lead_orders.py` (routes) and
 | --- | --- | --- | --- |
 | `off` | nobody | none | none |
 | `staff` | hotkeys in `LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS`, no Gamma | Leadpoet's keys only | none |
-| `shadow` | staff hotkeys, no Gamma | ranked miner keys, then Leadpoet's | computed and published, never weighted |
+| `shadow` | staff hotkeys, no Gamma | Leadpoet's keys only | what-if only: published in the receipt, never owed or weighted |
 | `live` | any hotkey with Gamma balance | ranked miner keys, then Leadpoet's | weighted, under the lane cap |
 
-Keys follow each order's own mode, not the gateway's current mode: an order
-placed in `staff` spends only Leadpoet's keys even after the gateway moves to
-`shadow` or `live`.
+Keys follow each order's own mode, not the gateway's current mode: only a
+`live` order spends miner keys, even after the gateway moves to `live`.
+Miners can register keys in `shadow` and `live`. A shadow order's receipt
+carries `what_if_rewards_microusd`, the reward its settled spend would have
+earned on miner keys. Shadow spend never counts toward the key ranking, so
+shadow cannot move the live order of keys.
 
 ## Policy (one signed, versioned record)
 
@@ -76,10 +79,12 @@ and receipt always use that stored version, never the current one.
   an order's reserved spend would pass it.
 - Charge = min(hold, max(delivered × price, ceil(min_charge_ratio × spend))),
   in whole micro-USD. Spend is settled spend only.
-- Miner reward (USD) = floor(that miner's settled spend on the order × (1 +
-  premium)). Leadpoet's own keys earn nothing. If an order's total settled
-  spend passes its ceiling (a provider reported more than was reserved), every
-  reward on it is scaled by ceiling / total spend.
+- Miner reward (USD) = floor(that miner's rewardable spend on the order × (1 +
+  premium)), where each call's rewardable spend is min(cost, reserved). A cost
+  above the call's reservation is still charged to the buyer, but the excess
+  earns no reward; the miner's statement shows it as `excess_microusd`.
+  Leadpoet's own keys earn nothing. If an order's total rewardable spend
+  passes its ceiling, every reward on it is scaled by ceiling / total.
 - A call whose cost the provider did not report (no cost field on a 2xx, a
   timeout, a transport error) is settled `uncertain`: its reservation keeps
   counting against the ceiling, and it is never charged to the buyer or
@@ -88,22 +93,39 @@ and receipt always use that stored version, never the current one.
   longer than the broker's 240 s Deepline timeout) is finished as `failed`
   with reason `deadline_passed` at the next claim, and charged the minimum
   charge on its settled spend.
-- At finish, the order stops taking reservations and every call still open is
-  settled `uncertain`. A provider answer that arrives after finish is kept in
-  a separate late-settlement table and is never charged, rewarded or
-  published. The receipt's call rows are frozen when the receipt is signed.
+- Finish is refused with 409 `calls_open` while any of the order's calls is
+  still open: the runner waits for its own calls and finishes again. Only the
+  overdue sweep (deadline plus grace, longer than any provider timeout)
+  finishes an order with open calls, settling them `uncertain`. Once finished,
+  the order takes no reservations. The receipt's call rows are frozen when the
+  receipt is signed, and the buyer's charge never changes after finish.
+- Repayment of uncertain calls (live orders, miner keys only). The broker
+  stores the provider's request id on every call it can, a timeout included:
+  OpenRouter's generation id, Deepline's request id. A bounded reconcile step
+  (10 calls and 15 s per pass, 5 s per lookup, calls under 7 days old) reads
+  each uncertain OpenRouter call back once through OpenRouter's free
+  generation lookup on the same miner key; no answer leaves it for the next
+  pass. A provider answer that arrives after finish is also kept, in a
+  separate late-settlement table. When either gives a known cost, the miner is
+  owed a late reward of floor(min(cost, reserved) × (1 + premium)), paid in a
+  following epoch's payout like any other reward and listed in the miner's
+  statement. It is never charged to the buyer and never changes the receipt.
+- Late rewards keep the no-farming rule: all rewards on an order stay at or
+  below charge × (1 + premium) / `min_charge_ratio`. A delivered order has
+  room for them; a failed order, charged only the minimum on its settled
+  spend, has almost none, so a late cost on a failed order is mostly not
+  repaid (known limit).
 - A finished order with no receipt (for example, signing failed) is settled
   again by an idempotent reconcile pass that runs on every claim and every
   epoch pass.
 - Per epoch, rewards owed are paid oldest first up to the lane cap; the rest
   carries forward in USD and converts to alpha at the paying epoch's price.
-  The emission price source is not decided yet: until it is, `live` payouts are
-  refused and `shadow` publishes what is owed with no payments. Shadow payouts
-  are never recorded as paid, so shadow does not simulate the carry-forward.
-- What is owed is counted per mode. A `live` payout counts only `live` orders,
-  so it never pays a shadow backlog; recording a payment against a non-live
-  order is refused. Shadow payouts publish shadow orders only and are never
-  weighted. Staff orders earn nothing.
+  Late rewards join the same queue by the epoch they were recorded in. The
+  emission price source is not decided yet: until it is, `live` payouts are
+  refused. A `shadow` epoch publishes a payout document with no payments;
+  shadow orders owe nothing (their what-if rewards are in their receipts).
+- A `live` payout counts only `live` orders; recording a payment against a
+  non-live order is refused. Staff and shadow orders earn nothing.
 - The Gamma service id (`LEADPOET_LEAD_ORDERS_GAMMA_SERVICE`) may be an SS58
   account or a number. The storage item name is configurable
   (`LEADPOET_LEAD_ORDERS_GAMMA_STORAGE`, default `GammaSpent`). A chain without
@@ -112,10 +134,20 @@ and receipt always use that stored version, never the current one.
 
 ## Key order
 
-Per provider, miner keys are ranked by USD spend settled over the last
-`ranking_window_epochs`, highest first; ties and new keys by registration time.
-Leadpoet's key is always last. On 401, 402, 403, 429-with-no-retry or a spent
-limit the broker moves to the next key for the rest of the order.
+Per provider, miner keys are ranked by USD spend settled on `live` orders over
+the last `ranking_window_epochs`, highest first; ties and new keys by
+registration time. Leadpoet's key is always last. On 401, 402, 403,
+429-with-no-retry or a spent limit the broker moves to the next key for the
+rest of the order.
+
+Each miner key has a daily cap (`daily_cap_usd`, required at registration,
+USD 1 to 10,000, at most 6 decimals, else 422 `daily_cap_invalid`). The
+reserve step locks the key and adds the key's spend over the last 24 hours
+(settled cost, or the reservation while a call is open or uncertain); a
+reservation that would pass the cap is refused `key_capped` and the broker
+tries the next key. So no order, however many run at once, spends more than
+the cap on a key in a day, apart from a provider reporting more than was
+reserved.
 
 Miner data terms are required. A miner running an order on their own key can
 see the order's lead data in their provider account, so a key is registered
@@ -228,7 +260,10 @@ reservation is made or a key is chosen.
   `openrouter_max_output_tokens`; reasoning counts inside that cap, and
   `reasoning.max_tokens` is clamped to it). Where `provider.max_price` sets a
   component, that price is reserved instead of the listed one, since
-  OpenRouter never routes above it. The broker always sends
+  OpenRouter never routes above it. The broker always sends a full
+  `provider.max_price`: a component the runner left out is filled with the
+  dearest listed price across the request's models, so OpenRouter cannot
+  route to an endpoint dearer than the reservation assumed. The broker always sends
   `provider.data_collection: "deny"` and `zdr: true`, so lead data never goes
   to an endpoint that keeps it; a request asking otherwise is 400
   `provider_privacy_required`. It sets `usage: {include: true}` and settles
@@ -257,7 +292,9 @@ reservation is made or a key is chosen.
   the ledger or receipts. `firecrawl_scrape` is allowed (Hiring reads a fresh
   copy of an indexed job post whose own page fails); the custom-event tools
   (`serper_google_maps_search`, `socrata_query_dataset`) stay refused. Each
-  call reserves `deepline_reserve_per_call_usd` and settles at the cost read
+  call reserves the operation's known fixed price where Arena's Deepline price
+  table has one (at least 1 micro-USD), else `deepline_reserve_per_call_usd`,
+  and settles at the cost read
   from the response body the way the site reads it: `billing.cost_usd` when it
   is a finite number ≥ 0 (rounded up to the micro-USD), else the credit
   fields. Arena's own Deepline cost reading is unchanged. Async job billing
@@ -270,7 +307,11 @@ use no key, so they have no ledger row.
 ## Buyer API (hotkey-signed)
 
 Each request carries `X-Hotkey`, `X-Timestamp` (±60 s) and `X-Signature`, an
-sr25519 signature over `METHOD\nPATH\nTIMESTAMP\nsha256(body)`.
+sr25519 signature over `METHOD\nHOST\nPATH\nTIMESTAMP\nsha256(body)`. HOST
+is the gateway's public host, lowercased (the host of
+`LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL`, with a port only if that URL has one),
+so a signature made for another gateway, such as Arena's, is refused here.
+Miner-terms acceptances store the signed host too.
 
 - `POST /lead-orders/buyers` `{email, company, country, terms_version}`: sends a
   confirmation link; free-mail domains are refused. Orders need a confirmed
@@ -303,9 +344,25 @@ mailer is wired the registration is stored and the call answers 503
 `confirmation_email_unavailable`.
 
 Miner key routes (hotkey-signed): `POST /lead-orders/keys` `{provider,
-credentials}` stores the key encrypted with the Arena credential KMS key and
-returns `{key_id, public_fingerprint}`; one active key per miner and
-provider. `POST /lead-orders/keys/{key_id}/revoke`.
+credentials, daily_cap_usd}` stores the key encrypted with the Arena
+credential KMS key and returns `{status, key_id, public_fingerprint,
+daily_cap_usd}`; one active key per miner and provider.
+`POST /lead-orders/keys/{key_id}/revoke`.
+
+`GET /lead-orders/statement?since=<call sequence>` (hotkey-signed; the
+signature covers the path without the query) is a miner's own ledger. It
+answers up to 500 calls on the miner's keys after `since`, in sequence order,
+each with `sequence`, `call_id`, `order_id`, `key_id`, `provider`,
+`reserved_microusd`, `status` (`open`, `settled`, `uncertain`),
+`cost_microusd`, `excess_microusd` (cost above the reservation, not
+rewarded), `settled_at`, `provider_request_id`, `late_cost_microusd`,
+`late_at`, `late_reward_microusd`, `receipt_hash` and
+`order_reward_microusd`. It also gives all-time totals per key (`calls`,
+reserved, settled, excess, open and uncertain calls, late cost and late
+reward), `rewards_owed_microusd`, `rewards_paid_microusd`, `next_since` and
+`more`. A miner can match every row to their provider's own usage records by
+the request id, which appears in the statement only, never in a public
+receipt.
 
 ## Suppression feed
 
@@ -360,6 +417,11 @@ prompts, call order and lead data are never published.
   cost), sorted by random call id. Anyone can recompute the Merkle root.
 - `GET /lead-orders/epochs/{epoch}` → the signed payout document for an epoch
   (404 when the lane is off, for any input).
+- `GET /lead-orders/policies/{version}` → the signed policy document a receipt
+  names by `policy_version` (404 `policy_unknown`), so anyone can recompute
+  its charge and rewards.
+- A payout document lists late rewards as payments that carry the `call_id`
+  they repay.
 
 ## Weights
 
@@ -370,3 +432,21 @@ winners, keeps the lane under `lane_emission_cap`, and refuses hotkeys that
 are not registered. With no lane fractions (any mode but `live`, or an empty
 epoch) it returns the Arena weights unchanged. It is not yet called by the
 validator's weight signer: wiring it in is a separate reviewed change.
+
+## Known limits
+
+- Deepline key ownership is not proven. A stolen Deepline key could be
+  registered by someone who does not own it; there is no Deepline call that
+  proves the registrant controls the account. Revoking the key stops it.
+- Lead-order keys are encrypted with the Arena credential KMS key, not a
+  dedicated key, so the two share access and audit scope.
+- The suppression hashes are unsalted (see the suppression feed).
+- Miners see what Leadpoet calls on their keys. Every call runs on miner keys
+  in `live` (Gavin's choice, Nov 20 2026), so a miner can read the request
+  shapes, models and Deepline operations in their own provider account. The
+  lead-finding code stays private; the method behind it is visible.
+- Late costs on a failed order are mostly not repaid (see Money), and a late
+  Deepline cost is repaid only when Deepline's answer arrives after finish:
+  there is no Deepline read-back.
+- The ledger stores no model or operation per call, so the statement cannot
+  show them; miners match calls by provider request id instead.

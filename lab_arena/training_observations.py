@@ -12,6 +12,7 @@ import io
 import json
 import re
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
@@ -34,6 +35,7 @@ MAX_WEB_BODY_BYTES = 6 * 1024 * 1024  # A 2 MiB decoded fetch can expand through
 JOURNAL_SCHEMA_VERSION = "leadpoet.lab_arena.training_observation_journal.v1"
 MAX_SEGMENT_BYTES = 16 * 1024 * 1024
 MAX_SEGMENTS = 1024
+_SEGMENT_READ_BATCH = 16
 MAX_JOURNAL_ATTEMPTS = 10_000_000
 OPTIONAL_CAPTURE_INCOMPLETE = "optional_capture_incomplete"
 OPTIONAL_FAILURE_TAG_CAPABILITY = "training_observation_optional_failure_tag"
@@ -610,7 +612,18 @@ class Buffer:
                 "complete": not failures, "failures": sorted(failures)}
 
 
-def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
+def _row_digest(row: Any) -> bytes:
+    return hashlib.sha256(_canonical(row)).digest()
+
+
+def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = (), *,
+                      clean_rows: frozenset[bytes] = frozenset()) -> dict:
+    # clean_rows holds digests of rows this lease already stored after the
+    # full privacy scan. An identical row is that scan's output, so it is
+    # kept as is instead of being scanned again; any other row is scanned.
+    def known(row: Any) -> bool:
+        return bool(clean_rows) and isinstance(row, Mapping) and _row_digest(row) in clean_rows
+
     if not isinstance(document, Mapping) or frozenset(document) not in {_V1_FIELDS, _V2_FIELDS}:
         raise ObservationError("payload_invalid")
     rows = document["observations"]
@@ -618,7 +631,7 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
         raise ObservationError("count_invalid")
     if any(type(document[key]) is not int or document[key] < 0 for key in ("observation_count", "local_refusal_count")) or type(document["complete"]) is not bool or not isinstance(document["failures"], list) or any(not isinstance(x, str) or x not in _FAILURES for x in document["failures"]):
         raise ObservationError("counts_invalid")
-    cleaned = [clean_observation(row, secrets) for row in rows]
+    cleaned = [dict(row) if known(row) else clean_observation(row, secrets) for row in rows]
     ordinals = [row["ordinal"] for row in cleaned]
     actions = [row["action_sequence"] for row in cleaned if row["action_sequence"] is not None]
     if ordinals != sorted(set(ordinals)) or len(set(actions)) != len(actions):
@@ -662,7 +675,8 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
                 and (len(raw) != receipt["body_bytes"]
                      or "sha256:" + hashlib.sha256(raw).hexdigest() != receipt["body_sha256"])):
             raise ObservationError("response_receipt_observation_invalid")
-    cleaned_agent = [clean_agent_observation(row, secrets) for row in agent_rows]
+    cleaned_agent = [dict(row) if known(row) else clean_agent_observation(row, secrets)
+                     for row in agent_rows]
     ids = [row["id"] for row in cleaned_agent]
     if ids != list(range(len(ids))):
         raise ObservationError("agent_observation_order_invalid")
@@ -699,11 +713,12 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
 
 
 def build_snapshot(run_id: str, kind: str, document: Mapping[str, Any], *, lease_generation: int,
-                   claim_request_hash: str, secrets: Sequence[str] = ()) -> tuple[dict, bytes]:
+                   claim_request_hash: str, secrets: Sequence[str] = (),
+                   clean_rows: frozenset[bytes] = frozenset()) -> tuple[dict, bytes]:
     object_ref(run_id, lease_generation, claim_request_hash)
     if kind not in {"execute", "score"} or len(_canonical(document)) > MAX_OBJECT_BYTES:
         raise ObservationError("snapshot_invalid")
-    payload = _validate_payload(document, secrets)
+    payload = _validate_payload(document, secrets, clean_rows=clean_rows)
     schema_version = SCHEMA_VERSION if set(payload) == _V2_FIELDS else LEGACY_SCHEMA_VERSION
     snapshot = {"schema_version": schema_version, "run_id": run_id, "kind": kind,
                 "lease_generation": lease_generation, "claim_request_hash": claim_request_hash,
@@ -807,7 +822,7 @@ def build_segment(run_id: str, kind: str, value: Mapping[str, Any], *,
 
 
 def read_segment(objects: Any, run_id: str, kind: str, lease_generation: int,
-                 claim_request_hash: str, number: int) -> dict | None:
+                 claim_request_hash: str, number: int, *, recheck_privacy: bool = True) -> dict | None:
     ref = segment_ref(run_id, lease_generation, claim_request_hash, number)
     getter = getattr(objects, "get_optional_bounded", None)
     if not callable(getter):
@@ -841,13 +856,43 @@ def read_segment(objects: Any, run_id: str, kind: str, lease_generation: int,
                 or contracts.document_hash(segment["payload"]) != segment["payload_sha256"]
                 or contracts.document_hash({key: value for key, value in segment.items()
                                             if key != "segment_sha256"}) != segment["segment_sha256"]
-                or _clean_segment_payload(segment["payload"], clean_text_digests=OrderedDict()) != segment["payload"]):
+                or (recheck_privacy and _clean_segment_payload(
+                    segment["payload"], clean_text_digests=OrderedDict()) != segment["payload"])):
             raise ObservationError("journal_invalid")
         return segment
     except ObservationError:
         raise
     except Exception:
         raise ObservationError("journal_unavailable") from None
+
+
+def stored_clean_row_digests(objects: Any, run_id: str, kind: str, lease_generation: int,
+                             claim_request_hash: str) -> frozenset[bytes]:
+    """Digests of rows this lease's stored segments hold, already privacy-scanned.
+
+    Only the gateway writes these objects, each after the full scan with this
+    lease's secrets. Reading stops at the first missing or invalid segment; a
+    shorter set only means more rows get scanned again.
+    """
+    def read(number: int) -> dict | None:
+        try:
+            return read_segment(objects, run_id, kind, lease_generation, claim_request_hash,
+                                number, recheck_privacy=False)
+        except ObservationError:
+            return None
+
+    digests: set[bytes] = set()
+    # A long run has hundreds of segments; read them a batch at a time so
+    # the store's round trips do not add up inside the upload's timeout.
+    with ThreadPoolExecutor(max_workers=_SEGMENT_READ_BATCH) as pool:
+        for start in range(0, MAX_SEGMENTS, _SEGMENT_READ_BATCH):
+            numbers = range(start, min(start + _SEGMENT_READ_BATCH, MAX_SEGMENTS))
+            for segment in pool.map(read, numbers):
+                if segment is None:
+                    return frozenset(digests)
+                for key in ("observations", "agent_observations"):
+                    digests.update(_row_digest(row) for row in segment["payload"][key])
+    return frozenset(digests)
 
 
 def read_journal_prefix(objects: Any, run_id: str, kind: str, lease_generation: int,

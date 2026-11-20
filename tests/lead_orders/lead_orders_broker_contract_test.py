@@ -184,7 +184,7 @@ def test_finding_core_deepline_operations_are_accepted(operation):
 
 
 def test_custom_event_tools_stay_refused():
-    for operation in ("firecrawl_scrape", "serper_google_maps_search", "socrata_query_dataset"):
+    for operation in ("serper_google_maps_search", "socrata_query_dataset"):
         with pytest.raises(LeadOrderBrokerError) as refused:
             broker()._prepare(deepline_execute(operation))
         assert refused.value.code == "operation_not_allowed"
@@ -202,3 +202,36 @@ def test_icypeas_async_costs_read_back_like_the_other_operations():
     # No billing record on a 2xx stays unknown, never guessed.
     silent = ProviderResponse(status=200, headers={}, body=json.dumps({"status": "completed", "toolResponse": {}}).encode())
     assert broker()._cost("deepline", None, silent) is None
+
+
+def test_firecrawl_scrape_for_a_fresh_job_post_copy_is_accepted_and_reserved():
+    # finding/providers.ts fetchEventPageCopy, sent raw-v2.
+    request = BrokerRequest("deepline", "POST", "api/v2/integrations/firecrawl_scrape/execute", {},
+                            json.dumps({"payload": {"url": "https://jobs.example.com/payroll-manager",
+                                                    "formats": ["rawHtml"], "onlyMainContent": False,
+                                                    "maxAge": 0, "timeout": 30_000}}).encode(), "application/json",
+                            headers={"x-deepline-execute-response-contract": "raw-v2"})
+    outbound, reserve, _ = broker()._prepare(request)
+    assert reserve == POLICY.deepline_reserve_per_call_microusd
+    assert outbound.headers == {"x-deepline-execute-response-contract": "raw-v2"}
+
+
+def bill(billing) -> ProviderResponse:
+    return ProviderResponse(status=200, headers={}, body=json.dumps(
+        {"status": "completed", "toolResponse": {}, "billing": billing}).encode())
+
+
+def test_deepline_cost_reads_cost_usd_first_then_credits_like_the_site():
+    from lab_arena import broker as arena_broker
+
+    only_usd = bill({"cost_usd": 0.0031})
+    assert broker()._cost("deepline", None, only_usd) == 3_100
+    # Both present: cost_usd wins (plan credits can cost more than $0.10 each).
+    assert broker()._cost("deepline", None, bill({"cost_usd": 0.0019, "credits_charged": 0.02})) == 1_900
+    assert broker()._cost("deepline", None, bill({"cost_usd": 0.0000001})) == 1  # rounded up, never down
+    # An unusable cost_usd falls back to credits, as the site does.
+    for bad in ("0.5", -1, None, True):
+        assert broker()._cost("deepline", None, bill({"cost_usd": bad, "credits_charged": 0.02})) == 2_000
+    assert broker()._cost("deepline", None, bill({"cost_usd": "x"})) is None
+    # Arena's own reader is unchanged: credits only.
+    assert arena_broker.deepline_cost_microusd(bytes(only_usd.body)) is None

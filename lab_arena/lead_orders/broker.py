@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import json
 import re
-from decimal import Decimal
+import math
+from decimal import ROUND_CEILING, Decimal
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -53,6 +54,8 @@ DEEPLINE_OPERATIONS = frozenset({
     "dropleads_email_finder", "leadmagic_email_finder", "findymail_find_from_name",
     "findymail_find_from_business_profile", "crustdata_v3_job_search", "quickenrich_employee_email_enrich",
     "icypeas_email_verification", "icypeas_read_results",
+    # Hiring reads a fresh copy of an indexed job post whose own page fails.
+    "firecrawl_scrape",
 })
 # OpenRouter request fields whose cost the reservation covers: the prompt is
 # priced from the whole body, the output (reasoning included, which counts
@@ -88,6 +91,25 @@ MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 TIMEOUT_SECONDS = {"openrouter": 120.0, "deepline": 240.0}
 _FORWARDED_RESPONSE_HEADERS = ("content-type",)
+
+
+def deepline_cost_microusd(body: bytes) -> Optional[int]:
+    """A Deepline bill as the site reads it: ``billing.cost_usd``, else credits.
+
+    Lead orders only (leadpoet-site server/deepline.ts deeplineBilledCostUsd).
+    Arena's own reader (``lab_arena.broker.deepline_cost_microusd``) is
+    unchanged and still reads credits only.
+    """
+
+    try:
+        document = json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        document = None
+    billing = document.get("billing") if isinstance(document, Mapping) else None
+    cost = billing.get("cost_usd") if isinstance(billing, Mapping) else None
+    if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+        return int((Decimal(str(cost)) * Decimal(1_000_000)).to_integral_value(rounding=ROUND_CEILING))
+    return arena_broker.deepline_cost_microusd(bytes(body))
 
 
 def _nonnegative_number(value: Any) -> bool:
@@ -332,7 +354,7 @@ class LeadOrderBroker:
             model = used if models and used in models else (models[0] if models else "")
             cost = arena_broker.actual_openrouter_cost_microusd(self._price_table(), model, document)
         else:
-            cost = arena_broker.deepline_cost_microusd(bytes(response.body))
+            cost = deepline_cost_microusd(bytes(response.body))
         if cost is not None:
             return int(cost)
         # Providers do not bill a call they refused (4xx). A 2xx or 5xx with

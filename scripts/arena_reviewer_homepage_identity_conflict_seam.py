@@ -596,3 +596,30 @@ def convert_completed_empty_profile_files(files: dict[str, bytes]) -> dict[str, 
             raise HomepageIdentityConflictSeamError("empty-profile repair checksum differs")
         result[name] = candidate
     return result
+
+
+HEADQUARTERS_SOURCE_CORRECTION_ID = "preserved_bound_headquarters_source_v1"
+HEADQUARTERS_SOURCE_REPAIRED_SHA256 = '81806e30b6cfe8b060621aa96edb2997be0007f670c0632c72a951a9445c4a2e'
+_HEADQUARTERS_SOURCE_DELTAS = (
+    ('                url\n                for url in dict.fromkeys((*candidates, *submitted_source_urls))\n                if url in submitted_source_urls\n',
+     '                url\n                # Prefer the exact existing profile when aliases coexist.\n                # Otherwise retain the already fetched alias and its body.\n                for url in dict.fromkeys(\n                    (evidence_url if evidence_url in candidates else "",\n                     *candidates, evidence_url, *submitted_source_urls)\n                    if source_field == STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD\n                    else (*candidates, *submitted_source_urls)\n                )\n                if url in submitted_source_urls\n'),
+    ('            and (\n                len(candidates) < MAX_PREFETCHED_PAGES\n                or submitted_profile_url in candidates\n',
+     '            and (\n                source_field == STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD\n                or len(candidates) < MAX_PREFETCHED_PAGES\n                or submitted_profile_url in candidates\n'),
+    ('                    continue\n            candidates[submitted_profile_url] = {\n',
+     '                    continue\n            if submitted_profile_url not in candidates and len(candidates) >= MAX_PREFETCHED_PAGES:\n                # A disputed, identity-bound HQ is required for this review.\n                # Retain it instead of the last optional cached page; retries\n                # must not crowd out the very source they need to verify.\n                candidates.pop(next(reversed(candidates)))\n            candidates[submitted_profile_url] = {\n'),
+)
+
+
+def convert_preserved_headquarters_source_files(original: dict[str, bytes]) -> dict[str, bytes]:
+    """Preserve the exact private HQ source without changing frozen verdict checks."""
+    files = convert_completed_empty_profile_files(original)
+    source = files[FINALITY_FILE].decode("utf-8")
+    for old, new in _HEADQUARTERS_SOURCE_DELTAS:
+        if source.count(old) != 1:
+            raise HomepageIdentityConflictSeamError("unexpected headquarters source context")
+        source = source.replace(old, new, 1)
+    repaired = source.encode("utf-8")
+    if hashlib.sha256(repaired).hexdigest() != HEADQUARTERS_SOURCE_REPAIRED_SHA256:
+        raise HomepageIdentityConflictSeamError("unexpected headquarters source checksum")
+    files[FINALITY_FILE] = repaired
+    return files

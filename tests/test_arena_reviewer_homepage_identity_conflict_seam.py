@@ -65,12 +65,15 @@ def test_unknown_or_partial_sources_fail_closed(source):
 
 
 @pytest.mark.parametrize("verify_existing", [False, True])
-@pytest.mark.parametrize("empty_profile", [False, True])
-def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys, verify_existing, empty_profile):
+@pytest.mark.parametrize("mode", ["identity", "empty_profile", "headquarters"])
+def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys, verify_existing, mode):
+    empty_profile = mode != "identity"
+    headquarters = mode == "headquarters"
     original = dict(ORIGINAL_FILES)
     if empty_profile:
         original[seam.PROFILE_FILE] = frozen_source("homepage_identity_conflict_396", seam.PROFILE_FILE)
-    corrected = seam.convert_completed_empty_profile_files(original) if empty_profile else CORRECTED_FILES
+    corrected = (seam.convert_preserved_headquarters_source_files(original) if headquarters
+                 else seam.convert_completed_empty_profile_files(original) if empty_profile else CORRECTED_FILES)
     base_ref = "registry.example/reviewer@" + seam.FROZEN_IMAGE_DIGEST
     tag = "registry.example/reviewer:reviewer-" + seam.FROZEN_IMAGE_DIGEST[7:19] + "-" + "c" * 12 + "-homepage-identity-source"
     candidate_ref = "registry.example/reviewer@sha256:" + "b" * 64 if verify_existing else tag
@@ -78,6 +81,8 @@ def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys
             "--homepage-identity-and-source-validation-only"]
     if empty_profile:
         args.append("--completed-empty-profile")
+    if headquarters:
+        args.append("--preserved-headquarters-source")
     if verify_existing:
         args += ["--verify-image", candidate_ref]
     monkeypatch.setattr(composer.sys, "argv", args)
@@ -117,7 +122,9 @@ def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys
     assert composer.main() == 0
     proof = json.loads(capsys.readouterr().out)
     assert proof["grading_image"] == base_ref
-    assert proof["grading_corrections"] == list(seam.CORRECTIONS) + ([seam.EMPTY_PROFILE_CORRECTION_ID] if empty_profile else [])
+    assert proof["grading_corrections"] == (list(seam.CORRECTIONS)
+        + ([seam.EMPTY_PROFILE_CORRECTION_ID] if empty_profile else [])
+        + ([seam.HEADQUARTERS_SOURCE_CORRECTION_ID] if headquarters else []))
     assert proof["original_files"] == {name: hashlib.sha256(value).hexdigest() for name, value in original.items()}
     assert proof["overlay_files"] == {name: hashlib.sha256(value).hexdigest() for name, value in corrected.items()}
     assert proof["base_layers_unchanged"] is proof["process_configuration_unchanged"] is True
@@ -234,7 +241,8 @@ def test_empty_profile_composition_preserves_all_other_frozen_bytes(monkeypatch)
     original = {**ORIGINAL_FILES, seam.PROFILE_FILE: frozen_source('homepage_identity_conflict_396', seam.PROFILE_FILE)}
     after = seam.convert_completed_empty_profile_files(original)
     for name in (seam.FINALITY_FILE, seam.PROFILE_FILE):
-        assert after[name] == (composer.ROOT / name).read_bytes()
+        assert hashlib.sha256(after[name]).hexdigest() == seam.EMPTY_PROFILE_REPAIRED_SHA256[name]
+    assert after[seam.PROFILE_FILE] == (composer.ROOT / seam.PROFILE_FILE).read_bytes()
     assert after[seam.SOURCE_FILE] == CORRECTED_FILES[seam.SOURCE_FILE]
     for changed in ({**original, seam.PROFILE_FILE: original[seam.PROFILE_FILE]+b'\n'},
                     {**original, 'extra.py': b''}, ORIGINAL_FILES):
@@ -242,3 +250,28 @@ def test_empty_profile_composition_preserves_all_other_frozen_bytes(monkeypatch)
             seam.convert_completed_empty_profile_files(changed)
     _install(monkeypatch, after[seam.FINALITY_FILE])
     controls.test_completed_empty_profile_through_native_parser_finishes_unproven(monkeypatch, True)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_headquarters_overlay_changes_only_prefetch_and_replays_retained_evidence(monkeypatch, retry):
+    from tests import test_retained_headquarters_source as retained
+    original = {**ORIGINAL_FILES, seam.PROFILE_FILE: frozen_source('homepage_identity_conflict_396', seam.PROFILE_FILE)}
+    before = seam.convert_completed_empty_profile_files(original)
+    after = seam.convert_preserved_headquarters_source_files(original)
+    assert after[seam.FINALITY_FILE] == (composer.ROOT / seam.FINALITY_FILE).read_bytes()
+    for name in (seam.SOURCE_FILE, seam.PROFILE_FILE): assert before[name] == after[name]
+    trees = [ast.parse(files[seam.FINALITY_FILE]) for files in (before, after)]
+    for tree in trees:
+        tree.body = [n for n in tree.body if getattr(n, 'name', '') != '_investigator_prefetched_pages']
+    assert ast.dump(trees[0]) == ast.dump(trees[1])
+    _install(monkeypatch, after[seam.FINALITY_FILE])
+    monkeypatch.setattr(retained, 'scorer', controls.scorer)
+    retained.test_retained_quote_survives_full_investigator_validation(monkeypatch, retry, '')
+
+
+def test_headquarters_mode_requires_reviewed_parent_before_docker(monkeypatch):
+    monkeypatch.setattr(composer.sys, 'argv', ['build_arena_reviewer_runtime.py',
+        '--grading-image', 'registry.example/base@' + seam.FROZEN_IMAGE_DIGEST,
+        '--preserved-headquarters-source'])
+    with pytest.raises(composer.CompositionError, match='requires completed-empty-profile'):
+        composer.main()

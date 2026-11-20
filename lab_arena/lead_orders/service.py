@@ -32,6 +32,49 @@ from lab_arena.lead_orders.store import LeadOrderStore
 
 CONFIRMATION_MAX_AGE_SECONDS = 48 * 3600
 MAX_ORDER_BYTES = 16_384
+# The runner's own limit (leadpoet-site server/lead-search/subnet/order.ts).
+MAX_LEADS_PER_ORDER = 1_000
+# (field, items, characters per item) for the optional lists the runner reads.
+_SEARCH_LISTS = (("terms", 8, 120), ("buyer_titles", 12, 120), ("excluded_companies", 500, 253))
+_MARKET_LISTS = (("countries", 20, 60), ("employee_ranges", 20, 60), ("industries", 50, 200))
+
+
+def _text_ok(value: Any, maximum: int, *, minimum: int = 1) -> bool:
+    return isinstance(value, str) and minimum <= len(value.strip()) <= maximum
+
+
+def _list_ok(container: Mapping[str, Any], name: str, items: int, chars: int) -> bool:
+    if name not in container:
+        return True  # the runner defaults a missing list to []
+    value = container[name]
+    return isinstance(value, list) and len(value) <= items and all(_text_ok(item, chars) for item in value)
+
+
+def runner_order_problem(seller: Mapping[str, Any], search: Mapping[str, Any]) -> Optional[str]:
+    """The refusal code the runner's order schema would give, or None.
+
+    Mirrors ``subnetLeadOrderSchema`` in leadpoet-site
+    server/lead-search/subnet/order.ts (Nov 20 2026), so an order the runner
+    would fail as invalid is refused here before any hold is taken. Fields
+    the runner ignores are allowed and stored.
+    """
+
+    if not _text_ok(seller.get("product"), 200):
+        return "seller_invalid:product"
+    if not _text_ok(seller.get("summary"), 1_000, minimum=0):
+        return "seller_invalid:summary"
+    if not _text_ok(search.get("signal"), 64):
+        return "search_invalid:signal"
+    for name, items, chars in _SEARCH_LISTS:
+        if not _list_ok(search, name, items, chars):
+            return "search_invalid:%s" % name
+    market = search.get("market")
+    if not isinstance(market, Mapping):
+        return "search_invalid:market"
+    for name, items, chars in _MARKET_LISTS:
+        if not _list_ok(market, name, items, chars):
+            return "search_invalid:market.%s" % name
+    return None
 # Longer than the slowest provider timeout (Deepline, 240 s), so calls in
 # flight at the deadline settle before an overdue order is closed.
 OVERDUE_GRACE_SECONDS = 300
@@ -213,7 +256,7 @@ class LeadOrderService:
         if not isinstance(payload, Mapping) or set(payload) - {"order_id", "leads", "seller", "search"}:
             raise LeadOrderServiceError(422, "order_invalid")
         leads = payload.get("leads")
-        if type(leads) is not int or not 1 <= leads <= 100_000:
+        if type(leads) is not int or not 1 <= leads <= MAX_LEADS_PER_ORDER:
             raise LeadOrderServiceError(422, "leads_invalid")
         request_doc = {}
         for name in ("seller", "search"):
@@ -221,6 +264,9 @@ class LeadOrderService:
             if not isinstance(part, Mapping) or not part:
                 raise LeadOrderServiceError(422, "%s_invalid" % name)
             request_doc[name] = dict(part)
+        problem = runner_order_problem(request_doc["seller"], request_doc["search"])
+        if problem:
+            raise LeadOrderServiceError(422, problem)
         if len(canonical_json(request_doc).encode("utf-8")) > MAX_ORDER_BYTES:
             raise LeadOrderServiceError(422, "order_too_large")
         order_id = str(payload.get("order_id") or uuid.uuid4())

@@ -739,7 +739,7 @@ def test_order_retry_with_the_same_id_and_a_different_body_is_409(store):
     order_id = str(uuid.uuid4())
     placed = service.place_order(staff, {"order_id": order_id, "leads": 10, **ORDER})
     assert service.place_order(staff, {"order_id": order_id, "leads": 10, **ORDER})["order_id"] == placed["order_id"]
-    for changed in ({"leads": 12, **ORDER}, {"leads": 10, "seller": ORDER["seller"], "search": {"signal": "funding"}}):
+    for changed in ({"leads": 12, **ORDER}, {"leads": 10, "seller": ORDER["seller"], "search": dict(ORDER["search"], signal="funding")}):
         with pytest.raises(LeadOrderServiceError) as taken:
             service.place_order(staff, dict(changed, order_id=order_id))
         assert taken.value.status == 409 and taken.value.code == "order_id_taken"
@@ -884,3 +884,42 @@ def test_suppression_push_stores_hashes_only_and_the_feed_is_for_buyers_and_sign
     assert unconfirmed.value.code == "suppressions_not_allowed"
     confirm(owner, buyer)
     assert service.read_suppressions(buyer, "0")["suppressions"]
+
+
+def test_orders_the_runner_would_refuse_are_refused_at_placement_with_no_hold(store, owner):
+    staff = hotkey()
+    _, service, _ = make(store, "staff", staff=[staff])
+    seller, search = ORDER["seller"], ORDER["search"]
+    market = search["market"]
+    cases = (
+        ({"leads": 1_001, **ORDER}, "leads_invalid"),
+        ({"leads": 10, "seller": {"summary": "x"}, "search": search}, "seller_invalid:product"),
+        ({"leads": 10, "seller": {"product": "   ", "summary": "x"}, "search": search}, "seller_invalid:product"),
+        ({"leads": 10, "seller": {"product": "p" * 201, "summary": ""}, "search": search}, "seller_invalid:product"),
+        ({"leads": 10, "seller": {"product": "Payroll"}, "search": search}, "seller_invalid:summary"),
+        ({"leads": 10, "seller": dict(seller, summary="s" * 1_001), "search": search}, "seller_invalid:summary"),
+        ({"leads": 10, "seller": seller, "search": dict(search, signal="")}, "search_invalid:signal"),
+        ({"leads": 10, "seller": seller, "search": {"signal": "hiring"}}, "search_invalid:market"),
+        ({"leads": 10, "seller": seller, "search": dict(search, terms=["t"] * 9)}, "search_invalid:terms"),
+        ({"leads": 10, "seller": seller, "search": dict(search, terms=None)}, "search_invalid:terms"),
+        ({"leads": 10, "seller": seller, "search": dict(search, buyer_titles=[""])}, "search_invalid:buyer_titles"),
+        ({"leads": 10, "seller": seller, "search": dict(search, excluded_companies=["d" * 254])},
+         "search_invalid:excluded_companies"),
+        ({"leads": 10, "seller": seller, "search": dict(search, market=dict(market, countries=["US"] * 21))},
+         "search_invalid:market.countries"),
+        ({"leads": 10, "seller": seller, "search": dict(search, market=dict(market, industries="software"))},
+         "search_invalid:market.industries"),
+    )
+    for body, code in cases:
+        with pytest.raises(LeadOrderServiceError) as refused:
+            service.place_order(staff, body)
+        assert (refused.value.status, refused.value.code) == (422, code)
+    assert sql(owner, "SELECT count(*) FROM public.lead_orders WHERE hotkey=%s", (staff,)) == [(0,)]
+    # What the runner allows: an empty summary, missing lists, an empty market, extra fields.
+    minimal = {"leads": 10, "seller": {"product": "Payroll", "summary": "", "site": "acme.io"},
+               "search": {"signal": "hiring", "market": {}, "note": "kept"}}
+    placed = service.place_order(staff, minimal)
+    assert placed["status"] == "queued"
+    claimed = service.claim()
+    assert claimed["seller"] == minimal["seller"] and claimed["search"] == minimal["search"]
+    service.finish(claimed["order_id"], {"status": "failed"})

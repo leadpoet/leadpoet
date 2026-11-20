@@ -142,6 +142,10 @@ MAX_DEPENDENCY_WORKSPACE_BYTES = 1024 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 20_000
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
+# Keep aligned with lab_arena/judge/Dockerfile: every agent uses that trusted
+# CPython runtime, even when the host runner uses a different Python version.
+DEPENDENCY_PYTHON_VERSION = (3, 11)
+_DEPENDENCY_CACHE_TARGET = b"binary-wheels-v2:cpython-3.11\n"
 _DEPENDENCY_INSTALL_STDERR_TAIL_BYTES = 8 * 1024
 _DEPENDENCY_INSTALL_NETWORK_MARKERS = (
     b"ConnectTimeoutError(",
@@ -1425,6 +1429,39 @@ def _validated_requirements(path: Path) -> List[str]:
     return requirements
 
 
+def _dependency_python() -> str:
+    """Select trusted CPython matching the sandbox, including pip's markers."""
+    if (
+        sys.implementation.name == "cpython"
+        and sys.version_info[:2] == DEPENDENCY_PYTHON_VERSION
+    ):
+        return sys.executable
+    # Never search PATH or execute a submitted interpreter. The isolated probe
+    # imports only the trusted interpreter's stdlib, not the submitted packages.
+    probe = (
+        "import sys; sys.exit(0 if sys.implementation.name == 'cpython' "
+        f"and sys.version_info[:2] == {DEPENDENCY_PYTHON_VERSION!r} else 1)"
+    )
+    for executable in ("/usr/local/bin/python3.11", "/usr/bin/python3.11"):
+        try:
+            result = subprocess.run(
+                [executable, "-I", "-c", probe],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+                timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return executable
+    raise DependencyInstallInfrastructureError(
+        "installer_error", detail="compatible dependency installer unavailable: CPython 3.11 required"
+    )
+
+
 def install_binary_requirements(requirements_path: Path, target_dir: Path) -> None:
     """Install wheels in bounded scratch space, then enforce final tree limits."""
 
@@ -1434,6 +1471,7 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
     target = Path(target_dir)
     if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
         raise RunnerError("dependency target must be an empty directory")
+    executable = _dependency_python()
     staging = Path(tempfile.mkdtemp(prefix="lab-arena-deps-"))
     mounted = False
     unmounted = False
@@ -1475,7 +1513,7 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
             "TMPDIR": str(temporary),
         }
         command = [
-            sys.executable,
+            executable,
             "-I",
             "-m",
             "pip",
@@ -1679,6 +1717,18 @@ class SourceCache:
             return None
         return source_ref if 1 <= len(source_ref) <= 1024 else None
 
+    @staticmethod
+    def _compatible_dependencies(target: Path) -> bool:
+        """Legacy caches may contain host-ABI wheels and must be rebuilt."""
+        marker = target / ".dependency-target"
+        try:
+            if marker.is_symlink():
+                return False
+            with marker.open("rb") as stream:
+                return stream.read(len(_DEPENDENCY_CACHE_TARGET) + 1) == _DEPENDENCY_CACHE_TARGET
+        except OSError:
+            return False
+
     def _load_existing_locked(self) -> None:
         existing = []
         for target in sorted(self._root.glob("submission-*"), key=lambda item: item.name):
@@ -1698,6 +1748,7 @@ class SourceCache:
                 or target.name != "submission-" + submission_id
                 or not 1 <= archive_size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
                 or self._ready_source_ref(marker) is None
+                or not self._compatible_dependencies(target)
                 or source.is_symlink()
                 or not source.is_dir()
                 or dependencies.is_symlink()
@@ -1752,6 +1803,7 @@ class SourceCache:
             archive.is_file()
             and archive.stat().st_size == source_size_bytes
             and self._ready_source_ref(archive.parent / ".ready") == source_ref
+            and self._compatible_dependencies(archive.parent)
         ):
             self._ready.move_to_end(submission_id)
             return cached
@@ -1793,6 +1845,9 @@ class SourceCache:
             if requirements.is_file():
                 self._dependency_installer(requirements, dependency_path)
             _lock_down_dependency_tree(dependency_path, site="source_cache")
+            dependency_marker = target / ".dependency-target"
+            dependency_marker.write_bytes(_DEPENDENCY_CACHE_TARGET)
+            os.chmod(dependency_marker, 0o400)
             marker = target / ".ready.tmp"
             marker.write_bytes(source_ref.encode("utf-8"))
             os.chmod(marker, 0o400)

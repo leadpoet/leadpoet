@@ -26,6 +26,7 @@ from tests.lab_arena.trajectory_runner_test import LoggingApi
         ("network", "provider_error", "network_error", 2, "NewConnectionError"),
         ("connection_reset", "provider_error", "network_error", 2, "ConnectionResetError"),
         ("host", "provider_error", "installer_error", 1, "No module named pip"),
+        ("python_abi", "provider_error", "installer_error", 0, "CPython 3.11 required"),
         ("timeout", "provider_error", "timeout", 2, "ReadTimeoutError"),
         ("payload_limit", "model_error", "source_error", 1,
          "site=install_staging threshold=regular_bytes"),
@@ -81,6 +82,12 @@ def test_dependency_failure_private_trajectory_round_trip(
     claimed["source_size_bytes"] = len(api.source_payload)
     api.leases = [claimed]
     pip_calls = []
+    if failure == "python_abi":
+        monkeypatch.setattr(runner, "sys", SimpleNamespace(
+            executable="/host/python3.12", version_info=(3, 12, 9),
+            implementation=SimpleNamespace(name="cpython"),
+            stderr=runner.sys.stderr,
+        ))
     if failure in ("payload_limit", "entry_limit"):
         monkeypatch.setattr(runner, "MAX_DEPENDENCY_BYTES", 32)
         monkeypatch.setattr(runner, "MAX_DEPENDENCY_FILES", 1 if failure == "entry_limit" else 2)
@@ -96,6 +103,9 @@ def test_dependency_failure_private_trajectory_round_trip(
     }.get(failure, "")
 
     def fake_install_command(command, **kwargs):
+        if failure == "python_abi":
+            assert command[1:3] == ["-I", "-c"]
+            return SimpleNamespace(returncode=1)
         if "pip" in command:
             pip_calls.append(command)
             if failure in ("payload_limit", "entry_limit"):

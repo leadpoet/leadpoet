@@ -398,6 +398,14 @@ The runner installs binary wheels only into a bounded cache and mounts those
 dependencies read-only. It rejects URLs, local paths, nested requirements,
 VCS dependencies, and source builds. The common trusted scorer image supplies
 Python for every agent; it is not a miner image or a miner identity.
+The dependency installer must use CPython 3.11, matching that image, so native
+wheels and transitive dependency markers match the sandbox. The runner uses
+its own interpreter when it is CPython 3.11; otherwise it verifies
+`/usr/local/bin/python3.11`, then `/usr/bin/python3.11`. A missing compatible
+interpreter fails as an infrastructure error before sandbox execution.
+Cache entries without the current dependency target stamp are rebuilt; active
+users finish before their entry is replaced. Wheels-only installation, bounded
+scratch space, and read-only dependency mounts remain required.
 
 The organizer supplies host provider keys for execution and judging of the
 public baseline:

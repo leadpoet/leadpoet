@@ -59,7 +59,8 @@ def test_review_guard_does_not_queue_behind_claim_control_but_canonical_state_st
         with pytest.raises(psycopg2.errors.LockNotAvailable):
             rpc(reader, "lab_arena_restart_guard_state_v1")
         assert rpc(reader) == {
-            "schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False,
+            "schema_version": "leadpoet.lab_arena.review_guard_state.v1",
+            "guard_present": False, "guard_active": False,
         }
         sweep.rollback()
         assert rpc(reader, "lab_arena_restart_guard_state_v1")["guard_present"] is False

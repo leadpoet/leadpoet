@@ -206,7 +206,7 @@ def test_tables_are_append_only_rls_on_and_not_granted(owner, store):
         cur.execute("""SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                        WHERE n.nspname='public' AND c.relkind='r' AND c.relname LIKE 'lead_order%'""")
         tables = dict(cur.fetchall())
-        assert len(tables) == 23 and all(tables.values())
+        assert len(tables) == 24 and all(tables.values())
         for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
             cur.execute("""SELECT count(*) FROM information_schema.role_table_grants
                            WHERE grantee=%s AND table_name LIKE 'lead_order%%'""", (role,))
@@ -1182,3 +1182,89 @@ def test_deepline_reserve_is_the_known_fixed_price_when_there_is_one(store):
     assert fixed["reserved_microusd"] == 1_000
     assert dynamic["reserved_microusd"] == POLICY.deepline_reserve_per_call_microusd
     service.finish(order_id, {"status": "failed"})
+
+
+# -- second review: claim stays fast, read-back backs off, orphaned calls ---------
+
+
+def backdate(owner, table, column, call_id, seconds):
+    with owner.cursor() as cur:
+        cur.execute("ALTER TABLE %s DISABLE TRIGGER %s_append_only" % (table, table))
+        cur.execute("UPDATE %s SET %s=%s-make_interval(secs=>%%s) WHERE call_id=%%s" % (table, column, column),
+                    (seconds, call_id))
+        cur.execute("ALTER TABLE %s ENABLE TRIGGER %s_append_only" % (table, table))
+
+
+def test_claim_never_runs_read_back_and_the_epoch_pass_does(store):
+    staff = hotkey()
+    config, _, epoch = make(store, "shadow", staff=[staff])
+    passes = []
+    service = LeadOrderService(config=config, policy=POLICY, policy_document=POLICY_DOC, store=store, signer=SIGNER,
+                               current_epoch=epoch, resolver=lambda: passes.append("read-back"))
+    service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    assert passes == []  # old behaviour: claim ran a read-back pass of up to 15 s
+    service.finish(order_id, {"status": "failed"})
+    service.run_epoch(3_500_000)
+    assert passes == ["read-back"]
+
+
+def test_finish_closes_orphaned_open_calls_and_waits_only_for_young_ones(store, owner):
+    staff = hotkey()
+    _, service, epoch = make(store, "staff", staff=[staff])
+    service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    leadpoet = ProviderKey(key_id="leadpoet-openrouter", provider="openrouter", miner_hotkey=None,
+                           registered_sequence=0, internal_fingerprint="sha256:" + "e" * 64)
+    orphan = str(uuid.uuid4())  # reserved, then the broker restarted before settling
+    assert store.reserve_call(call_id=orphan, order_id=order_id, provider="openrouter", key_id=leadpoet.key_id,
+                              miner_hotkey=None, public_fingerprint=leadpoet.public_fingerprint,
+                              reserve_microusd=300_000)["status"] == "reserved"
+    delivered = {"status": "delivered", "leads_delivered": 5, "delivery_url": "https://f.example/x"}
+    with pytest.raises(LeadOrderServiceError) as young:
+        service.finish(order_id, delivered)
+    assert young.value.code == "calls_open"
+    backdate(owner, "lead_order_calls", "created_at", orphan, 301)
+    # Old behaviour: 409 forever, then the sweep failed the order with nothing delivered.
+    done = service.finish(order_id, delivered)
+    assert done["charge_microusd"] == 5 * 200_000
+    assert {c["call_id"]: c["status"] for c in store.calls(order_id)}[orphan] == "uncertain"
+
+
+def test_read_back_records_attempts_skips_terminal_and_backs_off(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9400)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    registrar.secrets = {key["key_id"]: "m" * 40}
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    transport = FakeTransport([ProviderTransportError("timed out", openrouter_generation_id="gen-old-1"),
+                               ProviderTransportError("timed out", openrouter_generation_id="gen-new-1")])
+    broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
+    broker.call(token, dear_chat())
+    broker.call(token, dear_chat())
+    old, new = store.calls(order_id)
+    service.finish(order_id, {"status": "failed"})
+    ids = lambda: [r["call_id"] for r in store.uncertain_calls(limit=10) if r["order_id"] == order_id]
+    assert ids() == [old["call_id"], new["call_id"]]
+
+    # The oldest call's key is refused: terminal, never tried again. The newer
+    # one is not found yet: retry, then it waits out its back-off.
+    unauthorized = ProviderResponse(401, {"content-type": "application/json"}, b'{"error":"no"}')
+    not_yet = ProviderResponse(404, {"content-type": "application/json"}, b'{"error":"not found"}')
+    transport.responses += [unauthorized, not_yet]
+    broker.resolve_uncertain(limit=2)
+    assert ids() == []  # old behaviour: the same oldest calls on every pass
+    outcomes = sql(owner, "SELECT call_id::text,attempt,outcome FROM lead_order_call_readbacks WHERE call_id IN (%s,%s) "
+                          "ORDER BY call_id,attempt", (old["call_id"], new["call_id"]))
+    assert sorted(outcomes) == sorted([(old["call_id"], 1, "terminal"), (new["call_id"], 1, "retry")])
+    backdate(owner, "lead_order_call_readbacks", "attempted_at", new["call_id"], 601)
+    assert ids() == [new["call_id"]]
+    # Six tries at most, however long it waits.
+    for attempt in range(2, 7):
+        assert store.record_readback(call_id=new["call_id"], outcome="retry")["attempt"] == attempt
+    backdate(owner, "lead_order_call_readbacks", "attempted_at", new["call_id"], 10**6)
+    assert ids() == []
+    assert store.record_readback(call_id=str(uuid.uuid4()), outcome="retry")["status"] == "not_recordable"
+    revoke_all_keys(store)

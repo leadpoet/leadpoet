@@ -77,7 +77,9 @@ class LeadOrdersConfig:
     def public_host(self) -> str:
         """The host every signed request names (auth.signed_message)."""
 
-        return urlsplit(self.public_base_url).netloc.lower()
+        from lab_arena.lead_orders.auth import normalize_host
+
+        return normalize_host(urlsplit(self.public_base_url).netloc)
 
     @property
     def uses_gamma(self) -> bool:

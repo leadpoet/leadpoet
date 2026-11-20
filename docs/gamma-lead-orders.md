@@ -93,19 +93,24 @@ and receipt always use that stored version, never the current one.
   longer than the broker's 240 s Deepline timeout) is finished as `failed`
   with reason `deadline_passed` at the next claim, and charged the minimum
   charge on its settled spend.
-- Finish is refused with 409 `calls_open` while any of the order's calls is
-  still open: the runner waits for its own calls and finishes again. Only the
-  overdue sweep (deadline plus grace, longer than any provider timeout)
-  finishes an order with open calls, settling them `uncertain`. Once finished,
+- Finish is refused with 409 `calls_open` while a call opened in the last
+  300 s (the broker's longest provider wait, 240 s, plus a margin) is still
+  open: the runner waits and finishes again. An older open call was orphaned
+  (the broker stopped between reserve and settle, as on a deploy) and the
+  finish settles it `uncertain`; with no provider request id it cannot be read
+  back. The overdue sweep (deadline plus grace) settles every open call
+  `uncertain`. Once finished,
   the order takes no reservations. The receipt's call rows are frozen when the
   receipt is signed, and the buyer's charge never changes after finish.
 - Repayment of uncertain calls (live orders, miner keys only). The broker
   stores the provider's request id on every call it can, a timeout included:
-  OpenRouter's generation id, Deepline's request id. A bounded reconcile step
-  (10 calls and 15 s per pass, 5 s per lookup, calls under 7 days old) reads
-  each uncertain OpenRouter call back once through OpenRouter's free
-  generation lookup on the same miner key; no answer leaves it for the next
-  pass. A provider answer that arrives after finish is also kept, in a
+  OpenRouter's generation id, Deepline's request id. The epoch pass (never a
+  claim) runs a bounded read-back step: 10 calls and 15 s per pass, 5 s per
+  lookup, calls under 7 days old, through OpenRouter's free generation lookup
+  on the same miner key. Every attempt is recorded append-only. A terminal
+  answer (a refused key, a malformed record) stops that call; a retry waits
+  10 min × 2^(tries − 1), at most 6 tries; the least recently tried calls go
+  first, so a call that never answers cannot block the others. A provider answer that arrives after finish is also kept, in a
   separate late-settlement table. When either gives a known cost, the miner is
   owed a late reward of floor(min(cost, reserved) × (1 + premium)), paid in a
   following epoch's payout like any other reward and listed in the miner's
@@ -309,7 +314,8 @@ use no key, so they have no ledger row.
 Each request carries `X-Hotkey`, `X-Timestamp` (±60 s) and `X-Signature`, an
 sr25519 signature over `METHOD\nHOST\nPATH\nTIMESTAMP\nsha256(body)`. HOST
 is the gateway's public host, lowercased (the host of
-`LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL`, with a port only if that URL has one),
+`LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL`, with a port only if it is not a
+default one: `:443` and `:80` are dropped on both sides),
 so a signature made for another gateway, such as Arena's, is refused here.
 Miner-terms acceptances store the signed host too.
 

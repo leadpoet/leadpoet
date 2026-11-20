@@ -422,9 +422,12 @@ class LeadOrderBroker:
         """Read back the exact cost of uncertain OpenRouter calls on finished
         live orders, on the same miner key, through the same transport.
 
-        One free generation lookup per call, never a paid request. Bounded per
-        lookup and per pass; a call with no answer stays uncertain and is
-        tried again on a later pass (until it is 7 days old).
+        One free generation lookup per attempt, never a paid request. Bounded
+        per lookup and per pass. Every attempt is recorded: a terminal answer
+        (refused key, malformed record) stops the call; a retry waits 10 min x
+        2^(tries-1), at most 6 tries within 7 days, and the least recently
+        tried calls go first, so a call that never answers cannot starve the
+        others.
         """
 
         if self._registrar is None:
@@ -443,12 +446,16 @@ class LeadOrderBroker:
             try:
                 secret = self._registrar.decrypt(key)
             except lead_keys.LeadOrderKeyError:
+                self._store.record_readback(call_id=str(row["call_id"]), outcome="terminal")
                 continue
             state, cost = arena_broker._openrouter_generation_readback_once(
                 transport=self._transport, secret=secret, generation_id=str(row["provider_request_id"]),
                 timeout_seconds=min(RESOLVE_LOOKUP_SECONDS, remaining),
             )
-            if state == "found" and cost is not None:
+            found = state == "found" and cost is not None
+            self._store.record_readback(call_id=str(row["call_id"]),
+                                        outcome="found" if found else ("terminal" if state == "terminal" else "retry"))
+            if found:
                 result = self._store.resolve_call(call_id=str(row["call_id"]), cost_microusd=int(cost.microusd),
                                                   epoch=int(self._current_epoch()))
                 resolved += result.get("status") == "resolved"

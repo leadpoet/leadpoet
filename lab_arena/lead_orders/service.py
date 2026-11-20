@@ -474,10 +474,8 @@ class LeadOrderService:
 
     def reconcile(self, *, limit: int = RECONCILE_BATCH) -> List[str]:
         """Settle finished orders that have no receipt yet (a signer or store
-        failure after the finish committed), read back uncertain OpenRouter
-        calls (bounded, ``LeadOrderBroker.resolve_uncertain``) and record late
-        rewards for costs that became known after a receipt. Idempotent; a
-        failure leaves the work for the next pass."""
+        failure after the finish committed). Idempotent; a failure leaves the
+        work for the next pass. Runs on claim, so it does no provider calls."""
 
         settled = []
         for order_id in self._store.unsettled(limit=limit):
@@ -486,13 +484,20 @@ class LeadOrderService:
             except Exception:  # retried on the next claim or epoch pass
                 continue
             settled.append(order_id)
+        return settled
+
+    def repay_uncertain(self) -> int:
+        """Read back uncertain OpenRouter calls (bounded,
+        ``LeadOrderBroker.resolve_uncertain``) and record late rewards for
+        costs that became known after a receipt. Runs in the epoch pass, never
+        on claim: a read-back pass can take up to ``RESOLVE_PASS_SECONDS``."""
+
         if self._resolver is not None:
             try:
                 self._resolver()
             except Exception:  # a provider or store failure: next pass
                 pass
-        self._store.reward_late(epoch=int(self._current_epoch()), limit=LATE_REWARD_BATCH)
-        return settled
+        return self._store.reward_late(epoch=int(self._current_epoch()), limit=LATE_REWARD_BATCH)
 
     # -- miner keys -----------------------------------------------------------
     def register_key(self, hotkey: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -654,6 +659,7 @@ class LeadOrderService:
         if existing:
             return existing
         self.reconcile()
+        self.repay_uncertain()
         try:
             emission = self._emission_price.miner_emission_microusd(epoch)
         except rewards.EmissionPriceUnavailable:

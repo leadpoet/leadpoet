@@ -218,6 +218,17 @@ CREATE TABLE IF NOT EXISTS public.lead_order_call_resolutions (
   resolved_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
+-- Every read-back attempt on an uncertain call, so a call that never answers
+-- (a revoked or broken key, a generation that is gone) backs off and stops
+-- instead of taking every pass.
+CREATE TABLE IF NOT EXISTS public.lead_order_call_readbacks (
+  call_id UUID NOT NULL REFERENCES public.lead_order_calls(call_id),
+  attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 100),
+  outcome TEXT NOT NULL CHECK(outcome IN ('found','retry','terminal')),
+  attempted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY(call_id,attempt)
+);
+
 CREATE TABLE IF NOT EXISTS public.lead_order_rewards_owed (
   order_id UUID NOT NULL REFERENCES public.lead_order_finishes(order_id),
   miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
@@ -284,6 +295,7 @@ BEGIN
    'lead_order_finishes','lead_order_keys','lead_order_key_revocations','lead_order_miner_terms',
    'lead_order_suppressions','lead_order_key_exhaustions',
    'lead_order_calls','lead_order_call_settlements','lead_order_late_settlements','lead_order_call_resolutions',
+   'lead_order_call_readbacks',
    'lead_order_rewards_owed','lead_order_late_rewards','lead_order_receipts',
    'lead_order_reward_epochs','lead_order_reward_payments','lead_order_late_reward_payments'] LOOP
   EXECUTE format('ALTER TABLE public.%I OWNER TO lab_arena_owner',t);
@@ -603,13 +615,17 @@ BEGIN
  IF p_delivered<0 OR p_delivered>o.leads_requested THEN
   RETURN jsonb_build_object('status','delivered_out_of_range');
  END IF;
+ -- A call open for less than the longest provider wait (240 s) plus a margin
+ -- may still answer: the runner waits. An older one was orphaned (the broker
+ -- stopped between reserve and settle) and settles uncertain below.
  IF NOT coalesce(p_allow_open,FALSE) AND EXISTS(SELECT 1 FROM public.lead_order_calls c WHERE c.order_id=p_order_id
+   AND c.created_at>clock_timestamp()-interval '300 seconds'
    AND NOT EXISTS(SELECT 1 FROM public.lead_order_call_settlements s WHERE s.call_id=c.call_id)) THEN
   RETURN jsonb_build_object('status','calls_open');
  END IF;
  -- A failed order delivers nothing and pays the minimum charge on spend so far.
  delivered:=CASE WHEN p_status='delivered' THEN p_delivered ELSE 0 END;
- -- Calls still open now (overdue sweep only) settle uncertain: never charged,
+ -- Calls still open now (orphaned, or the overdue sweep) settle uncertain: never charged,
  -- and the rows are final before the receipt is built. The order row lock above
  -- also stops new reservations and waits out any settlement in progress.
  INSERT INTO public.lead_order_call_settlements(call_id,status,cost_microusd,http_status,settled_epoch)
@@ -881,10 +897,14 @@ CREATE OR REPLACE FUNCTION public.lead_order_uncertain_calls_v1(p_limit INTEGER)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $uncertain703$
  SELECT coalesce(jsonb_agg(jsonb_build_object('call_id',t.call_id,'order_id',t.order_id,'provider',t.provider,
    'key_id',t.key_id,'miner_hotkey',t.miner_hotkey,'sequence',t.key_sequence,'ciphertext_b64',t.ciphertext_b64,
-   'internal_fingerprint',t.internal_fingerprint,'provider_request_id',t.request_id) ORDER BY t.sequence),'[]'::JSONB)
+   'internal_fingerprint',t.internal_fingerprint,'provider_request_id',t.request_id,'attempts',t.attempts)
+   ORDER BY t.last_attempt NULLS FIRST,t.sequence),'[]'::JSONB)
  FROM (SELECT c.call_id,c.order_id,c.provider,c.key_id,c.miner_hotkey,c.sequence,k.sequence key_sequence,
-        k.ciphertext_b64,k.internal_fingerprint,coalesce(l.provider_request_id,s.provider_request_id) request_id
+        k.ciphertext_b64,k.internal_fingerprint,coalesce(l.provider_request_id,s.provider_request_id) request_id,
+        coalesce(a.attempts,0) attempts,a.last_attempt
   FROM public.lead_order_calls c
+  LEFT JOIN LATERAL (SELECT count(*)::INTEGER attempts,max(attempted_at) last_attempt,bool_or(outcome='terminal') terminal
+    FROM public.lead_order_call_readbacks b WHERE b.call_id=c.call_id) a ON TRUE
   JOIN public.lead_order_call_settlements s ON s.call_id=c.call_id AND s.status='uncertain'
   JOIN public.lead_order_finishes f ON f.order_id=c.order_id
   JOIN public.lead_orders o ON o.order_id=c.order_id AND o.mode='live'
@@ -895,8 +915,32 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    AND coalesce(l.provider_request_id,s.provider_request_id) IS NOT NULL
    AND NOT EXISTS(SELECT 1 FROM public.lead_order_key_revocations r WHERE r.key_id=c.key_id)
    AND NOT EXISTS(SELECT 1 FROM public.lead_order_call_resolutions x WHERE x.call_id=c.call_id)
-  ORDER BY c.sequence LIMIT greatest(1,least(p_limit,100))) t;
+   -- At most 6 tries, never after a terminal answer, waiting 10 min x 2^(tries-1)
+   -- after each retry (10, 20, 40, 80, 160 min).
+   AND NOT coalesce(a.terminal,FALSE) AND coalesce(a.attempts,0)<6
+   AND (a.last_attempt IS NULL
+     OR a.last_attempt<=clock_timestamp()-interval '10 minutes'*power(2,a.attempts-1))
+  ORDER BY a.last_attempt NULLS FIRST,c.sequence LIMIT greatest(1,least(p_limit,100))) t;
 $uncertain703$;
+
+-- Record one read-back attempt and its outcome (append-only).
+CREATE OR REPLACE FUNCTION public.lead_order_record_readback_v1(p_call_id UUID,p_outcome TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $readback703$
+DECLARE n INTEGER;
+BEGIN
+ IF p_outcome IS NULL OR p_outcome NOT IN ('found','retry','terminal') OR NOT EXISTS(
+   SELECT 1 FROM public.lead_order_call_settlements s WHERE s.call_id=p_call_id AND s.status='uncertain') THEN
+  RETURN jsonb_build_object('status','not_recordable');
+ END IF;
+ PERFORM 1 FROM public.lead_order_calls WHERE call_id=p_call_id FOR UPDATE;
+ SELECT coalesce(max(attempt),0)+1 INTO n FROM public.lead_order_call_readbacks WHERE call_id=p_call_id;
+ IF n>100 THEN
+  RETURN jsonb_build_object('status','not_recordable');
+ END IF;
+ INSERT INTO public.lead_order_call_readbacks(call_id,attempt,outcome) VALUES(p_call_id,n,p_outcome);
+ RETURN jsonb_build_object('status','recorded','attempt',n);
+END;
+$readback703$;
 
 -- Record the read-back cost of one uncertain call. Never charged to the buyer.
 CREATE OR REPLACE FUNCTION public.lead_order_resolve_call_v1(p_call_id UUID,p_cost BIGINT,p_epoch BIGINT)

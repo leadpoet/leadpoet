@@ -85,6 +85,7 @@ LEAD_ORDER_FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lead_order_unsettled_v1": (("p_limit", _I),),
     "lead_order_uncertain_calls_v1": (("p_limit", _I),),
     "lead_order_resolve_call_v1": (("p_call_id", _U), ("p_cost", _B), ("p_epoch", _B)),
+    "lead_order_record_readback_v1": (("p_call_id", _U), ("p_outcome", _T)),
     "lead_order_reward_late_v1": (("p_epoch", _B), ("p_limit", _I)),
     "lead_order_statement_v1": (("p_hotkey", _T), ("p_since", _B), ("p_limit", _I)),
 }
@@ -164,8 +165,10 @@ class LeadOrderStore:
 
     def finish(self, *, order_id: str, status: str, delivered: int, delivery_url: Optional[str],
                failure_reason: Optional[str], epoch: int, allow_open: bool = False) -> Dict[str, Any]:
-        """``allow_open`` is for the overdue sweep only: it settles open calls
-        uncertain. Without it a finish with open calls returns ``calls_open``."""
+        """``allow_open`` is for the overdue sweep only: it settles every open
+        call uncertain. Without it a finish returns ``calls_open`` while a call
+        opened in the last 300 s is still open; older open calls (orphaned by a
+        broker restart) settle uncertain."""
 
         return self._rpc(
             "lead_order_finish_v1", p_order_id=order_id, p_status=status, p_delivered=int(delivered),
@@ -199,6 +202,10 @@ class LeadOrderStore:
 
     def uncertain_calls(self, *, limit: int) -> List[Dict[str, Any]]:
         return list(self._rpc("lead_order_uncertain_calls_v1", p_limit=int(limit)) or [])
+
+    def record_readback(self, *, call_id: str, outcome: str) -> Dict[str, Any]:
+        """One read-back attempt (found, retry or terminal), append-only."""
+        return self._rpc("lead_order_record_readback_v1", p_call_id=call_id, p_outcome=outcome)
 
     def resolve_call(self, *, call_id: str, cost_microusd: int, epoch: int) -> Dict[str, Any]:
         return self._rpc("lead_order_resolve_call_v1", p_call_id=call_id, p_cost=int(cost_microusd),

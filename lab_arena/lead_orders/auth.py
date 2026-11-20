@@ -41,15 +41,28 @@ class AuthError(Exception):
         super().__init__(code)
 
 
+def normalize_host(host: str) -> str:
+    """Lowercase, with a default port (``:443``, ``:80``) dropped, so
+    ``gw.example``, ``GW.example:443`` and ``gw.example:80`` sign the same."""
+
+    text = (host or "").strip().lower()
+    for port in (":443", ":80"):
+        if text.endswith(port):
+            return text[: -len(port)]
+    return text
+
+
 def signed_message(method: str, host: str, path: str, timestamp: str, body: bytes) -> str:
     """METHOD, host, path, timestamp and body sha256, one per line.
 
     The host is this gateway's public host (``LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL``),
     never the request's Host header, so a signature made for one deployment
-    cannot be replayed against another. Arena signing does not use this.
+    cannot be replayed against another. Default ports are dropped
+    (``normalize_host``). Arena signing does not use this.
     """
 
-    return "%s\n%s\n%s\n%s\n%s" % (method.upper(), host.lower(), path, timestamp, hashlib.sha256(body).hexdigest())
+    return "%s\n%s\n%s\n%s\n%s" % (method.upper(), normalize_host(host), path, timestamp,
+                                   hashlib.sha256(body).hexdigest())
 
 
 @dataclass(frozen=True)

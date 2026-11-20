@@ -207,6 +207,7 @@ def test_buyer_signature_window_and_replay():
                          ({"body": b'{"leads":11}'}, "signature_invalid"),
                          ({"path": "/lead-orders/keys"}, "signature_invalid"),
                          ({"host": "other.example"}, "signature_invalid"),
+                         ({"host": "gw.example:8443"}, "signature_invalid"),
                          ({"host": ""}, "host_unconfigured"),
                          ({"hotkey": BOB}, "signature_invalid"),
                          ({"signature": "zz"}, "signature_invalid"),
@@ -276,3 +277,14 @@ def test_payout_document_shadow_without_price_and_live_with_price():
     lowered = rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries,
                                             miner_emission_microusd=4_000_000, payable_cap_microusd=100)
     assert lowered["paid_microusd"] == 100
+
+
+def test_signed_host_drops_default_ports_on_both_sides():
+    from lab_arena.lead_orders.config import LeadOrdersConfig
+
+    same = {auth.signed_message("GET", h, "/p", "1", b"") for h in ("gw.example", "GW.Example:443", "gw.example:80")}
+    assert len(same) == 1
+    assert auth.signed_message("GET", "gw.example:8443", "/p", "1", b"") not in same
+    for url, host in (("https://GW.example:443/x", "gw.example"), ("http://gw.example:80", "gw.example"),
+                      ("https://gw.example:8443", "gw.example:8443")):
+        assert LeadOrdersConfig(mode="off", public_base_url=url).public_host == host

@@ -623,3 +623,21 @@ def convert_preserved_headquarters_source_files(original: dict[str, bytes]) -> d
         raise HomepageIdentityConflictSeamError("unexpected headquarters source checksum")
     files[FINALITY_FILE] = repaired
     return files
+
+
+TARGET_SERVER_ERROR_CORRECTION_ID = "completed_target_server_error_discovery_v1"
+TARGET_SERVER_ERROR_REPAIRED_SHA256 = '2b5c5fb5e99fe47104768a55299ab4b3c1ad45a5a92ff5a59a236d64a14911c9'
+_TARGET_SERVER_ERROR_OLD = '    ("CRAWL_EMPTY_CONTENT", 500),\n'
+_TARGET_SERVER_ERROR_NEW = '    ("CRAWL_EMPTY_CONTENT", 500),\n    # A successful Exa request can report a target page\'s HTTP500. This\n    # permits the existing bounded discovery, not an absence/negative verdict.\n    ("CRAWL_HTTP_500", 500),\n'
+
+def convert_target_server_error_discovery_files(original: dict[str, bytes]) -> dict[str, bytes]:
+    """Recognize one exact native crawl outcome for the existing bounded search."""
+    files = convert_preserved_headquarters_source_files(original)
+    source = files[SOURCE_FILE].decode("utf-8")
+    if source.count(_TARGET_SERVER_ERROR_OLD) != 1:
+        raise HomepageIdentityConflictSeamError("unexpected target failure classifier")
+    repaired = source.replace(_TARGET_SERVER_ERROR_OLD, _TARGET_SERVER_ERROR_NEW, 1).encode("utf-8")
+    if hashlib.sha256(repaired).hexdigest() != TARGET_SERVER_ERROR_REPAIRED_SHA256:
+        raise HomepageIdentityConflictSeamError("unexpected target failure checksum")
+    files[SOURCE_FILE] = repaired
+    return files

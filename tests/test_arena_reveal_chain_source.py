@@ -469,6 +469,8 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547602.json", 492),
         (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547606.json", 492),
         (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547962.json", 492),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec493_block9549764.json", 493),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec493_block9549766.json", 493),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(

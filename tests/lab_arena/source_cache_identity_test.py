@@ -267,3 +267,54 @@ def test_marker_read_is_bounded_before_decoding():
 
     assert runner.SourceCache._ready_source_ref(Marker()) is None
     assert len(requested) == 1
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("stamp", [None, b"binary-wheels-v2:cpython-3.12\n"])
+def test_legacy_or_wrong_python_dependencies_rebuild(sources, restart, stamp):
+    make, root, payloads, fetches, installs = sources
+    cache = make()
+    with acquire(cache, payloads, "old", "same/source.tar.gz"):
+        pass
+    marker = root / "submission-sub-fixed" / ".dependency-target"
+    if marker.exists():
+        marker.unlink()
+    if stamp is not None:
+        marker.write_bytes(stamp)
+    if restart:
+        cache = make()
+    with acquire(cache, payloads, "old", "same/source.tar.gz"):
+        pass
+    assert fetches == installs == ["old", "old"]
+    assert marker.read_bytes() == b"binary-wheels-v2:cpython-3.11\n"
+
+
+def test_incompatible_dependency_cache_waits_for_active_users(sources, monkeypatch):
+    make, root, payloads, fetches, installs = sources
+    cache = make()
+    waiting = threading.Event()
+    wait = cache._condition.wait
+
+    def observe_wait(*args, **kwargs):
+        waiting.set()
+        return wait(*args, **kwargs)
+
+    monkeypatch.setattr(cache._condition, "wait", observe_wait)
+
+    def next_run():
+        with acquire(cache, payloads, "old", "same/source.tar.gz"):
+            return True
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with acquire(cache, payloads, "old", "same/source.tar.gz") as (source, deps):
+            marker = root / "submission-sub-fixed" / ".dependency-target"
+            if marker.exists():
+                marker.unlink()
+            pending = pool.submit(next_run)
+            assert waiting.wait(2)
+            assert not pending.done() and fetches == installs == ["old"]
+            assert (source / "harness.py").is_file()
+            assert (deps / "installed.py").read_text() == "old"
+        assert pending.result(timeout=3)
+    assert fetches == installs == ["old", "old"]
+    assert not cache._in_use and not cache._building

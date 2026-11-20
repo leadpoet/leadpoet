@@ -13,10 +13,12 @@ buyer, so no live order can be placed until a real mailer is wired in.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
 from lab_arena import signing
@@ -35,6 +37,9 @@ MAX_ORDER_BYTES = 16_384
 # The runner's own limit (leadpoet-site server/lead-search/subnet/order.ts).
 MAX_LEADS_PER_ORDER = 1_000
 # (field, items, characters per item) for the optional lists the runner reads.
+# The miner data terms text the gateway serves; its sha256 must equal the
+# policy's ``miner_terms_sha256``.
+MINER_TERMS_PATH = Path(__file__).resolve().parents[2] / "docs" / "gamma-lead-orders-miner-terms.md"
 _SEARCH_LISTS = (("terms", 8, 120), ("buyer_titles", 12, 120), ("excluded_companies", 500, 253))
 _MARKET_LISTS = (("countries", 20, 60), ("employee_ranges", 20, 60), ("industries", 50, 200))
 
@@ -485,9 +490,10 @@ class LeadOrderService:
 
         if identity.hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        if not isinstance(payload, Mapping) or set(payload) != {"terms_version"}:
+        if not isinstance(payload, Mapping) or set(payload) != {"terms_version", "terms_sha256"}:
             raise LeadOrderServiceError(422, "terms_invalid")
-        if payload["terms_version"] != self.policy.miner_terms_version:
+        if (payload["terms_version"] != self.policy.miner_terms_version
+                or payload["terms_sha256"] != self.policy.miner_terms_sha256):
             raise LeadOrderServiceError(422, "terms_version_not_current")
         if not identity.signature or not identity.body_sha256:
             raise LeadOrderServiceError(401, "signature_invalid")
@@ -497,6 +503,18 @@ class LeadOrderService:
         )
         return {"status": str(result["status"]), "terms_version": self.policy.miner_terms_version,
                 "accepted_at": result["accepted_at"]}
+
+    def miner_terms(self) -> Dict[str, Any]:
+        """Public: the current terms text, served only if it matches the policy's hash."""
+
+        try:
+            text = MINER_TERMS_PATH.read_bytes()
+        except OSError:
+            raise LeadOrderServiceError(503, "terms_unavailable") from None
+        if hashlib.sha256(text).hexdigest() != self.policy.miner_terms_sha256:
+            raise LeadOrderServiceError(503, "terms_unavailable")
+        return {"terms_version": self.policy.miner_terms_version,
+                "terms_sha256": self.policy.miner_terms_sha256, "text": text.decode("utf-8")}
 
     def push_suppressions(self, payload: Any) -> Dict[str, Any]:
         """Runner only: append hashed suppressions. Raw values are refused."""

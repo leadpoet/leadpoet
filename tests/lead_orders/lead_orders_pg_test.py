@@ -24,7 +24,7 @@ from lab_arena.lead_orders.broker import BrokerRequest, LeadOrderBroker, LeadOrd
 from lab_arena.lead_orders.config import LeadOrdersConfig
 from lab_arena.lead_orders.gamma import GammaReading
 from lab_arena.lead_orders.keys import ProviderKey
-from lab_arena.lead_orders.policy import DEFAULT_POLICY_BODY, sign_policy, load_policy
+from lab_arena.lead_orders.policy import DEFAULT_POLICY_BODY, sign_policy, load_policy, unsigned_policy
 from lab_arena.lead_orders.service import LeadOrderService, LeadOrderServiceError
 from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.store import ArenaStoreError, PsycopgTransport
@@ -452,7 +452,7 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     staff, miner_a, miner_b = hotkey(), hotkey(), hotkey()
     registrar = FakeRegistrar({})
     epoch = Epoch(2000)
-    _, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    config, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
     accept_terms(service, miner_a)
     accept_terms(service, miner_b)
     key_a = service.register_key(miner_a, {"provider": "openrouter", "credentials": {}})
@@ -513,13 +513,18 @@ def sql(owner, query, params):
         return [tuple(row) for row in cur.fetchall()] if cur.description else []
 
 
-def signed_identity(miner, body=b'{"terms_version":"miner-terms-2026-11-20"}'):
+TERMS_BODY = json.dumps({"terms_version": DEFAULT_POLICY_BODY["miner_terms_version"],
+                         "terms_sha256": DEFAULT_POLICY_BODY["miner_terms_sha256"]}).encode()
+
+
+def signed_identity(miner, body=TERMS_BODY):
     return BuyerIdentity(hotkey=miner, signed_at=1_763_500_000, signature="ab" * 64,
                          body_sha256=hashlib.sha256(body).hexdigest())
 
 
 def accept_terms(service, miner):
-    return service.accept_miner_terms(signed_identity(miner), {"terms_version": POLICY.miner_terms_version})
+    return service.accept_miner_terms(signed_identity(miner), {"terms_version": POLICY.miner_terms_version,
+                                                               "terms_sha256": POLICY.miner_terms_sha256})
 
 
 def revoke_all_keys(store):
@@ -790,20 +795,35 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     staff, miner, late = hotkey(), hotkey(), hotkey()
     registrar = FakeRegistrar({})
     epoch = Epoch(7000)
-    _, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    config, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
     with pytest.raises(LeadOrderServiceError) as unsigned:
         service.register_key(miner, {"provider": "openrouter", "credentials": {}})
     assert (unsigned.value.status, unsigned.value.code) == (403, "miner_terms_not_accepted")
     with pytest.raises(LeadOrderServiceError) as old:
-        service.accept_miner_terms(signed_identity(miner), {"terms_version": "miner-terms-0"})
+        service.accept_miner_terms(signed_identity(miner), {"terms_version": "miner-terms-0",
+                                                            "terms_sha256": POLICY.miner_terms_sha256})
     assert (old.value.status, old.value.code) == (422, "terms_version_not_current")
+    with pytest.raises(LeadOrderServiceError) as other_text:  # current version, different text
+        service.accept_miner_terms(signed_identity(miner), {"terms_version": POLICY.miner_terms_version,
+                                                            "terms_sha256": "0" * 64})
+    assert (other_text.value.status, other_text.value.code) == (422, "terms_version_not_current")
+    with pytest.raises(LeadOrderServiceError) as no_hash:
+        service.accept_miner_terms(signed_identity(miner), {"terms_version": POLICY.miner_terms_version})
+    assert (no_hash.value.status, no_hash.value.code) == (422, "terms_invalid")
+    served = service.miner_terms()
+    assert served["terms_sha256"] == hashlib.sha256(served["text"].encode()).hexdigest() == POLICY.miner_terms_sha256
+    stale = LeadOrderService(config=config, policy=unsigned_policy(dict(DEFAULT_POLICY_BODY, miner_terms_sha256="0" * 64)),
+                             policy_document=POLICY_DOC, store=store, signer=SIGNER, current_epoch=lambda: 1)
+    with pytest.raises(LeadOrderServiceError) as unavailable:
+        stale.miner_terms()
+    assert (unavailable.value.status, unavailable.value.code) == (503, "terms_unavailable")
     first = accept_terms(service, miner)
     assert first["status"] == "accepted" and first["terms_version"] == POLICY.miner_terms_version
     assert accept_terms(service, miner)["status"] == "exists"
     stored = sql(owner, "SELECT signed_method,signed_path,signed_at,body_sha256,signature "
                         "FROM public.lead_order_miner_terms WHERE miner_hotkey=%s", (miner,))
     assert stored == [("POST", "/lead-orders/miner-terms", 1_763_500_000,
-                       hashlib.sha256(b'{"terms_version":"miner-terms-2026-11-20"}').hexdigest(), "ab" * 64)]
+                       hashlib.sha256(TERMS_BODY).hexdigest(), "ab" * 64)]
     key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
     registrar.secrets = {key["key_id"]: "t" * 40}
     # The terms move to version 2: the key stays registered but is skipped

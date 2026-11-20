@@ -56,6 +56,9 @@ class FakeService:
         self.terms = (identity, payload)
         return {"status": "accepted", "terms_version": payload["terms_version"], "accepted_at": "t"}
 
+    def miner_terms(self):
+        return {"terms_version": "v1", "terms_sha256": "a" * 64, "text": "terms"}
+
     def push_suppressions(self, payload):
         self.pushed = payload
         return {"received": 1, "added": 1}
@@ -116,6 +119,7 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
                          ("GET", "/lead-orders/buyers/confirm?token=t"), ("GET", "/lead-orders/epochs/abc"),
                          ("GET", "/lead-orders/epochs/12"), ("POST", "/internal/lead-orders/suppressions"),
                          ("GET", "/lead-orders/suppressions?since=0"), ("POST", "/lead-orders/miner-terms"),
+                         ("GET", "/lead-orders/miner-terms"),
                          ("POST", "/lead-orders/broker/openrouter/api/v1/chat/completions")):
         response = client.request(method, path)
         assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
@@ -202,6 +206,8 @@ def test_suppression_push_needs_the_runner_secret_and_the_feed_a_signed_hotkey(c
     feed = client.get("/lead-orders/suppressions?since=5",
                       headers=signed("/lead-orders/suppressions", b"", method="GET"))
     assert feed.status_code == 200 and service.read == (ALICE, "5")
+    served = client.get("/lead-orders/miner-terms")  # public: a miner reads before signing
+    assert served.status_code == 200 and served.json()["terms_sha256"] == "a" * 64
     terms = json.dumps({"terms_version": "v1"}).encode()
     accepted = client.post("/lead-orders/miner-terms", content=terms, headers=signed("/lead-orders/miner-terms", terms))
     identity, payload = service.terms

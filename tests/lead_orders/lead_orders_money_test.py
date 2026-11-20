@@ -64,11 +64,23 @@ def test_default_policy_matches_contract_start_values():
         {"daily_leads_per_hotkey": 5},
         {"version": True},
         {"schema_version": "other"},
+        {"miner_terms_sha256": "A" * 64},
+        {"miner_terms_sha256": "ab"},
     ],
 )
 def test_unsafe_or_malformed_policy_is_refused(changes):
     with pytest.raises(PolicyError):
         build_policy_document(body(**changes))
+
+
+def test_default_policy_names_the_published_miner_terms_text():
+    # Editing the terms without a new version and hash would let a miner's
+    # signature point at words they never saw.
+    from lab_arena.lead_orders.service import MINER_TERMS_PATH
+    import hashlib
+    text = MINER_TERMS_PATH.read_bytes()
+    assert hashlib.sha256(text).hexdigest() == DEFAULT_POLICY_BODY["miner_terms_sha256"]
+    assert ("`%s`" % DEFAULT_POLICY_BODY["miner_terms_version"]).encode() in text
 
 
 def test_unknown_field_is_refused():

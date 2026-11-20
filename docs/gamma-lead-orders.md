@@ -43,6 +43,7 @@ placed in `staff` spends only Leadpoet's keys even after the gateway moves to
 | `deepline_reserve_per_call_usd` | 0.50 (worst-case hold per Deepline call) |
 | `openrouter_max_output_tokens` | 16384 (`max_tokens` is clamped to this) |
 | `miner_terms_version` | `miner-terms-2026-11-20` (the miner data terms a key's owner must have signed) |
+| `miner_terms_sha256` | sha256 of the exact terms text, so a signature names the words, not just a label |
 
 The record also carries `version` and `schema_version`, and is signed with the
 Arena signing key. Each version is stored once; an order records the version
@@ -125,9 +126,12 @@ but are skipped until their miner signs again. The terms text is in
 `docs/gamma-lead-orders-miner-terms.md`: use the data only to run orders,
 keep no copies, honour the suppression feed, report problems.
 
-- `POST /lead-orders/miner-terms` `{terms_version}` (hotkey-signed): the
-  version must equal the policy's `miner_terms_version` (else 422
-  `terms_version_not_current`). The acceptance is stored append-only with the
+- `GET /lead-orders/miner-terms` (public): `{terms_version, terms_sha256,
+  text}`. Served only when the deployed text hashes to the policy's
+  `miner_terms_sha256`, else 503 `terms_unavailable`.
+- `POST /lead-orders/miner-terms` `{terms_version, terms_sha256}`
+  (hotkey-signed): both must equal the policy's `miner_terms_version` and
+  `miner_terms_sha256` (else 422 `terms_version_not_current`). The acceptance is stored append-only with the
   hotkey, version, the request's signature, its `X-Timestamp` and the body's
   sha256, so it can be re-verified later. Answers `{status: accepted | exists,
   terms_version, accepted_at}`.

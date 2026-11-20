@@ -143,6 +143,11 @@ async def receipt(order_id: str, request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.public_receipt(order_id), auth="none")
 
 
+@router.get("/lead-orders/miner-terms")
+async def miner_terms(request: Request) -> Response:
+    return await _handle(request, lambda s, b, who, body: s.miner_terms(), auth="none")
+
+
 @router.get("/lead-orders/epochs/{epoch}")
 async def epoch_payout(epoch: str, request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.public_epoch(epoch), auth="none")

@@ -584,6 +584,10 @@ def main() -> int:
         help="preserve completed identity finality after an exact empty profile; requires homepage-identity-and-source-validation-only",
     )
     parser.add_argument(
+        "--preserved-headquarters-source", action="store_true",
+        help="retain bound headquarters context through aliases and retries; requires completed-empty-profile",
+    )
+    parser.add_argument(
         "--identity-repair-before-investigation-only", action="store_true",
         help="compose only the reviewed missing-identity ordering on exact frozen b699; excludes other corrections",
     )
@@ -751,11 +755,13 @@ def main() -> int:
         raise CompositionError("identity-repair-before-investigation-only mode cannot include other corrections")
     if args.homepage_identity_and_source_validation_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"homepage_identity_and_source_validation_only", "completed_empty_profile", "push"}
+        if name not in {"homepage_identity_and_source_validation_only", "completed_empty_profile", "preserved_headquarters_source", "push"}
     ):
         raise CompositionError("homepage-identity-and-source-validation-only mode cannot include other corrections")
     if args.completed_empty_profile and not args.homepage_identity_and_source_validation_only:
         raise CompositionError("completed-empty-profile requires homepage-identity-and-source-validation-only")
+    if args.preserved_headquarters_source and not args.completed_empty_profile:
+        raise CompositionError("preserved-headquarters-source requires completed-empty-profile")
     if args.empty_domain_negative_finality_only and any(
         value is True for name, value in vars(args).items()
         if name not in {"empty_domain_negative_finality_only", "push"}
@@ -925,7 +931,10 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
                 args.grading_image, root / "original", homepage_identity_and_source_validation_only=True,
                 **({"completed_empty_profile": True} if args.completed_empty_profile else {}),
             )
-            if args.completed_empty_profile:
+            if args.preserved_headquarters_source:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_preserved_headquarters_source_files
+                files = convert_preserved_headquarters_source_files(original)
+            elif args.completed_empty_profile:
                 from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_completed_empty_profile_files
                 files = convert_completed_empty_profile_files(original)
             else:
@@ -1137,6 +1146,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.completed_empty_profile:
                 from scripts.arena_reviewer_homepage_identity_conflict_seam import EMPTY_PROFILE_CORRECTION_ID
                 corrections.append(EMPTY_PROFILE_CORRECTION_ID)
+            if args.preserved_headquarters_source:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import HEADQUARTERS_SOURCE_CORRECTION_ID
+                corrections.append(HEADQUARTERS_SOURCE_CORRECTION_ID)
         if args.empty_domain_negative_finality_only:
             from scripts.arena_reviewer_empty_domain_finality_seam import CORRECTION_ID as EMPTY_DOMAIN_FINALITY_CORRECTION_ID
             corrections.append(EMPTY_DOMAIN_FINALITY_CORRECTION_ID)

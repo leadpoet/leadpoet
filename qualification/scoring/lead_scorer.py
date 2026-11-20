@@ -4292,7 +4292,14 @@ def _investigator_prefetched_pages(
         submitted_profile_url = next(
             (
                 url
-                for url in dict.fromkeys((*candidates, *submitted_source_urls))
+                # Prefer the exact existing profile when aliases coexist.
+                # Otherwise retain the already fetched alias and its body.
+                for url in dict.fromkeys(
+                    (evidence_url if evidence_url in candidates else "",
+                     *candidates, evidence_url, *submitted_source_urls)
+                    if source_field == STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
+                    else (*candidates, *submitted_source_urls)
+                )
                 if url in submitted_source_urls
                 and _strict_linkedin_company_profile_url(url) == evidence_url
             ),
@@ -4301,7 +4308,8 @@ def _investigator_prefetched_pages(
         if (
             include
             and (
-                len(candidates) < MAX_PREFETCHED_PAGES
+                source_field == STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
+                or len(candidates) < MAX_PREFETCHED_PAGES
                 or submitted_profile_url in candidates
             )
             and set(evidence) == (
@@ -4349,6 +4357,11 @@ def _investigator_prefetched_pages(
                     text += "\n\n" + identity_marker + identity_links
                 if len(text) > MAX_PAGE_CHARACTERS:
                     continue
+            if submitted_profile_url not in candidates and len(candidates) >= MAX_PREFETCHED_PAGES:
+                # A disputed, identity-bound HQ is required for this review.
+                # Retain it instead of the last optional cached page; retries
+                # must not crowd out the very source they need to verify.
+                candidates.pop(next(reversed(candidates)))
             candidates[submitted_profile_url] = {
                 "final_url": evidence_url,
                 "text": text,

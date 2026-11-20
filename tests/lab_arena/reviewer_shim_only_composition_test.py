@@ -204,6 +204,7 @@ def test_exact_frozen_transport_over_real_uds_and_http(
     body = b'{"choices":[]}'
     identity = contracts.hash_bytes(b'exact frozen shim transport regression')
     frames, upstream_seconds = [], []
+    upstream_recorded = threading.Event()
 
     class LocalApi(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -224,6 +225,7 @@ def test_exact_frozen_transport_over_real_uds_and_http(
             self.end_headers()
             self.wfile.write(encoded)
             upstream_seconds.append(time.monotonic() - started)
+            upstream_recorded.set()
 
     http_server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), LocalApi)
     thread = threading.Thread(target=http_server.serve_forever, daemon=True)
@@ -257,6 +259,9 @@ def test_exact_frozen_transport_over_real_uds_and_http(
             assert len(frames) == len(state.calls) == state.action_sequence == 1
             assert frames[0]['timeout_ms'] == 200
             assert read_timeouts == [pytest.approx(1.5)]
+            # The client may consume the reply before the HTTP handler records
+            # its timing. Join that bookkeeping without changing either timeout.
+            assert upstream_recorded.wait(2)
             assert upstream_seconds[0] < read_timeouts[0]
             receipt = state.worker_observations.document()['response_receipts'][0]
             if corrected or worker_delay < 0.5:

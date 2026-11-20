@@ -247,10 +247,18 @@ reservation is made or a key is chosen.
   its one value: `x-deepline-execute-response-contract: raw-v2`,
   `x-deepline-execute-response-intent: raw` and `x-deepline-tool-error-schema:
   1`. Another value is 400 `header_not_allowed:<name>`. They are not stored in
-  the ledger or receipts. Each call reserves
-  `deepline_reserve_per_call_usd` and settles at the cost read from the
-  response body. Async job billing that is
-  reported only later is a known limit: such calls settle `uncertain`.
+  the ledger or receipts. `firecrawl_scrape` is allowed (Hiring reads a fresh
+  copy of an indexed job post whose own page fails); the custom-event tools
+  (`serper_google_maps_search`, `socrata_query_dataset`) stay refused. Each
+  call reserves `deepline_reserve_per_call_usd` and settles at the cost read
+  from the response body the way the site reads it: `billing.cost_usd` when it
+  is a finite number ≥ 0 (rounded up to the micro-USD), else the credit
+  fields. Arena's own Deepline cost reading is unchanged. Async job billing
+  that is reported only later is a known limit: such calls settle `uncertain`.
+
+The runner also fetches public web pages (LinkedIn guest job pages,
+employers' own sites) directly, not through the broker. They cost nothing and
+use no key, so they have no ledger row.
 
 ## Buyer API (hotkey-signed)
 
@@ -269,7 +277,20 @@ sr25519 signature over `METHOD\nPATH\nTIMESTAMP\nsha256(body)`.
 the same id from the same hotkey and body returns the existing order; the
 same id with a different hotkey or body is 409 `order_id_taken`. `seller` and
 `search` are objects stored as given and handed to the runner; together they
-may not pass 16 KB. In `live` a buyer also needs a fresh Gamma reading. The
+may not pass 16 KB. `leads` must be 1–1,000 within the policy's limits (else
+422 `leads_invalid`). Placement refuses with 422, before any hold, a body the
+runner's schema (site `server/lead-search/subnet/order.ts`) would refuse:
+`seller.product` 1–200 characters (`seller_invalid:product`),
+`seller.summary` present and at most 1,000 (empty is fine;
+`seller_invalid:summary`), `search.signal` 1–64 (`search_invalid:signal`),
+`search.market` an object (`search_invalid:market`), and the lists, each
+optional but a list when present: `terms` ≤ 8 × 120, `buyer_titles` ≤ 12 ×
+120, `excluded_companies` ≤ 500 × 253, `market.countries` ≤ 20 × 60,
+`market.employee_ranges` ≤ 20 × 60, `market.industries` ≤ 50 × 200
+(`search_invalid:<list>` or `search_invalid:market.<list>`). Other text is trimmed
+and must not be empty. Other fields are kept and ignored, as the runner does.
+A signal the runner does not support passes placement; the runner finishes
+that order `failed` with no spend. In `live` a buyer also needs a fresh Gamma reading. The
 confirmation link is `GET /lead-orders/buyers/confirm?token=…`. Until a
 mailer is wired the registration is stored and the call answers 503
 `confirmation_email_unavailable`.

@@ -94,6 +94,31 @@ search a drive root, user profile, `.codex`, or `AppData` without explicit scope
 Use OnePatch only when explicitly requested; verify fresh scoped telemetry and
 direct production evidence without starting unrequested monitors or schedules.
 
+## Gamma lead orders
+
+Anyone holding Leadpoet Gamma may order sales leads, paid for by miners'
+provider keys and repaid from emissions ([contract](docs/gamma-lead-orders.md)).
+Boundary:
+
+- `LEADPOET_LEAD_ORDERS_MODE` is `off` by default. `staff` and `shadow` take
+  orders only from `LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS` and charge no Gamma.
+  `shadow` computes and publishes rewards and never weights them. `live`
+  needs Gamma enabled on netuid 71 and a change to this section that names
+  the release turning it on.
+- Money comes only from the signed policy record. A policy is refused unless
+  `min_charge_ratio` exceeds `miner_premium` plus the largest provider
+  discount. Lane rewards come only from the unallocated burn share, at most
+  `lane_emission_cap` of miner emission per epoch. Arena rounds, results,
+  rewards and weights stay unchanged when the lane is off or empty.
+- The broker holds miner keys. Leadpoet's key is always last, and every call
+  is reserved before it is sent, settled at the provider-reported cost, and
+  recorded. A call whose cost is uncertain is never charged or rewarded.
+- Lead data never passes through this repository or the gateway. The private
+  runner delivers it. Receipts publish totals per key and a Merkle root,
+  never prompts, models, tool names, call order or lead data.
+- A failed order is never retried automatically. Setting the mode to `off`
+  is the rollback.
+
 ## Historical task records
 
 Dated approvals and incident instructions are in the

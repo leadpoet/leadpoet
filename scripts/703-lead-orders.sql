@@ -126,6 +126,32 @@ CREATE TABLE IF NOT EXISTS public.lead_order_key_revocations (
   revoked_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
+-- A miner's hotkey-signed acceptance of one version of the miner data terms.
+-- The signature is over the request that accepted them (auth.signed_message:
+-- METHOD, path, signed_at, body_sha256), so it can be re-verified later.
+CREATE TABLE IF NOT EXISTS public.lead_order_miner_terms (
+  miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
+  terms_version TEXT NOT NULL CHECK(terms_version ~ '^[A-Za-z0-9._-]{1,32}$'),
+  signed_method TEXT NOT NULL CHECK(signed_method='POST'),
+  signed_path TEXT NOT NULL CHECK(signed_path='/lead-orders/miner-terms'),
+  signed_at BIGINT NOT NULL CHECK(signed_at>0),
+  body_sha256 TEXT NOT NULL CHECK(body_sha256 ~ '^[0-9a-f]{64}$'),
+  signature TEXT NOT NULL CHECK(signature ~ '^(0x)?[0-9a-fA-F]{128}$'),
+  accepted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY(miner_hotkey,terms_version)
+);
+
+-- Suppressed people, as hashes only: sha256 of the lowercased email or of the
+-- normalised LinkedIn URL. Raw values are never accepted or stored.
+CREATE TABLE IF NOT EXISTS public.lead_order_suppressions (
+  sequence BIGSERIAL NOT NULL UNIQUE,
+  kind TEXT NOT NULL CHECK(kind IN ('email_sha256','linkedin_sha256')),
+  hash TEXT NOT NULL CHECK(hash ~ '^[0-9a-f]{64}$'),
+  added_at TIMESTAMPTZ NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY(kind,hash)
+);
+
 CREATE TABLE IF NOT EXISTS public.lead_order_key_exhaustions (
   order_id UUID NOT NULL REFERENCES public.lead_order_claims(order_id),
   key_id TEXT NOT NULL,
@@ -209,7 +235,8 @@ DECLARE t TEXT;
 BEGIN
  FOREACH t IN ARRAY ARRAY['lead_order_policies','lead_order_gamma_readings','lead_order_buyers',
    'lead_order_buyer_confirmations','lead_order_nonces','lead_orders','lead_order_claims',
-   'lead_order_finishes','lead_order_keys','lead_order_key_revocations','lead_order_key_exhaustions',
+   'lead_order_finishes','lead_order_keys','lead_order_key_revocations','lead_order_miner_terms',
+   'lead_order_suppressions','lead_order_key_exhaustions',
    'lead_order_calls','lead_order_call_settlements','lead_order_late_settlements','lead_order_rewards_owed','lead_order_receipts',
    'lead_order_reward_epochs','lead_order_reward_payments'] LOOP
   EXECUTE format('ALTER TABLE public.%I OWNER TO lab_arena_owner',t);
@@ -625,13 +652,58 @@ BEGIN
 END;
 $revoke703$;
 
-CREATE OR REPLACE FUNCTION public.lead_order_keys_v1(p_provider TEXT)
+-- Active keys. With a terms version, only keys whose miner accepted exactly
+-- that version (the broker's ranking); NULL lists every active key (revoke).
+CREATE OR REPLACE FUNCTION public.lead_order_keys_v1(p_provider TEXT,p_terms_version TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $keys703$
  SELECT coalesce(jsonb_agg(jsonb_build_object('key_id',k.key_id,'provider',k.provider,'miner_hotkey',k.miner_hotkey,
    'sequence',k.sequence,'ciphertext_b64',k.ciphertext_b64,'internal_fingerprint',k.internal_fingerprint) ORDER BY k.sequence),'[]'::JSONB)
  FROM public.lead_order_keys k
- WHERE k.provider=p_provider AND NOT EXISTS(SELECT 1 FROM public.lead_order_key_revocations r WHERE r.key_id=k.key_id);
+ WHERE k.provider=p_provider AND NOT EXISTS(SELECT 1 FROM public.lead_order_key_revocations r WHERE r.key_id=k.key_id)
+  AND (p_terms_version IS NULL OR EXISTS(SELECT 1 FROM public.lead_order_miner_terms t
+       WHERE t.miner_hotkey=k.miner_hotkey AND t.terms_version=p_terms_version));
 $keys703$;
+
+CREATE OR REPLACE FUNCTION public.lead_order_accept_miner_terms_v1(
+ p_hotkey TEXT,p_version TEXT,p_signed_at BIGINT,p_body_sha256 TEXT,p_signature TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $terms703$
+BEGIN
+ INSERT INTO public.lead_order_miner_terms(miner_hotkey,terms_version,signed_method,signed_path,signed_at,body_sha256,signature)
+ VALUES(p_hotkey,p_version,'POST','/lead-orders/miner-terms',p_signed_at,p_body_sha256,p_signature)
+ ON CONFLICT DO NOTHING;
+ RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'accepted' ELSE 'exists' END,
+  'accepted_at',(SELECT accepted_at FROM public.lead_order_miner_terms WHERE miner_hotkey=p_hotkey AND terms_version=p_version));
+END;
+$terms703$;
+
+CREATE OR REPLACE FUNCTION public.lead_order_miner_terms_v1(p_hotkey TEXT,p_version TEXT)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $hasterms703$
+ SELECT EXISTS(SELECT 1 FROM public.lead_order_miner_terms WHERE miner_hotkey=p_hotkey AND terms_version=p_version);
+$hasterms703$;
+
+-- Append hashes; a hash already on the list keeps its first row.
+CREATE OR REPLACE FUNCTION public.lead_order_add_suppressions_v1(p_rows JSONB)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $supadd703$
+DECLARE v_added INTEGER;
+BEGIN
+ IF jsonb_typeof(p_rows)<>'array' OR jsonb_array_length(p_rows) NOT BETWEEN 1 AND 1000 THEN
+  RAISE EXCEPTION 'suppressions must be 1 to 1000 rows';
+ END IF;
+ INSERT INTO public.lead_order_suppressions(kind,hash,added_at)
+ SELECT r->>'kind',r->>'hash',(r->>'added_at')::TIMESTAMPTZ FROM jsonb_array_elements(p_rows) r
+ ON CONFLICT DO NOTHING;
+ GET DIAGNOSTICS v_added=ROW_COUNT;
+ RETURN jsonb_build_object('received',jsonb_array_length(p_rows),'added',v_added);
+END;
+$supadd703$;
+
+CREATE OR REPLACE FUNCTION public.lead_order_suppressions_v1(p_since BIGINT,p_limit INTEGER)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $suplist703$
+ SELECT coalesce(jsonb_agg(jsonb_build_object('sequence',s.sequence,'kind',s.kind,'hash',s.hash,
+   'added_at',to_char(s.added_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')) ORDER BY s.sequence),'[]'::JSONB)
+ FROM (SELECT * FROM public.lead_order_suppressions WHERE sequence>greatest(p_since,0)
+       ORDER BY sequence LIMIT least(greatest(p_limit,1),1000)) s;
+$suplist703$;
 
 -- Settled spend per key over the ranking window, from the call ledger.
 CREATE OR REPLACE FUNCTION public.lead_order_key_spend_v1(p_since_epoch BIGINT)

@@ -66,7 +66,13 @@ LEAD_ORDER_FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_ciphertext", _T), ("p_internal_fp", _T), ("p_public_fp", _T),
     ),
     "lead_order_revoke_key_v1": (("p_key_id", _T), ("p_reason", _T)),
-    "lead_order_keys_v1": (("p_provider", _T),),
+    "lead_order_keys_v1": (("p_provider", _T), ("p_terms_version", _T)),
+    "lead_order_accept_miner_terms_v1": (
+        ("p_hotkey", _T), ("p_version", _T), ("p_signed_at", _B), ("p_body_sha256", _T), ("p_signature", _T),
+    ),
+    "lead_order_miner_terms_v1": (("p_hotkey", _T), ("p_version", _T)),
+    "lead_order_add_suppressions_v1": (("p_rows", _J),),
+    "lead_order_suppressions_v1": (("p_since", _B), ("p_limit", _I)),
     "lead_order_key_spend_v1": (("p_since_epoch", _B),),
     "lead_order_owed_v1": (("p_through_epoch", _B), ("p_mode", _T)),
     "lead_order_record_payout_v1": (
@@ -202,8 +208,25 @@ class LeadOrderStore:
     def revoke_key(self, key_id: str, *, reason: str) -> None:
         self._rpc("lead_order_revoke_key_v1", p_key_id=key_id, p_reason=reason)
 
-    def keys(self, provider: str) -> List[Dict[str, Any]]:
-        return list(self._rpc("lead_order_keys_v1", p_provider=provider) or [])
+    def keys(self, provider: str, *, terms_version: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Active keys; with ``terms_version``, only keys whose miner accepted it."""
+
+        return list(self._rpc("lead_order_keys_v1", p_provider=provider, p_terms_version=terms_version) or [])
+
+    # Miner terms and suppressions -------------------------------------------
+    def accept_miner_terms(self, *, hotkey: str, version: str, signed_at: int, body_sha256: str,
+                           signature: str) -> Dict[str, Any]:
+        return self._rpc("lead_order_accept_miner_terms_v1", p_hotkey=hotkey, p_version=version,
+                         p_signed_at=int(signed_at), p_body_sha256=body_sha256, p_signature=signature)
+
+    def has_miner_terms(self, hotkey: str, version: str) -> bool:
+        return bool(self._rpc("lead_order_miner_terms_v1", p_hotkey=hotkey, p_version=version))
+
+    def add_suppressions(self, rows: List[Mapping[str, str]]) -> Dict[str, Any]:
+        return self._rpc("lead_order_add_suppressions_v1", p_rows=list(rows))
+
+    def suppressions(self, *, since: int, limit: int) -> List[Dict[str, Any]]:
+        return list(self._rpc("lead_order_suppressions_v1", p_since=int(since), p_limit=int(limit)) or [])
 
     def key_spend(self, *, since_epoch: int) -> Dict[str, int]:
         return {k: int(v) for k, v in (self._rpc("lead_order_key_spend_v1", p_since_epoch=int(since_epoch)) or {}).items()}

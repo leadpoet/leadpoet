@@ -10,6 +10,7 @@ under and anyone can verify it without AWS.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -39,8 +40,9 @@ _INT_FIELDS = (
     "openrouter_max_output_tokens",
 )
 _BODY_FIELDS = (
-    ("schema_version",) + _DECIMAL_FIELDS + _INT_FIELDS + ("max_provider_discounts",)
+    ("schema_version",) + _DECIMAL_FIELDS + _INT_FIELDS + ("max_provider_discounts", "miner_terms_version")
 )
+_TERMS_VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 
 # Start values from docs/gamma-lead-orders.md. Discounts are Gavin's Nov 19
 # figures: Deepline credit discounts reach 10%, OpenRouter gives none.
@@ -59,6 +61,9 @@ DEFAULT_POLICY_BODY: Dict[str, Any] = {
     "max_provider_discounts": {"deepline": "0.10", "openrouter": "0"},
     "deepline_reserve_per_call_usd": "0.50",
     "openrouter_max_output_tokens": 16384,
+    # The miner data terms a key's owner must have signed for the key to be
+    # registered or ranked (docs/gamma-lead-orders-miner-terms.md).
+    "miner_terms_version": "miner-terms-placeholder-1",
 }
 
 MICROUSD = Decimal(1_000_000)
@@ -106,6 +111,7 @@ class LeadOrderPolicy:
     max_provider_discounts: Mapping[str, Decimal]
     deepline_reserve_per_call_usd: Decimal
     openrouter_max_output_tokens: int
+    miner_terms_version: str
     policy_hash: str
 
     # -- micro-USD views used by the money module and the SQL functions ------
@@ -161,6 +167,9 @@ def validate_policy_body(body: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(discounts, Mapping) or set(discounts) != set(PROVIDERS):
         raise PolicyError("max_provider_discounts must name exactly %s" % ", ".join(PROVIDERS))
     parsed_discounts = {name: _decimal(discounts[name], "max_provider_discounts.%s" % name) for name in PROVIDERS}
+    terms = body.get("miner_terms_version")
+    if not isinstance(terms, str) or not _TERMS_VERSION_RE.fullmatch(terms):
+        raise PolicyError("miner_terms_version must be 1-32 of A-Z a-z 0-9 . _ -")
 
     if decimals["price_per_lead_usd"] <= 0:
         raise PolicyError("price_per_lead_usd must be positive")
@@ -219,6 +228,7 @@ def _from_validated(document: Mapping[str, Any]) -> LeadOrderPolicy:
         max_provider_discounts={k: Decimal(v) for k, v in document["max_provider_discounts"].items()},
         deepline_reserve_per_call_usd=Decimal(document["deepline_reserve_per_call_usd"]),
         openrouter_max_output_tokens=int(document["openrouter_max_output_tokens"]),
+        miner_terms_version=str(document["miner_terms_version"]),
         policy_hash=str(document[POLICY_HASH_FIELD]),
     )
 

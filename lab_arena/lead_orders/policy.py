@@ -63,7 +63,7 @@ DEFAULT_POLICY_BODY: Dict[str, Any] = {
     "openrouter_max_output_tokens": 16384,
     # The miner data terms a key's owner must have signed for the key to be
     # registered or ranked (docs/gamma-lead-orders-miner-terms.md).
-    "miner_terms_version": "miner-terms-placeholder-1",
+    "miner_terms_version": "miner-terms-2026-11-20",
 }
 
 MICROUSD = Decimal(1_000_000)

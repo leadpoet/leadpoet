@@ -42,7 +42,7 @@ placed in `staff` spends only Leadpoet's keys even after the gateway moves to
 | `max_provider_discounts` | Deepline 0.10, OpenRouter 0 |
 | `deepline_reserve_per_call_usd` | 0.50 (worst-case hold per Deepline call) |
 | `openrouter_max_output_tokens` | 16384 (`max_tokens` is clamped to this) |
-| `miner_terms_version` | `miner-terms-placeholder-1` (the miner data terms a key's owner must have signed) |
+| `miner_terms_version` | `miner-terms-2026-11-20` (the miner data terms a key's owner must have signed) |
 
 The record also carries `version` and `schema_version`, and is signed with the
 Arena signing key. Each version is stored once; an order records the version
@@ -122,9 +122,8 @@ only after its miner has signed the current `miner_terms_version`, and the
 broker ranks only keys whose miner accepted exactly that version. When the
 policy moves to a new version, keys signed under the old one stay registered
 but are skipped until their miner signs again. The terms text is in
-`docs/gamma-lead-orders-miner-terms.md` (a placeholder until Leadpoet writes
-it): use the data only to run orders, keep no copies, honour the suppression
-feed.
+`docs/gamma-lead-orders-miner-terms.md`: use the data only to run orders,
+keep no copies, honour the suppression feed, report problems.
 
 - `POST /lead-orders/miner-terms` `{terms_version}` (hotkey-signed): the
   version must equal the policy's `miner_terms_version` (else 422

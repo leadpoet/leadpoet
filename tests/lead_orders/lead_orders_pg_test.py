@@ -513,7 +513,7 @@ def sql(owner, query, params):
         return [tuple(row) for row in cur.fetchall()] if cur.description else []
 
 
-def signed_identity(miner, body=b'{"terms_version":"miner-terms-placeholder-1"}'):
+def signed_identity(miner, body=b'{"terms_version":"miner-terms-2026-11-20"}'):
     return BuyerIdentity(hotkey=miner, signed_at=1_763_500_000, signature="ab" * 64,
                          body_sha256=hashlib.sha256(body).hexdigest())
 
@@ -803,7 +803,7 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     stored = sql(owner, "SELECT signed_method,signed_path,signed_at,body_sha256,signature "
                         "FROM public.lead_order_miner_terms WHERE miner_hotkey=%s", (miner,))
     assert stored == [("POST", "/lead-orders/miner-terms", 1_763_500_000,
-                       hashlib.sha256(b'{"terms_version":"miner-terms-placeholder-1"}').hexdigest(), "ab" * 64)]
+                       hashlib.sha256(b'{"terms_version":"miner-terms-2026-11-20"}').hexdigest(), "ab" * 64)]
     key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
     registrar.secrets = {key["key_id"]: "t" * 40}
     # The terms move to version 2: the key stays registered but is skipped

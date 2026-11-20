@@ -42,6 +42,7 @@ placed in `staff` spends only Leadpoet's keys even after the gateway moves to
 | `max_provider_discounts` | Deepline 0.10, OpenRouter 0 |
 | `deepline_reserve_per_call_usd` | 0.50 (worst-case hold per Deepline call) |
 | `openrouter_max_output_tokens` | 16384 (`max_tokens` is clamped to this) |
+| `miner_terms_version` | `miner-terms-placeholder-1` (the miner data terms a key's owner must have signed) |
 
 The record also carries `version` and `schema_version`, and is signed with the
 Arena signing key. Each version is stored once; an order records the version
@@ -114,6 +115,25 @@ Per provider, miner keys are ranked by USD spend settled over the last
 `ranking_window_epochs`, highest first; ties and new keys by registration time.
 Leadpoet's key is always last. On 401, 402, 403, 429-with-no-retry or a spent
 limit the broker moves to the next key for the rest of the order.
+
+Miner data terms are required. A miner running an order on their own key can
+see the order's lead data in their provider account, so a key is registered
+only after its miner has signed the current `miner_terms_version`, and the
+broker ranks only keys whose miner accepted exactly that version. When the
+policy moves to a new version, keys signed under the old one stay registered
+but are skipped until their miner signs again. The terms text is in
+`docs/gamma-lead-orders-miner-terms.md` (a placeholder until Leadpoet writes
+it): use the data only to run orders, keep no copies, honour the suppression
+feed.
+
+- `POST /lead-orders/miner-terms` `{terms_version}` (hotkey-signed): the
+  version must equal the policy's `miner_terms_version` (else 422
+  `terms_version_not_current`). The acceptance is stored append-only with the
+  hotkey, version, the request's signature, its `X-Timestamp` and the body's
+  sha256, so it can be re-verified later. Answers `{status: accepted | exists,
+  terms_version, accepted_at}`.
+- `POST /lead-orders/keys` without a current acceptance is 403
+  `miner_terms_not_accepted`.
 
 ## Runner protocol (private runner ⇄ gateway)
 
@@ -258,6 +278,47 @@ Miner key routes (hotkey-signed): `POST /lead-orders/keys` `{provider,
 credentials}` stores the key encrypted with the Arena credential KMS key and
 returns `{key_id, public_fingerprint}`; one active key per miner and
 provider. `POST /lead-orders/keys/{key_id}/revoke`.
+
+## Suppression feed
+
+People who opted out or asked to be suppressed, as hashes only. Raw emails
+and LinkedIn URLs are never accepted or stored. Hashes are sha256 hex
+(64 lowercase characters) of:
+
+- `email_sha256`: the trimmed, lowercased email.
+- `linkedin_sha256`: the normalised profile URL: trimmed, `http(s)://`, a
+  two-letter country subdomain and `www.` stripped, trailing slashes removed,
+  lowercased (`https://de.linkedin.com/in/Ada-One/` →
+  `linkedin.com/in/ada-one`). This is leadpoet-site's
+  `normalizeContactLinkedin`; `lab_arena.lead_orders.suppressions` has the same
+  functions in Python.
+
+`POST /internal/lead-orders/suppressions` (runner bearer secret):
+
+```json
+{"suppressions": [
+  {"email_sha256": "<64 hex>", "linkedin_sha256": "<64 hex>", "added_at": "2026-11-19T10:00:00Z"}
+]}
+```
+
+1 to 500 entries. Each has `added_at` (UTC, `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`,
+not more than 5 minutes ahead) and one or both hashes. Any other field, a
+value that is not 64 lowercase hex characters, or a bad `added_at` refuses the
+whole push with 422 (`field_not_allowed`, `hash_invalid`, `hash_required`,
+`added_at_invalid`, `suppressions_invalid`); error codes never echo a value.
+Rows are append-only; a hash already on the list keeps its first row. Answers
+`{"received": <entries>, "added": <new hash rows>}`, so a retry is safe.
+
+`GET /lead-orders/suppressions?since=<sequence>` (hotkey-signed; the signature
+covers the path without the query): for a confirmed buyer or a miner who
+signed the current miner terms, else 403 `suppressions_not_allowed`. Answers
+`{"suppressions": [{"sequence", "kind", "hash", "added_at"}], "next_since",
+"more"}`, up to 1,000 rows in sequence order; call again with `next_since`
+while `more` is true.
+
+Known limit: the hashes are unsalted, so a reader who already has someone's
+email or profile URL can tell whether that person is suppressed. That is the
+feed's purpose. A reader cannot recover an address it does not already have.
 
 ## Receipts (public)
 

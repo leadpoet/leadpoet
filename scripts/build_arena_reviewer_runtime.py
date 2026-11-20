@@ -311,6 +311,7 @@ def extract_frozen_sources(
     empty_domain_negative_finality_only: bool = False,
     identity_repair_before_investigation_only: bool = False,
     homepage_identity_and_source_validation_only: bool = False,
+    completed_empty_profile: bool = False,
     identity_repair_finality_only: bool = False,
     completed_merger_survivor_only: bool = False,
     public_issuer_buyer_only: bool = False,
@@ -356,6 +357,8 @@ def extract_frozen_sources(
             names = (FINALITY_FILE,)
         if homepage_identity_and_source_validation_only:
             names = (FINALITY_FILE, ARCHIVE_FILE)
+            if completed_empty_profile:
+                names += ("qualification/scoring/linkedin_company_size.py",)
         if investigator_feedback:
             names += (GRADER_FILE,)
         if linkedin_headquarters_feedback:
@@ -577,6 +580,10 @@ def main() -> int:
         help="compose only reviewed homepage identity repair and HTML source validation on exact frozen396; excludes other corrections",
     )
     parser.add_argument(
+        "--completed-empty-profile", action="store_true",
+        help="preserve completed identity finality after an exact empty profile; requires homepage-identity-and-source-validation-only",
+    )
+    parser.add_argument(
         "--identity-repair-before-investigation-only", action="store_true",
         help="compose only the reviewed missing-identity ordering on exact frozen b699; excludes other corrections",
     )
@@ -744,9 +751,11 @@ def main() -> int:
         raise CompositionError("identity-repair-before-investigation-only mode cannot include other corrections")
     if args.homepage_identity_and_source_validation_only and any(
         value is True for name, value in vars(args).items()
-        if name not in {"homepage_identity_and_source_validation_only", "push"}
+        if name not in {"homepage_identity_and_source_validation_only", "completed_empty_profile", "push"}
     ):
         raise CompositionError("homepage-identity-and-source-validation-only mode cannot include other corrections")
+    if args.completed_empty_profile and not args.homepage_identity_and_source_validation_only:
+        raise CompositionError("completed-empty-profile requires homepage-identity-and-source-validation-only")
     if args.empty_domain_negative_finality_only and any(
         value is True for name, value in vars(args).items()
         if name not in {"empty_domain_negative_finality_only", "push"}
@@ -914,8 +923,13 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_homepage_identity_source_files
             original = extract_frozen_sources(
                 args.grading_image, root / "original", homepage_identity_and_source_validation_only=True,
+                **({"completed_empty_profile": True} if args.completed_empty_profile else {}),
             )
-            files = convert_homepage_identity_source_files(original)
+            if args.completed_empty_profile:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_completed_empty_profile_files
+                files = convert_completed_empty_profile_files(original)
+            else:
+                files = convert_homepage_identity_source_files(original)
         elif args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import convert_identity_repair_order_seam
             original = extract_frozen_sources(
@@ -1120,6 +1134,9 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         if args.homepage_identity_and_source_validation_only:
             from scripts.arena_reviewer_homepage_identity_conflict_seam import CORRECTIONS as HOMEPAGE_IDENTITY_SOURCE_CORRECTIONS
             corrections.extend(HOMEPAGE_IDENTITY_SOURCE_CORRECTIONS)
+            if args.completed_empty_profile:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import EMPTY_PROFILE_CORRECTION_ID
+                corrections.append(EMPTY_PROFILE_CORRECTION_ID)
         if args.empty_domain_negative_finality_only:
             from scripts.arena_reviewer_empty_domain_finality_seam import CORRECTION_ID as EMPTY_DOMAIN_FINALITY_CORRECTION_ID
             corrections.append(EMPTY_DOMAIN_FINALITY_CORRECTION_ID)

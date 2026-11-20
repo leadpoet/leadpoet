@@ -144,7 +144,7 @@ async def receipt(order_id: str, request: Request) -> Response:
 
 
 @router.get("/lead-orders/epochs/{epoch}")
-async def epoch_payout(epoch: int, request: Request) -> Response:
+async def epoch_payout(epoch: str, request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.public_epoch(epoch), auth="none")
 
 

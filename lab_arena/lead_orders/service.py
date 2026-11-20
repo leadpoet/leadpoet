@@ -27,12 +27,15 @@ from lab_arena.lead_orders import weights as lane_weights
 from lab_arena.lead_orders.auth import order_token_hash
 from lab_arena.lead_orders.config import MODE_LIVE, LeadOrdersConfig
 from lab_arena.lead_orders.gamma import GammaBalanceReader, GammaReadError
-from lab_arena.lead_orders.policy import LeadOrderPolicy
+from lab_arena.lead_orders.policy import LeadOrderPolicy, load_policy
 from lab_arena.lead_orders.store import LeadOrderStore
 
 CONFIRMATION_MAX_AGE_SECONDS = 48 * 3600
 MAX_ORDER_BYTES = 16_384
-OVERDUE_GRACE_SECONDS = 60
+# Longer than the slowest provider timeout (Deepline, 240 s), so calls in
+# flight at the deadline settle before an overdue order is closed.
+OVERDUE_GRACE_SECONDS = 300
+RECONCILE_BATCH = 20
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}$")
 _COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -53,6 +56,7 @@ _PLACE_REFUSALS = {
     "daily_cap": (429, "daily_cap"),
     "gamma_unavailable": (409, "gamma_unavailable"),
     "insufficient_balance": (402, "insufficient_balance"),
+    "conflict": (409, "order_id_taken"),
 }
 
 
@@ -120,7 +124,23 @@ class LeadOrderService:
         self._mailer = mailer or UnavailableMailer()
         self._emission_price = emission_price or rewards.UnavailableEmissionPrice()
         self._registrar = registrar
+        self._policies: Dict[int, LeadOrderPolicy] = {policy.version: policy}
         store.record_policy(policy_document)
+
+    def _order_policy(self, version: int) -> LeadOrderPolicy:
+        """The policy an order was placed under: its rewards and receipt use
+        it, as its charge does, so a later policy change never applies to it."""
+
+        version = int(version)
+        if version not in self._policies:
+            document = self._store.policy_document(version)
+            if not document:
+                raise LeadOrderServiceError(500, "order_policy_unknown")
+            self._policies[version] = load_policy(
+                document, public_key_der=self._signer.public_key_der,
+                expected_public_key_hash=self._signer.public_key_hash,
+            )
+        return self._policies[version]
 
     # -- buyers -------------------------------------------------------------
     def register_buyer(self, hotkey: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -172,10 +192,13 @@ class LeadOrderService:
             reading = self._gamma.read(hotkey)
         except GammaReadError:
             raise LeadOrderServiceError(503, "gamma_read_failed") from None
-        return self._store.record_gamma_reading(
+        result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,
             spent_units=reading.spent_units, available=reading.available,
         )
+        if result.get("status") == "counter_backwards":
+            raise LeadOrderServiceError(422, "gamma_counter_backwards")
+        return result
 
     def balance(self, hotkey: str) -> Dict[str, Any]:
         if not self.config.may_order(hotkey):
@@ -256,14 +279,14 @@ class LeadOrderService:
                 failure_reason="deadline_passed", epoch=int(self._current_epoch()),
             )
             if result.get("status") in ("finished", "exists"):
-                self._settle(order_id)
-                expired.append(order_id)
+                expired.append(order_id)  # settled by reconcile()
         return expired
 
     def claim(self) -> Optional[Dict[str, Any]]:
         """Claim the next order for the runner. The one-order token is shown once."""
 
         self.expire_overdue()
+        self.reconcile()
         token = secrets.token_urlsafe(32)
         claimed = self._store.claim(order_token_hash(token))
         if not claimed:
@@ -304,7 +327,7 @@ class LeadOrderService:
         return {"continue": bool(keep_going), "spent_usd": usd(committed), "deadline": view.get("deadline")}
 
     def finish(self, order_id: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
-        self._running_view(order_id)
+        view = self._running_view(order_id)
         if not isinstance(payload, Mapping) or set(payload) - {"status", "leads_delivered", "delivery_url", "failure_reason"}:
             raise LeadOrderServiceError(422, "finish_invalid")
         status = payload.get("status")
@@ -313,6 +336,8 @@ class LeadOrderService:
         reason = payload.get("failure_reason")
         if status not in ("delivered", "failed") or type(delivered) is not int or delivered < 0:
             raise LeadOrderServiceError(422, "finish_invalid")
+        if delivered > int(view["leads_requested"]):
+            raise LeadOrderServiceError(422, "leads_delivered_invalid")
         if status == "delivered" and (not isinstance(url, str) or not url.startswith("https://") or len(url) > 2048):
             raise LeadOrderServiceError(422, "delivery_url_invalid")
         if status == "failed" and reason is not None and (not isinstance(reason, str) or len(reason) > 200):
@@ -324,27 +349,54 @@ class LeadOrderService:
         )
         if result.get("status") == "unknown":
             raise LeadOrderServiceError(404, "order_unknown")
+        if result.get("status") == "delivered_out_of_range":
+            raise LeadOrderServiceError(422, "leads_delivered_invalid")
         receipt = self._settle(order_id)
         return {"status": result.get("order_status"), "charge_microusd": result.get("charge_microusd"),
                 "charged_usd": usd(result.get("charge_microusd")), "receipt_hash": receipt["receipt_hash"]}
 
     def _settle(self, order_id: str) -> Dict[str, Any]:
-        """Record rewards and a signed receipt; idempotent."""
+        """Record rewards and a signed receipt; idempotent.
+
+        Uses the order's own policy version. The call rows are final at
+        finish (open calls settle uncertain there), and the exact rows the
+        Merkle root is built from are stored with the receipt.
+        """
 
         view = self._store.view(order_id)
         if view and view.get("receipt"):
             return view["receipt"]
+        if not view or view.get("status") not in ("delivered", "failed"):
+            raise LeadOrderServiceError(409, "order_not_finished")
         calls = self._store.calls(order_id)
+        if any(row.get("status") == "open" for row in calls):
+            raise LeadOrderServiceError(500, "order_calls_open")
+        policy = self._order_policy(view["policy_version"])
         owed: Dict[str, int] = {}
         if view["mode"] in ("shadow", "live"):
-            owed = rewards.order_rewards(self.policy, order=view, calls=calls)
+            owed = rewards.order_rewards(policy, order=view, calls=calls)
         self._store.record_rewards(order_id, owed)
+        leaves = receipts.call_leaves(calls)
         receipt = receipts.sign_receipt(
             self._signer,
-            receipts.build_receipt(order=view, calls=calls, rewards=owed, policy_hash=self.policy.policy_hash),
+            receipts.build_receipt(order=view, calls=calls, rewards=owed, policy_hash=policy.policy_hash),
         )
-        self._store.record_receipt(order_id, receipt)
+        self._store.record_receipt(order_id, receipt, leaves)
         return receipt
+
+    def reconcile(self, *, limit: int = RECONCILE_BATCH) -> List[str]:
+        """Settle finished orders that have no receipt yet (a signer or store
+        failure after the finish committed). Idempotent; a failure leaves the
+        order for the next pass."""
+
+        settled = []
+        for order_id in self._store.unsettled(limit=limit):
+            try:
+                self._settle(order_id)
+            except Exception:  # retried on the next claim or epoch pass
+                continue
+            settled.append(order_id)
+        return settled
 
     # -- miner keys -----------------------------------------------------------
     def register_key(self, hotkey: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -380,8 +432,10 @@ class LeadOrderService:
         return {"status": "revoked", "key_id": key_id}
 
     # -- public -------------------------------------------------------------
-    def public_epoch(self, epoch: int) -> Dict[str, Any]:
-        document = self._store.reward_epoch(int(epoch)) if 0 <= int(epoch) < (1 << 62) else None
+    def public_epoch(self, epoch: Any) -> Dict[str, Any]:
+        text = str(epoch)
+        number = int(text) if text.isdigit() and len(text) <= 18 else -1
+        document = self._store.reward_epoch(number) if number >= 0 else None
         if not document:
             raise LeadOrderServiceError(404, "epoch_unknown")
         return document
@@ -392,7 +446,7 @@ class LeadOrderService:
         view = self._store.view(order_id)
         if not view or not view.get("receipt"):
             raise LeadOrderServiceError(404, "receipt_unknown")
-        return {"receipt": view["receipt"], "calls": receipts.call_leaves(self._store.calls(order_id))}
+        return {"receipt": view["receipt"], "calls": view.get("receipt_calls") or []}
 
     def run_epoch(
         self,
@@ -412,13 +466,14 @@ class LeadOrderService:
         existing = self._store.reward_epoch(epoch)
         if existing:
             return existing
+        self.reconcile()
         try:
             emission = self._emission_price.miner_emission_microusd(epoch)
         except rewards.EmissionPriceUnavailable:
             if self.config.weights_rewards:
                 return None  # live: no payout, Arena weights unchanged
             emission = None
-        entries = rewards.owed_entries(self._store.owed(through_epoch=epoch))
+        entries = rewards.owed_entries(self._store.owed(through_epoch=epoch, mode=self.config.mode))
         if registered_hotkeys is not None:
             entries = lane_weights.registered_entries(entries, registered_hotkeys)
         elif self.config.weights_rewards:

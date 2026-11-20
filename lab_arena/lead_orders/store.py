@@ -60,7 +60,7 @@ LEAD_ORDER_FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lead_order_view_v1": (("p_order_id", _U),),
     "lead_order_calls_v1": (("p_order_id", _U),),
     "lead_order_record_rewards_v1": (("p_order_id", _U), ("p_rewards", _J)),
-    "lead_order_record_receipt_v1": (("p_order_id", _U), ("p_hash", _T), ("p_doc", _J)),
+    "lead_order_record_receipt_v1": (("p_order_id", _U), ("p_hash", _T), ("p_doc", _J), ("p_calls", _J)),
     "lead_order_register_key_v1": (
         ("p_key_id", _T), ("p_provider", _T), ("p_miner_hotkey", _T), ("p_submission_id", _T),
         ("p_ciphertext", _T), ("p_internal_fp", _T), ("p_public_fp", _T),
@@ -68,11 +68,13 @@ LEAD_ORDER_FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lead_order_revoke_key_v1": (("p_key_id", _T), ("p_reason", _T)),
     "lead_order_keys_v1": (("p_provider", _T),),
     "lead_order_key_spend_v1": (("p_since_epoch", _B),),
-    "lead_order_owed_v1": (("p_through_epoch", _B),),
+    "lead_order_owed_v1": (("p_through_epoch", _B), ("p_mode", _T)),
     "lead_order_record_payout_v1": (
         ("p_epoch", _B), ("p_mode", _T), ("p_doc_hash", _T), ("p_doc", _J), ("p_payments", _J),
     ),
     "lead_order_reward_epoch_v1": (("p_epoch", _B),),
+    "lead_order_policy_v1": (("p_version", _I),),
+    "lead_order_unsettled_v1": (("p_limit", _I),),
 }
 
 
@@ -211,12 +213,20 @@ class LeadOrderStore:
         return self._rpc("lead_order_record_rewards_v1", p_order_id=order_id,
                          p_rewards={k: int(v) for k, v in rewards.items()})
 
-    def record_receipt(self, order_id: str, receipt: Mapping[str, Any]) -> Dict[str, Any]:
+    def record_receipt(self, order_id: str, receipt: Mapping[str, Any],
+                       call_leaves: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         return self._rpc("lead_order_record_receipt_v1", p_order_id=order_id,
-                         p_hash=receipt["receipt_hash"], p_doc=dict(receipt))
+                         p_hash=receipt["receipt_hash"], p_doc=dict(receipt),
+                         p_calls=[dict(leaf) for leaf in call_leaves])
 
-    def owed(self, *, through_epoch: int) -> List[Dict[str, Any]]:
-        return list(self._rpc("lead_order_owed_v1", p_through_epoch=int(through_epoch)) or [])
+    def policy_document(self, version: int) -> Optional[Dict[str, Any]]:
+        return self._rpc("lead_order_policy_v1", p_version=int(version))
+
+    def unsettled(self, *, limit: int) -> List[str]:
+        return [str(order_id) for order_id in (self._rpc("lead_order_unsettled_v1", p_limit=int(limit)) or [])]
+
+    def owed(self, *, through_epoch: int, mode: str) -> List[Dict[str, Any]]:
+        return list(self._rpc("lead_order_owed_v1", p_through_epoch=int(through_epoch), p_mode=mode) or [])
 
     def record_payout(self, *, epoch: int, mode: str, document: Mapping[str, Any],
                       payments: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:

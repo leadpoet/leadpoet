@@ -158,6 +158,18 @@ CREATE TABLE IF NOT EXISTS public.lead_order_call_settlements (
   CHECK((status='settled')=(cost_microusd IS NOT NULL))
 );
 
+-- A provider answer that arrived after its order finished. Kept for audit
+-- only: never charged, rewarded, ranked or published. The call's own row was
+-- already settled uncertain at finish.
+CREATE TABLE IF NOT EXISTS public.lead_order_late_settlements (
+  call_id UUID PRIMARY KEY REFERENCES public.lead_order_calls(call_id),
+  status TEXT NOT NULL CHECK(status IN ('settled','uncertain')),
+  cost_microusd BIGINT CHECK(cost_microusd IS NULL OR cost_microusd>=0),
+  http_status INTEGER CHECK(http_status IS NULL OR http_status BETWEEN 100 AND 599),
+  received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  CHECK((status='settled')=(cost_microusd IS NOT NULL))
+);
+
 CREATE TABLE IF NOT EXISTS public.lead_order_rewards_owed (
   order_id UUID NOT NULL REFERENCES public.lead_order_finishes(order_id),
   miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
@@ -169,6 +181,8 @@ CREATE TABLE IF NOT EXISTS public.lead_order_receipts (
   order_id UUID PRIMARY KEY REFERENCES public.lead_order_finishes(order_id),
   receipt_hash TEXT NOT NULL UNIQUE CHECK(receipt_hash ~ '^sha256:[0-9a-f]{64}$'),
   receipt_doc JSONB NOT NULL,
+  -- The exact call rows the Merkle root was built from, as published.
+  calls_doc JSONB NOT NULL CHECK(jsonb_typeof(calls_doc)='array'),
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -196,7 +210,7 @@ BEGIN
  FOREACH t IN ARRAY ARRAY['lead_order_policies','lead_order_gamma_readings','lead_order_buyers',
    'lead_order_buyer_confirmations','lead_order_nonces','lead_orders','lead_order_claims',
    'lead_order_finishes','lead_order_keys','lead_order_key_revocations','lead_order_key_exhaustions',
-   'lead_order_calls','lead_order_call_settlements','lead_order_rewards_owed','lead_order_receipts',
+   'lead_order_calls','lead_order_call_settlements','lead_order_late_settlements','lead_order_rewards_owed','lead_order_receipts',
    'lead_order_reward_epochs','lead_order_reward_payments'] LOOP
   EXECUTE format('ALTER TABLE public.%I OWNER TO lab_arena_owner',t);
   EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',t);
@@ -283,7 +297,7 @@ BEGIN
  -- chain or a broken read: refuse rather than shrink a balance silently.
  IF p_available AND prior.reading_id IS NOT NULL AND p_block_number>=prior.block_number
   AND p_units<prior.spent_units THEN
-  RAISE EXCEPTION 'GammaSpent went backwards' USING ERRCODE='22023';
+  RETURN jsonb_build_object('status','counter_backwards');
  END IF;
  INSERT INTO public.lead_order_gamma_readings(hotkey,block_number,block_hash,spent_units,available)
  VALUES(p_hotkey,p_block_number,lower(p_block_hash),CASE WHEN p_available THEN p_units ELSE 0 END,p_available);
@@ -355,7 +369,12 @@ BEGIN
  deadline_minutes:=(pol->>'order_deadline_minutes')::INTEGER;
  PERFORM pg_advisory_xact_lock(hashtextextended('lead_order_hotkey:'||p_hotkey,0));
  IF EXISTS(SELECT 1 FROM public.lead_orders WHERE order_id=p_order_id) THEN
-  RETURN jsonb_build_object('status','exists');
+  -- A retry with the same id is the same order only if every field matches.
+  IF EXISTS(SELECT 1 FROM public.lead_orders WHERE order_id=p_order_id AND hotkey=p_hotkey AND mode=p_mode
+            AND leads_requested=p_leads AND request_doc=p_request_doc) THEN
+   RETURN jsonb_build_object('status','exists');
+  END IF;
+  RETURN jsonb_build_object('status','conflict');
  END IF;
  hold:=p_leads::BIGINT*price;
  IF p_leads<min_leads THEN RETURN jsonb_build_object('status','below_minimum'); END IF;
@@ -381,17 +400,26 @@ $place703$;
 -- Claim the oldest queued order and bind the one-order token to it.
 CREATE OR REPLACE FUNCTION public.lead_order_claim_v1(p_token_hash TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $claim703$
-DECLARE o public.lead_orders; d TIMESTAMPTZ;
+DECLARE o public.lead_orders; d TIMESTAMPTZ; attempt INTEGER;
 BEGIN
- SELECT * INTO o FROM public.lead_orders q
-  WHERE NOT EXISTS(SELECT 1 FROM public.lead_order_claims c WHERE c.order_id=q.order_id)
-  ORDER BY q.sequence LIMIT 1 FOR UPDATE SKIP LOCKED;
- IF o.order_id IS NULL THEN RETURN NULL; END IF;
- d:=clock_timestamp()+make_interval(mins=>o.deadline_minutes);
- INSERT INTO public.lead_order_claims(order_id,token_hash,deadline) VALUES(o.order_id,p_token_hash,d);
- RETURN jsonb_build_object('order_id',o.order_id,'hotkey',o.hotkey,'mode',o.mode,
-  'leads_requested',o.leads_requested,'deadline',to_char(d AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-  'spend_ceiling_microusd',o.spend_ceiling_microusd,'request_doc',o.request_doc);
+ -- A concurrent claimer can commit a claim for the row this statement saw as
+ -- free. The insert then skips it and the next queued order is tried.
+ FOR attempt IN 1..20 LOOP
+  o:=NULL;
+  SELECT * INTO o FROM public.lead_orders q
+   WHERE NOT EXISTS(SELECT 1 FROM public.lead_order_claims c WHERE c.order_id=q.order_id)
+   ORDER BY q.sequence LIMIT 1 FOR UPDATE SKIP LOCKED;
+  IF o.order_id IS NULL THEN RETURN NULL; END IF;
+  d:=clock_timestamp()+make_interval(mins=>o.deadline_minutes);
+  INSERT INTO public.lead_order_claims(order_id,token_hash,deadline) VALUES(o.order_id,p_token_hash,d)
+  ON CONFLICT DO NOTHING;
+  IF FOUND THEN
+   RETURN jsonb_build_object('order_id',o.order_id,'hotkey',o.hotkey,'mode',o.mode,
+    'leads_requested',o.leads_requested,'deadline',to_char(d AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    'spend_ceiling_microusd',o.spend_ceiling_microusd,'request_doc',o.request_doc);
+  END IF;
+ END LOOP;
+ RETURN NULL;
 END;
 $claim703$;
 
@@ -436,7 +464,18 @@ $reserve703$;
 CREATE OR REPLACE FUNCTION public.lead_order_settle_call_v1(
  p_call_id UUID,p_status TEXT,p_cost BIGINT,p_http_status INTEGER,p_epoch BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $settle703$
+DECLARE v_order UUID;
 BEGIN
+ -- Share-lock the order so a settlement and the finish never interleave.
+ SELECT o.order_id INTO v_order FROM public.lead_order_calls c JOIN public.lead_orders o ON o.order_id=c.order_id
+  WHERE c.call_id=p_call_id FOR SHARE OF o;
+ IF v_order IS NULL THEN RETURN jsonb_build_object('status','unknown'); END IF;
+ IF EXISTS(SELECT 1 FROM public.lead_order_finishes WHERE order_id=v_order) THEN
+  INSERT INTO public.lead_order_late_settlements(call_id,status,cost_microusd,http_status)
+  VALUES(p_call_id,p_status,CASE WHEN p_status='settled' THEN p_cost END,p_http_status)
+  ON CONFLICT(call_id) DO NOTHING;
+  RETURN jsonb_build_object('status','late');
+ END IF;
  INSERT INTO public.lead_order_call_settlements(call_id,status,cost_microusd,http_status,settled_epoch)
  VALUES(p_call_id,p_status,CASE WHEN p_status='settled' THEN p_cost END,p_http_status,p_epoch)
  ON CONFLICT(call_id) DO NOTHING;
@@ -473,10 +512,16 @@ BEGIN
   RETURN jsonb_build_object('status','exists','order_status',f.status,'charge_microusd',f.charge_microusd);
  END IF;
  IF p_delivered<0 OR p_delivered>o.leads_requested THEN
-  RAISE EXCEPTION 'leads_delivered is outside the order' USING ERRCODE='22023';
+  RETURN jsonb_build_object('status','delivered_out_of_range');
  END IF;
  -- A failed order delivers nothing and pays the minimum charge on spend so far.
  delivered:=CASE WHEN p_status='delivered' THEN p_delivered ELSE 0 END;
+ -- Calls still open now settle uncertain: never charged or rewarded, and the
+ -- rows are final before the receipt is built. The order row lock above
+ -- also stops new reservations and waits out any settlement in progress.
+ INSERT INTO public.lead_order_call_settlements(call_id,status,cost_microusd,http_status,settled_epoch)
+ SELECT c.call_id,'uncertain',NULL,NULL,p_epoch FROM public.lead_order_calls c
+ WHERE c.order_id=p_order_id AND NOT EXISTS(SELECT 1 FROM public.lead_order_call_settlements s WHERE s.call_id=c.call_id);
  spend:=public.lead_order__settled_microusd_v1(p_order_id);
  charge:=LEAST(o.hold_microusd,GREATEST(delivered::BIGINT*o.price_per_lead_microusd,
   div(spend::NUMERIC*o.min_charge_ratio_ppm+999999,1000000)::BIGINT));
@@ -505,7 +550,7 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
   'deadline',to_char(c.deadline AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
   'expired',coalesce(c.deadline<=clock_timestamp(),FALSE),
   'committed_microusd',public.lead_order__committed_microusd_v1(o.order_id),
-  'receipt',r.receipt_doc)
+  'receipt',r.receipt_doc,'receipt_calls',r.calls_doc)
  FROM public.lead_orders o LEFT JOIN public.lead_order_claims c ON c.order_id=o.order_id
  LEFT JOIN public.lead_order_finishes f ON f.order_id=o.order_id
  LEFT JOIN public.lead_order_receipts r ON r.order_id=o.order_id
@@ -543,7 +588,7 @@ BEGIN
 END;
 $rewards703$;
 
-CREATE OR REPLACE FUNCTION public.lead_order_record_receipt_v1(p_order_id UUID,p_hash TEXT,p_doc JSONB)
+CREATE OR REPLACE FUNCTION public.lead_order_record_receipt_v1(p_order_id UUID,p_hash TEXT,p_doc JSONB,p_calls JSONB)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $receipt703$
 DECLARE existing TEXT;
 BEGIN
@@ -552,7 +597,7 @@ BEGIN
   IF existing<>p_hash THEN RAISE EXCEPTION 'order already has another receipt' USING ERRCODE='23505'; END IF;
   RETURN jsonb_build_object('status','exists');
  END IF;
- INSERT INTO public.lead_order_receipts(order_id,receipt_hash,receipt_doc) VALUES(p_order_id,p_hash,p_doc);
+ INSERT INTO public.lead_order_receipts(order_id,receipt_hash,receipt_doc,calls_doc) VALUES(p_order_id,p_hash,p_doc,p_calls);
  RETURN jsonb_build_object('status','recorded');
 END;
 $receipt703$;
@@ -597,14 +642,17 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
   WHERE s.status='settled' AND s.settled_epoch>=p_since_epoch GROUP BY c.key_id) t;
 $spend703$;
 
-CREATE OR REPLACE FUNCTION public.lead_order_owed_v1(p_through_epoch BIGINT)
+CREATE OR REPLACE FUNCTION public.lead_order_owed_v1(p_through_epoch BIGINT,p_mode TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $owed703$
  SELECT coalesce(jsonb_agg(jsonb_build_object('order_id',w.order_id,'miner_hotkey',w.miner_hotkey,
    'settled_epoch',f.settled_epoch,'settled_sequence',f.sequence,'owed_microusd',w.owed_microusd,
    'paid_microusd',coalesce((SELECT sum(p.paid_microusd) FROM public.lead_order_reward_payments p
      WHERE p.order_id=w.order_id AND p.miner_hotkey=w.miner_hotkey),0)) ORDER BY f.settled_epoch,f.sequence,w.miner_hotkey),'[]'::JSONB)
  FROM public.lead_order_rewards_owed w JOIN public.lead_order_finishes f ON f.order_id=w.order_id
- WHERE f.settled_epoch<=p_through_epoch;
+ JOIN public.lead_orders o ON o.order_id=w.order_id
+ -- Per mode: a live payout reads live orders only, so live never pays a
+ -- shadow backlog; a shadow payout publishes shadow orders' rewards only.
+ WHERE f.settled_epoch<=p_through_epoch AND o.mode=p_mode AND p_mode IN ('shadow','live');
 $owed703$;
 
 -- Record one epoch's payout document and payments. Never pays an entry past
@@ -624,6 +672,9 @@ BEGIN
  -- shrinks what live would later owe.
  IF p_mode='live' THEN
   FOR p IN SELECT * FROM jsonb_array_elements(p_payments) LOOP
+   IF NOT EXISTS(SELECT 1 FROM public.lead_orders WHERE order_id=(p->>'order_id')::UUID AND mode='live') THEN
+    RAISE EXCEPTION 'only live orders are paid' USING ERRCODE='22023';
+   END IF;
    INSERT INTO public.lead_order_reward_payments(epoch,order_id,miner_hotkey,paid_microusd)
    VALUES(p_epoch,(p->>'order_id')::UUID,p->>'miner_hotkey',(p->>'paid_microusd')::BIGINT);
    IF (SELECT sum(paid_microusd) FROM public.lead_order_reward_payments
@@ -637,6 +688,20 @@ BEGIN
  RETURN jsonb_build_object('status','recorded');
 END;
 $payout703$;
+
+CREATE OR REPLACE FUNCTION public.lead_order_policy_v1(p_version INTEGER)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $policyget703$
+ SELECT policy_doc FROM public.lead_order_policies WHERE version=p_version;
+$policyget703$;
+
+-- Finished orders still missing their receipt, oldest first.
+CREATE OR REPLACE FUNCTION public.lead_order_unsettled_v1(p_limit INTEGER)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $unsettled703$
+ SELECT coalesce(jsonb_agg(order_id ORDER BY sequence),'[]'::JSONB) FROM (
+  SELECT f.order_id,f.sequence FROM public.lead_order_finishes f
+  WHERE NOT EXISTS(SELECT 1 FROM public.lead_order_receipts r WHERE r.order_id=f.order_id)
+  ORDER BY f.sequence LIMIT greatest(1,least(p_limit,500))) t;
+$unsettled703$;
 
 CREATE OR REPLACE FUNCTION public.lead_order_reward_epoch_v1(p_epoch BIGINT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $epoch703$

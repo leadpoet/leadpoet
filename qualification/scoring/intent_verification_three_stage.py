@@ -3118,6 +3118,9 @@ def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
 
 _EXA_TARGET_CRAWL_FAILURES = {
     ("CRAWL_EMPTY_CONTENT", 500),
+    # A successful Exa request can report a target page's HTTP500. This
+    # permits the existing bounded discovery, not an absence/negative verdict.
+    ("CRAWL_HTTP_500", 500),
     ("CRAWL_LIVECRAWL_TIMEOUT", 504),
     ("CRAWL_UNKNOWN_ERROR", 500),
     ("SOURCE_NOT_AVAILABLE", 403),

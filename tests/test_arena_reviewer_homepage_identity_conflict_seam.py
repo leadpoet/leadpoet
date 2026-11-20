@@ -46,7 +46,8 @@ def test_exact_reviewed_delta_preserves_every_other_frozen_function():
     for tree in (before, after):
         tree.body = [node for node in tree.body if getattr(node, "name", "") not in changed]
     assert ast.dump(before) == ast.dump(after)
-    assert CORRECTED_FILES[seam.SOURCE_FILE] == (composer.ROOT / seam.SOURCE_FILE).read_bytes()
+    current = (composer.ROOT / seam.SOURCE_FILE).read_text()
+    assert CORRECTED_FILES[seam.SOURCE_FILE] == current.replace(seam._TARGET_SERVER_ERROR_NEW, seam._TARGET_SERVER_ERROR_OLD, 1).encode()
     assert seam.convert_homepage_identity_source_files(CORRECTED_FILES) == CORRECTED_FILES
     before, after = ast.parse(ORIGINAL_FILES[seam.SOURCE_FILE]), ast.parse(CORRECTED_FILES[seam.SOURCE_FILE])
     for tree in (before, after):
@@ -65,14 +66,16 @@ def test_unknown_or_partial_sources_fail_closed(source):
 
 
 @pytest.mark.parametrize("verify_existing", [False, True])
-@pytest.mark.parametrize("mode", ["identity", "empty_profile", "headquarters"])
+@pytest.mark.parametrize("mode", ["identity", "empty_profile", "headquarters", "target_server_error"])
 def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys, verify_existing, mode):
     empty_profile = mode != "identity"
-    headquarters = mode == "headquarters"
+    headquarters = mode in {"headquarters", "target_server_error"}
+    target_server_error = mode == "target_server_error"
     original = dict(ORIGINAL_FILES)
     if empty_profile:
         original[seam.PROFILE_FILE] = frozen_source("homepage_identity_conflict_396", seam.PROFILE_FILE)
-    corrected = (seam.convert_preserved_headquarters_source_files(original) if headquarters
+    corrected = (seam.convert_target_server_error_discovery_files(original) if target_server_error
+                 else seam.convert_preserved_headquarters_source_files(original) if headquarters
                  else seam.convert_completed_empty_profile_files(original) if empty_profile else CORRECTED_FILES)
     base_ref = "registry.example/reviewer@" + seam.FROZEN_IMAGE_DIGEST
     tag = "registry.example/reviewer:reviewer-" + seam.FROZEN_IMAGE_DIGEST[7:19] + "-" + "c" * 12 + "-homepage-identity-source"
@@ -83,6 +86,8 @@ def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys
         args.append("--completed-empty-profile")
     if headquarters:
         args.append("--preserved-headquarters-source")
+    if target_server_error:
+        args.append("--target-server-error-discovery")
     if verify_existing:
         args += ["--verify-image", candidate_ref]
     monkeypatch.setattr(composer.sys, "argv", args)
@@ -124,7 +129,8 @@ def test_exclusive_composer_build_and_verify_exact_two_files(monkeypatch, capsys
     assert proof["grading_image"] == base_ref
     assert proof["grading_corrections"] == (list(seam.CORRECTIONS)
         + ([seam.EMPTY_PROFILE_CORRECTION_ID] if empty_profile else [])
-        + ([seam.HEADQUARTERS_SOURCE_CORRECTION_ID] if headquarters else []))
+        + ([seam.HEADQUARTERS_SOURCE_CORRECTION_ID] if headquarters else [])
+        + ([seam.TARGET_SERVER_ERROR_CORRECTION_ID] if target_server_error else []))
     assert proof["original_files"] == {name: hashlib.sha256(value).hexdigest() for name, value in original.items()}
     assert proof["overlay_files"] == {name: hashlib.sha256(value).hexdigest() for name, value in corrected.items()}
     assert proof["base_layers_unchanged"] is proof["process_configuration_unchanged"] is True
@@ -274,4 +280,31 @@ def test_headquarters_mode_requires_reviewed_parent_before_docker(monkeypatch):
         '--grading-image', 'registry.example/base@' + seam.FROZEN_IMAGE_DIGEST,
         '--preserved-headquarters-source'])
     with pytest.raises(composer.CompositionError, match='requires completed-empty-profile'):
+        composer.main()
+
+
+def test_target_server_error_overlay_only_extends_discovery_classifier(monkeypatch):
+    from tests import test_intent_target_server_error_discovery as retained
+    original = {**ORIGINAL_FILES, seam.PROFILE_FILE: frozen_source("homepage_identity_conflict_396", seam.PROFILE_FILE)}
+    before = seam.convert_preserved_headquarters_source_files(original)
+    after = seam.convert_target_server_error_discovery_files(original)
+    for name in (seam.FINALITY_FILE, seam.PROFILE_FILE): assert before[name] == after[name]
+    assert after[seam.SOURCE_FILE] == (composer.ROOT / seam.SOURCE_FILE).read_bytes()
+    trees = [ast.parse(files[seam.SOURCE_FILE]) for files in (before, after)]
+    for tree in trees:
+        tree.body = [n for n in tree.body if not (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_EXA_TARGET_CRAWL_FAILURES" for t in n.targets))]
+    assert ast.dump(trees[0]) == ast.dump(trees[1])
+    import types
+    module = types.ModuleType("exact_frozen_target_discovery")
+    module.__file__ = str(composer.ROOT / seam.SOURCE_FILE)
+    exec(compile(after[seam.SOURCE_FILE], module.__file__, "exec"), vars(module))
+    monkeypatch.setattr(retained, "intent", module)
+    retained.test_retained_teleco_http_responses_reach_discovery_without_proving_absence(monkeypatch)
+
+
+def test_target_server_error_mode_requires_reviewed_parent_before_docker(monkeypatch):
+    monkeypatch.setattr(composer.sys, "argv", ["build_arena_reviewer_runtime.py",
+        "--grading-image", "registry.example/base@" + seam.FROZEN_IMAGE_DIGEST,
+        "--target-server-error-discovery"])
+    with pytest.raises(composer.CompositionError, match="requires preserved-headquarters-source"):
         composer.main()

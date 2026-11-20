@@ -113,9 +113,14 @@ Boundary:
 - The broker holds miner keys. Leadpoet's key is always last, and every call
   is reserved before it is sent, settled at the provider-reported cost, and
   recorded. A call whose cost is uncertain is never charged or rewarded.
-- Lead data never passes through this repository or the gateway. The private
-  runner delivers it. Receipts publish totals per key and a Merkle root,
-  never prompts, models, tool names, call order or lead data.
+- Provider calls, including those carrying a person's data, may run on
+  miners' keys (Gavin, Nov 19 2026). The broker uses only keys whose miner
+  accepted the current miner data terms. The suppression feed holds only
+  hashed emails and LinkedIn URLs, never raw values, and is readable by
+  confirmed buyers and miners with accepted terms.
+- Delivery files never pass through this repository or the gateway. The
+  private runner delivers them. Receipts publish totals per key and a Merkle
+  root, never prompts, models, tool names, call order or lead data.
 - A failed order is never retried automatically. Setting the mode to `off`
   is the rollback.
 

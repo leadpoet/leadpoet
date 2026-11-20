@@ -24,7 +24,7 @@ import json
 import re
 from decimal import Decimal
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlencode
 
@@ -59,6 +59,16 @@ DEEPLINE_OPERATIONS = frozenset({
 # against the same cap) from max_tokens or max_completion_tokens, each model
 # of a fallback list at its own price, the dearest one reserved. Fields that
 # add cost outside that (plugins, server-side tools, web search) are refused.
+# The response-shape headers the site sends on every Deepline execute call
+# (leadpoet-site server/deepline.ts and account-monitoring/deepline-integration.ts,
+# Nov 19 2026), each with the one value it sends. Without raw-v2 the runner
+# cannot read the result, though the call is still billed. They select only
+# the response shape: the billing object is read the same way either way.
+DEEPLINE_FORWARDED_HEADERS = {
+    "x-deepline-execute-response-contract": "raw-v2",
+    "x-deepline-execute-response-intent": "raw",
+    "x-deepline-tool-error-schema": "1",
+}
 OPENROUTER_FIELDS = frozenset({
     "model", "models", "route", "messages", "max_tokens", "max_completion_tokens", "reasoning", "provider",
     "user", "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty",
@@ -116,6 +126,9 @@ class BrokerRequest:
     query: Mapping[str, str]
     body: bytes
     content_type: Optional[str]
+    # Only DEEPLINE_FORWARDED_HEADERS are read from this; everything else the
+    # caller sent is dropped.
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 def _json_response(status: int, code: str) -> ProviderResponse:
@@ -212,6 +225,14 @@ class LeadOrderBroker:
                 raise LeadOrderBrokerError(400, "operation_not_allowed")
             if request.query:
                 raise LeadOrderBrokerError(400, "query_not_allowed")
+            forwarded = {}
+            for name, value in (request.headers or {}).items():
+                name = str(name).lower()
+                if name not in DEEPLINE_FORWARDED_HEADERS:
+                    continue
+                if value != DEEPLINE_FORWARDED_HEADERS[name]:
+                    raise LeadOrderBrokerError(400, "header_not_allowed:%s" % name)
+                forwarded[name] = value
             query: Dict[str, str] = {}
             url = "https://%s/%s" % (DEEPLINE_HOST, path)
             if query:
@@ -221,6 +242,7 @@ class LeadOrderBroker:
                 target=target, url=url, query=query, body=request.body if request.method == "POST" else b"",
                 content_type="application/json" if request.method == "POST" else None,
                 credential=operations.CredentialPlacement("header", "authorization", scheme="Bearer"),
+                headers=forwarded,
             )
             return outbound, self._policy.deepline_reserve_per_call_microusd, None
         raise LeadOrderBrokerError(404, "provider_not_allowed")
@@ -402,4 +424,4 @@ class LeadOrderBroker:
         return _json_response(503, "provider_keys_exhausted")
 
 
-__all__ = ["BrokerRequest", "LeadOrderBroker", "LeadOrderBrokerError"]
+__all__ = ["DEEPLINE_FORWARDED_HEADERS", "BrokerRequest", "LeadOrderBroker", "LeadOrderBrokerError"]

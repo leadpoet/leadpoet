@@ -158,6 +158,8 @@ async def broker(provider: str, path: str, request: Request) -> Response:
         response = b.call(token, support.BrokerRequest(
             provider=provider, method=request.method, path=path,
             query=dict(request.query_params), body=body, content_type=request.headers.get("content-type"),
+            headers={name: request.headers[name] for name in support.DEEPLINE_FORWARDED_HEADERS
+                     if name in request.headers},
         ))
         return Response(content=bytes(response.body), status_code=int(response.status),
                         media_type=response.headers.get("content-type"))

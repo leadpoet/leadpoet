@@ -12,7 +12,7 @@ from typing import Any, Tuple
 
 from lab_arena.chain import verify_hotkey_signature
 from lab_arena.lead_orders.auth import AuthError, verify_buyer_request, verify_runner
-from lab_arena.lead_orders.broker import BrokerRequest, LeadOrderBrokerError
+from lab_arena.lead_orders.broker import DEEPLINE_FORWARDED_HEADERS, BrokerRequest, LeadOrderBrokerError
 from lab_arena.lead_orders.config import LeadOrdersConfigError, load_config
 from lab_arena.lead_orders.service import LeadOrderServiceError
 
@@ -33,6 +33,7 @@ def build_state() -> Tuple[Any, Any, Any]:
 __all__ = [
     "AuthError",
     "BrokerRequest",
+    "DEEPLINE_FORWARDED_HEADERS",
     "LeadOrdersConfigError",
     "REQUEST_ERRORS",
     "build_state",

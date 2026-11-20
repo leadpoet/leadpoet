@@ -31,6 +31,9 @@ def test_real_worker_codex_response_keeps_host_capture_without_client_ack(monkey
             status, body = codex._dispatch(str(path), {"model": "openai/gpt-4o-mini", "input": "hi"})
         finally:
             server.stop()
+            # Receiving the frame can precede the handler's delivery receipt.
+            # Use the same bounded handler drain as worker finalization.
+            assert server.wait_for_handlers()
     assert status == 200 and body
     receipts = state.worker_observations.document()["response_receipts"]
     observations = state.worker_observations.document()["agent_observations"]

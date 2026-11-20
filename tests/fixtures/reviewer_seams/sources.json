@@ -171,5 +171,21 @@
         "sha256": "043a18a6c22a1b0e4e1ad7e9078bc1b9f4ce0fe001ad406a68f78f7945fd4c7e"
       }
     }
+  },
+  "evidence_consistency_repaired": {
+    "files": {
+      "qualification/scoring/lead_scorer.py": {
+        "fixture": "homepage_identity_conflict_396-lead_scorer.py.gz",
+        "sha256": "24f82207f0ff87e014be56024351e4e2ae87f1612c660591d76bfcafadd60feb"
+      },
+      "qualification/scoring/intent_verification_three_stage.py": {
+        "fixture": "homepage_identity_conflict_396-intent_verification_three_stage.py.gz",
+        "sha256": "043a18a6c22a1b0e4e1ad7e9078bc1b9f4ce0fe001ad406a68f78f7945fd4c7e"
+      },
+      "qualification/scoring/company_evidence_investigator.py": {
+        "fixture": "evidence_consistency_repaired_company.py.gz",
+        "sha256": "823dffe1fde7ef61d66f2847dca249660ecc3446ebd23246d68f5390f608cc1a"
+      }
+    }
   }
 }

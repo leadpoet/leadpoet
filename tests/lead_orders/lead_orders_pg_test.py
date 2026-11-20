@@ -151,6 +151,10 @@ def deepline_ok(credits):
                             json.dumps({"billing": {"credits_charged": credits}}).encode())
 
 
+def deepline(operation="harvestapi_get_job", body=b"{}"):
+    return BrokerRequest("deepline", "POST", "api/v2/integrations/%s/execute" % operation, {}, body, "application/json")
+
+
 def chat(max_tokens=100):
     return BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
                          json.dumps({"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
@@ -168,10 +172,10 @@ def make(store, mode, *, staff=(), gamma=None, registrar=None, epoch=None):
     return config, service, epoch
 
 
-def broker_for(store, transport, *, use_miner_keys=False, registrar=None, epoch=None):
+def broker_for(store, transport, *, registrar=None, epoch=None):
     return LeadOrderBroker(
         store=store, policy=POLICY, transport=transport, registrar=registrar,
-        leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET}, use_miner_keys=use_miner_keys,
+        leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
         price_table=lambda: PRICE_TABLE, current_epoch=epoch or Epoch(),
     )
 
@@ -193,7 +197,7 @@ def test_tables_are_append_only_rls_on_and_not_granted(owner, store):
         cur.execute("""SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                        WHERE n.nspname='public' AND c.relkind='r' AND c.relname LIKE 'lead_order%'""")
         tables = dict(cur.fetchall())
-        assert len(tables) == 17 and all(tables.values())
+        assert len(tables) == 18 and all(tables.values())
         for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
             cur.execute("""SELECT count(*) FROM information_schema.role_table_grants
                            WHERE grantee=%s AND table_name LIKE 'lead_order%%'""", (role,))
@@ -257,7 +261,7 @@ def test_staff_order_worked_example_charges_ten_leads_and_signs_receipt(store):
     assert sent["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert sent["headers"]["authorization"] == "Bearer " + SECRET
     assert json.loads(sent["body"])["usage"] == {"include": True}
-    assert broker.call(token, BrokerRequest("deepline", "POST", "api/v2/integrations/x/execute", {}, b"{}", None)).status == 200
+    assert broker.call(token, deepline()).status == 200
 
     assert service.heartbeat(order_id)["spent_usd"] == "1.00"
     done = service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://files.example/o.csv"})
@@ -307,13 +311,13 @@ def test_ceiling_refuses_the_next_call_with_402_and_uncertain_cost_counts(store)
     no_billing = ProviderResponse(200, {"content-type": "application/json"}, b"{}")
     transport = FakeTransport([no_billing] * 10)
     broker = broker_for(store, transport, epoch=epoch)
-    request = BrokerRequest("deepline", "GET", "api/v2/jobs/abc", {"page": "1"}, b"", None)
+    request = deepline("harvestapi_search_jobs")
     for _ in range(10):
         assert broker.call(token, request).status == 200
     refused = broker.call(token, request)
     assert refused.status == 402 and json.loads(refused.body) == {"error": "spend_ceiling"}
     assert len(transport.sent) == 10  # the refused call was never sent
-    assert transport.sent[0]["url"] == "https://code.deepline.com/api/v2/jobs/abc?page=1"
+    assert transport.sent[0]["url"] == "https://code.deepline.com/api/v2/integrations/harvestapi_search_jobs/execute"
     calls = store.calls(order["order_id"])
     assert len(calls) == 10 and {c["status"] for c in calls} == {"uncertain"}
     assert store.by_token(order_token_hash(token))["committed_microusd"] == 5 * USD
@@ -330,17 +334,38 @@ def test_transport_failure_settles_uncertain_and_routes_are_closed(store):
     broker = broker_for(store, FakeTransport([ProviderTransportError("down")]), epoch=epoch)
     assert broker.call(token, chat()).status == 502
     assert [c["status"] for c in store.calls(order["order_id"])] == ["uncertain"]
+    def body(**extra):
+        return json.dumps(dict({"model": MODEL, "messages": [{"role": "user", "content": "hi"}]}, **extra)).encode()
+
+    def chat_with(**extra):
+        return BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {}, body(**extra), None)
+
     for request, code in (
         (BrokerRequest("openrouter", "POST", "api/v1/models", {}, b"{}", None), "route_not_allowed"),
         (BrokerRequest("deepline", "GET", "api/v2/billing/balance", {}, b"", None), "route_not_allowed"),
-        (BrokerRequest("deepline", "GET", "api/v2/x", {"api_key": "s"}, b"", None), "credential_in_query"),
+        (BrokerRequest("deepline", "GET", "api/v2/jobs/abc", {}, b"", None), "route_not_allowed"),
+        (deepline("monitors_create"), "operation_not_allowed"),
+        (BrokerRequest("deepline", "POST", "api/v2/integrations/harvestapi_get_job/execute", {"api_key": "s"}, b"{}", None),
+         "query_not_allowed"),
         (BrokerRequest("scrapingdog", "GET", "x", {}, b"", None), "provider_not_allowed"),
         (BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
                        json.dumps({"model": "other/model", "messages": []}).encode(), None), "model_not_allowed"),
+        # Cost the reservation does not price is refused before anything is sent.
+        (chat_with(models=[MODEL, "other/model"]), "field_not_allowed:models"),
+        (chat_with(plugins=[{"id": "web"}]), "field_not_allowed:plugins"),
+        (chat_with(provider={"order": ["x"]}), "field_not_allowed:provider"),
+        (chat_with(reasoning={"max_tokens": 9999}), "field_not_allowed:reasoning"),
+        (chat_with(tools=[{"type": "openrouter:web_search"}]), "tool_not_allowed"),
+        (BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
+                       json.dumps({"model": MODEL + ":online", "messages": []}).encode(), None), "model_variant_not_allowed"),
+        (BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
+                       json.dumps({"model": MODEL, "messages": [{"role": "user", "content": [
+                           {"type": "file", "file": {"filename": "a.pdf"}}]}]}).encode(), None), "content_not_allowed"),
     ):
         with pytest.raises(LeadOrderBrokerError) as refused:
             broker.call(token, request)
-        assert refused.value.code == code
+        assert refused.value.code == code and refused.value.status in (400, 404)
+    assert len(store.calls(order["order_id"])) == 1  # no refused request reserved or sent anything
     with pytest.raises(LeadOrderBrokerError) as bad:
         broker.call("not-a-token", chat())
     assert bad.value.code == "order_token_invalid"
@@ -354,7 +379,7 @@ def test_overdue_orders_expire_as_failed_at_the_next_claim(store, owner):
     token, order_id = claim(service)
     with owner.cursor() as cur:  # simulate time passing past deadline and grace
         cur.execute("ALTER TABLE lead_order_claims DISABLE TRIGGER lead_order_claims_append_only")
-        cur.execute("UPDATE lead_order_claims SET deadline=now()-interval '2 minutes' WHERE order_id=%s", (order["order_id"],))
+        cur.execute("UPDATE lead_order_claims SET deadline=now()-interval '6 minutes' WHERE order_id=%s", (order["order_id"],))
         cur.execute("ALTER TABLE lead_order_claims ENABLE TRIGGER lead_order_claims_append_only")
     with pytest.raises(LeadOrderBrokerError) as late:
         broker_for(store, FakeTransport([]), epoch=epoch).call(token, chat())
@@ -413,9 +438,9 @@ def test_live_orders_need_confirmed_buyer_gamma_and_balance(store, owner):
     service.finish(order_id, {"status": "delivered", "leads_delivered": 3, "delivery_url": "https://f.example/x"})
     assert store.balance(buyer)["balance_microusd"] == 3 * USD - 600_000
     gamma.units[buyer] = 2 * 10**9  # the counter going backwards is refused
-    with pytest.raises(ArenaStoreError):
-        store.record_gamma_reading(hotkey=buyer, block_number=gamma.block + 5, block_hash="0x" + "1" * 64,
-                                   spent_units=1, available=True)
+    with pytest.raises(LeadOrderServiceError) as backwards:
+        service.balance(buyer)
+    assert backwards.value.status == 422 and backwards.value.code == "gamma_counter_backwards"
     assert first["mode"] == "live"
 
 
@@ -439,7 +464,7 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     spent = ProviderResponse(402, {"content-type": "application/json"},
                              json.dumps({"error": {"code": 402, "message": "Insufficient credits"}}).encode())
     transport = FakeTransport([spent, openrouter_ok("0.800000"), openrouter_ok("0.200000")])
-    broker = broker_for(store, transport, use_miner_keys=True, registrar=registrar, epoch=epoch)
+    broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
     assert broker.call(token, chat()).status == 200
     # First key is A (registered first, no spend yet); its 402 moves the
     # order to B; B serves the rest of the order.
@@ -458,7 +483,7 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     order2 = service.place_order(staff, {"leads": 10, **ORDER})
     token2, order_id2 = claim(service)
     transport2 = FakeTransport([openrouter_ok("0.010000")])
-    broker_for(store, transport2, use_miner_keys=True, registrar=registrar, epoch=epoch).call(token2, chat())
+    broker_for(store, transport2, registrar=registrar, epoch=epoch).call(token2, chat())
     assert transport2.sent[0]["headers"]["authorization"].endswith("b")
     service.finish(order_id2, {"status": "failed"})
 
@@ -468,13 +493,49 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     assert doc["mode"] == "shadow" and doc["emission_price_available"] is False and doc["payments"] == []
     assert doc["owed_microusd"] >= 1_250_000
     assert service.public_epoch(2000)["payout_hash"] == doc["payout_hash"]
-    assert all(row["paid_microusd"] == 0 for row in store.owed(through_epoch=2000))
+    shadow_owed = store.owed(through_epoch=2000, mode="shadow")
+    assert any(row["order_id"] == order["order_id"] for row in shadow_owed)
+    assert all(row["paid_microusd"] == 0 for row in shadow_owed)
+    # Live never sees, and so never pays, a shadow order's reward.
+    assert not [row for row in store.owed(through_epoch=10**9, mode="live") if row["order_id"] == order["order_id"]]
+    with pytest.raises(ArenaStoreError, match="only live"):
+        store.record_payout(epoch=4_000_000, mode="live", document={"payout_hash": "sha256:" + "c" * 64},
+                            payments=[{"order_id": order["order_id"], "miner_hotkey": miner_b, "paid_microusd": 1}])
     assert order2["status"] == "queued"
 
 
-def test_live_payout_pays_oldest_first_under_cap_and_never_overpays(store):
-    entries = [row for row in store.owed(through_epoch=10**9)]
-    assert entries, "earlier tests leave owed rewards"
+def revoke_all_keys(store):
+    for provider in ("openrouter", "deepline"):
+        for row in store.keys(provider):
+            store.revoke_key(row["key_id"], reason="test reset")
+
+
+def live_order_with_miner_reward(store, owner, *, epoch_value=3000):
+    """A finished live order whose spend went through a miner's key."""
+    revoke_all_keys(store)
+    gamma, buyer, miner = FakeGamma(), hotkey(), hotkey()
+    registrar = FakeRegistrar({})
+    _, service, epoch = make(store, "live", gamma=gamma, registrar=registrar, epoch=Epoch(epoch_value))
+    with pytest.raises(LeadOrderServiceError):
+        service.register_buyer(buyer, {"email": "b@acme.io", "company": "Acme", "country": "US", "terms_version": "t1"})
+    confirm(owner, buyer)
+    gamma.units[buyer] = 10 * 10**9
+    key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    registrar.secrets = {key["key_id"]: "m" * 40}
+    order = service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    transport = FakeTransport([openrouter_ok("0.400000")])
+    broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
+    assert transport.sent[0]["headers"]["authorization"] == "Bearer " + "m" * 40
+    service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
+    revoke_all_keys(store)
+    return order, miner
+
+
+def test_live_payout_pays_oldest_first_under_cap_and_never_overpays(store, owner):
+    order, miner = live_order_with_miner_reward(store, owner)
+    entries = [row for row in store.owed(through_epoch=10**9, mode="live") if row["order_id"] == order["order_id"]]
+    assert entries == [dict(entries[0], miner_hotkey=miner, owed_microusd=500_000)]
     epoch = 5_000_000
     payments = [{"order_id": entries[0]["order_id"], "miner_hotkey": entries[0]["miner_hotkey"],
                  "paid_microusd": entries[0]["owed_microusd"] + 1}]
@@ -484,7 +545,7 @@ def test_live_payout_pays_oldest_first_under_cap_and_never_overpays(store):
     payments[0]["paid_microusd"] = 1
     assert store.record_payout(epoch=epoch, mode="live", document=doc, payments=payments)["status"] == "recorded"
     assert store.record_payout(epoch=epoch, mode="live", document=doc, payments=payments)["status"] == "exists"
-    paid = [r for r in store.owed(through_epoch=10**9) if r["order_id"] == entries[0]["order_id"]
+    paid = [r for r in store.owed(through_epoch=10**9, mode="live") if r["order_id"] == entries[0]["order_id"]
             and r["miner_hotkey"] == entries[0]["miner_hotkey"]]
     assert paid[0]["paid_microusd"] == 1
 
@@ -506,3 +567,160 @@ def test_sql_charge_matches_money_module_for_many_cases(store):
                                         "delivery_url": "https://f.example/x"})
         assert result["charge_microusd"] == money.charge_microusd(
             POLICY, hold_microusd=leads * 200_000, delivered=delivered, spend_microusd=cost)
+
+
+# -- review fixes: policy version, per-order keys, open calls, reconcile ----------
+
+
+def test_rewards_and_receipt_use_the_orders_policy_version_not_the_current_one(store):
+    # v1: ratio 0.40, premium 0.25. v2 raises the premium to 0.45. An order
+    # placed under v1 and settled after the switch must still pay x1.25.
+    revoke_all_keys(store)
+    staff, miner = hotkey(), hotkey()
+    registrar = FakeRegistrar({})
+    epoch = Epoch(6000)
+    _, service_v1, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    key = service_v1.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    registrar.secrets = {key["key_id"]: "v" * 40}
+    order = service_v1.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service_v1)
+    broker_for(store, FakeTransport([openrouter_ok("0.400000")]), registrar=registrar, epoch=epoch).call(token, chat())
+
+    v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=2, price_per_lead_usd="0.30",
+                                      min_charge_ratio="0.60", miner_premium="0.45"))
+    v2 = load_policy(v2_doc, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
+    config = LeadOrdersConfig(mode="shadow", staff_hotkeys=frozenset([staff]), runner_secret="r" * 40,
+                              policy_path="/x", terms_version="t1", public_base_url="https://gw.example")
+    service_v2 = LeadOrderService(config=config, policy=v2, policy_document=v2_doc, store=store, signer=SIGNER,
+                                  current_epoch=epoch, registrar=registrar)
+    service_v2.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
+    receipt = service_v2.public_receipt(order["order_id"])["receipt"]
+    assert receipt["rewards_microusd"] == {miner: 500_000}  # $0.40 x 1.25, not x 1.45
+    assert receipt["policy_version"] == 1 and receipt["policy_hash"] == POLICY.policy_hash
+    assert receipt["charge_microusd"] == 2 * USD  # v1 price, from the order's stored terms
+    revoke_all_keys(store)
+
+
+def test_staff_order_spends_only_leadpoet_keys_after_the_gateway_moves_to_shadow(store):
+    revoke_all_keys(store)
+    staff, miner = hotkey(), hotkey()
+    registrar = FakeRegistrar({})
+    _, staff_service, epoch = make(store, "staff", staff=[staff])
+    staff_service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(staff_service)
+    # The gateway switches to shadow mid-order and a miner key is registered.
+    _, shadow_service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    key = shadow_service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    registrar.secrets = {key["key_id"]: "z" * 40}
+    transport = FakeTransport([openrouter_ok("0.100000")])
+    broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
+    assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET  # Leadpoet's key
+    assert {c["miner_hotkey"] for c in store.calls(order_id)} == {None}
+    shadow_service.finish(order_id, {"status": "failed"})
+    revoke_all_keys(store)
+
+
+def test_open_calls_settle_uncertain_at_finish_and_late_answers_never_change_the_receipt(store):
+    staff = hotkey()
+    _, service, epoch = make(store, "staff", staff=[staff])
+    order = service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    broker_for(store, FakeTransport([openrouter_ok("0.100000")]), epoch=epoch).call(token, chat())
+    leadpoet = ProviderKey(key_id="leadpoet-openrouter", provider="openrouter", miner_hotkey=None,
+                           registered_sequence=0, internal_fingerprint="sha256:" + "e" * 64)
+    in_flight = str(uuid.uuid4())  # reserved, provider has not answered yet
+    assert store.reserve_call(call_id=in_flight, order_id=order_id, provider="openrouter", key_id=leadpoet.key_id,
+                              miner_hotkey=None, public_fingerprint=leadpoet.public_fingerprint,
+                              reserve_microusd=300_000)["status"] == "reserved"
+    with pytest.raises(LeadOrderServiceError) as too_many:
+        service.finish(order_id, {"status": "delivered", "leads_delivered": 11, "delivery_url": "https://f.example/x"})
+    assert too_many.value.status == 422 and too_many.value.code == "leads_delivered_invalid"
+
+    done = service.finish(order_id, {"status": "delivered", "leads_delivered": 1, "delivery_url": "https://f.example/x"})
+    assert done["charge_microusd"] == 200_000  # 1 lead; the open call is never charged
+    statuses = {c["call_id"]: c["status"] for c in store.calls(order_id)}
+    assert statuses[in_flight] == "uncertain" and "open" not in statuses.values()
+    public = service.public_receipt(order["order_id"])
+
+    # The provider answers after the finish: kept aside, nothing published moves.
+    assert store.settle_call(call_id=in_flight, cost_microusd=250_000, http_status=200, epoch=epoch())["status"] == "late"
+    assert {c["call_id"]: c["status"] for c in store.calls(order_id)} == statuses
+    assert service.public_receipt(order["order_id"]) == public
+    receipts.verify_receipt(public["receipt"], calls=public["calls"], public_key_der=SIGNER.public_key_der,
+                            expected_public_key_hash=SIGNER.public_key_hash)
+    assert store.reserve_call(call_id=str(uuid.uuid4()), order_id=order_id, provider="openrouter",
+                              key_id=leadpoet.key_id, miner_hotkey=None, public_fingerprint=leadpoet.public_fingerprint,
+                              reserve_microusd=1)["status"] == "closed"
+
+
+class BrokenSigner(signing.ArenaSigner):
+    def __init__(self, public_key_der):
+        self.public_key_der = public_key_der
+
+    def sign(self, message):
+        raise RuntimeError("kms unavailable")
+
+
+def test_reconcile_settles_a_finished_order_whose_receipt_failed(store):
+    staff = hotkey()
+    config, healthy, epoch = make(store, "staff", staff=[staff])
+    broken = LeadOrderService(config=config, policy=POLICY, policy_document=POLICY_DOC, store=store,
+                              signer=BrokenSigner(public_key_der=SIGNER.public_key_der), current_epoch=epoch)
+    order = broken.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(broken)
+    with pytest.raises(RuntimeError):
+        broken.finish(order_id, {"status": "failed"})
+    assert store.view(order_id)["status"] == "failed" and not store.view(order_id)["receipt"]
+    assert order_id in store.unsettled(limit=500)
+    assert healthy.claim() is None  # the next claim pass reconciles
+    receipt = healthy.public_receipt(order["order_id"])["receipt"]
+    assert receipt["status"] == "failed" and order_id not in store.unsettled(limit=500)
+    assert healthy.reconcile() == []  # idempotent
+
+
+def test_claim_race_takes_the_next_order_instead_of_failing(store, database):
+    import threading
+    import time as _time
+
+    staff = hotkey()
+    _, service, _ = make(store, "staff", staff=[staff])
+    first = service.place_order(staff, {"leads": 10, **ORDER})["order_id"]
+    second = service.place_order(staff, {"leads": 10, **ORDER})["order_id"]
+    psycopg2, dsn = database
+    rival = psycopg2.connect(**dsn)  # another claimer, mid-transaction on the first order
+    try:
+        with rival.cursor() as cur:
+            cur.execute("INSERT INTO lead_order_claims(order_id,token_hash,deadline) VALUES(%s,%s,now()+interval '1 hour')",
+                        (first, order_token_hash("rival")))
+        result = {}
+
+        def claim_now():
+            try:
+                result["claimed"] = service.claim()
+            except Exception as exc:  # pragma: no cover - the failure this test guards
+                result["error"] = exc
+
+        worker = threading.Thread(target=claim_now)
+        worker.start()
+        _time.sleep(0.5)  # the worker is now waiting on the rival's claim row
+        rival.commit()
+        worker.join(10)
+    finally:
+        rival.close()
+    assert "error" not in result and result["claimed"]["order_id"] == second
+    service.finish(first, {"status": "failed"})
+    service.finish(second, {"status": "failed"})
+
+
+def test_order_retry_with_the_same_id_and_a_different_body_is_409(store):
+    staff = hotkey()
+    _, service, _ = make(store, "staff", staff=[staff])
+    order_id = str(uuid.uuid4())
+    placed = service.place_order(staff, {"order_id": order_id, "leads": 10, **ORDER})
+    assert service.place_order(staff, {"order_id": order_id, "leads": 10, **ORDER})["order_id"] == placed["order_id"]
+    for changed in ({"leads": 12, **ORDER}, {"leads": 10, "seller": ORDER["seller"], "search": {"signal": "funding"}}):
+        with pytest.raises(LeadOrderServiceError) as taken:
+            service.place_order(staff, dict(changed, order_id=order_id))
+        assert taken.value.status == 409 and taken.value.code == "order_id_taken"
+    token, claimed = claim(service)
+    service.finish(claimed, {"status": "failed"})

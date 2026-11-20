@@ -101,7 +101,8 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
                          ("GET", "/lead-orders/" + "0" * 8),
                          ("POST", "/internal/lead-orders/claim"), ("POST", "/internal/lead-orders/x/heartbeat"),
                          ("POST", "/internal/lead-orders/x/finish"), ("GET", "/lead-orders/receipts/x"),
-                         ("GET", "/lead-orders/buyers/confirm?token=t"),
+                         ("GET", "/lead-orders/buyers/confirm?token=t"), ("GET", "/lead-orders/epochs/abc"),
+                         ("GET", "/lead-orders/epochs/12"),
                          ("POST", "/lead-orders/broker/openrouter/api/v1/chat/completions")):
         response = client.request(method, path)
         assert response.status_code == 404 and response.json() == {"detail": "Not Found"}

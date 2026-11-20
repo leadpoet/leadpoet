@@ -116,7 +116,9 @@ def test_max_completion_tokens_is_clamped_like_max_tokens_and_reasoning_stays_in
 
 def test_privacy_preferences_are_forced_and_cannot_be_weakened():
     sent, _, _ = prepared(dict(GEMINI_READ, provider={"require_parameters": True}))
-    assert sent["provider"] == {"require_parameters": True, "data_collection": "deny", "zdr": True}
+    # max_price is always sent: the dearest listed price fills what the runner left out.
+    assert sent["provider"] == {"require_parameters": True, "data_collection": "deny", "zdr": True,
+                                "max_price": {"prompt": 0.75, "completion": 3.75, "request": 0.0}}
     for weak in ({"data_collection": "allow"}, {"zdr": False}):
         with pytest.raises(LeadOrderBrokerError) as refused:
             prepared(dict(GEMINI_READ, provider=weak))

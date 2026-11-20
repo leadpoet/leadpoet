@@ -188,6 +188,8 @@ class OwedEntry:
     settled_sequence: int
     owed_microusd: int
     paid_microusd: int = 0
+    # A late repayment for one call; None for an order's own reward.
+    call_id: Optional[str] = None
 
     @property
     def remaining_microusd(self) -> int:
@@ -198,7 +200,7 @@ class OwedEntry:
 class EpochPayout:
     epoch: int
     cap_microusd: int
-    payments: Tuple[Tuple[str, str, int], ...]  # (order_id, miner_hotkey, amount)
+    payments: Tuple[Tuple[str, str, int, Optional[str]], ...]  # (order_id, miner_hotkey, amount, call_id)
     paid_by_hotkey: Mapping[str, int]
     paid_microusd: int
     carry_forward_microusd: int
@@ -223,7 +225,7 @@ def epoch_payout(epoch: int, entries: Sequence[OwedEntry], *, cap_microusd: int)
     seen = set()
     payable: List[OwedEntry] = []
     for entry in entries:
-        key = (entry.order_id, entry.miner_hotkey)
+        key = (entry.order_id, entry.miner_hotkey, entry.call_id)
         if key in seen:
             raise MoneyError("duplicate owed entry")
         seen.add(key)
@@ -233,9 +235,9 @@ def epoch_payout(epoch: int, entries: Sequence[OwedEntry], *, cap_microusd: int)
             raise MoneyError("an entry was paid more than it was owed")
         if entry.settled_epoch <= epoch and entry.remaining_microusd > 0:
             payable.append(entry)
-    payable.sort(key=lambda e: (e.settled_epoch, e.settled_sequence, e.order_id, e.miner_hotkey))
+    payable.sort(key=lambda e: (e.settled_epoch, e.settled_sequence, e.order_id, e.miner_hotkey, e.call_id or ""))
     left = cap
-    payments: List[Tuple[str, str, int]] = []
+    payments: List[Tuple[str, str, int, Optional[str]]] = []
     by_hotkey: Dict[str, int] = {}
     owed_total = 0
     for entry in payable:
@@ -244,7 +246,7 @@ def epoch_payout(epoch: int, entries: Sequence[OwedEntry], *, cap_microusd: int)
         if amount <= 0:
             continue
         left -= amount
-        payments.append((entry.order_id, entry.miner_hotkey, amount))
+        payments.append((entry.order_id, entry.miner_hotkey, amount, entry.call_id))
         by_hotkey[entry.miner_hotkey] = by_hotkey.get(entry.miner_hotkey, 0) + amount
     paid = cap - left
     return EpochPayout(

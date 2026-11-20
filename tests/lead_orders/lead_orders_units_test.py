@@ -196,9 +196,9 @@ def test_buyer_signature_window_and_replay():
     used = set()
     nonce = lambda h, s, t: (h, s) not in used and not used.add((h, s))
     body = b'{"leads":10}'
-    message = auth.signed_message("POST", "/lead-orders", "1000", body)
+    message = auth.signed_message("POST", "gw.example", "/lead-orders", "1000", body)
     signature = "0x" + pair.sign(message.encode()).hex()
-    kwargs = dict(method="POST", path="/lead-orders", body=body, hotkey=ALICE, timestamp="1000",
+    kwargs = dict(method="POST", host="gw.example", path="/lead-orders", body=body, hotkey=ALICE, timestamp="1000",
                   signature=signature, verifier=wallet_signature_verifier, use_nonce=nonce, now=lambda: 1030)
     assert auth.verify_buyer_request(**kwargs).hotkey == ALICE
     with pytest.raises(auth.AuthError, match="signature_replayed"):
@@ -206,6 +206,8 @@ def test_buyer_signature_window_and_replay():
     for change, code in (({"now": lambda: 1061}, "timestamp_outside_window"),
                          ({"body": b'{"leads":11}'}, "signature_invalid"),
                          ({"path": "/lead-orders/keys"}, "signature_invalid"),
+                         ({"host": "other.example"}, "signature_invalid"),
+                         ({"host": ""}, "host_unconfigured"),
                          ({"hotkey": BOB}, "signature_invalid"),
                          ({"signature": "zz"}, "signature_invalid"),
                          ({"timestamp": "abc"}, "timestamp_invalid"),

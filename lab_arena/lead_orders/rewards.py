@@ -1,8 +1,11 @@
 """Per-order miner rewards and per-epoch lane payouts.
 
-* When an order finishes, ``order_rewards`` computes what each miner earned
-  from its settled calls (``money.order_miner_rewards``) and the store keeps
-  it once.
+* When a live order finishes, ``order_rewards`` computes what each miner
+  earned from its settled calls (``money.order_miner_rewards``, each call's
+  cost capped at its reservation) and the store keeps it once. A cost that
+  becomes known later (a late answer or a generation read-back) is owed as a
+  separate late reward per call (``lead_order_reward_late_v1``). Shadow
+  orders run on Leadpoet's keys and publish ``what_if_reward`` only.
 * Each epoch, ``epoch_payout_document`` pays owed USD oldest first under the
   lane cap and carries the rest forward. In shadow mode the document is
   published only and nothing is recorded as paid; in live mode the payments
@@ -44,15 +47,33 @@ class UnavailableEmissionPrice:
         raise EmissionPriceUnavailable("no emission USD price source is configured")
 
 
-def order_rewards(policy: LeadOrderPolicy, *, order: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
-    """USD owed per miner for one finished order, from its settled calls."""
+def _rewardable_calls(calls: Sequence[Mapping[str, Any]]) -> List[tuple]:
+    """(miner hotkey, rewardable cost) per settled call. A cost above the
+    call's reservation is recorded and charged, but rewards stop at the
+    reservation: the excess is shown in the miner's statement."""
 
-    settled = [
-        (row.get("miner_hotkey"), int(row["cost_microusd"]))
+    return [
+        (row.get("miner_hotkey"), min(int(row["cost_microusd"]), int(row["reserved_microusd"])))
         for row in calls
         if row.get("status") == "settled" and row.get("cost_microusd") is not None
     ]
-    return money.order_miner_rewards(policy, settled, ceiling_microusd=int(order["spend_ceiling_microusd"]))
+
+
+def order_rewards(policy: LeadOrderPolicy, *, order: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    """USD owed per miner for one finished order, from its settled calls."""
+
+    return money.order_miner_rewards(policy, _rewardable_calls(calls),
+                                     ceiling_microusd=int(order["spend_ceiling_microusd"]))
+
+
+def what_if_reward(policy: LeadOrderPolicy, *, order: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]) -> int:
+    """Shadow: what miners would have earned had their keys paid every call."""
+
+    spend = money.rewardable_spend_by_hotkey(
+        [("what-if", cost) for _, cost in _rewardable_calls(calls)],
+        ceiling_microusd=int(order["spend_ceiling_microusd"]),
+    ).get("what-if", 0)
+    return money.miner_reward_microusd(policy, spend)
 
 
 def owed_entries(rows: Sequence[Mapping[str, Any]]) -> List[money.OwedEntry]:
@@ -61,6 +82,7 @@ def owed_entries(rows: Sequence[Mapping[str, Any]]) -> List[money.OwedEntry]:
             order_id=str(row["order_id"]), miner_hotkey=str(row["miner_hotkey"]),
             settled_epoch=int(row["settled_epoch"]), settled_sequence=int(row["settled_sequence"]),
             owed_microusd=int(row["owed_microusd"]), paid_microusd=int(row["paid_microusd"]),
+            call_id=None if row.get("call_id") is None else str(row["call_id"]),
         )
         for row in rows
     ]
@@ -106,8 +128,9 @@ def epoch_payout_document(
         "cap_microusd": cap, "paid_microusd": payout.paid_microusd, "owed_microusd": owed_total,
         "carry_forward_microusd": payout.carry_forward_microusd,
         "payments": [
-            {"order_id": order_id, "miner_hotkey": hotkey, "paid_microusd": amount}
-            for order_id, hotkey, amount in payout.payments
+            # call_id names a late repayment (one call), None an order's reward.
+            {"order_id": order_id, "miner_hotkey": hotkey, "paid_microusd": amount, "call_id": call_id}
+            for order_id, hotkey, amount, call_id in payout.payments
         ],
         # Exact rationals as strings so every validator derives the same vector.
         "weight_fractions": {k: "%d/%d" % (v.numerator, v.denominator) for k, v in sorted(fractions.items())},
@@ -137,4 +160,5 @@ __all__ = [
     "order_rewards",
     "owed_entries",
     "sign_payout",
+    "what_if_reward",
 ]

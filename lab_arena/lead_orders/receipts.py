@@ -89,6 +89,7 @@ def build_receipt(
     calls: Sequence[Mapping[str, Any]],
     rewards: Mapping[str, int],
     policy_hash: str,
+    what_if_rewards_microusd: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Receipt body plus its hash, from the stored order view and call rows."""
 
@@ -115,6 +116,9 @@ def build_receipt(
         "calls_merkle_root": merkle_root(leaves),
         "rewards_microusd": {k: int(v) for k, v in sorted(rewards.items())},
     }
+    if what_if_rewards_microusd is not None:
+        # Shadow orders only: what miners would have earned; nothing is owed.
+        body["what_if_rewards_microusd"] = int(what_if_rewards_microusd)
     return dict(body, **{RECEIPT_HASH_FIELD: document_hash(body)})
 
 

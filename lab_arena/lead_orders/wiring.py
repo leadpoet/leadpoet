@@ -89,14 +89,15 @@ def build_from_environment(environ: Optional[Mapping[str, str]] = None):
     if config.uses_miner_keys:
         manager = CredentialManager(kms_key_id=_required("LAB_ARENA_CREDENTIAL_KMS_KEY_ID", env))
         registrar = lead_keys.MinerKeyRegistrar(manager)
-    service = LeadOrderService(
-        config=config, policy=policy, policy_document=document, store=store, signer=signer,
-        current_epoch=current_epoch, gamma_reader=gamma_reader, registrar=registrar,
-    )
     broker = LeadOrderBroker(
         store=store, policy=policy, transport=HttpxProviderTransport(), registrar=registrar,
         leadpoet_secrets={"openrouter": config.leadpoet_openrouter_key, "deepline": config.leadpoet_deepline_key},
         price_table=_CachedPriceTable(), current_epoch=current_epoch,
+    )
+    service = LeadOrderService(
+        config=config, policy=policy, policy_document=document, store=store, signer=signer,
+        current_epoch=current_epoch, gamma_reader=gamma_reader, registrar=registrar,
+        resolver=broker.resolve_uncertain,
     )
     return config, service, broker
 

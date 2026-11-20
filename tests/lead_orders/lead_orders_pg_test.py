@@ -34,12 +34,14 @@ MIGRATIONS = ("179-lab-arena-v1.sql", "703-lead-orders.sql")
 USD = 1_000_000
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 MODEL = "openai/gpt-test"
+DEAR = "openai/gpt-dear"  # 10,000 output tokens reserve $1.00: room for the costs the reward tests report
 SECRET = "x" * 40
 SIGNER = signing.LocalSigner.generate()
 POLICY_DOC = sign_policy(SIGNER, DEFAULT_POLICY_BODY)
 POLICY = load_policy(POLICY_DOC, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
 PRICE_TABLE = price_table_from_models_response(
-    {"data": [{"id": MODEL, "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]},
+    {"data": [{"id": MODEL, "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+              {"id": DEAR, "pricing": {"prompt": "0.000001", "completion": "0.000100"}}]},
     fetched_at="2026-11-19T00:00:00Z",
 )
 
@@ -156,10 +158,16 @@ def deepline(operation="harvestapi_get_job", body=b"{}"):
     return BrokerRequest("deepline", "POST", "api/v2/integrations/%s/execute" % operation, {}, body, "application/json")
 
 
-def chat(max_tokens=100):
+def chat(max_tokens=100, model=MODEL):
     return BrokerRequest("openrouter", "POST", "api/v1/chat/completions", {},
-                         json.dumps({"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+                         json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}],
                                      "max_tokens": max_tokens}).encode(), "application/json")
+
+
+def dear_chat():
+    """A call whose reservation ($1.00 and a little prompt) covers the costs
+    the reward tests report; rewards stop at the reservation."""
+    return chat(max_tokens=10_000, model=DEAR)
 
 
 def make(store, mode, *, staff=(), gamma=None, registrar=None, epoch=None):
@@ -198,7 +206,7 @@ def test_tables_are_append_only_rls_on_and_not_granted(owner, store):
         cur.execute("""SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                        WHERE n.nspname='public' AND c.relkind='r' AND c.relname LIKE 'lead_order%'""")
         tables = dict(cur.fetchall())
-        assert len(tables) == 20 and all(tables.values())
+        assert len(tables) == 23 and all(tables.values())
         for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
             cur.execute("""SELECT count(*) FROM information_schema.role_table_grants
                            WHERE grantee=%s AND table_name LIKE 'lead_order%%'""", (role,))
@@ -448,31 +456,29 @@ def test_live_orders_need_confirmed_buyer_gamma_and_balance(store, owner):
 # -- shadow mode: miner keys, failover, rewards, payouts ------------------------
 
 
-def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
-    staff, miner_a, miner_b = hotkey(), hotkey(), hotkey()
-    registrar = FakeRegistrar({})
-    epoch = Epoch(2000)
-    config, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+def test_live_ranks_miner_keys_fails_over_and_owes_rewards(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=2000)
+    miner_a, miner_b = hotkey(), hotkey()
     accept_terms(service, miner_a)
     accept_terms(service, miner_b)
-    key_a = service.register_key(miner_a, {"provider": "openrouter", "credentials": {}})
-    key_b = service.register_key(miner_b, {"provider": "openrouter", "credentials": {}})
+    key_a = service.register_key(miner_a, KEY)
+    key_b = service.register_key(miner_b, KEY)
     with pytest.raises(LeadOrderServiceError) as twice:
-        service.register_key(miner_a, {"provider": "openrouter", "credentials": {}})
+        service.register_key(miner_a, KEY)
     assert twice.value.code == "active_key_exists"
     registrar.secrets = {key_a["key_id"]: "a" * 40, key_b["key_id"]: "b" * 40}
 
-    order = service.place_order(staff, {"leads": 10, **ORDER})
+    order = service.place_order(buyer, {"leads": 10, **ORDER})
     token, order_id = claim(service)
     spent = ProviderResponse(402, {"content-type": "application/json"},
                              json.dumps({"error": {"code": 402, "message": "Insufficient credits"}}).encode())
     transport = FakeTransport([spent, openrouter_ok("0.800000"), openrouter_ok("0.200000")])
     broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
-    assert broker.call(token, chat()).status == 200
+    assert broker.call(token, dear_chat()).status == 200
     # First key is A (registered first, no spend yet); its 402 moves the
     # order to B; B serves the rest of the order.
     assert [s["headers"]["authorization"][-1] for s in transport.sent] == ["a", "b"]
-    assert broker.call(token, chat()).status == 200
+    assert broker.call(token, dear_chat()).status == 200
     assert transport.sent[-1]["headers"]["authorization"].endswith("b")
     calls = store.calls(order["order_id"])
     assert [c["cost_microusd"] for c in calls] == [0, 800_000, 200_000]
@@ -480,31 +486,47 @@ def test_shadow_ranks_miner_keys_fails_over_and_owes_rewards(store):
     service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
     receipt = service.public_receipt(order["order_id"])["receipt"]
     assert receipt["rewards_microusd"] == {miner_b: 1_250_000}  # $1.00 x 1.25
-    assert receipt["charge_microusd"] >= money.minimum_charge_microusd(POLICY, 1_000_000)
+    assert "what_if_rewards_microusd" not in receipt
 
     # B now ranks first by settled spend in the window.
-    order2 = service.place_order(staff, {"leads": 10, **ORDER})
+    service.place_order(buyer, {"leads": 10, **ORDER})
     token2, order_id2 = claim(service)
-    transport2 = FakeTransport([openrouter_ok("0.010000")])
+    transport2 = FakeTransport([openrouter_ok("0.000100")])
     broker_for(store, transport2, registrar=registrar, epoch=epoch).call(token2, chat())
     assert transport2.sent[0]["headers"]["authorization"].endswith("b")
     service.finish(order_id2, {"status": "failed"})
+    revoke_all_keys(store)
 
-    # Shadow payout: published, never recorded as paid, and with no emission
-    # price it shows what is owed with no payments.
-    doc = service.run_epoch(2000)
-    assert doc["mode"] == "shadow" and doc["emission_price_available"] is False and doc["payments"] == []
-    assert doc["owed_microusd"] >= 1_250_000
-    assert service.public_epoch(2000)["payout_hash"] == doc["payout_hash"]
-    shadow_owed = store.owed(through_epoch=2000, mode="shadow")
-    assert any(row["order_id"] == order["order_id"] for row in shadow_owed)
-    assert all(row["paid_microusd"] == 0 for row in shadow_owed)
-    # Live never sees, and so never pays, a shadow order's reward.
-    assert not [row for row in store.owed(through_epoch=10**9, mode="live") if row["order_id"] == order["order_id"]]
+
+def test_shadow_runs_on_leadpoet_keys_and_publishes_what_if_rewards_only(store):
+    # Old behaviour: a shadow order spent registered miner keys and owed
+    # rewards, which moved the live ranking. Now it never touches them.
+    revoke_all_keys(store)
+    staff, miner = hotkey(), hotkey()
+    registrar = FakeRegistrar({})
+    epoch = Epoch(2100)
+    _, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)  # registration works in shadow
+    registrar.secrets = {key["key_id"]: "a" * 40}
+    order = service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    transport = FakeTransport([openrouter_ok("0.800000")])
+    broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, dear_chat())
+    assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET
+    assert {c["miner_hotkey"] for c in store.calls(order_id)} == {None}
+    assert key["key_id"] not in store.key_spend(since_epoch=0)
+    service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
+    receipt = service.public_receipt(order["order_id"])["receipt"]
+    assert receipt["rewards_microusd"] == {} and receipt["what_if_rewards_microusd"] == 1_000_000  # $0.80 x 1.25
+    doc = service.run_epoch(2100)
+    assert doc["mode"] == "shadow" and doc["payments"] == []
+    assert not [r for r in store.owed(through_epoch=10**9, mode="shadow") if r["order_id"] == order["order_id"]]
+    assert service.statement(miner, "0")["calls"] == []
     with pytest.raises(ArenaStoreError, match="only live"):
         store.record_payout(epoch=4_000_000, mode="live", document={"payout_hash": "sha256:" + "c" * 64},
-                            payments=[{"order_id": order["order_id"], "miner_hotkey": miner_b, "paid_microusd": 1}])
-    assert order2["status"] == "queued"
+                            payments=[{"order_id": order["order_id"], "miner_hotkey": miner, "paid_microusd": 1}])
+    revoke_all_keys(store)
 
 
 def sql(owner, query, params):
@@ -519,7 +541,7 @@ TERMS_BODY = json.dumps({"terms_sha256": DEFAULT_POLICY_BODY["miner_terms_sha256
 
 
 def signed_identity(miner, body=TERMS_BODY):
-    return BuyerIdentity(hotkey=miner, signed_at=1_763_500_000, signature="ab" * 64,
+    return BuyerIdentity(hotkey=miner, signed_at=1_763_500_000, host="gw.example", signature="ab" * 64,
                          body_sha256=hashlib.sha256(body).hexdigest())
 
 
@@ -534,27 +556,37 @@ def revoke_all_keys(store):
             store.revoke_key(row["key_id"], reason="test reset")
 
 
-def live_order_with_miner_reward(store, owner, *, epoch_value=3000):
-    """A finished live order whose spend went through a miner's key."""
+KEY = {"provider": "openrouter", "credentials": {}, "daily_cap_usd": "50"}
+
+
+def live(store, owner, *, epoch_value, registrar=None):
+    """A live service with one confirmed, funded buyer and no active keys."""
     revoke_all_keys(store)
-    gamma, buyer, miner = FakeGamma(), hotkey(), hotkey()
-    registrar = FakeRegistrar({})
+    gamma, buyer = FakeGamma(), hotkey()
+    registrar = registrar or FakeRegistrar({})
     _, service, epoch = make(store, "live", gamma=gamma, registrar=registrar, epoch=Epoch(epoch_value))
     with pytest.raises(LeadOrderServiceError):
         service.register_buyer(buyer, {"email": "b@acme.io", "company": "Acme", "country": "US", "terms_version": "t1"})
     confirm(owner, buyer)
-    gamma.units[buyer] = 10 * 10**9
+    gamma.units[buyer] = 100 * 10**9
+    return service, registrar, buyer, epoch, gamma
+
+
+def live_order_with_miner_reward(store, owner, *, epoch_value=3000):
+    """A finished live order whose spend went through a miner's key."""
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=epoch_value)
+    miner = hotkey()
     accept_terms(service, miner)
-    key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    key = service.register_key(miner, KEY)
     registrar.secrets = {key["key_id"]: "m" * 40}
-    order = service.place_order(buyer, {"leads": 10, **ORDER})
+    service.place_order(buyer, {"leads": 10, **ORDER})
     token, order_id = claim(service)
     transport = FakeTransport([openrouter_ok("0.400000")])
-    broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
+    broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, dear_chat())
     assert transport.sent[0]["headers"]["authorization"] == "Bearer " + "m" * 40
     service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
     revoke_all_keys(store)
-    return order, miner
+    return {"order_id": order_id}, miner
 
 
 def test_live_payout_pays_oldest_first_under_cap_and_never_overpays(store, owner):
@@ -597,33 +629,36 @@ def test_sql_charge_matches_money_module_for_many_cases(store):
 # -- review fixes: policy version, per-order keys, open calls, reconcile ----------
 
 
-def test_rewards_and_receipt_use_the_orders_policy_version_not_the_current_one(store):
+def test_rewards_and_receipt_use_the_orders_policy_version_not_the_current_one(store, owner):
     # v1: ratio 0.40, premium 0.25. v2 raises the premium to 0.45. An order
     # placed under v1 and settled after the switch must still pay x1.25.
-    revoke_all_keys(store)
-    staff, miner = hotkey(), hotkey()
-    registrar = FakeRegistrar({})
-    epoch = Epoch(6000)
-    _, service_v1, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
+    service_v1, registrar, buyer, epoch, gamma = live(store, owner, epoch_value=6000)
+    miner = hotkey()
     accept_terms(service_v1, miner)
-    key = service_v1.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    key = service_v1.register_key(miner, KEY)
     registrar.secrets = {key["key_id"]: "v" * 40}
-    order = service_v1.place_order(staff, {"leads": 10, **ORDER})
+    order = service_v1.place_order(buyer, {"leads": 10, **ORDER})
     token, order_id = claim(service_v1)
-    broker_for(store, FakeTransport([openrouter_ok("0.400000")]), registrar=registrar, epoch=epoch).call(token, chat())
+    broker_for(store, FakeTransport([openrouter_ok("0.400000")]), registrar=registrar, epoch=epoch).call(
+        token, dear_chat())
 
     v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=2, price_per_lead_usd="0.30",
                                       min_charge_ratio="0.60", miner_premium="0.45"))
     v2 = load_policy(v2_doc, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
-    config = LeadOrdersConfig(mode="shadow", staff_hotkeys=frozenset([staff]), runner_secret="r" * 40,
-                              policy_path="/x", terms_version="t1", public_base_url="https://gw.example")
+    config = LeadOrdersConfig(mode="live", runner_secret="r" * 40, policy_path="/x", gamma_service="7",
+                              terms_version="t1", public_base_url="https://gw.example")
     service_v2 = LeadOrderService(config=config, policy=v2, policy_document=v2_doc, store=store, signer=SIGNER,
-                                  current_epoch=epoch, registrar=registrar)
+                                  current_epoch=epoch, gamma_reader=gamma, registrar=registrar)
     service_v2.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
     receipt = service_v2.public_receipt(order["order_id"])["receipt"]
     assert receipt["rewards_microusd"] == {miner: 500_000}  # $0.40 x 1.25, not x 1.45
     assert receipt["policy_version"] == 1 and receipt["policy_hash"] == POLICY.policy_hash
     assert receipt["charge_microusd"] == 2 * USD  # v1 price, from the order's stored terms
+    # The policy each receipt names is public, by version.
+    assert service_v2.public_policy(1) == POLICY_DOC
+    with pytest.raises(LeadOrderServiceError) as unknown:
+        service_v2.public_policy("99")
+    assert (unknown.value.status, unknown.value.code) == (404, "policy_unknown")
     revoke_all_keys(store)
 
 
@@ -637,7 +672,7 @@ def test_staff_order_spends_only_leadpoet_keys_after_the_gateway_moves_to_shadow
     # The gateway switches to shadow mid-order and a miner key is registered.
     _, shadow_service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
     accept_terms(shadow_service, miner)
-    key = shadow_service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    key = shadow_service.register_key(miner, {"provider": "openrouter", "credentials": {}, "daily_cap_usd": "50"})
     registrar.secrets = {key["key_id"]: "z" * 40}
     transport = FakeTransport([openrouter_ok("0.100000")])
     broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
@@ -647,12 +682,12 @@ def test_staff_order_spends_only_leadpoet_keys_after_the_gateway_moves_to_shadow
     revoke_all_keys(store)
 
 
-def test_open_calls_settle_uncertain_at_finish_and_late_answers_never_change_the_receipt(store):
+def test_finish_refuses_open_calls_and_only_the_overdue_sweep_settles_them_uncertain(store, owner):
     staff = hotkey()
     _, service, epoch = make(store, "staff", staff=[staff])
     order = service.place_order(staff, {"leads": 10, **ORDER})
     token, order_id = claim(service)
-    broker_for(store, FakeTransport([openrouter_ok("0.100000")]), epoch=epoch).call(token, chat())
+    broker_for(store, FakeTransport([openrouter_ok("0.000100")]), epoch=epoch).call(token, chat())
     leadpoet = ProviderKey(key_id="leadpoet-openrouter", provider="openrouter", miner_hotkey=None,
                            registered_sequence=0, internal_fingerprint="sha256:" + "e" * 64)
     in_flight = str(uuid.uuid4())  # reserved, provider has not answered yet
@@ -662,12 +697,24 @@ def test_open_calls_settle_uncertain_at_finish_and_late_answers_never_change_the
     with pytest.raises(LeadOrderServiceError) as too_many:
         service.finish(order_id, {"status": "delivered", "leads_delivered": 11, "delivery_url": "https://f.example/x"})
     assert too_many.value.status == 422 and too_many.value.code == "leads_delivered_invalid"
+    # Old behaviour: finish closed the open call uncertain, so its cost was
+    # never repaid. Now the runner must wait for its own calls.
+    with pytest.raises(LeadOrderServiceError) as still_open:
+        service.finish(order_id, {"status": "delivered", "leads_delivered": 1, "delivery_url": "https://f.example/x"})
+    assert (still_open.value.status, still_open.value.code) == (409, "calls_open")
+    assert store.view(order_id)["status"] == "running"
 
-    done = service.finish(order_id, {"status": "delivered", "leads_delivered": 1, "delivery_url": "https://f.example/x"})
-    assert done["charge_microusd"] == 200_000  # 1 lead; the open call is never charged
+    # A stuck call: past deadline and grace, the sweep closes it uncertain.
+    with owner.cursor() as cur:
+        cur.execute("ALTER TABLE lead_order_claims DISABLE TRIGGER lead_order_claims_append_only")
+        cur.execute("UPDATE lead_order_claims SET deadline=now()-interval '6 minutes' WHERE order_id=%s", (order_id,))
+        cur.execute("ALTER TABLE lead_order_claims ENABLE TRIGGER lead_order_claims_append_only")
+    assert service.claim() is None
     statuses = {c["call_id"]: c["status"] for c in store.calls(order_id)}
     assert statuses[in_flight] == "uncertain" and "open" not in statuses.values()
     public = service.public_receipt(order["order_id"])
+    assert public["receipt"]["charge_microusd"] == money.charge_microusd(
+        POLICY, hold_microusd=2 * USD, delivered=0, spend_microusd=100)  # the open call is never charged
 
     # The provider answers after the finish: kept aside, nothing published moves.
     assert store.settle_call(call_id=in_flight, cost_microusd=250_000, http_status=200, epoch=epoch())["status"] == "late"
@@ -792,13 +839,11 @@ def test_deepline_raw_v2_headers_are_sent_and_never_reach_receipts_or_the_ledger
 
 
 def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipped(store, owner):
-    revoke_all_keys(store)
+    live_service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=7000)
     staff, miner, late = hotkey(), hotkey(), hotkey()
-    registrar = FakeRegistrar({})
-    epoch = Epoch(7000)
     config, service, _ = make(store, "shadow", staff=[staff], registrar=registrar, epoch=epoch)
     with pytest.raises(LeadOrderServiceError) as unsigned:
-        service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+        service.register_key(miner, {"provider": "openrouter", "credentials": {}, "daily_cap_usd": "50"})
     assert (unsigned.value.status, unsigned.value.code) == (403, "miner_terms_not_accepted")
     with pytest.raises(LeadOrderServiceError) as old:
         service.accept_miner_terms(signed_identity(miner), {"terms_version": "miner-terms-0",
@@ -826,20 +871,20 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     first = accept_terms(service, miner)
     assert first["status"] == "accepted" and first["terms_version"] == POLICY.miner_terms_version
     assert accept_terms(service, miner)["status"] == "exists"
-    stored = sql(owner, "SELECT signed_method,signed_path,signed_at,body_sha256,signature "
+    stored = sql(owner, "SELECT signed_method,signed_host,signed_path,signed_at,body_sha256,signature "
                         "FROM public.lead_order_miner_terms WHERE miner_hotkey=%s", (miner,))
-    assert stored == [("POST", "/lead-orders/miner-terms", 1_763_500_000,
+    assert stored == [("POST", "gw.example", "/lead-orders/miner-terms", 1_763_500_000,
                        hashlib.sha256(TERMS_BODY).hexdigest(), "ab" * 64)]
-    key = service.register_key(miner, {"provider": "openrouter", "credentials": {}})
+    key = service.register_key(miner, {"provider": "openrouter", "credentials": {}, "daily_cap_usd": "50"})
     registrar.secrets = {key["key_id"]: "t" * 40}
     # The text changes but the version label does not: the key stays
     # registered but is skipped until its miner signs the new text, so the
     # order runs on Leadpoet's key.
     v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=3, miner_terms_sha256="1" * 64))
     v2 = load_policy(v2_doc, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
-    service.place_order(staff, {"leads": 10, **ORDER})
-    token, order_id = claim(service)
-    transport = FakeTransport([openrouter_ok("0.100000"), openrouter_ok("0.100000")])
+    live_service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(live_service)
+    transport = FakeTransport([openrouter_ok("0.000100"), openrouter_ok("0.000100")])
     broker_v2 = LeadOrderBroker(store=store, policy=v2, transport=transport, registrar=registrar,
                                 leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
                                 price_table=lambda: PRICE_TABLE, current_epoch=epoch)
@@ -847,7 +892,7 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET
     broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
     assert transport.sent[1]["headers"]["authorization"] == "Bearer " + "t" * 40  # current terms: ranked
-    service.finish(order_id, {"status": "failed"})
+    live_service.finish(order_id, {"status": "failed"})
     with pytest.raises(Exception):
         sql(owner, "UPDATE public.lead_order_miner_terms SET terms_sha256=%s WHERE miner_hotkey=%s", ("2" * 64, miner))
     revoke_all_keys(store)
@@ -950,3 +995,190 @@ def test_orders_the_runner_would_refuse_are_refused_at_placement_with_no_hold(st
     claimed = service.claim()
     assert claimed["seller"] == minimal["seller"] and claimed["search"] == minimal["search"]
     service.finish(claimed["order_id"], {"status": "failed"})
+
+
+# -- key-safety review: daily caps, overshoot, repayment, statement ----------------
+
+
+def reward(cost, reserved):
+    """Rewards stop at the reservation: min(cost, reserve) x 1.25."""
+    return min(cost, reserved) * 1_250_000 // 1_000_000
+
+
+def test_daily_cap_is_required_bounded_and_moves_the_order_to_the_next_key(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9000)
+    miner_a, miner_b = hotkey(), hotkey()
+    accept_terms(service, miner_a)
+    accept_terms(service, miner_b)
+    for payload, code in (({"provider": "openrouter", "credentials": {}}, "key_invalid"),
+                          (dict(KEY, daily_cap_usd="0.99"), "daily_cap_invalid"),
+                          (dict(KEY, daily_cap_usd="10000.01"), "daily_cap_invalid"),
+                          (dict(KEY, daily_cap_usd="1.0000001"), "daily_cap_invalid"),
+                          (dict(KEY, daily_cap_usd=True), "daily_cap_invalid"),
+                          (dict(KEY, daily_cap_usd="NaN"), "daily_cap_invalid")):
+        with pytest.raises(LeadOrderServiceError) as refused:
+            service.register_key(miner_a, payload)
+        assert (refused.value.status, refused.value.code) == (422, code)
+    key_a = service.register_key(miner_a, dict(KEY, daily_cap_usd="1"))
+    assert key_a["daily_cap_usd"] == "1.00"
+    key_b = service.register_key(miner_b, KEY)
+    registrar.secrets = {key_a["key_id"]: "a" * 40, key_b["key_id"]: "b" * 40}
+    order = service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    # A's first call reports far more than its reservation; the next
+    # reservation would take A over its $1.00 day, so the order moves to B.
+    transport = FakeTransport([openrouter_ok("0.999999"), openrouter_ok("0.000100")])
+    broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
+    assert broker.call(token, chat()).status == 200
+    assert broker.call(token, chat()).status == 200
+    assert [s["headers"]["authorization"][-1] for s in transport.sent] == ["a", "b"]
+    first, second = store.calls(order_id)
+    assert (first["miner_hotkey"], second["miner_hotkey"]) == (miner_a, miner_b)
+    assert store.reserve_call(call_id=str(uuid.uuid4()), order_id=order_id, provider="openrouter",
+                              key_id=key_a["key_id"], miner_hotkey=miner_a, public_fingerprint=key_a["public_fingerprint"],
+                              reserve_microusd=2)["status"] == "key_capped"
+
+    # Overshoot: the buyer's charge counts the full cost, the miner's
+    # reward stops at the reservation, and the statement shows the excess.
+    service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
+    receipt = service.public_receipt(order["order_id"])["receipt"]
+    assert receipt["rewards_microusd"] == {miner_a: reward(999_999, first["reserved_microusd"]),
+                                           miner_b: reward(100, second["reserved_microusd"])}
+    statement = service.statement(miner_a, "")
+    row, = statement["calls"]
+    assert row["cost_microusd"] == 999_999 and row["excess_microusd"] == 999_999 - first["reserved_microusd"]
+    assert statement["keys"][0]["excess_microusd"] == row["excess_microusd"]
+    revoke_all_keys(store)
+
+
+def test_timeout_is_read_back_on_the_miner_key_and_repaid_next_epoch_never_charged(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9100)
+    miner, other = hotkey(), hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    registrar.secrets = {key["key_id"]: "m" * 40}
+    order = service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    transport = FakeTransport([openrouter_ok("0.400000"),
+                               ProviderTransportError("timed out", openrouter_generation_id="gen-late-1")])
+    broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
+    assert broker.call(token, dear_chat()).status == 200
+    assert broker.call(token, dear_chat()).status == 502
+    paid, timed_out = store.calls(order_id)
+    assert timed_out["status"] == "uncertain" and timed_out["cost_microusd"] is None
+    service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
+    public = service.public_receipt(order["order_id"])
+    assert public["receipt"]["charge_microusd"] == 2 * USD
+    assert public["receipt"]["rewards_microusd"] == {miner: reward(400_000, paid["reserved_microusd"])}
+    assert "gen-late-1" not in json.dumps(public)  # the request id is for the miner's statement only
+
+    # Reconcile reads the generation back once, on the same miner key, free.
+    transport.responses.append(ProviderResponse(200, {"content-type": "application/json"},
+                                                json.dumps({"data": {"id": "gen-late-1", "total_cost": 0.3}}).encode()))
+    assert broker.resolve_uncertain() == 1
+    lookup = transport.sent[-1]
+    assert lookup["method"] == "GET" and lookup["url"].endswith("gen-late-1") and lookup["body"] == b""
+    assert lookup["headers"]["authorization"] == "Bearer " + "m" * 40
+    assert broker.resolve_uncertain() == 0  # resolved once; no second lookup
+    assert len(transport.sent) == 3
+    assert store.reward_late(epoch=9101, limit=10) == 1
+    assert store.reward_late(epoch=9102, limit=10) == 0
+
+    # Old behaviour: the cost was lost. Now it is owed in the next payout,
+    # while the buyer's charge and the signed receipt stay as they were.
+    late = reward(300_000, timed_out["reserved_microusd"])
+    assert service.public_receipt(order["order_id"]) == public
+    owed = [r for r in store.owed(through_epoch=10**9, mode="live") if r["order_id"] == order_id]
+    assert {r["call_id"]: r["owed_microusd"] for r in owed} == {
+        None: reward(400_000, paid["reserved_microusd"]), timed_out["call_id"]: late}
+    statement = service.statement(miner, "0")
+    rows = {r["call_id"]: r for r in statement["calls"]}
+    assert rows[timed_out["call_id"]]["provider_request_id"] == "gen-late-1"
+    assert rows[timed_out["call_id"]]["late_cost_microusd"] == 300_000
+    assert rows[timed_out["call_id"]]["late_reward_microusd"] == late
+    assert rows[timed_out["call_id"]]["receipt_hash"] == public["receipt"]["receipt_hash"]
+    assert statement["rewards_owed_microusd"] == reward(400_000, paid["reserved_microusd"]) + late
+    assert service.statement(other, "0")["calls"] == []
+
+    doc = {"payout_hash": "sha256:" + "d" * 64, "epoch": 6_000_000}
+    too_much = [{"order_id": order_id, "miner_hotkey": miner, "paid_microusd": late + 1, "call_id": timed_out["call_id"]}]
+    with pytest.raises(ArenaStoreError, match="exceeds"):
+        store.record_payout(epoch=6_000_000, mode="live", document=doc, payments=too_much)
+    exact = [dict(too_much[0], paid_microusd=late)]
+    assert store.record_payout(epoch=6_000_000, mode="live", document=doc, payments=exact)["status"] == "recorded"
+    assert service.statement(miner, "0")["rewards_paid_microusd"] == late
+    revoke_all_keys(store)
+
+
+def test_late_cost_on_a_failed_order_is_repaid_only_within_its_charge(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9200)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    registrar.secrets = {key["key_id"]: "m" * 40}
+    order = service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    broker_for(store, FakeTransport([openrouter_ok("0.400000")]), registrar=registrar, epoch=epoch).call(
+        token, dear_chat())
+    stuck = str(uuid.uuid4())
+    assert store.reserve_call(call_id=stuck, order_id=order_id, provider="openrouter", key_id=key["key_id"],
+                              miner_hotkey=miner, public_fingerprint=key["public_fingerprint"],
+                              reserve_microusd=300_000)["status"] == "reserved"
+    with owner.cursor() as cur:
+        cur.execute("ALTER TABLE lead_order_claims DISABLE TRIGGER lead_order_claims_append_only")
+        cur.execute("UPDATE lead_order_claims SET deadline=now()-interval '6 minutes' WHERE order_id=%s", (order_id,))
+        cur.execute("ALTER TABLE lead_order_claims ENABLE TRIGGER lead_order_claims_append_only")
+    assert service.claim() is None  # expired as failed, the stuck call closed uncertain
+    assert store.settle_call(call_id=stuck, cost_microusd=250_000, http_status=200, epoch=epoch(),
+                             provider_request_id="gen-stuck-1")["status"] == "late"
+    assert store.reward_late(epoch=9201, limit=10) == 1
+    receipt = service.public_receipt(order_id)["receipt"]
+    charge, order_reward = receipt["charge_microusd"], receipt["rewards_microusd"][miner]
+    # Charge >= 0.40 x rewarded spend must hold after the late reward too.
+    room = charge * 1_250_000 // 400_000 - order_reward
+    expected = max(0, min(reward(250_000, 300_000), room))
+    assert expected < reward(250_000, 300_000)
+    owed = {r["call_id"]: r["owed_microusd"] for r in store.owed(through_epoch=10**9, mode="live")
+            if r["order_id"] == order_id}
+    assert owed.get(stuck, 0) == expected  # a zero late reward is not listed as owed
+    row = {r["call_id"]: r for r in service.statement(miner, "0")["calls"]}[stuck]
+    assert row["late_cost_microusd"] == 250_000 and row["provider_request_id"] == "gen-stuck-1"
+    assert row["late_reward_microusd"] == expected
+    revoke_all_keys(store)
+
+
+def test_statement_pages_by_call_sequence(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9300)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    registrar.secrets = {key["key_id"]: "m" * 40}
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    broker = broker_for(store, FakeTransport([openrouter_ok("0.000100")] * 3), registrar=registrar, epoch=epoch)
+    for _ in range(3):
+        broker.call(token, chat())
+    service.finish(order_id, {"status": "failed"})
+    first = store.statement(miner, since=0, limit=2)
+    assert len(first["calls"]) == 2 and first["more"] is True
+    rest = store.statement(miner, since=first["next_since"], limit=2)
+    assert len(rest["calls"]) == 1 and rest["more"] is False
+    assert first["keys"] == rest["keys"] and first["keys"][0]["calls"] == 3
+    with pytest.raises(LeadOrderServiceError) as bad:
+        service.statement(miner, "-1")
+    assert bad.value.code == "since_invalid"
+    revoke_all_keys(store)
+
+
+def test_deepline_reserve_is_the_known_fixed_price_when_there_is_one(store):
+    staff = hotkey()
+    _, service, epoch = make(store, "staff", staff=[staff])
+    service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    broker = broker_for(store, FakeTransport([deepline_ok(0.01), deepline_ok(1)]), epoch=epoch)
+    broker.call(token, deepline("harvestapi_get_job"))  # 0.01 credits = $0.001
+    broker.call(token, deepline("harvestapi_search_jobs"))  # no fixed price: the flat reserve
+    fixed, dynamic = store.calls(order_id)
+    assert fixed["reserved_microusd"] == 1_000
+    assert dynamic["reserved_microusd"] == POLICY.deepline_reserve_per_call_microusd
+    service.finish(order_id, {"status": "failed"})

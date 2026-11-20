@@ -18,6 +18,7 @@ import re
 import secrets
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
@@ -84,6 +85,11 @@ def runner_order_problem(seller: Mapping[str, Any], search: Mapping[str, Any]) -
 # flight at the deadline settle before an overdue order is closed.
 OVERDUE_GRACE_SECONDS = 300
 RECONCILE_BATCH = 20
+LATE_REWARD_BATCH = 200
+# A miner's per-key daily cap at registration, whole or decimal USD.
+MIN_DAILY_CAP_USD = Decimal(1)
+MAX_DAILY_CAP_USD = Decimal(10_000)
+STATEMENT_PAGE_SIZE = 500
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}$")
 _COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -144,6 +150,22 @@ def email_domain(email: str) -> str:
     return email.rsplit("@", 1)[-1].lower()
 
 
+def _daily_cap_microusd(value: Any) -> int:
+    """A key's daily cap from ``daily_cap_usd``: a number or decimal string,
+    USD 1 to 10,000, at most 6 decimals."""
+
+    if type(value) not in (int, float, str):
+        raise LeadOrderServiceError(422, "daily_cap_invalid")
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation:
+        raise LeadOrderServiceError(422, "daily_cap_invalid") from None
+    if (not amount.is_finite() or not MIN_DAILY_CAP_USD <= amount <= MAX_DAILY_CAP_USD
+            or amount != amount.quantize(Decimal("0.000001"))):
+        raise LeadOrderServiceError(422, "daily_cap_invalid")
+    return int(amount * 1_000_000)
+
+
 class LeadOrderService:
     def __init__(
         self,
@@ -158,6 +180,7 @@ class LeadOrderService:
         mailer: Optional[ConfirmationMailer] = None,
         emission_price: Optional[rewards.EmissionPriceSource] = None,
         registrar: Optional[lead_keys.MinerKeyRegistrar] = None,
+        resolver: Optional[Callable[[], int]] = None,
     ) -> None:
         if not config.enabled:
             raise LeadOrderServiceError(404, "lead_orders_off")
@@ -172,6 +195,7 @@ class LeadOrderService:
         self._mailer = mailer or UnavailableMailer()
         self._emission_price = emission_price or rewards.UnavailableEmissionPrice()
         self._registrar = registrar
+        self._resolver = resolver
         self._policies: Dict[int, LeadOrderPolicy] = {policy.version: policy}
         store.record_policy(policy_document)
 
@@ -328,6 +352,9 @@ class LeadOrderService:
             result = self._store.finish(
                 order_id=order_id, status="failed", delivered=0, delivery_url=None,
                 failure_reason="deadline_passed", epoch=int(self._current_epoch()),
+                # Past deadline + grace (longer than any provider timeout), an
+                # open call is stuck: close it uncertain.
+                allow_open=True,
             )
             if result.get("status") in ("finished", "exists"):
                 expired.append(order_id)  # settled by reconcile()
@@ -402,6 +429,10 @@ class LeadOrderService:
             raise LeadOrderServiceError(404, "order_unknown")
         if result.get("status") == "delivered_out_of_range":
             raise LeadOrderServiceError(422, "leads_delivered_invalid")
+        if result.get("status") == "calls_open":
+            # A call is still in flight: the runner retries the finish once its
+            # calls return. Nothing is written, so a retry is safe.
+            raise LeadOrderServiceError(409, "calls_open")
         receipt = self._settle(order_id)
         return {"status": result.get("order_status"), "charge_microusd": result.get("charge_microusd"),
                 "charged_usd": usd(result.get("charge_microusd")), "receipt_hash": receipt["receipt_hash"]}
@@ -424,21 +455,29 @@ class LeadOrderService:
             raise LeadOrderServiceError(500, "order_calls_open")
         policy = self._order_policy(view["policy_version"])
         owed: Dict[str, int] = {}
-        if view["mode"] in ("shadow", "live"):
+        what_if: Optional[int] = None
+        if view["mode"] == MODE_LIVE:
             owed = rewards.order_rewards(policy, order=view, calls=calls)
+        elif view["mode"] == "shadow":
+            # Shadow runs on Leadpoet's keys: publish what miners would have
+            # earned, owe nothing.
+            what_if = rewards.what_if_reward(policy, order=view, calls=calls)
         self._store.record_rewards(order_id, owed)
         leaves = receipts.call_leaves(calls)
         receipt = receipts.sign_receipt(
             self._signer,
-            receipts.build_receipt(order=view, calls=calls, rewards=owed, policy_hash=policy.policy_hash),
+            receipts.build_receipt(order=view, calls=calls, rewards=owed, policy_hash=policy.policy_hash,
+                                   what_if_rewards_microusd=what_if),
         )
         self._store.record_receipt(order_id, receipt, leaves)
         return receipt
 
     def reconcile(self, *, limit: int = RECONCILE_BATCH) -> List[str]:
         """Settle finished orders that have no receipt yet (a signer or store
-        failure after the finish committed). Idempotent; a failure leaves the
-        order for the next pass."""
+        failure after the finish committed), read back uncertain OpenRouter
+        calls (bounded, ``LeadOrderBroker.resolve_uncertain``) and record late
+        rewards for costs that became known after a receipt. Idempotent; a
+        failure leaves the work for the next pass."""
 
         settled = []
         for order_id in self._store.unsettled(limit=limit):
@@ -447,6 +486,12 @@ class LeadOrderService:
             except Exception:  # retried on the next claim or epoch pass
                 continue
             settled.append(order_id)
+        if self._resolver is not None:
+            try:
+                self._resolver()
+            except Exception:  # a provider or store failure: next pass
+                pass
+        self._store.reward_late(epoch=int(self._current_epoch()), limit=LATE_REWARD_BATCH)
         return settled
 
     # -- miner keys -----------------------------------------------------------
@@ -457,8 +502,9 @@ class LeadOrderService:
             raise LeadOrderServiceError(403, "miner_keys_not_accepted")
         if hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        if not isinstance(payload, Mapping) or set(payload) != {"provider", "credentials"}:
+        if not isinstance(payload, Mapping) or set(payload) != {"provider", "credentials", "daily_cap_usd"}:
             raise LeadOrderServiceError(422, "key_invalid")
+        daily_cap = _daily_cap_microusd(payload["daily_cap_usd"])
         if not self._store.has_miner_terms(hotkey, self.policy.miner_terms_sha256):
             raise LeadOrderServiceError(403, "miner_terms_not_accepted")
         try:
@@ -471,10 +517,11 @@ class LeadOrderService:
             key_id=row["key_id"], provider=row["provider"], miner_hotkey=hotkey, registered_sequence=0,
             internal_fingerprint=row["internal_fingerprint"],
         ).public_fingerprint
-        result = self._store.register_key(row, public_fingerprint=public)
+        result = self._store.register_key(row, public_fingerprint=public, daily_cap_microusd=daily_cap)
         if result.get("status") != "registered":
             raise LeadOrderServiceError(409, str(result.get("status") or "key_not_registered"))
-        return {"status": "registered", "key_id": row["key_id"], "public_fingerprint": public}
+        return {"status": "registered", "key_id": row["key_id"], "public_fingerprint": public,
+                "daily_cap_usd": usd(daily_cap)}
 
     def revoke_key(self, hotkey: str, key_id: str) -> Dict[str, Any]:
         owned = [row for provider in lead_keys.PROVIDERS for row in self._store.keys(provider, terms_sha256=None)
@@ -505,7 +552,7 @@ class LeadOrderService:
             raise LeadOrderServiceError(422, "terms_body_not_canonical")
         result = self._store.accept_miner_terms(
             hotkey=identity.hotkey, version=self.policy.miner_terms_version,
-            terms_sha256=self.policy.miner_terms_sha256, signed_at=identity.signed_at,
+            terms_sha256=self.policy.miner_terms_sha256, host=identity.host, signed_at=identity.signed_at,
             body_sha256=identity.body_sha256, signature=identity.signature,
         )
         return {"status": str(result["status"]), "terms_version": self.policy.miner_terms_version,
@@ -549,7 +596,29 @@ class LeadOrderService:
         return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else int(text),
                 "more": len(rows) == suppressions.PAGE_SIZE}
 
+    def statement(self, hotkey: str, since: Any) -> Dict[str, Any]:
+        """A miner's own ledger: every call on their keys after ``since`` (call
+        sequence), with costs, reservations, settle state, provider request
+        ids, receipt hashes, rewards and late repayments, plus totals per key."""
+
+        if hotkey in self.config.blocked_hotkeys:
+            raise LeadOrderServiceError(403, "hotkey_not_allowed")
+        text = "0" if since in (None, "") else str(since)
+        if not text.isdigit() or len(text) > 18:
+            raise LeadOrderServiceError(422, "since_invalid")
+        return self._store.statement(hotkey, since=int(text), limit=STATEMENT_PAGE_SIZE)
+
     # -- public -------------------------------------------------------------
+    def public_policy(self, version: Any) -> Dict[str, Any]:
+        """The signed policy document an order names by version."""
+
+        text = str(version)
+        number = int(text) if text.isdigit() and len(text) <= 9 else -1
+        document = self._store.policy_document(number) if number >= 1 else None
+        if not document:
+            raise LeadOrderServiceError(404, "policy_unknown")
+        return document
+
     def public_epoch(self, epoch: Any) -> Dict[str, Any]:
         text = str(epoch)
         number = int(text) if text.isdigit() and len(text) <= 18 else -1

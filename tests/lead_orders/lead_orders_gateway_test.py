@@ -70,6 +70,15 @@ class FakeService:
     def public_receipt(self, order_id):
         return {"receipt": {"order_id": order_id}, "calls": []}
 
+    def statement(self, hotkey, since):
+        self.statement_read = (hotkey, since)
+        return {"calls": [], "next_since": 0, "more": False}
+
+    def public_policy(self, version):
+        if version != "v1":
+            raise LeadOrderServiceError(404, "policy_unknown")
+        return {"policy": {"version": "v1"}}
+
 
 class FakeBroker:
     def __init__(self):
@@ -97,11 +106,12 @@ def enable(mode="staff"):
     return service, broker
 
 
-def signed(path, body, *, timestamp=None, method="POST"):
+def signed(path, body, *, timestamp=None, method="POST", host="gw.example"):
     from bittensor_wallet import Keypair
 
     timestamp = str(int(time.time()) if timestamp is None else timestamp)
-    message = "%s\n%s\n%s\n%s" % (method, path, timestamp, __import__("hashlib").sha256(body).hexdigest())
+    message = "%s\n%s\n%s\n%s\n%s" % (method, host, path, timestamp,
+                                       __import__("hashlib").sha256(body).hexdigest())
     signature = "0x" + Keypair.create_from_uri("//Alice").sign(message.encode()).hex()
     return {"x-hotkey": ALICE, "x-timestamp": timestamp, "x-signature": signature, "content-type": "application/json"}
 
@@ -146,6 +156,9 @@ def test_signed_buyer_request_once_then_replay_refused(client):
     assert stale.json() == {"error": "timestamp_outside_window"}
     unsigned = client.post("/lead-orders", content=body)
     assert unsigned.status_code == 401
+    # A request signed for another gateway host cannot be replayed here.
+    elsewhere = client.post("/lead-orders", content=body, headers=signed("/lead-orders", body, host="arena.example"))
+    assert elsewhere.status_code == 401 and elsewhere.json() == {"error": "signature_invalid"}
     missing = client.get("/lead-orders/abc", headers=signed("/lead-orders/abc", b"", method="GET"))
     assert missing.status_code == 404 and missing.json() == {"error": "order_unknown"}
     # A signature for one path does not authorize another.
@@ -213,3 +226,13 @@ def test_suppression_push_needs_the_runner_secret_and_the_feed_a_signed_hotkey(c
     identity, payload = service.terms
     assert accepted.status_code == 200 and payload == {"terms_sha256": "a" * 64, "terms_version": "v1"} and identity.hotkey == ALICE
     assert identity.body_sha256 == __import__("hashlib").sha256(terms).hexdigest() and len(identity.signature) == 130
+
+
+def test_statement_needs_the_miners_signature_and_policies_are_public(client):
+    service, _ = enable()
+    assert client.get("/lead-orders/statement?since=3").status_code == 401
+    path = "/lead-orders/statement"
+    read = client.get(path + "?since=3", headers=signed(path, b"", method="GET"))
+    assert read.status_code == 200 and service.statement_read == (ALICE, "3")
+    assert client.get("/lead-orders/policies/v1").json() == {"policy": {"version": "v1"}}
+    assert client.get("/lead-orders/policies/v9").status_code == 404

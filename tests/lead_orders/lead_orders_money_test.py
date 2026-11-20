@@ -235,7 +235,7 @@ def test_epoch_payout_pays_oldest_first_and_carries_forward():
         entry("o4", OTHER, 14, 9 * USD),  # settled after the paying epoch
     ]
     payout = money.epoch_payout(12, entries, cap_microusd=3 * USD)
-    assert payout.payments == (("o1", OTHER, 1 * USD), ("o2", MINER, 2 * USD))
+    assert payout.payments == (("o1", OTHER, 1 * USD, None), ("o2", MINER, 2 * USD, None))
     assert payout.paid_by_hotkey == {OTHER: 1 * USD, MINER: 2 * USD}
     assert payout.paid_microusd == 3 * USD
     assert payout.carry_forward_microusd == 1 * USD + 4 * USD

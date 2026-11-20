@@ -12,7 +12,8 @@ The routes touch no Arena state, reward or weight.
   claim is the bearer API key, so provider SDKs work unchanged. It is bound
   to one order and stops working when that order finishes or its deadline
   passes.
-* Public routes: email confirmation, signed receipts, epoch payouts.
+* Public routes: email confirmation, signed receipts, signed policies, epoch
+  payouts, miner terms.
 """
 
 from __future__ import annotations
@@ -107,7 +108,7 @@ async def _handle(request: Request, work: Callable[[Any, Any, Any, bytes], Any],
             verifier = _verifier or support.verify_hotkey_signature
             headers = request.headers
             identity = await anyio.to_thread.run_sync(lambda: support.verify_buyer_request(
-                method=request.method, path=request.url.path, body=body,
+                method=request.method, host=config.public_host, path=request.url.path, body=body,
                 hotkey=headers.get("x-hotkey"), timestamp=headers.get("x-timestamp"),
                 signature=headers.get("x-signature"), verifier=verifier,
                 use_nonce=lambda h, s, t: service._store.use_nonce(hotkey=h, signature_hash=s, signed_at=t),
@@ -146,6 +147,11 @@ async def receipt(order_id: str, request: Request) -> Response:
 @router.get("/lead-orders/miner-terms")
 async def miner_terms(request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.miner_terms(), auth="none")
+
+
+@router.get("/lead-orders/policies/{version}")
+async def policy_document(version: str, request: Request) -> Response:
+    return await _handle(request, lambda s, b, who, body: s.public_policy(version), auth="none")
 
 
 @router.get("/lead-orders/epochs/{epoch}")
@@ -201,6 +207,11 @@ async def accept_miner_terms(request: Request) -> Response:
 @router.get("/lead-orders/suppressions")
 async def read_suppressions(request: Request, since: str = "") -> Response:
     return await _handle(request, lambda s, b, who, body: s.read_suppressions(who.hotkey, since), auth="buyer")
+
+
+@router.get("/lead-orders/statement")
+async def miner_statement(request: Request, since: str = "") -> Response:
+    return await _handle(request, lambda s, b, who, body: s.statement(who.hotkey, since), auth="buyer")
 
 
 @router.post("/lead-orders")

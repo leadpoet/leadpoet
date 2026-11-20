@@ -117,6 +117,9 @@ CREATE TABLE IF NOT EXISTS public.lead_order_keys (
   ciphertext_b64 TEXT NOT NULL CHECK(length(ciphertext_b64) BETWEEN 1 AND 16384),
   internal_fingerprint TEXT NOT NULL UNIQUE CHECK(internal_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
   public_fingerprint TEXT NOT NULL CHECK(public_fingerprint ~ '^sha256:[0-9a-f]{32}$'),
+  -- The miner's own spend cap for this key over any rolling 24 hours, USD 1 to
+  -- 10,000. Enforced in lead_order_reserve_call_v1.
+  daily_cap_microusd BIGINT NOT NULL CHECK(daily_cap_microusd BETWEEN 1000000 AND 10000000000),
   registered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -128,13 +131,14 @@ CREATE TABLE IF NOT EXISTS public.lead_order_key_revocations (
 
 -- A miner's hotkey-signed acceptance of one version of the miner data terms.
 -- The signature is over the request that accepted them (auth.signed_message:
--- METHOD, path, signed_at, body_sha256), so it can be re-verified later.
+-- METHOD, host, path, signed_at, body_sha256), so it can be re-verified later.
 CREATE TABLE IF NOT EXISTS public.lead_order_miner_terms (
   miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
   terms_version TEXT NOT NULL CHECK(terms_version ~ '^[A-Za-z0-9._-]{1,32}$'),
   -- sha256 of the exact terms text: an acceptance counts only for those words.
   terms_sha256 TEXT NOT NULL CHECK(terms_sha256 ~ '^[0-9a-f]{64}$'),
   signed_method TEXT NOT NULL CHECK(signed_method='POST'),
+  signed_host TEXT NOT NULL CHECK(signed_host ~ '^[a-z0-9.-]{1,253}(:[0-9]{1,5})?$'),
   signed_path TEXT NOT NULL CHECK(signed_path='/lead-orders/miner-terms'),
   signed_at BIGINT NOT NULL CHECK(signed_at>0),
   body_sha256 TEXT NOT NULL CHECK(body_sha256 ~ '^[0-9a-f]{64}$'),
@@ -175,6 +179,8 @@ CREATE TABLE IF NOT EXISTS public.lead_order_calls (
   CHECK((miner_hotkey IS NULL)=(key_id LIKE 'leadpoet-%'))
 );
 CREATE INDEX IF NOT EXISTS lead_order_calls_order_idx ON public.lead_order_calls(order_id,sequence);
+CREATE INDEX IF NOT EXISTS lead_order_calls_key_idx ON public.lead_order_calls(key_id,created_at);
+CREATE INDEX IF NOT EXISTS lead_order_calls_miner_idx ON public.lead_order_calls(miner_hotkey,sequence);
 
 CREATE TABLE IF NOT EXISTS public.lead_order_call_settlements (
   call_id UUID PRIMARY KEY REFERENCES public.lead_order_calls(call_id),
@@ -182,20 +188,34 @@ CREATE TABLE IF NOT EXISTS public.lead_order_call_settlements (
   cost_microusd BIGINT CHECK(cost_microusd IS NULL OR cost_microusd>=0),
   http_status INTEGER CHECK(http_status IS NULL OR http_status BETWEEN 100 AND 599),
   settled_epoch BIGINT NOT NULL CHECK(settled_epoch>=0),
+  -- The provider's own id for the call (OpenRouter generation id, Deepline
+  -- request id), kept for the miner's statement and reconcile only. Never
+  -- published in a receipt.
+  provider_request_id TEXT CHECK(provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'),
   settled_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   CHECK((status='settled')=(cost_microusd IS NOT NULL))
 );
 
--- A provider answer that arrived after its order finished. Kept for audit
--- only: never charged, rewarded, ranked or published. The call's own row was
--- already settled uncertain at finish.
+-- A provider answer that arrived after its order finished (the call's own
+-- row was already settled uncertain at finish). Never charged to the buyer;
+-- a known cost is repaid to the miner through lead_order_late_rewards.
 CREATE TABLE IF NOT EXISTS public.lead_order_late_settlements (
   call_id UUID PRIMARY KEY REFERENCES public.lead_order_calls(call_id),
   status TEXT NOT NULL CHECK(status IN ('settled','uncertain')),
   cost_microusd BIGINT CHECK(cost_microusd IS NULL OR cost_microusd>=0),
   http_status INTEGER CHECK(http_status IS NULL OR http_status BETWEEN 100 AND 599),
+  provider_request_id TEXT CHECK(provider_request_id IS NULL OR provider_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'),
   received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   CHECK((status='settled')=(cost_microusd IS NOT NULL))
+);
+
+-- The exact cost of an uncertain OpenRouter call, read back later from the
+-- provider's generation record on the same key. Never charged to the buyer.
+CREATE TABLE IF NOT EXISTS public.lead_order_call_resolutions (
+  call_id UUID PRIMARY KEY REFERENCES public.lead_order_calls(call_id),
+  cost_microusd BIGINT NOT NULL CHECK(cost_microusd>=0),
+  resolved_epoch BIGINT NOT NULL CHECK(resolved_epoch>=0),
+  resolved_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE IF NOT EXISTS public.lead_order_rewards_owed (
@@ -203,6 +223,23 @@ CREATE TABLE IF NOT EXISTS public.lead_order_rewards_owed (
   miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
   owed_microusd BIGINT NOT NULL CHECK(owed_microusd>0),
   PRIMARY KEY(order_id,miner_hotkey)
+);
+
+-- A miner's repayment for a call whose cost became known after its order's
+-- receipt (a late answer or a resolution). One row per call, paid from the
+-- lane like any reward, never charged to the buyer. owed is
+-- min(cost, reserved) x (1 + premium), capped so the order's rewards stay
+-- within charge x (1 + premium) / min_charge_ratio (the anti-farming bound);
+-- 0 is recorded when nothing fits, so the shortfall stays visible.
+CREATE TABLE IF NOT EXISTS public.lead_order_late_rewards (
+  call_id UUID PRIMARY KEY REFERENCES public.lead_order_calls(call_id),
+  sequence BIGSERIAL NOT NULL UNIQUE,
+  order_id UUID NOT NULL REFERENCES public.lead_order_finishes(order_id),
+  miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
+  cost_microusd BIGINT NOT NULL CHECK(cost_microusd>=0),
+  owed_microusd BIGINT NOT NULL CHECK(owed_microusd>=0),
+  settled_epoch BIGINT NOT NULL CHECK(settled_epoch>=0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE IF NOT EXISTS public.lead_order_receipts (
@@ -231,6 +268,13 @@ CREATE TABLE IF NOT EXISTS public.lead_order_reward_payments (
   FOREIGN KEY(order_id,miner_hotkey) REFERENCES public.lead_order_rewards_owed(order_id,miner_hotkey)
 );
 
+CREATE TABLE IF NOT EXISTS public.lead_order_late_reward_payments (
+  epoch BIGINT NOT NULL REFERENCES public.lead_order_reward_epochs(epoch),
+  call_id UUID NOT NULL REFERENCES public.lead_order_late_rewards(call_id),
+  paid_microusd BIGINT NOT NULL CHECK(paid_microusd>0),
+  PRIMARY KEY(epoch,call_id)
+);
+
 -- Ownership, RLS, no table grants, append-only triggers (row and TRUNCATE).
 DO $tables703$
 DECLARE t TEXT;
@@ -239,8 +283,9 @@ BEGIN
    'lead_order_buyer_confirmations','lead_order_nonces','lead_orders','lead_order_claims',
    'lead_order_finishes','lead_order_keys','lead_order_key_revocations','lead_order_miner_terms',
    'lead_order_suppressions','lead_order_key_exhaustions',
-   'lead_order_calls','lead_order_call_settlements','lead_order_late_settlements','lead_order_rewards_owed','lead_order_receipts',
-   'lead_order_reward_epochs','lead_order_reward_payments'] LOOP
+   'lead_order_calls','lead_order_call_settlements','lead_order_late_settlements','lead_order_call_resolutions',
+   'lead_order_rewards_owed','lead_order_late_rewards','lead_order_receipts',
+   'lead_order_reward_epochs','lead_order_reward_payments','lead_order_late_reward_payments'] LOOP
   EXECUTE format('ALTER TABLE public.%I OWNER TO lab_arena_owner',t);
   EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',t);
   EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC,anon,authenticated,service_role,lab_arena_service',t);
@@ -464,11 +509,12 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
 $token703$;
 
 -- Reserve a call's worst-case cost before it is sent. Refused at the ceiling,
--- after the deadline, and once the order is finished.
+-- after the deadline, once the order is finished, and on a miner key whose
+-- rolling 24-hour spend plus this reservation would pass the miner's own cap.
 CREATE OR REPLACE FUNCTION public.lead_order_reserve_call_v1(
  p_call_id UUID,p_order_id UUID,p_provider TEXT,p_key_id TEXT,p_miner_hotkey TEXT,p_public_fingerprint TEXT,p_reserve BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reserve703$
-DECLARE o public.lead_orders; c public.lead_order_claims; committed BIGINT;
+DECLARE o public.lead_orders; c public.lead_order_claims; committed BIGINT; cap BIGINT; day_spend BIGINT;
 BEGIN
  SELECT * INTO o FROM public.lead_orders WHERE order_id=p_order_id FOR UPDATE;
  SELECT * INTO c FROM public.lead_order_claims WHERE order_id=p_order_id;
@@ -479,6 +525,17 @@ BEGIN
  IF c.deadline<=clock_timestamp() THEN RETURN jsonb_build_object('status','expired'); END IF;
  IF EXISTS(SELECT 1 FROM public.lead_order_key_exhaustions WHERE order_id=p_order_id AND key_id=p_key_id) THEN
   RETURN jsonb_build_object('status','key_exhausted');
+ END IF;
+ IF p_miner_hotkey IS NOT NULL THEN
+  -- The key row lock serialises reservations on one key across orders, so
+  -- two orders can never pass the cap together.
+  SELECT k.daily_cap_microusd INTO cap FROM public.lead_order_keys k
+   WHERE k.key_id=p_key_id AND k.miner_hotkey=p_miner_hotkey FOR UPDATE;
+  IF cap IS NULL THEN RETURN jsonb_build_object('status','key_unknown'); END IF;
+  SELECT coalesce(sum(CASE WHEN s.status='settled' THEN s.cost_microusd ELSE k.reserved_microusd END),0)::BIGINT
+   INTO day_spend FROM public.lead_order_calls k LEFT JOIN public.lead_order_call_settlements s ON s.call_id=k.call_id
+   WHERE k.key_id=p_key_id AND k.created_at>clock_timestamp()-interval '24 hours';
+  IF day_spend+p_reserve>cap THEN RETURN jsonb_build_object('status','key_capped'); END IF;
  END IF;
  committed:=public.lead_order__committed_microusd_v1(p_order_id);
  IF committed+p_reserve>o.spend_ceiling_microusd THEN
@@ -491,7 +548,7 @@ END;
 $reserve703$;
 
 CREATE OR REPLACE FUNCTION public.lead_order_settle_call_v1(
- p_call_id UUID,p_status TEXT,p_cost BIGINT,p_http_status INTEGER,p_epoch BIGINT)
+ p_call_id UUID,p_status TEXT,p_cost BIGINT,p_http_status INTEGER,p_epoch BIGINT,p_request_id TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $settle703$
 DECLARE v_order UUID;
 BEGIN
@@ -500,13 +557,13 @@ BEGIN
   WHERE c.call_id=p_call_id FOR SHARE OF o;
  IF v_order IS NULL THEN RETURN jsonb_build_object('status','unknown'); END IF;
  IF EXISTS(SELECT 1 FROM public.lead_order_finishes WHERE order_id=v_order) THEN
-  INSERT INTO public.lead_order_late_settlements(call_id,status,cost_microusd,http_status)
-  VALUES(p_call_id,p_status,CASE WHEN p_status='settled' THEN p_cost END,p_http_status)
+  INSERT INTO public.lead_order_late_settlements(call_id,status,cost_microusd,http_status,provider_request_id)
+  VALUES(p_call_id,p_status,CASE WHEN p_status='settled' THEN p_cost END,p_http_status,p_request_id)
   ON CONFLICT(call_id) DO NOTHING;
   RETURN jsonb_build_object('status','late');
  END IF;
- INSERT INTO public.lead_order_call_settlements(call_id,status,cost_microusd,http_status,settled_epoch)
- VALUES(p_call_id,p_status,CASE WHEN p_status='settled' THEN p_cost END,p_http_status,p_epoch)
+ INSERT INTO public.lead_order_call_settlements(call_id,status,cost_microusd,http_status,settled_epoch,provider_request_id)
+ VALUES(p_call_id,p_status,CASE WHEN p_status='settled' THEN p_cost END,p_http_status,p_epoch,p_request_id)
  ON CONFLICT(call_id) DO NOTHING;
  RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'settled' ELSE 'exists' END);
 END;
@@ -527,8 +584,11 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
 $exhausted703$;
 
 -- Finish once. charge = min(hold, max(delivered x price, ceil(ratio x settled spend))).
+-- The runner's finish is refused while any call is open (calls_open); only
+-- the overdue sweep (p_allow_open) closes open calls as uncertain.
 CREATE OR REPLACE FUNCTION public.lead_order_finish_v1(
- p_order_id UUID,p_status TEXT,p_delivered INTEGER,p_delivery_url TEXT,p_failure_reason TEXT,p_epoch BIGINT)
+ p_order_id UUID,p_status TEXT,p_delivered INTEGER,p_delivery_url TEXT,p_failure_reason TEXT,p_epoch BIGINT,
+ p_allow_open BOOLEAN)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $finish703$
 DECLARE o public.lead_orders; f public.lead_order_finishes; spend BIGINT; charge BIGINT; delivered INTEGER;
 BEGIN
@@ -543,10 +603,14 @@ BEGIN
  IF p_delivered<0 OR p_delivered>o.leads_requested THEN
   RETURN jsonb_build_object('status','delivered_out_of_range');
  END IF;
+ IF NOT coalesce(p_allow_open,FALSE) AND EXISTS(SELECT 1 FROM public.lead_order_calls c WHERE c.order_id=p_order_id
+   AND NOT EXISTS(SELECT 1 FROM public.lead_order_call_settlements s WHERE s.call_id=c.call_id)) THEN
+  RETURN jsonb_build_object('status','calls_open');
+ END IF;
  -- A failed order delivers nothing and pays the minimum charge on spend so far.
  delivered:=CASE WHEN p_status='delivered' THEN p_delivered ELSE 0 END;
- -- Calls still open now settle uncertain: never charged or rewarded, and the
- -- rows are final before the receipt is built. The order row lock above
+ -- Calls still open now (overdue sweep only) settle uncertain: never charged,
+ -- and the rows are final before the receipt is built. The order row lock above
  -- also stops new reservations and waits out any settlement in progress.
  INSERT INTO public.lead_order_call_settlements(call_id,status,cost_microusd,http_status,settled_epoch)
  SELECT c.call_id,'uncertain',NULL,NULL,p_epoch FROM public.lead_order_calls c
@@ -632,7 +696,8 @@ END;
 $receipt703$;
 
 CREATE OR REPLACE FUNCTION public.lead_order_register_key_v1(
- p_key_id TEXT,p_provider TEXT,p_miner_hotkey TEXT,p_submission_id TEXT,p_ciphertext TEXT,p_internal_fp TEXT,p_public_fp TEXT)
+ p_key_id TEXT,p_provider TEXT,p_miner_hotkey TEXT,p_submission_id TEXT,p_ciphertext TEXT,p_internal_fp TEXT,p_public_fp TEXT,
+ p_daily_cap BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $key703$
 BEGIN
  -- One active key per miner and provider: a new key needs the old one revoked.
@@ -640,8 +705,9 @@ BEGIN
    AND NOT EXISTS(SELECT 1 FROM public.lead_order_key_revocations r WHERE r.key_id=k.key_id)) THEN
   RETURN jsonb_build_object('status','active_key_exists');
  END IF;
- INSERT INTO public.lead_order_keys(key_id,provider,miner_hotkey,submission_id,ciphertext_b64,internal_fingerprint,public_fingerprint)
- VALUES(p_key_id,p_provider,p_miner_hotkey,p_submission_id,p_ciphertext,p_internal_fp,p_public_fp);
+ INSERT INTO public.lead_order_keys(key_id,provider,miner_hotkey,submission_id,ciphertext_b64,internal_fingerprint,
+  public_fingerprint,daily_cap_microusd)
+ VALUES(p_key_id,p_provider,p_miner_hotkey,p_submission_id,p_ciphertext,p_internal_fp,p_public_fp,p_daily_cap);
  RETURN jsonb_build_object('status','registered','key_id',p_key_id);
 END;
 $key703$;
@@ -667,11 +733,12 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
 $keys703$;
 
 CREATE OR REPLACE FUNCTION public.lead_order_accept_miner_terms_v1(
- p_hotkey TEXT,p_version TEXT,p_terms_sha256 TEXT,p_signed_at BIGINT,p_body_sha256 TEXT,p_signature TEXT)
+ p_hotkey TEXT,p_version TEXT,p_terms_sha256 TEXT,p_host TEXT,p_signed_at BIGINT,p_body_sha256 TEXT,p_signature TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $terms703$
 BEGIN
- INSERT INTO public.lead_order_miner_terms(miner_hotkey,terms_version,terms_sha256,signed_method,signed_path,signed_at,body_sha256,signature)
- VALUES(p_hotkey,p_version,p_terms_sha256,'POST','/lead-orders/miner-terms',p_signed_at,p_body_sha256,p_signature)
+ INSERT INTO public.lead_order_miner_terms(miner_hotkey,terms_version,terms_sha256,signed_method,signed_host,signed_path,
+  signed_at,body_sha256,signature)
+ VALUES(p_hotkey,p_version,p_terms_sha256,'POST',p_host,'/lead-orders/miner-terms',p_signed_at,p_body_sha256,p_signature)
  ON CONFLICT DO NOTHING;
  RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'accepted' ELSE 'exists' END,
   'accepted_at',(SELECT accepted_at FROM public.lead_order_miner_terms WHERE miner_hotkey=p_hotkey AND terms_sha256=p_terms_sha256));
@@ -707,26 +774,38 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
        ORDER BY sequence LIMIT least(greatest(p_limit,1),1000)) s;
 $suplist703$;
 
--- Settled spend per key over the ranking window, from the call ledger.
+-- Settled spend per key over the ranking window, from live orders only:
+-- staff and shadow spend never moves the live ranking.
 CREATE OR REPLACE FUNCTION public.lead_order_key_spend_v1(p_since_epoch BIGINT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $spend703$
  SELECT coalesce(jsonb_object_agg(key_id,total),'{}'::JSONB) FROM (
   SELECT c.key_id,sum(s.cost_microusd)::BIGINT total FROM public.lead_order_calls c
   JOIN public.lead_order_call_settlements s ON s.call_id=c.call_id
-  WHERE s.status='settled' AND s.settled_epoch>=p_since_epoch GROUP BY c.key_id) t;
+  JOIN public.lead_orders o ON o.order_id=c.order_id
+  WHERE s.status='settled' AND s.settled_epoch>=p_since_epoch AND o.mode='live' GROUP BY c.key_id) t;
 $spend703$;
 
 CREATE OR REPLACE FUNCTION public.lead_order_owed_v1(p_through_epoch BIGINT,p_mode TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $owed703$
- SELECT coalesce(jsonb_agg(jsonb_build_object('order_id',w.order_id,'miner_hotkey',w.miner_hotkey,
+ SELECT coalesce(jsonb_agg(e ORDER BY (e->>'settled_epoch')::BIGINT,(e->>'settled_sequence')::BIGINT,
+   e->>'miner_hotkey',coalesce(e->>'call_id','')),'[]'::JSONB) FROM (
+  SELECT jsonb_build_object('order_id',w.order_id,'miner_hotkey',w.miner_hotkey,'call_id',NULL,
    'settled_epoch',f.settled_epoch,'settled_sequence',f.sequence,'owed_microusd',w.owed_microusd,
    'paid_microusd',coalesce((SELECT sum(p.paid_microusd) FROM public.lead_order_reward_payments p
-     WHERE p.order_id=w.order_id AND p.miner_hotkey=w.miner_hotkey),0)) ORDER BY f.settled_epoch,f.sequence,w.miner_hotkey),'[]'::JSONB)
- FROM public.lead_order_rewards_owed w JOIN public.lead_order_finishes f ON f.order_id=w.order_id
- JOIN public.lead_orders o ON o.order_id=w.order_id
- -- Per mode: a live payout reads live orders only, so live never pays a
- -- shadow backlog; a shadow payout publishes shadow orders' rewards only.
- WHERE f.settled_epoch<=p_through_epoch AND o.mode=p_mode AND p_mode IN ('shadow','live');
+     WHERE p.order_id=w.order_id AND p.miner_hotkey=w.miner_hotkey),0)) e
+  FROM public.lead_order_rewards_owed w JOIN public.lead_order_finishes f ON f.order_id=w.order_id
+  JOIN public.lead_orders o ON o.order_id=w.order_id
+  -- Per mode: a live payout reads live orders only, so live never pays a
+  -- shadow backlog; a shadow payout publishes shadow orders' rewards only.
+  WHERE f.settled_epoch<=p_through_epoch AND o.mode=p_mode AND p_mode IN ('shadow','live')
+  UNION ALL
+  -- Late repayments, one entry per call, payable from the epoch they were recorded.
+  SELECT jsonb_build_object('order_id',l.order_id,'miner_hotkey',l.miner_hotkey,'call_id',l.call_id,
+   'settled_epoch',l.settled_epoch,'settled_sequence',l.sequence,'owed_microusd',l.owed_microusd,
+   'paid_microusd',coalesce((SELECT sum(p.paid_microusd) FROM public.lead_order_late_reward_payments p
+     WHERE p.call_id=l.call_id),0))
+  FROM public.lead_order_late_rewards l JOIN public.lead_orders o ON o.order_id=l.order_id
+  WHERE l.settled_epoch<=p_through_epoch AND l.owed_microusd>0 AND o.mode=p_mode AND p_mode IN ('shadow','live')) t;
 $owed703$;
 
 -- Record one epoch's payout document and payments. Never pays an entry past
@@ -748,6 +827,19 @@ BEGIN
   FOR p IN SELECT * FROM jsonb_array_elements(p_payments) LOOP
    IF NOT EXISTS(SELECT 1 FROM public.lead_orders WHERE order_id=(p->>'order_id')::UUID AND mode='live') THEN
     RAISE EXCEPTION 'only live orders are paid' USING ERRCODE='22023';
+   END IF;
+   IF p->>'call_id' IS NOT NULL THEN
+    IF NOT EXISTS(SELECT 1 FROM public.lead_order_late_rewards WHERE call_id=(p->>'call_id')::UUID
+      AND order_id=(p->>'order_id')::UUID AND miner_hotkey=p->>'miner_hotkey') THEN
+     RAISE EXCEPTION 'late payment names another order or miner' USING ERRCODE='22023';
+    END IF;
+    INSERT INTO public.lead_order_late_reward_payments(epoch,call_id,paid_microusd)
+    VALUES(p_epoch,(p->>'call_id')::UUID,(p->>'paid_microusd')::BIGINT);
+    IF (SELECT sum(paid_microusd) FROM public.lead_order_late_reward_payments WHERE call_id=(p->>'call_id')::UUID)
+      >(SELECT owed_microusd FROM public.lead_order_late_rewards WHERE call_id=(p->>'call_id')::UUID) THEN
+     RAISE EXCEPTION 'payout exceeds what is owed' USING ERRCODE='22023';
+    END IF;
+    CONTINUE;
    END IF;
    INSERT INTO public.lead_order_reward_payments(epoch,order_id,miner_hotkey,paid_microusd)
    VALUES(p_epoch,(p->>'order_id')::UUID,p->>'miner_hotkey',(p->>'paid_microusd')::BIGINT);
@@ -781,6 +873,131 @@ CREATE OR REPLACE FUNCTION public.lead_order_reward_epoch_v1(p_epoch BIGINT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $epoch703$
  SELECT doc FROM public.lead_order_reward_epochs WHERE epoch=p_epoch;
 $epoch703$;
+
+-- Uncertain OpenRouter calls on finished live orders that have a provider
+-- generation id and an active miner key: the reconcile pass reads their exact
+-- cost back. Calls older than 7 days stay uncertain (bounded, fail closed).
+CREATE OR REPLACE FUNCTION public.lead_order_uncertain_calls_v1(p_limit INTEGER)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $uncertain703$
+ SELECT coalesce(jsonb_agg(jsonb_build_object('call_id',t.call_id,'order_id',t.order_id,'provider',t.provider,
+   'key_id',t.key_id,'miner_hotkey',t.miner_hotkey,'sequence',t.key_sequence,'ciphertext_b64',t.ciphertext_b64,
+   'internal_fingerprint',t.internal_fingerprint,'provider_request_id',t.request_id) ORDER BY t.sequence),'[]'::JSONB)
+ FROM (SELECT c.call_id,c.order_id,c.provider,c.key_id,c.miner_hotkey,c.sequence,k.sequence key_sequence,
+        k.ciphertext_b64,k.internal_fingerprint,coalesce(l.provider_request_id,s.provider_request_id) request_id
+  FROM public.lead_order_calls c
+  JOIN public.lead_order_call_settlements s ON s.call_id=c.call_id AND s.status='uncertain'
+  JOIN public.lead_order_finishes f ON f.order_id=c.order_id
+  JOIN public.lead_orders o ON o.order_id=c.order_id AND o.mode='live'
+  JOIN public.lead_order_keys k ON k.key_id=c.key_id
+  LEFT JOIN public.lead_order_late_settlements l ON l.call_id=c.call_id
+  WHERE c.provider='openrouter' AND c.created_at>clock_timestamp()-interval '7 days'
+   AND coalesce(l.status,'uncertain')='uncertain'
+   AND coalesce(l.provider_request_id,s.provider_request_id) IS NOT NULL
+   AND NOT EXISTS(SELECT 1 FROM public.lead_order_key_revocations r WHERE r.key_id=c.key_id)
+   AND NOT EXISTS(SELECT 1 FROM public.lead_order_call_resolutions x WHERE x.call_id=c.call_id)
+  ORDER BY c.sequence LIMIT greatest(1,least(p_limit,100))) t;
+$uncertain703$;
+
+-- Record the read-back cost of one uncertain call. Never charged to the buyer.
+CREATE OR REPLACE FUNCTION public.lead_order_resolve_call_v1(p_call_id UUID,p_cost BIGINT,p_epoch BIGINT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $resolve703$
+BEGIN
+ IF p_cost IS NULL OR p_cost<0 OR NOT EXISTS(
+   SELECT 1 FROM public.lead_order_calls c
+   JOIN public.lead_order_call_settlements s ON s.call_id=c.call_id AND s.status='uncertain'
+   JOIN public.lead_order_finishes f ON f.order_id=c.order_id
+   WHERE c.call_id=p_call_id AND NOT EXISTS(SELECT 1 FROM public.lead_order_late_settlements l
+     WHERE l.call_id=c.call_id AND l.status='settled')) THEN
+  RETURN jsonb_build_object('status','not_resolvable');
+ END IF;
+ INSERT INTO public.lead_order_call_resolutions(call_id,cost_microusd,resolved_epoch) VALUES(p_call_id,p_cost,p_epoch)
+ ON CONFLICT(call_id) DO NOTHING;
+ RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'resolved' ELSE 'exists' END);
+END;
+$resolve703$;
+
+-- Turn late known costs into late rewards, once per call, after the order's
+-- receipt (so its on-time rewards are recorded). owed = min(cost, reserved) x
+-- (1 + premium), capped so all rewards on the order stay within
+-- charge x (1 + premium) / min_charge_ratio. Live orders and miner keys only.
+CREATE OR REPLACE FUNCTION public.lead_order_reward_late_v1(p_epoch BIGINT,p_limit INTEGER)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $late703$
+DECLARE r RECORD; prem BIGINT; reward BIGINT; room BIGINT; n INTEGER:=0;
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended('lead_order_late_rewards',0));
+ FOR r IN SELECT c.call_id,c.order_id,c.miner_hotkey,c.reserved_microusd,coalesce(l.cost_microusd,x.cost_microusd) cost,
+   o.policy_version,o.min_charge_ratio_ppm,f.charge_microusd
+  FROM public.lead_order_calls c
+  JOIN public.lead_order_call_settlements s ON s.call_id=c.call_id AND s.status='uncertain'
+  JOIN public.lead_orders o ON o.order_id=c.order_id AND o.mode='live'
+  JOIN public.lead_order_finishes f ON f.order_id=c.order_id
+  JOIN public.lead_order_receipts rc ON rc.order_id=c.order_id
+  LEFT JOIN public.lead_order_late_settlements l ON l.call_id=c.call_id AND l.status='settled'
+  LEFT JOIN public.lead_order_call_resolutions x ON x.call_id=c.call_id
+  WHERE c.miner_hotkey IS NOT NULL AND coalesce(l.cost_microusd,x.cost_microusd) IS NOT NULL
+   AND NOT EXISTS(SELECT 1 FROM public.lead_order_late_rewards w WHERE w.call_id=c.call_id)
+  ORDER BY c.sequence LIMIT greatest(1,least(p_limit,500))
+ LOOP
+  SELECT trunc((policy_doc->>'miner_premium')::NUMERIC*1000000)::BIGINT INTO prem
+   FROM public.lead_order_policies WHERE version=r.policy_version;
+  reward:=div(LEAST(r.cost,r.reserved_microusd)::NUMERIC*(1000000+prem),1000000)::BIGINT;
+  room:=div(r.charge_microusd::NUMERIC*(1000000+prem),r.min_charge_ratio_ppm)::BIGINT
+   -coalesce((SELECT sum(owed_microusd) FROM public.lead_order_rewards_owed WHERE order_id=r.order_id),0)
+   -coalesce((SELECT sum(owed_microusd) FROM public.lead_order_late_rewards WHERE order_id=r.order_id),0);
+  INSERT INTO public.lead_order_late_rewards(call_id,order_id,miner_hotkey,cost_microusd,owed_microusd,settled_epoch)
+  VALUES(r.call_id,r.order_id,r.miner_hotkey,r.cost,GREATEST(0,LEAST(reward,room)),p_epoch);
+  n:=n+1;
+ END LOOP;
+ RETURN jsonb_build_object('recorded',n);
+END;
+$late703$;
+
+-- A miner's own statement: every call on the miner's keys after p_since (by
+-- call sequence, at most 500), plus all-time totals per key. The provider
+-- request id is shown here only, never in a public receipt.
+CREATE OR REPLACE FUNCTION public.lead_order_statement_v1(p_hotkey TEXT,p_since BIGINT,p_limit INTEGER)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $statement703$
+ WITH mine AS (
+  SELECT c.*,s.status settle_status,s.cost_microusd settled_cost,s.settled_at,
+   coalesce(l.provider_request_id,s.provider_request_id) request_id,
+   coalesce(CASE WHEN l.status='settled' THEN l.cost_microusd END,x.cost_microusd) late_cost,
+   coalesce(CASE WHEN l.status='settled' THEN l.received_at END,x.resolved_at) late_at,
+   rc.receipt_hash,w.owed_microusd order_reward,lr.owed_microusd late_reward
+  FROM public.lead_order_calls c
+  LEFT JOIN public.lead_order_call_settlements s ON s.call_id=c.call_id
+  LEFT JOIN public.lead_order_late_settlements l ON l.call_id=c.call_id
+  LEFT JOIN public.lead_order_call_resolutions x ON x.call_id=c.call_id
+  LEFT JOIN public.lead_order_receipts rc ON rc.order_id=c.order_id
+  LEFT JOIN public.lead_order_rewards_owed w ON w.order_id=c.order_id AND w.miner_hotkey=c.miner_hotkey
+  LEFT JOIN public.lead_order_late_rewards lr ON lr.call_id=c.call_id
+  WHERE c.miner_hotkey=p_hotkey),
+ page AS (SELECT * FROM mine WHERE sequence>greatest(p_since,0) ORDER BY sequence LIMIT least(greatest(p_limit,1),500))
+ SELECT jsonb_build_object(
+  'calls',(SELECT coalesce(jsonb_agg(jsonb_build_object('sequence',sequence,'call_id',call_id,'order_id',order_id,
+    'key_id',key_id,'provider',provider,'reserved_microusd',reserved_microusd,'status',coalesce(settle_status,'open'),
+    'cost_microusd',settled_cost,
+    'excess_microusd',CASE WHEN settled_cost>reserved_microusd THEN settled_cost-reserved_microusd ELSE 0 END,
+    'settled_at',to_char(settled_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    'provider_request_id',request_id,'late_cost_microusd',late_cost,
+    'late_at',to_char(late_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),'late_reward_microusd',late_reward,
+    'receipt_hash',receipt_hash,'order_reward_microusd',order_reward) ORDER BY sequence),'[]'::JSONB) FROM page),
+  'keys',(SELECT coalesce(jsonb_agg(jsonb_build_object('key_id',key_id,'provider',provider,'calls',calls,
+    'reserved_microusd',reserved,'settled_microusd',settled,'excess_microusd',excess,'open_calls',open_calls,
+    'uncertain_calls',uncertain_calls,'late_cost_microusd',late_cost,'late_reward_microusd',late_reward) ORDER BY key_id),'[]'::JSONB)
+   FROM (SELECT key_id,provider,count(*) calls,sum(reserved_microusd) reserved,
+     coalesce(sum(settled_cost),0) settled,
+     coalesce(sum(CASE WHEN settled_cost>reserved_microusd THEN settled_cost-reserved_microusd ELSE 0 END),0) excess,
+     count(*) FILTER (WHERE settle_status IS NULL) open_calls,count(*) FILTER (WHERE settle_status='uncertain') uncertain_calls,
+     coalesce(sum(late_cost),0) late_cost,coalesce(sum(late_reward),0) late_reward
+    FROM mine GROUP BY key_id,provider) k),
+  'rewards_owed_microusd',coalesce((SELECT sum(owed_microusd) FROM public.lead_order_rewards_owed WHERE miner_hotkey=p_hotkey),0)
+    +coalesce((SELECT sum(owed_microusd) FROM public.lead_order_late_rewards WHERE miner_hotkey=p_hotkey),0),
+  'rewards_paid_microusd',coalesce((SELECT sum(paid_microusd) FROM public.lead_order_reward_payments WHERE miner_hotkey=p_hotkey),0)
+    +coalesce((SELECT sum(p.paid_microusd) FROM public.lead_order_late_reward_payments p
+      JOIN public.lead_order_late_rewards l ON l.call_id=p.call_id WHERE l.miner_hotkey=p_hotkey),0),
+  'next_since',coalesce((SELECT max(sequence) FROM page),greatest(p_since,0)),
+  'more',(SELECT count(*) FROM page)=least(greatest(p_limit,1),500));
+$statement703$;
 
 -- Every lead_order function: owner, no PUBLIC execute, service-only execute.
 DO $functions703$

@@ -11,6 +11,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import FrozenSet, Mapping, Optional
+from urllib.parse import urlsplit
 
 MODE_ENV = "LEADPOET_LEAD_ORDERS_MODE"
 STAFF_HOTKEYS_ENV = "LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS"
@@ -73,11 +74,20 @@ class LeadOrdersConfig:
         return self.mode != MODE_OFF
 
     @property
+    def public_host(self) -> str:
+        """The host every signed request names (auth.signed_message)."""
+
+        return urlsplit(self.public_base_url).netloc.lower()
+
+    @property
     def uses_gamma(self) -> bool:
         return self.mode == MODE_LIVE
 
     @property
     def uses_miner_keys(self) -> bool:
+        """Whether miners may register keys. Only live orders spend them;
+        shadow orders run on Leadpoet's keys and compute what-if rewards."""
+
         return self.mode in (MODE_SHADOW, MODE_LIVE)
 
     @property

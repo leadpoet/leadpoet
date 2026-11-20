@@ -6,11 +6,16 @@ the one-order token it got at claim. For every call the broker:
 1. checks the token's order is running (not finished, not past deadline);
 2. reserves the call's worst-case cost against the order's spend ceiling
    *before* sending (402 ``spend_ceiling`` once the next call would pass it);
-3. sends with the best-ranked key (miner keys by settled spend, Leadpoet last);
+3. sends with the best-ranked key (live orders: miner keys by settled spend,
+   Leadpoet last; staff and shadow orders: Leadpoet's keys only), skipping a
+   miner key whose own daily cap the call would pass;
 4. settles the reservation at the provider-reported cost, one ledger row per
-   call. A call with no reported cost is settled ``uncertain``: its
-   reservation keeps counting against the ceiling, and it is never charged
-   to the buyer or rewarded to a miner;
+   call, with the provider's request id (OpenRouter generation id, Deepline
+   request id) kept for the miner's statement. A call with no reported cost
+   is settled ``uncertain``: its reservation keeps counting against the
+   ceiling and it is never charged to the buyer. ``resolve_uncertain`` later
+   reads an uncertain OpenRouter call's exact cost back from its generation
+   record so the miner can be repaid;
 5. on 401, 402, 403, a spent limit or a 429 without Retry-After, marks that
    key exhausted for the rest of the order and retries on the next key.
 
@@ -23,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 import math
+import time
 from decimal import ROUND_CEILING, Decimal
 import uuid
 from dataclasses import dataclass, field
@@ -30,7 +36,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import urlencode
 
 from lab_arena import broker as arena_broker
-from lab_arena import operations
+from lab_arena import operations, provider_costs
 from lab_arena.broker import BrokerError, ProviderResponse, ProviderTransport, ProviderTransportError
 from lab_arena.lead_orders import keys as lead_keys
 from lab_arena.lead_orders.auth import order_token_hash
@@ -90,6 +96,14 @@ _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhi
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 TIMEOUT_SECONDS = {"openrouter": 120.0, "deepline": 240.0}
+# Generation read-back (reconcile): per lookup and per pass, so a claim that
+# runs reconcile can never wait long.
+RESOLVE_LOOKUP_SECONDS = 5.0
+RESOLVE_PASS_SECONDS = 15.0
+RESOLVE_BATCH = 10
+# max_price components the broker fills from the listed price when the runner
+# leaves them out (OpenRouter's documented max_price fields).
+_INJECTED_MAX_PRICE = (("prompt", True), ("completion", True), ("request", False))
 _FORWARDED_RESPONSE_HEADERS = ("content-type",)
 
 
@@ -221,12 +235,24 @@ class LeadOrderBroker:
             params["provider"] = provider_prefs
             params["usage"] = {"include": True}
             table = self._price_table()
-            reserve = 0
+            listed = []
             for model in models:
                 pricing = table["models"].get(model)
                 if pricing is None:
                     raise LeadOrderBrokerError(400, "model_not_allowed")
-                pricing = _capped_pricing(pricing, provider_prefs.get("max_price"))
+                listed.append(pricing)
+            # Always send max_price, so no endpoint above the listed price can
+            # run the call: a component the runner left out gets the dearest
+            # listed price across the fallback models.
+            max_price = dict(provider_prefs.get("max_price") or {})
+            for name, per_token in _INJECTED_MAX_PRICE:
+                if name not in max_price:
+                    dearest = max(Decimal(str(pricing[name])) for pricing in listed)
+                    max_price[name] = float(dearest * Decimal(1_000_000) if per_token else dearest)
+            provider_prefs["max_price"] = max_price
+            reserve = 0
+            for model, pricing in zip(models, listed):
+                pricing = _capped_pricing(pricing, max_price)
                 reserve = max(reserve, arena_broker._max_openrouter_cost_for_pricing(
                     pricing, params, max_output_tokens=output_tokens, model=model
                 ))
@@ -266,7 +292,13 @@ class LeadOrderBroker:
                 credential=operations.CredentialPlacement("header", "authorization", scheme="Bearer"),
                 headers=forwarded,
             )
-            return outbound, self._policy.deepline_reserve_per_call_microusd, None
+            # A published fixed price lowers the flat reserve; a dynamically
+            # priced operation keeps it.
+            reserve = self._policy.deepline_reserve_per_call_microusd
+            known = provider_costs.deepline_reservation_cost({"tool": matched.group(1)})
+            if known is not None:
+                reserve = max(1, min(reserve, int(known.microusd)))
+            return outbound, reserve, None
         raise LeadOrderBrokerError(404, "provider_not_allowed")
 
     @staticmethod
@@ -363,6 +395,65 @@ class LeadOrderBroker:
             return 0
         return None
 
+    @staticmethod
+    def _request_id(provider: str, response: Optional[ProviderResponse],
+                    error: Optional[ProviderTransportError]) -> Optional[str]:
+        """The provider's own id for the call, read from the answer or the
+        transport error; None when absent or malformed."""
+
+        if provider == "openrouter":
+            if error is not None:
+                return error.openrouter_generation_id
+            if response is None:
+                return None
+            try:
+                document = json.loads(bytes(response.body).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                document = None
+            return arena_broker._openrouter_generation_identity(document, dict(response.headers))[1]
+        if error is not None:
+            return error.deepline_job_id
+        if response is None:
+            return None
+        return arena_broker._deepline_response_header_request_id(
+            {str(k).lower(): v for k, v in response.headers.items()})
+
+    def resolve_uncertain(self, *, limit: int = RESOLVE_BATCH, clock: Callable[[], float] = time.monotonic) -> int:
+        """Read back the exact cost of uncertain OpenRouter calls on finished
+        live orders, on the same miner key, through the same transport.
+
+        One free generation lookup per call, never a paid request. Bounded per
+        lookup and per pass; a call with no answer stays uncertain and is
+        tried again on a later pass (until it is 7 days old).
+        """
+
+        if self._registrar is None:
+            return 0
+        deadline = clock() + RESOLVE_PASS_SECONDS
+        resolved = 0
+        for row in self._store.uncertain_calls(limit=limit):
+            remaining = deadline - clock()
+            if remaining <= 0:
+                break
+            key = lead_keys.ProviderKey(
+                key_id=row["key_id"], provider=row["provider"], miner_hotkey=row["miner_hotkey"],
+                registered_sequence=int(row["sequence"]), internal_fingerprint=row["internal_fingerprint"],
+                ciphertext_b64=row["ciphertext_b64"],
+            )
+            try:
+                secret = self._registrar.decrypt(key)
+            except lead_keys.LeadOrderKeyError:
+                continue
+            state, cost = arena_broker._openrouter_generation_readback_once(
+                transport=self._transport, secret=secret, generation_id=str(row["provider_request_id"]),
+                timeout_seconds=min(RESOLVE_LOOKUP_SECONDS, remaining),
+            )
+            if state == "found" and cost is not None:
+                result = self._store.resolve_call(call_id=str(row["call_id"]), cost_microusd=int(cost.microusd),
+                                                  epoch=int(self._current_epoch()))
+                resolved += result.get("status") == "resolved"
+        return resolved
+
     # -- the call -------------------------------------------------------------
     def call(self, token: str, request: BrokerRequest) -> ProviderResponse:
         order = self._store.by_token(order_token_hash(token)) if token else None
@@ -376,10 +467,11 @@ class LeadOrderBroker:
         outbound, reserve, models = self._prepare(request)
         provider = request.provider
         epoch = int(self._current_epoch())
-        # Decided per order, from the mode it was placed in: a staff order
-        # spends only Leadpoet's keys even after the gateway moves to shadow
-        # or live, since staff orders never repay miners.
-        use_miner_keys = order.get("mode") in ("shadow", "live") and self._registrar is not None
+        # Decided per order, from the mode it was placed in: only live orders
+        # spend miner keys. Staff and shadow orders run on Leadpoet's keys
+        # (shadow computes what-if rewards), so they never spend a miner's
+        # money without repaying it and never move the live ranking.
+        use_miner_keys = order.get("mode") == "live" and self._registrar is not None
         window_start = max(0, epoch - self._policy.ranking_window_epochs + 1)
         miner_keys = []
         if use_miner_keys:
@@ -408,7 +500,7 @@ class LeadOrderBroker:
                 miner_hotkey=key.miner_hotkey, public_fingerprint=key.public_fingerprint, reserve_microusd=reserve,
             )
             status = reserved.get("status")
-            if status == "key_exhausted":
+            if status in ("key_exhausted", "key_capped", "key_unknown"):
                 continue
             if status == "ceiling":
                 return _json_response(402, "spend_ceiling")
@@ -417,20 +509,22 @@ class LeadOrderBroker:
             if status != "reserved":
                 raise LeadOrderBrokerError(409, "order_closed")
             response: Optional[ProviderResponse] = None
+            error: Optional[ProviderTransportError] = None
             try:
                 url, headers = arena_broker.inject_credential(outbound, secret)
                 response = self._transport.send(
                     method=outbound.target.method, url=url, headers=headers, body=outbound.body,
                     timeout_seconds=TIMEOUT_SECONDS[provider], max_response_bytes=MAX_RESPONSE_BYTES,
                 )
-            except ProviderTransportError:
-                response = None
+            except ProviderTransportError as exc:
+                error = exc
             finally:
                 # Always settle the reservation, whatever happened in between.
                 cost = None if response is None else self._cost(provider, models, response)
                 self._store.settle_call(
                     call_id=call_id, cost_microusd=cost,
                     http_status=None if response is None else int(response.status), epoch=epoch,
+                    provider_request_id=self._request_id(provider, response, error),
                 )
             if response is None:
                 return _json_response(502, "provider_unreachable")

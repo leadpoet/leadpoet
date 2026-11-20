@@ -724,3 +724,38 @@ def test_order_retry_with_the_same_id_and_a_different_body_is_409(store):
         assert taken.value.status == 409 and taken.value.code == "order_id_taken"
     token, claimed = claim(service)
     service.finish(claimed, {"status": "failed"})
+
+
+RAW_V2 = {"x-deepline-execute-response-contract": "raw-v2", "x-deepline-execute-response-intent": "raw",
+          "x-deepline-tool-error-schema": "1"}
+
+
+def test_deepline_raw_v2_headers_are_sent_and_never_reach_receipts_or_the_ledger(store):
+    staff = hotkey()
+    _, service, epoch = make(store, "staff", staff=[staff])
+    placed = service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    # A raw-v2 execute answer, as Icypeas's verification returns it.
+    raw = ProviderResponse(200, {"content-type": "application/json"}, json.dumps({
+        "status": "completed", "toolResponse": {"success": True, "item": {"_id": "v1", "status": "NONE"}},
+        "billing": {"credits_charged": 0.02}}).encode())
+    transport = FakeTransport([raw])
+    broker = broker_for(store, transport, epoch=epoch)
+    request = BrokerRequest("deepline", "POST", "api/v2/integrations/icypeas_email_verification/execute", {},
+                            b'{"payload":{"email":"ada.one@northwind.com"}}', "application/json",
+                            headers=dict(RAW_V2, **{"x-other": "dropped", "authorization": "Bearer runner"}))
+    assert broker.call(token, request).status == 200
+    sent = transport.sent[0]["headers"]
+    assert {name: sent[name] for name in RAW_V2} == RAW_V2
+    assert "x-other" not in sent and sent["authorization"] == "Bearer " + SECRET
+    for name, value in RAW_V2.items():
+        with pytest.raises(LeadOrderBrokerError) as refused:
+            broker.call(token, BrokerRequest("deepline", "POST", "api/v2/integrations/icypeas_read_results/execute",
+                                             {}, b"{}", "application/json", headers={name: value + "x"}))
+        assert (refused.value.status, refused.value.code) == (400, "header_not_allowed:" + name)
+    assert len(transport.sent) == 1  # refused calls are never sent
+    service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://files.example/o.csv"})
+    public = service.public_receipt(placed["order_id"])
+    assert public["receipt"]["spend_microusd"] == 2_000  # 0.02 credits x $0.10, read from the raw-v2 billing
+    stored = json.dumps([public, store.view(order_id)], default=str)
+    assert "raw-v2" not in stored and "x-deepline" not in stored

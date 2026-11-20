@@ -165,3 +165,14 @@ def test_broker_takes_the_order_token_as_the_api_key(client):
 def test_public_receipt_needs_no_auth(client):
     enable()
     assert client.get("/lead-orders/receipts/o9").json()["receipt"] == {"order_id": "o9"}
+
+
+def test_broker_passes_only_the_deepline_response_shape_headers(client):
+    _, broker = enable()
+    client.post("/lead-orders/broker/deepline/api/v2/integrations/icypeas_read_results/execute",
+                headers={"authorization": "Bearer tok", "x-deepline-execute-response-contract": "raw-v2",
+                         "x-deepline-execute-response-intent": "raw", "x-deepline-tool-error-schema": "1",
+                         "x-other": "kept-out", "cookie": "c=1"}, content=b"{}")
+    _, request = broker.calls[0]
+    assert request.headers == {"x-deepline-execute-response-contract": "raw-v2",
+                               "x-deepline-execute-response-intent": "raw", "x-deepline-tool-error-schema": "1"}

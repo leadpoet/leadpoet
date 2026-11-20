@@ -72,6 +72,7 @@ from gateway.models.responses import HealthResponse
 from gateway.api import epoch, attestation
 from gateway.api.arena_proxy import router as arena_proxy_router
 from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
+from gateway.api.lead_orders import router as lead_orders_router
 from gateway.api import metrics as metrics_api
 
 # Import background tasks
@@ -379,6 +380,8 @@ app.include_router(metrics_api.router)
 
 app.include_router(arena_proxy_router)
 app.include_router(arena_testnet_proxy_router)
+# Gamma lead orders: every route is 404 until LEADPOET_LEAD_ORDERS_MODE is set.
+app.include_router(lead_orders_router)
 
 # ============================================================
 # Health Check Endpoints

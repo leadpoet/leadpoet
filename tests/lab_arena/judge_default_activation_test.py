@@ -213,7 +213,8 @@ def test_service_freezes_new_defaults_and_keeps_both_saved_rounds_byte_identical
     assert future["scorer_policy"]["judge_models"] == MODELS
     assert future["judge_reasoning_route_registry"] == reasoning_capture.load_registry()
     assert future["judge_provider_routing"] == {
-        GLM: ["near-ai/fp8", "fireworks"], DEEPSEEK: ["nebius/fp8", "together"]}
+        GLM: ["near-ai/fp8", "fireworks"], DEEPSEEK: ["nebius/fp8", "together"],
+        GPT_OSS: ["near-ai/fp4", "deepinfra/bf16"]}
     assert future["scorer_policy"] == scoring.build_scorer_policy()
     assert "judge_provider_routing" not in old
     assert contracts.validate_round_configuration(json.loads(json.dumps(future))) == future

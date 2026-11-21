@@ -42,12 +42,26 @@ def reader_635():
     return module
 
 
+@lru_cache(maxsize=1)
+def gateway_635():
+    """The 635 reader behind today's handlers, scanning every row as 635 did."""
+    old = reader_635()
+    module = types.ModuleType("training_observations_gateway_635_fixture")
+    module.__dict__.update(old.__dict__)
+    module.read_segment = lambda *args, recheck_privacy=True, **kwargs: old.read_segment(
+        *args, **kwargs)
+    module.build_snapshot = lambda *args, clean_rows=frozenset(), **kwargs: old.build_snapshot(
+        *args, **kwargs)
+    module.stored_clean_row_digests = lambda *args, **kwargs: frozenset()
+    return module
+
+
 def capture_api(service, monkeypatch, *, legacy_reader, uploads, lose_first_ack=False):
     """Exercise exact 635 and current readers through real capture handlers."""
     def call(method, run_id, token, document):
         with monkeypatch.context() as scope:
             if legacy_reader:
-                scope.setattr(service_module, "training_observations", reader_635())
+                scope.setattr(service_module, "training_observations", gateway_635())
             return method(run_id, token, document)
 
     def segment(run_id, token, document):

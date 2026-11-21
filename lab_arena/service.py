@@ -7376,15 +7376,21 @@ class ArenaService:
 
     def handle_training_observations(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
         run = self._training_final_observation_capture_run(run_id, lease_token)
+        objects = self._config.training_object_store
+        kind = str(run.get("kind") or "execute")
         try:
+            # The final snapshot repeats the rows this lease already streamed
+            # as segments; reuse their stored scan instead of scanning again.
+            clean_rows = frozenset() if objects is None else training_observations.stored_clean_row_digests(
+                objects, run_id, kind, run.get("lease_generation"), run.get("claim_request_hash"))
             snapshot, compressed = training_observations.build_snapshot(
-                run_id, str(run.get("kind") or "execute"), document,
+                run_id, kind, document,
                 lease_generation=run.get("lease_generation"),
                 claim_request_hash=run.get("claim_request_hash"), secrets=(lease_token,),
+                clean_rows=clean_rows,
             )
         except (ValueError, TypeError, RecursionError):
             raise ServiceError("training_observations_invalid", 400) from None
-        objects = self._config.training_object_store
         if objects is None:
             raise ServiceError("training_observations_unavailable", 503)
         ref = training_observations.object_ref(run_id, snapshot["lease_generation"], snapshot["claim_request_hash"])
@@ -7451,9 +7457,12 @@ class ArenaService:
             raise ServiceError("training_observation_segment_unavailable", 503)
         if segment["number"]:
             try:
+                # This gateway stored the previous segment after the full
+                # privacy scan; check its chain, not its text, again.
                 previous = training_observations.read_segment(
                     objects, run_id, segment["kind"], segment["lease_generation"],
-                    segment["claim_request_hash"], segment["number"] - 1)
+                    segment["claim_request_hash"], segment["number"] - 1,
+                    recheck_privacy=False)
             except Exception as exc:
                 _warn_observation_segment_failure(run_id, segment["number"], "previous_read", exc)
                 raise ServiceError("training_observation_segment_unavailable", 503) from None

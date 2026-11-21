@@ -8705,7 +8705,15 @@ class ArenaService:
                 if _judge_continuation_enabled(round_row):
                     with telemetry.stage("advance_expire_leases"):
                         self._store.expire_leases(round_id)
-                if self._frozen_unfinished_judgment(round_row):
+                # The last step before publication, and the only one on this
+                # branch that was unmeasured: it reads every run in the round
+                # with no limit. Without its own stage a driver sitting here
+                # and a driver sitting in publish produce the same silence.
+                with telemetry.stage("advance_frozen_judgment") as observed:
+                    frozen = self._frozen_unfinished_judgment(round_row)
+                    observed.count = 1 if frozen else 0
+                    observed.idle = not frozen
+                if frozen:
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}
                 try:

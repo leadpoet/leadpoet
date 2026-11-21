@@ -366,6 +366,24 @@ FAILURE_DIAGNOSTIC_ERROR_CLASSES = (
     "judge_error",
     "provider_unavailable",
 )
+# The optional third field of a failure diagnostic. stage/error_class cannot
+# separate a scorer-reported failure from the unclassified fallback -- both
+# report scorer/judge_error -- so this is the field that says why.
+FAILURE_DIAGNOSTIC_REASONS = (
+    "source_blocked",
+    "malformed_response",
+    "invalid_final_checkpoint",
+    "no_valid_checkpoint",
+    "invalid_json",
+    "output_schema_mismatch",
+    "output_contract_violation",
+    "provider_error",
+    "provider_credit_exhausted",
+    "provider_authentication_failed",
+    "admission_budget_interrupted",
+    "unexpected_verifier_error",
+    "unknown",
+)
 
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
@@ -1911,21 +1929,7 @@ RUN_RESULT_FIELDS = (
                 "reason",
                 "str",
                 required=False,
-                choices=(
-                    "source_blocked",
-                    "malformed_response",
-                    "invalid_final_checkpoint",
-                    "no_valid_checkpoint",
-                    "invalid_json",
-                    "output_schema_mismatch",
-                    "output_contract_violation",
-                    "provider_error",
-                    "provider_credit_exhausted",
-                    "provider_authentication_failed",
-                    "admission_budget_interrupted",
-                    "unexpected_verifier_error",
-                    "unknown",
-                ),
+                choices=FAILURE_DIAGNOSTIC_REASONS,
             ),
         ),
     ),

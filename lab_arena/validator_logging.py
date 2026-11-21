@@ -21,6 +21,14 @@ from lab_arena.scoring_startup import ScoringStartupError
 from lab_arena.weight_read_diagnostics import chain_error_fields
 
 
+def _readiness_event(value):
+    """Match the receiver's bounded lifecycle allowance, including failures."""
+    return value['kind'] in {'validator.startup', 'validator.ready', 'validator.stopping'} or (
+        value['kind'] in {'validator.error', 'validator.recovered'}
+        and value['content'].get('phase') in {'startup', 'weights', 'scoring_setup', 'scoring_cycle'}
+    )
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -116,6 +124,12 @@ class ValidatorOperationalLogger:
             from lab_arena.runtime_version import SOURCE_METADATA
             value = event(kind, {**SOURCE_METADATA, **content, "session_id": self.session_id}, run_id=run_id, round_id=round_id)
             with self._lock:
+                if len(self._queue) == self.QUEUE_LIMIT:
+                    expendable = next((item for item in self._queue if not _readiness_event(item)), None)
+                    if expendable is not None:
+                        self._queue.remove(expendable)
+                    elif not _readiness_event(value):
+                        return  # A diagnostic flood cannot evict lifecycle evidence.
                 self._queue.append(value)
             self._wake.set()
         except Exception:
@@ -229,6 +243,8 @@ class ValidatorOperationalLogger:
                 batch = []
                 if current >= retry_at or self._stop.is_set():
                     for value in list(self._queue)[:self.BATCH_LIMIT]:
+                        if batch and _readiness_event(value) != _readiness_event(batch[0]):
+                            break  # Preserve order without coupling independent rate limits.
                         if len(json.dumps(batch + [value]).encode()) > 27 * 1024:
                             break
                         batch.append(value)

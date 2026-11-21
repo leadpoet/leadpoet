@@ -5740,4 +5740,7 @@ def test_structured_reply_shapes_preserve_failure_classification(
         diagnostic=diagnostic,
     ))
     assert result is None
-    assert diagnostic == {'failure_reason': expected_reason}
+    assert diagnostic == {
+        'failure_reason': expected_reason,
+        **({'completed_empty_profile': 'true'} if expected_reason == 'malformed_response' else {}),
+    }

@@ -21,7 +21,7 @@ from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_service_round import FakeChain, wallet_verify
 
-MIGRATION = '475-lab-arena-validator-claim-capacity-observations.sql'
+MIGRATION = '706-lab-arena-validator-readiness-allowance.sql'
 PRIMARY = Keypair.create_from_uri('//events-primary')
 EXTERNAL = Keypair.create_from_uri('//events-external')
 OUTSIDER = Keypair.create_from_uri('//events-outsider')
@@ -32,7 +32,8 @@ RUN = 'validator-events-run'
 @pytest.fixture(scope='module')
 def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS + (
-        '434-lab-arena-validator-events.sql', MIGRATION,
+        '434-lab-arena-validator-events.sql',
+        '475-lab-arena-validator-claim-capacity-observations.sql', MIGRATION,
     ))
 
 
@@ -172,6 +173,101 @@ def test_rate_limit_exact_retry_daily_cap_and_global_retention(setup):
     with connect() as db, db.cursor() as cur:
         cur.execute("INSERT INTO public.lab_arena_validator_events (validator_hotkey,network,netuid,event_id,event_kind,occurred_at,content,gateway_source_commit,created_at) SELECT %s,'finney',71,md5(i::text)::uuid,'validator.state',clock_timestamp(),'{}'::jsonb,'unknown',clock_timestamp()-interval '2 hours' FROM generate_series(1,1000) i",(EXTERNAL.ss58_address,))
     assert post(http,EXTERNAL,[validator_events.event('validator.state',{'state':'idle'})]).status_code == 429
+
+
+def test_full_diagnostic_budget_cannot_hide_restart_readiness_or_failure(setup):
+    from scripts.restart_arena_pair import ready_session
+
+    http, _, _, connect, _ = setup
+    with connect() as db, db.cursor() as cur:
+        cur.execute("INSERT INTO public.lab_arena_validator_events (validator_hotkey,network,netuid,event_id,event_kind,occurred_at,content,gateway_source_commit,created_at) SELECT %s,'finney',71,md5(i::text)::uuid,'validator.error',clock_timestamp(),'{\"phase\":\"weight_recovery\"}'::jsonb,'unknown',clock_timestamp()-interval '2 hours' FROM generate_series(1,1000) i", (EXTERNAL.ss58_address,))
+    session = str(uuid.uuid4())
+    source = 'a' * 40
+    metadata = {'session_id': session, 'validator_source_commit': source}
+    docs = [validator_events.event(kind, {**metadata, **content}) for kind, content in (
+        ('validator.startup', {'phase': 'startup'}),
+        ('validator.ready', {'phase': 'weights'}),
+        ('validator.ready', {'phase': 'scoring_setup', 'ready_slots': 12}),
+        ('validator.error', {'phase': 'weights', 'error_class': 'TimeoutError'}),
+    )]
+    assert post(http, EXTERNAL, docs).status_code == 200
+    assert post(http, EXTERNAL, docs).json()['existing'] == len(docs)
+    assert post(http, EXTERNAL, [validator_events.event('validator.state', {'state': 'idle'})]).status_code == 429
+
+    def readiness():
+        with connect() as db, db.cursor() as cur:
+            cur.execute("SELECT validator_event_id,event_kind,occurred_at::text,created_at::text,content FROM lab_arena_validator_events WHERE content->>'session_id'=%s ORDER BY validator_event_id", (session,))
+            records = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+        return ready_session(records, candidate=source, started_at=docs[0]['occurred_at'])
+
+    assert readiness() is None  # The error remains authoritative despite a full diagnostic lane.
+    recovered = validator_events.event('validator.recovered', {**metadata, 'phase': 'weights'})
+    assert post(http, EXTERNAL, [recovered]).status_code == 200
+    assert readiness() == session
+
+
+@pytest.mark.parametrize('lane_kind,content', [
+    ('validator.state', {'state': 'idle'}),
+    ('validator.ready', {'phase': 'weights'}),
+])
+def test_each_allowance_remains_bounded_under_concurrent_writes(setup, lane_kind, content):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _, _, store, connect, _ = setup
+    with connect() as db, db.cursor() as cur:
+        cur.execute("INSERT INTO public.lab_arena_validator_events (validator_hotkey,network,netuid,event_id,event_kind,occurred_at,content,gateway_source_commit,created_at) SELECT %s,'finney',71,md5(i::text)::uuid,%s,clock_timestamp(),%s::jsonb,'unknown',clock_timestamp() FROM generate_series(1,59) i", (EXTERNAL.ss58_address, lane_kind, json.dumps(content)))
+    docs = [validator_events.event(lane_kind, content) for _ in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda doc: store.append_validator_events(
+            EXTERNAL.ss58_address, 'finney', 71, [doc], 'unknown'), docs))
+    assert sum(result['status'] == 'accepted' for result in results) == 1
+    assert sum(result['status'] == 'rate_limited' for result in results) == 7
+    assert len(rows(connect)) == 60
+
+
+def test_lifecycle_daily_cap_and_exact_replay_are_bounded(setup):
+    http, _, _, connect, _ = setup
+    with connect() as db, db.cursor() as cur:
+        cur.execute("INSERT INTO public.lab_arena_validator_events (validator_hotkey,network,netuid,event_id,event_kind,occurred_at,content,gateway_source_commit,created_at) SELECT %s,'finney',71,md5(i::text)::uuid,'validator.ready',clock_timestamp(),'{\"phase\":\"weights\"}'::jsonb,'unknown',clock_timestamp()-interval '2 hours' FROM generate_series(1,999) i", (EXTERNAL.ss58_address,))
+    doc = validator_events.event('validator.startup', {'phase': 'startup'})
+    assert post(http, EXTERNAL, [doc, doc]).json()['inserted'] == 1
+    assert post(http, EXTERNAL, [doc]).json()['existing'] == 1
+    assert post(http, EXTERNAL, [validator_events.event('validator.ready', {'phase': 'weights'})]).status_code == 429
+    assert post(http, EXTERNAL, [validator_events.event('validator.state', {'state': 'idle'})]).status_code == 200
+
+
+def test_real_sender_delivers_lifecycle_after_diagnostics_are_rejected(setup):
+    from urllib.error import HTTPError
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+
+    http, _, _, connect, _ = setup
+    with connect() as db, db.cursor() as cur:
+        cur.execute("INSERT INTO public.lab_arena_validator_events (validator_hotkey,network,netuid,event_id,event_kind,occurred_at,content,gateway_source_commit,created_at) SELECT %s,'finney',71,md5(i::text)::uuid,'validator.state',clock_timestamp(),'{}'::jsonb,'unknown',clock_timestamp()-interval '2 hours' FROM generate_series(1,1000) i", (EXTERNAL.ss58_address,))
+    ticks = [0.0]
+    statuses = []
+
+    def monotonic():
+        ticks[0] += 30
+        return ticks[0]
+
+    def transport(envelope):
+        response = http.post('/arena/v1/validators/events', json=envelope)
+        statuses.append(response.status_code)
+        if response.status_code != 200:
+            raise HTTPError('https://gateway.invalid', response.status_code, 'limited', {}, None)
+        log._stop.set()
+
+    log = ValidatorOperationalLogger('https://gateway.invalid', keypair=EXTERNAL,
+        network='finney', netuid=71, transport=transport, monotonic=monotonic)
+    log.HEARTBEAT_SECONDS = 1e6
+    log.emit('validator.error', {'phase': 'weight_recovery'})
+    log.emit('validator.startup', {'phase': 'startup'})
+    log.emit('validator.ready', {'phase': 'weights'})
+    log.emit('validator.ready', {'phase': 'scoring_setup', 'ready_slots': 12})
+    log._send_loop()
+    assert statuses == [429, 200]
+    saved = [row for row in rows(connect) if row[6].get('session_id') == log.session_id]
+    assert [row[1] for row in saved] == ['validator.startup', 'validator.ready', 'validator.ready']
 
 
 def test_migration_replay_privileges_and_sql_bounds(setup):

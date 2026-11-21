@@ -58,6 +58,10 @@ reviewed completed-negative predicate in the exact frozen79cd lead scorer.
 The exclusive --identity-repair-before-investigation-only mode inserts only
 the reviewed missing-identity ordering correction in exact frozen b699.
 
+The exclusive --homepage-identity-and-source-validation-only mode routes the
+reviewed bound homepage conflict through identity repair and corrects the raw
+HTML anti-bot false positive in exact frozen396. Only those two files change.
+
 The exclusive --completed-merger-survivor-only mode adds only reviewed
 completed-merger target proof to the exact frozen810 lead scorer.
 Its --source-local-refusal-finality sub-option adds only the matching shim and
@@ -306,6 +310,8 @@ def extract_frozen_sources(
     verified_homepage_brand_alias: bool = False,
     empty_domain_negative_finality_only: bool = False,
     identity_repair_before_investigation_only: bool = False,
+    homepage_identity_and_source_validation_only: bool = False,
+    completed_empty_profile: bool = False,
     identity_repair_finality_only: bool = False,
     completed_merger_survivor_only: bool = False,
     public_issuer_buyer_only: bool = False,
@@ -349,6 +355,10 @@ def extract_frozen_sources(
                 or identity_repair_finality_only or completed_merger_survivor_only
                 or submitted_company_context_only or public_issuer_buyer_only):
             names = (FINALITY_FILE,)
+        if homepage_identity_and_source_validation_only:
+            names = (FINALITY_FILE, ARCHIVE_FILE)
+            if completed_empty_profile:
+                names += ("qualification/scoring/linkedin_company_size.py",)
         if investigator_feedback:
             names += (GRADER_FILE,)
         if linkedin_headquarters_feedback:
@@ -566,6 +576,22 @@ def main() -> int:
         help="compose only reviewed completed missing-LinkedIn repair finality on exact frozen 2dc; excludes other corrections",
     )
     parser.add_argument(
+        "--homepage-identity-and-source-validation-only", action="store_true",
+        help="compose only reviewed homepage identity repair and HTML source validation on exact frozen396; excludes other corrections",
+    )
+    parser.add_argument(
+        "--completed-empty-profile", action="store_true",
+        help="preserve completed identity finality after an exact empty profile; requires homepage-identity-and-source-validation-only",
+    )
+    parser.add_argument(
+        "--preserved-headquarters-source", action="store_true",
+        help="retain bound headquarters context through aliases and retries; requires completed-empty-profile",
+    )
+    parser.add_argument(
+        "--target-server-error-discovery", action="store_true",
+        help="recognize exact target HTTP500 for existing bounded discovery; requires preserved-headquarters-source",
+    )
+    parser.add_argument(
         "--identity-repair-before-investigation-only", action="store_true",
         help="compose only the reviewed missing-identity ordering on exact frozen b699; excludes other corrections",
     )
@@ -731,6 +757,17 @@ def main() -> int:
         if name not in {"identity_repair_before_investigation_only", "push"}
     ):
         raise CompositionError("identity-repair-before-investigation-only mode cannot include other corrections")
+    if args.homepage_identity_and_source_validation_only and any(
+        value is True for name, value in vars(args).items()
+        if name not in {"homepage_identity_and_source_validation_only", "completed_empty_profile", "preserved_headquarters_source", "target_server_error_discovery", "push"}
+    ):
+        raise CompositionError("homepage-identity-and-source-validation-only mode cannot include other corrections")
+    if args.completed_empty_profile and not args.homepage_identity_and_source_validation_only:
+        raise CompositionError("completed-empty-profile requires homepage-identity-and-source-validation-only")
+    if args.preserved_headquarters_source and not args.completed_empty_profile:
+        raise CompositionError("preserved-headquarters-source requires completed-empty-profile")
+    if args.target_server_error_discovery and not args.preserved_headquarters_source:
+        raise CompositionError("target-server-error-discovery requires preserved-headquarters-source")
     if args.empty_domain_negative_finality_only and any(
         value is True for name, value in vars(args).items()
         if name not in {"empty_domain_negative_finality_only", "push"}
@@ -777,6 +814,10 @@ def main() -> int:
         from scripts.arena_reviewer_identity_repair_order_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
             raise CompositionError("identity repair ordering requires the exact frozen b699 image")
+    if args.homepage_identity_and_source_validation_only:
+        from scripts.arena_reviewer_homepage_identity_conflict_seam import FROZEN_IMAGE_DIGEST
+        if match[2] != FROZEN_IMAGE_DIGEST:
+            raise CompositionError("homepage identity conflict repair requires the exact frozen396 image")
     if args.public_issuer_buyer_only:
         from scripts.arena_reviewer_public_buyer_seam import FROZEN_IMAGE_DIGEST
         if match[2] != FROZEN_IMAGE_DIGEST:
@@ -890,6 +931,23 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             if args.visible_auxiliary_context:
                 from scripts.arena_reviewer_visible_auxiliary_context_seam import convert_visible_auxiliary_context_seam
                 files[FINALITY_FILE] = convert_visible_auxiliary_context_seam(files[FINALITY_FILE])
+        elif args.homepage_identity_and_source_validation_only:
+            from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_homepage_identity_source_files
+            original = extract_frozen_sources(
+                args.grading_image, root / "original", homepage_identity_and_source_validation_only=True,
+                **({"completed_empty_profile": True} if args.completed_empty_profile else {}),
+            )
+            if args.target_server_error_discovery:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_target_server_error_discovery_files
+                files = convert_target_server_error_discovery_files(original)
+            elif args.preserved_headquarters_source:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_preserved_headquarters_source_files
+                files = convert_preserved_headquarters_source_files(original)
+            elif args.completed_empty_profile:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import convert_completed_empty_profile_files
+                files = convert_completed_empty_profile_files(original)
+            else:
+                files = convert_homepage_identity_source_files(original)
         elif args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import convert_identity_repair_order_seam
             original = extract_frozen_sources(
@@ -1009,6 +1067,7 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
             + ("-verified-display-brand" if args.verified_display_brand else "")
             + ("-empty-domain-negative-finality" if args.empty_domain_negative_finality_only else "")
             + ("-identity-repair-order" if args.identity_repair_before_investigation_only else "")
+            + ("-homepage-identity-source" if args.homepage_identity_and_source_validation_only else "")
             + ("-identity-repair-finality" if args.identity_repair_finality_only else "")
             + ("-visible-auxiliary-context" if args.visible_auxiliary_context else "")
             + ("-completed-merger-survivor" if args.completed_merger_survivor_only else "")
@@ -1090,6 +1149,18 @@ def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str
         if args.identity_repair_before_investigation_only:
             from scripts.arena_reviewer_identity_repair_order_seam import CORRECTION_ID as IDENTITY_REPAIR_ORDER_CORRECTION_ID
             corrections.append(IDENTITY_REPAIR_ORDER_CORRECTION_ID)
+        if args.homepage_identity_and_source_validation_only:
+            from scripts.arena_reviewer_homepage_identity_conflict_seam import CORRECTIONS as HOMEPAGE_IDENTITY_SOURCE_CORRECTIONS
+            corrections.extend(HOMEPAGE_IDENTITY_SOURCE_CORRECTIONS)
+            if args.completed_empty_profile:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import EMPTY_PROFILE_CORRECTION_ID
+                corrections.append(EMPTY_PROFILE_CORRECTION_ID)
+            if args.preserved_headquarters_source:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import HEADQUARTERS_SOURCE_CORRECTION_ID
+                corrections.append(HEADQUARTERS_SOURCE_CORRECTION_ID)
+            if args.target_server_error_discovery:
+                from scripts.arena_reviewer_homepage_identity_conflict_seam import TARGET_SERVER_ERROR_CORRECTION_ID
+                corrections.append(TARGET_SERVER_ERROR_CORRECTION_ID)
         if args.empty_domain_negative_finality_only:
             from scripts.arena_reviewer_empty_domain_finality_seam import CORRECTION_ID as EMPTY_DOMAIN_FINALITY_CORRECTION_ID
             corrections.append(EMPTY_DOMAIN_FINALITY_CORRECTION_ID)

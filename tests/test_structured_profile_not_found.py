@@ -49,7 +49,10 @@ def test_exact_absence_and_provider_failure_controls(monkeypatch, body, reason):
         "acme.example.com", "https://www.linkedin.com/company/acme", diagnostic=diagnostic,
     ))
     assert result is None
-    assert diagnostic == ({"failure_reason": reason} if reason else {})
+    expected = {"failure_reason": reason} if reason else {}
+    if body == {"error": None, "status": 200, "element": None}:
+        expected["completed_empty_profile"] = "true"
+    assert diagnostic == expected
 
 
 def test_valid_200_profile_still_requires_exact_identity_and_projects_size(monkeypatch):

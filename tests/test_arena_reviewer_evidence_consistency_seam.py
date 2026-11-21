@@ -13,7 +13,7 @@ from tests.lab_arena.reviewer_runtime_composition_test import layer
 
 
 ORIGINAL = {name: frozen_source("evidence_consistency2ec", name) for name in seam.FILES}
-CORRECTED = {name: (composer.ROOT / name).read_bytes() for name in seam.FILES}
+CORRECTED = {name: frozen_source("evidence_consistency_repaired", name) for name in seam.FILES}
 
 
 def test_exact_three_file_delta_preserves_every_other_top_level_definition():
@@ -65,7 +65,13 @@ def test_unknown_missing_or_extra_source_is_not_admitted(side, fault):
 
 
 @pytest.mark.parametrize("verify_existing", [False, True])
-def test_actual_composer_keeps_layers_configuration_and_exact_file_set(monkeypatch, capsys, verify_existing):
+def test_actual_composer_keeps_layers_configuration_and_exact_file_set(monkeypatch, capsys, tmp_path, verify_existing):
+    # Historical composition uses its exact reviewed source, not later changes.
+    for name, source in CORRECTED.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source)
+    monkeypatch.setattr(composer, "ROOT", tmp_path)
     base_ref = "registry.example/reviewer@" + seam.FROZEN_IMAGE_DIGEST
     tag = "registry.example/reviewer:reviewer-" + seam.FROZEN_IMAGE_DIGEST[7:19] + "-" + "c" * 12 + "-evidence-consistency"
     candidate_ref = "registry.example/reviewer@sha256:" + "b" * 64 if verify_existing else tag

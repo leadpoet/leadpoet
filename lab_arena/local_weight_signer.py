@@ -9,6 +9,7 @@ implementation or add a second weight algorithm.
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import time
@@ -202,6 +203,16 @@ class HttpsJsonRpcTransport:
                             raise ValidatorChainSourceV2Error(
                                 "host chain RPC HTTP response cleanup failed"
                             ) from close_exc
+                except (urllib.error.URLError, ConnectionError, TimeoutError,
+                        http.client.IncompleteRead) as exc:
+                    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                    if not isinstance(reason, (ConnectionError, TimeoutError,
+                                               http.client.IncompleteRead)):
+                        raise
+                    # These are read-only RPC methods. Reuse the HTTP retry
+                    # allowance; never extend its deadline for a network fault.
+                    last_error = exc
+                    status = None
                 if status == 429 and not rate_limit_budget_added:
                     # Canonical rate-limit recovery has a separate, fixed wait
                     # allowance. Do not renew it on later attempts or increase
@@ -210,7 +221,7 @@ class HttpsJsonRpcTransport:
                     rate_limit_budget_added = True
                 if attempt_number == len(CHAIN_RPC_RETRY_BACKOFF_SECONDS):
                     raise ValidatorChainSourceV2Error(
-                        "host chain RPC exhausted transient HTTP retries"
+                        "host chain RPC exhausted transient read retries"
                     ) from last_error
                 delay = max(
                     float((CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS if status == 429

@@ -187,8 +187,13 @@ def test_broker_takes_the_order_token_as_the_api_key(client):
     assert proxied.status_code == 402 and proxied.json() == {"error": "spend_ceiling"}
     token, request = broker.calls[0]
     assert token == "tok" and request.provider == "openrouter" and request.path == "api/v1/chat/completions"
-    client.get("/lead-orders/broker/deepline/api/v2/jobs/1?page=2", headers={"authorization": "Basic tok"})
+    decisions = client.post("/lead-orders/broker/openrouter/api/alpha/decisions",
+                            headers={"authorization": "Bearer tok", "content-type": "application/json"}, content=b"{}")
+    assert decisions.status_code == 402 and decisions.json() == {"error": "spend_ceiling"}
     token, request = broker.calls[1]
+    assert token == "tok" and request.provider == "openrouter" and request.path == "api/alpha/decisions"
+    client.get("/lead-orders/broker/deepline/api/v2/jobs/1?page=2", headers={"authorization": "Basic tok"})
+    token, request = broker.calls[2]
     assert token == "" and request.query == {"page": "2"}  # a non-bearer header passes no token
 
 

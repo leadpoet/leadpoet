@@ -179,7 +179,7 @@ def test_review_guard_read_is_installed_and_preserves_restart_authority(database
     guard.test_review_guard_does_not_queue_behind_claim_control_but_canonical_state_still_does(database)
     for commit in (False, True):
         guard.test_real_guard_update_blocks_read_until_commit_or_rollback(database, commit)
-    guard.test_retained_expired_guard_still_blocks_and_operator_pause_semantics_stay_same(database)
+    guard.test_retained_expired_guard_releases_review_and_operator_pause_semantics_stay_same(database)
 
 
 def test_new_migrations_have_unique_sequence_numbers():

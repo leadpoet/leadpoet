@@ -59,6 +59,7 @@ def run_two_review_cycles(monkeypatch, *, fail_at=None, error=None, guard_presen
         return {} if malformed else {
             "schema_version": "leadpoet.lab_arena.review_guard_state.v1",
             "guard_present": guard_present,
+            "guard_active": guard_present,
         }
 
     def review(*, should_continue):

@@ -219,7 +219,8 @@ def _capture_private_ledger(harness: "FullThinkingHarness", report: Path,
 
 
 def full_thinking_database(*, production_order: bool = True):
-    """Historical full-thinking authority through574, for migration controls."""
+    """Historical full-thinking authority through 574 plus the current review
+    guard lease read, for migration controls."""
     # The 538 fixture carries the 517 write-once trigger and scorer history.
     # It omits several independently tested mainline branches. Apply their
     # exact guarded migrations before the post-538 tail; the dated 542-546
@@ -275,6 +276,7 @@ def full_thinking_database(*, production_order: bool = True):
                     "572-lab-arena-concurrent-baseline-judging.sql",
                     "573-lab-arena-closed-provider-eligible-run-materialization.sql",
                     "574-lab-arena-review-guard-row-read.sql",
+                    "705-lab-arena-review-guard-lease-expiry.sql",
                 )
                 if production_order:
                     # Production already has main's 571-574. Verify the PR

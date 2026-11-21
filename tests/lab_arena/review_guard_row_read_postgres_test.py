@@ -11,7 +11,8 @@ from tests.postgres_migration_harness import SCRIPTS
 
 
 RPC = "lab_arena_review_guard_state_v1"
-MIGRATION = "574-lab-arena-review-guard-row-read.sql"
+ROW_READ_MIGRATION = "574-lab-arena-review-guard-row-read.sql"
+MIGRATION = "705-lab-arena-review-guard-lease-expiry.sql"
 GUARD = "lab_arena_restart_guard:" + "b" * 64
 OWNER = "lab_arena_restart_owner:" + "c" * 64
 
@@ -19,6 +20,7 @@ OWNER = "lab_arena_restart_owner:" + "c" * 64
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(DEFAULT_MIGRATIONS + (
+        ROW_READ_MIGRATION,
         MIGRATION,
     ))
 
@@ -59,7 +61,8 @@ def test_review_guard_does_not_queue_behind_claim_control_but_canonical_state_st
         with pytest.raises(psycopg2.errors.LockNotAvailable):
             rpc(reader, "lab_arena_restart_guard_state_v1")
         assert rpc(reader) == {
-            "schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False,
+            "schema_version": "leadpoet.lab_arena.review_guard_state.v1",
+            "guard_present": False, "guard_active": False,
         }
         sweep.rollback()
         assert rpc(reader, "lab_arena_restart_guard_state_v1")["guard_present"] is False
@@ -110,7 +113,7 @@ def test_guard_update_lock_timeout_fails_closed(database):
         assert rpc(reader)["guard_present"] is False
 
 
-def test_retained_expired_guard_still_blocks_and_operator_pause_semantics_stay_same(database):
+def test_retained_expired_guard_releases_review_and_operator_pause_semantics_stay_same(database):
     with closing(connect(database, transactional=True)) as admin:
         with admin.cursor() as cursor:
             cursor.execute("UPDATE public.lab_arena_restart_claim_control SET operator_paused=TRUE WHERE singleton")
@@ -119,7 +122,10 @@ def test_retained_expired_guard_still_blocks_and_operator_pause_semantics_stay_s
         acquire(admin)
         with admin.cursor() as cursor:
             cursor.execute("UPDATE public.lab_arena_restart_claim_control SET guard_expires_at=clock_timestamp()-interval '1 second' WHERE singleton")
-        assert rpc(admin)["guard_present"] is True
+        # The commitment is retained, so presence still reports the restart;
+        # its lease has lapsed, so review work is no longer withheld.
+        review = rpc(admin)
+        assert review["guard_present"] is True and review["guard_active"] is False
         canonical = rpc(admin, "lab_arena_restart_guard_state_v1")
         assert canonical["guard_present"] is True and canonical["guard_active"] is False
         admin.rollback()

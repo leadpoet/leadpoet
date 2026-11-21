@@ -960,6 +960,46 @@ def test_suppression_push_stores_hashes_only_and_the_feed_is_for_buyers_and_sign
     assert service.read_suppressions(buyer, "0")["suppressions"]
 
 
+def test_suppression_cursor_keeps_both_concurrent_pushes(database, owner, store):
+    psycopg2, dsn = database
+    cursor = sql(owner, "SELECT coalesce(max(sequence),0) FROM lead_order_suppressions", ())[0][0]
+    hashes = [hashlib.sha256(uuid.uuid4().bytes).hexdigest() for _ in range(2)]
+    push = "SELECT public.lead_order_add_suppressions_v1(%s::jsonb)"
+
+    def batch(digest):
+        return (json.dumps([{"kind": "email_sha256", "hash": digest, "added_at": "2026-11-20T00:00:00Z"}]),)
+
+    first = psycopg2.connect(**dsn)
+    second = psycopg2.connect(**dsn)
+    second.autocommit = True
+    try:
+        sql(first, push, batch(hashes[0]))
+        sql(second, "SET statement_timeout='5s'", ())
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(sql, second, push, batch(hashes[1]))
+            try:
+                deadline = monotonic() + 3
+                while not pending.done():
+                    if sql(owner, "SELECT %s=ANY(pg_blocking_pids(%s))",
+                           (first.get_backend_pid(), second.get_backend_pid()))[0][0]:
+                        break
+                    assert monotonic() < deadline, "second push did not start"
+                    sleep(0.01)
+                # Poll the feed while the first push still holds its transaction.
+                assert store.suppressions(since=cursor, limit=1) == []
+            finally:
+                first.commit()
+            assert pending.result(timeout=5)[0][0]["added"] == 1
+        for expected in hashes:
+            row, = store.suppressions(since=cursor, limit=1)
+            assert row["hash"] == expected
+            cursor = row["sequence"]
+        assert store.suppressions(since=cursor, limit=1) == []
+    finally:
+        first.close()
+        second.close()
+
+
 def test_orders_the_runner_would_refuse_are_refused_at_placement_with_no_hold(store, owner):
     staff = hotkey()
     _, service, _ = make(store, "staff", staff=[staff])

@@ -781,6 +781,8 @@ BEGIN
  IF jsonb_typeof(p_rows)<>'array' OR jsonb_array_length(p_rows) NOT BETWEEN 1 AND 1000 THEN
   RAISE EXCEPTION 'suppressions must be 1 to 1000 rows';
  END IF;
+ -- Keep cursor order consistent with commit order for concurrent pushes.
+ PERFORM pg_advisory_xact_lock(hashtextextended('lead_order_suppression_feed',0));
  INSERT INTO public.lead_order_suppressions(kind,hash,added_at)
  SELECT r->>'kind',r->>'hash',(r->>'added_at')::TIMESTAMPTZ FROM jsonb_array_elements(p_rows) r
  ON CONFLICT DO NOTHING;

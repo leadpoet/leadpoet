@@ -286,7 +286,10 @@ class MeasuredArchiveFixture:
     def __init__(self, fixture_path: Path, spec_version: int) -> None:
         self.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         self.runtime_spec_version = spec_version
-        self.inclusion_block = int(self.fixture["inclusion_block"])
+        # Queue, commitment and surrounding headers in this harness are synthetic;
+        # only the measured runtime and transition event bytes are archive data.
+        self.inclusion_block = int(self.fixture.get(
+            "inclusion_block", self.fixture["block_number"] - 3))
         self.reveal_block = int(self.fixture["block_number"])
         self.validator_uid = int(self.fixture["expected"]["uid"])
         self.validator_account = bytes.fromhex(
@@ -463,6 +466,11 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC488_FIXTURE, 488),
         (SPEC490_FIXTURE, 490),
         (SPEC491_FIXTURE, 491),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547602.json", 492),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547606.json", 492),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547962.json", 492),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec493_block9549764.json", 493),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec493_block9549766.json", 493),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(

@@ -298,6 +298,44 @@ def test_hq_reuses_existing_trailing_slash_profile_without_a_duplicate_slot():
                                 "text": "Existing profile description.\n\n" + HQ_TEXT}}
 
 
+@pytest.mark.parametrize("full_retry_cache", [False, True])
+def test_hq_remains_quotable_at_selected_source_after_aliases_or_retry_cache(full_retry_cache):
+    """Nov20 Qwilr: cited www profile lost HQ; a retry then dropped it entirely."""
+    alias = PROFILE.replace("www.linkedin.com", "linkedin.com")
+    profile_text = "Quaise Energy\nCompany size\n51-200 employees\nHeadquarters\nHouston, Texas"
+    retry = {
+        f"https://www.quaise.com/{path}": {"final_url": f"https://www.quaise.com/{path}",
+                                          "text": "Quaise Energy develops geothermal power plants."}
+        for path in ("", "pricing/", "about/")
+    } if full_retry_cache else {}
+    sources = {alias: {"status": "fetched", "final_url": PROFILE, "text": profile_text},
+               PROFILE: {"status": "fetched", "final_url": PROFILE, "text": profile_text}}
+    pages = lead_scorer._investigator_prefetched_pages(
+        sources, [*retry, alias, PROFILE], verified_identity=ANCHOR,
+        matched_company_retry_pages=retry,
+        structured_profile_headquarters_evidence=_project(_body()),
+        include_structured_headquarters=True,
+    )
+    assert len(pages) <= investigator.MAX_PREFETCHED_PAGES
+    assert PROFILE in pages
+    assert HQ_TEXT in pages[PROFILE]["text"]
+    if full_retry_cache:
+        assert list(pages)[:2] == list(retry)[:2]
+        assert all(pages[url] == retry[url] for url in list(retry)[:2])
+    claims = investigator._validated_findings(
+        {"findings": [{"target": "geography", "status": "VERIFIED",
+                       "observed_country": "United States", "observed_state": "Texas",
+                       "evidence_url": PROFILE, "evidence_quote": HQ_TEXT}]},
+        targets=("geography",), fetched_pages={u: p["text"] for u, p in pages.items()},
+        fetched_final_urls={u: p["final_url"] for u, p in pages.items()},
+        first_party_domains={"quaise.com"}, identity_names={"quaiseenergy"},
+        identity_anchor={"verified_name": "Quaise Energy", "verified_domain": "quaise.com",
+                         "verified_linkedin_slug": "quaise-energy"},
+        structured_headquarters_evidence=_project(_body()),
+    )
+    assert claims["geography"]["status"] == "VERIFIED"
+
+
 @pytest.mark.parametrize("field,value", [
     ("name", "Other Entity"), ("website", "https://other.example/"),
     ("linkedinUrl", "https://www.linkedin.com/company/other"),

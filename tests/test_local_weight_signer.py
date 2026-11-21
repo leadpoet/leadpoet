@@ -649,3 +649,129 @@ def test_builder_uses_the_network_archive_default(network, expected_archive):
     )
     assert client._chain_source._host_archive_transport.endpoint == expected_archive
     client.close()
+
+
+@pytest.mark.parametrize('failure', [
+    ConnectionResetError(104, 'reset'),
+    urllib.error.URLError(ConnectionResetError(104, 'reset')),
+    TimeoutError('read timed out'),
+])
+def test_https_transport_retries_connection_fault_in_existing_budget(failure):
+    now, observed, sleeps = [100.0], [], []
+    def opener(request, *, timeout):
+        observed.append((bytes(request.data), timeout))
+        now[0] += 1.0
+        if len(observed) == 1:
+            raise failure
+        return _Response(b'{"jsonrpc":"2.0","id":7,"result":"0xabc"}')
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+    transport = HttpsJsonRpcTransport('https://chain.example', timeout_seconds=9,
+        opener=opener, clock=lambda: now[0], sleep=sleep)
+    assert transport.call(method='chain_getBlockHash', params=[3], request_id=7) == '0xabc'
+    assert sleeps == [1.0]
+    assert [timeout for _, timeout in observed] == [9, 7]
+    assert observed[0][0] == observed[1][0]
+
+
+def test_https_transport_reset_during_body_read_closes_and_retries():
+    import http.client
+    responses, sleeps = [], []
+    class Interrupted(_Response):
+        def read(self, limit):
+            raise http.client.IncompleteRead(b'{"jsonrpc":')
+        def __exit__(self, *_args):
+            self.close()
+    def opener(request, *, timeout):
+        response = (Interrupted(b'') if not responses else
+                    _Response(b'{"jsonrpc":"2.0","id":7,"result":"0xabc"}'))
+        responses.append(response)
+        return response
+    transport = HttpsJsonRpcTransport('https://chain.example', timeout_seconds=9,
+        opener=opener, clock=lambda: 100.0, sleep=sleeps.append)
+    assert transport.call(method='chain_getBlockHash', params=[3], request_id=7) == '0xabc'
+    assert len(responses) == 2 and responses[0].closed
+    assert sleeps == [1.0]
+
+
+def test_https_transport_network_failures_share_http_attempt_limit():
+    calls, sleeps = [], []
+    def opener(request, *, timeout):
+        calls.append(bytes(request.data))
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 503, 'unavailable', {}, None)
+        raise urllib.error.URLError(ConnectionResetError(104, 'reset'))
+    transport = HttpsJsonRpcTransport('https://chain.example', timeout_seconds=9,
+        opener=opener, clock=lambda: 100.0, sleep=sleeps.append)
+    with pytest.raises(ValidatorChainSourceV2Error, match='exhausted transient'):
+        transport.call(method='chain_getBlockHash', params=[3], request_id=7)
+    assert len(calls) == 3 and len(set(calls)) == 1
+    assert sleeps == [1.0, 3.0]
+
+
+def test_https_transport_network_timeout_does_not_extend_deadline():
+    now, calls = [100.0], []
+    def opener(request, *, timeout):
+        calls.append(timeout)
+        now[0] += timeout
+        raise TimeoutError('read timed out')
+    transport = HttpsJsonRpcTransport('https://chain.example', timeout_seconds=9,
+        opener=opener, clock=lambda: now[0], sleep=lambda _: pytest.fail('deadline spent'))
+    with pytest.raises(ValidatorChainSourceV2Error, match='deadline exhausted'):
+        transport.call(method='chain_getBlockHash', params=[3], request_id=7)
+    assert calls == [9]
+
+
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_https_transport_certificate_failure_is_not_retryable(wrapped):
+    import ssl
+    calls = []
+    error = ssl.SSLCertVerificationError('untrusted certificate')
+    if wrapped:
+        error = urllib.error.URLError(error)
+    def opener(*args, **kwargs):
+        calls.append(1)
+        raise error
+    transport = HttpsJsonRpcTransport('https://chain.example', timeout_seconds=9,
+        opener=opener, sleep=lambda _: pytest.fail('certificate failures must not retry'))
+    with pytest.raises(ValidatorChainSourceV2Error):
+        transport.call(method='chain_getBlockHash', params=[3], request_id=7)
+    assert calls == [1]
+
+
+def test_https_transport_recovers_real_disconnected_read_socket():
+    import http.server
+    import socket
+    import threading
+    requests = []
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append(self.rfile.read(int(self.headers['Content-Length'])))
+            if len(requests) == 1:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            body = b'{"jsonrpc":"2.0","id":7,"result":"0xabc"}'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *_args):
+            pass
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        transport = HttpsJsonRpcTransport(f'http://127.0.0.1:{server.server_port}',
+            timeout_seconds=9, sleep=lambda _: None)
+        assert transport.call(method='chain_getBlockHash', params=[3], request_id=7) == '0xabc'
+        assert len(requests) == 2 and requests[0] == requests[1]
+        with pytest.raises(ValidatorChainSourceV2Error):
+            transport.call(method='author_submitExtrinsic', params=['0x00'], request_id=8)
+        assert len(requests) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

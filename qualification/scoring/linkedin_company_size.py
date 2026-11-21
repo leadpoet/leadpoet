@@ -405,8 +405,8 @@ def _structured_provider_reported_error(value: Any, *, depth: int = 0) -> bool:
     )
 
 
-def _structured_profile_explicitly_not_found(value: Any) -> bool:
-    """Recognize the requested profile's explicit absence, without credit."""
+def _structured_profile_completed_without_result(value: Any, *, status_code: int) -> bool:
+    """Recognize an exact completed empty reply; it supplies no evidence."""
     current = value
     wrappers = ("toolResponse", "rawV2", "raw", "result", "data", "output")
     for _ in range(8):
@@ -414,7 +414,7 @@ def _structured_profile_explicitly_not_found(value: Any) -> bool:
             return False
         if (set(current) == {"error", "status", "element"}
             and current["error"] is None and type(current["status"]) is int
-            and current["status"] == 404 and current["element"] is None):
+            and current["status"] == status_code and current["element"] is None):
             return True
         status = current.get("status")
         if ("status" in current and not (
@@ -423,7 +423,7 @@ def _structured_profile_explicitly_not_found(value: Any) -> bool:
         )) or ("job_id" in current and "status" not in current):
             return False
         # An outer account, request or job failure takes precedence over a
-        # nested not-found payload. Empty/malformed success is not absence.
+        # nested empty payload. Missing fields and malformed success still fail.
         if _structured_provider_reported_error({
             key: item for key, item in current.items() if key not in wrappers
         }):
@@ -1020,10 +1020,14 @@ async def fetch_structured_linkedin_company_size(
     except Exception:  # noqa: BLE001
         _set_failure_reason(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
         return None
-    if _structured_profile_explicitly_not_found(body):
+    if _structured_profile_completed_without_result(body, status_code=404):
         # A completed exact-profile lookup found no profile. Keep the
         # caller's insufficient-evidence outcome; supply no identity or size.
         return None
+    if diagnostic is not None and _structured_profile_completed_without_result(body, status_code=200):
+        # Preserve the existing missing-size failure. Identity research may
+        # separately finish unproven after its independent checks complete.
+        diagnostic["completed_empty_profile"] = "true"
     if _structured_provider_reported_error(body):
         _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
         return None

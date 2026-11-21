@@ -142,7 +142,7 @@ def test_spec490_proof_rejects_changed_binding(mutation, match):
         )
 
 
-@pytest.mark.parametrize("unknown_spec", [489, 492])
+@pytest.mark.parametrize("unknown_spec", [489, 494])
 def test_unmeasured_runtime_still_fails_closed(unknown_spec):
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
         load_subtensor_events_profile_v2(spec_version=unknown_spec)

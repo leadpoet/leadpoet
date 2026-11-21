@@ -288,6 +288,16 @@ reservation is made or a key is chosen.
   400 `provider_field_not_allowed:<name>`. A model variant such as `:online`
   is 400 `model_variant_not_allowed`, a non-function tool 400
   `tool_not_allowed`, and non-text message content 400 `content_not_allowed`.
+- OpenRouter Decisions: one additional route, `POST api/alpha/decisions`, only
+  for Lead Search's fixed Jev market-fit question. It accepts only
+  `typesafe/jev-1.13`, the market and company state, that one choice question,
+  and the exact TypeSafe-only ZDR policy (`data_collection: deny`, no
+  fallbacks, max prompt price $0.042/M tokens, no output or request charge).
+  The body is capped at 24 KiB and the call has a 10-second timeout. Its
+  reservation is 1,033 micro-USD (one input token per byte at the enforced
+  price); it settles at OpenRouter's reported `usage.cost`. An answer without
+  a reported cost remains uncertain under the normal broker rules. Any other
+  model, question, field or provider policy is refused before key selection.
 - Deepline: only `POST api/v2/integrations/{operation}/execute`, with no query
   string, for the operations the Lead Search finding core uses
   (`DEEPLINE_OPERATIONS` in `lab_arena/lead_orders/broker.py`). Another

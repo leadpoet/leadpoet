@@ -721,6 +721,7 @@ CREATE OR REPLACE FUNCTION public.lead_order_register_key_v1(
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $key703$
 BEGIN
  -- One active key per miner and provider: a new key needs the old one revoked.
+ PERFORM pg_advisory_xact_lock(hashtextextended('lead_order_register_key:'||p_miner_hotkey||':'||p_provider,0));
  IF EXISTS(SELECT 1 FROM public.lead_order_keys k WHERE k.miner_hotkey=p_miner_hotkey AND k.provider=p_provider
    AND NOT EXISTS(SELECT 1 FROM public.lead_order_key_revocations r WHERE r.key_id=k.key_id)) THEN
   RETURN jsonb_build_object('status','active_key_exists');

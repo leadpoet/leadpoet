@@ -1022,6 +1022,33 @@ def test_reserve_requires_the_registered_miner_key_binding(store, owner, wrong_b
     service.finish(order_id, {"status": "failed"})
 
 
+def test_concurrent_key_registration_keeps_one_active_key_per_miner_and_provider(database, owner):
+    psycopg2, dsn = database
+    miner = hotkey()
+    register = "SELECT public.lead_order_register_key_v1(%s,%s,%s,%s,%s,%s,%s,%s)"
+
+    def key(provider):
+        key_id = uuid.uuid4().hex
+        return (key_id, provider, miner, "lead-order:" + key_id, "Y2lwaGVy",
+                "sha256:" + hashlib.sha256(key_id.encode()).hexdigest(), "sha256:" + key_id, USD)
+
+    first = psycopg2.connect(**dsn)
+    try:
+        sql(first, "SET ROLE lab_arena_service", ())
+        assert sql(first, register, key("openrouter"))[0][0]["status"] == "registered"
+        # The second session can register another provider immediately. For the
+        # same provider it must wait until the first registration is visible.
+        sql(owner, "SET lock_timeout='300ms'", ())
+        assert sql(owner, register, key("deepline"))[0][0]["status"] == "registered"
+        second_key = key("openrouter")
+        with pytest.raises(psycopg2.errors.LockNotAvailable):
+            sql(owner, register, second_key)
+        first.commit()
+        assert sql(owner, register, second_key)[0][0]["status"] == "active_key_exists"
+    finally:
+        first.close()
+
+
 def test_revocation_stops_new_reservations_but_preserves_inflight_settlement(store, owner):
     service, _, buyer, epoch, _ = live(store, owner, epoch_value=8901)
     miner = hotkey()

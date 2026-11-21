@@ -220,3 +220,39 @@ def test_nonstore_exception_cannot_claim_store_diagnostics(monkeypatch):
         assert CANARY not in str(span) + str(error)
     finally:
         client.close()
+
+
+@pytest.mark.parametrize('message,expected', [
+    # Our own RAISE EXCEPTION literals name themselves and are projected.
+    ('lab_arena_reward_current_achievement_invalid', 'lab_arena_reward_current_achievement_invalid'),
+    ('lab_arena_slot_policy_invalid', 'lab_arena_slot_policy_invalid'),
+    # Everything else is refused, so the field is simply absent.
+    (CANARY, None),
+    ('duplicate key value violates unique constraint "lab_arena_runs_pkey"', None),
+    ('arena-2026-10-16', None),
+    ('5Grwva...HotkeyMixedCase', None),
+    ('', None),
+    ('ab', None),
+    ('x' * 65, None),
+    (None, None),
+    (42, None),
+])
+def test_only_a_bare_refusal_symbol_reaches_the_store_diagnostics(message, expected):
+    def handle(request):
+        return httpx.Response(400, json={'code': '22023', 'message': message, 'details': CANARY})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = PostgrestTransport('https://db.example', service_key='sb_secret_test', http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            store.rpc(RPC, {'p_run_id': CANARY})
+    base = dict(operation='rpc', resource=RPC, http_status=400, code='22023')
+    assert caught.value.store_error == (
+        {**base, 'refusal': expected} if expected is not None else base
+    )
+    assert CANARY not in json.dumps(caught.value.store_error)
+
+
+def test_refusal_rides_onto_the_store_error_span_fields():
+    assert 'arena.store_refusal' in STORE_ERROR_SPAN_FIELDS
+    metadata = dict(operation='rpc', resource=RPC, code='22023',
+                    refusal='lab_arena_reward_current_achievement_invalid')
+    assert safe_store_error_metadata(metadata) == metadata

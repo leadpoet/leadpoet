@@ -113,6 +113,9 @@ def test_valid_guard_states_do_not_report_failures_or_add_reads(monkeypatch, gua
     guards = [s for s in spans if s.name == "arena.review_guard"]
     assert len(guards) == len(reads) == 2
     assert all(s.attributes["arena.outcome"] == "ok" for s in guards)
+    # A held guard is reported on the guard span itself, not inferred from the
+    # silence that follows it. The read still succeeded, so the outcome is "ok".
+    assert all(s.attributes["arena.count"] == (1 if guard_present else 0) for s in guards)
     assert not any(k.startswith("arena.store_") for s in guards for k in s.attributes)
     assert len(reviews) == (0 if guard_present else 2)
 

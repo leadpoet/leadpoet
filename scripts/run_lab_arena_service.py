@@ -248,7 +248,7 @@ def main(argv=None) -> int:
     def review_allowed() -> bool:
         if stop.is_set():
             return False
-        with telemetry.stage("review_guard"):
+        with telemetry.stage("review_guard") as observed:
             guard = service._store._transport.rpc("lab_arena_review_guard_state_v1", {})
             if (
                 not isinstance(guard, Mapping)
@@ -256,6 +256,11 @@ def main(argv=None) -> int:
                 or type(guard.get("guard_present")) is not bool
             ):
                 raise ValueError("Arena restart guard state is invalid")
+            # Count the hold itself. A retained guard stops paid review for as
+            # long as it is held, and until now the only trace of that was the
+            # absence of review_submissions spans — indistinguishable from an
+            # empty queue. The read still succeeds, so the outcome stays "ok".
+            observed.count = 1 if guard["guard_present"] else 0
             return not stop.is_set() and not guard["guard_present"]
 
     def safe_review_allowed() -> bool:

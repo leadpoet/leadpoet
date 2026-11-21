@@ -36,8 +36,9 @@ _KEY_ID_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 class LeadOrderKeyError(RuntimeError):
     """Safe key-registry error; never carries a secret."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, retryable: bool = False) -> None:
         self.code = code
+        self.retryable = retryable
         super().__init__(code)
 
 
@@ -125,7 +126,7 @@ class MinerKeyRegistrar:
                 secret, submission_id=submission_id, miner_hotkey=miner_hotkey, provider=provider
             )
         except CredentialError as exc:
-            raise LeadOrderKeyError(exc.code) from None
+            raise LeadOrderKeyError(exc.code, retryable=exc.retryable) from None
         return {
             "key_id": key_id,
             "provider": provider,
@@ -149,7 +150,7 @@ class MinerKeyRegistrar:
                 key.provider,
             )
         except CredentialError as exc:
-            raise LeadOrderKeyError(exc.code) from None
+            raise LeadOrderKeyError(exc.code, retryable=exc.retryable) from None
 
 
 def arena_broker_secret(credentials: Mapping[str, Any], field: str) -> str:

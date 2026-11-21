@@ -517,7 +517,7 @@ class LeadOrderService:
                 miner_hotkey=hotkey, provider=str(payload["provider"]), credentials=payload["credentials"],
             )
         except lead_keys.LeadOrderKeyError as exc:
-            raise LeadOrderServiceError(422, exc.code) from None
+            raise LeadOrderServiceError(503 if exc.retryable else 422, exc.code) from None
         public = lead_keys.ProviderKey(
             key_id=row["key_id"], provider=row["provider"], miner_hotkey=hotkey, registered_sequence=0,
             internal_fingerprint=row["internal_fingerprint"],

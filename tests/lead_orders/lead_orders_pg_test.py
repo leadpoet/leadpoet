@@ -20,12 +20,13 @@ import pytest
 
 from lab_arena import signing
 from lab_arena.broker import ProviderResponse, ProviderTransportError, price_table_from_models_response
+from lab_arena.credentials import CredentialError
 from lab_arena.lead_orders import money, receipts, suppressions
 from lab_arena.lead_orders.auth import BuyerIdentity, order_token_hash
 from lab_arena.lead_orders.broker import BrokerRequest, LeadOrderBroker, LeadOrderBrokerError
 from lab_arena.lead_orders.config import LeadOrdersConfig
 from lab_arena.lead_orders.gamma import GammaReading
-from lab_arena.lead_orders.keys import ProviderKey
+from lab_arena.lead_orders.keys import MinerKeyRegistrar, ProviderKey
 from lab_arena.lead_orders.policy import DEFAULT_POLICY_BODY, sign_policy, load_policy, unsigned_policy
 from lab_arena.lead_orders.service import LeadOrderService, LeadOrderServiceError
 from lab_arena.lead_orders.store import LeadOrderStore
@@ -1394,6 +1395,97 @@ def test_finish_closes_orphaned_open_calls_and_waits_only_for_young_ones(store, 
     done = service.finish(order_id, delivered)
     assert done["charge_microusd"] == 5 * 200_000
     assert {c["call_id"]: c["status"] for c in store.calls(order_id)}[orphan] == "uncertain"
+
+
+def test_broker_withholds_credential_echo_and_settles_reported_cost(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9401)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    fixture_key = "test-miner-credential"
+    registrar.secrets[key["key_id"]] = fixture_key
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    response = ProviderResponse(200, {"content-type": "application/json"},
+                                json.dumps({"text": fixture_key, "id": "gen-" + fixture_key,
+                                            "usage": {"cost": "0.01"}}).encode())
+    broker = broker_for(store, FakeTransport([response]), registrar=registrar, epoch=epoch)
+    answer = broker.call(token, dear_chat())
+    assert answer.status == 502 and fixture_key.encode() not in answer.body
+    row, = store.statement(miner, since=0, limit=1)["calls"]
+    assert row["cost_microusd"] == 10_000 and row["provider_request_id"] is None
+    service.finish(order_id, {"status": "failed"})
+
+
+def test_openrouter_settlement_uses_paid_result_after_catalog_expires(store):
+    staff = hotkey()
+    _, service, epoch = make(store, "staff", staff=[staff])
+    service.place_order(staff, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    reads = []
+
+    def price_table():
+        if reads:
+            raise RuntimeError("catalog temporarily unavailable")
+        reads.append(True)
+        return PRICE_TABLE
+
+    broker = LeadOrderBroker(store=store, policy=POLICY, transport=FakeTransport([openrouter_ok("0.01")]),
+                             registrar=None, leadpoet_secrets={"openrouter": SECRET},
+                             price_table=price_table, current_epoch=epoch)
+    assert broker.call(token, dear_chat()).status == 200
+    row, = store.calls(order_id)
+    assert row["status"] == "settled" and row["cost_microusd"] == 10_000
+    service.finish(order_id, {"status": "failed"})
+
+
+@pytest.mark.parametrize("phase", ["dispatch", "readback"])
+def test_transient_kms_failure_keeps_miner_key_eligible(store, owner, phase):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9402)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    fixture_key = "test-runtime-key"
+    registrar.secrets[key["key_id"]] = fixture_key
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    generation = "gen-transient-1"
+    transport = FakeTransport([ProviderTransportError("timeout", openrouter_generation_id=generation)])
+    broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
+    if phase == "readback":
+        broker.call(token, dear_chat())
+        service.finish(order_id, {"status": "failed"})
+
+    class RecoveringKms:
+        available = False
+
+        def runtime_key(self, row, provider):
+            if not self.available:
+                raise CredentialError("credential_kms_unavailable", retryable=True)
+            return fixture_key
+
+    kms = RecoveringKms()
+    broker = broker_for(store, transport, registrar=MinerKeyRegistrar(kms), epoch=epoch)
+    if phase == "dispatch":
+        with pytest.raises(LeadOrderBrokerError) as unavailable:
+            broker.call(token, dear_chat())
+        assert unavailable.value.status == 503
+        assert store.exhausted_keys(order_id) == [] and not transport.sent
+        kms.available = True
+        transport.responses = [openrouter_ok("0.01")]
+        assert broker.call(token, dear_chat()).status == 200
+        assert store.calls(order_id)[0]["key_id"] == key["key_id"]
+        service.finish(order_id, {"status": "failed"})
+    else:
+        assert broker.resolve_uncertain() == 0
+        row, = store.calls(order_id)
+        assert sql(owner, "SELECT outcome FROM lead_order_call_readbacks WHERE call_id=%s",
+                   (row["call_id"],)) == [("retry",)]
+        backdate(owner, "lead_order_call_readbacks", "attempted_at", row["call_id"], 601)
+        kms.available = True
+        record = {"data": {"id": generation, "total_cost": "0.01"}}
+        transport.responses = [ProviderResponse(200, {}, json.dumps(record).encode())]
+        assert broker.resolve_uncertain() == 1
 
 
 def test_read_back_records_attempts_skips_terminal_and_backs_off(store, owner):

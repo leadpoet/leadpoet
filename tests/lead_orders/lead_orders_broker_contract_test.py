@@ -162,9 +162,8 @@ def openrouter_answer(model: str, cost: str) -> ProviderResponse:
 
 
 def test_openrouter_settles_at_the_reported_cost_of_the_model_that_answered():
-    models = (GLM, GEMINI)
-    assert broker()._cost("openrouter", models, openrouter_answer(GEMINI, "0.000731")) == 731
-    assert broker()._cost("openrouter", models, openrouter_answer("z-ai/glm-5.3-flash-1101", "0.000052")) == 52
+    assert broker()._cost("openrouter", openrouter_answer(GEMINI, "0.000731")) == 731
+    assert broker()._cost("openrouter", openrouter_answer("z-ai/glm-5.3-flash-1101", "0.000052")) == 52
 
 
 def deepline_execute(operation: str) -> BrokerRequest:
@@ -198,12 +197,12 @@ def test_icypeas_async_costs_read_back_like_the_other_operations():
     verify = deepline_answer({"success": True, "item": {"_id": "v1", "status": "NONE"}}, 0.02)
     working = deepline_answer({"success": True, "total": 1, "items": [{"_id": "v1", "status": "IN_PROGRESS"}]}, 0)
     done = deepline_answer({"success": True, "total": 1, "items": [{"_id": "v1", "status": "DEBITED"}]}, 0)
-    assert broker()._cost("deepline", None, verify) == int(Decimal("0.02") * Decimal("0.10") * 1_000_000)
-    assert broker()._cost("deepline", None, working) == 0
-    assert broker()._cost("deepline", None, done) == 0
+    assert broker()._cost("deepline", verify) == int(Decimal("0.02") * Decimal("0.10") * 1_000_000)
+    assert broker()._cost("deepline", working) == 0
+    assert broker()._cost("deepline", done) == 0
     # No billing record on a 2xx stays unknown, never guessed.
     silent = ProviderResponse(status=200, headers={}, body=json.dumps({"status": "completed", "toolResponse": {}}).encode())
-    assert broker()._cost("deepline", None, silent) is None
+    assert broker()._cost("deepline", silent) is None
 
 
 def test_firecrawl_scrape_for_a_fresh_job_post_copy_is_accepted_and_reserved():
@@ -227,13 +226,13 @@ def test_deepline_cost_reads_cost_usd_first_then_credits_like_the_site():
     from lab_arena import broker as arena_broker
 
     only_usd = bill({"cost_usd": 0.0031})
-    assert broker()._cost("deepline", None, only_usd) == 3_100
+    assert broker()._cost("deepline", only_usd) == 3_100
     # Both present: cost_usd wins (plan credits can cost more than $0.10 each).
-    assert broker()._cost("deepline", None, bill({"cost_usd": 0.0019, "credits_charged": 0.02})) == 1_900
-    assert broker()._cost("deepline", None, bill({"cost_usd": 0.0000001})) == 1  # rounded up, never down
+    assert broker()._cost("deepline", bill({"cost_usd": 0.0019, "credits_charged": 0.02})) == 1_900
+    assert broker()._cost("deepline", bill({"cost_usd": 0.0000001})) == 1  # rounded up, never down
     # An unusable cost_usd falls back to credits, as the site does.
     for bad in ("0.5", -1, None, True):
-        assert broker()._cost("deepline", None, bill({"cost_usd": bad, "credits_charged": 0.02})) == 2_000
-    assert broker()._cost("deepline", None, bill({"cost_usd": "x"})) is None
+        assert broker()._cost("deepline", bill({"cost_usd": bad, "credits_charged": 0.02})) == 2_000
+    assert broker()._cost("deepline", bill({"cost_usd": "x"})) is None
     # Arena's own reader is unchanged: credits only.
     assert arena_broker.deepline_cost_microusd(bytes(only_usd.body)) is None

@@ -372,7 +372,8 @@ class LeadOrderBroker:
                 raise LeadOrderBrokerError(400, "content_not_allowed")  # images and files are priced apart
         return tuple(models)
 
-    def _cost(self, provider: str, models: Optional[tuple], response: ProviderResponse) -> Optional[int]:
+    @staticmethod
+    def _cost(provider: str, response: ProviderResponse) -> Optional[int]:
         """Provider-reported cost in micro-USD, 0 for a refused call, else None."""
 
         status = int(response.status)
@@ -381,10 +382,10 @@ class LeadOrderBroker:
                 document = json.loads(bytes(response.body).decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
                 document = None
-            # OpenRouter's usage.cost is the charge for the model that answered.
-            used = document.get("model") if isinstance(document, Mapping) else None
-            model = used if models and used in models else (models[0] if models else "")
-            cost = arena_broker.actual_openrouter_cost_microusd(self._price_table(), model, document)
+            # Admission already checked the catalog. The provider reports the
+            # actual charge, including fallback models, in the response.
+            bill = provider_costs.openrouter_cost(document)
+            cost = bill.microusd if bill is not None else None
         else:
             cost = deepline_cost_microusd(bytes(response.body))
         if cost is not None:
@@ -445,8 +446,9 @@ class LeadOrderBroker:
             )
             try:
                 secret = self._registrar.decrypt(key)
-            except lead_keys.LeadOrderKeyError:
-                self._store.record_readback(call_id=str(row["call_id"]), outcome="terminal")
+            except lead_keys.LeadOrderKeyError as exc:
+                self._store.record_readback(call_id=str(row["call_id"]),
+                                            outcome="retry" if exc.retryable else "terminal")
                 continue
             state, cost = arena_broker._openrouter_generation_readback_once(
                 transport=self._transport, secret=secret, generation_id=str(row["provider_request_id"]),
@@ -471,7 +473,7 @@ class LeadOrderBroker:
         if order.get("expired"):
             raise LeadOrderBrokerError(410, "order_expired")
         order_id = str(order["order_id"])
-        outbound, reserve, models = self._prepare(request)
+        outbound, reserve, _ = self._prepare(request)
         provider = request.provider
         epoch = int(self._current_epoch())
         # Decided per order, from the mode it was placed in: only live orders
@@ -498,7 +500,9 @@ class LeadOrderBroker:
         for key in ranked:
             try:
                 secret = self._leadpoet_secrets[provider] if key.is_leadpoet else self._registrar.decrypt(key)
-            except lead_keys.LeadOrderKeyError:
+            except lead_keys.LeadOrderKeyError as exc:
+                if exc.retryable:
+                    raise LeadOrderBrokerError(503, exc.code) from None
                 self._store.exhaust_key(order_id=order_id, key_id=key.key_id, reason=lead_keys.FAILOVER_UNAUTHORIZED)
                 continue
             call_id = str(uuid.uuid4())
@@ -527,13 +531,16 @@ class LeadOrderBroker:
                 error = exc
             finally:
                 # Always settle the reservation, whatever happened in between.
-                cost = None if response is None else self._cost(provider, models, response)
+                cost = None if response is None else self._cost(provider, response)
+                request_id = self._request_id(provider, response, error)
+                if request_id and secret in request_id:
+                    request_id = None
                 self._store.settle_call(
                     call_id=call_id, cost_microusd=cost,
                     http_status=None if response is None else int(response.status), epoch=epoch,
-                    provider_request_id=self._request_id(provider, response, error),
+                    provider_request_id=request_id,
                 )
-            if response is None:
+            if response is None or arena_broker._response_contains_credential(response, secret):
                 return _json_response(502, "provider_unreachable")
             reason = lead_keys.failover_reason(provider, response)
             if reason is not None:

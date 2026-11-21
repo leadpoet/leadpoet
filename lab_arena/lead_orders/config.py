@@ -38,7 +38,6 @@ MIN_RUNNER_SECRET_BYTES = 32
 
 _HOTKEY_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
-_SERVICE_RE = re.compile(r"^(?:[1-9A-HJ-NP-Za-km-z]{46,48}|[0-9]{1,10})$")
 _TERMS_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 
 
@@ -146,10 +145,9 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> LeadOrdersConfig
         raise LeadOrdersConfigError("%s must be an https URL" % PUBLIC_BASE_URL_ENV)
     if not _NAME_RE.fullmatch(config.gamma_pallet) or not _NAME_RE.fullmatch(config.gamma_storage):
         raise LeadOrdersConfigError("Gamma pallet and storage names are invalid")
-    if mode == MODE_LIVE and not _SERVICE_RE.fullmatch(config.gamma_service):
-        # The key type of the service id is not settled (subtensor PR 3343):
-        # an SS58 account or a numeric service id are both accepted.
-        raise LeadOrdersConfigError("%s must be the Leadpoet Gamma service id in live mode" % GAMMA_SERVICE_ENV)
+    if mode == MODE_LIVE and not _HOTKEY_RE.fullmatch(config.gamma_service):
+        # Runtime 493 keys GammaSpent by the service's AccountId32, not a number.
+        raise LeadOrdersConfigError("%s must be the Leadpoet Gamma service's SS58 hotkey in live mode" % GAMMA_SERVICE_ENV)
     if mode in (MODE_STAFF, MODE_SHADOW) and not config.staff_hotkeys:
         raise LeadOrdersConfigError("%s is required in %s mode" % (STAFF_HOTKEYS_ENV, mode))
     return config

@@ -1,9 +1,9 @@
 """Read ``GammaSpent(netuid, service, hotkey)`` at a finalized block.
 
 Gamma is a dollar-valued, non-transferable credit (10^9 units per USD). The
-chain keeps a running total of what each hotkey spent to each service. The
-spend design is still moving (subtensor PR 3343), and Gamma may not be
-enabled on netuid 71 yet, so the storage item can be absent from the runtime.
+chain keeps a running total of what each hotkey spent to each service.
+Runtime 493 identifies the service by its AccountId32 hotkey. Older runtimes
+can lack the storage item, and Gamma may not be enabled on netuid 71 yet.
 An absent item reads as ``available=False`` with zero spent: no balance, and
 live orders are refused. Any other read failure raises, so the caller fails
 closed instead of crediting a guess.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from lab_arena.chain import ArenaChain, ArenaChainError, BlockRef
 
@@ -34,15 +34,13 @@ class GammaReading:
     available: bool
 
 
-def parse_service_id(value: str) -> Union[str, int]:
-    """The service id is an SS58 account or a numeric id; config decides."""
+def parse_service_id(value: str) -> str:
+    """The service id is the service hotkey's SS58 account address."""
 
     text = str(value or "").strip()
     if _SS58_RE.fullmatch(text):
         return text
-    if text.isdigit() and len(text) <= 10:
-        return int(text)
-    raise GammaReadError("Gamma service id is invalid")
+    raise GammaReadError("Gamma service id must be an SS58 hotkey")
 
 
 def _storage_missing(exc: BaseException) -> bool:

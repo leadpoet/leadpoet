@@ -131,8 +131,10 @@ and receipt always use that stored version, never the current one.
   shadow orders owe nothing (their what-if rewards are in their receipts).
 - A `live` payout counts only `live` orders; recording a payment against a
   non-live order is refused. Staff and shadow orders earn nothing.
-- The Gamma service id (`LEADPOET_LEAD_ORDERS_GAMMA_SERVICE`) may be an SS58
-  account or a number. The storage item name is configurable
+- The Gamma service id (`LEADPOET_LEAD_ORDERS_GAMMA_SERVICE`) must be the
+  SS58 hotkey registered as a service on the subnet. Runtime 493 uses an
+  AccountId32 for this key; numeric service ids are refused before a chain read.
+  The storage item name is configurable
   (`LEADPOET_LEAD_ORDERS_GAMMA_STORAGE`, default `GammaSpent`). A chain without
   it reads as no balance, and `live` orders are refused (`gamma_unavailable`).
   A counter that goes backwards is refused with 422 `gamma_counter_backwards`.

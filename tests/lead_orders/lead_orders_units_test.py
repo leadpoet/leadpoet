@@ -32,7 +32,8 @@ BASE_ENV = {
 
 
 def test_config_is_off_by_default_and_ignores_other_settings():
-    for env in ({}, {"LEADPOET_LEAD_ORDERS_MODE": "off", "LEADPOET_LEAD_ORDERS_RUNNER_SECRET": "x"}):
+    for env in ({}, {"LEADPOET_LEAD_ORDERS_MODE": "off", "LEADPOET_LEAD_ORDERS_RUNNER_SECRET": "x",
+                     "LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": "7"}):
         config = load_config(env)
         assert config.mode == "off" and not config.enabled and not config.weights_rewards
         assert not config.may_order(ALICE) and not config.runner_secret_matches("x")
@@ -51,7 +52,7 @@ def test_config_requires_every_setting_outside_off():
         load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live"))  # no Gamma service id
     with pytest.raises(LeadOrdersConfigError):
         load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="loud"))
-    live = load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live", LEADPOET_LEAD_ORDERS_GAMMA_SERVICE="12",
+    live = load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live", LEADPOET_LEAD_ORDERS_GAMMA_SERVICE=ALICE,
                             LEADPOET_LEAD_ORDERS_BLOCKED_HOTKEYS=BOB))
     assert live.may_order(ALICE) is True and live.may_order(BOB) is False and live.weights_rewards
     staff = load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="staff"))
@@ -61,6 +62,21 @@ def test_config_requires_every_setting_outside_off():
 
 
 # -- Gamma reader -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("service_id", ["0", "7", "4294967295"])
+def test_gamma_service_config_rejects_numeric_ids(service_id):
+    with pytest.raises(LeadOrdersConfigError, match="SS58"):
+        load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live",
+                         LEADPOET_LEAD_ORDERS_GAMMA_SERVICE=service_id))
+
+
+@pytest.mark.parametrize("service_id", ["0", "7", "4294967295"])
+def test_gamma_service_reader_rejects_numeric_ids_before_chain_access(service_id):
+    client = FakeClient()
+    with pytest.raises(GammaReadError, match="SS58"):
+        GammaBalanceReader(FakeChain(client), service_id=service_id)
+    assert client.calls == []
 
 
 class StorageFunctionNotFound(Exception):
@@ -89,25 +105,25 @@ class FakeChain:
 
 def test_gamma_reader_reads_finalized_spent_counter():
     client = FakeClient(value=type("V", (), {"value": 2_500_000_000})())
-    reading = GammaBalanceReader(FakeChain(client), service_id="7").read(ALICE)
+    reading = GammaBalanceReader(FakeChain(client), service_id=BOB).read(ALICE)
     assert reading.available and reading.spent_units == 2_500_000_000 and reading.block_number == 500
-    assert client.calls == [("SubtensorModule", "GammaSpent", [71, 7, ALICE], "0x" + "ab" * 32)]
+    assert client.calls == [("SubtensorModule", "GammaSpent", [71, BOB, ALICE], "0x" + "ab" * 32)]
     assert money.gamma_units_to_microusd(reading.spent_units) == 2_500_000
     assert GammaBalanceReader(FakeChain(FakeClient(value=None)), service_id=BOB).read(ALICE).spent_units == 0
 
 
 def test_gamma_missing_storage_reads_zero_unavailable_and_other_errors_raise():
-    missing = GammaBalanceReader(FakeChain(FakeClient(error=StorageFunctionNotFound("GammaSpent"))), service_id="7")
+    missing = GammaBalanceReader(FakeChain(FakeClient(error=StorageFunctionNotFound("GammaSpent"))), service_id=BOB)
     reading = missing.read(ALICE)
     assert reading.available is False and reading.spent_units == 0
     wrapped = RuntimeError("query failed")
     wrapped.__cause__ = ValueError("Storage function SubtensorModule.GammaSpent not found")
-    assert GammaBalanceReader(FakeChain(FakeClient(error=wrapped)), service_id="7").read(ALICE).available is False
+    assert GammaBalanceReader(FakeChain(FakeClient(error=wrapped)), service_id=BOB).read(ALICE).available is False
     with pytest.raises(GammaReadError):
-        GammaBalanceReader(FakeChain(FakeClient(error=TimeoutError("slow"))), service_id="7").read(ALICE)
+        GammaBalanceReader(FakeChain(FakeClient(error=TimeoutError("slow"))), service_id=BOB).read(ALICE)
     for bad in (-1, 1 << 128, "12", True):
         with pytest.raises(GammaReadError):
-            GammaBalanceReader(FakeChain(FakeClient(value=bad)), service_id="7").read(ALICE)
+            GammaBalanceReader(FakeChain(FakeClient(value=bad)), service_id=BOB).read(ALICE)
     with pytest.raises(GammaReadError):
         GammaBalanceReader(FakeChain(FakeClient()), service_id="not a service")
 

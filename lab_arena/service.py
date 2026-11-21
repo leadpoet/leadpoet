@@ -7935,8 +7935,15 @@ class ArenaService:
 
             def reconcile(candidate: Mapping[str, Any]) -> Dict[str, Any]:
                 try:
-                    with telemetry.stage("reconcile_deepline_cost"):
-                        return broker.reconcile_deepline_cost(candidate)
+                    # A check that reads the bill and settles nothing is not
+                    # "ok" — it is idle work, and reporting it as ok hides a
+                    # backlog that is re-read every pass and never clears.
+                    with telemetry.stage("reconcile_deepline_cost") as observed:
+                        result = broker.reconcile_deepline_cost(candidate)
+                        settled = result.get("status") == "settled"
+                        observed.count = 1 if settled else 0
+                        observed.idle = not settled
+                        return result
                 except Exception as exc:
                     # A failed read/write leaves the original liability intact.
                     # Independent candidates must still make progress.

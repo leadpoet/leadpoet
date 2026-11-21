@@ -90,6 +90,22 @@ def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch, 
         assert attributes["arena.outcome"].string_value == ("ok" if settled_entries else "idle")
         assert attributes["arena.count"].int_value == len(settled_entries)
         assert attributes["arena.error_type"].string_value == "-"
+        # A candidate that read its bill and settled nothing is idle, never
+        # "ok" — reporting it as ok hid a backlog re-read on every pass.
+        checks = [span for span in spans if span.name == "arena.reconcile_deepline_cost"]
+        assert len(checks) == 8
+        outcomes = sorted(
+            {item.key: item.value for item in span.attributes}["arena.outcome"].string_value
+            for span in checks
+        )
+        assert outcomes == sorted(
+            ["ok"] * len(settled_entries) + ["idle"] * (8 - len(settled_entries))
+        )
+        assert all(
+            {item.key: item.value for item in span.attributes}["arena.count"].int_value
+            == (1 if {item.key: item.value for item in span.attributes}["arena.outcome"].string_value == "ok" else 0)
+            for span in checks
+        )
         assert b"fixture-private-prompt" not in body
         assert b"fixture-ingest-token" not in body
     finally:

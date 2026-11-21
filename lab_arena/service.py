@@ -390,6 +390,22 @@ def _warn_observation_segment_failure(
         pass
 
 
+def _observe_deferred_close(observed: Any, result: Any) -> Any:
+    """Mark a close step idle when a drain guard deferred it.
+
+    `lab_arena_close_stage` and `lab_arena_close_scoring` both return
+    `{"status": "draining"}` when a guard defers the close: nothing moves, no
+    row changes, no error is raised. The step therefore recorded
+    `arena.outcome = "ok"` with count 0 -- byte-for-byte the shape of the one
+    healthy close a round performs each day. On 2026-11-20 that made a round
+    that could not close read green for ten hours and 135 identical close
+    attempts. Name the deferral so the repeat is legible.
+    """
+    if isinstance(result, Mapping) and result.get("status") == "draining":
+        observed.idle = True
+    return result
+
+
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
@@ -8646,8 +8662,10 @@ class ArenaService:
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
-                    with telemetry.stage("advance_close_stage"):
-                        return self.close_stage(round_id, stage)
+                    with telemetry.stage("advance_close_stage") as observed:
+                        return _observe_deferred_close(
+                            observed, self.close_stage(round_id, stage)
+                        )
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_closed", "stage2_closed"):
                 stage = int(status[5])
@@ -8683,8 +8701,10 @@ class ArenaService:
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs
                 ):
-                    with telemetry.stage("advance_close_scoring"):
-                        return self.close_scoring(round_id, stage)
+                    with telemetry.stage("advance_close_scoring") as observed:
+                        return _observe_deferred_close(
+                            observed, self.close_scoring(round_id, stage)
+                        )
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])

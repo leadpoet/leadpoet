@@ -132,3 +132,51 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+def test_a_scoring_close_that_drains_reads_idle_not_ok(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "stage2_scoring"
+    row["configuration_doc"]["schedule"]["final_scoring_close"] = (
+        service.now() - timedelta(minutes=1)
+    ).isoformat().replace("+00:00", "Z")
+    service._recover_baseline = lambda _: None
+    service._store.list_runs = lambda *_args, **_kwargs: [{"status": "accepted"}]
+    deferred = {"status": "draining", "round_status": "stage2_scoring",
+                "stage_generation": 3}
+    service.close_scoring = lambda *_args: deferred
+
+    assert service.advance_round("round") is deferred
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_close_scoring"]
+    assert span.attributes["arena.outcome"] == "idle"
+
+
+def test_a_scoring_close_that_moves_the_round_still_reads_ok(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "stage2_scoring"
+    row["configuration_doc"]["schedule"]["final_scoring_close"] = (
+        service.now() - timedelta(minutes=1)
+    ).isoformat().replace("+00:00", "Z")
+    service._recover_baseline = lambda _: None
+    service._store.list_runs = lambda *_args, **_kwargs: [{"status": "accepted"}]
+    service.close_scoring = lambda *_args: {"status": "ok", "round_status": "stage2_judged"}
+
+    service.advance_round("round")
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_close_scoring"]
+    assert span.attributes["arena.outcome"] == "ok"
+
+
+def test_a_stage_close_that_drains_reads_idle_not_ok(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "stage2"
+    service._recover_baseline = lambda _: None
+    service.stage_is_complete = lambda *_: True
+    deferred = {"status": "draining", "round_status": "stage2", "stage_generation": 2}
+    service.close_stage = lambda *_args: deferred
+
+    assert service.advance_round("round") is deferred
+    span = {s.attributes["arena.stage"]: s
+            for s in exporter.get_finished_spans()}["advance_close_stage"]
+    assert span.attributes["arena.outcome"] == "idle"

@@ -873,6 +873,11 @@ class ServiceConfig:
     training_object_store: Optional[ObjectStore] = None
     # Existing private directory shared by canonical gateway processes.
     publication_lock_dir: Optional[Path] = None
+    # Wall-clock ceiling on one publication attempt's evidence gathering.
+    # Ordinary publications finish well inside it; a slow object store gives
+    # the driver thread back rather than holding every other stage. ``None``
+    # restores the former unbounded behaviour.
+    publication_evidence_budget_seconds: Optional[float] = 600.0
 
     def __post_init__(self) -> None:
         if (
@@ -1057,6 +1062,18 @@ def round_id_for_cutoff(cutoff: datetime) -> str:
 # ---------------------------------------------------------------------------
 
 
+class PublicationBudgetExceeded(RuntimeError):
+    """One publication attempt spent its whole evidence-gathering budget.
+
+    Publication runs on the single round-driver thread, so an attempt that
+    keeps reading stored evidence holds up every other stage — judging,
+    review, the heartbeat. Nothing bounds how many objects one attempt reads,
+    only how large and how slow each read may be, so a slow object store has
+    frozen the driver for hours. Give up the tick instead and retry on the
+    next one.
+    """
+
+
 @dataclass
 class _PublicationReads:
     """Validated reads shared only within one publication attempt."""
@@ -1070,14 +1087,24 @@ class _PublicationReads:
     raw_outputs_by_ref: Dict[str, bytes] = field(default_factory=dict)
     qualified_by_submission: Dict[str, Dict[int, int]] = field(default_factory=dict)
     costs_by_position: Dict[Tuple[str, int], Dict[str, Any]] = field(default_factory=dict)
+    # ``time.monotonic`` value after which this attempt stops fetching. Only
+    # uncached reads check it, so the work already gathered is never thrown
+    # away mid-calculation.
+    deadline: Optional[float] = None
+
+    def _check_budget(self) -> None:
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise PublicationBudgetExceeded(str(self.round_row.get("round_id") or ""))
 
     def evaluation_icps(self) -> Sequence[Mapping[str, Any]]:
         if self.icps is None:
+            self._check_budget()
             self.icps = self.service.evaluation_icps(str(self.round_row["round_id"]))
         return self.icps
 
     def scoring_outputs(self, stage: int) -> Dict[str, Mapping[str, Any]]:
         if stage not in self.judges_by_stage:
+            self._check_budget()
             self.judges_by_stage[stage] = self.service._scoring_outputs(
                 str(self.round_row["round_id"]), stage, round_row=self.round_row
             )
@@ -1085,6 +1112,7 @@ class _PublicationReads:
 
     def output(self, ref: str) -> Dict[str, Any]:
         if ref not in self.outputs_by_ref:
+            self._check_budget()
             raw = self.service._objects.get_bounded(ref, MAX_OUTPUT_BYTES)
             try:
                 document = json.loads(raw.decode("utf-8"))
@@ -1101,6 +1129,7 @@ class _PublicationReads:
         cached = self.qualified_by_submission.setdefault(submission_id, {})
         missing = sorted(set(positions) - cached.keys())
         if missing:
+            self._check_budget()
             counted = self.service._qualified_company_counts(
                 self.round_row, submission_id, self.runs,
                 positions=missing, publication_reads=self,
@@ -5600,9 +5629,9 @@ class ArenaService:
 
     def publish(self, round_id: str) -> Dict[str, Any]:
         lock_dir = getattr(getattr(self, "_config", None), "publication_lock_dir", None)
-        if lock_dir is None:  # Embedded/test services do not have a host directory.
-            return self._publish_locked(round_id)
         try:
+            if lock_dir is None:  # Embedded/test services have no host directory.
+                return self._publish_locked(round_id)
             with publication_round_lock(lock_dir, round_id) as acquired:
                 if not acquired:
                     return {"status": "retry", "round_status": "scored",
@@ -5612,6 +5641,15 @@ class ArenaService:
                 return self._publish_locked(round_id)
         except PublicationLockError as exc:
             raise ServiceError("publication_lock_unavailable", 503) from exc
+        except PublicationBudgetExceeded:
+            # Hand the driver thread back. The round keeps its status, so the
+            # next tick starts a fresh attempt; every other stage runs between.
+            logger.warning(
+                "publication evidence budget exhausted, retrying next tick",
+                extra={"round_id": round_id},
+            )
+            return {"status": "retry", "round_status": "scored",
+                    "reason": "publication_evidence_budget_exhausted"}
 
     def _publish_locked(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
@@ -5634,8 +5672,11 @@ class ArenaService:
             configuration.get("execution_sequence_policy")
             == contracts.BASELINE_SCORED_FIRST_POLICY
         )
+        budget = getattr(getattr(self, "_config", None),
+                         "publication_evidence_budget_seconds", None)
         publication_reads = _PublicationReads(
-            self, round_row, self._store.list_runs(round_id, kind="execute")
+            self, round_row, self._store.list_runs(round_id, kind="execute"),
+            deadline=None if budget is None else time.monotonic() + float(budget),
         )
         try:
             infrastructure_failures = self._execution_infrastructure_failures(publication_reads)

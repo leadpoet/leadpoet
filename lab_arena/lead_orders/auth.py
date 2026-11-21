@@ -24,10 +24,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from lab_arena.lead_orders.config import LeadOrdersConfig
+from lab_arena.lead_orders.config import LeadOrdersConfig, is_valid_hotkey
 
 TIMESTAMP_WINDOW_SECONDS = 60
-_HOTKEY_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
 _SIG_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]{128}$")
 
 SignatureVerifier = Callable[[str, str, str], bool]
@@ -92,7 +91,7 @@ def verify_buyer_request(
 
     if not host:
         raise AuthError(401, "host_unconfigured")
-    if not hotkey or not _HOTKEY_RE.fullmatch(hotkey):
+    if not hotkey or not is_valid_hotkey(hotkey):
         raise AuthError(401, "hotkey_invalid")
     if not timestamp or not timestamp.isdigit() or len(timestamp) > 12:
         raise AuthError(401, "timestamp_invalid")

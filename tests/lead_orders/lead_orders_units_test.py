@@ -19,6 +19,9 @@ from lab_arena.lead_orders.policy import unsigned_policy
 POLICY = unsigned_policy()
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+# A valid format-40 AccountId32, a mistyped format-42 checksum, and numeric text.
+WRONG_NETWORK = "4zVPe3pyrYm2nenze7ns4xVoGycNdggAAbEmCszvXGDw2CKz"
+INVALID_ADDRESSES = [ALICE[:-1] + "Z", WRONG_NETWORK, "1" * 46]
 BASE_ENV = {
     "LEADPOET_LEAD_ORDERS_RUNNER_SECRET": "s" * 32,
     "LEADPOET_LEAD_ORDERS_POLICY_PATH": "/etc/policy.json",
@@ -64,18 +67,36 @@ def test_config_requires_every_setting_outside_off():
 # -- Gamma reader -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("service_id", ["0", "7", "4294967295"])
-def test_gamma_service_config_rejects_numeric_ids(service_id):
+@pytest.mark.parametrize("service_id", ["0", "7", "4294967295", *INVALID_ADDRESSES])
+def test_gamma_service_config_rejects_invalid_accounts(service_id):
     with pytest.raises(LeadOrdersConfigError, match="SS58"):
         load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live",
                          LEADPOET_LEAD_ORDERS_GAMMA_SERVICE=service_id))
 
 
-@pytest.mark.parametrize("service_id", ["0", "7", "4294967295"])
-def test_gamma_service_reader_rejects_numeric_ids_before_chain_access(service_id):
+@pytest.mark.parametrize("service_id", ["0", "7", "4294967295", *INVALID_ADDRESSES])
+def test_gamma_service_reader_rejects_invalid_accounts_before_chain_access(service_id):
     client = FakeClient()
     with pytest.raises(GammaReadError, match="SS58"):
         GammaBalanceReader(FakeChain(client), service_id=service_id)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("setting", ["LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS", "LEADPOET_LEAD_ORDERS_BLOCKED_HOTKEYS"])
+@pytest.mark.parametrize("address", INVALID_ADDRESSES)
+def test_config_validates_each_configured_hotkey(setting, address):
+    env = dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="staff")
+    env[setting] = ALICE + "," + address
+    with pytest.raises(LeadOrdersConfigError, match="invalid hotkey"):
+        load_config(env)
+
+
+@pytest.mark.parametrize("address", INVALID_ADDRESSES)
+def test_gamma_reader_rejects_invalid_buyer_before_chain_access(address):
+    client = FakeClient()
+    reader = GammaBalanceReader(FakeChain(client), service_id=BOB)
+    with pytest.raises(GammaReadError, match="hotkey is invalid"):
+        reader.read(address)
     assert client.calls == []
 
 
@@ -201,6 +222,16 @@ def test_registrar_binds_ciphertext_to_a_lead_order_submission_id():
 
 
 # -- auth -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("address", INVALID_ADDRESSES)
+def test_invalid_buyer_hotkey_is_rejected_before_signature_verification(address):
+    with pytest.raises(auth.AuthError, match="hotkey_invalid"):
+        auth.verify_buyer_request(
+            method="GET", host="gw.example", path="/lead-orders/balance", body=b"", hotkey=address,
+            timestamp="1000", signature="00" * 64, verifier=lambda *_: pytest.fail("unexpected verifier call"),
+            use_nonce=lambda *_: pytest.fail("unexpected nonce use"), now=lambda: 1000,
+        )
 
 
 def test_buyer_signature_window_and_replay():

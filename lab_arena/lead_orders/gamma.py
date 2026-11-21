@@ -11,13 +11,12 @@ closed instead of crediting a guess.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from lab_arena.chain import ArenaChain, ArenaChainError, BlockRef
+from lab_arena.lead_orders.config import is_valid_hotkey
 
-_SS58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
 MAX_U128 = (1 << 128) - 1
 
 
@@ -38,7 +37,7 @@ def parse_service_id(value: str) -> str:
     """The service id is the service hotkey's SS58 account address."""
 
     text = str(value or "").strip()
-    if _SS58_RE.fullmatch(text):
+    if is_valid_hotkey(text):
         return text
     raise GammaReadError("Gamma service id must be an SS58 hotkey")
 
@@ -87,7 +86,7 @@ class GammaBalanceReader:
         self._storage = storage
 
     def read(self, hotkey: str, *, head: Optional[BlockRef] = None) -> GammaReading:
-        if not _SS58_RE.fullmatch(str(hotkey or "")):
+        if not is_valid_hotkey(hotkey):
             raise GammaReadError("hotkey is invalid")
         block = head if head is not None else self._chain.finalized_head()
         try:

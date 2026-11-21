@@ -45,10 +45,24 @@ class LeadOrdersConfigError(RuntimeError):
     pass
 
 
+def is_valid_hotkey(value: Optional[str]) -> bool:
+    """Accept only checksummed Bittensor (SS58 format 42) AccountId32 addresses."""
+
+    if not isinstance(value, str) or not _HOTKEY_RE.fullmatch(value):
+        return False
+    from scalecodec.utils.ss58 import ss58_decode
+    from lab_arena.chain import SS58_FORMAT
+
+    try:
+        return len(ss58_decode(value, valid_ss58_format=SS58_FORMAT)) == 64
+    except ValueError:
+        return False
+
+
 def _hotkeys(raw: str, name: str) -> FrozenSet[str]:
     values = frozenset(item.strip() for item in raw.split(",") if item.strip())
     for value in values:
-        if not _HOTKEY_RE.fullmatch(value):
+        if not is_valid_hotkey(value):
             raise LeadOrdersConfigError("%s has an invalid hotkey" % name)
     return values
 
@@ -145,7 +159,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> LeadOrdersConfig
         raise LeadOrdersConfigError("%s must be an https URL" % PUBLIC_BASE_URL_ENV)
     if not _NAME_RE.fullmatch(config.gamma_pallet) or not _NAME_RE.fullmatch(config.gamma_storage):
         raise LeadOrdersConfigError("Gamma pallet and storage names are invalid")
-    if mode == MODE_LIVE and not _HOTKEY_RE.fullmatch(config.gamma_service):
+    if mode == MODE_LIVE and not is_valid_hotkey(config.gamma_service):
         # Runtime 493 keys GammaSpent by the service's AccountId32, not a number.
         raise LeadOrdersConfigError("%s must be the Leadpoet Gamma service's SS58 hotkey in live mode" % GAMMA_SERVICE_ENV)
     if mode in (MODE_STAFF, MODE_SHADOW) and not config.staff_hotkeys:
@@ -161,5 +175,6 @@ __all__ = [
     "MODE_OFF",
     "MODE_SHADOW",
     "MODE_STAFF",
+    "is_valid_hotkey",
     "load_config",
 ]

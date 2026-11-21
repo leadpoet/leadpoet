@@ -2104,12 +2104,16 @@ def test_generated_gateway_artifacts_are_ignored_by_deploy_checkout() -> None:
 def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
     dockerfile = (ROOT / "gateway" / "Dockerfile").read_text(encoding="utf-8")
     for path in (
+        "lab_arena",
         "leadpoet_canonical",
         "leadpoet_verifier",
         "qualification",
         "Leadpoet",
     ):
         assert f"COPY {path}/ ./{path}/" in dockerfile
+    terms = "docs/gamma-lead-orders-miner-terms.md"
+    assert (ROOT / terms).is_file()
+    assert f"COPY {terms} ./{terms}" in dockerfile
 
 
 def test_gateway_restart_does_not_require_closed_model_identity() -> None:

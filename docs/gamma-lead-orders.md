@@ -150,7 +150,8 @@ rest of the order.
 Each miner key has a daily cap (`daily_cap_usd`, required at registration,
 USD 1 to 10,000, at most 6 decimals, else 422 `daily_cap_invalid`). The
 reserve step locks the key and adds the key's spend over the last 24 hours
-(settled cost, or the reservation while a call is open or uncertain); a
+using the actual cost as soon as a settlement, late response or readback supplies it.
+An open or unresolved call counts at its reservation. A new
 reservation that would pass the cap is refused `key_capped` and the broker
 tries the next key. So no order, however many run at once, spends more than
 the cap on a key in a day, apart from a provider reporting more than was

@@ -292,12 +292,8 @@ class LeadOrderBroker:
                 credential=operations.CredentialPlacement("header", "authorization", scheme="Bearer"),
                 headers=forwarded,
             )
-            # A published fixed price lowers the flat reserve; a dynamically
-            # priced operation keeps it.
-            reserve = self._policy.deepline_reserve_per_call_microusd
             known = provider_costs.deepline_reservation_cost({"tool": matched.group(1)})
-            if known is not None:
-                reserve = max(1, min(reserve, int(known.microusd)))
+            reserve = self._policy.deepline_reserve_per_call_microusd if known is None else max(1, known.microusd)
             return outbound, reserve, None
         raise LeadOrderBrokerError(404, "provider_not_allowed")
 

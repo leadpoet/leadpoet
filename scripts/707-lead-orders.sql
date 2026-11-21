@@ -548,8 +548,12 @@ BEGIN
   IF cap IS NULL OR EXISTS(SELECT 1 FROM public.lead_order_key_revocations WHERE key_id=p_key_id) THEN
    RETURN jsonb_build_object('status','key_unknown');
   END IF;
-  SELECT coalesce(sum(CASE WHEN s.status='settled' THEN s.cost_microusd ELSE k.reserved_microusd END),0)::BIGINT
-   INTO day_spend FROM public.lead_order_calls k LEFT JOIN public.lead_order_call_settlements s ON s.call_id=k.call_id
+  -- Known costs replace reservations, including costs recovered after finish.
+  SELECT coalesce(sum(coalesce(s.cost_microusd,l.cost_microusd,x.cost_microusd,k.reserved_microusd)),0)::BIGINT
+   INTO day_spend FROM public.lead_order_calls k
+   LEFT JOIN public.lead_order_call_settlements s ON s.call_id=k.call_id
+   LEFT JOIN public.lead_order_late_settlements l ON l.call_id=k.call_id
+   LEFT JOIN public.lead_order_call_resolutions x ON x.call_id=k.call_id
    WHERE k.key_id=p_key_id AND k.created_at>clock_timestamp()-interval '24 hours';
   IF day_spend+p_reserve>cap THEN RETURN jsonb_build_object('status','key_capped'); END IF;
  END IF;

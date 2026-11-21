@@ -36,8 +36,8 @@ PRICE_TABLE = price_table_from_models_response({"data": [
 ]}, fetched_at="2026-11-19T00:00:00Z")
 
 
-def broker() -> LeadOrderBroker:
-    return LeadOrderBroker(store=None, policy=POLICY, transport=None, registrar=None, leadpoet_secrets={},
+def broker(policy=POLICY) -> LeadOrderBroker:
+    return LeadOrderBroker(store=None, policy=policy, transport=None, registrar=None, leadpoet_secrets={},
                            price_table=lambda: PRICE_TABLE, current_epoch=lambda: 1)
 
 
@@ -174,6 +174,16 @@ def deepline_execute(operation: str) -> BrokerRequest:
 def deepline_answer(tool_response: dict, credits) -> ProviderResponse:
     body = {"status": "completed", "toolResponse": tool_response, "billing": {"credits_charged": credits}}
     return ProviderResponse(status=200, headers={}, body=json.dumps(body).encode())
+
+
+def test_known_deepline_price_applies_above_and_below_dynamic_fallback():
+    document = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, deepline_reserve_per_call_usd="0.01"))
+    policy = load_policy(document, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
+    priced = broker(policy)
+    for operation, expected in (("harvestapi_search_leads", 70_000), ("harvestapi_get_job", 1_000),
+                                ("harvestapi_search_jobs", 10_000)):
+        _, reserved, _ = priced._prepare(deepline_execute(operation))
+        assert reserved == expected
 
 
 @pytest.mark.parametrize("operation", ["crustdata_v3_job_search", "quickenrich_employee_email_enrich",

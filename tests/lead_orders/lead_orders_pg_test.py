@@ -1217,6 +1217,44 @@ def test_daily_cap_is_required_bounded_and_moves_the_order_to_the_next_key(store
     revoke_all_keys(store)
 
 
+@pytest.mark.parametrize("source", ["late_response", "readback"])
+@pytest.mark.parametrize("actual_cost", [250_000, 750_000])
+def test_daily_key_cap_uses_actual_late_cost_across_orders(store, owner, source, actual_cost):
+    service, _, buyer, epoch, _ = live(store, owner, epoch_value=9001)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, dict(KEY, daily_cap_usd="1"))
+    binding = dict(provider="openrouter", key_id=key["key_id"], miner_hotkey=miner,
+                   public_fingerprint=key["public_fingerprint"])
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    _, first = claim(service)
+    call_id = str(uuid.uuid4())
+    assert store.reserve_call(order_id=first, call_id=call_id, reserve_microusd=500_000,
+                              **binding)["status"] == "reserved"
+    if source == "readback":
+        store.settle_call(call_id=call_id, cost_microusd=None, http_status=None, epoch=epoch(),
+                          provider_request_id="gen-test-late-cost")
+    else:
+        backdate(owner, "lead_order_calls", "created_at", call_id, 301)
+    service.finish(first, {"status": "failed"})
+
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    _, second = claim(service)
+    new_call = dict(order_id=second, call_id=str(uuid.uuid4()), **binding)
+    assert store.reserve_call(**new_call, reserve_microusd=500_001)["status"] == "key_capped"
+    if source == "readback":
+        assert store.resolve_call(call_id=call_id, cost_microusd=actual_cost, epoch=epoch())["status"] == "resolved"
+    else:
+        assert store.settle_call(call_id=call_id, cost_microusd=actual_cost,
+                                 http_status=200, epoch=epoch())["status"] == "late"
+    remaining = USD - actual_cost
+    assert store.reserve_call(**new_call, reserve_microusd=remaining + 1)["status"] == "key_capped"
+    assert store.reserve_call(**new_call, reserve_microusd=remaining)["status"] == "reserved"
+    store.settle_call(call_id=new_call["call_id"], cost_microusd=0, http_status=200, epoch=epoch())
+    service.finish(second, {"status": "failed"})
+    store.reward_late(epoch=epoch(), limit=10)  # Drain this case from the shared reward queue.
+
+
 def test_timeout_is_read_back_on_the_miner_key_and_repaid_next_epoch_never_charged(store, owner):
     service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9100)
     miner, other = hotkey(), hotkey()

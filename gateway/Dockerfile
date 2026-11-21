@@ -55,6 +55,7 @@ COPY gateway/ ./gateway/
 
 # Gateway runtime imports shared canonical and qualification packages from the
 # repository root. Keep the image aligned with the production package layout.
+COPY lab_arena/ ./lab_arena/
 COPY leadpoet_canonical/ ./leadpoet_canonical/
 COPY leadpoet_verifier/ ./leadpoet_verifier/
 COPY qualification/ ./qualification/

@@ -539,11 +539,15 @@ BEGIN
   RETURN jsonb_build_object('status','key_exhausted');
  END IF;
  IF p_miner_hotkey IS NOT NULL THEN
-  -- The key row lock serialises reservations on one key across orders, so
-  -- two orders can never pass the cap together.
+  -- Match the full key binding and share revoke_key's row lock. Check
+  -- revocation after acquiring it so a concurrent revoke cannot be missed.
+  -- The lock also serialises the daily cap across orders.
   SELECT k.daily_cap_microusd INTO cap FROM public.lead_order_keys k
-   WHERE k.key_id=p_key_id AND k.miner_hotkey=p_miner_hotkey FOR UPDATE;
-  IF cap IS NULL THEN RETURN jsonb_build_object('status','key_unknown'); END IF;
+   WHERE k.key_id=p_key_id AND k.miner_hotkey=p_miner_hotkey
+    AND k.provider=p_provider AND k.public_fingerprint=p_public_fingerprint FOR UPDATE;
+  IF cap IS NULL OR EXISTS(SELECT 1 FROM public.lead_order_key_revocations WHERE key_id=p_key_id) THEN
+   RETURN jsonb_build_object('status','key_unknown');
+  END IF;
   SELECT coalesce(sum(CASE WHEN s.status='settled' THEN s.cost_microusd ELSE k.reserved_microusd END),0)::BIGINT
    INTO day_spend FROM public.lead_order_calls k LEFT JOIN public.lead_order_call_settlements s ON s.call_id=k.call_id
    WHERE k.key_id=p_key_id AND k.created_at>clock_timestamp()-interval '24 hours';
@@ -731,6 +735,8 @@ $key703$;
 CREATE OR REPLACE FUNCTION public.lead_order_revoke_key_v1(p_key_id TEXT,p_reason TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $revoke703$
 BEGIN
+ -- Serialize with new reservations; already reserved calls can still settle.
+ PERFORM 1 FROM public.lead_order_keys WHERE key_id=p_key_id FOR UPDATE;
  INSERT INTO public.lead_order_key_revocations(key_id,reason) VALUES(p_key_id,p_reason) ON CONFLICT DO NOTHING;
  RETURN jsonb_build_object('status','revoked');
 END;

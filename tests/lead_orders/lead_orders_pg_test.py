@@ -12,7 +12,9 @@ import hashlib
 import json
 import random
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
+from time import monotonic, sleep
 
 import pytest
 
@@ -998,6 +1000,102 @@ def test_orders_the_runner_would_refuse_are_refused_at_placement_with_no_hold(st
 
 
 # -- key-safety review: daily caps, overshoot, repayment, statement ----------------
+
+
+@pytest.mark.parametrize("wrong_binding", ["provider", "public_fingerprint", "miner_hotkey", "key_id"])
+def test_reserve_requires_the_registered_miner_key_binding(store, owner, wrong_binding):
+    service, _, buyer, _, _ = live(store, owner, epoch_value=8900)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    _, order_id = claim(service)
+    binding = dict(provider="openrouter", key_id=key["key_id"], miner_hotkey=miner,
+                   public_fingerprint=key["public_fingerprint"])
+    binding[wrong_binding] = {
+        "provider": "deepline", "public_fingerprint": "sha256:" + "0" * 32,
+        "miner_hotkey": hotkey(), "key_id": "missing-key",
+    }[wrong_binding]
+    assert store.reserve_call(call_id=str(uuid.uuid4()), order_id=order_id,
+                              reserve_microusd=100_000, **binding)["status"] == "key_unknown"
+    assert store.calls(order_id) == []
+    service.finish(order_id, {"status": "failed"})
+
+
+def test_revocation_stops_new_reservations_but_preserves_inflight_settlement(store, owner):
+    service, _, buyer, epoch, _ = live(store, owner, epoch_value=8901)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    _, order_id = claim(service)
+    reservation = dict(order_id=order_id, provider="openrouter", key_id=key["key_id"],
+                       miner_hotkey=miner, public_fingerprint=key["public_fingerprint"],
+                       reserve_microusd=100_000)
+    in_flight = str(uuid.uuid4())
+    assert store.reserve_call(call_id=in_flight, **reservation)["status"] == "reserved"
+    assert service.revoke_key(miner, key["key_id"])["status"] == "revoked"
+    assert store.reserve_call(call_id=str(uuid.uuid4()), **reservation)["status"] == "key_unknown"
+    assert store.settle_call(call_id=in_flight, cost_microusd=80_000, http_status=200,
+                             epoch=epoch())["status"] == "settled"
+    service.finish(order_id, {"status": "failed"})
+    receipt = service.public_receipt(order_id)["receipt"]
+    assert receipt["rewards_microusd"] == {miner: 100_000}
+    row, = store.calls(order_id)
+    assert row["call_id"] == in_flight and row["cost_microusd"] == 80_000
+
+
+@pytest.mark.parametrize("revoke_first", [True, False], ids=["revoke-first", "reserve-first"])
+def test_reserve_and_revoke_serialize_on_the_miner_key(database, store, owner, revoke_first):
+    service, _, buyer, epoch, _ = live(store, owner, epoch_value=8902)
+    miner = hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    _, order_id = claim(service)
+    call_id = str(uuid.uuid4())
+    reserve = ("SELECT public.lead_order_reserve_call_v1(%s,%s,%s,%s,%s,%s,%s)",
+               (call_id, order_id, "openrouter", key["key_id"], miner, key["public_fingerprint"], 100_000))
+    revoke = ("SELECT public.lead_order_revoke_key_v1(%s,%s)", (key["key_id"], "test revoke"))
+    first, second = (revoke, reserve) if revoke_first else (reserve, revoke)
+    psycopg2, dsn = database
+    blocker = psycopg2.connect(**dsn)
+    contender = psycopg2.connect(**dsn)
+    contender.autocommit = True
+    try:
+        for connection in (blocker, contender):
+            sql(connection, "SET statement_timeout='5s'", ())
+            sql(connection, "SET ROLE lab_arena_service", ())
+        assert sql(blocker, *first)[0][0]["status"] == ("revoked" if revoke_first else "reserved")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(sql, contender, *second)
+            try:
+                deadline = monotonic() + 3
+                while monotonic() < deadline:
+                    waiting = sql(owner, "SELECT %s=ANY(pg_blocking_pids(%s))",
+                                  (blocker.get_backend_pid(), contender.get_backend_pid()))[0][0]
+                    if waiting or pending.done():
+                        break
+                    sleep(0.01)
+                assert waiting, "The competing operation did not wait for the miner-key lock"
+                blocker.commit()
+                result = pending.result(timeout=5)[0][0]
+                assert result["status"] == ("key_unknown" if revoke_first else "revoked")
+            finally:
+                blocker.rollback()
+    finally:
+        blocker.close()
+        contender.close()
+    if revoke_first:
+        assert store.calls(order_id) == []
+    else:
+        assert store.settle_call(call_id=call_id, cost_microusd=80_000, http_status=200,
+                                 epoch=epoch())["status"] == "settled"
+    assert store.reserve_call(call_id=str(uuid.uuid4()), order_id=order_id, provider="openrouter",
+                              key_id=key["key_id"], miner_hotkey=miner,
+                              public_fingerprint=key["public_fingerprint"],
+                              reserve_microusd=1)["status"] == "key_unknown"
+    service.finish(order_id, {"status": "failed"})
 
 
 def reward(cost, reserved):

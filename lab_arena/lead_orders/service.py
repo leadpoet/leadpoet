@@ -1,7 +1,7 @@
 """Lead-order orchestration: buyers, orders, runner claims, settlement.
 
 Everything here is reached only when ``LEADPOET_LEAD_ORDERS_MODE`` is not
-``off``. Money rules run in the database (``scripts/703-lead-orders.sql``)
+``off``. Money rules run in the database (``scripts/707-lead-orders.sql``)
 and in ``money``; this module wires them together and never touches an
 Arena table, reward or weight.
 

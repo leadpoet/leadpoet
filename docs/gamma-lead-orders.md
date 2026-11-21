@@ -11,7 +11,7 @@ answers 404 and no store, chain, KMS or provider client is built.
 
 Code: `lab_arena/lead_orders/` (policy, money, gamma, keys, broker, receipts,
 rewards, weights, service), `gateway/api/lead_orders.py` (routes) and
-`scripts/703-lead-orders.sql` (append-only tables and RPCs, RLS on).
+`scripts/707-lead-orders.sql` (append-only tables and RPCs, RLS on).
 
 ## Modes
 

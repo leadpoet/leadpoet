@@ -1,6 +1,6 @@
 """Lead orders on a disposable PostgreSQL: SQL rules, service, broker, receipts.
 
-Runs scripts/703 on top of the Lab Arena base (179) through the same harness
+Runs scripts/707 on top of the Lab Arena base (179) through the same harness
 the Arena tests use (Docker in CI, ``LAB_ARENA_PG_LOCAL=1`` locally). Every
 order a test places is claimed in the same test, because the claim queue is
 shared by the module's database.
@@ -32,7 +32,7 @@ from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.store import ArenaStoreError, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 
-MIGRATIONS = ("179-lab-arena-v1.sql", "703-lead-orders.sql")
+MIGRATIONS = ("179-lab-arena-v1.sql", "707-lead-orders.sql")
 USD = 1_000_000
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 MODEL = "openai/gpt-test"

@@ -1,6 +1,6 @@
 """Pure lead-order money arithmetic in integer micro-USD.
 
-No I/O and no floats. The SQL functions in ``scripts/703-lead-orders.sql``
+No I/O and no floats. The SQL functions in ``scripts/707-lead-orders.sql``
 apply the same rules atomically; ``tests/lead_orders`` checks they agree.
 
 Rounding always favours the side that keeps the lane safe: the minimum charge

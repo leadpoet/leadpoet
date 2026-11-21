@@ -1,6 +1,6 @@
 """Lead-order storage: thin typed calls to the ``lead_order_*_v1`` functions.
 
-All state lives in the append-only tables of ``scripts/703-lead-orders.sql``
+All state lives in the append-only tables of ``scripts/707-lead-orders.sql``
 and every read and write goes through its SECURITY DEFINER functions, the
 same way ``lab_arena.store`` reaches the Arena tables. The Arena transports
 (PostgREST in production, psycopg2 in tests) are reused as they are; this

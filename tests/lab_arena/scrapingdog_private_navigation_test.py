@@ -88,3 +88,59 @@ def test_failed_or_synthetic_response_is_not_projected(status):
     assert br._without_private_search_navigation(response,'scrapingdog.google',DOG_KEY)is response
     synthetic=replace(response,status=200,internal_provenance='credential_echo')
     assert br._without_private_search_navigation(synthetic,'scrapingdog.google',DOG_KEY)is synthetic
+
+
+def jobs_document(secret=DOG_KEY):
+    # Observed Google Jobs response. Application and source links are evidence.
+    navigation = 'https://api.scrapingdog.com/redirect?api_key=' + quote(secret, safe='')
+    return {'jobs_results': [
+        {'title': 'Account Executive', 'source_link': 'https://example.com/careers/ae',
+         'source_link_google_goto_link': navigation,
+         'apply_options': [{'title': 'Apply', 'link': 'https://example.com/apply/ae',
+                            'google_goto_link': navigation}]},
+        {'title': 'Sales Engineer', 'source_link_google_goto_link': 'https://example.com/public',
+         'apply_options': [{'google_goto_link': 'https://example.com/public-apply'}]},
+    ], 'scrapingdog_pagination': {'next':navigation}}
+
+
+def test_google_jobs_delivers_listings_with_private_navigation_removed():
+    document = jobs_document()
+    instance, store, transport = make_broker(transport=FakeTransport([(200, document)]))
+    result = instance.execute(CONTEXT, operation_id='scrapingdog.google_jobs',
+                              parameters={'query':'sales'}, action_sequence=0, timeout_ms=5000)
+    assert result.status == 200
+    expected = deepcopy(document)
+    del expected['scrapingdog_pagination']
+    del expected['jobs_results'][0]['source_link_google_goto_link']
+    del expected['jobs_results'][0]['apply_options'][0]['google_goto_link']
+    assert json.loads(result.body) == expected
+    assert DOG_KEY.encode() not in result.body and DOG_KEY not in json.dumps(store.calls)
+    repeat = instance.execute(CONTEXT, operation_id='scrapingdog.google_jobs',
+                              parameters={'query':'sales'}, action_sequence=0, timeout_ms=5000)
+    assert repeat.body == result.body and len(transport.sent) == 1
+    assert result.call['outcome'] == 'settled' and result.call['actual_microusd'] > 0
+    terminal = store.calls[result.call['call_identity']]['terminal']
+    assert json.loads(base64.b64decode(terminal['body_b64'])) == expected
+
+
+@pytest.mark.parametrize('target', ['source_link','link','description','unexpected'])
+def test_jobs_secret_in_evidence_or_unknown_field_still_refuses_response(target):
+    document = jobs_document()
+    where = document['jobs_results'][0]['apply_options'][0] if target == 'link' else document['jobs_results'][0]
+    where[target] = 'https://example.com/' + DOG_KEY
+    instance, store, _ = make_broker(transport=FakeTransport([(200, document)]))
+    result = instance.execute(CONTEXT, operation_id='scrapingdog.google_jobs',
+                              parameters={'query':'sales'}, action_sequence=0, timeout_ms=5000)
+    assert result.status == 502
+    assert DOG_KEY.encode() not in result.body and DOG_KEY not in json.dumps(store.calls)
+
+
+@pytest.mark.parametrize('document', [
+    {'jobs_results':['There are no jobs for this query']},
+    {'jobs_results':[None,{'apply_options':[None,'public text']}]},
+    jobs_document('public-navigation'),
+])
+def test_jobs_without_private_navigation_stay_byte_exact(document):
+    body=json.dumps(document,indent=2).encode()
+    response=br.ProviderResponse(200,{},body)
+    assert br._without_private_search_navigation(response,'scrapingdog.google_jobs',DOG_KEY) is response

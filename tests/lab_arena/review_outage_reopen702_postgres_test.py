@@ -431,13 +431,15 @@ def test_reopen_refuses_up_front_when_it_could_stall_the_next_round(db):
     # Default deadlines publish ~4.5h out, after next cutoff - 2h.
     with pytest.raises(Exception, match='collide with next round %s baseline gate' % next_id):
         reopen(connection, round_id, dry=True)
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    times = (now + timedelta(minutes=10), now + timedelta(minutes=40), now + timedelta(minutes=59),
-             now + timedelta(minutes=60))
-    preview = reopen(connection, round_id, times=times, dry=True)
-    assert preview['next_round_id'] == next_id
+    # Derive the inclusive boundary from the saved cutoff. Wall time can
+    # advance while the preceding refusal controls run on a busy CI worker.
     cutoff = datetime.strptime(store.get_round(next_id)['configuration_doc']['schedule']['submission_cutoff'],
                                '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    latest = cutoff - timedelta(hours=2)
+    times = (latest - timedelta(minutes=50), latest - timedelta(minutes=20),
+             latest - timedelta(minutes=1), latest)
+    preview = reopen(connection, round_id, times=times, dry=True)
+    assert preview['next_round_id'] == next_id
     assert preview['republish_by'] == iso(cutoff - timedelta(minutes=60))
     for column in ('champion_funding_frozen', 'benchmark_ref'):
         damage(connection, round_id, 'UPDATE lab_arena_rounds SET %s=%s WHERE round_id=%%s'

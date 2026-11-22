@@ -1084,6 +1084,14 @@ continue claiming pending work. The guard ends
 when fewer than three matching leases remain in that window; the separate
 expired-lease cooldown remains in force under its existing rules.
 
+A validator that runs submitted dependencies needs CPython 3.11 to resolve
+wheels for the sandbox. Run the validator with CPython 3.11, or provide the
+trusted interpreter at `/usr/local/bin/python3.11` or `/usr/bin/python3.11`.
+Three distinct leased executions that prove this interpreter was unavailable
+before sandbox startup, with zero provider cost or output, exclude that host
+from new execution claims for that round. Other validators can take those
+assignments. Existing leases, judging and weights continue normally.
+
 ## Miner flow
 
 Run `python scripts/lab_arena_miner.py interactive`. It reads the local source

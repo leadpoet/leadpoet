@@ -1298,6 +1298,17 @@ def _without_private_search_navigation(
             for result in results:
                 if isinstance(result, dict):
                     remove_private_field(result, "google_goto_link")
+        jobs = document.get("jobs_results") if operation_id == "scrapingdog.google_jobs" else None
+        if isinstance(jobs, list):
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                remove_private_field(job, "source_link_google_goto_link")
+                options = job.get("apply_options")
+                if isinstance(options, list):
+                    for option in options:
+                        if isinstance(option, dict):
+                            remove_private_field(option, "google_goto_link")
         if changed:
             return replace(response, body=json.dumps(
                 document, ensure_ascii=False, allow_nan=False, separators=(",", ":"),

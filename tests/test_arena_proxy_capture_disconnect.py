@@ -14,7 +14,11 @@ import uvicorn
 
 from gateway.api import arena_proxy as proxy
 from gateway.middleware.body_size import BodySizeLimitMiddleware
-from lab_arena.api import TRAINING_OBSERVATION_WORKER_LIMIT, create_app
+from lab_arena.api import (
+    TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT,
+    TRAINING_OBSERVATION_WORKER_LIMIT,
+    create_app,
+)
 from lab_arena.service import LocalObjectStore
 from tests.lab_arena.api_provider_capacity_test import wait_until
 from tests.lab_arena.api_training_input_capacity_test import (
@@ -111,7 +115,11 @@ def test_tcp_gateway_disconnect_removes_actual_sidecar_queue(monkeypatch,kind):
         from tests.lab_arena.api_training_observation_capacity_test import ObservationService,request
         from tests.lab_arena.api_provider_capacity_test import post_provider
         service=(CaptureService if kind=='training-input'else ObservationService)(anyio.to_thread.current_default_thread_limiter())
-        capacity = CAPTURE_LIMIT if kind == 'training-input' else TRAINING_OBSERVATION_WORKER_LIMIT
+        # Storage confirmation holds its own reserve, so filling its queue
+        # takes its own smaller capacity, not the uploads'.
+        capacity = {'training-input': CAPTURE_LIMIT,
+                    'verify': TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT}.get(
+            kind, TRAINING_OBSERVATION_WORKER_LIMIT)
         service.release.set()
         app,finished,watching=observed_sidecar(create_app(service))
         def post(client,run):

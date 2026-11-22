@@ -46,6 +46,18 @@ TRAINING_INPUT_WORKER_LIMIT = 2
 # permits put the same demand near 40% utilisation, and still leave the 32
 # control-route workers of NON_PROVIDER_WORKER_RESERVE untouched.
 TRAINING_OBSERVATION_WORKER_LIMIT = 6
+# The storage-confirmation check (HEAD with If-Match) is the runner's last
+# resort after its final upload has already failed twice: it asks whether the
+# bytes landed anyway, and a refusal here is how a run record is LOST rather
+# than merely delayed. Sharing the permits above makes that check unavailable
+# exactly when it is needed — observed 2026-11-19 and again 2026-11-22, when
+# five checks were refused `lease_expired` because the claim ran out while the
+# check queued behind the slow uploads it existed to rescue. It therefore gets
+# its own small reserve. Demand is two orders of magnitude below the uploads
+# (94 checks against 13,498 segments in the busiest 3.5h observed on
+# 2026-11-22, p50 416 ms), so two permits leave it near 1% utilisation while
+# adding negligible CPU contention next to the six above.
+TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT = 2
 # Public result reads fetch run outputs from the object store, so one slow
 # S3 leg holds a worker for the whole call. On 2026-11-04 these reads ran for
 # up to 22 minutes each; 12-19 of them were in flight at once and the shared
@@ -132,6 +144,7 @@ def create_app(service: ArenaService) -> FastAPI:
     provider_limiter: Optional[anyio.CapacityLimiter] = None
     training_input_limiter: Optional[anyio.CapacityLimiter] = None
     training_observation_limiter: Optional[anyio.CapacityLimiter] = None
+    training_observation_verify_limiter: Optional[anyio.CapacityLimiter] = None
     public_object_read_limiter: Optional[anyio.CapacityLimiter] = None
 
     def _training_observation_limiter() -> anyio.CapacityLimiter:
@@ -140,6 +153,15 @@ def create_app(service: ArenaService) -> FastAPI:
             _ensure_worker_pool()
             training_observation_limiter = anyio.CapacityLimiter(TRAINING_OBSERVATION_WORKER_LIMIT)
         return training_observation_limiter
+
+    def _training_observation_verify_limiter() -> anyio.CapacityLimiter:
+        nonlocal training_observation_verify_limiter
+        if training_observation_verify_limiter is None:
+            _ensure_worker_pool()
+            training_observation_verify_limiter = anyio.CapacityLimiter(
+                TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT
+            )
+        return training_observation_verify_limiter
 
     def _public_object_read_limiter() -> anyio.CapacityLimiter:
         nonlocal public_object_read_limiter
@@ -525,7 +547,7 @@ def create_app(service: ArenaService) -> FastAPI:
                 raise HTTPException(status_code=400, detail="observation digest invalid")
             digest = await capture_call(
                 request, service.verify_training_observations, run_id, lease_token, if_match[1:-1],
-                worker_limiter=_training_observation_limiter(), json_response=False,
+                worker_limiter=_training_observation_verify_limiter(), json_response=False,
             )
             headers["ETag"] = '"' + digest + '"'
         return Response(status_code=204, headers=headers)

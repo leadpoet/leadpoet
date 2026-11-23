@@ -46,6 +46,7 @@ candidate query. They never carry a run ID or provider payload.
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Optional
@@ -57,6 +58,9 @@ NO_TOOL = "-"
 NO_MODEL = "-"
 
 _recorder: Optional[Any] = None
+
+# A deferral reason is a source-code literal, never a row value.
+_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 def install_recorder(recorder: Optional[Any]) -> None:
@@ -76,6 +80,7 @@ def record(
     source_sha: Optional[str] = None,
     store_error: Optional[Mapping[str, Any]] = None,
     billing_lookup: Optional[Mapping[str, Any]] = None,
+    reason: Optional[str] = None,
 ) -> None:
     """Record one stage outcome. Never raises."""
     recorder = _recorder
@@ -92,6 +97,7 @@ def record(
             source_sha=source_sha,
             **({"store_error": store_error} if store_error else {}),
             **({"billing_lookup": billing_lookup} if billing_lookup else {}),
+            **({"reason": reason} if reason else {}),
         )
     except BaseException:
         pass
@@ -287,11 +293,16 @@ def record_gate(
 class StageResult:
     """Mutable handle a stage body uses to report magnitude and idleness."""
 
-    __slots__ = ("count", "idle")
+    __slots__ = ("count", "idle", "reason")
 
     def __init__(self) -> None:
         self.count = 0
         self.idle = False
+        # The literal a deferring stage returned ("judge_incomplete",
+        # "daily_icp_set_not_ready", ...). A stage that defers by returning
+        # looks identical to one that did its work; this names the wait.
+        # Set it with ``defer_reason`` so only source literals get through.
+        self.reason: Optional[str] = None
 
 
 @contextmanager
@@ -325,13 +336,34 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
         duration_ms=(time.monotonic() - start_mono) * 1000.0,
         start_ns=start_ns,
         billing_lookup=billing_lookup,
+        reason=result.reason,
     )
+
+
+def defer_reason(outcome: Any) -> Optional[str]:
+    """Name the wait a round-driver stage returned, or None.
+
+    Reads only the ``reason`` a stage put in its own return mapping, which is
+    always a source-code literal. Anything else — a value that is not a short
+    lowercase identifier, or a mapping with no reason — reads as None, so no
+    row content can reach a span through this path.
+    """
+    try:
+        if not isinstance(outcome, Mapping):
+            return None
+        reason = outcome.get("reason")
+        if type(reason) is not str or not _REASON_RE.fullmatch(reason):
+            return None
+        return reason
+    except BaseException:
+        return None
 
 
 __all__ = [
     "NO_ERROR",
     "NO_TOOL",
     "StageResult",
+    "defer_reason",
     "install_recorder",
     "note_denial",
     "record",

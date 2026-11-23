@@ -8623,8 +8623,10 @@ class ArenaService:
                     self._invalidate_hot_round()
                     return {**outage, "round_status": self._round(round_id)["status"]}
             if status == "open":
-                with telemetry.stage("advance_commit_benchmark"):
-                    return self.commit_benchmark(round_id)
+                with telemetry.stage("advance_commit_benchmark") as observed:
+                    committed = self.commit_benchmark(round_id)
+                    observed.reason = telemetry.defer_reason(committed)
+                    return committed
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)
@@ -8709,8 +8711,10 @@ class ArenaService:
                     return {"status": "waiting", "round_status": status,
                             "reason": "frozen_judgment_incomplete"}
                 try:
-                    with telemetry.stage("advance_publish"):
-                        return self.publish(round_id)
+                    with telemetry.stage("advance_publish") as observed:
+                        published = self.publish(round_id)
+                        observed.reason = telemetry.defer_reason(published)
+                        return published
                 except ServiceError as exc:
                     if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["publication"])

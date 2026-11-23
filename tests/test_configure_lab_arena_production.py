@@ -1304,3 +1304,11 @@ def test_full_configuration_preserves_both_preflights_and_partial_apply(monkeypa
     assert service_key() not in output.out + output.err
     if failure == "apply":
         assert "apply failed after 1 target(s)" in output.err
+
+def test_collection_enrollment_mode_changes_only_gateway_setting(monkeypatch):
+    requests = []
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_: requests.append(request) or {"ok": True})
+    assert MODULE.main(["--collection-mode", "pilot", "--check", "--allowed-account", "493765492819"]) == 0
+    assert len(requests) == 1 and requests[0]["secret_id"] == MODULE.GATEWAY_SECRET
+    assert requests[0]["updates"] == {"LEADPOET_COLLECTION_MODE": "pilot"}
+    assert requests[0]["role"] == "collection_mode_only" and not requests[0]["apply"]

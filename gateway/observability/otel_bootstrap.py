@@ -405,6 +405,12 @@ ARENA_NO_DENIAL = "-"
 # check alone would admit a caller-controlled identifier such as "private_key".
 ARENA_DENIAL_CODES = frozenset(
     {
+        "agent_submissions_replaced_by_key_enrollment",
+        "champion_rounds_replaced_by_collection",
+        "collection_inactive",
+        "collection_ineligible_hotkey",
+        "collection_request_invalid",
+        "collection_weight_state_unavailable",
         "accepted_judgment_binding_invalid",
         "accepted_judgment_score_missing",
         "accepted_judgment_source_invalid",

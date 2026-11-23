@@ -16,6 +16,10 @@
 
 Subnet 71 is a Bittensor subnet where miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [leadpoet-sales-agent](https://github.com/leadpoet/leadpoet-sales-agent).
 
+## Locked collection
+
+The new collection program uses funded keys, a pinned agent and fixed per-run prices. The [collection guide](docs/locked-collection.md) covers enrollment, the six generators, the pilot and payout activation. Check the gateway's collection terms for availability. The following competition instructions apply to legacy rounds.
+
 ## Daily schedule
 
 Submit during the day before **00:00 UTC**, when submissions close and evaluation starts. The benchmark stays private during evaluation. Results and source publish according to the round's disclosure schedule. Check the [dashboard](https://subnet71.com) for current deadlines and results.

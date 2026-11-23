@@ -78,6 +78,8 @@ def placeholder(param: str, sql_type: str):
         return {}
     if lowered in ("bigint", "integer", "int", "numeric", "smallint"):
         return 0
+    if lowered == "uuid":
+        return "0a71e000-0000-4000-a000-000000000001"
     if lowered == "boolean":
         return False
     if lowered == "timestamptz":

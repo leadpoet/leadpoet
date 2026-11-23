@@ -220,6 +220,15 @@ def stack(tmp_path_factory):
                     cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
                 cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
                 assert cursor.fetchone()[0] == schema_acl
+                # Exercise the actual collection RPC and trigger definitions through PostgREST as well as SQL.
+                for migration in (
+                    "720-locked-collection-intake.sql",
+                    "721-locked-collection-reward-epoch.sql",
+                    "722-collection-call-budget.sql",
+                    "723-collection-pilot-prices.sql",
+                    "724-collection-scenario-ranking.sql",
+                ):
+                    cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its
             # schema snapshot, preserving historical write RPCs and ACLs.
             arena_pg.prepare_current_service_reads(

@@ -10,30 +10,53 @@ import os
 import re
 import uuid
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 from lab_arena import contracts, store
-from lab_arena.credentials import REQUIRED_SUBMITTED_CREDENTIAL_FIELDS
+from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 
-MODELS = (
-    "moonshotai/kimi-k3.1-pro",
-    "deepseek/deepseek-v4-pro-0813",
-    "thinkingmachines/inkling-2-small",
-    "tencent/hy4",
-    "z-ai/glm-5.3",
-    "deepseek/deepseek-v4.1-flash-1017",
-)
-PROVIDERS = ("openrouter", "deepline")
+
+class GeneratorRoute(NamedTuple):
+    revision: str
+    tag: str
+
+
+# Slot order is part of the batch. Evidence for both APIs is in docs/locked-collection.md.
+GENERATOR_ROUTES = {
+    "moonshotai/kimi-k3.1-pro": GeneratorRoute(
+        "moonshotai/kimi-k3.1-pro-20261023", "deepinfra/bf16"
+    ),
+    "deepseek/deepseek-v4-pro-0813": GeneratorRoute(
+        "deepseek/deepseek-v4-pro-20260813", "deepinfra/fp8"
+    ),
+    "mistralai/mistral-large-4-0": GeneratorRoute(
+        "mistralai/mistral-large-4-0-20261006", "mistral/zdr"
+    ),
+    "qwen/qwen3.8-27b": GeneratorRoute(
+        "qwen/qwen3.8-27b-20260814", "deepinfra/fp8"
+    ),
+    "nvidia/nemotron-3.5-super-vl": GeneratorRoute(
+        "nvidia/nemotron-3.5-super-vl-20261015", "deepinfra/fp4"
+    ),
+    "deepseek/deepseek-v4.1-flash-1017": GeneratorRoute(
+        "deepseek/deepseek-v4.1-flash-20261017", "particle-ai/us/flex"
+    ),
+}
+MODELS = tuple(GENERATOR_ROUTES)
+PROVIDERS = ("openrouter",)
+TASK_SCOPE = "synthetic_workflows"
+SYNTHETIC_SCENARIO = re.compile(r"(?:C[0-9]{2}|K[0-9]{2}|B[1-8]|E[1-7]|P[1-6])-s[1-9][0-9]{0,7}")
 SCOPE = {
     op: "lab_arena.collection." + op + ".v1"
     for op in ("register", "revoke", "statement")
 }
 TERMS = (
-    "I authorize Leadpoet to spend on these OpenRouter and Deepline keys to run centrally assigned "
-    "agent inference and tool calls, subject to the rolling 24-hour limit per provider key "
-    "I sign below. Leadpoet funds verification and ranking separately. The OpenRouter management key is used only to validate the runtime key. "
-    "Revocation stops new calls. Already dispatched calls can still be billed. "
-    "I may see synthetic scenarios or run data on my provider account; I will use this data only "
-    "for this collection program and will not copy or disclose private run data. "
+    "I authorize Leadpoet to spend on my OpenRouter key for centrally assigned simulated sales workflows "
+    "within the rolling 24-hour limit I sign below. I will keep input/output logging, product-use sharing "
+    "and external trace broadcast disabled for this key. The scenarios use invented data and local tools. "
+    "My enrollment does not authorize live web research, third-party enrichment or Deepline charges. "
+    "Leadpoet funds verification and ranking. The read-only management key is used only to verify the runtime key. "
+    "Revocation stops new calls. Already dispatched calls can still be billed. I will keep private run data confidential. "
     "Pilot jobs incur real provider charges and earn no on-chain reward. Authentic completed live jobs earn the "
     "assigned fixed run quote under the epoch settlement rules; spending more does not increase "
     "the quote. If total quotes exceed available epoch emissions, payouts scale proportionally. Unpaid amounts do not carry forward."
@@ -75,6 +98,10 @@ _SIGNATURES = {
         ("artifact", "text"),
         ("epoch", "bigint"),
     ),
+    "prepare_launch": (
+        ("job", "uuid"), ("token_hash", "text"), ("quality", "jsonb"), ("artifact", "text"),
+    ),
+    "launch_finish": (("job", "uuid"), ("anchor", "jsonb")),
     "statement": (("hotkey", "text"), ("mode", "text")),
 }
 
@@ -83,6 +110,15 @@ class IntakeError(ValueError):
     def __init__(self, code, status=400):
         self.code, self.status = code, status
         super().__init__(code)
+
+
+def live_finney_arena():
+    # Match the production gateway defaults in lab_arena.wiring.
+    return (
+        os.environ.get("LAB_ARENA_MODE") == "live"
+        and os.environ.get("LAB_ARENA_NETWORK", "finney") == "finney"
+        and os.environ.get("LAB_ARENA_NETUID", "71") == "71"
+    )
 
 
 def mode_from_environment():
@@ -95,6 +131,7 @@ def mode_from_environment():
 def terms(mode):
     return {
         "mode": mode,
+        "task_scope": TASK_SCOPE,
         "terms": TERMS,
         "terms_sha256": TERMS_HASH,
         "network": "finney",
@@ -158,11 +195,12 @@ class CollectionIntake:
         """Caller authenticates the scoped signed envelope. Only that envelope is retained."""
         body, hk = signed["body"], signed["hotkey"]
         if (
-            set(body) != {"credentials_sha256", "terms_sha256", "daily_cap_microusd"}
+            set(body) != {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
+            or body["task_scope"] != TASK_SCOPE
             or body["terms_sha256"] != TERMS_HASH
             or signed["round_id"] != scope_id(self.mode)
             or not isinstance(credentials, dict)
-            or set(credentials) != set(REQUIRED_SUBMITTED_CREDENTIAL_FIELDS)
+            or set(credentials) != set(OPENROUTER_FUNDING_FIELDS)
             or not all(isinstance(v, str) for v in credentials.values())
             or body["credentials_sha256"] != contracts.document_hash(credentials)
         ):
@@ -170,18 +208,13 @@ class CollectionIntake:
         cap = _micros(body["daily_cap_microusd"], 1)
         registration = str(uuid.UUID(hex=signed["request_id"]))
         prefix = "collection:" + registration
-        encrypted = self.credential_manager.validate_and_encrypt(
+        encrypted = self.credential_manager.validate_openrouter_funding(
             credentials, submission_id=prefix, miner_hotkey=hk
         )
-        keys = {
-            p: {
-                "key_id": str(uuid.uuid5(uuid.UUID(registration), p)),
-                "fingerprint": contracts.hash_bytes(
-                    credentials[p + "_api_key"].encode()
-                ),
-                "ciphertext_b64": encrypted[p],
-            }
-            for p in PROVIDERS
+        key = {
+            "key_id": str(uuid.uuid5(uuid.UUID(registration), "openrouter")),
+            "fingerprint": contracts.hash_bytes(credentials["openrouter_api_key"].encode()),
+            "ciphertext_b64": encrypted,
         }
         return self._rpc(
             "register",
@@ -191,7 +224,8 @@ class CollectionIntake:
             mode=self.mode,
             consent=signed,
             cap=cap,
-            **keys,
+            openrouter=key,
+            deepline=None,
         )
 
     def revoke(self, hotkey, registration_id):
@@ -234,6 +268,8 @@ class CollectionIntake:
             or len(set(scenario_ids)) != len(scenario_ids)
         ):
             raise IntakeError("collection_scenarios_invalid")
+        if not all(SYNTHETIC_SCENARIO.fullmatch(s) for s in scenario_ids):
+            raise IntakeError("collection_synthetic_scope_required")
         for values, minimum in (
             (prices_microusd, 1 if self.mode == "live" else 0),
             (budgets_microusd, 1),
@@ -275,7 +311,7 @@ class CollectionIntake:
             raise IntakeError("collection_key_unavailable", 403)
         return self.credential_manager.runtime_key(row, provider)
 
-    def complete(self, job_id, lease_token, status, quality, artifact_sha256, epoch):
+    def complete(self, job_id, lease_token, status, quality, artifact_sha256, epoch, *, prepare_launch=False):
         if (
             status not in ("accepted", "rejected", "failed")
             or type(epoch) is not int
@@ -287,6 +323,13 @@ class CollectionIntake:
         ):
             raise IntakeError("collection_artifact_invalid")
         _validate_quality(quality)
+        if prepare_launch:
+            if status != "accepted" or self.mode != "live":
+                raise IntakeError("collection_launch_invalid")
+            return self._rpc(
+                "prepare_launch", job=_uuid(job_id), token_hash=store.hash_lease_token(lease_token),
+                quality=quality, artifact=artifact_sha256,
+            )
         return self._rpc(
             "finish",
             job=_uuid(job_id),

@@ -13,7 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from lab_arena import collection_judge as judge, collection_judge_review as review
 from lab_arena.collection_calibration import compile_pilot
-from lab_arena.collection_intake import MODELS
+from lab_arena.collection_intake import MODELS, live_finney_arena
 from lab_arena.collection_research import export_research_rows
 from lab_arena.collection_workflow import CHAMPION_REV, POET_REV, export_row
 from lab_arena.service import S3ObjectStore
@@ -59,6 +59,7 @@ def source_bundle(raw, prompt, transport, objects):
         [assignment(j) for j in jobs],
         jobs=jobs,
         objects=objects,
+        expected_builder=POET_REV,
         planted=keyed_by_run("control_slots"),
         drift=keyed_by_run("drift_slots"),
     )
@@ -141,6 +142,9 @@ def write_exports(bundle, receipt, public_key, objects, output):
                     or manifest["harness_commit"] != CHAMPION_REV
                     or manifest["builder_commit"] != POET_REV
                     or manifest["scenario_id"] != sid
+                    or manifest.get("judge_policy") != bundle["policy"]
+                    or manifest["assessment"]["sha256"] != "sha256:" + judge.digest(a)
+                    or manifest["packet"]["sha256"] != "sha256:" + judge.digest(item["packet"])
                 ):
                     raise ValueError("generator source authority differs")
                 if manifest.get("ranking"):
@@ -221,7 +225,7 @@ def write_exports(bundle, receipt, public_key, objects, output):
     return metadata
 
 
-def cutover_anchor(transport):
+def cutover_anchor(transport, *, launch_job=None):
     """Bind an operator's pricing document to the current finalized legacy epoch."""
     from lab_arena import chain, signing
     from lab_arena.store import ArenaStore
@@ -264,7 +268,17 @@ def cutover_anchor(transport):
         millis = getattr(timestamp, "value", timestamp)
         if type(millis) is not int:
             raise ValueError("finalized timestamp missing")
+        miner = {}
+        if launch_job is not None:
+            hotkey = launch_job["miner_hotkey"]
+            uid = client.client.query("SubtensorModule", "Uids", [71, hotkey], block_hash=snapshot.block_hash)
+            owner = client.client.query("SubtensorModule", "Owner", [hotkey], block_hash=snapshot.block_hash)
+            if (type(getattr(uid, "value", uid)) is not int or hotkey == state["burn_hotkey"]
+                    or getattr(owner, "value", owner) != launch_job["owner_coldkey"]):
+                raise ValueError("launch miner is no longer eligible")
+            miner = {"miner_hotkey": hotkey}
         return {
+            **miner,
             "epoch": epoch,
             "state_hash": state["state_hash"],
             "head_block": snapshot.current_block,
@@ -285,10 +299,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.action != "bundle" and args.receipt is None:
         p.error("--receipt is required")
-    if (
-        os.environ.get("LAB_ARENA_NETWORK") != "finney"
-        or os.environ.get("LAB_ARENA_NETUID") != "71"
-    ):
+    if not live_finney_arena():
         raise ValueError("expected Finney/71 operator configuration")
     db = PostgrestTransport(
         os.environ["LAB_ARENA_SUPABASE_URL"],

@@ -42,11 +42,11 @@ _DIRECT_URLOPEN = urlrequest.build_opener(
 
 REQUIRED_RUNTIME_PROVIDERS = ("openrouter", "deepline")
 RUNTIME_PROVIDERS = REQUIRED_RUNTIME_PROVIDERS + ("scrapingdog",)
-REQUIRED_SUBMITTED_CREDENTIAL_FIELDS = (
+OPENROUTER_FUNDING_FIELDS = (
     "openrouter_api_key",
     "openrouter_management_key",
-    "deepline_api_key",
 )
+REQUIRED_SUBMITTED_CREDENTIAL_FIELDS = OPENROUTER_FUNDING_FIELDS + ("deepline_api_key",)
 OPTIONAL_SUBMITTED_CREDENTIAL_FIELDS = ("scrapingdog_api_key",)
 SUBMITTED_CREDENTIAL_FIELDS = (
     REQUIRED_SUBMITTED_CREDENTIAL_FIELDS + OPTIONAL_SUBMITTED_CREDENTIAL_FIELDS
@@ -258,6 +258,18 @@ class CredentialManager:
         if not isinstance(ciphertext, (bytes, bytearray)) or not ciphertext:
             raise CredentialError("credential_kms_unavailable", retryable=True)
         return base64.b64encode(bytes(ciphertext)).decode("ascii")
+
+    def validate_openrouter_funding(
+        self, credentials: Mapping[str, Any], *, submission_id: str, miner_hotkey: str
+    ) -> str:
+        """Verify ownership and encrypt only the synthetic collection runtime key."""
+        _identity(submission_id, miner_hotkey)
+        if not isinstance(credentials, Mapping) or set(credentials) != set(OPENROUTER_FUNDING_FIELDS):
+            raise CredentialError("submission_credentials_invalid")
+        runtime = _openrouter_key(credentials["openrouter_api_key"], "openrouter_api_key_invalid")
+        management = _openrouter_key(credentials["openrouter_management_key"], "openrouter_management_key_invalid")
+        self._validate_openrouter(runtime, management)
+        return self._encrypt(runtime, submission_id=submission_id, miner_hotkey=miner_hotkey, provider="openrouter")
 
     def validate_and_encrypt(
         self,

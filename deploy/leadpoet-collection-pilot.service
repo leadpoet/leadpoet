@@ -1,0 +1,17 @@
+[Unit]
+Description=Run one signed miner-funded synthetic pilot assignment
+After=network-online.target
+ConditionPathExists=/home/ec2-user/.local/share/leadpoet/collection/pilot/batch.json
+ConditionPathExists=/home/ec2-user/.local/share/leadpoet/collection/pilot/prompt.json
+
+[Service]
+Type=oneshot
+User=ec2-user
+Group=ec2-user
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+WorkingDirectory=/home/ec2-user/.local/share/leadpoet/collection/pilot/runner
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/ec2-user/venv311/bin/python3 -B -m scripts.run_locked_collection --pilot-only --environment-file /home/ec2-user/.config/leadpoet/gateway.env --batch ../batch.json --prompt ../prompt.json --champion-repo ../agent.git --poet-repo ../scenarios.git --max-jobs 1
+TimeoutStartSec=2h

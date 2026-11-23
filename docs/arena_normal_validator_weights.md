@@ -608,15 +608,25 @@ records to calibrate each (scenario family, generator model). The fixed fee
 is the average settled miner-funded OpenRouter and Deepline cost times 1.25,
 rounded up to one micro-USD. Host-funded judge charges contribute zero to
 this price. The price compiler verifies the entire pilot batch, stored
-manifests, human review signature, QA report, and resolved costs. The
-`collection_reward_cutover` table requires its compiled `pilot_evidence`
-for activation under the operator's existing migration authority. Schedule
-`first_epoch` prospectively and provision the live worker only after the
-owner has verified the approved price and budget table. A separate
-`collection_reward_schedule_v1()` read returns those exact fees and limits.
-The database rejects a different quote, cap, harness or model for a live
-run. Installing the migrations leaves champion payments active until the
-recorded epoch.
+manifests, human review signature, QA report, and resolved costs. With the
+migration authority, insert the compiled document into `collection_reward_launch`
+as `pilot_evidence`, using network `finney`, netuid 71 and
+`first_epoch = cutover_anchor.epoch + 1`. This stages the measured prices
+and permits one live run. Check the source and recent finalized weights of
+primary, Rizzo and Yuma before staging. Drain existing competition awards
+with the established daily-cutoff setting when preparing the transition.
+
+Enrollment alone leaves the champion mechanism active. The worker stores
+the first completed live job and its assessed artifact before activating
+rewards. A fresh worker recovers that completion without another provider call.
+The first accepted live job and activation commit together. A fresh finalized
+chain read binds its current miner and payout epoch. Pilot runs and earlier
+epochs cannot earn a retroactive quote. An operator can withdraw the staged
+row before a job starts or after a failed attempt. A running or completed
+launch job must be resolved first. The read-only
+`collection_reward_schedule_v1()` shows the pilot-approved fees, limits
+and any pending launch job. `collection_reward_start_v1()` identifies
+the first actual collection payout epoch.
 
 For payout epoch E, sum the frozen prices of all accepted, live,
 miner-funded jobs whose accepted epoch was E−1. Code checks, provider

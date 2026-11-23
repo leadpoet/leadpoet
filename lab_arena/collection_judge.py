@@ -11,11 +11,33 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import re
+from typing import NamedTuple
 
 
 SPEC = "1.0"
+MAX_VISIBLE_REASONING_CHARS = 16384
 PARTS = ("truth", "decision", "completeness", "efficiency", "safety")
 JUDGES = ("fable", "astra")
+
+
+class QualificationJudge(NamedTuple):
+    role: str
+    revision: str
+    route: str
+    max_tokens: int
+
+
+# These independently hosted revisions may collect blind calibration evidence only.
+QUALIFICATION_JUDGES = {
+    "moonshotai/kimi-k3": QualificationJudge(
+        "kimi", "moonshotai/kimi-k3-20260715", "deepinfra/mxfp4", 1200
+    ),
+    "mistralai/mistral-large-2512": QualificationJudge(
+        "mistral", "mistralai/mistral-large-2512", "mistral/zdr", 600
+    ),
+}
+QUALIFICATION_ROLES = tuple(j.role for j in QUALIFICATION_JUDGES.values())
+
 TAGS = frozenset(
     """made_up_fact wrong_number stale_source_used source_conflict_ignored claim_without_evidence
 wrong_qualification wrong_contact wrong_record_changed should_have_asked should_have_said_unknown overconfident
@@ -92,6 +114,9 @@ class BatchPolicy:
             and _integer(self.agreement_percent, 1, 100),
             "batch thresholds",
         )
+        if self.qualification:
+            _require(self.pilot, "candidate judges require a qualification pilot")
+            return
         _require(
             re.fullmatch(r"anthropic/claude-fable-\d+(?:[.-]\d+)*", self.fable_version)
             and re.fullmatch(
@@ -100,9 +125,18 @@ class BatchPolicy:
             "judge models",
         )
 
+    @property
+    def qualification(self):
+        # Preserve the serialized field names and digests of historical policies.
+        return (self.fable_version, self.astra_version) == tuple(QUALIFICATION_JUDGES)
+
+    @property
+    def roles(self):
+        return QUALIFICATION_ROLES if self.qualification else JUDGES
+
     def version(self, judge):
-        _require(judge in JUDGES, "judge")
-        return self.fable_version if judge == "fable" else self.astra_version
+        _require(judge in self.roles, "judge")
+        return self.fable_version if judge == self.roles[0] else self.astra_version
 
 
 def validate_prompt(policy, prompt):
@@ -129,6 +163,14 @@ def validate_prompt(policy, prompt):
             "worked examples",
         )
     _require(digest(prompt) == policy.prompt_sha256, "private rubric digest mismatch")
+    if policy.qualification:
+        _require(
+            all(
+                "fable | astra" not in prompt[k]
+                for k in ("run_instructions", "ranking_instructions")
+            ),
+            "qualification rubric must use the actual judge identity",
+        )
 
 
 def assign_judges(policy, assignments):
@@ -195,7 +237,11 @@ def assign_judges(policy, assignments):
                 digest([policy.seed, r["run_id"], j]),
             )
 
-        judge = min(JUDGES, key=imbalance)
+        _require(
+            r["generator"] not in (policy.fable_version, policy.astra_version),
+            "judge cannot grade its own generator",
+        )
+        judge = min(policy.roles, key=imbalance)
         for k, v in factors:
             counts[k, v, judge] += 1
         out[r["run_id"]] = {"run_id": r["run_id"], "primary": judge, "overlap": False}
@@ -251,7 +297,7 @@ def _packet(p):
         projected.append({k: step[k] for k in ("step", "action", "evidence")})
         if step.get("reasoning") is not None:
             _require(
-                type(step["reasoning"]) is str and len(step["reasoning"]) <= 8192,
+                type(step["reasoning"]) is str and len(step["reasoning"]) <= MAX_VISIBLE_REASONING_CHARS,
                 "visible reasoning",
             )
             projected[-1]["reasoning"] = step["reasoning"]
@@ -376,11 +422,17 @@ def _request(policy, call, judge, stage, messages, validate):
     # each paid attempt against the same per-run / batch cap before network dispatch.
     base = digest([asdict(policy), judge, stage, messages])
     for attempt in (1, 2):
+        model = policy.version(judge)
+        qualification = QUALIFICATION_JUDGES.get(model)
+        options = {}
+        if qualification and qualification.role == "kimi":
+            options["reasoning_effort"] = "none" if stage == "ranking" else "low"
         raw = call(
             request_id=f"collection-{base}-{attempt}",
-            model=policy.version(judge),
+            model=model,
             messages=messages,
-            max_tokens=400,
+            max_tokens=qualification.max_tokens if qualification else 400,
+            **options,
         )
         try:
             return validate(_parse(raw))
@@ -408,7 +460,7 @@ def judge_run(policy, assignment, packet, call, *, prompt):
     validate_prompt(policy, prompt)
     _require(
         assignment["run_id"] == packet["run_id"]
-        and assignment["primary"] in JUDGES
+        and assignment["primary"] in policy.roles
         and type(assignment["overlap"]) is bool,
         "assigned run mismatch",
     )
@@ -477,7 +529,7 @@ def judge_run(policy, assignment, packet, call, *, prompt):
     records = result["records"]
     records.append(evaluate(primary))
     if result["overlap"] or records[0]["confidence"] == "low":
-        records.append(evaluate(next(j for j in JUDGES if j != primary)))
+        records.append(evaluate(next(j for j in policy.roles if j != primary)))
     _decide(policy, records, n, result)
     result["claim_review"] = claim_review(packet, records)
     return result
@@ -638,7 +690,7 @@ def rank_scenario(policy, candidates, call, *, prompt):
     eligible.sort(key=lambda c: (-c[0], digest([policy.seed, "tiebreak", c[1]])))
     top = sorted(eligible[:3], key=lambda c: digest([policy.seed, "blind rank", c[1]]))
     by_label = {chr(65 + i): c for i, c in enumerate(top)}
-    judge = JUDGES[int(digest([policy.seed, "rank judge", sid]), 16) % 2]
+    judge = policy.roles[int(digest([policy.seed, "rank judge", sid]), 16) % 2]
     identity = {
         "spec_version": SPEC,
         "scenario_id": digest([policy.seed, "scenario", sid])[:16],
@@ -728,6 +780,10 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
         "unknown or duplicate assessment",
     )
     problems = set()
+    if policy.qualification:
+        # Real marks can be signed and examined. A candidate panel cannot release a
+        # training export, a price manifest, or incentives until separately qualified.
+        problems.add("judge_qualification")
     if set(by_id) != set(frozen):
         problems.add("incomplete_batch")
     if (
@@ -787,7 +843,9 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
             or assigned[rid]["overlap"]
             or records[0]["confidence"] == "low"
         )
-        expected_judges = set(JUDGES) if second_required else {assigned[rid]["primary"]}
+        expected_judges = (
+            set(policy.roles) if second_required else {assigned[rid]["primary"]}
+        )
         _require(
             len(records) == len(expected_judges)
             and {v["judge"] for v in records} == expected_judges,
@@ -875,9 +933,9 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
     }
     # A difference in means is flagged for review without claiming that it proves systematic bias.
     differences = {
-        m: {p: values["fable"][p] - values["astra"][p] for p in PARTS}
+        m: {p: values[policy.roles[0]][p] - values[policy.roles[1]][p] for p in PARTS}
         for m, values in means.items()
-        if set(values) == set(JUDGES)
+        if set(values) == set(policy.roles)
     }
     return {
         "batch_id": policy.batch_id,

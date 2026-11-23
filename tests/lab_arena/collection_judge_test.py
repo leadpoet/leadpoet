@@ -415,3 +415,17 @@ def test_blinded_evidence_keeps_cited_and_contradictory_late_rows_or_explicitly_
     assert (
         a["status"] == "cannot_judge" and not caller.requests and a["keep_steps"] == 0
     )
+
+
+def test_judge_receives_complete_long_reasoning_from_an_open_generator():
+    from lab_arena.collection_workflow import _steps, IncompleteEvidence
+
+    reasoning = "a" * 9857
+    msgs = [{"role": "assistant", "content": "Wait.", "reasoning": reasoning}]
+    p = packet()
+    p["steps"] = _steps(msgs, "Wait.", "Wait.")
+    _, run = j._packet(p)
+    assert run["steps"][0]["reasoning"] == reasoning
+    msgs[0]["reasoning"] = "b" * 16385
+    with pytest.raises(IncompleteEvidence, match="visible_reasoning_exceeds_limit"):
+        _steps(msgs, "Wait.", "Wait.")

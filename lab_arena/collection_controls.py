@@ -70,7 +70,7 @@ def drift_case(packet, assessment, manifest, *, source_manifest_sha256):
     ) or assessment["packet_sha256"] != judge.digest([scenario, run]):
         raise ValueError("reference scores are not bound to the reviewed packet")
     records = assessment["records"]
-    if len(records) != 2 or {v["judge"] for v in records} != set(judge.JUDGES):
+    if len(records) != 2 or {v["judge"] for v in records} != set(source_policy.roles):
         raise ValueError("both recorded reference judgments required")
     for v in records:
         identity = {
@@ -91,7 +91,9 @@ def drift_case(packet, assessment, manifest, *, source_manifest_sha256):
             "source_manifest_sha256": source_manifest_sha256,
             "source_batch_id": source_policy.batch_id,
             "source_run_id": packet["run_id"],
-            "judge_versions": {j: source_policy.version(j) for j in judge.JUDGES},
+            "judge_versions": {
+                j: source_policy.version(j) for j in source_policy.roles
+            },
         },
     }
     validate_case(case)
@@ -134,8 +136,12 @@ def validate_case(case):
             ),
             "drift source identity",
         )
-        judge._fields(provenance["judge_versions"], judge.JUDGES)
-        judge._fields(expected, judge.JUDGES)
+        versions = provenance["judge_versions"]
+        roles = judge.JUDGES
+        if versions == {j.role: m for m, j in judge.QUALIFICATION_JUDGES.items()}:
+            roles = judge.QUALIFICATION_ROLES
+        judge._fields(versions, roles)
+        judge._fields(expected, roles)
         for version in provenance["judge_versions"].values():
             judge._require(judge._text(version, 128), "drift source version")
         for scores in expected.values():

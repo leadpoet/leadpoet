@@ -13,7 +13,7 @@ from lab_arena import (
     collection_judge_review as review,
 )
 from lab_arena.collection_calibration import compile_pilot
-from lab_arena.collection_intake import MODELS
+from lab_arena.collection_intake import GENERATOR_ROUTES, MODELS
 from lab_arena.collection_workflow import CHAMPION_REV, POET_REV, store_artifact
 from lab_arena.service import LocalObjectStore
 from scripts import collection_batch as release
@@ -48,9 +48,11 @@ def pilot(tmp_path):
         "name": "test",
         "mode": "pilot",
         "seed": "test-seed",
-        "routes": dict.fromkeys(
-            [*MODELS, "anthropic/claude-fable-5.2", "openai/gpt-6.2-astra"], "test"
-        ),
+        "routes": {
+            **{model: route.tag for model, route in GENERATOR_ROUTES.items()},
+            "anthropic/claude-fable-5.2": "test",
+            "openai/gpt-6.2-astra": "test",
+        },
         "scenario_ids": [f"C01-s{2000+i}" for i in range(22)],
         "budgets_microusd": dict.fromkeys(MODELS, 1000000),
         "control_slots": {"130": True, "131": False},
@@ -220,3 +222,44 @@ def test_reviewed_registered_generator_release_and_pricing(tmp_path, pilot):
     db.rows.pop()
     with pytest.raises(ValueError, match="incomplete"):
         release.source_bundle(raw, PROMPT, db, objects)
+
+
+def test_price_compilation_refuses_missing_generator_upload(pilot, monkeypatch):
+    _, db, objects, bundle, receipt, public = pilot
+    get = objects.get_bounded
+
+    def missing(ref, size):
+        if "/generator-" in ref:
+            raise FileNotFoundError("generator unavailable")
+        return get(ref, size)
+
+    monkeypatch.setattr(objects, "get_bounded", missing)
+    with pytest.raises(FileNotFoundError, match="generator"):
+        compile_pilot(db, bundle, receipt, public, objects)
+
+
+def test_export_binds_reviewed_judges_to_generator_manifest(pilot, tmp_path):
+    _, _, objects, bundle, _, _ = pilot
+    altered = deepcopy(bundle)
+    item = next(i for i in altered["runs"] if "control_sha256" not in i)
+    rid = item["packet"]["run_id"]
+    bid = altered["policy"]["batch_id"]
+    manifest = release.read_artifact(
+        objects, bid, rid, "manifest", {"sha256": item["manifest_sha256"]}, 1024 * 1024
+    )
+    manifest["judge_policy"] = {
+        **altered["policy"],
+        "fable_version": "moonshotai/kimi-k3",
+        "astra_version": "mistralai/mistral-large-2512",
+    }
+    item["manifest_sha256"] = store_artifact(objects, bid, rid, "manifest", manifest)[
+        "sha256"
+    ]
+    test_private, test_public = keys()
+    signed = review.sign_review(
+        altered, complete_marks(altered), "unit-test", test_private
+    )
+    out = tmp_path / "mismatched.zip"
+    with pytest.raises(ValueError, match="source authority"):
+        release.write_exports(altered, signed, test_public, objects, out)
+    assert not out.exists()

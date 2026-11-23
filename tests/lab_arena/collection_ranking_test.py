@@ -19,16 +19,17 @@ from tests.lab_arena.collection_intake_test import (
     BUDGETS,
 )
 from tests.lab_arena.collection_judge_test import POLICY, PROMPT, Caller, packet
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_with_lab_arena_migration
 
 
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(
         (
-            "179-lab-arena-v1.sql",
+            *DEFAULT_MIGRATIONS,
             "720-locked-collection-intake.sql",
             "724-collection-scenario-ranking.sql",
+            "727-collection-synthetic-funding.sql",
         )
     )
 
@@ -45,7 +46,7 @@ def test_last_concurrent_finisher_owns_one_immutable_paid_ranking(database, tmp_
     app = intake.CollectionIntake(transport, manager(), "live")
     for name in "ABCDEF":
         signed, creds = registration(name)
-        app.register(signed, "5" + "x" * 47, creds)
+        app.register(signed, signed["hotkey"], creds)
     jobs = [app.claim("b-1", SAMPLE, COMMIT, PRICES, BUDGETS) for i in range(6)]
     policy = replace(POLICY, batch_id="b-1")
     objects = LocalObjectStore(tmp_path)

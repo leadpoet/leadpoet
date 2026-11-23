@@ -208,6 +208,7 @@ def test_registered_manifest_refuses_relabeling_input_and_omitted_runs():
     m = {
         **job,
         "judge_policy": asdict(POLICY),
+        "generator": store_artifact(objects, POLICY.batch_id, rid, "generator", {"run": rid, "teacher": "gen"}),
         "packet": store_artifact(objects, POLICY.batch_id, rid, "judge-input", p),
         "assessment": store_artifact(objects, POLICY.batch_id, rid, "judge-output", a),
     }

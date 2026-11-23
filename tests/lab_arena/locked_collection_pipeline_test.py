@@ -10,18 +10,19 @@ import pytest
 
 from lab_arena import broker, collection_judge as judge, contracts, store
 from lab_arena.collection_broker import CollectionBroker, CollectionCallError, VERSIONS
-from lab_arena.collection_intake import CollectionIntake, MODELS
+from lab_arena.collection_intake import CollectionIntake, GENERATOR_ROUTES, MODELS
 from lab_arena.collection_worker import process_job
 from lab_arena.collection_workflow import CHAMPION_REV, build_scenario, workflow_sources
 from lab_arena.service import LocalObjectStore
 from tests.lab_arena import collection_intake_test as intake_fixture
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_with_lab_arena_migration
 
 MIGRATIONS = (
-    "179-lab-arena-v1.sql",
+    *DEFAULT_MIGRATIONS,
     "720-locked-collection-intake.sql",
     "722-collection-call-budget.sql",
     "724-collection-scenario-ranking.sql",
+    "727-collection-synthetic-funding.sql",
 )
 
 
@@ -47,7 +48,7 @@ def transport(database):
 def registered(db, hotkeychar):
     intake = CollectionIntake(db, intake_fixture.manager(), "pilot")
     signed, credentials = intake_fixture.registration(hotkeychar, "pilot")
-    intake.register(signed, "5" + "Y" * 47, credentials)
+    intake.register(signed, signed["hotkey"], credentials)
     return intake
 
 
@@ -72,13 +73,17 @@ def setup_broker(enrolled, db, job, transport):
         },
         fetched_at="2026-11-23T00:00:00Z",
     )
+    pricing["endpoint_providers"] = dict.fromkeys(models, "test")
     return CollectionBroker(
         enrolled,
         db,
         transport,
         job,
         pricing,
-        routes=dict.fromkeys(models, "test"),
+        routes={
+            **dict.fromkeys(models, "test"),
+            **{m: r.tag for m, r in GENERATOR_ROUTES.items()},
+        },
         judge_key="private-test-credential-only",
     )
 
@@ -151,6 +156,45 @@ class StandIn:
             "choices": [{"message": message, "finish_reason": finish}],
         }
         return broker.ProviderResponse(200, {}, json.dumps(data).encode())
+
+
+def test_workflow_preserves_only_provider_exposed_reasoning_text(transport):
+    enrolled = registered(transport, "Q")
+    job = claim(enrolled, "visible-thought", "B1-s2027")
+
+    class VisibleParts(StandIn):
+        def send(self, **request):
+            original = super().send(**request)
+            data = json.loads(original.body)
+            data["choices"][0]["message"]["reasoning_details"] = [
+                {"type": "reasoning.encrypted", "data": "opaque bytes"},
+                {"type": "reasoning.text", "text": "Read the source."},
+                {"type": "reasoning.text", "text": "Compare the dates."},
+            ]
+            return broker.ProviderResponse(200, {}, json.dumps(data).encode())
+
+    upstream = VisibleParts()
+    adapter = setup_broker(enrolled, transport, job, upstream)
+    response = adapter.model_call("visible", {
+        "model": job["model"], "messages": [{"role": "user", "content": "Test"}],
+        "max_tokens": 128,
+    })
+    assert upstream.sends[0]["reasoning"] == {"effort": "low", "exclude": False}
+    assert response["choices"][0]["message"]["reasoning"] == "Read the source.\nCompare the dates."
+
+
+def test_provider_receipt_must_match_the_admitted_endpoint(transport):
+    enrolled = registered(transport, "Z")
+    job = claim(enrolled, "wrong-provider-receipt", "B1-s2027")
+    adapter = setup_broker(enrolled, transport, job, StandIn())
+    adapter.pricing["endpoint_providers"][job["model"]] = "Other Service"
+    with pytest.raises(CollectionCallError, match="assigned model"):
+        adapter.model_call("wrong-provider", {
+            "model": job["model"],
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 16,
+        })
+    assert adapter.usage()["settled_microusd"] == 10
 
 
 def test_replayed_call_never_spends_twice_and_cap_cannot_be_bypassed(transport):

@@ -9,6 +9,8 @@ from urllib.parse import urlencode
 from decimal import Decimal
 
 from lab_arena import broker, contracts, operations, provider_costs, store
+from lab_arena.collection_judge import QUALIFICATION_JUDGES
+from lab_arena.collection_intake import GENERATOR_ROUTES
 from lab_arena.lead_orders.broker import deepline_cost_microusd
 
 store.FUNCTION_SIGNATURES.update(
@@ -36,15 +38,23 @@ store.FUNCTION_SIGNATURES.update(
 
 
 VERSIONS = {
-    "moonshotai/kimi-k3.1-pro": "moonshotai/kimi-k3.1-pro-20261023",
-    "deepseek/deepseek-v4-pro-0813": "deepseek/deepseek-v4-pro-20260813",
-    "thinkingmachines/inkling-2-small": "thinkingmachines/inkling-2-small-20261107",
-    "tencent/hy4": "tencent/hy4-20261104",
-    "z-ai/glm-5.3": "z-ai/glm-5.3-20260816",
-    "deepseek/deepseek-v4.1-flash-1017": "deepseek/deepseek-v4.1-flash-20261017",
+    **{model: route.revision for model, route in GENERATOR_ROUTES.items()},
     "anthropic/claude-fable-5.2": "anthropic/claude-fable-5.2-20261109",
     "openai/gpt-6.2-astra": "openai/gpt-6.2-astra-20261117",
 }
+
+
+def batch_versions(routes):
+    if set(routes) == set(VERSIONS):
+        return VERSIONS
+    if set(routes) == set(GENERATOR_ROUTES) | QUALIFICATION_JUDGES.keys():
+        if any(routes[m] != j.route for m, j in QUALIFICATION_JUDGES.items()):
+            raise ValueError("unverified qualification judge route")
+        return {
+            **{m: v.revision for m, v in GENERATOR_ROUTES.items()},
+            **{m: j.revision for m, j in QUALIFICATION_JUDGES.items()},
+        }
+    raise ValueError("incomplete collection route set")
 
 
 class CollectionCallError(RuntimeError):
@@ -74,6 +84,7 @@ class CollectionBroker:
         self.job = job
         self.pricing = pricing
         self.routes = routes
+        self.versions = batch_versions(routes)
         self.catalog = catalog
         self.judge_key = judge_key
 
@@ -210,8 +221,9 @@ class CollectionBroker:
             if (
                 body.get("model") != model
                 or len(selected) != 1
-                or selected[0].get("model") != VERSIONS[model]
+                or selected[0].get("model") != self.versions[model]
                 or not selected[0].get("provider")
+                or selected[0]["provider"] != self.pricing["endpoint_providers"][model]
                 or body.get("provider") not in (None, selected[0]["provider"])
             ):
                 raise CollectionCallError(
@@ -221,16 +233,23 @@ class CollectionBroker:
 
     def model_call(self, request_id, parameters, *, judge=None, api="chat"):
         model = self.job["model"] if judge is None else judge
-        if judge is not None and judge not in {
+        candidate = QUALIFICATION_JUDGES.get(judge)
+        if judge is not None and not candidate and judge not in {
             "anthropic/claude-fable-5.2",
             "openai/gpt-6.2-astra",
         }:
             raise CollectionCallError("unknown collection judge")
+        if candidate and (
+            self.job.get("mode") != "pilot" or self.routes.get(model) != candidate.route
+            or model == self.job["model"]
+        ):
+            raise CollectionCallError("unapproved qualification judge assignment")
         if parameters.get("model") != model or api not in {"chat", "responses"}:
             raise CollectionCallError("wrong collection assignment")
         token_field = "max_tokens" if api == "chat" else "max_output_tokens"
         tokens = parameters.get(token_field)
-        if type(tokens) is not int or not 1 <= tokens <= (400 if judge else 32768):
+        maximum = candidate.max_tokens if candidate else (400 if judge else 32768)
+        if type(tokens) is not int or not 1 <= tokens <= maximum:
             raise CollectionCallError("invalid output allowance")
         if api == "responses" and not judge:
             # Reuse the canonical stateless Responses validator for the pinned
@@ -246,6 +265,8 @@ class CollectionBroker:
                 for t in parameters.get("tools", [])
                 if t.get("type") == "openrouter:web_search"
             ]
+            if hosted and self.job.get("deepline_key_id") is None:
+                raise CollectionCallError("hosted web search is outside synthetic funding scope")
             if hosted and (
                 len(hosted) != 1
                 or parameters.get("max_tool_calls") != 1
@@ -271,6 +292,10 @@ class CollectionBroker:
             ):
                 raise CollectionCallError("unsupported model request fields")
         route = self.routes[model]
+        if judge is None and (
+            model not in GENERATOR_ROUTES or GENERATOR_ROUTES[model].tag != route
+        ):
+            raise CollectionCallError("unverified generator route")
         price = self.pricing["models"][model]
         policy = {
             "only": [route],
@@ -282,16 +307,20 @@ class CollectionBroker:
                 for k in ("prompt", "completion", "request")
             },
         }
-        if not judge:
-            policy["enforce_distillable_text"] = True
+        # Both generated actions and private judgments select training examples.
+        policy["enforce_distillable_text"] = True
+        if candidate:
+            policy["require_parameters"] = True
         body = dict(parameters, provider=policy)
+        if api == "chat" and judge is None:
+            body.setdefault("reasoning", {"effort": "low", "exclude": False})
         if api == "chat":
             body["usage"] = {"include": True}
         reserve = broker.max_openrouter_cost_microusd(
             self.pricing, model, body, max_output_tokens=tokens
         )
         path = "chat/completions" if api == "chat" else "responses"
-        return self._call(
+        result = self._call(
             request_id,
             "judge" if judge else "openrouter",
             "https://openrouter.ai/api/v1/" + path,
@@ -300,7 +329,27 @@ class CollectionBroker:
             model=model,
         )
 
-    def judge(self, *, request_id, model, messages, max_tokens):
+        if api == "chat" and judge is None:
+            for choice in result.get("choices", []):
+                message = choice.get("message", {})
+                if message.get("reasoning") or message.get("reasoning_content"):
+                    continue
+                details = message.get("reasoning_details") or []
+                text = "\n".join(
+                    part["text"] for part in details
+                    if isinstance(part, dict) and part.get("type") == "reasoning.text"
+                    and isinstance(part.get("text"), str) and part["text"].strip()
+                )
+                if text:
+                    message["reasoning"] = text
+        return result
+
+    def judge(self, *, request_id, model, messages, max_tokens, reasoning_effort=None):
+        options = {}
+        if reasoning_effort is not None:
+            if model != "moonshotai/kimi-k3" or reasoning_effort not in ("none", "low"):
+                raise CollectionCallError("unapproved judge reasoning setting")
+            options["reasoning"] = {"effort": reasoning_effort}
         response = self.model_call(
             request_id,
             {
@@ -308,6 +357,7 @@ class CollectionBroker:
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
+                **options,
             },
             judge=model,
         )
@@ -317,6 +367,8 @@ class CollectionBroker:
         return choice["message"]["content"]
 
     def deepline(self, request_id, parameters):
+        if self.job.get("deepline_key_id") is None:
+            raise CollectionCallError("Deepline is outside synthetic funding scope")
         if self.catalog is None:
             raise CollectionCallError("missing frozen Deepline catalog")
         from lab_arena import deepline_catalog

@@ -2230,10 +2230,15 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             except (reviewer_runtime.ReviewerRuntimeError, KeyError, TypeError, ValueError):
                 attempt_gap(selected_id, "source_identity", "reviewer_runtime_identity_unverified")
         selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
-        if selected_id in selected_ids and not _verified_runtime_source(selected_resource):
-            reasons["source_identity"].add("runtime_source_unverified")
-        elif selected_id not in selected_ids and not _verified_runtime_source(selected_resource):
-            reasons["research_process"].add("prior_attempt_source_unverified")
+        if not _verified_runtime_source(selected_resource):
+            # The last failed judge supplies diagnostic history when no judge was accepted.
+            if selected_id == run_id or (
+                selected_id in selected_ids and by_id[selected_id].get("status") != "failed"
+            ):
+                reasons["source_identity"].add("runtime_source_unverified")
+            else:
+                reasons["research_process"].add("prior_attempt_source_unverified")
+                related_gaps[selected_id]["research_process"].add("prior_attempt_source_unverified")
         if selected_id not in snapshots:
             try:
                 from lab_arena.training_input import InputCaptureError, read_input

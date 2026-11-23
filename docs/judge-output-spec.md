@@ -32,3 +32,15 @@ For every scenario family, preserve a real, versioned known-good example already
 For each of the 30 drift anchors select a distinct previously measured private run with complete scores from both Fable and Astra. Pass the original packet, assessment, manifest and its recorded digest to `collection_controls.drift_case()`. It derives the expectations from the actual prior records. Preserve those original immutable objects across batches. When baseline records do not exist yet, measure a separate reference set before using it for drift evaluation; an invented baseline cannot authorize release.
 
 Freeze the expected control/drift labels and the **content digest of the whole case** by slot in `control_artifacts` in the private batch manifest. The separate private pack, `{"schema":"collection.controls.v1","cases":{...}}`, maps each digest to the corresponding case. The worker rebinds only its run ID. The judge sees the blinded trial data. The stored manifest points to the protected control case and carries no generator row or ranking. At review, the verifier checks the exact packet, stored manifest hash, expected label and (for drift) source measurements again. Control calls have no generator payout or training export.
+
+## Reusing measured independent claim checks
+
+The pinned Poet claim reader uses three Jev 1.14 votes for each sentence. A reviewed private source archive may supply these original results without charging for another decision. `scripts.collection_claims import` reads a private JSON inventory with schema `collection.claim-files.v1` and a `sources` list. Each entry contains `source_run_id`, `run_folder` and the SHA-256 of that folder's original `claims.json`. Use only authentic source runs kept by the trusted data owner. The importer rebuilds their guarded tasks, written units and cited source materials, replays the original votes through the pinned reader's `check()` using an offline transport, and signs the verified entries with the archive signer's Ed25519 key. It refuses altered tallies and leaves incomplete votes out. The signature authenticates the importing operator's attestation to the supplied historic files. It does not turn those files into provider-signed responses.
+
+```
+python -m scripts.collection_claims import --inventory PRIVATE/run-files.json \
+  --poet-repo PRIVATE/Poet-9B --champion-repo PATH/leadpoet-sales-agent \
+  --private-key PRIVATE/claim-import-signer.pem --out PRIVATE/claim-pack.json
+```
+
+Freeze the returned `claim_pack_sha256` in the batch manifest and provision its trusted public key independently. Collection reuses a record only when its exact unit digest (ID, written text and all source facts) matches, and records the original run, current run, batch and imported pack digest. New text, changed sources and conflicting independent observations remain flagged for blind adjudication. Private claim-reader data is excluded from model prompts and exported training rows.

@@ -27,6 +27,7 @@ def process_job(
     epoch,
     research=None,
     control_packet=None,
+    claim_pack=None,
     persist=store_artifact,
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
@@ -74,6 +75,10 @@ def process_job(
         ):
             raise ValueError("incorrect research segment identity")
         row_ref = persist(objects, batch, run_id, "generator", row)
+    if not control_ref and claim_pack is not None:
+        from lab_arena.collection_claims import apply_pack
+
+        packet = apply_pack(packet, batch_id=batch, pack=claim_pack)
     packet_ref = persist(objects, batch, run_id, "judge-input", packet)
     assessment = judge.judge_run(
         policy, assignment, packet, broker.judge, prompt=prompt

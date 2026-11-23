@@ -30,7 +30,12 @@ from lab_arena.store import PostgrestTransport
 
 
 def load_batch(raw, prompt):
-    if set(raw) - {"research_index_sha256", "thresholds", "control_artifacts"} != {
+    if set(raw) - {
+        "research_index_sha256",
+        "thresholds",
+        "control_artifacts",
+        "claim_pack_sha256",
+    } != {
         "mode",
         "seed",
         "routes",
@@ -125,6 +130,7 @@ def run_cohort(
     max_jobs,
     research=None,
     controls=None,
+    claim_pack=None,
 ):
     ceiling = dict(raw["budgets_microusd"])
     fees = dict.fromkeys(MODELS, 0)
@@ -185,6 +191,7 @@ def run_cohort(
                 epoch=epoch,
                 research=research,
                 control_packet=controls.bind(job) if controls else None,
+                claim_pack=claim_pack,
             )
         except Exception as exc:
             # Never print raw model output, arguments, credentials or provider messages.
@@ -228,6 +235,7 @@ def main(argv=None):
         action="store_true",
         help="relay a single research assignment to the isolated validator worker",
     )
+    p.add_argument("--claim-pack", type=Path)
     p.add_argument("--control-pack", type=Path)
     p.add_argument("--preflight", action="store_true")
     args = p.parse_args(argv)
@@ -248,6 +256,18 @@ def main(argv=None):
             else {"schema": PACK_SCHEMA, "cases": {}}
         ),
     )
+    claim_pack = None
+    if args.claim_pack or "claim_pack_sha256" in raw:
+        from lab_arena.collection_claims import verify_pack
+        from scripts.collection_review import read_file
+
+        if not args.claim_pack:
+            p.error("frozen claim report pack is required")
+        claim_pack = verify_pack(
+            json.loads(read_file(args.claim_pack)),
+            Path(os.environ["LAB_ARENA_COLLECTION_CLAIM_PUBLIC_KEY_FILE"]).read_bytes(),
+            raw["claim_pack_sha256"],
+        )
     research_index = None
     if any(s.startswith("research-") for s in raw["scenario_ids"]):
         if not args.research_case_index:
@@ -337,6 +357,7 @@ def main(argv=None):
                 max_jobs=args.max_jobs,
                 research=research,
                 controls=controls,
+                claim_pack=claim_pack,
             )
             if args.research_stdio and completed == 0:
                 from lab_arena.collection_research import send

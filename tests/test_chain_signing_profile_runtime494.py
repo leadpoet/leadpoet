@@ -69,6 +69,7 @@ def test_finney_runtime_493_keeps_its_measured_transaction_version():
         genesis_hash=GENESIS,
     )
     assert profile["transaction_version"] == 1
+    assert profile["extrinsic_period"] == 32
     assert profile["commit_call_index"] == "0776"
 
 
@@ -94,6 +95,8 @@ def test_chain_signing_profile_expands_transaction_version_overrides():
     profiles = {item["spec_version"]: item for item in chain_signing_profiles(_profile())}
     assert profiles[437]["transaction_version"] == 1
     assert profiles[438]["transaction_version"] == 1
+    assert profiles[437]["extrinsic_period"] == 32
+    assert profiles[438]["extrinsic_period"] == 32
     assert profiles[494]["transaction_version"] == 2
     assert profiles[494]["extrinsic_period"] == 32
 
@@ -112,15 +115,8 @@ def test_transaction_version_override_keys_are_validated_before_sorting():
         chain_signing_profiles(profile)
 
 
-def test_extrinsic_period_override_must_name_supported_spec_version():
+def test_extrinsic_period_must_be_a_power_of_two():
     profile = _profile()
-    profile["extrinsic_period_overrides"] = {"493": 32}
-    with pytest.raises(HotkeyAuthorityV2Error, match="extrinsic period overrides"):
-        chain_signing_profiles(profile)
-
-
-def test_extrinsic_period_override_must_be_valid_mortal_period():
-    profile = _profile()
-    profile["extrinsic_period_overrides"] = {"494": 30}
+    profile["extrinsic_period"] = 30
     with pytest.raises(HotkeyAuthorityV2Error, match="power of two"):
         chain_signing_profiles(profile)

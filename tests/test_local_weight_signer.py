@@ -369,7 +369,7 @@ def test_builder_uses_public_profile_with_local_chain_transport_and_compatible_c
         drand_backend=object(),
         finalization_sleep=lambda _seconds: None,
     )
-    assert client.extrinsic_period == 8
+    assert client.extrinsic_period == 32
     assert client._chain_profile == load_public_chain_signing_profile("finney")
 
     calls = []

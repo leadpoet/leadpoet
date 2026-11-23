@@ -41,7 +41,7 @@ class Database:
 
 
 @pytest.fixture
-def pilot(tmp_path):
+def pilot(tmp_path, request):
     db = Database()
     objects = LocalObjectStore(tmp_path / "objects")
     raw = {
@@ -53,7 +53,9 @@ def pilot(tmp_path):
             "anthropic/claude-fable-5.2": "test",
             "openai/gpt-6.2-astra": "test",
         },
-        "scenario_ids": [f"C01-s{2000+i}" for i in range(22)],
+        "scenario_ids": [
+            f"C01-s{2000+i}" for i in range(getattr(request, "param", 22))
+        ],
         "budgets_microusd": dict.fromkeys(MODELS, 1000000),
         "control_slots": {"130": True, "131": False},
         "drift_slots": {
@@ -110,7 +112,7 @@ def pilot(tmp_path):
         str(i): judge.digest(case) for i, case in private_cases.items()
     }
     policy = load_batch(raw, PROMPT)
-    for i in range(132):
+    for i in range(len(raw["scenario_ids"]) * len(MODELS)):
         rid = f"run-{i}"
         sid = raw["scenario_ids"][i // 6]
         model = MODELS[i % 6]
@@ -263,3 +265,67 @@ def test_export_binds_reviewed_judges_to_generator_manifest(pilot, tmp_path):
     with pytest.raises(ValueError, match="source authority"):
         release.write_exports(altered, signed, test_public, objects, out)
     assert not out.exists()
+
+
+def test_registered_failed_attempts_remain_visible_without_review_votes(pilot):
+    raw, db, objects, old, _, _ = pilot
+    completed = db.rows[1]
+    failed = dict(
+        completed,
+        job_id="original-failed",
+        status="failed",
+        artifact_sha256=None,
+        attempt=1,
+    )
+    completed["attempt"] = 2
+    db.rows.append(failed)
+    new = release.source_bundle(raw, PROMPT, db, objects)
+    assert new["runs"] == old["runs"]
+    assert len(new["failed_attempts"]) == 1
+    assert new["failed_attempts"][0]["run_id"] == "original-failed"
+    assert review.prepare_review(new)[1] == review.prepare_review(old)[1]
+    failed["status"] = "accepted"
+    with pytest.raises(ValueError):
+        release.source_bundle(raw, PROMPT, db, objects)
+
+
+def test_unreplaced_failure_preserves_reviews_and_enforces_real_pilot_minimum(pilot):
+    raw, db, objects, _, _, _ = pilot
+    failed = db.rows[0]
+    failed.update(status="failed", artifact_sha256=None)
+    bundle = release.source_bundle(raw, PROMPT, db, objects)
+    assert not any(i["packet"]["run_id"] == failed["job_id"] for i in bundle["runs"])
+    private, _ = keys()
+    report = review.sign_review(bundle, complete_marks(bundle), "test-human", private)[
+        "report"
+    ]
+    assert report["blind_human_marks"] == 50
+    assert "pilot_judged_runs" in report["holds"]
+    assert "incomplete_batch" not in report["holds"]
+
+
+@pytest.mark.parametrize("pilot", [23], indirect=True)
+def test_exhausted_noncontrol_slot_does_not_erase_successes_but_failed_control_holds_export(
+    pilot, tmp_path
+):
+    raw, db, objects, _, _, _ = pilot
+    first = db.rows[0]
+    first.update(status="failed", artifact_sha256=None)
+    db.rows.append(dict(first, attempt=2, job_id="exhausted"))
+    b = release.source_bundle(raw, PROMPT, db, objects)
+    private, public = keys()
+    signed = review.sign_review(b, complete_marks(b), "test-human", private)
+    assert (
+        signed["report"]["quality_ready"]
+        and signed["report"]["terminal_failed_attempts"] == 2
+    )
+    data = release.write_exports(b, signed, public, objects, tmp_path / "frozen.zip")
+    assert data["views"]["decisions"]["rows"] == 105
+    db.rows[130].update(status="failed", artifact_sha256=None)
+    b = release.source_bundle(raw, PROMPT, db, objects)
+    signed = review.sign_review(b, complete_marks(b), "test-human", private)
+    assert "unjudged_control" in signed["report"]["holds"]
+    with pytest.raises(ValueError, match="did not pass review"):
+        release.write_exports(
+            b, signed, public, objects, tmp_path / "unjudged-control.zip"
+        )

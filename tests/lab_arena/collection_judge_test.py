@@ -161,9 +161,12 @@ def test_invalid_evidence_retried_once_per_judge_then_unusable(alter):
     c = Caller(alter)
     result = j.judge_run(POLICY, ASSIGN, packet(), c, prompt=PROMPT)
     assert result["status"] == "cannot_judge" and result["keep_steps"] == 0
-    assert len(c.requests) == 4
-    assert len({r["request_id"] for r in c.requests}) == 4
-    assert all(v["scores"] is None for v in result["records"])
+    assert len(c.requests) == 2
+    assert len({r["request_id"] for r in c.requests}) == 2
+    assert (
+        result["records"] == []
+        and result["verifier_unavailable"]["reason"] == "invalid_verdict"
+    )
 
 
 def test_budget_and_transport_failures_propagate_without_new_paid_identity():
@@ -429,3 +432,28 @@ def test_judge_receives_complete_long_reasoning_from_an_open_generator():
     msgs[0]["reasoning"] = "b" * 16385
     with pytest.raises(IncompleteEvidence, match="visible_reasoning_exceeds_limit"):
         _steps(msgs, "Wait.", "Wait.")
+
+
+@pytest.mark.parametrize("completed", [0, 1])
+def test_owner_verifier_outage_keeps_only_actual_votes(completed):
+    run, call = packet(), Caller()
+    attempts = []
+
+    def throttled(**request):
+        attempts.append(request)
+        if len(attempts) > completed:
+            raise j.JudgeUnavailable(
+                request["model"], request["request_id"], "http_error"
+            )
+        return call(**request)
+
+    a = j.judge_run(POLICY, dict(ASSIGN, overlap=True), run, throttled, prompt=PROMPT)
+    assert a["status"] == "cannot_judge" and not j.training_selection(a)
+    assert (
+        len(a["records"]) == completed and not a["keep_steps"] and not a["hard_steps"]
+    )
+    assert a["verifier_unavailable"] == {
+        "model": attempts[-1]["model"],
+        "request_id": attempts[-1]["request_id"],
+        "reason": "http_error",
+    }

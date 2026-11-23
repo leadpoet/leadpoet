@@ -27,6 +27,8 @@ def db():
             "725-collection-generator-roster.sql",
             "726-collection-first-paid-job.sql",
             "727-collection-synthetic-funding.sql",
+            "728-collection-pilot-attempts.sql",
+            "729-collection-ready-judge-recovery.sql",
         )
     )
 
@@ -37,10 +39,11 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
     batch = "test-pilot"
     reg, orr, dee = map(str, (uuid4(), uuid4(), uuid4()))
     commit = "1" * 40
+    scenarios = [f"C01-s{2001+i}" for i in range(17)]
     with pg.connect(**dsn) as conn, conn.cursor() as q:
         q.execute(
             "INSERT INTO public.collection_batches VALUES (%s,'pilot',%s,%s,%s,%s,%s)",
-            (batch, commit, Json(["C01-s2001"]), Json(MODELS), Json({}), Json({})),
+            (batch, commit, Json(scenarios), Json(MODELS), Json({}), Json({})),
         )
         q.execute(
             "INSERT INTO public.collection_registrations(registration_id,miner_hotkey,owner_coldkey,mode,consent) "
@@ -63,7 +66,7 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
                 """INSERT INTO public.collection_jobs(job_id,batch_id,mode,miner_hotkey,registration_id,openrouter_key_id,
                       deepline_key_id,slot,collection_day,scenario_id,model,harness_commit,budget_microusd,price_microusd,
                       status,lease_token_hash,lease_expires_at,finished_at,accepted_epoch,artifact_sha256)
-                      VALUES (%s,%s,'pilot',%s,%s,%s,%s,%s,current_date-%s,'C01-s2001',%s,%s,3000000,0,'accepted',%s,
+                      VALUES (%s,%s,'pilot',%s,%s,%s,%s,%s,current_date-%s,%s,%s,%s,3000000,0,'accepted',%s,
                       now(),now(),100,%s)""",
                 (
                     job,
@@ -74,6 +77,7 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
                     dee,
                     slot,
                     slot,
+                    scenarios[slot // 6],
                     model,
                     commit,
                     "sha256:" + "a" * 64,
@@ -102,6 +106,27 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
             result["budgets"] == {"C": dict.fromkeys(MODELS, 3000000)}
             and result["job_count"] == 102
         )
+        # Retry liability comes from the original budget. Neither the failed miner charge
+        # nor the verifier charge buys an additional completed run or inflates its quote.
+        q.execute("SAVEPOINT with_retry")
+        q.execute("UPDATE public.collection_jobs SET status='failed',accepted_epoch=NULL,artifact_sha256=NULL WHERE job_id=%s",(job,))
+        retry = str(uuid4())
+        q.execute("""INSERT INTO public.collection_jobs(job_id,batch_id,mode,miner_hotkey,registration_id,openrouter_key_id,
+                  deepline_key_id,slot,attempt,collection_day,scenario_id,model,harness_commit,budget_microusd,price_microusd,
+                  status,lease_token_hash,lease_expires_at,finished_at,accepted_epoch,artifact_sha256)
+                  SELECT %s,batch_id,mode,miner_hotkey,registration_id,openrouter_key_id,deepline_key_id,slot,2,current_date-500,
+                  scenario_id,model,harness_commit,budget_microusd-2120,0,'accepted',lease_token_hash,now(),now(),100,%s
+                  FROM public.collection_jobs WHERE job_id=%s""",(retry,"sha256:"+"f"*64,job))
+        q.execute("INSERT INTO public.collection_calls(job_id,request_id,provider,key_id,request_hash,reserved_microusd) VALUES (%s,'retry','openrouter',%s,%s,100)",(retry,orr,"e"*64))
+        q.execute("INSERT INTO public.collection_call_receipts VALUES (%s,'retry',%s,%s,50,200)",(retry,"c"*64,retry))
+        q.execute("SELECT public.collection_pilot_fees_v1(%s,'[]')",(batch,))
+        counted = q.fetchone()[0]
+        assert counted["prices"]["C"][model] == 145  # ceil(1.25 * (16 * 120 + 50) / 17)
+        assert counted["job_count"] == 102 and counted["budgets"] == result["budgets"]
+        q.execute("INSERT INTO public.collection_calls(job_id,request_id,provider,key_id,request_hash,reserved_microusd) VALUES (%s,'unknown','openrouter',%s,%s,20)",(job,orr,"f"*64))
+        with pytest.raises(pg.Error, match="incomplete"):
+            q.execute("SELECT public.collection_pilot_fees_v1(%s,'[]')",(batch,))
+        q.execute("ROLLBACK TO with_retry")
         from tests.lab_arena.collection_rewards_test import insert_legacy_state
 
         legacy = insert_legacy_state(q, 100)
@@ -195,7 +220,7 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
         with pytest.raises(pg.Error, match="running collection job"):
             q.execute("DELETE FROM public.collection_reward_launch")
         q.execute("ROLLBACK TO leased")
-        args = (live_job, token, Json({}), "sha256:" + "f" * 64)
+        args = (live_job, token, Json({"training_status":"cannot_judge"}), "sha256:" + "f" * 64)
         prepare_sql = "SELECT public.collection_prepare_launch_v1(%s,%s,%s,%s)"
         finish_sql = "SELECT public.collection_launch_finish_v1(%s,%s)"
         anchor = dict(proof["cutover_anchor"], miner_hotkey=miner)
@@ -227,6 +252,13 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
             assert resumed["pending"] == pending["pending"] and before["first_epoch"] is None
             fresh.execute("SELECT has_table_privilege(current_user,'public.collection_reward_launch','INSERT')")
             assert fresh.fetchone() == (False,)
+        source = args[-1]
+        q.execute("SAVEPOINT pending_outage")
+        with pytest.raises(pg.Error, match="owner verification"):
+            q.execute(finish_sql, (live_job, Json(anchor)))
+        q.execute("ROLLBACK TO pending_outage")
+        from tests.lab_arena.collection_launch_review_test import verify_recovery_contract
+        verify_recovery_contract(q, pg, live_job, source, claimed["budget_microusd"])
         q.execute("SAVEPOINT paid")
         with pytest.raises(pg.Error, match="finalized legacy epoch readback"):
             q.execute(finish_sql, (live_job, Json(dict(anchor, observed_at=int(time.time()) - 150))))

@@ -20,14 +20,16 @@ def compile_pilot(transport, bundle, receipt, pinned_public_key_pem, objects):
     if not policy.pilot:
         raise ValueError("expected pilot review")
     rows = transport.rpc("collection_pilot_costs_v1", {"p_batch": policy.batch_id})
-    if not isinstance(rows, list) or not rows or len(rows) > 24576:
+    if not isinstance(rows, list) or not rows or len(rows) > 2 * 24576:
         raise ValueError("invalid pilot job evidence")
+    rows, failures = review.terminal_pilot_attempts(rows)
     verified = review.registered_bundle(
         policy,
         bundle["assignments"],
         planted=bundle["planted"],
         drift=bundle["drift"],
         jobs=rows,
+        failed_attempts=failures,
         objects=objects,
         expected_builder=POET_REV,
     )

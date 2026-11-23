@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "bf652b96056d0c9e4722b95cfa7466c531006ebf",
+  "baseline_commit": "dab4e6472919e169373d304a353c4633bfef9b70",
   "entries": [
     {
       "ast_sha256": "sha256:0322239466f9d95f17c77713b5ddd188d15318676bb4e0cbd6d2cacbd19c74ad",
@@ -522,7 +522,7 @@
       "symbol": "verify_roles"
     },
     {
-      "ast_sha256": "sha256:8b9ffa7a08893dc9a31a19243d2021f6c5f9cda175357afaae2f55843c7fa508",
+      "ast_sha256": "sha256:236468f37961e58ab7919b0090bfb9b15f0f3f17fe35955b05c73b4338b01753",
       "path": "lab_arena/collection_rewards.py",
       "symbol": "__module__"
     },
@@ -992,7 +992,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9c3309336ae2b2aecc307a77f6059471b6ecc434a17659729412a7abfe2f10d2",
-  "protected_source_commit": "961a62a3e1c3dcfb2a72cdfcab5b9ed4f2e471be",
+  "manifest_hash": "sha256:c40553766f1d577eea8bd9ee10d625a5b8fe23c288db13d12270e47f0b146f59",
+  "protected_source_commit": "dab4e6472919e169373d304a353c4633bfef9b70",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

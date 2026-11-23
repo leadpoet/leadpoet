@@ -65,7 +65,7 @@ def test_refuses_untrusted_sql(repository, case):
 
 def state():
     return dict(database='postgres', user=subject.USER, session_user=subject.USER, ssl=True,
-                version=170009, recovery=False, flags=[True, False, False, False, False, False, False],
+                version=170009, recovery=False, transaction_read_only=False, flags=[True, False, False, False, False, False, False],
                 memberships=[['lab_arena_owner', False, True, True]], schema_ready=True,
                 temporary_ready=True, container_owner=False, external_definers=False)
 
@@ -124,6 +124,41 @@ def test_dedicated_secret_and_tls_only(access):
     assert a.options['host'] == subject.HOST and a.options['hostaddr'] == '127.0.0.1'
     assert a.options['user'] == subject.USER and a.options['dbname'] == 'postgres'
     assert a.options['sslmode'] == 'verify-full' and a.connection.autocommit is True
+
+
+def test_online_gp3_optimization_retains_authority_checks(access):
+    access.db.update(DBInstanceStatus='storage-optimization', StorageType='gp3', PendingModifiedValues={})
+    assert subject.connect(25551, access.ca) is access.connection
+    assert access.options['sslmode'] == 'verify-full'
+    assert access.connection.statements == [subject.ROLE_QUERY]
+
+
+@pytest.mark.parametrize('overrides', [
+    {'StorageType': 'io1'}, {'StorageType': None}, {'PendingModifiedValues': None},
+    {'PendingModifiedValues': {'AllocatedStorage': 182}},
+    {'ReadReplicaSourceDBInstanceIdentifier': 'other-writer'},
+    {'DBInstanceStatus': 'modifying'}, {'DBInstanceStatus': 'backing-up'},
+    {'DBInstanceStatus': 'storage-full'}, {'DBInstanceStatus': 'rebooting'},
+])
+def test_unready_storage_state_refused_before_reading_secret(access, overrides):
+    access.db.update(DBInstanceStatus='storage-optimization', StorageType='gp3', PendingModifiedValues={})
+    access.db.update(overrides)
+    with pytest.raises(subject.MigrationError):
+        subject.connect(25551, access.ca)
+    assert access.calls == []
+
+
+@pytest.mark.parametrize('bad_state', [
+    {'transaction_read_only': True}, {'transaction_read_only': None}, {'recovery': True},
+    {'ssl': False}, {'memberships': []},
+])
+def test_optimizing_instance_requires_verified_writable_session(access, bad_state):
+    access.db.update(DBInstanceStatus='storage-optimization', StorageType='gp3', PendingModifiedValues={})
+    access.connection.authority.update(bad_state)
+    with pytest.raises(subject.MigrationError):
+        subject.connect(25551, access.ca)
+    assert access.connection.closed
+    assert access.connection.statements == [subject.ROLE_QUERY]
 
 
 @pytest.mark.parametrize('case', ['host', 'account', 'db_name', 'secret_name', 'secret_arn',

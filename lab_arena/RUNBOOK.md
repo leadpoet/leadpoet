@@ -1092,6 +1092,12 @@ before sandbox startup, with zero provider cost or output, exclude that host
 from new execution claims for that round. Other validators can take those
 assignments. Existing leases, judging and weights continue normally.
 
+The gateway also pauses new execution claims from a validator when three
+distinct paid executions in the same round expire naturally within one lease
+TTL with no output or signed finish. It uses the round's frozen TTL. Claims
+resume when fewer than three such expiries remain in the window. Existing
+leases, judging and weight submission continue during the cooldown.
+
 ## Miner flow
 
 Run `python scripts/lab_arena_miner.py interactive`. It reads the local source

@@ -217,7 +217,8 @@ class RemoteResearch:
         trace={}; trace_bytes=0
         with self.open_channel(job) as (reader, writer):
             send(writer,{"type":"research_start",**{k:job[k] for k in ("job_id","scenario_id","model","harness_commit")},
-                         "icp":case["icp"],"evaluation_date":case["evaluation_date"],"deepline_catalog":broker.catalog})
+                         "icp":case["icp"],"evaluation_date":case["evaluation_date"],"deepline_catalog":broker.catalog,
+                         "scorer_image_digest":case["reference"]["scorer_image_digest"]})
             for _ in range(4*MAX_CALLS):
                 event=receive(reader)
                 if event.get("type")=="quota":
@@ -259,20 +260,25 @@ class RemoteResearch:
             or checked["output_sha256"]!=contracts.document_hash(companies)
             or not checked["checks"] or not all(type(v) is bool for v in checked["checks"].values())):
             raise ValueError("research judgment is not bound to the submitted artifacts")
-        checked["checks"]["complete_trainable_context"] = all(r is not None for r in rows)
+        from lab_arena import training_capture
+        checked["checks"].update(answered=True, shape=all(r is not None for r in rows),
+                                 training_split=case.get("split")=="train", privacy=True)
         packet={"run_id":job["job_id"],"scenario_id":job["scenario_id"],"task":encode(case["icp"]).decode(),
                 "steps":steps,"final_output":encode(companies).decode(),
                 **{k:checked[k] for k in ("facts","reference_answer","grading_notes","checks")}}
-        from lab_arena import training_capture
         wire, redactions=training_capture.sanitize_training_value(
             {"provider_calls":[{"operation_id":x["op"],"request":{"outbound":{"body":x["request"]}},
                                 "response":x["response"]} for _,x in sorted(trace.items())]}, aggregate_parts=True)
         result={"run":job["job_id"],"teacher":job["model"],"research_rows":rows, "capture":wire,
                 "native_review_required":not checked["checks"].get("native_coverage",True)}
-        if redactions:
+        # Apply the same privacy boundary to the derived judge packet, including
+        # native verifier evidence. Retain no raw secret in the operator store.
+        clean_packet, packet_redactions=training_capture.sanitize_training_value(packet)
+        if redactions or packet_redactions:
             # Never retain unfiltered sensitive/opaque fields in a derived copy.
             result["research_rows"]=[]
-            packet.update(checks={"privacy":False},steps=[],facts="",final_output="",reference_answer="")
+            packet={**clean_packet,"checks":{**checked["checks"],"privacy":False},"steps":[],"facts":"",
+                    "final_output":"","reference_answer":""}
         return result,packet
 
 
@@ -309,9 +315,9 @@ class FrozenResearchCases:
                 or any(not re.fullmatch(r"research-[A-Za-z0-9_-]{1,90}",k) for k in index)):
             raise ValueError("invalid frozen research case index")
         for ref in index.values():
-            if (type(ref) is not dict or set(ref)!={"run_id","example_hash","scorer_image_digest","scorer_policy_hash"}
-                    or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", ref["run_id"])
-                    or not all(re.fullmatch(r"sha256:[0-9a-f]{64}",ref[k]) for k in ref if k!="run_id")):
+            if (type(ref) is not dict or set(ref)!={"run_id","example_hash","scorer_image_digest","scorer_policy_hash","split"}
+                    or ref.get("split")!="train" or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", ref["run_id"])
+                    or not all(re.fullmatch(r"sha256:[0-9a-f]{64}",ref[k]) for k in ("example_hash","scorer_image_digest","scorer_policy_hash"))):
                 raise ValueError("unbound research reference")
         self.index = json.loads(encode(index))
 
@@ -337,7 +343,7 @@ class FrozenResearchCases:
             if row["input"].get("source_evidence") and row["meta"]["score_run_id"]==raw["score_run_id"]:
                 labels[contracts.document_hash(c)]={"company":c.get("company_name"),
                     "class":row["label"]["class"],"source_evidence":row["input"]["source_evidence"]}
-        return {"icp":icp,"evaluation_date":raw["evaluation_date"],"labels":labels,"reference":ref,
+        return {"icp":icp,"split":ref["split"],"evaluation_date":raw["evaluation_date"],"labels":labels,"reference":ref,
                 "scored_run_id":raw["score_run_id"],"deepline_catalog":deepline_catalog.validate_catalog(catalog)}
 
     def grade(self,job,case,companies):

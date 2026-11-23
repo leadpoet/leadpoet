@@ -62,6 +62,14 @@ def source_bundle(raw, prompt, transport, objects):
         planted=keyed_by_run("control_slots"),
         drift=keyed_by_run("drift_slots"),
     )
+    slot_for = {row["job_id"]: str(row["slot"]) for row in jobs}
+    checked_controls = {
+        slot_for[item["packet"]["run_id"]]: item["control_sha256"]
+        for item in bundle["runs"]
+        if "control_sha256" in item
+    }
+    if checked_controls != raw.get("control_artifacts", {}):
+        raise ValueError("registered control differs from frozen private case")
     return bundle
 
 
@@ -213,6 +221,60 @@ def write_exports(bundle, receipt, public_key, objects, output):
     return metadata
 
 
+def cutover_anchor(transport):
+    """Bind an operator's pricing document to the current finalized legacy epoch."""
+    from lab_arena import chain, signing
+    from lab_arena.store import ArenaStore
+    from leadpoet_canonical.arena_weights import verify_accepted_weight_state_signature
+
+    config = chain.ArenaChainConfig(
+        os.environ["LAB_ARENA_CHAIN_ENDPOINT"], 71, "finney", 15
+    )
+    client = chain.ArenaChain(config, chain.connect_substrate(config))
+    try:
+        snapshot = chain.finalized_epoch_snapshot(client)
+        epoch = snapshot.settlement_epoch_id(chain.load_arena_cutover())
+        row = ArenaStore(transport).get_weight_state("finney", 71, epoch)
+        if not row or row["state_doc"]["reward_basis"]["schema_version"].startswith(
+            "leadpoet.collection."
+        ):
+            raise ValueError("current signed legacy state required")
+        signer = signing.KmsSigner(
+            os.environ["LAB_ARENA_SIGNING_KEY_ID"],
+            region_name=os.environ.get("AWS_REGION"),
+        )
+        state = row["state_doc"]
+        verify_accepted_weight_state_signature(
+            state,
+            public_key_der=signer.public_key_der,
+            expected_public_key_hash=signer.public_key_hash,
+        )
+        if (
+            state["epoch"] != epoch
+            or state["genesis_hash"] != snapshot.network_genesis_hash.removeprefix("0x")
+            or (state["network"], state["netuid"]) != ("finney", 71)
+            or not state["valid_from_block"]
+            <= snapshot.current_block
+            <= state["valid_until_block"]
+        ):
+            raise ValueError("accepted state differs from finalized chain")
+        timestamp = client.client.query(
+            "Timestamp", "Now", block_hash=snapshot.block_hash
+        )
+        millis = getattr(timestamp, "value", timestamp)
+        if type(millis) is not int:
+            raise ValueError("finalized timestamp missing")
+        return {
+            "epoch": epoch,
+            "state_hash": state["state_hash"],
+            "head_block": snapshot.current_block,
+            "head_hash": snapshot.block_hash,
+            "observed_at": millis // 1000,
+        }
+    finally:
+        client.close()
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("action", choices=("bundle", "prices", "export"))
@@ -250,7 +312,11 @@ def main(argv=None):
         )
         if args.action == "prices":
             write_new(
-                args.output, compile_pilot(db, bundle, receipt, public_key, objects)
+                args.output,
+                dict(
+                    compile_pilot(db, bundle, receipt, public_key, objects),
+                    cutover_anchor=cutover_anchor(db),
+                ),
             )
         else:
             write_exports(bundle, receipt, public_key, objects, args.output)

@@ -666,3 +666,16 @@ provider receipts. The export ZIP contains JSONL for decisions-only,
 reasoning and hard-step reasoning views, plus row counts and file hashes.
 It omits planted/drift controls and all judge response text. An incomplete
 or modified batch cannot publish a partial output file.
+
+Before scheduling the switch, stop opening new competition rounds and let
+all issued paid rounds, pending Git promotions and the latest award finish.
+The cutover must immediately follow the current accepted legacy epoch. The
+price document's `cutover_anchor` records that epoch, its signed state hash,
+and a fresh finalized chain block with its observed timestamp. Use
+`cutover_anchor.epoch + 1` for `first_epoch`. If the anchor is older than
+120 seconds at insertion, rerun the price command for a fresh observation.
+A missing accepted legacy state, a pending promotion, an overlapping award,
+or an incomplete measured six-model cohort stops activation. Once scheduled,
+the gateway and database fence new mainnet competition issuance and new
+Git promotion plans even if a worker returns to an older environment setting.
+Previously issued signed states retain their original signature and history.

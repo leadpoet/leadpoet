@@ -7,7 +7,7 @@ import pytest
 from bittensor_wallet import Keypair
 from psycopg2.extras import Json
 
-from lab_arena import collection_rewards as fees, signing, weight_state
+from lab_arena import collection_rewards as fees, rewards, signing, weight_state
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
 from leadpoet_canonical.arena_weights import (
@@ -170,19 +170,101 @@ def db():
     yield from database_with_lab_arena_migration(
         DEFAULT_MIGRATIONS
         + (
-            "713-locked-collection-intake.sql",
-            "714-locked-collection-reward-epoch.sql",
+            "720-locked-collection-intake.sql",
+            "721-locked-collection-reward-epoch.sql",
         )
     )
+
+
+def insert_legacy_state(cursor, epoch):
+    legacy_basis = signing.sign_document(
+        SIGNER,
+        rewards.reward_basis_document(
+            round_id="arena-2026-11-23",
+            published_at="2026-11-23T00:00:00Z",
+            finalized_epoch=epoch - 1,
+            king_outcome="crowned",
+            king_hotkey=MINER,
+        ),
+        hash_field="reward_basis_hash",
+    )
+    document = weight_state.build_accepted_weight_state(
+        SIGNER,
+        network="finney",
+        genesis_hash=GENESIS,
+        netuid=71,
+        epoch=epoch,
+        valid_from_block=1,
+        valid_until_block=49,
+        reward_basis=legacy_basis,
+        burn_hotkey=BURN,
+        issued_at="2026-11-23T00:00:00Z",
+    )
+    cursor.execute(
+        "SELECT public.lab_arena_publish_weight_state_v1('finney',71,%s,%s,%s)",
+        (epoch, document["state_hash"], Json(document)),
+    )
+    return document
 
 
 def test_native_scoped_gateway_issues_only_accepted_jobs_once(db):
     pg, dsn = db
     store = ArenaStore(PsycopgTransport(lambda: pg.connect(**dsn)))
     with pg.connect(**dsn) as conn, conn.cursor() as q:
+        q.execute("SAVEPOINT invalid_cutover")
+        with pytest.raises(pg.Error, match="latest accepted legacy"):
+            q.execute(
+                "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,%s)",
+                (EPOCH,),
+            )
+        q.execute("ROLLBACK TO invalid_cutover")
+        old = insert_legacy_state(q, EPOCH - 1)
+        q.execute("SAVEPOINT old_state_exists")
+        for wrong in (EPOCH - 1, EPOCH + 1):
+            with pytest.raises(pg.Error, match="latest accepted legacy"):
+                q.execute(
+                    "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,%s)",
+                    (wrong,),
+                )
+            q.execute("ROLLBACK TO old_state_exists")
+        shared_config = Json(
+            dict(mode="live", network_name="finney", netuid=71, rewards_enabled=True)
+        )
+        q.execute(
+            "INSERT INTO public.lab_arena_rounds(round_id, configuration_doc,rewards_enabled) "
+            "VALUES ('arena-2026-11-23',%s,true)",
+            (shared_config,),
+        )
+        with pytest.raises(pg.Error, match="must finish"):
+            q.execute(
+                "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,%s)",
+                (EPOCH,),
+            )
+        q.execute("ROLLBACK TO old_state_exists")
         q.execute(
             "INSERT INTO public.collection_reward_cutover VALUES (%s,71,%s)",
             ("finney", EPOCH),
+        )
+        q.execute("SAVEPOINT retired")
+        with pytest.raises(pg.Error, match="retired"):
+            q.execute(
+                "INSERT INTO public.lab_arena_rounds(round_id,configuration_doc,rewards_enabled) "
+                "VALUES ('arena-2026-11-24',%s,true)",
+                (shared_config,),
+            )
+        q.execute("ROLLBACK TO retired")
+        q.execute(
+            "SELECT state_doc FROM public.lab_arena_accepted_weight_states WHERE epoch=%s",
+            (EPOCH - 1,),
+        )
+        assert q.fetchone()[0] == old
+        assert (
+            verify_accepted_weight_state_signature(
+                old,
+                public_key_der=SIGNER.public_key_der,
+                expected_public_key_hash=SIGNER.public_key_hash,
+            )
+            == old["state_hash"]
         )
         q.execute(
             """INSERT INTO public.collection_batches VALUES

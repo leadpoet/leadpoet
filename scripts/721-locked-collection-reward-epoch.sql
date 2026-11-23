@@ -80,7 +80,7 @@ BEGIN
  END IF;
  IF EXISTS(SELECT FROM public.lab_arena_rounds r WHERE r.configuration_doc->>'network_name'='finney'
            AND r.configuration_doc->>'netuid'='71' AND r.configuration_doc->>'mode'='live'
-           AND r.rewards_enabled AND (r.status NOT IN ('published','cancelled') OR
+           AND ((r.rewards_enabled AND r.status NOT IN ('published','cancelled')) OR
            (r.promotion_doc IS NOT NULL AND r.baseline_promoted_at IS NULL)
            OR r.effective_reward_epoch >= NEW.first_epoch)) THEN
   RAISE EXCEPTION 'legacy competition or prepared promotion must finish before cutover';

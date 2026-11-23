@@ -31,7 +31,15 @@ def _read_bundle(bundle):
     schedule = judge.assign_judges(policy, bundle["assignments"])
     assessments, packets = [], {}
     for item in bundle["runs"]:
-        judge._fields(item, ("packet", "assessment", "manifest_sha256"))
+        keys = {"packet", "assessment", "manifest_sha256"}
+        if "control_sha256" in item:
+            keys.add("control_sha256")
+            judge._require(
+                isinstance(item["control_sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", item["control_sha256"]),
+                "control digest",
+            )
+        judge._fields(item, keys)
         judge._require(
             isinstance(item["manifest_sha256"], str)
             and re.fullmatch(r"sha256:[0-9a-f]{64}", item["manifest_sha256"]),
@@ -272,13 +280,17 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects):
     def ident(value):
         return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
 
-    def verified(rid, kind, ref, limit):
+    def verified(rid, kind, ref, limit, batch=None):
+        batch = policy.batch_id if batch is None else batch
+        judge._require(
+            ident(rid) and ident(batch), "invalid registered artifact coordinates"
+        )
         sha = ref.get("sha256")
         judge._require(
             isinstance(sha, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", sha),
             "registered artifact digest",
         )
-        key = f"collection/{policy.batch_id}/{rid}/{kind}-{sha[7:]}.json"
+        key = f"collection/{batch}/{rid}/{kind}-{sha[7:]}.json"
         judge._require(ref.get("key", key) == key, "registered artifact path")
         raw = objects.get_bounded(key, limit)
         judge._require(
@@ -297,6 +309,7 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects):
         "registered job set",
     )
     runs = []
+    control_templates = set()
     for rid in sorted(by_id):
         record = known[rid]
         a = by_id[rid]
@@ -326,11 +339,67 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects):
             packet["run_id"] == rid and packet["scenario_id"] == record["scenario_id"],
             "registered packet identity",
         )
+        control = manifest.get("control")
+        if rid in planted or rid in drift:
+            from lab_arena import collection_controls as controls
+
+            judge._require(
+                control
+                and manifest.get("generator") is None
+                and not manifest.get("ranking"),
+                "control missing dedicated private case",
+            )
+            case = verified(rid, "control-case", control, 16 * 1024 * 1024)
+            checked = controls.validate_case(case)
+            expected = planted[rid] if rid in planted else drift[rid]
+            judge._require(
+                control["sha256"] == "sha256:" + checked
+                and packet == {**case["packet"], "run_id": rid}
+                and case["kind"] == ("planted" if rid in planted else "drift")
+                and judge.digest(case["expected"]) == judge.digest(expected),
+                "control case or expected answer differs",
+            )
+            packet_hash = judge.digest(case["packet"])
+            judge._require(
+                packet_hash not in control_templates, "duplicate control template"
+            )
+            control_templates.add(packet_hash)
+            if case["kind"] == "drift":
+                orig = case["provenance"]
+                src = orig["source_run_id"]
+                batch = orig["source_batch_id"]
+                judge._require(
+                    batch != policy.batch_id, "drift reference must predate evaluation"
+                )
+                sh = orig["source_manifest_sha256"]
+                baseline = verified(src, "manifest", {"sha256": sh}, 1024 * 1024, batch)
+                judge._require(
+                    not baseline.get("control"),
+                    "drift baseline must be an original measured run",
+                )
+                original_packet = verified(
+                    src, "judge-input", baseline["packet"], 16 * 1024 * 1024, batch
+                )
+                original_assessment = verified(
+                    src, "judge-output", baseline["assessment"], 1024 * 1024, batch
+                )
+                reproduced = controls.drift_case(
+                    original_packet,
+                    original_assessment,
+                    baseline,
+                    source_manifest_sha256=sh,
+                )
+                judge._require(
+                    reproduced == case, "drift anchor differs from recorded baseline"
+                )
+        else:
+            judge._require(control is None, "unexpected control case on generation job")
         runs.append(
             {
                 "packet": packet,
                 "assessment": assessment,
                 "manifest_sha256": record["artifact_sha256"],
+                **({"control_sha256": control["sha256"][7:]} if control else {}),
             }
         )
     result = {

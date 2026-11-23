@@ -7,7 +7,11 @@ from zipfile import ZipFile
 
 import pytest
 
-from lab_arena import collection_judge as judge, collection_judge_review as review
+from lab_arena import (
+    collection_controls as controls,
+    collection_judge as judge,
+    collection_judge_review as review,
+)
 from lab_arena.collection_calibration import compile_pilot
 from lab_arena.collection_intake import MODELS
 from lab_arena.collection_workflow import CHAMPION_REV, POET_REV, store_artifact
@@ -55,6 +59,54 @@ def pilot(tmp_path):
             for i in range(100, 130)
         },
     }
+    private_cases = {}
+    source_policy = judge.BatchPolicy(
+        "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True
+    )
+    for i in range(100, 132):
+        src = f"reference-{i}"
+        sid = raw["scenario_ids"][i // 6]
+        original = dict(
+            packet(src), scenario_id=sid, task=f"Check synthetic account {i}"
+        )
+        if i >= 130:
+            case = controls.planted_case(
+                original,
+                expected=i == 130,
+                reviewer="fixture",
+                rationale="Known fixture control outcome",
+                source_sha256="sha256:" + judge.digest(original),
+            )
+        else:
+            sa = {"run_id": src, "primary": "fable", "overlap": True}
+            verdict = judge.judge_run(
+                source_policy, sa, original, Caller(), prompt=PROMPT
+            )
+            baseline = {
+                "job_id": src,
+                "scenario_id": sid,
+                "batch_id": source_policy.batch_id,
+                "judge_policy": asdict(source_policy),
+                "packet": store_artifact(
+                    objects, source_policy.batch_id, src, "judge-input", original
+                ),
+                "assessment": store_artifact(
+                    objects, source_policy.batch_id, src, "judge-output", verdict
+                ),
+            }
+            manifest_ref = store_artifact(
+                objects, source_policy.batch_id, src, "manifest", baseline
+            )
+            case = controls.drift_case(
+                original,
+                verdict,
+                baseline,
+                source_manifest_sha256=manifest_ref["sha256"],
+            )
+        private_cases[i] = case
+    raw["control_artifacts"] = {
+        str(i): judge.digest(case) for i, case in private_cases.items()
+    }
     policy = load_batch(raw, PROMPT)
     for i in range(132):
         rid = f"run-{i}"
@@ -71,7 +123,11 @@ def pilot(tmp_path):
             scenario_id=sid,
             status="accepted",
         )
-        p = dict(packet(rid), scenario_id=sid)
+        p = (
+            dict(private_cases[i]["packet"], run_id=rid)
+            if i in private_cases
+            else dict(packet(rid), scenario_id=sid)
+        )
         assigned = judge.assign_judges(policy, [assignment(job)])[rid]
         a = judge.judge_run(
             policy,
@@ -112,6 +168,11 @@ def pilot(tmp_path):
             ("generator", "generator", row),
         ]:
             manifest[field] = store_artifact(objects, policy.batch_id, rid, kind, value)
+        if i in private_cases:
+            manifest.pop("generator")
+            manifest["control"] = store_artifact(
+                objects, policy.batch_id, rid, "control-case", private_cases[i]
+            )
         job["artifact_sha256"] = store_artifact(
             objects, policy.batch_id, rid, "manifest", manifest
         )["sha256"]

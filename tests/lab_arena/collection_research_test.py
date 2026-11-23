@@ -23,7 +23,7 @@ def params(model):
 
 def test_gateway_projects_only_bound_model_turns_and_keeps_labels_separate(monkeypatch):
     j=job()
-    c={"icp":{"output_schema_version":"leadpoet.lab_arena.output.v6"},"deepline_catalog":None,"evaluation_date":"2026-11-23"}
+    c={"reference":{"scorer_image_digest":"sha256:"+"1"*64},"icp":{"output_schema_version":"leadpoet.lab_arena.output.v6"},"deepline_catalog":None,"evaluation_date":"2026-11-23"}
     source=io.BytesIO()
     req=params(j["model"])
     research.send(source,{"type":"provider","frame":{"operation_id":"openrouter.responses",

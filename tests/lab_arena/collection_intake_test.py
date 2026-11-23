@@ -11,7 +11,7 @@ from lab_arena.credentials import CredentialManager
 from lab_arena.service import ArenaService, ServiceError
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 
-MIGRATIONS = ("179-lab-arena-v1.sql", "713-locked-collection-intake.sql")
+MIGRATIONS = ("179-lab-arena-v1.sql", "720-locked-collection-intake.sql")
 CAP = 4_000_000
 MODE = "live"
 COMMIT = "1" * 40
@@ -146,6 +146,19 @@ def test_signed_deployment_scope_and_wrong_signature_rejected_before_registratio
     signed["timestamp"] = int(datetime.now(timezone.utc).timestamp())
     with pytest.raises(ServiceError,match="signature_invalid"):
         svc.handle_collection_request("register",{"authorization":signed,"credentials":creds})
+    # Live intake configuration can drain existing source rounds before the
+    # durable cutover. The registered window check still owns those requests.
+    class WindowChecked(Exception):
+        pass
+    def previous_round(*args, **kwargs):
+        raise WindowChecked
+    svc._request_round = previous_round
+    with pytest.raises(WindowChecked):
+        svc.handle_submission_presign({})
+    with pytest.raises(WindowChecked):
+        svc.handle_submission_finalize("sub-id",{})
+    svc._config.collection_emission_valuation = lambda block: {}
+    svc._store = SimpleNamespace(collection_reward_start_epoch=lambda: 26600)
     with pytest.raises(ServiceError,match="replaced_by_key_enrollment"):
         svc.handle_submission_presign({})
     with pytest.raises(ServiceError,match="replaced_by_key_enrollment"):

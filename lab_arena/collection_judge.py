@@ -782,7 +782,8 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
             "verdict identity",
         )
         second_required = (
-            policy.pilot
+            rid in control_ids
+            or policy.pilot
             or assigned[rid]["overlap"]
             or records[0]["confidence"] == "low"
         )
@@ -821,6 +822,22 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
         problems.add("judge_agreement")
     if policy.pilot and sum(r not in control_ids for r in observed) < 100:
         problems.add("pilot_judged_runs")
+
+    # Known-good/bad controls must exercise each requested task family. The
+    # scheduler uses C/K/B/E/P seeds and `research-*`; keep arbitrary fixture or
+    # future kind names exact when they do not use these conventions.
+    def family(rid):
+        sid = by_id[rid]["scenario_id"]
+        match = re.match(r"^([A-Z]+)\d+-s\d+$", sid)
+        return match[1] if match else sid.split("-", 1)[0]
+
+    observed_families = {family(rid) for rid in by_id if rid not in control_ids}
+    for kind in observed_families:
+        labels = {
+            v for rid, v in planted.items() if rid in by_id and family(rid) == kind
+        }
+        if labels != {True, False}:
+            problems.add("missing_planted_controls_for_family")
     candidates = sorted(
         (r for r in observed if r not in control_ids),
         key=lambda r: digest([policy.seed, "human", r]),

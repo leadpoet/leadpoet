@@ -80,7 +80,11 @@ BEGIN
  SELECT jsonb_object_agg(family,prices),jsonb_object_agg(family,budgets),bool_or(invalid),sum(jobs)
  INTO amounts,caps,bad,real_count FROM by_family;
 
- IF amounts IS NULL OR bad OR real_count<100 THEN RAISE EXCEPTION 'pilot measurement incomplete'; END IF;
+ IF amounts IS NULL OR bad OR real_count<100 OR EXISTS (
+  SELECT FROM jsonb_each(amounts) t(family,prices)
+  WHERE NOT prices ?& ARRAY['moonshotai/kimi-k3.1-pro','deepseek/deepseek-v4-pro-0813',
+    'thinkingmachines/inkling-2-small','tencent/hy4','z-ai/glm-5.3','deepseek/deepseek-v4.1-flash-1017']
+ ) THEN RAISE EXCEPTION 'pilot measurement incomplete'; END IF;
  RETURN jsonb_build_object('prices',amounts,'budgets',caps,'job_count',real_count,
    'measurement_sha256',encode(sha256(convert_to(measurements::text,'UTF8')),'hex'));
 END $$;
@@ -88,8 +92,20 @@ END $$;
 CREATE FUNCTION public.collection_approved_pilot_guard_v1() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
 DECLARE evidence jsonb:=NEW.pilot_evidence; calculated jsonb; batch public.collection_batches;
+ prior public.lab_arena_accepted_weight_states; observation jsonb:=NEW.pilot_evidence->'cutover_anchor';
 BEGIN
  SELECT * INTO STRICT batch FROM public.collection_batches WHERE batch_id=evidence->>'batch_id' AND mode='pilot';
+ SELECT * INTO prior FROM public.lab_arena_accepted_weight_states WHERE network='finney' AND netuid=71 AND epoch=NEW.first_epoch-1;
+ IF NOT FOUND OR jsonb_typeof(observation) IS DISTINCT FROM 'object' OR
+    NOT observation ?& ARRAY['epoch','state_hash','head_block','head_hash','observed_at'] OR
+    (observation->>'epoch')::bigint IS DISTINCT FROM prior.epoch OR
+    observation->>'state_hash' IS DISTINCT FROM prior.state_hash OR
+    coalesce(observation->>'head_hash','') !~ '^0x[0-9a-f]{64}$' OR
+    coalesce((observation->>'head_block')::bigint,-1) NOT BETWEEN
+        (prior.state_doc->>'valid_from_block')::bigint AND (prior.state_doc->>'valid_until_block')::bigint OR
+    coalesce(extract(epoch from clock_timestamp())-(observation->>'observed_at')::bigint,-1) NOT BETWEEN 0 AND 120 THEN
+  RAISE EXCEPTION 'current finalized legacy epoch readback required for cutover';
+ END IF;
  IF evidence->>'schema' IS DISTINCT FROM 'leadpoet.collection.approved_pilot.v1' OR
     NOT (evidence ?& ARRAY['review_sha256','review_bundle_sha256','judge_policy_sha256','judge_prompt_sha256',
                      'builder_commit','harness_commit','prices','budgets','control_ids','job_count','measurement_sha256'])

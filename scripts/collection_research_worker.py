@@ -15,20 +15,21 @@ import sys
 import tempfile
 import uuid
 
-from lab_arena import contracts, integrity, operations, output, runner, runtime, source_bundle
+from lab_arena import contracts, operations, output, runner, runtime, source_bundle
 from lab_arena.collection_intake import MODELS
+from lab_arena.cache_retention import workspace_cache_lock
 from lab_arena.collection_research import PipeAPI, encode, receive, send
 from lab_arena.collection_workflow import CHAMPION_REV
 from lab_arena.web_egress import WebEgressServer
 
 
 def run_assignment(config, job, api, sandbox):
-    if (set(job)!={"type","job_id","scenario_id","model","harness_commit","evaluation_date","icp","deepline_catalog"}
+    if (set(job)!={"type","job_id","scenario_id","model","harness_commit","evaluation_date","icp","deepline_catalog","scorer_image_digest"}
             or job["type"]!="research_start" or job["harness_commit"]!=CHAMPION_REV or job["model"] not in MODELS):
         raise ValueError("unexpected research assignment")
     identity = str(uuid.UUID(job["job_id"]))
     rootfs = config.rootfs.resolve(strict=True)
-    if (not re.fullmatch(r"sha256:[a-f0-9]{64}",config.image_digest)
+    if (config.image_digest!=job["scorer_image_digest"] or not re.fullmatch(r"sha256:[a-f0-9]{64}",config.image_digest)
             or (rootfs.parent/".exported").read_text().strip()!=config.image_digest
             or rootfs.name!="rootfs" or not rootfs.is_dir()):
         raise ValueError("trusted scorer image unavailable")
@@ -45,9 +46,12 @@ def run_assignment(config, job, api, sandbox):
         source=root/"source"
         source.mkdir()
         source_bundle.extract_source_archive(contents,source)
+        if (not runner.SourceCache._compatible_dependencies(deps.parent)
+                or (deps.parent/"source"/"requirements.txt").read_bytes() != (source/"requirements.txt").read_bytes()):
+            raise ValueError("dependency cache ABI or requirements differ from pinned champion")
         inp, out, sockets=(root/name for name in ["input","output","sockets"])
         for d in (inp,out,sockets): d.mkdir(mode=0o700)
-        icp=integrity.agent_visible_icp(job["icp"],contacts_required=False)
+        icp=dict(job["icp"])  # exact retained private agent-visible input; no evaluator fields supplied
         schema=job["icp"].get("output_schema_version")
         if schema!="leadpoet.lab_arena.output.v6":
             raise ValueError("research requires company-only output")
@@ -104,7 +108,10 @@ def main(argv=None):
     sys.stdout=sys.stderr
     try:
         job=receive(sys.stdin.buffer)
-        sandbox=runtime.RunscRuntime(runtime.RuntimeConfig(runsc_path=args.runsc,work_dir=args.work_dir/"sandboxes"))
+        if job=={"type":"idle"}: return 0
+        sandbox_work=args.work_dir.resolve(strict=True)/"sandboxes"
+        sandbox_work.mkdir(mode=0o700,exist_ok=True)
+        sandbox=runtime.RunscRuntime(runtime.RuntimeConfig(runsc_path=args.runsc,work_dir=sandbox_work))
         result=run_assignment(args,job,PipeAPI(sys.stdin.buffer,wire),sandbox)
         send(wire,result)
         return 0

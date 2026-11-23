@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from lab_arena.collection_controls import ControlPack, PACK_SCHEMA
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport, fetch_openrouter_price_table
-from lab_arena.collection_broker import CollectionBroker
+from lab_arena.collection_broker import CollectionBroker, VERSIONS
 from lab_arena.collection_intake import MODELS, CollectionIntake
 from lab_arena.collection_worker import process_job
 from lab_arena.collection_workflow import (
@@ -28,7 +29,7 @@ from lab_arena.store import PostgrestTransport
 
 
 def load_batch(raw, prompt):
-    if set(raw) - {"research_index_sha256"} != {
+    if set(raw) - {"research_index_sha256", "thresholds", "control_artifacts"} != {
         "mode",
         "seed",
         "routes",
@@ -74,13 +75,22 @@ def load_batch(raw, prompt):
             "prompt": judge.digest(prompt),
             "champion": CHAMPION_REV,
             "builder": POET_REV,
+            "model_revisions": VERSIONS,
         }
     )
+    thresholds = raw.get("thresholds", {})
+    if not isinstance(thresholds, dict) or set(thresholds) - {
+        "accept_sum",
+        "salvage_min_steps",
+        "agreement_percent",
+    }:
+        raise ValueError("unknown batch threshold")
     policy = judge.BatchPolicy(
         raw["name"] + "-" + bundle_hash[:24],
         raw["seed"],
         judge.digest(prompt),
         pilot=raw["mode"] == "pilot",
+        **thresholds,
     )
     judge.validate_prompt(policy, prompt)
     return policy
@@ -113,6 +123,7 @@ def run_cohort(
     judge_key,
     max_jobs,
     research=None,
+    controls=None,
 ):
     ceiling = dict(raw["budgets_microusd"])
     fees = dict.fromkeys(MODELS, 0)
@@ -172,6 +183,7 @@ def run_cohort(
                 sources=sources,
                 epoch=epoch,
                 research=research,
+                control_packet=controls.bind(job) if controls else None,
             )
         except Exception as exc:
             # Never print raw model output, arguments, credentials or provider messages.
@@ -212,6 +224,7 @@ def main(argv=None):
         action="store_true",
         help="relay a single research assignment to the isolated validator worker",
     )
+    p.add_argument("--control-pack", type=Path)
     p.add_argument("--preflight", action="store_true")
     args = p.parse_args(argv)
     if not 1 <= args.max_jobs <= 6:
@@ -219,6 +232,14 @@ def main(argv=None):
     raw = json.loads(args.batch.read_text())
     prompt = json.loads(args.prompt.read_text())
     policy = load_batch(raw, prompt)
+    controls = ControlPack(
+        raw,
+        (
+            json.loads(args.control_pack.read_text())
+            if args.control_pack
+            else {"schema": PACK_SCHEMA, "cases": {}}
+        ),
+    )
     research_index = None
     if any(s.startswith("research-") for s in raw["scenario_ids"]):
         if not args.research_case_index:
@@ -291,7 +312,7 @@ def main(argv=None):
             transport = stack.enter_context(closing(HttpxProviderTransport()))
             if args.research_stdio:
                 stack.enter_context(redirect_stdout(sys.stderr))
-            run_cohort(
+            completed = run_cohort(
                 raw=raw,
                 policy=policy,
                 prompt=prompt,
@@ -307,7 +328,12 @@ def main(argv=None):
                 or os.environ.get("LAB_ARENA_OPENROUTER_API_KEY"),
                 max_jobs=args.max_jobs,
                 research=research,
+                controls=controls,
             )
+            if args.research_stdio and completed == 0:
+                from lab_arena.collection_research import send
+
+                send(protocol_out, {"type": "idle"})
     return 0
 
 

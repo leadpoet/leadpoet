@@ -2792,7 +2792,9 @@ class ArenaService:
     def handle_submission_presign(self, envelope: Any) -> Dict[str, Any]:
         """Reserve one private source upload for a signed miner request."""
 
-        if self.collection_mode() == "live":
+        # Existing rounds retain their original intake deadline while draining.
+        # The DB admits cutover only after paid legacy rounds have finished.
+        if self._collection_reward_start() is not None:
             raise ServiceError("agent_submissions_replaced_by_key_enrollment", 410)
 
         validated, round_row = self._request_round(
@@ -2932,7 +2934,9 @@ class ArenaService:
     ) -> Dict[str, Any]:
         """Verify uploaded bytes and admit the source under the same signed owner."""
 
-        if self.collection_mode() == "live":
+        # Existing rounds retain their original intake deadline while draining.
+        # The DB admits cutover only after paid legacy rounds have finished.
+        if self._collection_reward_start() is not None:
             raise ServiceError("agent_submissions_replaced_by_key_enrollment", 410)
 
         validated, round_row = self._request_round(
@@ -9383,7 +9387,7 @@ class ArenaService:
             raise ServiceError("accepted_weight_state_reward_clock_unavailable", 503) from exc
 
     def _collection_reward_start(self) -> Optional[int]:
-        if (getattr(self._config, "collection_emission_valuation", None) is None or
+        if (getattr(getattr(self, "_config", None), "collection_emission_valuation", None) is None or
                 self._config.mode != "live" or self._chain_scope() != ("finney", 71)):
             return None
         return self._store.collection_reward_start_epoch()

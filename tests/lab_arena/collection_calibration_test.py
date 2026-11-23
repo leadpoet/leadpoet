@@ -1,5 +1,6 @@
 """Economic authorization joins the real 713–716 database contracts."""
 
+import time
 from uuid import uuid4
 
 from bittensor_wallet import Keypair
@@ -18,10 +19,10 @@ def db():
     yield from database_with_lab_arena_migration(
         DEFAULT_MIGRATIONS
         + (
-            "713-locked-collection-intake.sql",
-            "714-locked-collection-reward-epoch.sql",
-            "715-collection-call-budget.sql",
-            "716-collection-pilot-prices.sql",
+            "720-locked-collection-intake.sql",
+            "721-locked-collection-reward-epoch.sql",
+            "722-collection-call-budget.sql",
+            "723-collection-pilot-prices.sql",
         )
     )
 
@@ -97,8 +98,18 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
             result["budgets"] == {"C": dict.fromkeys(MODELS, 3000000)}
             and result["job_count"] == 102
         )
+        from tests.lab_arena.collection_rewards_test import insert_legacy_state
+
+        legacy = insert_legacy_state(q, 100)
         proof = {
             **result,
+            "cutover_anchor": {
+                "epoch": 100,
+                "state_hash": legacy["state_hash"],
+                "head_block": 25,
+                "head_hash": "0x" + "b" * 64,
+                "observed_at": int(time.time()),
+            },
             "schema": "leadpoet.collection.approved_pilot.v1",
             "batch_id": batch,
             "harness_commit": commit,
@@ -110,6 +121,29 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
             "judge_prompt_sha256": "e" * 64,
         }
         q.execute("SAVEPOINT altered")
+        for bad_anchor in (
+            {"observed_at": int(time.time()) - 150},
+            {"head_block": 51},
+            {"epoch": 99},
+            {"state_hash": "sha256:" + "f" * 64},
+        ):
+            with pytest.raises(pg.Error, match="finalized legacy epoch readback"):
+                q.execute(
+                    "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,101,%s)",
+                    (
+                        Json(
+                            dict(
+                                proof,
+                                cutover_anchor={
+                                    **proof["cutover_anchor"],
+                                    **bad_anchor,
+                                },
+                            )
+                        ),
+                    ),
+                )
+            q.execute("ROLLBACK TO altered")
+
         with pytest.raises(pg.Error, match="prices or budget differs"):
             q.execute(
                 "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,101,%s)",

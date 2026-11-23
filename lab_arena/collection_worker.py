@@ -26,6 +26,7 @@ def process_job(
     sources,
     epoch,
     research=None,
+    control_packet=None,
     persist=store_artifact,
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
@@ -39,23 +40,40 @@ def process_job(
     ):
         raise ValueError("frozen collection assignment mismatch")
     judge.validate_prompt(policy, prompt)
-    if job["scenario_id"].startswith("research-"):
-        if research is None:
-            raise ValueError("missing trusted research runner")
-        row, packet = research(job, broker)
-    else:
-        row, packet = play_workflow(*sources, job, broker)
-    segments = row.get("research_rows", [row])
-    if (
-        not segments
-        or row["run"] != run_id
-        or packet["scenario_id"] != job["scenario_id"]
-        or any(
-            x.get("teacher") != job["model"] or x.get("run") != run_id for x in segments
+    control_ref = None
+    row_ref = None
+    if control_packet is not None:
+        packet = control_packet["packet"]
+        if (
+            judge.digest(control_packet["case"]) != control_packet["case_sha256"]
+            or packet["run_id"] != run_id
+            or packet["scenario_id"] != job["scenario_id"]
+        ):
+            raise ValueError("invalid blind control assignment")
+        assignment = dict(assignment, overlap=True)
+        control_ref = persist(
+            objects, batch, run_id, "control-case", control_packet["case"]
         )
-    ):
-        raise ValueError("collection artifact identity mismatch")
-    row_ref = persist(objects, batch, run_id, "generator", row)
+    else:
+        if job["scenario_id"].startswith("research-"):
+            if research is None:
+                raise ValueError("missing trusted research runner")
+            row, packet = research(job, broker)
+        else:
+            row, packet = play_workflow(*sources, job, broker)
+        if (
+            row["run"] != run_id
+            or row["teacher"] != job["model"]
+            or packet["scenario_id"] != job["scenario_id"]
+            or packet["run_id"] != run_id
+        ):
+            raise ValueError("collection artifact identity mismatch")
+        if any(
+            x is not None and (x["teacher"] != job["model"] or x["run"] != run_id)
+            for x in row.get("research_rows", [])
+        ):
+            raise ValueError("incorrect research segment identity")
+        row_ref = persist(objects, batch, run_id, "generator", row)
     packet_ref = persist(objects, batch, run_id, "judge-input", packet)
     assessment = judge.judge_run(
         policy, assignment, packet, broker.judge, prompt=prompt
@@ -75,20 +93,24 @@ def process_job(
     }
     from lab_arena.collection_ranking import rank_pack_if_ready
 
-    ranking = rank_pack_if_ready(
-        job, packet, assessment, policy, prompt, broker, objects, broker.database
-    )
-    if ranking is not None:
-        manifest["ranking"] = ranking
+    if control_ref:
+        manifest["control"] = control_ref
+    else:
+        ranking = rank_pack_if_ready(
+            job, packet, assessment, policy, prompt, broker, objects, broker.database
+        )
+        if ranking is not None:
+            manifest["ranking"] = ranking
     receipt = persist(objects, batch, run_id, "manifest", manifest)
     public = judge.public_result(assessment)["judges"]
     summary = public[0] if public else {}
     summary = dict(summary, training_status=assessment["status"])
     checks = packet["checks"]
     complete_execution = all(
-        checks.get(k, True) for k in ("answered", "shape", "privacy", "training_split")
+        checks.get(k) is True
+        for k in ("answered", "shape", "privacy", "training_split")
     )
-    status = "accepted" if complete_execution else "rejected"
+    status = "accepted" if complete_execution and not control_ref else "rejected"
     intake.complete(
         run_id, job["lease_token"], status, summary, receipt["sha256"], epoch()
     )

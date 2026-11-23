@@ -27,8 +27,8 @@ def database():
     yield from database_with_lab_arena_migration(
         (
             "179-lab-arena-v1.sql",
-            "713-locked-collection-intake.sql",
-            "717-collection-scenario-ranking.sql",
+            "720-locked-collection-intake.sql",
+            "724-collection-scenario-ranking.sql",
         )
     )
 

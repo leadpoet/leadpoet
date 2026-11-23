@@ -29,6 +29,7 @@ SELECT jsonb_build_object(
  'database',current_database(),'user',current_user,'session_user',session_user,
  'ssl',(SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()),
  'version',current_setting('server_version_num')::int,'recovery',pg_is_in_recovery(),
+ 'transaction_read_only',current_setting('transaction_read_only')::boolean,
  'flags',jsonb_build_array(r.rolcanlogin,r.rolsuper,r.rolcreatedb,r.rolcreaterole,
                          r.rolreplication,r.rolbypassrls,r.rolinherit),
  'memberships',(SELECT coalesce(jsonb_agg(jsonb_build_array(g.rolname,
@@ -99,8 +100,12 @@ def connect(local_port, ca_file):
             f"arn:aws:rds:{REGION}:{ACCOUNT}:db:{INSTANCE}" and
             db[0].get("Endpoint", {}).get("Address") == HOST and
             db[0].get("Endpoint", {}).get("Port") == 5432 and
-            db[0].get("DBName") == "postgres" and db[0].get("Engine") == "postgres" and
-            db[0].get("DBInstanceStatus") == "available", "RDS target identity differs")
+            db[0].get("DBName") == "postgres" and db[0].get("Engine") == "postgres", "RDS target identity differs")
+    instance = db[0]
+    status = instance.get("DBInstanceStatus")
+    optimizing = status == "storage-optimization" and instance.get("StorageType") == "gp3"
+    require(status == "available" or (optimizing and instance.get("PendingModifiedValues") == {}
+            and not instance.get("ReadReplicaSourceDBInstanceIdentifier")), "RDS writer is not ready for migration")
     value = session.client("secretsmanager", config=AWS_CLIENT_CONFIG).get_secret_value(SecretId=SECRET)
     require(value.get("Name") == SECRET and re.fullmatch(
         rf"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{re.escape(SECRET)}-[A-Za-z0-9]{{6}}",
@@ -125,6 +130,7 @@ def connect(local_port, ca_file):
                 and state.get("flags") == [True, False, False, False, False, False, False]
                 and state.get("memberships") == [["lab_arena_owner", False, True, True]]
                 and state.get("schema_ready") is True and state.get("temporary_ready") is True
+                and (not optimizing or state.get("transaction_read_only") is False)
                 and state.get("container_owner") is False
                 and state.get("external_definers") is False, "database authority differs")
         return connection

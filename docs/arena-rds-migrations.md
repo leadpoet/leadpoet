@@ -6,6 +6,10 @@ master-login fallback. It requires an existing localhost tunnel to the fixed
 Arena RDS endpoint and the verified regional RDS CA file. Tunnel setup is a
 separate authorized operation. The helper does not start or stop shared tunnels.
 
+The runner also accepts a gp3 writer in `storage-optimization` when RDS reports an empty
+`PendingModifiedValues` object and PostgreSQL confirms a writable primary session.
+AWS keeps the database online during this background operation. [RDS instance status](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/accessing-monitoring.html)
+
 ## Deployed access
 
 On November 13, 2026, PR #1215 applied migration 692 and provisioned the dedicated

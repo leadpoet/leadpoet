@@ -430,10 +430,10 @@ def _configure_secret_request(request, *, client, account):
         value = updates["LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED"]
         if not isinstance(value, str) or value not in {"true", "false"}:
             fail("weekly_slot_decay_invalid")
-    if request["role"] == "collection_mode_only" or "LEADPOET_COLLECTION_MODE" in updates:
+    if request["role"] == "collection_mode_only" or "LAB_ARENA_COLLECTION_MODE" in updates:
         if (request["role"] != "collection_mode_only" or secret_id != GATEWAY_SECRET or
-                set(updates) != {"LEADPOET_COLLECTION_MODE"} or request.get("aliases") or request.get("service_key")
-                or updates["LEADPOET_COLLECTION_MODE"] not in {"off", "pilot", "live"}):
+                set(updates) != {"LAB_ARENA_COLLECTION_MODE"} or request.get("aliases") or request.get("service_key")
+                or updates["LAB_ARENA_COLLECTION_MODE"] not in {"off", "pilot", "live"}):
             fail("collection_mode_scope_invalid")
     if request["role"] == "openrouter_concurrency_only":
         if (
@@ -880,7 +880,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.collection_mode is not None:
             request = {"secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                        "apply": args.apply, "role": "collection_mode_only", "aliases": {},
-                       "updates": {"LEADPOET_COLLECTION_MODE": args.collection_mode}}
+                       "updates": {"LAB_ARENA_COLLECTION_MODE": args.collection_mode}}
             result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0

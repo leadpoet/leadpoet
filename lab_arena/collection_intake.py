@@ -86,7 +86,7 @@ class IntakeError(ValueError):
 
 
 def mode_from_environment():
-    mode = os.environ.get("LEADPOET_COLLECTION_MODE", "off")
+    mode = os.environ.get("LAB_ARENA_COLLECTION_MODE", "off")
     if mode not in {"off", "pilot", "live"}:
         raise IntakeError("collection_mode_invalid", 503)
     return mode

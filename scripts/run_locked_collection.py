@@ -12,7 +12,8 @@ from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
 
 from lab_arena import chain, collection_judge as judge
-from lab_arena.broker import HttpxProviderTransport, fetch_openrouter_price_table
+from lab_arena.broker import HttpxProviderTransport
+from lab_arena.collection_prices import endpoint_prices
 from lab_arena.collection_broker import CollectionBroker, VERSIONS
 from lab_arena.collection_intake import MODELS, CollectionIntake
 from lab_arena.collection_worker import process_job
@@ -213,6 +214,9 @@ def run_cohort(
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--environment-file", type=Path, help="Protected Arena gateway environment"
+    )
     p.add_argument("--batch", type=Path, required=True)
     p.add_argument("--prompt", type=Path, required=True)
     p.add_argument("--champion-repo", type=Path, required=True)
@@ -227,6 +231,10 @@ def main(argv=None):
     p.add_argument("--control-pack", type=Path)
     p.add_argument("--preflight", action="store_true")
     args = p.parse_args(argv)
+    if args.environment_file:
+        from scripts.run_lab_arena_service import load_scoped_environment
+
+        load_scoped_environment(args.environment_file)
     if not 1 <= args.max_jobs <= 6:
         p.error("select 1 to 6 jobs per invocation")
     raw = json.loads(args.batch.read_text())
@@ -270,7 +278,7 @@ def main(argv=None):
                 )
             )
             return 0
-        mode = os.environ.get("LEADPOET_COLLECTION_MODE", "off")
+        mode = os.environ.get("LAB_ARENA_COLLECTION_MODE", "off")
         if (
             mode != raw["mode"]
             or os.environ.get("LAB_ARENA_NETWORK") != "finney"
@@ -320,7 +328,7 @@ def main(argv=None):
                 database=db,
                 objects=objects,
                 transport=transport,
-                pricing=fetch_openrouter_price_table(model_ids=tuple(raw["routes"])),
+                pricing=endpoint_prices(raw["routes"]),
                 epoch=lambda: chain.current_settlement_epoch(client, cutover),
                 sources=sources,
                 owner_lookup=lambda hk: resolve_finalized_owner(client, hk),

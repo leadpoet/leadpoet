@@ -183,7 +183,7 @@ def test_enrollment_rejects_swapped_keys_terms_or_mode(transport):
 def test_signed_deployment_scope_and_wrong_signature_rejected_before_registration(
     monkeypatch,
 ):
-    monkeypatch.setenv("LEADPOET_COLLECTION_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_COLLECTION_MODE", "live")
     svc = object.__new__(ArenaService)
     svc._config = SimpleNamespace(
         mode="live",

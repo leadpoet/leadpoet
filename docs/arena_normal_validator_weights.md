@@ -96,8 +96,10 @@ transaction checks still apply.
 
 Finney signing profiles list measured runtime versions and transaction version
 changes. Runtime 494 keeps the `commit_timelocked_mechanism_weights` call and
-signature payload layout, with transaction version 2. Unknown transaction
-versions remain rejected until their metadata is measured.
+signature payload layout, with transaction version 2 and a 32-block mortality
+window. The signer still rejects any era that extends beyond the accepted
+weight state's validity. Unknown transaction versions remain rejected until
+their metadata is measured.
 
 Reward-basis v2 uses the [improvement reward slots](arena_reward_slots.md).
 The gateway and validator use the same canonical slot allocation code. Keep

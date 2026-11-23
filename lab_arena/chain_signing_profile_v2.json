@@ -30,6 +30,9 @@
   "transaction_version_overrides": {
     "494": 2
   },
+  "extrinsic_period_overrides": {
+    "494": 32
+  },
   "runtime_upgrade_policy": {
     "mode": "exact_payload_invariants_v1",
     "minimum_spec_version": 437

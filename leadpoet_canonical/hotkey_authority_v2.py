@@ -39,6 +39,7 @@ _PROFILE_OPTIONAL_FIELDS = {
     "supported_spec_versions",
     "runtime_upgrade_policy",
     "transaction_version_overrides",
+    "extrinsic_period_overrides",
 }
 
 _EXPECTED_SIGNED_EXTENSIONS = (
@@ -182,6 +183,16 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
     spec_version = _integer(
         value.get("spec_version"), "spec_version", maximum=(1 << 32) - 1
     )
+    extrinsic_period = _integer(
+        value.get("extrinsic_period"),
+        "extrinsic_period",
+        minimum=4,
+        maximum=65536,
+    )
+    _require(
+        extrinsic_period & (extrinsic_period - 1) == 0,
+        "extrinsic period must be a power of two",
+    )
     normalized = {
         "schema_version": CHAIN_SIGNING_PROFILE_SCHEMA_VERSION,
         "network": network,
@@ -225,12 +236,7 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
             minimum=1,
             maximum=1024,
         ),
-        "extrinsic_period": _integer(
-            value.get("extrinsic_period"),
-            "extrinsic_period",
-            minimum=4,
-            maximum=65536,
-        ),
+        "extrinsic_period": extrinsic_period,
         "signed_extensions": list(_EXPECTED_SIGNED_EXTENSIONS),
     }
     normalized_supported = [spec_version]
@@ -279,6 +285,37 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
                 maximum=(1 << 32) - 1,
             )
         normalized["transaction_version_overrides"] = normalized_overrides
+    if "extrinsic_period_overrides" in value:
+        overrides = value.get("extrinsic_period_overrides")
+        _require(
+            isinstance(overrides, Mapping) and 0 < len(overrides) <= 16,
+            "extrinsic period overrides are invalid",
+        )
+        normalized_overrides = {}
+        for raw_spec_version in sorted(overrides, key=str):
+            raw_extrinsic_period = overrides[raw_spec_version]
+            _require(
+                isinstance(raw_spec_version, str)
+                and bool(re.fullmatch(r"0|[1-9][0-9]*", raw_spec_version)),
+                "extrinsic period overrides are invalid",
+            )
+            override_spec_version = int(raw_spec_version)
+            _require(
+                override_spec_version in normalized_supported,
+                "extrinsic period overrides must name supported spec versions",
+            )
+            extrinsic_period = _integer(
+                raw_extrinsic_period,
+                "extrinsic period override",
+                minimum=4,
+                maximum=65536,
+            )
+            _require(
+                extrinsic_period & (extrinsic_period - 1) == 0,
+                "extrinsic period override must be a power of two",
+            )
+            normalized_overrides[raw_spec_version] = extrinsic_period
+        normalized["extrinsic_period_overrides"] = normalized_overrides
     if "runtime_upgrade_policy" in value:
         policy = value.get("runtime_upgrade_policy")
         _require(
@@ -320,6 +357,7 @@ def chain_signing_profiles(
             "supported_spec_versions",
             "runtime_upgrade_policy",
             "transaction_version_overrides",
+            "extrinsic_period_overrides",
         }
     }
     overrides = manifest.get("transaction_version_overrides", {})
@@ -329,6 +367,9 @@ def chain_signing_profiles(
         transaction_version = overrides.get(str(spec_version))
         if transaction_version is not None:
             profile["transaction_version"] = transaction_version
+        extrinsic_period = manifest.get("extrinsic_period_overrides", {}).get(str(spec_version))
+        if extrinsic_period is not None:
+            profile["extrinsic_period"] = extrinsic_period
         profiles.append(profile)
     return tuple(profiles)
 
@@ -380,6 +421,7 @@ def select_chain_signing_profile(
                 "supported_spec_versions",
                 "runtime_upgrade_policy",
                 "transaction_version_overrides",
+                "extrinsic_period_overrides",
             }
         }
         selected = {**base, "spec_version": spec_version}

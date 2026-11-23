@@ -160,3 +160,18 @@ def test_unverified_fresh_evidence_never_substitutes_for_native_grade(bad):
         x["response"]["result"]["data"]["rawHtml"] += " inconsistent"
         trace[4] = x
     assert ev.evidence_for(c, ctx, ev.verified_pages(trace)) is None
+
+
+def test_passive_markdown_gets_same_url_checks_as_raw_html():
+    context, c, trace = case()
+    record = trace[0]
+    record["request"]["payload"]["formats"] = ["markdown"]
+    data = record["response"]["result"]["data"]
+    data.pop("rawHtml")
+    data["markdown"] = "Acme Cloud\n[Official LinkedIn](" + LI + ")"
+    assert ev.evidence_for(c, context, ev.verified_pages(trace))
+    record["response"]["result"]["success"] = False
+    assert ev.evidence_for(c, context, ev.verified_pages(trace)) is None
+    record["response"]["result"].pop("success")
+    data["markdown"] = "Acme Cloud\n<!-- [Official LinkedIn](" + LI + ") -->"
+    assert ev.evidence_for(c, context, ev.verified_pages(trace)) is None

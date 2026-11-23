@@ -63,6 +63,15 @@ def verified_pages(trace):
             not isinstance(resp, dict)
             or resp.get("status") != "completed"
             or req.get("tool") != "firecrawl_scrape"
+            or req.get("response_contract") is not None
+            or resp.get("error")
+            or (
+                isinstance(resp.get("result"), dict)
+                and (
+                    resp["result"].get("error")
+                    or resp["result"].get("success") is False
+                )
+            )
         ):
             continue
         args = req.get("payload")
@@ -103,22 +112,41 @@ def verified_pages(trace):
             deepline_catalog.CatalogError,
         ):
             continue
-        body = data.get("rawHtml")
-        if (
-            "rawHtml" not in args["formats"]
-            or not isinstance(body, str)
-            or not 1 <= len(body) <= 1_048_576
-        ):
+        if "rawHtml" in args["formats"] and isinstance(data.get("rawHtml"), str):
+            body = data["rawHtml"]
+            if not (1 <= len(body) <= 1_048_576) or visible_html_body_empty(body):
+                continue
+            text = _text(visible_html_text(body))
+            links = visible_html_links(body)
+        elif "markdown" in args["formats"] and isinstance(data.get("markdown"), str):
+            body = data["markdown"]
+            if not 1 <= len(body) <= 1_048_576:
+                continue
+            # Firecrawl's passive Markdown representation only. Exclude code
+            # examples/HTML comments before extracting visible text or links.
+            md = re.sub(
+                r"<!--.*?-->|(?ms:^\s*```[^\n]*\n.*?^\s*```[^\n]*$)",
+                "",
+                body,
+                flags=re.S,
+            )
+            if "<" in md or ">" in md:
+                continue
+            matches = list(
+                re.finditer(r"(?<!!)\[([^\[\]\n]*)\]\((https://[^\s()]+)\)", md)
+            )
+            links = tuple(x.group(2) for x in matches)
+            text = _text(
+                re.sub(r"(?<!!)\[([^\[\]\n]*)\]\((https://[^\s()]+)\)", r"\1", md)
+            )
+        else:
             continue
-        if visible_html_body_empty(body):
-            continue
-        text = _text(visible_html_text(body))
         if not text:
             continue
         pg = Page(
             key,
             text,
-            visible_html_links(body),
+            links,
             f"generate-research-{seq}",
             sha256(body.encode()).hexdigest(),
         )

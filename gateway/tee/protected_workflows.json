@@ -522,6 +522,11 @@
       "symbol": "verify_roles"
     },
     {
+      "ast_sha256": "sha256:8b9ffa7a08893dc9a31a19243d2021f6c5f9cda175357afaae2f55843c7fa508",
+      "path": "lab_arena/collection_rewards.py",
+      "symbol": "__module__"
+    },
+    {
       "ast_sha256": "sha256:97cfc684e0483852ee27ca22014c11f89012460166c153484d4b0ff3395d6b43",
       "path": "lab_arena/rewards.py",
       "symbol": "LEGACY_CHAMPION_AWARD_HOTKEY"
@@ -612,6 +617,11 @@
       "symbol": "reward_slot_policy_document"
     },
     {
+      "ast_sha256": "sha256:68b6ec5e8249ca386614ae0a9c6e76aa32c8d84b51a27480f0e23f617dd2a25d",
+      "path": "lab_arena/service.py",
+      "symbol": "ArenaService._collection_reward_active"
+    },
+    {
       "ast_sha256": "sha256:5c26dabc420e43e857ea4c0691c6bdfe82d7bd40a3c389241672eced38774b89",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService._project_reward_basis"
@@ -627,14 +637,29 @@
       "symbol": "ArenaService.public_reward_basis"
     },
     {
-      "ast_sha256": "sha256:007f7a07ea9f20eb9b962ecb533666548f9688a26f21d93cffb9c5e8d9b0bb9a",
+      "ast_sha256": "sha256:680c00f5740bc6c40102de5e671b7a5c88f69804977e23cd568e9f3ec1680dba",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService.public_weight_state"
     },
     {
-      "ast_sha256": "sha256:091a9d992d0e8e6eede21158ab7193984e39171a7e3a1b2eab525fc2d8bd5df3",
+      "ast_sha256": "sha256:9f4961857836dc56672efa945601d67c8bf608bb49eb86f731048255dc1b3f5a",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "COLLECTION_BASIS_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:ddb8df46c33deff556f0a16e538c39ce0e7b73ef00329ea32f615bee57b28c76",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "_collection_basis"
+    },
+    {
+      "ast_sha256": "sha256:f8f2b3836a9b6a92e4d1002055157ee0e4681b79f01456c8a393a96cbc2a66d5",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "derive_arena_weights"
+    },
+    {
+      "ast_sha256": "sha256:13a4c67616273a403884a3e5f5f611b767747387a6fa554507328caf307255e9",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "validate_collection_basis"
     },
     {
       "ast_sha256": "sha256:9b6065349bbca6a219f23da8083fb926105743d350b65cccef4fd0b000006c6b",
@@ -967,7 +992,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:19834703347fd92f9880eed8d21fe6634412fc575691fd75e9f8ffed6a743812",
-  "protected_source_commit": "bf652b96056d0c9e4722b95cfa7466c531006ebf",
+  "manifest_hash": "sha256:9c3309336ae2b2aecc307a77f6059471b6ecc434a17659729412a7abfe2f10d2",
+  "protected_source_commit": "961a62a3e1c3dcfb2a72cdfcab5b9ed4f2e471be",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

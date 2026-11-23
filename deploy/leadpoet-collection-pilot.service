@@ -12,6 +12,6 @@ UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 WorkingDirectory=/home/ec2-user/.local/share/leadpoet/collection/pilot/runner
-Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONDONTWRITEBYTECODE=1 AWS_DEFAULT_REGION=us-east-1 AWS_REGION=us-east-1
 ExecStart=/home/ec2-user/venv311/bin/python3 -B -m scripts.run_locked_collection --pilot-only --environment-file /home/ec2-user/.config/leadpoet/gateway.env --batch ../batch.json --prompt ../prompt.json --champion-repo ../agent.git --poet-repo ../scenarios.git --max-jobs 1
 TimeoutStartSec=2h

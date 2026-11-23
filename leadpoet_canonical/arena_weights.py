@@ -30,6 +30,7 @@ from leadpoet_canonical.lab_arena_rewards import (
 
 
 ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION = "leadpoet.arena.accepted_weight_state.v1"
+COLLECTION_BASIS_SCHEMA = "leadpoet.collection.fixed_run_quotes.v1"
 WEIGHT_STATE_SIGNATURE_PREFIX = "arena_weight_state_hash:"
 PARTS_PER_BILLION = 1_000_000_000
 U16_MAX = 65_535
@@ -127,6 +128,44 @@ def _hotkey(value: Any, name: str) -> str:
     return text
 
 
+def _collection_basis(state: Mapping[str, Any]) -> bool:
+    return isinstance(state.get("reward_basis"), Mapping) and state["reward_basis"].get("schema_version") == COLLECTION_BASIS_SCHEMA
+
+
+def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block: int) -> None:
+    """All monetary inputs are whole micro-USD or explicitly named chain base units."""
+    _require(set(basis) == {"schema_version", "source_epoch", "job_count", "job_set_sha256",
+                            "quotes_microusd", "valuation"}, "collection basis fields are invalid")
+    _require(_integer(basis["source_epoch"], "source_epoch") + 1 == epoch, "collection source epoch differs")
+    count = _integer(basis["job_count"], "job_count")
+    _require(isinstance(basis["job_set_sha256"], str) and
+             re.fullmatch(r"[0-9a-f]{64}", basis["job_set_sha256"]), "collection job hash is invalid")
+    quotes = basis["quotes_microusd"]
+    _require(type(quotes) is dict and len(quotes) <= min(65536, count), "collection beneficiaries are invalid")
+    _require(bool(quotes) == bool(count), "collection job count differs")
+    for key, amount in quotes.items():
+        _hotkey(key, "beneficiary")
+        _require(_integer(amount, "quote total") > 0, "quote total must be positive")
+    valuation = basis["valuation"]
+    if not count:
+        _require(valuation is None, "empty collection has a valuation")
+        return
+    _require(isinstance(valuation, dict) and set(valuation) == {
+        "block", "block_hash", "miner_alpha_rao", "tao_rao_per_alpha", "tao_price_microusd",
+        "price_updated_at", "observed_at", "emission_microusd"}, "collection valuation fields are invalid")
+    _require(_integer(valuation["block"], "valuation block") == start_block, "collection valuation block differs")
+    _require(isinstance(valuation["block_hash"], str) and
+             re.fullmatch(r"0x[0-9a-f]{64}", valuation["block_hash"]), "valuation block hash is invalid")
+    _require(0 <= _integer(valuation["observed_at"], "observed_at") -
+             _integer(valuation["price_updated_at"], "price_updated_at") <= 900, "stale TAO/USD price")
+    alpha = _integer(valuation["miner_alpha_rao"], "miner_alpha_rao")
+    price = _integer(valuation["tao_rao_per_alpha"], "tao_rao_per_alpha")
+    usd = _integer(valuation["tao_price_microusd"], "tao_price_microusd")
+    budget = _integer(valuation["emission_microusd"], "emission_microusd")
+    _require(price > 0 and usd > 0 and budget == alpha * price * usd // 10**18,
+             "collection emission valuation differs")
+
+
 def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(isinstance(value, Mapping), "accepted weight state must be an object")
     required = set(_BODY_FIELDS) | {"state_hash", "signature"}
@@ -142,8 +181,15 @@ def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     valid_until = _integer(value.get("valid_until_block"), "valid_until_block")
     _require(valid_from <= valid_until, "accepted weight state validity window is invalid")
     _require(isinstance(value.get("issued_at"), str) and bool(_TIMESTAMP_RE.fullmatch(value["issued_at"])), "issued_at is invalid")
-    reward_basis = validate_reward_basis(value.get("reward_basis"))
-    _require(int(reward_basis["effective_reward_epoch"]) <= epoch, "reward basis is not effective for epoch")
+    if _collection_basis(value):
+        _require(not (set(value) & set(_OPTIONAL_BODY_FIELDS)), "collection cannot pay champion slots")
+        _require((network, netuid) == ("finney", 71), "collection subnet differs")
+        reward_basis = value["reward_basis"]
+        validate_collection_basis(reward_basis, epoch, valid_from)
+        _require(value.get("burn_hotkey") not in reward_basis["quotes_microusd"], "burn cannot fund a job")
+    else:
+        reward_basis = validate_reward_basis(value.get("reward_basis"))
+        _require(int(reward_basis["effective_reward_epoch"]) <= epoch, "reward basis is not effective for epoch")
     if "slot_eligibility" in value:
         _require(
             reward_basis["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION
@@ -182,6 +228,9 @@ def verify_accepted_weight_state_signature(value: Any, *, public_key_der: bytes,
         key.verify(raw_signature, (WEIGHT_STATE_SIGNATURE_PREFIX + state["state_hash"]).encode("utf-8"), ec.ECDSA(hashes.SHA256()))
     except Exception as exc:
         raise ArenaWeightError("accepted weight state signature is invalid") from exc
+    if _collection_basis(state):
+        # Collection facts are frozen once in the signed state itself.
+        return str(state["state_hash"])
     try:
         verify_reward_basis_signature(state["reward_basis"], public_key_der=public_key_der, expected_public_key_hash=expected_public_key_hash)
     except LabArenaRewardError as exc:
@@ -200,7 +249,18 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
     registered_hotkeys = set(hotkeys)
     burn_hotkey = str(state["burn_hotkey"])
     _require(burn_hotkey in registered_hotkeys, "burn_hotkey is not registered at finalized state")
-    if state["reward_basis"]["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION:
+    collection_share = Fraction(0)
+    if _collection_basis(state):
+        basis = state["reward_basis"]
+        quotes = basis["quotes_microusd"]
+        budget = (basis["valuation"] or {}).get("emission_microusd", 0)
+        if quotes:
+            divisor = max(budget, sum(quotes.values()))
+            by_hotkey = {key: Fraction(amount, divisor) for key, amount in quotes.items()
+                         if key in registered_hotkeys}
+            collection_share = sum(by_hotkey.values(), Fraction(0))
+        champion_share = Fraction(0)
+    elif state["reward_basis"]["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION:
         by_hotkey = slot_allocations(
             state["reward_basis"], int(state["epoch"]), hotkeys,
             until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
@@ -216,7 +276,7 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
         else:
             champion_share = Fraction(0)
     _require(champion_share <= 1, "Arena allocation exceeds total emissions")
-    unused = Fraction(1) - champion_share
+    unused = Fraction(1) - champion_share - collection_share
     if unused:
         by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) + unused
     registered = []
@@ -240,4 +300,5 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
         "weights_hash": compare_weights_hash(int(state["netuid"]), int(state["epoch"]), sparse),
         "champion_share_ppb": int(champion_share * PARTS_PER_BILLION),
         "burned_residual_ppb": int(unused * PARTS_PER_BILLION),
+        **({"collection_share_ppb": int(collection_share * PARTS_PER_BILLION)} if _collection_basis(state) else {}),
     }

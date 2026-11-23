@@ -1304,3 +1304,24 @@ def test_full_configuration_preserves_both_preflights_and_partial_apply(monkeypa
     assert service_key() not in output.out + output.err
     if failure == "apply":
         assert "apply failed after 1 target(s)" in output.err
+
+def test_collection_enrollment_mode_changes_only_gateway_setting(monkeypatch):
+    requests = []
+    monkeypatch.setattr(MODULE, "_configure_secret", lambda request, **_: requests.append(request) or {"ok": True})
+    assert MODULE.main(["--collection-mode", "pilot", "--check", "--allowed-account", "493765492819"]) == 0
+    assert len(requests) == 1 and requests[0]["secret_id"] == MODULE.GATEWAY_SECRET
+    assert requests[0]["updates"] == {"LAB_ARENA_COLLECTION_MODE": "pilot"}
+    assert requests[0]["role"] == "collection_mode_only" and not requests[0]["apply"]
+
+
+def test_collection_mode_survives_native_sidecar_env_loader(tmp_path, monkeypatch):
+    from scripts.run_lab_arena_service import load_scoped_environment
+    from lab_arena.collection_intake import mode_from_environment
+    import os
+    path=tmp_path/"gateway-env"
+    path.write_text(json.dumps({"LAB_ARENA_COLLECTION_MODE":"pilot","UNRELATED_SECRET":"fixture"}))
+    monkeypatch.delenv("LAB_ARENA_COLLECTION_MODE",raising=False)
+    monkeypatch.delenv("UNRELATED_SECRET",raising=False)
+    load_scoped_environment(path)
+    assert mode_from_environment()=="pilot"
+    assert "UNRELATED_SECRET" not in os.environ

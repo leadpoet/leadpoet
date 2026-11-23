@@ -1,0 +1,46 @@
+# Collection judgments, version 1.0
+
+The trusted worker grades each synthetic scenario against its deterministic checks first. A failed check makes the run ineligible. After a pass, the broker sends a blinded evidence packet to the assigned frontier judge. The private rubric, worked examples, reference facts and responses are retained with the batch under restricted access. Register credentials with privacy and spend controls that cover these calls. Routes used with a miner's credentials must protect reference materials from disclosure to the account holder.
+
+The owner freezes the generator assignment, judge model versions, batch seed and private prompt digest before starting work. The private prompt artifact supplies `run_instructions`, `ranking_instructions`, `rubric`, `rubric_version`, `tag_version`, and two worked `examples` for each level `0` through `3`. `lab_arena.collection_judge.digest()` computes its canonical SHA-256. For training batches, assign the second judge to a deterministic random ten-percent sample, rounded up, and to low-confidence runs. In pilot mode, every run passing code checks receives both judges. OpenRouter and Deepline charges are metered by the worker's broker; each judge response has a maximum of 400 tokens. Budget failures propagate. Invalid replies receive one retry, then become unusable assessments.
+
+Each run record has five integer scores (truth, decision, completeness, efficiency and safety), supporting steps for every score below three, controlled failure tags, the first bad step, hard steps, reasoning status, unsupported claims, confidence and an abstention flag. `validate_verdict` is the executable wire contract. The pilot starts at a total of 10/15 with positive truth and safety scores. Disagreeing judges require review. Rejected runs can yield the prefix preceding the first bad step when it contains at least three good steps. Only agreed hard steps are retained in the selective reasoning export. Bind trusted, precomputed claim-reader records to a digest of the exact written unit and its sources. Missing or conflicting findings put training selection on hold. A reviewer may explicitly resolve a held writing unit under the same signed batch receipt. A ranking call compares the best two or three complete, accepted runs against the same scenario using shuffled labels. All judge text stays outside generator rows. Miners see their score and failure tags. Rankings guide curation; they do not create a champion payment.
+
+## Blind pilot review
+
+The pilot includes at least 100 judged production-candidate runs across six generators, separate known-good and known-bad controls, and 30 drift anchors with frozen expected rubric scores. The collector must supply the complete batch assignment and authentic broker-backed evidence. Store the bundle, receipts and logs privately. The bundle schema is `collection.review.v1` with `policy`, `assignments`, `runs` (each has `packet`, `assessment` and the stored run `manifest_sha256`), `planted` and `drift`; see `lab_arena/collection_judge_review.py`. A reviewer grades a blind sample of 50 eligible judged non-control runs. Selection is independent of which runs passed. The utility writes each mark blank. The reviewer enters a score from 0 to 3 for every part, issues a receipt using their protected Ed25519 PEM private key, and returns it to the service. The service pins its trusted reviewer public key via independent provisioning. A key supplied alongside a receipt is not a trust anchor.
+
+```
+python -m scripts.collection_review sample --bundle PRIVATE/batch.json \
+  --jobs PRIVATE/blind-jobs.json --marks-template PRIVATE/blind-marks.json \
+  --claim-jobs PRIVATE/blind-claims.json
+python -m scripts.collection_review sign --bundle PRIVATE/batch.json \
+  --reviewer REVIEWER_ID --private-key PRIVATE/reviewer.pem \
+  --marks PRIVATE/blind-marks.json --receipt PRIVATE/receipt.json
+python -m scripts.collection_review verify --bundle PRIVATE/batch.json \
+  --receipt PRIVATE/receipt.json --public-key PINNED/reviewer-public.pem
+```
+
+Give the reviewer the blind jobs, optional blind claim disputes, and blank marks template until all marks are recorded. Use protected operator accounts, private input files (mode 0600) and a protected review directory. The signed receipt binds the complete input snapshot, sample, reviewer, marks and report. `verify_review` recalculates the report on the store's own batch snapshot and refuses mismatches or holds. A signature authenticates who attested to the marks, not whether a person did the work: the operator must use a real blind review. Never use test signatures or model-generated ratings to authorize payout. Both planted control classes must pass the control checks. A failed drift check or below-threshold agreement (initially 85%) holds the batch. Inspect per-dimension human agreement, generator/judge means, first-error and hard-step agreement, and receipt-backed costs before freezing later thresholds and prices.
+
+Each comparison pack contains six model slots for one batch/scenario. Migration 724 registers the private, immutable stored inputs and verdict hashes. The last ready worker obtains the sole ranking assignment while its existing lease and judge spend cap are active. An invalid ranking, missing evidence or insufficient confirmed candidates yields no ranking preference. The signed review bundle includes each row's immutable manifest hash, including its generator and ranking object references.
+
+## Preparing private controls
+
+For every scenario family, preserve a real, versioned known-good example already checked against the world state, and a plausible known-bad example with an independently established error (e.g. a contradicted price) that still passes the structural graders. A trusted reviewer records the expected accept/reject label and their rationale *before* the batch is run. `collection_controls.planted_case()` takes the original packet, reviewed label, rationale, reviewer, and source digest. An unmodified failed code check never suffices as a judge control.
+
+For each of the 30 drift anchors select a distinct previously measured private run with complete scores from both Fable and Astra. Pass the original packet, assessment, manifest and its recorded digest to `collection_controls.drift_case()`. It derives the expectations from the actual prior records. Preserve those original immutable objects across batches. When baseline records do not exist yet, measure a separate reference set before using it for drift evaluation; an invented baseline cannot authorize release.
+
+Freeze the expected control/drift labels and the **content digest of the whole case** by slot in `control_artifacts` in the private batch manifest. The separate private pack, `{"schema":"collection.controls.v1","cases":{...}}`, maps each digest to the corresponding case. The worker rebinds only its run ID. The judge sees the blinded trial data. The stored manifest points to the protected control case and carries no generator row or ranking. At review, the verifier checks the exact packet, stored manifest hash, expected label and (for drift) source measurements again. Control calls have no generator payout or training export.
+
+## Reusing measured independent claim checks
+
+The pinned Poet claim reader uses three Jev 1.14 votes for each sentence. A reviewed private source archive may supply these original results without charging for another decision. `scripts.collection_claims import` reads a private JSON inventory with schema `collection.claim-files.v1` and a `sources` list. Each entry contains `source_run_id`, `run_folder` and the SHA-256 of that folder's original `claims.json`. Use only authentic source runs kept by the trusted data owner. The importer rebuilds their guarded tasks, written units and cited source materials, replays the original votes through the pinned reader's `check()` using an offline transport, and signs the verified entries with the archive signer's Ed25519 key. It refuses altered tallies and leaves incomplete votes out. The signature authenticates the importing operator's attestation to the supplied historic files. It does not turn those files into provider-signed responses.
+
+```
+python -m scripts.collection_claims import --inventory PRIVATE/run-files.json \
+  --poet-repo PRIVATE/Poet-9B --champion-repo PATH/leadpoet-sales-agent \
+  --private-key PRIVATE/claim-import-signer.pem --out PRIVATE/claim-pack.json
+```
+
+Freeze the returned `claim_pack_sha256` in the batch manifest and provision its trusted public key independently. Collection reuses a record only when its exact unit digest (ID, written text and all source facts) matches, and records the original run, current run, batch and imported pack digest. New text, changed sources and conflicting independent observations remain flagged for blind adjudication. Private claim-reader data is excluded from model prompts and exported training rows.

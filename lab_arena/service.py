@@ -858,6 +858,7 @@ class ServiceConfig:
     # ancestry, release identity, or a preconstructed weight vector.
     accepted_burn_hotkey: str = ""
     # Enable only after normal validators support signed model tenure.
+    collection_emission_valuation: Optional[Callable[[int], Mapping[str, Any]]] = None
     weekly_slot_decay_enabled: bool = False
     # Identity-only test seam for existing leases. New claims and capacity
     # always require the finalized permit/stake snapshot, never this override.
@@ -1682,6 +1683,8 @@ class ArenaService:
         existing = self._store.get_round(round_id)
         if existing is not None:
             return self._existing_round_configuration_for_create(existing)
+        if self.collection_mode() == "live" or self._collection_reward_start() is not None:
+            raise ServiceError("champion_rounds_replaced_by_collection", 410)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
         checkpoint_policy = contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
         checkpoint_wall, checkpoint_lease = contracts.CHECKPOINT_DEADLINE_PROFILES[
@@ -1930,6 +1933,8 @@ class ArenaService:
         second call finds the round it created.
         """
 
+        if self.collection_mode() == "live" or self._collection_reward_start() is not None:
+            return {"status": "disabled"}
         defaults = self._config.defaults
         # A round made after a late startup can have tomorrow's submission
         # opening. It must block another creation without being advertised to
@@ -2725,8 +2730,72 @@ class ArenaService:
         if not decision.allowed:
             raise ServiceError("submission_rate_limited", 429)
 
+    def collection_mode(self) -> str:
+        from lab_arena import collection_intake
+        if self._chain_scope() != ("finney", 71) or getattr(getattr(self, "_config", None), "mode", None) != "live" or self._pinned_round_id():
+            return "off"
+        try:
+            return collection_intake.mode_from_environment()
+        except collection_intake.IntakeError as exc:
+            raise ServiceError(exc.code, exc.status) from None
+
+    def collection_terms(self) -> Dict[str, Any]:
+        from lab_arena import collection_intake
+        mode = self.collection_mode()
+        if mode == "off":
+            raise ServiceError("collection_inactive", 404)
+        return collection_intake.terms(mode)
+
+    def handle_collection_request(self, operation: str, request: Any) -> Dict[str, Any]:
+        from lab_arena import collection_intake as collection
+        mode = self.collection_mode()
+        if mode == "off":
+            raise ServiceError("collection_inactive", 404)
+        register = operation == "register"
+        if operation not in collection.SCOPE or (register and (
+            not isinstance(request, dict) or set(request) != {"authorization", "credentials"}
+        )):
+            raise ServiceError("collection_request_invalid", 400)
+        envelope = request["authorization"] if register else request
+        try:
+            signed = contracts.validate_signed_request(
+                envelope, expected_scope=collection.SCOPE[operation], now=int(self.now().timestamp()),
+                verify_signature=self._config.verify_signature, expected_round_id=collection.scope_id(mode),
+            )
+        except ArenaSignatureError:
+            raise ServiceError("signature_invalid", 401) from None
+        except ArenaContractError:
+            raise ServiceError("collection_request_invalid", 400) from None
+        hk = signed["hotkey"]
+        intake = collection.CollectionIntake(self._store._transport, self._config.credential_manager, mode)
+        try:
+            if register:
+                self._enforce_submission_request_limit(hk)
+                if hk in self._config.banned_hotkeys_source() or hk == self._config.defaults.baseline_hotkey:
+                    raise ServiceError("collection_ineligible_hotkey", 403)
+                if self._config.credential_manager is None:
+                    raise ServiceError("credential_validation_unavailable", 503)
+                owner = resolve_finalized_owner(self._config.chain, hk)
+                return intake.register(signed, owner.coldkey, request["credentials"])
+            if operation == "revoke" and set(signed["body"]) == {"registration_id"}:
+                return intake.revoke(hk, signed["body"]["registration_id"])
+            if operation == "statement" and not signed["body"]:
+                return intake.statement(hk)
+            raise ServiceError("collection_request_invalid", 400)
+        except collection.IntakeError as exc:
+            raise ServiceError(exc.code, exc.status) from None
+        except OwnerAdmissionError as exc:
+            raise ServiceError(exc.code, 403 if exc.code == "hotkey_unregistered" else 503) from None
+        except credentials_module.CredentialError as exc:
+            raise ServiceError(exc.code, 503 if exc.retryable else 422) from None
+
     def handle_submission_presign(self, envelope: Any) -> Dict[str, Any]:
         """Reserve one private source upload for a signed miner request."""
+
+        # Existing rounds retain their original intake deadline while draining.
+        # The DB admits cutover only after paid legacy rounds have finished.
+        if self._collection_reward_start() is not None:
+            raise ServiceError("agent_submissions_replaced_by_key_enrollment", 410)
 
         validated, round_row = self._request_round(
             envelope, scope=contracts.SCOPE_SUBMISSION_PRESIGN
@@ -2864,6 +2933,11 @@ class ArenaService:
         self, submission_id: str, envelope: Any
     ) -> Dict[str, Any]:
         """Verify uploaded bytes and admit the source under the same signed owner."""
+
+        # Existing rounds retain their original intake deadline while draining.
+        # The DB admits cutover only after paid legacy rounds have finished.
+        if self._collection_reward_start() is not None:
+            raise ServiceError("agent_submissions_replaced_by_key_enrollment", 410)
 
         validated, round_row = self._request_round(
             envelope, scope=contracts.SCOPE_SUBMISSION_FINALIZE
@@ -5814,7 +5888,7 @@ class ArenaService:
         lost response is reconciled against those same branch heads on retry.
         """
 
-        if self._config.mode != "live":
+        if self._config.mode != "live" or self._collection_reward_start() is not None:
             return {"status": "disabled", "promoted": 0}
         promoted = 0
         network_name, netuid = self._chain_scope()
@@ -5894,6 +5968,8 @@ class ArenaService:
         row = self._round(round_id)
         if row.get("baseline_promoted_at"):
             return {"status": "existing"}
+        if self._collection_reward_start() is not None:
+            return {"status": "collection_cutover"}
         configuration = row.get("configuration_doc") or {}
         decision = (row.get("publication_doc") or {}).get("king_decision") or {}
         if (
@@ -5964,7 +6040,7 @@ class ArenaService:
         and the next driver tick retries the same oldest round.
         """
 
-        if self._config.mode != "live":
+        if self._config.mode != "live" or self._collection_reward_start() is not None:
             return {"status": "disabled", "activated": 0}
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
@@ -6217,6 +6293,8 @@ class ArenaService:
         row = self._round(round_id)
         if row.get("reward_activated_at"):
             return {"status": "existing", "effective_reward_epoch": row.get("effective_reward_epoch")}
+        if self._collection_reward_start() is not None:
+            return {"status": "collection_cutover"}
         configuration = row.get("configuration_doc") or {}
         if row.get("status") != "published":
             return {"status": "stale", "round_status": row.get("status")}
@@ -9053,7 +9131,10 @@ class ArenaService:
         week = None
         governing = None
         weekly_clock = None
-        if epoch is not None:
+        collection_epoch = epoch is not None and self._collection_reward_active(epoch)
+        if collection_epoch:
+            eligibility = False
+        elif epoch is not None:
             governing = self.public_reward_basis(epoch, public_only=True)
             if governing is None:
                 eligibility = False
@@ -9112,6 +9193,7 @@ class ArenaService:
             "reward_slot_policy": governing.get("slot_policy") if governing else None,
             "reward_slots": governing.get("reward_slots") if governing else None,
             "current_epoch": epoch,
+            **({"reward_mode": "fixed_collection_quotes"} if collection_epoch else {}),
             **({"weekly_slot_decay": weekly_clock} if weekly_clock is not None else {}),
         }
 
@@ -9304,6 +9386,16 @@ class ArenaService:
         except Exception as exc:
             raise ServiceError("accepted_weight_state_reward_clock_unavailable", 503) from exc
 
+    def _collection_reward_start(self) -> Optional[int]:
+        if (getattr(getattr(self, "_config", None), "collection_emission_valuation", None) is None or
+                self._config.mode != "live" or self._chain_scope() != ("finney", 71)):
+            return None
+        return self._store.collection_reward_start_epoch()
+
+    def _collection_reward_active(self, epoch: int) -> bool:
+        first = self._collection_reward_start()
+        return first is not None and epoch >= first
+
     def public_weight_state(self, epoch: int) -> Dict[str, Any]:
         """Return or atomically publish one accepted state for an Arena epoch."""
 
@@ -9311,6 +9403,15 @@ class ArenaService:
             return {"state": None, "lookup_ok": True}
         network, netuid = self._chain_scope()
         requested_epoch = int(epoch)
+        if self._collection_reward_active(requested_epoch):
+            from lab_arena import collection_rewards
+            try:
+                state = collection_rewards.epoch_state(self._store, self._config.chain, self._reward_signer(),
+                    epoch=requested_epoch, burn_hotkey=self._config.accepted_burn_hotkey,
+                    valuation_source=self._config.collection_emission_valuation)
+            except Exception as exc:
+                raise ServiceError("collection_weight_state_unavailable", 503) from exc
+            return {"state": state, "lookup_ok": True}
         # Reward selection reads only mode and baseline_hotkey from each
         # configuration. Keep signed history/scope metadata, not every round's
         # large frozen provider catalog, on this frequent validator read.

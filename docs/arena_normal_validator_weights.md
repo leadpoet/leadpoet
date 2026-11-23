@@ -593,3 +593,89 @@ retained without rewriting job or scoring data. Restart the gateway at the fixed
 commit; validators retry weight retrieval through their existing normal loop.
 Scoring eligibility, miner rewards, weight vectors, wallets, and saved signed
 transactions are unchanged.
+
+## Locked collection settlement
+
+After a reviewed collection cutover on Finney/71, the gateway signs a
+`leadpoet.collection.fixed_run_quotes.v1` basis in the existing accepted
+weight-state envelope. Update every participating validator's canonical
+weight kernel before cutover. Older kernels reject the new basis.
+Historical signed states and pending reveal journals keep their original
+authority.
+
+Use a signed blind pilot review and the private gateway's measured billing
+records to calibrate each (scenario family, generator model). The fixed fee
+is the average settled miner-funded OpenRouter and Deepline cost times 1.25,
+rounded up to one micro-USD. Host-funded judge charges contribute zero to
+this price. The price compiler verifies the entire pilot batch, stored
+manifests, human review signature, QA report, and resolved costs. The
+`collection_reward_cutover` table requires its compiled `pilot_evidence`
+for activation under the operator's existing migration authority. Schedule
+`first_epoch` prospectively and provision the live worker only after the
+owner has verified the approved price and budget table. A separate
+`collection_reward_schedule_v1()` read returns those exact fees and limits.
+The database rejects a different quote, cap, harness or model for a live
+run. Installing the migrations leaves champion payments active until the
+recorded epoch.
+
+For payout epoch E, sum the frozen prices of all accepted, live,
+miner-funded jobs whose accepted epoch was E−1. Code checks, provider
+receipts and a verified run artifact precede acceptance. Each run is counted
+in precisely this epoch. The signed state binds the job count, digest,
+beneficiary totals and valuation. Retrying a state read returns the first
+accepted state; a late completion cannot change frozen work. Empty epochs
+allocate the weight to the documented burn hotkey.
+
+The observed USD budget is the sum of miner alpha from the last finalized
+epoch-boundary `IncentiveAlphaEmittedToMiners` event, valued at the
+`SwapRuntimeApi.current_alpha_price` for that block and a CoinGecko
+TAO/USD quote updated within 15 minutes. A missing price or missing event
+blocks issuance where there is paid work. When the sum of fees is below the
+budget, miners receive the signed weight fraction for their fees and the
+remainder goes to burn. In saturation each miner receives its share of all
+fees and the payout has no carry-forward. Unregistered recipients' portions
+go to burn. Quantization and consensus affect the eventual emission.
+The miner statement labels these as weight targets. Use finalized
+commitment/reveal and matching vectors for weight verification; reporting
+actual token income separately requires the subsequent chain distribution.
+
+Build the private batch review on the authorized gateway/worker host with the
+original private manifest and rubric. All outputs below are new private files.
+The installed `LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE` pins the actual
+human reviewer's Ed25519 public key; a key supplied by a receipt cannot
+authorize a release.
+
+```sh
+python3.11 -m scripts.collection_batch bundle --batch batch.json --prompt prompt.json --output review-input.json
+python3.11 -m scripts.collection_review sample --bundle review-input.json --jobs blind.json --marks-template marks.json
+```
+
+The human completes the blind marks on their own machine and signs the
+review with `scripts.collection_review sign`. Use the signed receipt to
+compile quotes and produce the private training release.
+
+```sh
+python3.11 -m scripts.collection_batch prices --batch batch.json --prompt prompt.json --receipt signed-review.json --output approved-prices.json
+python3.11 -m scripts.collection_batch export --batch batch.json --prompt prompt.json --receipt signed-review.json --output released-rows.zip
+```
+
+Each command reconstructs the complete registered job set and sealed
+controls. Price compilation checks registered pilot measurements, and the
+cutover transaction verifies the same fee table directly against settled
+provider receipts. The export ZIP contains JSONL for decisions-only,
+reasoning and hard-step reasoning views, plus row counts and file hashes.
+It omits planted/drift controls and all judge response text. An incomplete
+or modified batch cannot publish a partial output file.
+
+Before scheduling the switch, stop opening new competition rounds and let
+all issued paid rounds, pending Git promotions and the latest award finish.
+The cutover must immediately follow the current accepted legacy epoch. The
+price document's `cutover_anchor` records that epoch, its signed state hash,
+and a fresh finalized chain block with its observed timestamp. Use
+`cutover_anchor.epoch + 1` for `first_epoch`. If the anchor is older than
+120 seconds at insertion, rerun the price command for a fresh observation.
+A missing accepted legacy state, a pending promotion, an overlapping award,
+or an incomplete measured six-model cohort stops activation. Once scheduled,
+the gateway and database fence new mainnet competition issuance and new
+Git promotion plans even if a worker returns to an older environment setting.
+Previously issued signed states retain their original signature and history.

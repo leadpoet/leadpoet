@@ -376,6 +376,12 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_reopen_review_outage_v1": (("p_round_id", "text"), ("p_round_sha256", "text"), ("p_submissions", "jsonb"), ("p_review_deadline", "timestamptz"), ("p_stage_2_close", "timestamptz"), ("p_final_scoring_close", "timestamptz"), ("p_publication_deadline", "timestamptz"), ("p_request_id", "text"), ("p_actor_ref", "text"), ("p_approval_ref", "text"), ("p_dry_run", "boolean")),
     "lab_arena_advance_review_outage_v1": (("p_round_id", "text"),),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
+    "collection_reward_start_v1": (),
+    "collection_reward_schedule_v1": (),
+    "collection_batch_jobs_v1": (("p_batch", "text"),),
+    "collection_pilot_costs_v1": (("p_batch", "text"),),
+    "collection_pilot_fees_v1": (("p_batch", "text"), ("p_controls", "jsonb")),
+    "collection_reward_quotes_v1": (("p_epoch", "bigint"),),
     "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),
     "lab_arena_record_chain_outcome_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_validator_hotkey", "text"), ("p_request_id", "text"), ("p_extrinsic_hash", "text"), ("p_outcome_doc", "jsonb")),
 }
@@ -1679,6 +1685,17 @@ class ArenaStore:
         if set(result) != {"eligible"} or type(result["eligible"]) is not bool:
             raise ArenaStoreError("participation response is invalid")
         return result["eligible"]
+
+    def collection_reward_start_epoch(self) -> Optional[int]:
+        row = _require_mapping(self._transport.rpc("collection_reward_start_v1", {}), "collection_reward_start")
+        first = row["first_epoch"]
+        if first is not None and (type(first) is not int or first < 1):
+            raise ArenaStoreError("invalid collection cutover epoch")
+        return first
+
+    def collection_reward_quotes(self, epoch: int) -> Dict[str, Any]:
+        return dict(_require_mapping(self._transport.rpc("collection_reward_quotes_v1", {"p_epoch": epoch}),
+                                     "collection_reward_quotes"))
 
     def get_weight_state(self, network: str, netuid: int, epoch: int) -> Optional[Dict[str, Any]]:
         rows = self._transport.select(

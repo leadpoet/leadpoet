@@ -430,6 +430,11 @@ def _configure_secret_request(request, *, client, account):
         value = updates["LAB_ARENA_WEEKLY_SLOT_DECAY_ENABLED"]
         if not isinstance(value, str) or value not in {"true", "false"}:
             fail("weekly_slot_decay_invalid")
+    if request["role"] == "collection_mode_only" or "LAB_ARENA_COLLECTION_MODE" in updates:
+        if (request["role"] != "collection_mode_only" or secret_id != GATEWAY_SECRET or
+                set(updates) != {"LAB_ARENA_COLLECTION_MODE"} or request.get("aliases") or request.get("service_key")
+                or updates["LAB_ARENA_COLLECTION_MODE"] not in {"off", "pilot", "live"}):
+            fail("collection_mode_scope_invalid")
     if request["role"] == "openrouter_concurrency_only":
         if (
             secret_id != "leadpoet/prod/gateway/env"
@@ -723,6 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--check", action="store_true", help="check only (the default)")
     mode.add_argument("--apply", action="store_true", help="apply after an authorized check")
     scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--collection-mode", choices=("off", "pilot", "live"), help="configure only the mainnet gateway's funded collection enrollment mode")
     scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
     scope.add_argument("--miner-credentials-only", action="store_true", help="inspect or configure only the gateway Arena miner KMS key")
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
@@ -812,6 +818,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     narrow_scope = (
         args.prepare_runner
         or args.miner_credentials_only
+        or getattr(args, "collection_mode", None) is not None
         or args.testnet_proxy is not None
         or args.scorer_image_only
         or args.openrouter_max_concurrency is not None
@@ -867,6 +874,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "apply": args.apply, "role": "scorer_image_only", "aliases": {},
                 "updates": {"LAB_ARENA_SCORER_IMAGE": args.scorer_image},
             }
+            result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.collection_mode is not None:
+            request = {"secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                       "apply": args.apply, "role": "collection_mode_only", "aliases": {},
+                       "updates": {"LAB_ARENA_COLLECTION_MODE": args.collection_mode}}
             result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0

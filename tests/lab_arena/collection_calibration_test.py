@@ -1,4 +1,4 @@
-"""Economic authorization joins the real 713–716 database contracts."""
+"""Economic authorization joins the real collection database contracts."""
 
 import time
 from uuid import uuid4

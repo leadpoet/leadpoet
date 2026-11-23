@@ -168,7 +168,8 @@ def run_cohort(
         if not job:
             break
         try:
-            owner_lookup(job["miner_hotkey"])
+            if owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]:
+                raise ValueError("collection funding owner changed")
             model_broker = CollectionBroker(
                 intake,
                 database,

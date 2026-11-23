@@ -117,7 +117,8 @@ BEGIN
  IF FOUND THEN
   IF job.lease_token_hash<>p_token_hash OR job.batch_id<>p_batch OR job.status<>'running' OR job.lease_expires_at<=clock_timestamp()
   THEN RETURN jsonb_build_object('error','claim_conflict'); END IF;
-  RETURN to_jsonb(job)-'lease_token_hash';
+  RETURN (to_jsonb(job)-'lease_token_hash') || jsonb_build_object('owner_coldkey',
+   (SELECT owner_coldkey FROM public.collection_registrations WHERE registration_id=job.registration_id));
  END IF;
  UPDATE public.collection_jobs SET status='failed',finished_at=clock_timestamp(),quality='{}'
  WHERE mode=p_mode AND status='running' AND lease_expires_at<=clock_timestamp();
@@ -139,7 +140,8 @@ BEGIN
  VALUES(p_job,p_batch,p_mode,enrollment.registration_id,enrollment.miner_hotkey,enrollment.openrouter_key_id,enrollment.deepline_key_id,
    n,day_utc,p_scenarios->>(n/6)::integer,generator,p_commit,spending,price,p_token_hash,clock_timestamp()+interval '2 hours')
  RETURNING * INTO job;
- RETURN to_jsonb(job)-'lease_token_hash';
+ RETURN (to_jsonb(job)-'lease_token_hash') || jsonb_build_object('owner_coldkey',
+   (SELECT owner_coldkey FROM public.collection_registrations WHERE registration_id=job.registration_id));
 END; $$;
 
 CREATE FUNCTION public.collection_credential_v1(p_job uuid,p_token_hash text,p_provider text)

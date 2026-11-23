@@ -381,6 +381,19 @@ def create_app(service: ArenaService) -> FastAPI:
 
     # -- miner --------------------------------------------------------------
 
+    @app.get("/arena/v1/collection/terms")
+    async def collection_terms() -> Any:
+        return await no_store_public_call(service.collection_terms)
+
+    @app.post("/arena/v1/collection/{operation}")
+    async def collection_request(operation: str, request: Request) -> Any:
+        if operation not in ("register", "statement", "revoke"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        document = await _read_json(request, limits=contracts.StrictLimits(
+            max_depth=5, max_list_items=0, max_object_keys=12, max_string_bytes=4096, max_total_bytes=22528))
+        result = await run_in_threadpool(service.handle_collection_request, operation, document)
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
     @app.post("/arena/v1/submissions/presign")
     async def submission_presign(request: Request) -> Any:
         """Reserve one bounded private source upload."""

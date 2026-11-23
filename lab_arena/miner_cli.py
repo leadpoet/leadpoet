@@ -7,6 +7,7 @@ import json
 import os
 import sys
 
+from lab_arena import collection_cli
 from lab_arena.miner_submit import (
     MinerSubmissionError,
     read_submission_review,
@@ -57,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--round-id", required=True)
     review.add_argument("--submission-id", required=True)
     _common_arguments(review)
+    collection_cli.add_commands(commands, _common_arguments)
     return parser
 
 
@@ -117,6 +119,8 @@ def main(argv=None) -> int:
     if argv is None and len(sys.argv) == 1:
         argv = ["interactive"]
     args = build_parser().parse_args(argv)
+    if args.command.startswith("collection-"):
+        return collection_cli.run(args, _keypair)
     if args.command in {"submit-model", "submit-source"}:
         return submit_source(args)
     if args.command == "interactive":

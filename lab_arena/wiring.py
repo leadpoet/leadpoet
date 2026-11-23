@@ -32,6 +32,7 @@ from lab_arena.service import (
     ServiceError,
 )
 from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
+from lab_arena import collection_rewards
 from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
@@ -702,6 +703,7 @@ def build_service_from_environment(mode: str):
         review_route_preflight=ReviewRoutePreflight(),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
+        collection_emission_valuation=lambda block: collection_rewards.emission_valuation(arena_chain, block),
         weekly_slot_decay_enabled=_weekly_slot_decay_enabled_from_environment(),
         scorer_image_access=image_access,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),

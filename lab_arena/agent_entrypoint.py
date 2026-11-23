@@ -179,7 +179,7 @@ def _web_access():
                     os.environ[name] = value
 
 
-def _load_run_icp(source_dir: Path) -> Any:
+def _load_harness(source_dir: Path) -> Any:
     harness_path = source_dir / "harness.py"
     if not harness_path.is_file():
         raise AgentContractError("harness.py is missing")
@@ -194,6 +194,11 @@ def _load_run_icp(source_dir: Path) -> Any:
         raise AgentContractError("harness.py cannot be loaded")
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
+    return module
+
+
+def _load_run_icp(source_dir: Path) -> Any:
+    module = _load_harness(source_dir)
     function = getattr(module, "run_icp", None)
     if not callable(function) or inspect.iscoroutinefunction(function):
         raise AgentContractError("harness.run_icp must be synchronous")
@@ -263,7 +268,17 @@ def _run(*, source_dir: Path, input_path: Path, output_path: Path) -> None:
 
 def main() -> int:
     with _web_access():
-        run()
+        if sys.argv[1:] == ["--locked-research"]:
+            # This flag is set only by the trusted collection runner's OCI command.
+            task = json.loads(INPUT_PATH.read_bytes())
+            if not isinstance(task, dict) or not isinstance(task.get("icp"), dict):
+                raise AgentContractError("invalid collection research input")
+            result = _load_harness(SOURCE_DIR).run_task(
+                {"type": "lead_research", "icp": task["icp"]}, model=task["model"])
+            import lab_arena_checkpoint
+            lab_arena_checkpoint.write(result, output_path=OUTPUT_PATH)
+        else:
+            run()
     return 0
 
 

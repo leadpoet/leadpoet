@@ -8623,8 +8623,16 @@ class ArenaService:
                     self._invalidate_hot_round()
                     return {**outage, "round_status": self._round(round_id)["status"]}
             if status == "open":
-                with telemetry.stage("advance_commit_benchmark"):
-                    return self.commit_benchmark(round_id)
+                with telemetry.stage("advance_commit_benchmark") as observed:
+                    committed = self.commit_benchmark(round_id)
+                    if committed.get("status") == "retry":
+                        # A benchmark commit that is waiting on a named gate
+                        # retries every tick with no deadline escape. Without
+                        # the reason on the span the loop is indistinguishable
+                        # from a healthy commit and the round silently stalls.
+                        observed.idle = True
+                        observed.reason = str(committed.get("reason") or "")
+                return committed
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)

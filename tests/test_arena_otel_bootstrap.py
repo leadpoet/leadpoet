@@ -421,6 +421,41 @@ def test_stage_context_records_the_failure_and_re_raises():
         telemetry.install_recorder(None)
 
 
+def test_stage_reason_names_why_a_stage_made_no_progress():
+    exp = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exp))
+    try:
+        with telemetry.stage("advance_commit_benchmark") as observed:
+            observed.idle = True
+            observed.reason = "code_review_infrastructure_hold"
+
+        (span,) = exp.get_finished_spans()
+        assert span.attributes["arena.stage"] == "advance_commit_benchmark"
+        assert span.attributes["arena.outcome"] == "idle"
+        assert span.attributes["arena.error_type"] == "code_review_infrastructure_hold"
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_stage_reason_defaults_to_no_error_and_drops_an_unbounded_value():
+    exp = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exp))
+    try:
+        with telemetry.stage("advance_commit_benchmark"):
+            pass
+        with telemetry.stage("advance_commit_benchmark") as observed:
+            observed.reason = "round-9 blocked by reviewer at 10.0.0.4"
+
+        plain, unbounded = exp.get_finished_spans()
+        # An unexpected reason costs the attribute, never the whole span: the
+        # boundary validator drops a span whose error_type is malformed.
+        assert plain.attributes["arena.error_type"] == "-"
+        assert unbounded.attributes["arena.error_type"] == "-"
+        assert "10.0.0.4" not in repr(dict(unbounded.attributes))
+    finally:
+        telemetry.install_recorder(None)
+
+
 def test_a_broken_recorder_never_breaks_the_pipeline():
     class _Exploding:
         def record(self, *args, **kwargs):

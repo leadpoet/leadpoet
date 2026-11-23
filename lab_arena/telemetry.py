@@ -46,6 +46,7 @@ candidate query. They never carry a run ID or provider payload.
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Optional
@@ -287,11 +288,31 @@ def record_gate(
 class StageResult:
     """Mutable handle a stage body uses to report magnitude and idleness."""
 
-    __slots__ = ("count", "idle")
+    __slots__ = ("count", "idle", "reason")
 
     def __init__(self) -> None:
         self.count = 0
         self.idle = False
+        # Why a stage completed without making progress, e.g. the named wait a
+        # benchmark commit is retrying on. One bounded snake_case code from the
+        # caller's own frozen vocabulary; anything else is dropped.
+        self.reason = NO_ERROR
+
+
+_STAGE_REASON_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _stage_reason(reason: Any) -> str:
+    """Keep a stage reason inside the exported vocabulary, or drop it.
+
+    The boundary validator rejects the whole span on a malformed value, so an
+    unexpected reason must cost the attribute, never the observation.
+    """
+    try:
+        text = str(reason)
+    except BaseException:
+        return NO_ERROR
+    return text if _STAGE_REASON_RE.fullmatch(text) else NO_ERROR
 
 
 @contextmanager
@@ -321,6 +342,7 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
     record(
         name,
         "idle" if result.idle else "ok",
+        error_type=_stage_reason(result.reason),
         count=int(result.count or 0),
         duration_ms=(time.monotonic() - start_mono) * 1000.0,
         start_ns=start_ns,

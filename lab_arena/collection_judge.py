@@ -51,6 +51,47 @@ class InvalidVerdict(ValueError):
     pass
 
 
+class JudgeUnavailable(RuntimeError):
+    """A bounded owner-funded request could not provide a verified verdict."""
+
+    def __init__(self, model, request_id, reason):
+        super().__init__("owner-funded verifier unavailable")
+        self.model = model
+        self.request_id = request_id
+        self.reason = reason
+
+
+def validate_unavailable(policy, assessment, primary):
+    missing = assessment["verifier_unavailable"]
+    _fields(missing, ("model", "request_id", "reason"))
+    records = assessment["records"]
+    _require(
+        len(records) <= 1 and (not records or records[0]["judge"] == primary),
+        "invalid partial verifier records",
+    )
+    expected = next(j for j in policy.roles if j != primary) if records else primary
+    _require(
+        missing["model"] == policy.version(expected)
+        and missing["reason"]
+        in (
+            "budget_exhausted",
+            "already_reserved",
+            "http_error",
+            "transport_error",
+            "unverified_receipt",
+            "invalid_verdict",
+            "identity_mismatch",
+        )
+        and isinstance(missing["request_id"], str)
+        and re.fullmatch(r"collection-[0-9a-f]{64}-[12]", missing["request_id"])
+        and assessment["status"] == "cannot_judge"
+        and assessment["keep_steps"] == 0
+        and assessment["hard_steps"] == []
+        and assessment["claim_review"] == "missing",
+        "invalid unavailable verifier evidence",
+    )
+
+
 def _json(value):
     return json.dumps(
         value,
@@ -438,6 +479,8 @@ def _request(policy, call, judge, stage, messages, validate):
             return validate(_parse(raw))
         except InvalidVerdict:
             continue
+    if stage == "run":
+        raise JudgeUnavailable(model, f"collection-{base}-2", "invalid_verdict")
     return None
 
 
@@ -455,7 +498,7 @@ def _system(prompt, key):
     }
 
 
-def judge_run(policy, assignment, packet, call, *, prompt):
+def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
     """Return private records and selection indices. Never emit judge prose in training rows."""
     validate_prompt(policy, prompt)
     _require(
@@ -522,14 +565,57 @@ def judge_run(policy, assignment, packet, call, *, prompt):
             messages,
             lambda v: validate_verdict(v, identity, n),
         )
-        verdict = verdict or _abstain(identity, "invalid_reply_after_retry")
         return dict(verdict, run_id=packet["run_id"], scenario_id=packet["scenario_id"])
 
     primary = assignment["primary"]
     records = result["records"]
-    records.append(evaluate(primary))
-    if result["overlap"] or records[0]["confidence"] == "low":
-        records.append(evaluate(next(j for j in policy.roles if j != primary)))
+    if previous is not None:
+        validate_unavailable(policy, previous, primary)
+        _require(
+            all(
+                previous[k] == result[k]
+                for k in (
+                    "batch_id",
+                    "run_id",
+                    "scenario_id",
+                    "policy_sha256",
+                    "prompt_sha256",
+                    "packet_sha256",
+                    "overlap",
+                )
+            ),
+            "recovery evidence differs from frozen judgment",
+        )
+        for v in previous["records"]:
+            identity = dict(
+                spec_version=SPEC,
+                run_id=packet["run_id"],
+                scenario_id=packet["scenario_id"],
+                judge=primary,
+                judge_version=policy.version(primary),
+            )
+            _require(
+                validate_verdict(v, identity, n) == v and not v["cannot_judge"],
+                "a completed abstention is not a provider failure",
+            )
+            records.append(v)
+    try:
+        if not records:
+            records.append(evaluate(primary))
+        if result["overlap"] or records[0]["confidence"] == "low":
+            records.append(evaluate(next(j for j in policy.roles if j != primary)))
+    except JudgeUnavailable as exc:
+        result.update(
+            status="cannot_judge",
+            claim_review="missing",
+            verifier_unavailable={
+                "model": exc.model,
+                "request_id": exc.request_id,
+                "reason": exc.reason,
+            },
+        )
+        validate_unavailable(policy, result, primary)
+        return result
     _decide(policy, records, n, result)
     result["claim_review"] = claim_review(packet, records)
     return result
@@ -763,7 +849,9 @@ def blind_human_sample(policy, packets, limit=50):
     return aliases, jobs
 
 
-def quality_report(policy, *, assignments, assessments, human_marks, planted, drift):
+def quality_report(
+    policy, *, assignments, assessments, human_marks, planted, drift, failed_run_ids=()
+):
     """Read all inputs from the trusted batch store. A report cannot create human marks.
 
     `assignments` is the full frozen set of {run_id, generator, harness, miner}.
@@ -784,20 +872,9 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
         # Real marks can be signed and examined. A candidate panel cannot release a
         # training export, a price manifest, or incentives until separately qualified.
         problems.add("judge_qualification")
-    if set(by_id) != set(frozen):
+    failed_scheduled = set(failed_run_ids) & set(frozen)
+    if set(by_id) != set(frozen) - failed_scheduled:
         problems.add("incomplete_batch")
-    if (
-        policy.pilot
-        and len(
-            set(
-                a["generator"]
-                for a in assignments
-                if a["run_id"] not in planted and a["run_id"] not in drift
-            )
-        )
-        < 6
-    ):
-        problems.add("pilot_model_coverage")
     if set(planted) & set(drift) or not (set(planted) | set(drift)) <= set(frozen):
         raise ValueError("control identities")
     if not all(type(expected) is bool for expected in planted.values()) or set(
@@ -810,6 +887,8 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
     observed = {}
     agree = total = matched_bad = matched_hard = 0
     control_ids = set(planted) | set(drift)
+    if failed_scheduled & control_ids:
+        problems.add("unjudged_control")
     for rid, assessment in by_id.items():
         _require(
             assessment["policy_sha256"] == digest(asdict(policy))
@@ -817,6 +896,13 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
             "foreign assessment",
         )
         records = assessment["records"]
+        if assessment.get("verifier_unavailable"):
+            validate_unavailable(policy, assessment, assigned[rid]["primary"])
+            if rid in control_ids:
+                problems.add("unjudged_control")
+            elif assigned[rid]["overlap"] or policy.pilot:
+                total += 1  # A requested comparison without two votes is not agreement.
+            continue
         if not records:
             _require(
                 assessment["status"] == "code_rejected"
@@ -878,8 +964,16 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
                 per_model[frozen[rid]["generator"]][v["judge"]].append(v["scores"])
     if not total or agree * 100 < total * policy.agreement_percent:
         problems.add("judge_agreement")
-    if policy.pilot and sum(r not in control_ids for r in observed) < 100:
-        problems.add("pilot_judged_runs")
+    if policy.pilot:
+        complete = {
+            r
+            for r, v in observed.items()
+            if r not in control_ids and all(not x["cannot_judge"] for x in v)
+        }
+        if len(complete) < 100:
+            problems.add("pilot_judged_runs")
+        if len({frozen[r]["generator"] for r in complete}) < 6:
+            problems.add("pilot_model_coverage")
 
     # Known-good/bad controls must exercise each requested task family. The
     # scheduler uses C/K/B/E/P seeds and `research-*`; keep arbitrary fixture or
@@ -897,7 +991,11 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
         if labels != {True, False}:
             problems.add("missing_planted_controls_for_family")
     candidates = sorted(
-        (r for r in observed if r not in control_ids),
+        (
+            r
+            for r, v in observed.items()
+            if r not in control_ids and all(not x["cannot_judge"] for x in v)
+        ),
         key=lambda r: digest([policy.seed, "human", r]),
     )[:50]
     blind = {
@@ -941,6 +1039,20 @@ def quality_report(policy, *, assignments, assessments, human_marks, planted, dr
         "batch_id": policy.batch_id,
         "policy_sha256": digest(asdict(policy)),
         "quality_ready": not problems,
+        **(
+            {"terminal_failed_attempts": len(set(failed_run_ids))}
+            if failed_run_ids
+            else {}
+        ),
+        **(
+            {
+                "unavailable_verifications": sum(
+                    bool(a.get("verifier_unavailable")) for a in assessments
+                )
+            }
+            if any(a.get("verifier_unavailable") for a in assessments)
+            else {}
+        ),
         "holds": sorted(problems),
         "random_overlap_count": total,
         "accept_agreement_count": agree,

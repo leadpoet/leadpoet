@@ -23,9 +23,10 @@ RECEIPT_SCHEMA = "collection.human-review.v1"
 
 
 def _read_bundle(bundle):
-    judge._fields(
-        bundle, ("schema", "policy", "assignments", "runs", "planted", "drift")
-    )
+    fields = {"schema", "policy", "assignments", "runs", "planted", "drift"}
+    if "failed_attempts" in bundle:
+        fields.add("failed_attempts")
+    judge._fields(bundle, fields)
     judge._require(bundle["schema"] == BUNDLE_SCHEMA, "bundle schema")
     policy = judge.BatchPolicy(**bundle["policy"])
     schedule = judge.assign_judges(policy, bundle["assignments"])
@@ -94,8 +95,10 @@ def _read_bundle(bundle):
             "assessment packet digest",
         )
         n = len(run["steps"])
+        unavailable = "verifier_unavailable" in a
         judge._require(
-            type(a["records"]) is list and 1 <= len(a["records"]) <= 2,
+            type(a["records"]) is list
+            and (0 if unavailable else 1) <= len(a["records"]) <= 2,
             "judge record count",
         )
         for v in a["records"]:
@@ -109,17 +112,64 @@ def _read_bundle(bundle):
             judge._require(
                 v == judge.validate_verdict(v, identity, n), "noncanonical verdict"
             )
+        if unavailable:
+            judge.validate_unavailable(policy, a, schedule[rid]["primary"])
+            continue
         decision = judge._decide(policy, a["records"], n, {})
         decision["claim_review"] = judge.claim_review(p, a["records"])
         judge._require(
             all(a[k] == v for k, v in decision.items()), "assessment decision"
         )
-    judge._require(set(schedule) == set(packets), "incomplete batch")
+    failures = bundle.get("failed_attempts", [])
+    judge._require(type(failures) is list, "failed attempt list required")
+    failed_ids = set()
+    attempts = set()
+    slots = {a.get("slot"): a for a in bundle["assignments"]}
+    for f in failures:
+        judge._fields(
+            f,
+            (
+                "run_id",
+                "slot",
+                "attempt",
+                "miner",
+                "generator",
+                "harness",
+                "scenario_id",
+            ),
+        )
+        a = slots.get(f["slot"])
+        rid = f["run_id"]
+        judge._require(
+            policy.pilot
+            and a
+            and judge._integer(f["slot"], 0, 24575)
+            and judge._integer(f["attempt"], 1, 2)
+            and (f["slot"], f["attempt"]) not in attempts
+            and judge._text(rid, 128)
+            and rid not in failed_ids
+            and rid not in packets
+            and judge._text(f["miner"], 256)
+            and judge._text(f["scenario_id"], 128)
+            and all(f[k] == a[k] for k in ("generator", "harness"))
+            and (rid == a["run_id"] or (f["attempt"] == 1 and rid not in schedule)),
+            "invalid failed pilot attempt",
+        )
+        failed_ids.add(rid)
+        attempts.add((f["slot"], f["attempt"]))
+    judge._require(
+        all(n == 1 or (s, 1) in attempts for s, n in attempts),
+        "missing previous failed attempt",
+    )
+    judge._require(set(schedule) - failed_ids == set(packets), "incomplete batch")
     control_ids = set(bundle["planted"]) | set(bundle["drift"])
     reviewable = [
         packets[a["run_id"]]
         for a in assessments
-        if a["records"] and a["run_id"] not in control_ids
+        if a["records"]
+        and not a.get("verifier_unavailable")
+        and a["run_id"] not in control_ids
+        and all(not v["cannot_judge"] for v in a["records"])
     ]
     return policy, assessments, reviewable
 
@@ -177,6 +227,7 @@ def _report(bundle, form, reviewer):
         planted=bundle["planted"],
         drift=bundle["drift"],
         human_marks=marks,
+        failed_run_ids={f["run_id"] for f in bundle.get("failed_attempts", [])},
     )
 
     approved = []
@@ -268,7 +319,70 @@ def verify_review(bundle, receipt, public_key_pem):
     return report
 
 
-def registered_bundle(policy, assignments, *, planted, drift, jobs, objects, expected_builder=None):
+def terminal_pilot_attempts(rows):
+    """Keep the terminal job of each logical slot and every recorded failure."""
+    by_slot = {}
+    failed = []
+    seen = set()
+    for row in sorted(rows, key=lambda r: (r["slot"], r.get("attempt", 1))):
+        slot, n, rid = row["slot"], row.get("attempt", 1), row["job_id"]
+        previous = by_slot.get(slot)
+        judge._require(
+            rid not in seen
+            and judge._integer(slot, 0, 24575)
+            and (
+                n == 1
+                if previous is None
+                else (
+                    n == 2
+                    and previous.get("attempt", 1) == 1
+                    and previous["status"] == "failed"
+                    and all(
+                        previous[k] == row[k]
+                        for k in ("batch_id", "scenario_id", "model", "harness_commit")
+                    )
+                )
+            )
+            and type(n) is int
+            and row["status"] in ("accepted", "rejected", "failed"),
+            "invalid pilot slot attempts",
+        )
+        if row["status"] == "failed":
+            judge._require(
+                row["artifact_sha256"] is None,
+                "failed attempt has conflicting evidence",
+            )
+            failed.append(
+                dict(
+                    run_id=rid,
+                    slot=slot,
+                    attempt=n,
+                    miner=row["miner_hotkey"],
+                    generator=row["model"],
+                    harness=row["harness_commit"],
+                    scenario_id=row["scenario_id"],
+                )
+            )
+        else:
+            judge._require(
+                bool(row["artifact_sha256"]), "missing terminal pilot manifest"
+            )
+        by_slot[slot] = row
+        seen.add(rid)
+    return list(by_slot.values()), failed
+
+
+def registered_bundle(
+    policy,
+    assignments,
+    *,
+    planted,
+    drift,
+    jobs,
+    objects,
+    expected_builder=None,
+    failed_attempts=(),
+):
     """Reconstruct from server-owned *complete* batch records at release/sign-off.
 
     The caller supplies enrollment/assignment metadata and controls frozen at batch open,
@@ -321,6 +435,11 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects, exp
             and record["miner_hotkey"] == a["miner"],
             "registered job metadata",
         )
+        if record.get("status") == "failed" and policy.pilot:
+            judge._require(
+                record["artifact_sha256"] is None, "conflicting failed manifest"
+            )
+            continue
         manifest = verified(
             rid, "manifest", {"sha256": record["artifact_sha256"]}, 1024 * 1024
         )
@@ -336,6 +455,65 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects, exp
         )
         packet = verified(rid, "judge-input", manifest["packet"], 16 * 1024 * 1024)
         assessment = verified(rid, "judge-output", manifest["assessment"], 1024 * 1024)
+        if "judge_recovery" in manifest:
+            recovery = manifest["judge_recovery"]
+            judge._fields(recovery, ("attempt_id", "prior_manifest_sha256"))
+            prior = verified(
+                rid,
+                "manifest",
+                {"sha256": recovery["prior_manifest_sha256"]},
+                1024 * 1024,
+            )
+            judge._require(
+                not policy.pilot
+                and "judge_recovery" not in prior
+                and not prior.get("control")
+                and re.fullmatch(
+                    r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}",
+                    recovery["attempt_id"],
+                )
+                and {
+                    k: v
+                    for k, v in manifest.items()
+                    if k not in ("judge_recovery", "assessment")
+                }
+                == {k: v for k, v in prior.items() if k != "assessment"},
+                "recovered generator evidence differs from original",
+            )
+            old = verified(rid, "judge-output", prior["assessment"], 1024 * 1024)
+            primary = judge.assign_judges(policy, [a])[rid]["primary"]
+            judge.validate_unavailable(policy, old, primary)
+            judge._require(
+                assessment["records"], "recovered judgment needs genuine verdicts"
+            )
+            required_votes = (
+                2
+                if old["overlap"] or assessment["records"][0]["confidence"] == "low"
+                else 1
+            )
+            judge._require(
+                assessment["records"][: len(old["records"])] == old["records"]
+                and len({v["judge"] for v in assessment["records"]})
+                == len(assessment["records"])
+                == required_votes
+                and old["verifier_unavailable"]["model"]
+                in {v["judge_version"] for v in assessment["records"]}
+                and not assessment.get("verifier_unavailable")
+                and all(not v["cannot_judge"] for v in assessment["records"])
+                and all(
+                    old[k] == assessment[k]
+                    for k in (
+                        "packet_sha256",
+                        "policy_sha256",
+                        "prompt_sha256",
+                        "run_id",
+                        "batch_id",
+                        "scenario_id",
+                        "overlap",
+                    )
+                ),
+                "incomplete recovered judgment or changed previous vote",
+            )
         judge._require(
             packet["run_id"] == rid and packet["scenario_id"] == record["scenario_id"],
             "registered packet identity",
@@ -417,5 +595,7 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects, exp
         "planted": planted,
         "drift": drift,
     }
+    if failed_attempts:
+        result["failed_attempts"] = failed_attempts
     _read_bundle(result)
     return result

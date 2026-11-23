@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from decimal import Decimal
 
 from lab_arena import broker, contracts, operations, provider_costs, store
-from lab_arena.collection_judge import QUALIFICATION_JUDGES
+from lab_arena.collection_judge import QUALIFICATION_JUDGES, JudgeUnavailable
 from lab_arena.collection_intake import GENERATOR_ROUTES
 from lab_arena.lead_orders.broker import deepline_cost_microusd
 
@@ -128,6 +128,11 @@ class CollectionBroker:
             p_hash=digest(content),
         )
         if admitted["status"] != "reserved":
+            if provider == "judge" and admitted["status"] in (
+                "budget_exhausted",
+                "already_reserved",
+            ):
+                raise JudgeUnavailable(model, request_id, admitted["status"])
             raise CollectionCallError(admitted["status"])
         try:
             response = self.transport.send(
@@ -150,6 +155,8 @@ class CollectionBroker:
                 p_provider_id=None,
                 p_hash=digest(b""),
             )
+            if provider == "judge":
+                raise JudgeUnavailable(model, request_id, "transport_error") from None
             raise CollectionCallError(
                 "provider transport failed; reservation retained"
             ) from None
@@ -205,18 +212,24 @@ class CollectionBroker:
             p_status=response.status,
             p_provider_id=upstream_id,
         )
+        if provider == "judge" and response.status != 200:
+            raise JudgeUnavailable(model, request_id, "http_error")
         if (
             response.status != 200
             or cost is None
             or broker._response_contains_credential(response, secret)
         ):
+            if provider == "judge":
+                raise JudgeUnavailable(model, request_id, "unverified_receipt")
             raise CollectionCallError("provider reply unavailable or unverified")
         if model:
-            endpoints = (body.get("openrouter_metadata") or {}).get("endpoints") or {}
+            metadata = body.get("openrouter_metadata")
+            endpoints = metadata.get("endpoints") if isinstance(metadata, dict) else None
+            available = endpoints.get("available") if isinstance(endpoints, dict) else None
             selected = [
                 row
-                for row in endpoints.get("available", [])
-                if row.get("selected") is True
+                for row in (available if isinstance(available, list) else ())
+                if isinstance(row, dict) and row.get("selected") is True
             ]
             if (
                 body.get("model") != model
@@ -226,6 +239,8 @@ class CollectionBroker:
                 or selected[0]["provider"] != self.pricing["endpoint_providers"][model]
                 or body.get("provider") not in (None, selected[0]["provider"])
             ):
+                if provider == "judge":
+                    raise JudgeUnavailable(model, request_id, "identity_mismatch")
                 raise CollectionCallError(
                     "assigned model revision did not serve the response"
                 )
@@ -361,10 +376,19 @@ class CollectionBroker:
             },
             judge=model,
         )
-        (choice,) = response["choices"]
-        if choice.get("finish_reason") != "stop":
-            return ""  # Truncation goes through the single invalid-verdict retry.
-        return choice["message"]["content"]
+        choices = response.get("choices")
+        if (
+            not isinstance(choices, list)
+            or len(choices) != 1
+            or not isinstance(choices[0], dict)
+        ):
+            return ""
+        choice = choices[0]
+        if choice.get("finish_reason") != "stop" or not isinstance(
+            choice.get("message"), dict
+        ):
+            return ""  # Missing/truncated output uses the single invalid-verdict retry.
+        return choice["message"].get("content")
 
     def deepline(self, request_id, parameters):
         if self.job.get("deepline_key_id") is None:

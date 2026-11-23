@@ -31,13 +31,16 @@ def _true_zdr_routes(open_url):
     return matches
 
 
-def endpoint_prices(routes, *, open_url=None):
+def endpoint_prices(routes, *, open_url=None, models=None):
     open_url = open_url or broker._DIRECT_URLOPEN
     rows = []
     providers = {}
     revisions = batch_versions(routes)
+    selected = dict(routes) if models is None else {m: routes[m] for m in models}
+    if not selected:
+        raise ValueError("no collection endpoint selected")
     strict = _true_zdr_routes(open_url)
-    for model, route in routes.items():
+    for model, route in selected.items():
         url = "https://openrouter.ai/api/v1/models/" + model + "/endpoints"
         data = _catalog(url, open_url)
         if data["id"] != model:
@@ -69,7 +72,7 @@ def endpoint_prices(routes, *, open_url=None):
         rows.append({"id": model, "pricing": prices})
     table = broker.price_table_from_models_response(
         {"data": rows},
-        tuple(routes),
+        tuple(selected),
         fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     table["endpoint_providers"] = providers

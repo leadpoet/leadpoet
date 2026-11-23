@@ -196,6 +196,42 @@ def test_metered_judges_use_owner_funding_and_strict_routes(
         )
     assert len(sent) == 2
 
+    channel.job = job
+
+    class Unavailable:
+        def send(self, **request):
+            if status == 200:
+                malformed = {
+                    "id": "gen-no-metadata-" + job["job_id"],
+                    "model": json.loads(request["body"])["model"],
+                    "usage": {"cost": 0.00001},
+                    "openrouter_metadata": {"endpoints": ["invalid"]},
+                }
+                return broker.ProviderResponse(
+                    status, {}, json.dumps(malformed).encode()
+                )
+            return broker.ProviderResponse(
+                status, {}, b'{"error":{"message":"unavailable"}}'
+            )
+
+    channel.transport = Unavailable()
+    for status in (401, 402, 403, 404, 429, 503, 200):
+        evidence = packet(job["job_id"])
+        evidence["steps"][0]["evidence"] = f"Different scoped control {status}"
+        gap = judge.judge_run(
+            policy, assignment, evidence, channel.judge, prompt=PROMPT
+        )
+        expected = "identity_mismatch" if status == 200 else "http_error"
+        assert gap["verifier_unavailable"]["reason"] == expected and not gap["records"]
+        with driver.connect(**dsn) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT http_status, cost_microusd FROM public.collection_call_receipts "
+                "WHERE job_id=%s AND request_id=%s",
+                (job["job_id"], gap["verifier_unavailable"]["request_id"]),
+            )
+            assert cursor.fetchone() == (status, 10 if status == 200 else None)
+        assert channel.usage()["settled_microusd"] == 0
+
 
 def test_restart_requires_the_original_generator_before_finishing_launch(monkeypatch):
     from types import SimpleNamespace
@@ -322,3 +358,194 @@ def test_first_live_job_can_resume_after_its_generator_is_restored(
     assert not calls
     worker.finish_launch(db, pending, objects, policy, approved)
     assert calls == ["collection_launch_finish_v1"]
+
+
+def test_rejudge_ready_reuses_the_generator_and_the_completed_primary(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from uuid import uuid4
+    import json
+    from lab_arena import broker
+    from lab_arena.collection_broker import VERSIONS
+    from lab_arena.collection_workflow import store_artifact
+    from lab_arena.service import LocalObjectStore
+    from scripts import collection_batch, run_locked_collection as worker
+
+    policy = judge.BatchPolicy("frozen-live", "seed", judge.digest(PROMPT))
+    rid, attempt = str(uuid4()), str(uuid4())
+    p = packet(rid)
+    p["checks"] = dict.fromkeys(
+        ("answered", "shape", "privacy", "training_split"), True
+    )
+    pending = dict(
+        job_id=rid,
+        batch_id=policy.batch_id,
+        scenario_id=p["scenario_id"],
+        model=MODELS[0],
+        harness_commit=worker.CHAMPION_REV,
+        miner_hotkey="miner",
+        owner_coldkey="owner",
+        status="ready",
+    )
+    source = dict(
+        run_id=rid,
+        generator=MODELS[0],
+        harness=pending["harness_commit"],
+        miner="miner",
+    )
+    scheduled = judge.assign_judges(policy, [source])[rid]
+    scheduled["overlap"] = True
+    answers = Caller()
+
+    def first_attempt(**request):
+        if answers.requests:
+            raise judge.JudgeUnavailable(
+                request["model"], request["request_id"], "http_error"
+            )
+        return answers(**request)
+
+    prior = judge.judge_run(policy, scheduled, p, first_attempt, prompt=PROMPT)
+    missing = prior["verifier_unavailable"]["model"]
+    obj = LocalObjectStore(tmp_path)
+
+    def store(kind, value):
+        return store_artifact(obj, policy.batch_id, rid, kind, value)
+
+    m = {
+        **pending,
+        "builder_commit": worker.POET_REV,
+        "judge_policy": asdict(policy),
+        "generator": store("generator", {"run": rid, "teacher": MODELS[0]}),
+        "packet": store("judge-input", p),
+        "assessment": store("judge-output", prior),
+    }
+    old = store("manifest", m)["sha256"]
+    approved = dict(
+        harness_commit=worker.CHAMPION_REV,
+        builder_commit=worker.POET_REV,
+        judge_prompt_sha256=policy.prompt_sha256,
+    )
+    pending["artifact_sha256"] = old
+    calls, requests = [], []
+    routes = {m: r.tag for m, r in GENERATOR_ROUTES.items()}
+    routes.update({policy.version(r): "test" for r in policy.roles})
+
+    def rpc(name, args):
+        if name == "collection_reward_schedule_v1":
+            return {
+                "staged": True,
+                "pending": dict(pending),
+                "pilot_evidence": approved,
+            }
+        if name == "collection_launch_finish_v1":
+            calls.append("finish")
+            return {"status": "accepted"}
+        assert (
+            args["p_source"] == old
+            and args["p_attempt"] == attempt
+            and args["p_job"] == rid
+        )
+        if name == "collection_reserve_launch_judge_v1":
+            requests.append(args["p_request"])
+            return {"status": "reserved"}
+        if name == "collection_record_launch_judge_v1":
+            assert (
+                args["p_request"] == requests[-1]
+                and args["p_cost"] == 10
+                and args["p_status"] == 200
+            )
+            return {"status": "recorded"}
+        assert (
+            name == "collection_finish_launch_review_v1"
+            and args["p_requests"] == requests
+        )
+        pending["artifact_sha256"] = args["p_artifact"]
+        return {"artifact_sha256": args["p_artifact"]}
+
+    db = SimpleNamespace(rpc=rpc)
+
+    def prices(routes, *, models):
+        assert tuple(models) == (missing,)
+        pricing = broker.price_table_from_models_response(
+            {
+                "data": [
+                    {
+                        "id": missing,
+                        "pricing": {"prompt": "0.0000001", "completion": "0.0000002"},
+                    }
+                ]
+            },
+            tuple(models),
+            fetched_at="2026-11-23T00:00:00Z",
+        )
+        pricing["endpoint_providers"] = {missing: "test"}
+        return pricing
+
+    monkeypatch.setattr(worker, "endpoint_prices", prices)
+
+    def send(**req):
+        assert req["headers"]["authorization"] == "Bearer owner-test"
+        body = json.loads(req["body"])
+        assert body["model"] == missing and body["provider"]["enforce_distillable_text"]
+        calls.append(missing)
+        return broker.ProviderResponse(
+            200,
+            {},
+            json.dumps(
+                {
+                    "id": "gen-recovered",
+                    "model": missing,
+                    "provider": "test",
+                    "openrouter_metadata": {
+                        "endpoints": {
+                            "available": [
+                                {
+                                    "selected": True,
+                                    "provider": "test",
+                                    "model": VERSIONS[missing],
+                                }
+                            ]
+                        }
+                    },
+                    "usage": {"cost": 0.00001},
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": answers(**body)},
+                        }
+                    ],
+                }
+            ).encode(),
+        )
+
+    transport = SimpleNamespace(send=send)
+    monkeypatch.setattr(collection_batch, "cutover_anchor", lambda *args, **kwargs: {})
+    worker.rejudge_ready(
+        db,
+        obj,
+        transport,
+        {"routes": routes},
+        policy,
+        PROMPT,
+        "owner-test",
+        rid,
+        attempt,
+    )
+    assert calls == [missing, "finish"] and len(requests) == 1
+    updated = worker.ready_launch_evidence(pending, obj, policy, approved)
+    assert updated["assessment"]["records"][:1] == prior["records"]
+    assert len(updated["assessment"]["records"]) == 2 and updated["packet"] == p
+    with pytest.raises(ValueError, match="only an unavailable verifier"):
+        worker.rejudge_ready(
+            db,
+            obj,
+            None,
+            {"routes": {}},
+            policy,
+            PROMPT,
+            "owner-test",
+            rid,
+            str(uuid4()),
+        )
+    assert calls == [missing, "finish"]

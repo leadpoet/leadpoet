@@ -10,6 +10,7 @@ import re
 import sys
 from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
+from uuid import UUID
 
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
@@ -124,9 +125,8 @@ def assignment(job):
     }
 
 
-def finish_launch(database, pending, objects, policy, approved):
+def ready_launch_evidence(pending, objects, policy, approved):
     from lab_arena.collection_judge_review import registered_bundle
-    from scripts.collection_batch import cutover_anchor
 
     if (
         pending["batch_id"] != policy.batch_id
@@ -160,12 +160,122 @@ def finish_launch(database, pending, objects, policy, approved):
         for k in ("answered", "shape", "privacy", "training_split")
     ):
         raise ValueError("first live collection execution is incomplete")
+    return evidence["runs"][0]
+
+
+def complete_launch_verdict(assessment):
+    return (
+        bool(assessment["records"])
+        and not assessment.get("verifier_unavailable")
+        and all(not v["cannot_judge"] for v in assessment["records"])
+    )
+
+
+def finish_launch(database, pending, objects, policy, approved):
+    from scripts.collection_batch import cutover_anchor
+
+    evidence = ready_launch_evidence(pending, objects, policy, approved)
+    if not complete_launch_verdict(evidence["assessment"]):
+        raise ValueError("first live collection job awaits owner verification")
     anchor = cutover_anchor(database, launch_job=pending)
     result = database.rpc(
         "collection_launch_finish_v1", {"p_job": pending["job_id"], "p_anchor": anchor}
     )
     if result.get("status") != "accepted":
         raise ValueError("collection launch acceptance unavailable")
+
+
+def rejudge_ready(
+    database, objects, transport, raw, policy, prompt, judge_key, job_id, attempt_id
+):
+    """Retry only an unavailable owner verdict against the exact stored live execution."""
+    from lab_arena.collection_launch_review import LaunchReviewBroker, finish_review
+    from lab_arena.collection_workflow import store_artifact
+    from scripts.collection_batch import read_artifact
+
+    schedule = database.rpc("collection_reward_schedule_v1", {})
+    pending = schedule.get("pending") or {}
+    if (
+        not schedule.get("staged")
+        or pending.get("status") != "ready"
+        or pending.get("job_id") != job_id
+    ):
+        raise ValueError("requested staged job is not ready for owner adjudication")
+    approved = schedule["pilot_evidence"]
+    evidence = ready_launch_evidence(pending, objects, policy, approved)
+    previous = evidence["assessment"]
+    if not previous.get("verifier_unavailable") or any(
+        v["cannot_judge"] for v in previous["records"]
+    ):
+        raise ValueError(
+            "only an unavailable verifier on the original execution may be retried"
+        )
+    roles = {policy.version(r): r for r in policy.roles}
+    missing_model = previous["verifier_unavailable"]["model"]
+    primary = (
+        previous["records"][0]["judge"] if previous["records"] else roles[missing_model]
+    )
+    prices = endpoint_prices(
+        raw["routes"], models=[missing_model] if previous["records"] else roles
+    )
+    channel = LaunchReviewBroker(
+        database,
+        transport,
+        pending,
+        prices,
+        routes=raw["routes"],
+        judge_key=judge_key,
+        attempt_id=attempt_id,
+    )
+    replacement = judge.judge_run(
+        policy,
+        {"run_id": job_id, "primary": primary, "overlap": previous["overlap"]},
+        evidence["packet"],
+        channel.judge,
+        prompt=prompt,
+        previous=previous,
+    )
+    if not complete_launch_verdict(replacement):
+        raise ValueError(
+            "owner adjudication did not produce a complete verified record"
+        )
+    batch = policy.batch_id
+    original = read_artifact(
+        objects,
+        batch,
+        job_id,
+        "manifest",
+        {"sha256": evidence["manifest_sha256"]},
+        1024 * 1024,
+    )
+    revised = dict(
+        original,
+        assessment=store_artifact(objects, batch, job_id, "judge-output", replacement),
+        judge_recovery={
+            "attempt_id": attempt_id,
+            "prior_manifest_sha256": evidence["manifest_sha256"],
+        },
+    )
+    link = store_artifact(objects, batch, job_id, "manifest", revised)
+    quality = dict(
+        judge.public_result(replacement)["judges"][0],
+        training_status=replacement["status"],
+    )
+    finish_review(
+        database,
+        pending,
+        attempt_id,
+        link["sha256"],
+        quality,
+        channel.completed_requests,
+    )
+    current = database.rpc("collection_reward_schedule_v1", {}).get("pending") or {}
+    if (
+        current.get("job_id") != job_id
+        or current.get("artifact_sha256") != link["sha256"]
+    ):
+        raise ValueError("revised launch evidence is not current")
+    finish_launch(database, current, objects, policy, approved)
 
 
 def run_cohort(
@@ -288,6 +398,19 @@ def run_cohort(
     return completed
 
 
+def evidence_stores():
+    return (
+        PostgrestTransport(
+            os.environ["LAB_ARENA_SUPABASE_URL"],
+            service_key=os.environ["LAB_ARENA_SERVICE_KEY"],
+        ),
+        S3ObjectStore(
+            os.environ["LAB_ARENA_BUCKET"],
+            prefix=os.getenv("LAB_ARENA_OBJECT_PREFIX", ""),
+        ),
+    )
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -295,8 +418,8 @@ def main(argv=None):
     )
     p.add_argument("--batch", type=Path, required=True)
     p.add_argument("--prompt", type=Path, required=True)
-    p.add_argument("--champion-repo", type=Path, required=True)
-    p.add_argument("--poet-repo", type=Path, required=True)
+    p.add_argument("--champion-repo", type=Path)
+    p.add_argument("--poet-repo", type=Path)
     p.add_argument("--max-jobs", type=int, default=1)
     p.add_argument("--research-case-index", type=Path)
     p.add_argument(
@@ -307,6 +430,13 @@ def main(argv=None):
     p.add_argument("--claim-pack", type=Path)
     p.add_argument("--control-pack", type=Path)
     p.add_argument("--preflight", action="store_true")
+    p.add_argument(
+        "--rejudge-ready",
+        type=UUID,
+        nargs=2,
+        metavar=("JOB_UUID", "ATTEMPT_UUID"),
+        help="Retry unavailable owner judgments for one recorded first live job",
+    )
     p.add_argument("--pilot-only", action="store_true", help="Accept only unpaid synthetic qualification jobs")
     args = p.parse_args(argv)
     if args.environment_file:
@@ -318,6 +448,40 @@ def main(argv=None):
     raw = json.loads(args.batch.read_text())
     prompt = json.loads(args.prompt.read_text())
     policy = load_batch(raw, prompt)
+    judge_key = os.getenv("LEADPOET_COLLECTION_JUDGE_KEY") or os.getenv(
+        "LAB_ARENA_OPENROUTER_API_KEY"
+    )
+    if args.rejudge_ready:
+        if (
+            args.pilot_only
+            or args.preflight
+            or args.research_stdio
+            or policy.pilot
+            or os.getenv("LAB_ARENA_COLLECTION_MODE") != "live"
+            or not live_finney_arena()
+            or not judge_key
+        ):
+            p.error(
+                "owner adjudication requires the original live Finney/71 batch and owner credential"
+            )
+        database, objects = evidence_stores()
+        job_id, attempt_id = map(str, args.rejudge_ready)
+        with closing(HttpxProviderTransport()) as transport:
+            rejudge_ready(
+                database,
+                objects,
+                transport,
+                raw,
+                policy,
+                prompt,
+                judge_key,
+                job_id,
+                attempt_id,
+            )
+        print(json.dumps({"job": job_id, "status": "verified"}))
+        return 0
+    if not args.champion_repo or not args.poet_repo:
+        p.error("running generators requires --champion-repo and --poet-repo")
     if args.pilot_only and (
         not policy.pilot or not policy.qualification
         or any(s.startswith("research-") for s in raw["scenario_ids"])
@@ -379,20 +543,13 @@ def main(argv=None):
             or not live_finney_arena()
         ):
             raise ValueError("collection environment/scope mismatch")
-        db = PostgrestTransport(
-            os.environ["LAB_ARENA_SUPABASE_URL"],
-            service_key=os.environ["LAB_ARENA_SERVICE_KEY"],
-        )
+        db, objects = evidence_stores()
         cm = CredentialManager(kms_key_id=os.environ["LAB_ARENA_CREDENTIAL_KMS_KEY_ID"])
         config = chain.ArenaChainConfig(
             os.environ["LAB_ARENA_CHAIN_ENDPOINT"], 71, "finney", 30
         )
         client = chain.ArenaChain(config, chain.connect_substrate(config))
         cutover = chain.load_arena_cutover()
-        objects = S3ObjectStore(
-            os.environ["LAB_ARENA_BUCKET"],
-            prefix=os.getenv("LAB_ARENA_OBJECT_PREFIX", ""),
-        )
         research = None
         protocol_out = sys.stdout.buffer
         if research_index is not None:
@@ -428,8 +585,7 @@ def main(argv=None):
                 epoch=lambda: chain.current_settlement_epoch(client, cutover),
                 sources=sources,
                 owner_lookup=lambda hk: resolve_finalized_owner(client, hk),
-                judge_key=os.getenv("LEADPOET_COLLECTION_JUDGE_KEY")
-                or os.environ.get("LAB_ARENA_OPENROUTER_API_KEY"),
+                judge_key=judge_key,
                 max_jobs=args.max_jobs,
                 research=research,
                 controls=controls,

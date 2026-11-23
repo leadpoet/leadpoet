@@ -26,7 +26,17 @@ def source_bundle(raw, prompt, transport, objects):
     policy = load_batch(raw, prompt)
     jobs = transport.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
     expected_count = len(raw["scenario_ids"]) * len(MODELS)
-    if not isinstance(jobs, list) or len(jobs) != expected_count:
+    if (
+        not isinstance(jobs, list)
+        or not expected_count <= len(jobs) <= 2 * expected_count
+    ):
+        raise ValueError("incomplete registered batch")
+    if any(j["batch_id"] != policy.batch_id or j["mode"] != raw["mode"] for j in jobs):
+        raise ValueError("job differs from frozen batch")
+    failures = []
+    if policy.pilot:
+        jobs, failures = review.terminal_pilot_attempts(jobs)
+    if len(jobs) != expected_count:
         raise ValueError("incomplete registered batch")
     slots = {}
     for job in jobs:
@@ -40,7 +50,10 @@ def source_bundle(raw, prompt, transport, objects):
             or job["scenario_id"] != raw["scenario_ids"][index // len(MODELS)]
             or job["model"] != MODELS[index % len(MODELS)]
             or job["harness_commit"] != CHAMPION_REV
-            or not job.get("artifact_sha256")
+            or (
+                not job.get("artifact_sha256")
+                and not (policy.pilot and job["status"] == "failed")
+            )
         ):
             raise ValueError("job differs from frozen batch")
         slots[index] = job
@@ -58,6 +71,7 @@ def source_bundle(raw, prompt, transport, objects):
         policy,
         [assignment(j) for j in jobs],
         jobs=jobs,
+        failed_attempts=failures,
         objects=objects,
         expected_builder=POET_REV,
         planted=keyed_by_run("control_slots"),
@@ -69,7 +83,12 @@ def source_bundle(raw, prompt, transport, objects):
         for item in bundle["runs"]
         if "control_sha256" in item
     }
-    if checked_controls != raw.get("control_artifacts", {}):
+    expected_controls = {
+        k: v
+        for k, v in raw.get("control_artifacts", {}).items()
+        if slots[int(k)]["status"] != "failed"
+    }
+    if checked_controls != expected_controls:
         raise ValueError("registered control differs from frozen private case")
     return bundle
 

@@ -38,6 +38,7 @@ _PROFILE_FIELDS = {
 _PROFILE_OPTIONAL_FIELDS = {
     "supported_spec_versions",
     "runtime_upgrade_policy",
+    "transaction_version_overrides",
 }
 
 _EXPECTED_SIGNED_EXTENSIONS = (
@@ -232,6 +233,7 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "signed_extensions": list(_EXPECTED_SIGNED_EXTENSIONS),
     }
+    normalized_supported = [spec_version]
     if "supported_spec_versions" in value:
         supported = value.get("supported_spec_versions")
         _require(
@@ -252,6 +254,31 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
             "supported spec versions are not canonical",
         )
         normalized["supported_spec_versions"] = normalized_supported
+    if "transaction_version_overrides" in value:
+        overrides = value.get("transaction_version_overrides")
+        _require(
+            isinstance(overrides, Mapping) and 0 < len(overrides) <= 16,
+            "transaction version overrides are invalid",
+        )
+        normalized_overrides = {}
+        for raw_spec_version in sorted(overrides, key=str):
+            raw_transaction_version = overrides[raw_spec_version]
+            _require(
+                isinstance(raw_spec_version, str)
+                and bool(re.fullmatch(r"0|[1-9][0-9]*", raw_spec_version)),
+                "transaction version overrides are invalid",
+            )
+            override_spec_version = int(raw_spec_version)
+            _require(
+                override_spec_version in normalized_supported,
+                "transaction version overrides must name supported spec versions",
+            )
+            normalized_overrides[raw_spec_version] = _integer(
+                raw_transaction_version,
+                "transaction version override",
+                maximum=(1 << 32) - 1,
+            )
+        normalized["transaction_version_overrides"] = normalized_overrides
     if "runtime_upgrade_policy" in value:
         policy = value.get("runtime_upgrade_policy")
         _require(
@@ -289,12 +316,21 @@ def chain_signing_profiles(
     base = {
         key: item
         for key, item in manifest.items()
-        if key not in {"supported_spec_versions", "runtime_upgrade_policy"}
+        if key not in {
+            "supported_spec_versions",
+            "runtime_upgrade_policy",
+            "transaction_version_overrides",
+        }
     }
-    return tuple(
-        {**base, "spec_version": int(spec_version)}
-        for spec_version in versions
-    )
+    overrides = manifest.get("transaction_version_overrides", {})
+    profiles = []
+    for spec_version in versions:
+        profile = {**base, "spec_version": int(spec_version)}
+        transaction_version = overrides.get(str(spec_version))
+        if transaction_version is not None:
+            profile["transaction_version"] = transaction_version
+        profiles.append(profile)
+    return tuple(profiles)
 
 
 def select_chain_signing_profile(
@@ -340,8 +376,11 @@ def select_chain_signing_profile(
         base = {
             key: item
             for key, item in validate_chain_signing_profile(value).items()
-            if key
-            not in {"supported_spec_versions", "runtime_upgrade_policy"}
+            if key not in {
+                "supported_spec_versions",
+                "runtime_upgrade_policy",
+                "transaction_version_overrides",
+            }
         }
         selected = {**base, "spec_version": spec_version}
     _require(

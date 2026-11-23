@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from lab_arena.api import (
+    TRAINING_OBSERVATION_FINAL_WORKER_LIMIT,
     TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT,
     TRAINING_OBSERVATION_WORKER_LIMIT,
     create_app,
@@ -18,13 +19,16 @@ from tests.lab_arena.api_provider_capacity_test import HEADERS, post_provider, w
 DIGEST = 'sha256:' + '1' * 64
 LIMIT = TRAINING_OBSERVATION_WORKER_LIMIT
 VERIFY_LIMIT = TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT
-# Storage confirmation holds its own reserve, so a mixed burst occupies both.
-MIXED_LIMIT = LIMIT + VERIFY_LIMIT
+FINAL_LIMIT = TRAINING_OBSERVATION_FINAL_WORKER_LIMIT
+# Storage confirmation and the final handback each hold their own reserve, so
+# a mixed burst occupies all three.
+MIXED_LIMIT = LIMIT + VERIFY_LIMIT + FINAL_LIMIT
+BOUNDS = {'segment': LIMIT, 'final': FINAL_LIMIT, 'verify': VERIFY_LIMIT}
 
 
 def bound(kind):
     """Permits available to one request kind on its own."""
-    return VERIFY_LIMIT if kind == 'verify' else LIMIT
+    return BOUNDS[kind]
 
 
 class ObservationService(CaptureService):
@@ -170,7 +174,7 @@ def test_capture_failure_releases_permit_and_preserves_error(kind, run_id):
             else:
                 response = await request(client, kind, run_id)
                 assert response.status_code == 503
-            responses = await asyncio.gather(*(request(client, kind, str(i)) for i in range(LIMIT + 1)))
+            responses = await asyncio.gather(*(request(client, kind, str(i)) for i in range(bound(kind) + 1)))
             assert all(r.status_code in {200, 204} for r in responses)
             assert service.observation_active == 0
     asyncio.run(scenario())
@@ -278,7 +282,7 @@ def test_storage_confirmation_is_not_blocked_by_a_full_upload_queue():
         service = ObservationService(default)
         app = create_app(service)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-            uploads = [request(client, 'final', 'upload' + str(i)) for i in range(LIMIT * 3)]
+            uploads = [request(client, 'segment', 'upload' + str(i)) for i in range(LIMIT * 3)]
             try:
                 await wait_until(lambda: service.observation_active >= LIMIT)
                 assert service.observation_active == LIMIT, 'upload permits are not full'
@@ -296,4 +300,36 @@ def test_storage_confirmation_is_not_blocked_by_a_full_upload_queue():
             finally:
                 service.observation_release.set()
                 await asyncio.wait_for(asyncio.gather(*uploads), 5)
+    asyncio.run(scenario())
+
+
+def test_final_handback_is_not_blocked_by_a_full_segment_queue():
+    """The run-record handback must not queue behind the segment stream.
+
+    The handback is one object write per completed run and is the step that
+    turns a finished run into a stored record. Segments arrive two orders of
+    magnitude more often. While they shared permits, the handback waited for
+    them: on 2026-11-23 between 03:00Z and 04:00Z 26 of 35 handbacks took
+    over 30 s and 11 were abandoned at the runner's 60 s deadline.
+    """
+    async def scenario():
+        default = anyio.to_thread.current_default_thread_limiter()
+        service = ObservationService(default)
+        app = create_app(service)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            segments = [request(client, 'segment', 'segment' + str(i)) for i in range(LIMIT * 3)]
+            try:
+                await wait_until(lambda: service.observation_active >= LIMIT)
+                assert service.observation_active == LIMIT, 'segment permits are not full'
+                # Release only once the handback is already inside the
+                # service: sharing the segment permits would keep it out.
+                handback = request(client, 'final', 'handback')
+                await wait_until(lambda: 'handback' in service.observation_calls)
+                assert service.observation_active == LIMIT + 1
+                service.observation_release.set()
+                assert (await asyncio.wait_for(handback, 3)).status_code == 200
+            finally:
+                service.observation_release.set()
+                await asyncio.wait_for(asyncio.gather(*segments), 5)
+            assert service.observation_active == default.borrowed_tokens == 0
     asyncio.run(scenario())

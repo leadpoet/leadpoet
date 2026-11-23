@@ -58,6 +58,19 @@ TRAINING_OBSERVATION_WORKER_LIMIT = 6
 # 2026-11-22, p50 416 ms), so two permits leave it near 1% utilisation while
 # adding negligible CPU contention next to the six above.
 TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT = 2
+# The final run-record handback (POST .../training-observations) is one
+# object write per completed run, and it is the step that turns a finished
+# run into a stored record. It shared the six permits above with the segment
+# stream, which arrives two orders of magnitude more often, so the handback
+# queued behind the uploads of other runs: on 2026-11-23 between 03:00Z and
+# 04:00Z, 26 of 35 handbacks took over 30 s and 11 were abandoned by the
+# runner at its 60 s deadline, with a p50 of 42 s against a p50 of 618 ms in
+# the quiet hour before. The work itself is a single snapshot build and
+# object put, so that 42 s is queueing, not service time. Demand is tiny next
+# to the segment stream (56 handbacks against 9,474 segments in the 12 h
+# after the 2026-11-23 deploy), so two permits hold it near 1% utilisation
+# and leave the six upload permits and the 32 control-route workers alone.
+TRAINING_OBSERVATION_FINAL_WORKER_LIMIT = 2
 # Public result reads fetch run outputs from the object store, so one slow
 # S3 leg holds a worker for the whole call. On 2026-11-04 these reads ran for
 # up to 22 minutes each; 12-19 of them were in flight at once and the shared
@@ -145,6 +158,7 @@ def create_app(service: ArenaService) -> FastAPI:
     training_input_limiter: Optional[anyio.CapacityLimiter] = None
     training_observation_limiter: Optional[anyio.CapacityLimiter] = None
     training_observation_verify_limiter: Optional[anyio.CapacityLimiter] = None
+    training_observation_final_limiter: Optional[anyio.CapacityLimiter] = None
     public_object_read_limiter: Optional[anyio.CapacityLimiter] = None
 
     def _training_observation_limiter() -> anyio.CapacityLimiter:
@@ -162,6 +176,15 @@ def create_app(service: ArenaService) -> FastAPI:
                 TRAINING_OBSERVATION_VERIFY_WORKER_LIMIT
             )
         return training_observation_verify_limiter
+
+    def _training_observation_final_limiter() -> anyio.CapacityLimiter:
+        nonlocal training_observation_final_limiter
+        if training_observation_final_limiter is None:
+            _ensure_worker_pool()
+            training_observation_final_limiter = anyio.CapacityLimiter(
+                TRAINING_OBSERVATION_FINAL_WORKER_LIMIT
+            )
+        return training_observation_final_limiter
 
     def _public_object_read_limiter() -> anyio.CapacityLimiter:
         nonlocal public_object_read_limiter
@@ -572,7 +595,7 @@ def create_app(service: ArenaService) -> FastAPI:
         ))
         return await capture_call(
             request, service.handle_training_observations, run_id, lease_token, document,
-            worker_limiter=_training_observation_limiter(),
+            worker_limiter=_training_observation_final_limiter(),
         )
 
     @app.post("/arena/v1/runs/{run_id}/training-observation-segments")

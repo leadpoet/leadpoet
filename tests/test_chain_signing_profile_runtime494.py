@@ -29,6 +29,7 @@ def test_finney_runtime_494_uses_mechanism_call_and_transaction_version_two():
     )
     assert profile["spec_version"] == 494
     assert profile["transaction_version"] == 2
+    assert profile["extrinsic_period"] == 32
     assert profile["commit_call_index"] == "0776"
 
     call = encode_commit_timelocked_call(
@@ -48,7 +49,7 @@ def test_finney_runtime_494_uses_mechanism_call_and_transaction_version_two():
     )
     expected = b"".join((
         call,
-        bytes.fromhex("3200"),  # Period 8, current block 9572067.
+        bytes.fromhex("3400"),  # Period 32, current block 9572067.
         b"\x00",  # Nonce.
         b"\x00",  # Zero transaction tip.
         b"\x00",  # Disabled metadata hash.
@@ -68,6 +69,7 @@ def test_finney_runtime_493_keeps_its_measured_transaction_version():
         genesis_hash=GENESIS,
     )
     assert profile["transaction_version"] == 1
+    assert profile["extrinsic_period"] == 32
     assert profile["commit_call_index"] == "0776"
 
 
@@ -93,7 +95,10 @@ def test_chain_signing_profile_expands_transaction_version_overrides():
     profiles = {item["spec_version"]: item for item in chain_signing_profiles(_profile())}
     assert profiles[437]["transaction_version"] == 1
     assert profiles[438]["transaction_version"] == 1
+    assert profiles[437]["extrinsic_period"] == 32
+    assert profiles[438]["extrinsic_period"] == 32
     assert profiles[494]["transaction_version"] == 2
+    assert profiles[494]["extrinsic_period"] == 32
 
 
 def test_transaction_version_override_must_name_supported_spec_version():
@@ -107,4 +112,11 @@ def test_transaction_version_override_keys_are_validated_before_sorting():
     profile = _profile()
     profile["transaction_version_overrides"] = {"494": 2, 494: 2}
     with pytest.raises(HotkeyAuthorityV2Error, match="transaction version overrides"):
+        chain_signing_profiles(profile)
+
+
+def test_extrinsic_period_must_be_a_power_of_two():
+    profile = _profile()
+    profile["extrinsic_period"] = 30
+    with pytest.raises(HotkeyAuthorityV2Error, match="power of two"):
         chain_signing_profiles(profile)

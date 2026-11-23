@@ -182,6 +182,16 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
     spec_version = _integer(
         value.get("spec_version"), "spec_version", maximum=(1 << 32) - 1
     )
+    extrinsic_period = _integer(
+        value.get("extrinsic_period"),
+        "extrinsic_period",
+        minimum=4,
+        maximum=65536,
+    )
+    _require(
+        extrinsic_period & (extrinsic_period - 1) == 0,
+        "extrinsic period must be a power of two",
+    )
     normalized = {
         "schema_version": CHAIN_SIGNING_PROFILE_SCHEMA_VERSION,
         "network": network,
@@ -225,12 +235,7 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
             minimum=1,
             maximum=1024,
         ),
-        "extrinsic_period": _integer(
-            value.get("extrinsic_period"),
-            "extrinsic_period",
-            minimum=4,
-            maximum=65536,
-        ),
+        "extrinsic_period": extrinsic_period,
         "signed_extensions": list(_EXPECTED_SIGNED_EXTENSIONS),
     }
     normalized_supported = [spec_version]

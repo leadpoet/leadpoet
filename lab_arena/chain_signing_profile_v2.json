@@ -4,7 +4,7 @@
   "commit_call_index": "0776",
   "serve_axon_call_index": "0704",
   "commit_reveal_version": 4,
-  "extrinsic_period": 8,
+  "extrinsic_period": 32,
   "genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
   "max_snapshot_block_drift": 64,
   "mechid": 0,

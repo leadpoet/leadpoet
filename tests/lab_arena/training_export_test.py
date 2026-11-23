@@ -220,6 +220,36 @@ def test_partial_judge_is_not_a_negative_or_complete_label():
     assert "final_judge_unavailable" in result["completeness"]["incomplete_reasons"]
 
 
+@pytest.mark.parametrize("dirty_run,judge_status,source_verified", [
+    ("judge", "failed", True),
+    ("judge", "accepted", False),
+    ("execution", "failed", False),
+])
+def test_runtime_source_warning_follows_the_attempt_that_supplied_it(dirty_run, judge_status, source_verified):
+    values = fixture()
+    execution, judge = values["runs"]
+    if judge_status == "failed":
+        judge.update(status="failed", terminal_cause="judge_error", output_ref=None)
+    dirty = judge if dirty_run == "judge" else execution
+    dirty["result_doc"]["resource_summary"].update(
+        validator_source_origin="git_checkout", validator_source_dirty="dirty",
+    )
+
+    result = assemble_example(**values)
+    proof = result["completeness"]
+    assert proof["dimensions"]["source_identity"] is source_verified
+    if dirty_run == "judge" and judge_status == "failed":
+        assert "prior_attempt_source_unverified" in proof["reasons_by_dimension"]["research_process"]
+        judge_gaps = result["related_run_gap_attribution"][judge["run_id"]]["research_process_gaps"]
+        assert "prior_attempt_source_unverified" in judge_gaps
+        assert result["label_authority"]["origin"] == "unavailable"
+        assert "final_judge_unavailable" in proof["incomplete_reasons"]
+        assert "score_run_id" not in result and "judgment" not in result
+        assert not proof["complete"]
+    else:
+        assert "runtime_source_unverified" in proof["reasons_by_dimension"]["source_identity"]
+
+
 def test_ambiguous_judge_and_cross_run_context_fail_closed():
     values = fixture()
     values["runs"].append(dict(values["runs"][1], run_id="judge-duplicate"))

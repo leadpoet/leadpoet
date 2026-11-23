@@ -4,18 +4,22 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 import json
+import os
 import sys
 import time
 
 import requests
 
 from lab_arena import contracts
-from lab_arena.collection_intake import SCOPE, TERMS_HASH, scope_id
+from lab_arena.collection_intake import SCOPE, TASK_SCOPE, TERMS_HASH, scope_id
+from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
     _api_base_url,
     _signed_request,
-    submission_credentials_from_environment,
+    REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS,
+    SUBMISSION_CREDENTIAL_MAX_LENGTH,
+    SUBMISSION_CREDENTIAL_MIN_LENGTH,
 )
 
 
@@ -30,7 +34,7 @@ def add_commands(commands, common_options):
             parser.add_argument(
                 "--daily-cap-usd",
                 required=True,
-                help="Maximum rolling 24h spend on each provider key",
+                help="Maximum rolling 24h spend on your OpenRouter key",
             )
             parser.add_argument(
                 "--accept-terms",
@@ -67,11 +71,26 @@ def run(args, wallet, *, session=requests):
             if action == "register":
                 if args.accept_terms != TERMS_HASH:
                     raise MinerSubmissionError("collection_terms_changed")
-                creds = submission_credentials_from_environment()
-                creds.pop("scrapingdog_api_key", None)
+                creds = {
+                    field: os.environ.get(
+                        REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS[field], ""
+                    )
+                    for field in OPENROUTER_FUNDING_FIELDS
+                }
+                if any(
+                    not SUBMISSION_CREDENTIAL_MIN_LENGTH
+                    <= len(key)
+                    <= SUBMISSION_CREDENTIAL_MAX_LENGTH
+                    or key != key.strip()
+                    for key in creds.values()
+                ):
+                    raise MinerSubmissionError(
+                        "openrouter_funding_credentials_required"
+                    )
                 body = {
                     "daily_cap_microusd": daily_cap(args.daily_cap_usd),
                     "terms_sha256": TERMS_HASH,
+                    "task_scope": TASK_SCOPE,
                     "credentials_sha256": contracts.document_hash(creds),
                 }
             if action == "revoke":

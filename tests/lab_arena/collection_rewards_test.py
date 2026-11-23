@@ -404,3 +404,53 @@ def test_normal_validator_signs_recovers_and_checks_collection_vector(tmp_path):
     source.included = source.revealed = True
     assert orchestrator().run_once(EPOCH) == "finalized"
     assert reports[0]["state_hash"] == accepted["state_hash"]
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+def test_delayed_issuance_reads_pruned_state_only_at_the_same_finalized_height(monkeypatch, same_hash):
+    from async_substrate_interface.errors import SubstrateRequestException
+    from lab_arena import chain
+    from Leadpoet.utils.subnet_epoch import OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+
+    primary_hash = "0x" + "a" * 64
+    archive_hash = primary_hash if same_hash else "0x" + "b" * 64
+    def finalized(number):
+        assert number == 101
+        return primary_hash
+
+    def pruned(_):
+        raise SubstrateRequestException("UnknownBlock: State already discarded")
+
+    cfg = chain.ArenaChainConfig("wss://entrypoint-finney.opentensor.ai:443", 71, "finney", 15)
+    primary = NS(config=cfg, finalized_block_hash=finalized, client=NS(get_events=pruned))
+    calls = []
+    def open_archive(options):
+        assert options.endpoint == OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+        assert options.netuid == 71 and options.network_name == "finney"
+        return object()
+
+    def read_events(digest):
+        assert digest == primary_hash
+        return [{"event": {"module_id":"SubtensorModule", "event_id":"IncentiveAlphaEmittedToMiners",
+                           "attributes":{"netuid":71,"emissions":[1_000_000_000]}}}]
+
+    def price(**params):
+        assert params["params"] == [71] and params["block_hash"] == primary_hash
+        return 10**9
+
+    def archive_finalized(number):
+        calls.append(number)
+        return archive_hash
+
+    archive = NS(config=cfg, finalized_block_hash=archive_finalized,
+                 client=NS(get_events=read_events, runtime_call=price),
+                 close=lambda: calls.append("closed"))
+    monkeypatch.setattr(chain, "connect_substrate", open_archive)
+    monkeypatch.setattr(chain, "ArenaChain", lambda *_: archive)
+    if same_hash:
+        result = fees.emission_valuation(primary, 101, now=lambda: 10, price_source=lambda _: (1_000_000,10))
+        assert result["block_hash"] == primary_hash and result["emission_microusd"] == 1_000_000
+    else:
+        with pytest.raises(ValueError, match="finalized block"):
+            fees.emission_valuation(primary, 101, price_source=lambda _: pytest.fail("no price on a mismatched fork"))
+    assert calls == [101, "closed"]

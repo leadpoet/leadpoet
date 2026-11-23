@@ -29,9 +29,12 @@ def process_job(
     control_packet=None,
     claim_pack=None,
     persist=store_artifact,
+    prepare_launch=False,
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
     run_id, batch = job["job_id"], job["batch_id"]
+    if job.get("deepline_key_id") is None and job["scenario_id"].startswith("research-"):
+        raise ValueError("live research is outside synthetic funding scope")
     if (
         job["harness_commit"] != CHAMPION_REV
         or job["model"] not in MODELS
@@ -116,7 +119,8 @@ def process_job(
         for k in ("answered", "shape", "privacy", "training_split")
     )
     status = "accepted" if complete_execution and not control_ref else "rejected"
-    intake.complete(
-        run_id, job["lease_token"], status, summary, receipt["sha256"], epoch()
-    )
+    if status == "accepted" and prepare_launch:
+        intake.complete(run_id, job["lease_token"], status, summary, receipt["sha256"], epoch(), prepare_launch=True)
+    else:
+        intake.complete(run_id, job["lease_token"], status, summary, receipt["sha256"], epoch())
     return manifest

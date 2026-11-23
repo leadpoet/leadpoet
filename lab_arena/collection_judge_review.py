@@ -268,7 +268,7 @@ def verify_review(bundle, receipt, public_key_pem):
     return report
 
 
-def registered_bundle(policy, assignments, *, planted, drift, jobs, objects):
+def registered_bundle(policy, assignments, *, planted, drift, jobs, objects, expected_builder=None):
     """Reconstruct from server-owned *complete* batch records at release/sign-off.
 
     The caller supplies enrollment/assignment metadata and controls frozen at batch open,
@@ -330,6 +330,7 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects):
             and manifest["judge_policy"] == asdict(policy)
             and manifest["model"] == record["model"]
             and manifest["harness_commit"] == record["harness_commit"]
+            and (expected_builder is None or manifest.get("builder_commit") == expected_builder)
             and manifest["scenario_id"] == record["scenario_id"],
             "registered manifest identity",
         )
@@ -394,6 +395,12 @@ def registered_bundle(policy, assignments, *, planted, drift, jobs, objects):
                 )
         else:
             judge._require(control is None, "unexpected control case on generation job")
+            judge._require(isinstance(manifest.get("generator"), dict), "missing generator upload")
+            row = verified(rid, "generator", manifest["generator"], 128 * 1024 * 1024)
+            judge._require(
+                row.get("run") == rid and row.get("teacher") == record["model"],
+                "generator identity differs from registered job",
+            )
         runs.append(
             {
                 "packet": packet,

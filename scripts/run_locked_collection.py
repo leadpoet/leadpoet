@@ -14,8 +14,8 @@ from pathlib import Path
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
 from lab_arena.collection_prices import endpoint_prices
-from lab_arena.collection_broker import CollectionBroker, VERSIONS
-from lab_arena.collection_intake import MODELS, CollectionIntake
+from lab_arena.collection_broker import CollectionBroker, batch_versions
+from lab_arena.collection_intake import GENERATOR_ROUTES, MODELS, CollectionIntake, live_finney_arena
 from lab_arena.collection_worker import process_job
 from lab_arena.collection_workflow import (
     CHAMPION_REV,
@@ -70,18 +70,25 @@ def load_batch(raw, prompt):
         for n in raw["budgets_microusd"].values()
     ):
         raise ValueError("every model needs a bounded positive budget")
-    judges = {"anthropic/claude-fable-5.2", "openai/gpt-6.2-astra"}
-    if set(raw["routes"]) != set(MODELS) | judges or not all(
+    revisions = batch_versions(raw["routes"])
+    qualification = set(judge.QUALIFICATION_JUDGES) <= revisions.keys()
+    if qualification and raw["mode"] != "pilot":
+        raise ValueError("candidate judges require a qualification pilot")
+    if not all(
         re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", v) for v in raw["routes"].values()
     ):
         raise ValueError("every generator and judge needs one pinned provider route")
+    if any(
+        raw["routes"][model] != route.tag for model, route in GENERATOR_ROUTES.items()
+    ):
+        raise ValueError("unverified generator route")
     bundle_hash = judge.digest(
         {
             "manifest": raw,
             "prompt": judge.digest(prompt),
             "champion": CHAMPION_REV,
             "builder": POET_REV,
-            "model_revisions": VERSIONS,
+            "model_revisions": revisions,
         }
     )
     thresholds = raw.get("thresholds", {})
@@ -91,11 +98,15 @@ def load_batch(raw, prompt):
         "agreement_percent",
     }:
         raise ValueError("unknown batch threshold")
+    versions = {}
+    if qualification:
+        versions["fable_version"], versions["astra_version"] = judge.QUALIFICATION_JUDGES
     policy = judge.BatchPolicy(
         raw["name"] + "-" + bundle_hash[:24],
         raw["seed"],
         judge.digest(prompt),
         pilot=raw["mode"] == "pilot",
+        **versions,
         **thresholds,
     )
     judge.validate_prompt(policy, prompt)
@@ -111,6 +122,50 @@ def assignment(job):
         "slot": job["slot"],
         "cohort": job["slot"],
     }
+
+
+def finish_launch(database, pending, objects, policy, approved):
+    from lab_arena.collection_judge_review import registered_bundle
+    from scripts.collection_batch import cutover_anchor
+
+    if (
+        pending["batch_id"] != policy.batch_id
+        or policy.pilot
+        or pending["harness_commit"] != CHAMPION_REV
+        or approved["harness_commit"] != CHAMPION_REV
+        or approved["builder_commit"] != POET_REV
+        or approved["judge_prompt_sha256"] != policy.prompt_sha256
+    ):
+        raise ValueError("staged launch differs from calibrated live batch")
+    job = pending["job_id"]
+    evidence = registered_bundle(
+        policy,
+        [
+            {
+                "run_id": job,
+                "generator": pending["model"],
+                "harness": pending["harness_commit"],
+                "miner": pending["miner_hotkey"],
+            }
+        ],
+        jobs=[pending],
+        objects=objects,
+        planted={},
+        drift={},
+        expected_builder=POET_REV,
+    )
+    checks = evidence["runs"][0]["packet"]["checks"]
+    if not all(
+        checks.get(k) is True
+        for k in ("answered", "shape", "privacy", "training_split")
+    ):
+        raise ValueError("first live collection execution is incomplete")
+    anchor = cutover_anchor(database, launch_job=pending)
+    result = database.rpc(
+        "collection_launch_finish_v1", {"p_job": pending["job_id"], "p_anchor": anchor}
+    )
+    if result.get("status") != "accepted":
+        raise ValueError("collection launch acceptance unavailable")
 
 
 def run_cohort(
@@ -132,6 +187,7 @@ def run_cohort(
     controls=None,
     claim_pack=None,
 ):
+    staged = False
     ceiling = dict(raw["budgets_microusd"])
     fees = dict.fromkeys(MODELS, 0)
     if not judge_key:
@@ -140,6 +196,12 @@ def run_cohort(
         schedule = database.rpc("collection_reward_schedule_v1", {})
         if not schedule or epoch() < schedule["first_epoch"] - 1:
             raise ValueError("payout cutover not ready")
+        staged = schedule.get("staged", False)
+        if staged and schedule.get("pending"):
+            pending = schedule["pending"]
+            if pending["status"] == "ready":
+                finish_launch(database, pending, objects, policy, schedule["pilot_evidence"])
+            return 0
         approved = schedule["pilot_evidence"]
         (family,) = {
             ("research" if sid.startswith("research-") else sid[0])
@@ -193,6 +255,7 @@ def run_cohort(
                 research=research,
                 control_packet=controls.bind(job) if controls else None,
                 claim_pack=claim_pack,
+                prepare_launch=staged,
             )
         except Exception as exc:
             # Never print raw model output, arguments, credentials or provider messages.
@@ -217,6 +280,11 @@ def run_cohort(
             flush=True,
         )
         completed += 1
+        if staged:
+            pending = database.rpc("collection_reward_schedule_v1", {}).get("pending")
+            if pending and pending["status"] == "ready":
+                finish_launch(database, pending, objects, policy, approved)
+            break
     return completed
 
 
@@ -239,6 +307,7 @@ def main(argv=None):
     p.add_argument("--claim-pack", type=Path)
     p.add_argument("--control-pack", type=Path)
     p.add_argument("--preflight", action="store_true")
+    p.add_argument("--pilot-only", action="store_true", help="Accept only unpaid synthetic qualification jobs")
     args = p.parse_args(argv)
     if args.environment_file:
         from scripts.run_lab_arena_service import load_scoped_environment
@@ -249,6 +318,11 @@ def main(argv=None):
     raw = json.loads(args.batch.read_text())
     prompt = json.loads(args.prompt.read_text())
     policy = load_batch(raw, prompt)
+    if args.pilot_only and (
+        not policy.pilot or not policy.qualification
+        or any(s.startswith("research-") for s in raw["scenario_ids"])
+    ):
+        p.error("the pilot worker requires a synthetic qualification batch")
     controls = ControlPack(
         raw,
         (
@@ -302,8 +376,7 @@ def main(argv=None):
         mode = os.environ.get("LAB_ARENA_COLLECTION_MODE", "off")
         if (
             mode != raw["mode"]
-            or os.environ.get("LAB_ARENA_NETWORK") != "finney"
-            or os.environ.get("LAB_ARENA_NETUID") != "71"
+            or not live_finney_arena()
         ):
             raise ValueError("collection environment/scope mismatch")
         db = PostgrestTransport(
@@ -338,6 +411,8 @@ def main(argv=None):
             research = RemoteResearch(open_channel, cases.load, cases.grade)
         with ExitStack() as stack:
             stack.callback(client.close)
+            # Confirm the finalized genesis and subnet before even an unpaid lease.
+            chain.current_settlement_epoch(client, cutover)
             transport = stack.enter_context(closing(HttpxProviderTransport()))
             if args.research_stdio:
                 stack.enter_context(redirect_stdout(sys.stderr))
@@ -360,6 +435,8 @@ def main(argv=None):
                 controls=controls,
                 claim_pack=claim_pack,
             )
+            if completed == 0 and not args.research_stdio:
+                print(json.dumps({"batch": policy.batch_id, "status": "idle"}), flush=True)
             if args.research_stdio and completed == 0:
                 from lab_arena.collection_research import send
 

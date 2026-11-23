@@ -167,7 +167,7 @@ def _steps(messages, reference, final_output):
             if len(action) > 8192:
                 raise IncompleteEvidence("action_exceeds_limit")
             reasoning = m.get("reasoning") or m.get("reasoning_content")
-            if reasoning and len(reasoning) > 8192:
+            if reasoning and len(reasoning) > judge.MAX_VISIBLE_REASONING_CHARS:
                 raise IncompleteEvidence("visible_reasoning_exceeds_limit")
             turns.append(
                 (

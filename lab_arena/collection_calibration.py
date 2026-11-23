@@ -29,6 +29,7 @@ def compile_pilot(transport, bundle, receipt, pinned_public_key_pem, objects):
         drift=bundle["drift"],
         jobs=rows,
         objects=objects,
+        expected_builder=POET_REV,
     )
     if judge.digest(verified) != judge.digest(bundle):
         raise ValueError("submitted pilot review differs from stored artifacts")

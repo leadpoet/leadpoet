@@ -1683,7 +1683,7 @@ class ArenaService:
         existing = self._store.get_round(round_id)
         if existing is not None:
             return self._existing_round_configuration_for_create(existing)
-        if self.collection_mode() == "live" or self._collection_reward_start() is not None:
+        if self._collection_reward_start() is not None:
             raise ServiceError("champion_rounds_replaced_by_collection", 410)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
         checkpoint_policy = contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
@@ -1933,7 +1933,7 @@ class ArenaService:
         second call finds the round it created.
         """
 
-        if self.collection_mode() == "live" or self._collection_reward_start() is not None:
+        if self._collection_reward_start() is not None:
             return {"status": "disabled"}
         defaults = self._config.defaults
         # A round made after a late startup can have tomorrow's submission
@@ -2771,7 +2771,9 @@ class ArenaService:
         try:
             if register:
                 self._enforce_submission_request_limit(hk)
-                if hk in self._config.banned_hotkeys_source() or hk == self._config.defaults.baseline_hotkey:
+                if hk in self._config.banned_hotkeys_source() or hk in (
+                    self._config.defaults.baseline_hotkey, self._config.accepted_burn_hotkey,
+                ):
                     raise ServiceError("collection_ineligible_hotkey", 403)
                 if self._config.credential_manager is None:
                     raise ServiceError("credential_validation_unavailable", 503)

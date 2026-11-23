@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for an eligible miner in the current synthetic pilot
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=5min
+Unit=leadpoet-collection-pilot.service
+
+[Install]
+WantedBy=timers.target

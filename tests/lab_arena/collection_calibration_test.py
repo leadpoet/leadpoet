@@ -7,7 +7,7 @@ from bittensor_wallet import Keypair
 import pytest
 from psycopg2.extras import Json
 
-from lab_arena.collection_intake import MODELS
+from lab_arena.collection_intake import MODELS, TASK_SCOPE, TERMS_HASH
 from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     database_with_lab_arena_migration,
@@ -23,6 +23,10 @@ def db():
             "721-locked-collection-reward-epoch.sql",
             "722-collection-call-budget.sql",
             "723-collection-pilot-prices.sql",
+            "724-collection-scenario-ranking.sql",
+            "725-collection-generator-roster.sql",
+            "726-collection-first-paid-job.sql",
+            "727-collection-synthetic-funding.sql",
         )
     )
 
@@ -150,12 +154,97 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
                 (Json(dict(proof, prices={"C": dict.fromkeys(MODELS, 10000)})),),
             )
         q.execute("ROLLBACK TO altered")
+        # Even an approved pilot cannot retire champions with no earned live quote.
+        with pytest.raises(pg.Error, match="first paid collection job"):
+            q.execute(
+                "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,101,%s)",
+                (Json(proof),),
+            )
+            q.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        q.execute("ROLLBACK TO altered")
         q.execute(
-            "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,101,%s)",
+            "INSERT INTO public.collection_reward_launch VALUES ('finney',71,101,%s)",
             (Json(proof),),
         )
-        q.execute("SELECT public.collection_reward_schedule_v1()")
-        assert q.fetchone()[0]["pilot_evidence"] == proof
+        q.execute("SELECT public.collection_reward_start_v1(), public.collection_reward_schedule_v1()")
+        start, staged = q.fetchone()
+        assert start == {"first_epoch": None}
+        assert staged["staged"] and staged["pilot_evidence"] == proof
+        q.execute("SAVEPOINT staged")
+        q.execute("DELETE FROM public.collection_reward_launch")
+        q.execute("SELECT public.collection_reward_schedule_v1(), public.collection_reward_start_v1()")
+        assert q.fetchone() == ({}, {"first_epoch": None})
+        q.execute("ROLLBACK TO staged")
+        live_job, live_batch, token = str(uuid4()), "test-live", "sha256:" + "b" * 64
+        live_reg, live_orr = str(uuid4()), str(uuid4())
+        consent = {"body": {"task_scope": TASK_SCOPE, "terms_sha256": TERMS_HASH}}
+        q.execute("SET LOCAL ROLE lab_arena_service")
+        q.execute("SELECT public.collection_register_v1(%s,%s,%s,'live',%s,10000000,%s,NULL)",
+                  (live_reg, miner, miner, Json(consent),
+                   Json({"key_id": live_orr, "fingerprint": "sha256:" + "3"*64, "ciphertext_b64": "fixture"})))
+        assert q.fetchone()[0]["status"] == "enrolled"
+        fee = result["prices"]["C"][MODELS[0]]
+        q.execute("SELECT public.collection_claim_v1(%s,%s,%s,'live',%s,%s,%s,%s,%s,%s)",
+                  (live_job, token, live_batch, commit, Json(["C01-s2001"]), Json(MODELS),
+                   Json(result["prices"]["C"]), Json(result["budgets"]["C"]), TERMS_HASH))
+        claimed = q.fetchone()[0]
+        assert claimed["job_id"] == live_job and claimed["deepline_key_id"] is None
+        assert claimed["price_microusd"] == fee and claimed["openrouter_key_id"] == live_orr
+        q.execute("RESET ROLE")
+        q.execute("SAVEPOINT leased")
+        with pytest.raises(pg.Error, match="running collection job"):
+            q.execute("DELETE FROM public.collection_reward_launch")
+        q.execute("ROLLBACK TO leased")
+        args = (live_job, token, Json({}), "sha256:" + "f" * 64)
+        prepare_sql = "SELECT public.collection_prepare_launch_v1(%s,%s,%s,%s)"
+        finish_sql = "SELECT public.collection_launch_finish_v1(%s,%s)"
+        anchor = dict(proof["cutover_anchor"], miner_hotkey=miner)
+        with pytest.raises(pg.Error, match="settled first paid collection job"):
+            q.execute(prepare_sql, args)
+        q.execute("ROLLBACK TO leased")
+        q.execute("INSERT INTO public.collection_calls(job_id,request_id,provider,key_id,request_hash,reserved_microusd) "
+                  "VALUES (%s,'first','openrouter',%s,%s,500)", (live_job,live_orr,"a"*64))
+        q.execute("INSERT INTO public.collection_call_receipts(job_id,request_id,response_hash,provider_id,cost_microusd,http_status) "
+                  "VALUES (%s,'first',%s,%s,100,200)", (live_job,"b"*64,live_job))
+        q.execute(prepare_sql, args)
+        assert q.fetchone()[0]["status"] == "ready"
+        q.execute(prepare_sql, args)
+        assert q.fetchone()[0]["status"] == "ready"
+        # A new worker can resume only the terminal acceptance without any provider key or old lease token.
+        q.execute("SELECT public.collection_reward_schedule_v1(),public.collection_reward_start_v1()")
+        pending, champion = q.fetchone()
+        assert pending["pending"] == {
+            "job_id": live_job, "miner_hotkey": miner, "owner_coldkey": miner, "status": "ready",
+            "batch_id": live_batch, "model": MODELS[0], "scenario_id": "C01-s2001",
+            "harness_commit": commit, "artifact_sha256": args[-1],
+        }
+        assert champion == {"first_epoch": None}
+        conn.commit()
+        with pg.connect(**dsn) as independent, independent.cursor() as fresh:
+            fresh.execute("SET LOCAL ROLE lab_arena_service")
+            fresh.execute("SELECT public.collection_reward_schedule_v1(),public.collection_reward_start_v1()")
+            resumed, before = fresh.fetchone()
+            assert resumed["pending"] == pending["pending"] and before["first_epoch"] is None
+            fresh.execute("SELECT has_table_privilege(current_user,'public.collection_reward_launch','INSERT')")
+            assert fresh.fetchone() == (False,)
+        q.execute("SAVEPOINT paid")
+        with pytest.raises(pg.Error, match="finalized legacy epoch readback"):
+            q.execute(finish_sql, (live_job, Json(dict(anchor, observed_at=int(time.time()) - 150))))
+        q.execute("ROLLBACK TO paid")
+        q.execute("SELECT public.collection_reward_start_v1(),status FROM public.collection_jobs WHERE job_id=%s", (live_job,))
+        assert q.fetchone() == ({"first_epoch": None}, "ready")
+        q.execute(finish_sql, (live_job, Json(anchor)))
+        assert q.fetchone()[0]["status"] == "accepted"
+        q.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        q.execute(finish_sql, (live_job, Json(anchor)))
+        assert q.fetchone()[0]["status"] == "accepted"
+        q.execute("SELECT public.collection_reward_start_v1(),public.collection_reward_quotes_v1(101),"
+                  "public.collection_reward_quotes_v1(102),public.collection_reward_schedule_v1()")
+        active, first, second, schedule = q.fetchone()
+        assert active == {"first_epoch": 101}
+        assert first["job_count"] == 1 and first["quotes_microusd"] == {miner: fee}
+        assert second["job_count"] == 0
+        assert not schedule.get("staged")
         q.execute(
             "INSERT INTO public.collection_calls(job_id,request_id,provider,key_id,request_hash,reserved_microusd) "
             "VALUES (%s,'missing','deepline',%s,%s,30)",
@@ -163,3 +252,56 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
         )
         with pytest.raises(pg.Error, match="incomplete"):
             q.execute("SELECT public.collection_pilot_fees_v1(%s,'[]')", (batch,))
+
+
+def test_live_enrollment_preserves_champion_rounds_until_activation():
+    from datetime import timedelta
+    from tests.lab_arena.reasoning_activation_creation_test import CUTOFF, service_and_store
+    from lab_arena.service import ServiceError
+
+    service, store = service_and_store()
+    service.collection_mode = lambda: "live"
+    service._collection_reward_start = lambda: None
+    service.open_round = lambda **_: {"round_id": "current", "status": "open"}
+    assert service.ensure_daily_round()["round_id"] == "current"
+    before = service.create_round(CUTOFF)
+    service._collection_reward_start = lambda: 101
+    assert service.ensure_daily_round() == {"status": "disabled"}
+    assert service.create_round(CUTOFF) == before
+    with pytest.raises(ServiceError, match="champion_rounds_replaced"):
+        service.create_round(CUTOFF + timedelta(days=1))
+
+
+def test_worker_resumes_completed_launch_before_claiming_another_job(monkeypatch):
+    from types import SimpleNamespace
+    from scripts import run_locked_collection as worker
+
+    pending = {"status": "ready", "job_id": str(uuid4())}
+    db = SimpleNamespace(rpc=lambda name, args: {"first_epoch": 101, "staged": True, "pending": pending, "pilot_evidence": {}})
+    resumed = []
+    monkeypatch.setattr(worker, "finish_launch", lambda database, job, *args: resumed.append(job))
+    assert worker.run_cohort(raw={"budgets_microusd": {}}, policy=SimpleNamespace(pilot=False), prompt={},
+                             intake=None, database=db, objects=None, transport=None, pricing=None, epoch=lambda: 100,
+                             sources=None, owner_lookup=None, judge_key="fixture", max_jobs=1) == 0
+    assert resumed == [pending]
+
+
+def test_burn_target_cannot_enroll_even_with_a_different_baseline(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from lab_arena import contracts
+    from lab_arena.service import ArenaService, ServiceError
+    from tests.lab_arena.collection_intake_test import registration
+
+    signed, creds = registration("X", "live")
+    service = object.__new__(ArenaService)
+    service._clock = lambda: datetime.now(timezone.utc)
+    service._config = SimpleNamespace(verify_signature=lambda *_: True, credential_manager=None,
+                                      defaults=SimpleNamespace(baseline_hotkey="5" + "Y" * 47),
+                                      accepted_burn_hotkey=signed["hotkey"], banned_hotkeys_source=lambda: ())
+    service._store = SimpleNamespace(_transport=None)
+    service.collection_mode = lambda: "live"
+    service._enforce_submission_request_limit = lambda _: None
+    monkeypatch.setattr(contracts, "validate_signed_request", lambda *a, **kw: signed)
+    with pytest.raises(ServiceError, match="collection_ineligible_hotkey"):
+        service.handle_collection_request("register", {"authorization": signed, "credentials": creds})

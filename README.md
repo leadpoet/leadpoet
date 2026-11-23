@@ -18,7 +18,9 @@ Subnet 71 is a Bittensor subnet where miners improve an open sales-research agen
 
 ## Locked collection
 
-The new collection program uses funded keys, a pinned agent and fixed per-run prices. The [collection guide](docs/locked-collection.md) covers enrollment, the six generators, the pilot and payout activation. Check the gateway's collection terms for availability. The following competition instructions apply to legacy rounds.
+Miners can opt in to fund simulated sales workflows with an OpenRouter key. The subnet runs the agent and records its decisions to help train an open sales model. You set a daily spending limit and can revoke access.
+
+Pilot runs use paid API credits and earn no emissions. Champion rewards continue during testing. Run `leadpoet collection-terms` to check availability. See the [collection guide](docs/locked-collection.md) for setup and reward rules.
 
 ## Daily schedule
 

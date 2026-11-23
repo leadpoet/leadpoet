@@ -35,14 +35,7 @@ def tao_usd(now: int) -> tuple[int, int]:
     return int(price * 10**6), updated
 
 
-def emission_valuation(
-    chain, start_block: int, *, now=time.time, price_source=tao_usd
-) -> dict:
-    """Use the finalized epoch-boundary miner distribution and alpha spot price.
-
-    This values the weight target. Final emitted balances depend on Subtensor consensus.
-    """
-    block_hash = chain.finalized_block_hash(start_block)
+def _epoch_alpha_values(chain, block_hash):
     events = chain.client.get_events(block_hash)
     distributions = [
         event["event"]["attributes"]["emissions"]
@@ -69,6 +62,33 @@ def emission_valuation(
     price = getattr(price, "value", price)
     if type(price) is not int or price <= 0:
         raise ValueError("invalid finalized alpha/TAO price")
+    return alpha, price
+
+
+def emission_valuation(
+    chain, start_block: int, *, now=time.time, price_source=tao_usd
+) -> dict:
+    """Value the exact finalized SN71 epoch boundary, including on delayed issuance."""
+    from async_substrate_interface.errors import SubstrateRequestException
+
+    block_hash = chain.finalized_block_hash(start_block)
+    try:
+        alpha, price = _epoch_alpha_values(chain, block_hash)
+    except SubstrateRequestException as exc:
+        if "state already discarded" not in str(exc).lower() or (chain.config.network_name, chain.config.netuid) != ("finney", 71):
+            raise
+        from dataclasses import replace
+        from Leadpoet.utils.subnet_epoch import OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+        from lab_arena import chain as chain_module
+
+        config = replace(chain.config, endpoint=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT)
+        archive = chain_module.ArenaChain(config, chain_module.connect_substrate(config))
+        try:
+            if archive.finalized_block_hash(start_block) != block_hash:
+                raise ValueError("archive finalized block differs from primary")
+            alpha, price = _epoch_alpha_values(archive, block_hash)
+        finally:
+            archive.close()
     observed = int(now())
     usd, updated = price_source(observed)
     return {

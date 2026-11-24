@@ -1,0 +1,15 @@
+[Unit]
+Description=Read SN71 collection participation and finalized validator weights
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ec2-user
+Group=ec2-user
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+WorkingDirectory=/home/ec2-user/.local/share/leadpoet/collection/watch-runner
+Environment=PYTHONDONTWRITEBYTECODE=1 AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
+ExecStart=/home/ec2-user/venv311/bin/python3 -B -m scripts.collection_participation_watch --environment-file /home/ec2-user/.config/leadpoet/gateway.env --state-directory /home/ec2-user/.local/share/leadpoet/collection/watch
+TimeoutStartSec=3min

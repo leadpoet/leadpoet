@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for funded SN71 runs, admission failures and reward transitions
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=10min
+
+[Install]
+WantedBy=timers.target

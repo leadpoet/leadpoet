@@ -122,7 +122,11 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     from lab_arena import collection_intake as intake, collection_trajectories as traces
     from lab_arena.collection_broker import batch_versions
     from lab_arena.collection_experiment_export import verified_panel
-    from lab_arena.collection_quality import require_release_partition, verify_split, PARTITIONS
+    from lab_arena.collection_quality import (
+        require_release_partition,
+        verify_split,
+        PARTITIONS,
+    )
     from lab_arena.collection_workflow import store_artifact
 
     terms = raw.get("terms_sha256")
@@ -133,67 +137,165 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     policy = load_batch(raw, prompt)
     split = raw["split_manifest"]
     split_hash = "sha256:" + judge.digest(split)
-    require_release_partition({"cases":[{"scenario_id":sid} for sid in raw["scenario_ids"]],"split_sha256":split_hash})
+    require_release_partition(
+        {
+            "cases": [{"scenario_id": sid} for sid in raw["scenario_ids"]],
+            "split_sha256": split_hash,
+        }
+    )
     approved = verified_panel(database, objects, raw, policy, **qualification)
+    if not raw.get("capture_version"):
+        raise ValueError(
+            "comparison training release requires a checkpointed transcript"
+        )
     bundle = source_bundle(raw, prompt, database, objects)
-    rows = database.rpc("collection_batch_jobs_v1", {"p_batch":policy.batch_id})
-    grants=traces.verified_grants(database,policy.batch_id,rows,mode=raw["mode"],scope=intake.TASK_SCOPE,digest=terms)
-    by_id={item["packet"]["run_id"]:item for item in bundle["runs"]}
-    failed={item["run_id"] for item in bundle.get("failed_attempts",())}
-    if set(by_id)|failed != set(grants):
+    rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
+    grants = traces.verified_grants(
+        database,
+        policy.batch_id,
+        rows,
+        mode=raw["mode"],
+        scope=intake.TASK_SCOPE,
+        digest=terms,
+    )
+    by_id = {item["packet"]["run_id"]: item for item in bundle["runs"]}
+    failed = {item["run_id"] for item in bundle.get("failed_attempts", ())}
+    if set(by_id) | failed != set(grants):
         raise ValueError("registered jobs changed during release")
-    controls=set(bundle["planted"])|set(bundle["drift"])
-    agent,builder=comparison_revisions(raw)
-    revisions=batch_versions(raw["routes"])
-    settings_hash="sha256:"+judge.digest(raw)
-    if output.exists():raise FileExistsError(output)
+    controls = set(bundle["planted"]) | set(bundle["drift"])
+    agent, builder = comparison_revisions(raw)
+    revisions = batch_versions(raw["routes"])
+    settings_hash = "sha256:" + judge.digest(raw)
+    if output.exists():
+        raise FileExistsError(output)
     with tempfile.TemporaryDirectory(dir=output.parent) as td:
-        stage=Path(td)/"trajectories.zip"
-        with ZipFile(stage,"x",compression=ZIP_DEFLATED) as z:
-            full=traces.TrajectoryArchive(z)
-            for job in sorted(rows,key=lambda r:(r["slot"],r["attempt"])):
-                rid=job["job_id"]
-                if rid in controls or str(job["slot"]) in raw["control_slots"] or str(job["slot"]) in raw["drift_slots"]:
-                    full.stats["excluded_controls"]+=1
+        stage = Path(td) / "trajectories.zip"
+        with ZipFile(stage, "x", compression=ZIP_DEFLATED) as z:
+            full = traces.TrajectoryArchive(z)
+            for job in sorted(rows, key=lambda r: (r["slot"], r["attempt"])):
+                rid = job["job_id"]
+                if (
+                    rid in controls
+                    or str(job["slot"]) in raw["control_slots"]
+                    or str(job["slot"]) in raw["drift_slots"]
+                ):
+                    full.stats["excluded_controls"] += 1
                     continue
-                auth=grants[rid]
-                billed=dict(job,**{k:auth[k] for k in ("miner_cost_microusd","generator_calls","unresolved")})
-                packet=None;assessment=None;hold=None;stamp=None
+                auth = grants[rid]
+                billed = dict(
+                    job,
+                    **{
+                        k: auth[k]
+                        for k in (
+                            "miner_cost_microusd",
+                            "generator_calls",
+                            "unresolved",
+                        )
+                    },
+                )
+                packet = None
+                assessment = None
+                hold = None
+                stamp = None
                 if rid in by_id:
-                    item=by_id[rid]
-                    if item["manifest_sha256"]!=job["artifact_sha256"]:
+                    item = by_id[rid]
+                    if item["manifest_sha256"] != job["artifact_sha256"]:
                         raise ValueError("registered generator manifest changed")
-                    manifest=read_artifact(objects,policy.batch_id,rid,"manifest",{"sha256":job["artifact_sha256"]},1024*1024)
-                    generator=read_artifact(objects,policy.batch_id,rid,"generator",manifest["generator"],128*1024*1024)
-                    packet=item["packet"];assessment=item["assessment"];stamp=verify_split(packet["split"],split)
-                    if generator.get("split")!={k:stamp[k] for k in PARTITIONS}:
+                    manifest = read_artifact(
+                        objects,
+                        policy.batch_id,
+                        rid,
+                        "manifest",
+                        {"sha256": job["artifact_sha256"]},
+                        1024 * 1024,
+                    )
+                    generator = read_artifact(
+                        objects,
+                        policy.batch_id,
+                        rid,
+                        "generator",
+                        manifest["generator"],
+                        128 * 1024 * 1024,
+                    )
+                    packet = item["packet"]
+                    assessment = item["assessment"]
+                    stamp = verify_split(packet["split"], split)
+                    if generator.get("split") != {k: stamp[k] for k in PARTITIONS}:
                         raise ValueError("comparison transcript differs from its split")
-                    calls=[ev for ev in (generator.get("evidence") or {}).get("events",[]) if ev["kind"]=="reply"]
-                    if not billed["generator_calls"] or not billed["miner_cost_microusd"]:
-                        raise ValueError("complete generator has no verified funded call")
+                    calls = [
+                        ev
+                        for ev in (generator.get("evidence") or {}).get("events", [])
+                        if ev["kind"] == "reply"
+                    ]
+                    if (
+                        not billed["generator_calls"]
+                        or not billed["miner_cost_microusd"]
+                    ):
+                        raise ValueError(
+                            "complete generator has no verified funded call"
+                        )
                 else:
-                    saved=f"collection/{policy.batch_id}/{rid}/saved/"
-                    pointer=objects.get_optional_bounded(saved+"split.json",8192)
+                    saved = f"collection/{policy.batch_id}/{rid}/saved/"
+                    pointer = objects.get_optional_bounded(saved + "split.json", 8192)
                     if pointer:
-                        stamp=verify_split(read_artifact(objects,policy.batch_id,rid,"split",json.loads(pointer),1024*1024),split)
-                    original=bundle.get("failed_journals",{}).get(rid,{}).get("events")
-                    generator,calls,hold=traces.partial_generator(objects,job,original)
-                    if not stamp:hold="missing_verified_split"
-                    if objects.get_optional_bounded(saved+"quarantine.json",8192) is not None:hold="quarantine"
-                full.write(traces.trajectory_row(job=billed,generator=None if hold else generator,packet=packet,calls=calls,
-                    settings_sha256=settings_hash,harness=agent,builder=builder,revision=revisions[job["model"]],
-                    route=raw["routes"][job["model"]],split=stamp,terms_sha256=terms,assessment=assessment,
-                    partial=rid in failed,hold=hold))
-            result=full.finish()
-            metadata={"schema":traces.SCHEMA,"batch_id":policy.batch_id,"settings_sha256":settings_hash,"split_sha256":split_hash,
-                      "qualification_sha256":"sha256:"+judge.digest(approved),"rows":result.get("trajectory_rows",0),**result}
-            z.writestr("metadata.json",judge._json(metadata))
-        os.chmod(stage,0o600)
-        store_artifact(objects,policy.batch_id,"export","split",split)
-        store_artifact(objects,policy.batch_id,"export","release",metadata)
-        os.link(stage,output)
+                        stamp = verify_split(
+                            read_artifact(
+                                objects,
+                                policy.batch_id,
+                                rid,
+                                "split",
+                                json.loads(pointer),
+                                1024 * 1024,
+                            ),
+                            split,
+                        )
+                    original = (
+                        bundle.get("failed_journals", {}).get(rid, {}).get("events")
+                    )
+                    generator, calls, hold = traces.partial_generator(
+                        objects, job, original
+                    )
+                    if not stamp:
+                        hold = "missing_verified_split"
+                    if (
+                        objects.get_optional_bounded(saved + "quarantine.json", 8192)
+                        is not None
+                    ):
+                        hold = "quarantine"
+                full.write(
+                    traces.trajectory_row(
+                        job=billed,
+                        generator=None if hold else generator,
+                        packet=packet,
+                        calls=calls,
+                        settings_sha256=settings_hash,
+                        harness=agent,
+                        builder=builder,
+                        revision=revisions[job["model"]],
+                        route=raw["routes"][job["model"]],
+                        split=stamp,
+                        terms_sha256=terms,
+                        assessment=assessment,
+                        partial=rid in failed,
+                        hold=hold,
+                    )
+                )
+            result = full.finish()
+            metadata = {
+                "schema": traces.SCHEMA,
+                "batch_id": policy.batch_id,
+                "settings_sha256": settings_hash,
+                "split_sha256": split_hash,
+                "qualification_sha256": "sha256:" + judge.digest(approved),
+                "rows": result.get("trajectory_rows", 0),
+                **result,
+            }
+            z.writestr("metadata.json", judge._json(metadata))
+        os.chmod(stage, 0o600)
+        store_artifact(objects, policy.batch_id, "export", "split", split)
+        store_artifact(objects, policy.batch_id, "export", "release", metadata)
+        os.link(stage, output)
     return metadata
-
 
 
 def cutover_anchor(transport, *, launch_job=None):
@@ -300,35 +402,68 @@ def main(argv=None):
     from lab_arena.collection_experiment import SCHEMA, load_experiment
     from lab_arena.collection_experiment_export import record_feedback, write_dataset
 
-    experiment=raw.get("schema")==SCHEMA
-    if args.action=="training-feedback":
+    experiment = raw.get("schema") == SCHEMA
+    if args.action == "training-feedback":
         if not args.dataset_metadata or not args.evaluation:
             p.error("supply the released dataset metadata and signed Poet evaluation")
-        metadata=json.loads(read_file(args.dataset_metadata))
-        batch=load_experiment(raw,prompt).batch_id if experiment else load_batch(raw,prompt).batch_id
-        if metadata["batch_id"]!=batch:raise ValueError("evaluation references a different batch")
-        ref=record_feedback(metadata,json.loads(read_file(args.evaluation)),objects,
-            read_file(Path(os.environ["LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE"]),private=False))
-        write_new(args.output,ref)
+        metadata = json.loads(read_file(args.dataset_metadata))
+        batch = (
+            load_experiment(raw, prompt).batch_id
+            if experiment
+            else load_batch(raw, prompt).batch_id
+        )
+        if metadata["batch_id"] != batch:
+            raise ValueError("evaluation references a different batch")
+        ref = record_feedback(
+            metadata,
+            json.loads(read_file(args.evaluation)),
+            objects,
+            read_file(
+                Path(os.environ["LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE"]),
+                private=False,
+            ),
+        )
+        write_new(args.output, ref)
         return 0
-    if args.action in {"experiment-audit","corrections","export"}:
-        qualification=None
-        if args.action!="experiment-audit":
+    if args.action in {"experiment-audit", "corrections", "export"}:
+        qualification = None
+        if args.action != "experiment-audit":
             if not (args.panel_batch and args.panel_prompt and args.qualification):
-                p.error("supply the original qualification pilot and independent approvals")
-            qualification={
-                "raw":json.loads(read_file(args.panel_batch)), "prompt":json.loads(read_file(args.panel_prompt)),
-                "receipt":json.loads(read_file(args.receipt)), "approval":json.loads(read_file(args.qualification)),
-                "reviewer_key":read_file(Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]), private=False),
-                "approver_key":read_file(Path(os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]), private=False),
+                p.error(
+                    "supply the original qualification pilot and independent approvals"
+                )
+            qualification = {
+                "raw": json.loads(read_file(args.panel_batch)),
+                "prompt": json.loads(read_file(args.panel_prompt)),
+                "receipt": json.loads(read_file(args.receipt)),
+                "approval": json.loads(read_file(args.qualification)),
+                "reviewer_key": read_file(
+                    Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]),
+                    private=False,
+                ),
+                "approver_key": read_file(
+                    Path(
+                        os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]
+                    ),
+                    private=False,
+                ),
             }
         if experiment:
-            result=write_dataset(load_experiment(raw,prompt),db,objects,args.output,qualification=qualification,
-                                 full_trajectories=args.action=="export")
-        elif args.action=="export":
-            result=write_exports(raw,prompt,db,objects,args.output,qualification=qualification)
-        else:p.error("expected an experiment manifest")
-        print(json.dumps({"batch":result["batch_id"],"rows":result["rows"]}))
+            result = write_dataset(
+                load_experiment(raw, prompt),
+                db,
+                objects,
+                args.output,
+                qualification=qualification,
+                full_trajectories=args.action == "export",
+            )
+        elif args.action == "export":
+            result = write_exports(
+                raw, prompt, db, objects, args.output, qualification=qualification
+            )
+        else:
+            p.error("expected an experiment manifest")
+        print(json.dumps({"batch": result["batch_id"], "rows": result["rows"]}))
         return 0
     bundle = source_bundle(raw, prompt, db, objects)
     if args.action == "bundle":
@@ -341,19 +476,37 @@ def main(argv=None):
             maximum=8192,
             private=False,
         )
-        if args.action == "prices":
-            write_new(
-                args.output,
-                dict(
-                    compile_pilot(
-                        db, bundle, receipt, public_key, objects,
-                        approval=json.loads(read_file(args.qualification)) if args.qualification else None,
-                        approver_key=read_file(Path(os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]),
-                                               maximum=8192, private=False) if args.qualification else None,
+        write_new(
+            args.output,
+            dict(
+                compile_pilot(
+                    db,
+                    bundle,
+                    receipt,
+                    public_key,
+                    objects,
+                    approval=(
+                        json.loads(read_file(args.qualification))
+                        if args.qualification
+                        else None
                     ),
-                    cutover_anchor=cutover_anchor(db),
+                    approver_key=(
+                        read_file(
+                            Path(
+                                os.environ[
+                                    "LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"
+                                ]
+                            ),
+                            maximum=8192,
+                            private=False,
+                        )
+                        if args.qualification
+                        else None
+                    ),
                 ),
-            )
+                cutover_anchor=cutover_anchor(db),
+            ),
+        )
 
     print(
         json.dumps(

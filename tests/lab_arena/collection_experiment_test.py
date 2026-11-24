@@ -414,10 +414,22 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         raw["claim_protocol"] = "collection.fresh-claims.v2"
     raw["arms"][0].update(repeats=1, max_steps=90)
     monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raw["terms_sha256"])
+    from bittensor_wallet import Keypair
+
     enrolled = intake.CollectionIntake(db, ifx.manager(), "pilot")
+    signer = Keypair.create_from_uri("//TrajectoryPilot")
     auth, cred = ifx.registration("H", "pilot")
-    auth["body"].update(
-        task_scope="synthetic_corrections", terms_sha256=raw["terms_sha256"]
+    auth = contracts.build_signed_request(
+        scope=intake.SCOPE["register"],
+        round_id=intake.scope_id("pilot"),
+        hotkey=signer.ss58_address,
+        body=dict(
+            auth["body"],
+            task_scope=intake.CORRECTION_SCOPE,
+            terms_sha256=raw["terms_sha256"],
+        ),
+        timestamp=1,
+        sign_message=lambda msg: signer.sign(msg.encode()).hex(),
     )
     enrolled.register(auth, auth["hotkey"], cred)
     with workflow_sources(
@@ -667,6 +679,32 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         )
         assert "evidence" not in chosen and "checkpoint" not in chosen
 
+    full_path = tmp_path / "full-trajectories.zip"
+    metadata = exports.write_dataset(
+        spec,
+        db,
+        objects,
+        full_path,
+        qualification={"test": True},
+        full_trajectories=True,
+    )
+    with ZipFile(full_path) as z:
+        traj = json.loads(z.read(f"trajectories/{rid}.jsonl"))
+        pref = json.loads(z.read(f"pairs/{rid}.jsonl"))
+        assert (
+            traj["messages"] == row["messages"]
+            and traj["final_turn_present"]
+            and traj["verified_task_pass"] is True
+        )
+        assert (
+            traj["miner_cost_microusd"] == j["miner_cost_microusd"]
+            and traj["builder_commit"]
+        )
+        assert traj["experiment"]["role"] == "continuation" and traj["step_checks"]
+        assert pref["rejected"] == pair["rejected"] and pref["chosen"] == pair["chosen"]
+        assert metadata["correction_pairs"] == metadata["trajectory_rows"] == 1
+        assert metadata["dataset_sha256"] != released["dataset_sha256"]
+        assert all("reference_answer" not in msg for msg in traj["messages"])
     # Missing original events must also hold release, even if DB and summary survive.
     first_event = objects._path(f"collection/{spec.batch_id}/{rid}/events/00000.json")
     first_event.unlink()

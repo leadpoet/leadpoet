@@ -86,12 +86,15 @@ def main(argv=None):
             private=False,
         ),
     }
+    from lab_arena.collection_experiment import source_revisions
+    live, pilot = load_experiment(load(args.live),prompt), load_experiment(load(args.pilot),prompt)
+    if source_revisions(live.raw) != source_revisions(pilot.raw):
+        raise ValueError("pilot and live builder revisions differ")
     with workflow_sources(
-        args.champion_repo, args.poet_repo, corrections=True
+        args.champion_repo, args.poet_repo, corrections=True, builder_revision=source_revisions(live.raw)[1]
     ) as sources:
         candidate = prepare(
-            load_experiment(load(args.live), prompt),
-            load_experiment(load(args.pilot), prompt),
+            live, pilot,
             args.inputs,
             sources,
             db,

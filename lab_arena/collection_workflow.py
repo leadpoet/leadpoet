@@ -32,6 +32,13 @@ CORRECTION_POET_REV = "d37173aca32ea59c7c5ffea46b0941726c55f30f"
 
 
 COMPARISON_CAPTURE = "collection.workflow-events.v1"
+# The final release pins the merged training-only task here.
+TRAIN_ONLY_POET_REV = CORRECTION_POET_REV
+
+
+def experiment_revisions(scenarios=()):
+    builder = TRAIN_ONLY_POET_REV if any(s.startswith("P7-s") for s in scenarios) else CORRECTION_POET_REV
+    return CORRECTION_CHAMPION_REV, builder
 
 
 def comparison_revisions(settings):
@@ -39,7 +46,7 @@ def comparison_revisions(settings):
         return CHAMPION_REV, POET_REV
     if settings["capture_version"] != COMPARISON_CAPTURE:
         raise ValueError("unknown comparison capture version")
-    return CORRECTION_CHAMPION_REV, CORRECTION_POET_REV
+    return CORRECTION_CHAMPION_REV, TRAIN_ONLY_POET_REV
 
 
 def _materialize(repo, commit, destination, *paths):
@@ -73,8 +80,13 @@ def _load(name, path):
 
 
 @contextmanager
-def workflow_sources(champion_repo, poet_repo, *, corrections=False):
+def workflow_sources(champion_repo, poet_repo, *, corrections=False, builder_revision=None):
     """Enter once in a dedicated worker process: Poet9B uses flat sibling imports."""
+    if builder_revision is None:
+        builder_revision = CORRECTION_POET_REV if corrections else POET_REV
+    allowed = {CORRECTION_POET_REV, TRAIN_ONLY_POET_REV} if corrections else {POET_REV}
+    if builder_revision not in allowed:
+        raise ValueError("unapproved workflow builder revision")
     with tempfile.TemporaryDirectory(prefix="collection-pinned-") as temp:
         root = Path(temp).resolve()
         agent, poet = root / "agent", root / "poet"
@@ -85,7 +97,7 @@ def workflow_sources(champion_repo, poet_repo, *, corrections=False):
         )
         _materialize(
             poet_repo,
-            CORRECTION_POET_REV if corrections else POET_REV,
+            builder_revision,
             poet,
             "harness/gtm-tasks",
         )
@@ -98,7 +110,7 @@ def workflow_sources(champion_repo, poet_repo, *, corrections=False):
                 builders.branch = _load("collection_branches", tasks / "branch_runs.py")
             harness = _load("collection_harness", agent / "harness.py")
             harness.source_revision = CORRECTION_CHAMPION_REV if corrections else CHAMPION_REV
-            builders.source_revision = CORRECTION_POET_REV if corrections else POET_REV
+            builders.source_revision = builder_revision
             # These are the producer's committed frozen evaluation identities.
             # A batch creator cannot reclassify an evaluation template as training.
             frozen = json.loads((tasks / "FROZEN_V2.json").read_bytes())
@@ -117,7 +129,7 @@ def workflow_sources(champion_repo, poet_repo, *, corrections=False):
 
 def build_scenario(builders, scenario_id):
     match = re.fullmatch(
-        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-6])-s([1-9]\d{0,7})", scenario_id
+        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-7])-s([1-9]\d{0,7})", scenario_id
     )
     if not match:
         raise ValueError("unknown workflow scenario id")

@@ -49,20 +49,16 @@ class Experiment:
         return self.raw["mode"] == "pilot"
 
 
-def source_revisions():
-    from lab_arena.collection_workflow import (
-        CORRECTION_CHAMPION_REV,
-        CORRECTION_POET_REV,
-    )
-
-    return CORRECTION_CHAMPION_REV, CORRECTION_POET_REV
+def source_revisions(raw=None):
+    from lab_arena.collection_workflow import experiment_revisions
+    return experiment_revisions(c["scenario_id"] for c in (raw or {}).get("cases", []))
 
 
 def load_experiment(raw, prompt):
     from lab_arena.collection_claims import protocol_of
 
     protocol_of(raw)
-    agent_revision, builder_revision = source_revisions()
+    agent_revision, builder_revision = source_revisions(raw)
 
     if (
         set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot"}
@@ -269,6 +265,8 @@ def read_inputs(spec, directory, sources):
             raise ValueError("private experiment input digest changed")
         return value
 
+    if (sources[0].source_revision, sources[1].source_revision) != source_revisions(spec.raw):
+        raise ValueError("experiment loaded the wrong pinned sources")
     split = read(spec.raw["split_sha256"])
     resolved = {}
     for case in spec.raw["cases"]:
@@ -358,12 +356,11 @@ def run_experiment(
 ):
     from lab_arena.collection_broker import CollectionBroker
     from lab_arena.collection_workflow import (
-        CORRECTION_CHAMPION_REV,
-        CORRECTION_POET_REV,
         play_workflow,
     )
     from lab_arena.collection_claims import read_fresh
 
+    agent, builder = source_revisions(spec.raw)
     stored, split, provenance = inputs
     live = spec.raw["mode"] == "live"
     tariff = None
@@ -379,7 +376,7 @@ def run_experiment(
         if before_claim is not None:
             before_claim()
         job = intake.claim_experiment(
-            spec, CORRECTION_CHAMPION_REV, fixed_quote=fixed_quote
+            spec, agent, fixed_quote=fixed_quote
         )
         if not job:
             break
@@ -422,7 +419,7 @@ def run_experiment(
                 or job["scenario_id"] != case["scenario_id"]
                 or job["mode"] != spec.raw["mode"]
                 or job["price_microusd"] != fixed_quote
-                or job["harness_commit"] != CORRECTION_CHAMPION_REV
+                or job["harness_commit"] != agent
                 or job["batch_id"] != batch
                 or owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]
             ):
@@ -487,8 +484,8 @@ def run_experiment(
                 "job_id": run_id,
                 "model": job["model"],
                 "scenario_id": job["scenario_id"],
-                "harness_commit": CORRECTION_CHAMPION_REV,
-                "builder_commit": CORRECTION_POET_REV,
+                "harness_commit": agent,
+                "builder_commit": builder,
                 "experiment": meta,
                 "generator": row_ref,
                 "packet": packet_ref,

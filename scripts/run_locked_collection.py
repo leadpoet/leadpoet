@@ -638,8 +638,8 @@ def _run_options(args, p, raw, *, before_claim=None):
             raise ValueError(
                 "research requires one authenticated validator relay per invocation"
             )
-    agent,builder = experiments.source_revisions() if experiment else comparison_revisions(raw)
-    source_args = {"corrections": True} if experiment or "capture_version" in raw else {}
+    agent,builder = experiments.source_revisions(raw) if experiment else comparison_revisions(raw)
+    source_args = {"corrections": True, "builder_revision":builder} if experiment or "capture_version" in raw else {}
     with workflow_sources(args.champion_repo, args.poet_repo, **source_args) as sources:
         experiment_inputs = experiments.read_inputs(experiment, args.experiment_inputs, sources) if experiment else None
         try:

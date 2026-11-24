@@ -60,4 +60,7 @@ def admit_built_split(builders, task, shape, split):
     identity = scenario_split(builders, task, shape)
     if identity["template_id"] in builders.evaluation_templates:
         raise ValueError("scenario uses a frozen evaluation template")
+    if identity["template_id"] == "P7":
+        if not hasattr(builders,"training_partition") or split != builders.training_partition("P7"):
+            raise ValueError("split differs from the producer-approved P7 partition")
     return admit_split(identity, split)

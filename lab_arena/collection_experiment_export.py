@@ -170,7 +170,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     job["batch_id"] != batch
                     or job["model"] != arm["model"]
                     or job["scenario_id"] != case["scenario_id"]
-                    or job["harness_commit"] != source_revisions()[0]
+                    or job["harness_commit"] != source_revisions(spec.raw)[0]
                 ):
                     raise ValueError("job differs from frozen experiment")
                 stats["attempts"] += 1
@@ -247,7 +247,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     or manifest["model"] != job["model"]
                     or manifest["scenario_id"] != job["scenario_id"]
                     or (manifest["harness_commit"], manifest["builder_commit"])
-                    != source_revisions()
+                    != source_revisions(spec.raw)
                     or manifest["experiment"]
                     != {
                         "id": spec.raw["id"],
